@@ -3,6 +3,7 @@ pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod codex_shared;
 pub(crate) mod codex_stop;
+mod codex_terminal_theme;
 pub(crate) mod headless;
 pub(crate) mod opencode;
 pub(crate) mod session_identity;
@@ -580,6 +581,29 @@ pub(crate) async fn record_agent_turn_started_for_watch(state: &AppState, sessio
             }),
         );
     };
+}
+
+/// Publishes a provider-confirmed turn start while holding the terminal
+/// broker's lifecycle read lock across generation validation and watch
+/// publication. This prevents a receipt from an old runtime entering the
+/// replacement runtime's watch stream.
+pub(crate) async fn record_agent_turn_started_for_watch_at_generation(
+    state: &AppState,
+    session_id: &str,
+    runtime_generation: u64,
+) -> Result<(), String> {
+    let watch_state = {
+        let agents = state.agents.lock().await;
+        agents
+            .get(session_id)
+            .map(|agent| agent.watch_state.clone())
+            .ok_or_else(|| format!("agent {session_id} disappeared before turn receipt"))?
+    };
+    state
+        .terminal_sessions
+        .record_turn_started_for_generation(session_id, runtime_generation, watch_state)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Adds the provider-confirmed end of a turn to the control-plane watch
