@@ -28,6 +28,9 @@ use wardian_core::models::chat::{
 
 const PROVIDER_LOG_TAIL_BYTES: u64 = 2 * 1024 * 1024;
 
+#[path = "chat_opencode_tools.rs"]
+mod opencode_tools;
+
 #[derive(Clone)]
 pub(crate) struct AgentArchiveCaptureSnapshot {
     pub(crate) session_id: String,
@@ -948,12 +951,21 @@ fn load_opencode_db_chat_events_from_db(
 
     let mut events = Vec::new();
     let mut request_root_id = None;
+    let mut text_sequence = 0;
     for row in rows {
         let row = row.map_err(|err| err.to_string())?;
+        events.extend(opencode_tools::project(
+            wardian_session_id,
+            opencode_session_id,
+            &row,
+            request_root_id.as_deref(),
+            db_path,
+            events.len() as u64 + 1,
+        ));
         let Some(event) = opencode_db_part_to_chat_event(
             wardian_session_id,
             opencode_session_id,
-            events.len() as u64 + 1,
+            text_sequence + 1,
             row,
             request_root_id.as_deref(),
         )?
@@ -961,6 +973,14 @@ fn load_opencode_db_chat_events_from_db(
             continue;
         };
         let mut event = event;
+        // Keep legacy text IDs stable when previously omitted tool parts appear.
+        text_sequence += 1;
+        event.sequence = Some(events.len() as u64 + 1);
+        event.created_at = event.metadata["part_time_created"]
+            .as_i64()
+            .or_else(|| event.metadata["message_time_created"].as_i64())
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|time| time.to_rfc3339());
         // `source_path` is part of the archive source-record contract and is
         // retained when events are replayed after a restart.
         event.metadata["source_path"] = serde_json::json!(db_path.to_string_lossy());

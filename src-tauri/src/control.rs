@@ -6185,39 +6185,7 @@ mod tests {
         assert!(error.contains("wardian agent restart agent-1"));
     }
 
-    #[tokio::test]
-    async fn message_delivery_writes_terminal_bytes_after_opencode_is_ready() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "OpenCodeOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "opencode".to_string();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-            *agent.terminal_title.lock().unwrap() = "OpenCode".to_string();
-        }
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        deliver_message_to_target(
-            None,
-            &state,
-            "OpenCodeOne",
-            "hello",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(rx.recv().await.unwrap(), b"hello".to_vec());
-        assert_eq!(rx.recv().await.unwrap(), b"\x1b[13u".to_vec());
-    }
+    include!("control/opencode_receipt_tests.rs");
 
     #[tokio::test]
     async fn native_codex_delivery_waits_for_provider_applied_payload() {
