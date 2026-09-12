@@ -5,7 +5,8 @@ contain cell-like agents and workspace ground; entering an agent, workspace,
 or situated automation reveals its composition, then readable records.
 Position reflects shared teams, workspaces, worktrees, and concrete assignments.
 Skills appear on their carriers and inside Skills, not as independent
-map units. Unassigned Library blueprints do not populate the map.
+map units. Unassigned Library blueprints and completed one-off automation runs
+do not populate the map.
 
 Use the Garden when you want to see the shape of your setup: which agents
 cluster around a repository, which agents participate in a routine, what files
@@ -81,6 +82,12 @@ dates and expandable excerpts, alongside notification details.
 Skill provenance remains in its accessible label and hover description, with
 canonical details available through the skill record.
 
+Assigned routine definitions remain part of Garden geography. A manual
+automation appears while it is running or awaiting approval, then leaves the
+Garden when it completes or fails. Its durable evidence remains available in
+Automation Monitor and Observe; recent scheduled execution state stays folded
+into the routine it belongs to instead of creating a separate historical cell.
+
 Entering an agent, workspace, automation, or record brings it to a readable
 scale. On a small or short viewport, the outer plane or membrane may extend
 offscreen while the reading column fits the available width and height. Text
@@ -92,7 +99,7 @@ plane and geography.
 | Identity | Purpose, class, provider, model, saved permission settings, and **Open agent session** |
 | Skills and Tools | Deployed skills with direct, class-inherited, or global provenance; linked or copied state; configured tools |
 | Memory | Stable and Current records, grouped by agent-wide or workspace-bound scope |
-| Automations, Conversations, and Inbox | Current/recent conversation excerpts, assigned routines, and loaded Inbox items attributed by agent session ID |
+| Automations, Conversations, and Inbox | Current/recent conversation excerpts, assigned routines, active manual runs, and loaded Inbox items attributed by agent session ID |
 | Workspace, Teams, and Agents | Workspace, team membership, and peers sharing a team or workspace |
 
 Saved permission and tool settings describe configuration; runtime application
@@ -158,13 +165,14 @@ requirement alone does not locate a blueprint.
 - No concrete agent or workspace: no invented map location; use Automation
   Monitor. Missing map participants can also prevent a route from being drawn.
 
-Running and awaiting-approval runs remain eligible regardless of age. Other
-runs remain recent for **24 hours**, using their update time, then completion
-or start time when absent. This window is separate from the file-activity range.
-An open routine or stage keeps its evidence while its automation remains in the
-Garden breadcrumb, even after the run leaves the map's activity window. This
-does not put old runs back on the map. Historical evidence also remains
-available in Automation Monitor.
+Running and awaiting-approval runs remain eligible regardless of age. Scheduled
+evidence remains recent for **24 hours**, using its update time, then completion
+or start time when absent, and stays folded into its routine. Completed and
+failed unscheduled runs do not populate the map. This rule is separate from the
+file-activity range. An open routine or stage keeps its evidence while its
+automation remains in the Garden breadcrumb without putting historical trails
+back on the map. Historical evidence also remains available in Automation
+Monitor.
 
 Ordinary connections recede at the habitat overview and return as you zoom
 closer. A selected route stays visible, as do local attention indicators.

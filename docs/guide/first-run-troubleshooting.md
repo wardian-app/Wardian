@@ -69,6 +69,11 @@ If the provider opens but asks you to sign in, finish authentication in the norm
 
 ## Terminal Does Not Start
 
+If a saved agent cannot start its provider when Wardian reopens, its terminal
+shows the launch error alongside the red Error status. The message remains
+available when you close and reopen that terminal. It is read-only until the
+provider starts successfully; a successful restart clears the old error.
+
 If the agent appears but the terminal stays empty, exits immediately, or turns red:
 
 1. Confirm the workspace folder exists and your user account can write to it.
