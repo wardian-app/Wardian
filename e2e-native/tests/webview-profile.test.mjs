@@ -1,4 +1,4 @@
-// @tier ci — Offline environment/ownership regressions; no app or browser.
+// @tier nightly — Offline environment/ownership regressions; no app or browser.
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
