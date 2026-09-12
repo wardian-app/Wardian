@@ -20,6 +20,27 @@ This document captures the practical runtime differences between Wardian's suppo
   direct `node <script.js>` launch resolved from an npm shim. Shell-wrap only
   when shell dispatch is required and no verified native launcher is available.
 
+### Native transport compatibility
+
+OpenCode ACP starts with its own command arguments. Wardian applies the selected
+model through `session/set_model` and the configured agent through
+`session/set_mode` after binding either a new or resumed session; a rejected
+selection stops bootstrap before a prompt is submitted.
+Only ACP `agent_message_chunk` text contributes to the assistant answer. Thoughts,
+user echoes, and tool updates remain progress signals. Native answer chunks retain
+their whitespace, including whitespace-only chunks, so streaming preserves words
+and formatting.
+Codex app-server receives the selected model through a repeatable `-c` config
+override, alongside the reasoning-effort override. Its interactive `--model`
+flag does not establish the model used by an app-server thread.
+
+Pi RPC streams typed text deltas and publishes the complete assistant message at
+`message_end`. Wardian replaces the accumulated answer for final messages and
+older full-message updates. User echoes, thinking, and tool events cannot become
+assistant answers. Bootstrap timeout diagnostics identify
+the protocol stage, such as `initialize` or `thread/resume`, without including
+the prompt. An unknown Codex resume identity remains a bootstrap error.
+
 ## Quick Comparison
 
 | Provider | Working root | Instruction file | Skill model | Session identity |
@@ -321,6 +342,12 @@ Refresh resolves completed mappings without moving homes or recovering a live
 startup overlay. The provider executable, normal TUI invocation and shell `HOME`
 are unchanged. See [the removal criteria](https://github.com/wardian-app/Wardian/issues/1235).
 
+On Windows, managed Codex MCP publication uses the existing parent's canonical
+verbatim path for both the temporary file and destination, including before
+compact-home mapping. It resolves only the parent. Configuration is written
+before ownership; interrupted publication leaves an unowned entry that retries
+preserve as a collision. See [the regression](https://github.com/wardian-app/Wardian/issues/1245).
+
 ### Known operational edge cases
 
 - Codex skill discovery can be correct while shell execution is still blocked by the CLI sandbox. In that case, the agent sees the skill but fails when the skill tries to invoke shell tools.
@@ -347,9 +374,13 @@ This is how OpenCode sees Wardian-managed class and agent context without forcin
 
 ### Session identity
 
-- OpenCode session IDs are discovered from JSON output during `opencode run --format json`, or captured from `opencode session list` while the interactive TUI runs.
+- OpenCode session IDs are discovered from JSON output during `opencode run --format json`. For interactive TUI launches, Wardian binds the provider's `created` log record to the same OpenCode run that loaded this agent's generated `.opencode/opencode.json`; if that ownership evidence is absent or ambiguous, Wardian leaves the session identity unset rather than adopting a global session-list match.
+- Interactive identity discovery also runs when the title remains idle. It checks log metadata between polls and reads the ownership evidence only when the source changes; a Processing title is not required to resume or link an already completed conversation.
 - Valid IDs match `ses_…`; Wardian never substitutes its own UUIDs into `--session`.
 - Resume uses `--session <session_id>`.
+- Wardian resolves OpenCode's database and rolling log from `XDG_DATA_HOME` first, then the platform data directories. This matters on Windows as well: OpenCode honors the XDG override, so using only `%LOCALAPPDATA%` can associate a session with another installation's transcript.
+- Once that launch-scoped identity is available, transcript refresh reads OpenCode's SQLite `message`/`part` rows and retains the database path as `source_path` provenance metadata; later rows are visible on the next refresh without restarting the agent.
+- SQLite tool parts expose native call IDs, names, structured input, and completed or failed output. Pending parts do not create placeholder results. Tool output has the Tool role; tool events never create human prompts. Tool IDs remain stable across refreshes, and adding previously omitted tools preserves existing text-event IDs. The retained fixture covers OpenCode 1.18.29; unknown states and conflicting native identities are omitted.
 
 ### Headless prompt input
 
@@ -372,7 +403,9 @@ that the provider's answer satisfies the requested task.
 - OpenCode is closer to Gemini than Codex on workspace handling: Wardian launches from the habitat command root while passing the real repo as the project directory.
 - OpenCode is closer to Codex than Gemini on instruction naming: it consumes `AGENTS.md` directly.
 - If OpenCode stops seeing Wardian skills or class instructions, inspect the generated `<habitat>/.opencode/opencode.json` (`OPENCODE_CONFIG`) first, then verify the junctioned `skills/` entries resolve.
-- Interactive status comes from TUI window-title scraping ("OpenCode" idle, "OC | …" processing), while token/cost telemetry comes from OpenCode's shared SQLite store via wardian-core; both channels are expected to exist side by side.
+- Interactive startup remains Starting until the current runtime's canonical screen shows the OpenCode composer and command footer without a loading or consent screen. A generic window title or an older completion in the rolling log cannot release queued input. Later screen repaints can establish readiness without another title event. Once startup completes, TUI window titles report turn status ("OpenCode" idle, "OC | …" processing), while token/cost telemetry comes from OpenCode's shared SQLite store via wardian-core. Composer readiness authorizes submission; provider acceptance still requires the delivery transport's receipt.
+- OpenCode turn receipts for Wardian-delivered prompts come only from a new, session-bound user text part in OpenCode's read-only SQLite store. Title changes, including restored and approval titles, are status evidence rather than acceptance receipts.
+- The chat-log link and transcript source must resolve from the same provider data root as the running OpenCode process. If an isolated harness sets `XDG_DATA_HOME`, keep that setting for the Wardian process that reads telemetry and chat history as well.
 - TUI "Permission required" prompts never appear in the window title. Wardian detects them from the provider log (`message=asking id=per_…`) and raises Action Needed; the ask is attributed to a session only while its prompt loop is the sole open loop in the log, and clears once loop activity resumes after the prompt is answered.
 - On Windows, Wardian resolves the `opencode` command from PATH. When an
   npm-generated `.cmd` or `.ps1` shim points at the package's top-level native

@@ -1,6 +1,7 @@
 mod pi_startup;
 use pi_startup::pi_output_has_startup_ready_prompt;
 
+pub(crate) mod codex_menu_status;
 pub(crate) mod startup_readiness;
 use startup_readiness::record_provider_ready_evidence;
 pub(crate) use startup_readiness::{
@@ -3005,14 +3006,25 @@ async fn wait_for_terminal_ready_for_control_send(
             info.uuid, info.uuid
         ));
     }
+    if info.provider == "codex"
+        && startup_readiness::codex_current_screen_requires_choice(state, &info.uuid).await?
+    {
+        return Err(format!(
+            "Agent {} requires an explicit Codex model choice; no prompt bytes sent",
+            info.uuid
+        ));
+    }
+    // Cached Ready can come from a previous turn in OpenCode's rolling log.
+    // The current composer must authorize input even when that cache is Ready.
+    if info.provider == "opencode" {
+        return wait_for_opencode_terminal_ready(state, &info.uuid, 15_000).await;
+    }
     if provider_input_current_state(state, &info.uuid).await == Some(ProviderInputReadiness::Ready)
     {
         return Ok(());
     }
 
-    if info.provider == "opencode" {
-        wait_for_opencode_terminal_ready(state, &info.uuid, 15_000).await
-    } else if info.provider == "codex" {
+    if info.provider == "codex" {
         wait_for_terminal_output(state, &info.uuid, 15_000, |output| {
             provider_output_has_ready_prompt("codex", output)
         })
@@ -3106,31 +3118,24 @@ async fn wait_for_opencode_terminal_ready(
         .unwrap_or(0);
     let started = std::time::Instant::now();
     while started.elapsed() < std::time::Duration::from_millis(timeout_ms) {
-        let (title, status) = {
+        let current_status = {
             let agents = state.agents.lock().await;
             let agent = agents
                 .get(session_id)
                 .ok_or_else(|| format!("Agent {} not found or is off", session_id))?;
-            let title = agent
-                .terminal_title
-                .lock()
-                .map(|value| value.clone())
-                .unwrap_or_default();
-            let status = agent
-                .current_status
-                .lock()
-                .map(|value| value.clone())
-                .unwrap_or_default();
-            (title, status)
+            agent.current_status.clone()
         };
-        let title = title.trim();
+        let status = current_status
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_default();
         if wardian_core::identity::normalize_status(&status) == "idle"
-            && (title == "OpenCode" || title.starts_with("OC | "))
+            && startup_readiness::opencode_current_screen_is_ready(state, session_id).await?
             && record_provider_ready_evidence(
                 state,
                 session_id,
                 generation,
-                ProviderReadyEvidence::TitleDetected,
+                ProviderReadyEvidence::PromptDetected,
             )
             .await
         {
@@ -5773,6 +5778,8 @@ mod test_support;
 
 #[cfg(test)]
 mod tests {
+    include!("control/opencode_startup_tests.rs");
+
     use super::*;
     use crate::state::ActiveAgent;
     use std::collections::HashMap;
@@ -6100,48 +6107,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opencode_control_send_waits_for_open_code_title() {
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "OpenCodeOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "opencode".to_string();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-            *agent.terminal_title.lock().unwrap() = "OpenCode".to_string();
-        }
-        let info = delivery_target_infos(&state, &["agent-1".to_string()])
-            .await
-            .unwrap()
-            .remove(0);
-
-        wait_for_terminal_ready_for_control_send(&state, &info)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn opencode_control_send_accepts_idle_oc_title() {
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "OpenCodeOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "opencode".to_string();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-            *agent.terminal_title.lock().unwrap() = "OC | Self-introduction".to_string();
-        }
-        let info = delivery_target_infos(&state, &["agent-1".to_string()])
-            .await
-            .unwrap()
-            .remove(0);
-
-        wait_for_terminal_ready_for_control_send(&state, &info)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
     async fn codex_control_send_rejects_stalled_composer_even_when_state_is_ready() {
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
@@ -6171,39 +6136,7 @@ mod tests {
         assert!(error.contains("wardian agent restart agent-1"));
     }
 
-    #[tokio::test]
-    async fn message_delivery_writes_terminal_bytes_after_opencode_is_ready() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "OpenCodeOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "opencode".to_string();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-            *agent.terminal_title.lock().unwrap() = "OpenCode".to_string();
-        }
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        deliver_message_to_target(
-            None,
-            &state,
-            "OpenCodeOne",
-            "hello",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(rx.recv().await.unwrap(), b"hello".to_vec());
-        assert_eq!(rx.recv().await.unwrap(), b"\x1b[13u".to_vec());
-    }
+    include!("control/opencode_receipt_tests.rs");
 
     #[tokio::test]
     async fn native_codex_delivery_waits_for_provider_applied_payload() {

@@ -11,7 +11,8 @@ use super::codex::{codex_log_lookup_session_id, codex_session_file_path, codex_s
 use super::display_log_path;
 use super::opencode::{
     apply_opencode_log_metrics, opencode_last_assistant_text, opencode_log_dirs,
-    opencode_log_path_in, provider_should_fallback_to_idle_after_quiet_period,
+    opencode_log_path_in, opencode_telemetry_session_id,
+    provider_should_fallback_to_idle_after_quiet_period,
 };
 use crate::providers::antigravity::AntigravityProvider;
 use crate::providers::pi::PiProvider;
@@ -1116,6 +1117,17 @@ fn set_snapshot_status_from_log(snap: &AgentSnapshot, next_status: &str, is_init
     {
         return;
     }
+    // An append does not make the rolling log's old turn state belong to this
+    // process. Check the live status here: a composer repaint may have ended
+    // startup while telemetry was reading the log. Never restore stale Starting.
+    if snap.provider == "opencode"
+        && snap
+            .current_status
+            .lock()
+            .is_ok_and(|status| status.eq_ignore_ascii_case("Starting"))
+    {
+        return;
+    }
     set_snapshot_status(snap, next_status);
 }
 
@@ -1359,7 +1371,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                     provider: config.provider.clone(),
                     folder: config.folder.clone(),
                     is_off: config.is_off,
-                    resume_session: config.resume_session.clone(),
+                    resume_session: opencode_telemetry_session_id(&config),
                     provider_generation: 0,
                     process_id: agent.process_id,
                     query_count: agent.query_count.clone(),
@@ -1471,10 +1483,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 .try_lock()
                 .ok()
                 .and_then(|path| path.as_ref().map(|p| display_log_path(p)));
-            let opencode_session_id = snap
-                .resume_session
-                .as_deref()
-                .filter(|value| value.starts_with("ses_"));
+            let opencode_session_id = snap.resume_session.as_deref();
             let gemini_session_id = snap.resume_session.as_deref();
             let status_before_log_work = snap.current_status.lock().unwrap().clone();
             let mut last_query_timestamp = last_user_query_timestamps.remove(&snap.session_id);
@@ -2111,7 +2120,9 @@ pub async fn get_app_metrics(state: &AppState) -> AppTelemetry {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    include!("telemetry/opencode_startup_tests.rs");
+
     use super::{AgentSnapshot, TelemetryPassTimings, TelemetrySlowAgent};
     use rusqlite::Connection;
     use std::collections::{BTreeSet, HashMap};
@@ -2453,47 +2464,6 @@ mod tests {
         }
         .slow_log_message(std::time::Duration::from_millis(500))
         .is_none());
-    }
-
-    #[test]
-    fn initial_log_replay_does_not_record_status_transition() {
-        let snap = test_snapshot("Off");
-
-        super::set_snapshot_status_from_log(&snap, "Idle", true);
-
-        assert_eq!(*snap.current_status.lock().unwrap(), "Off");
-        assert!(snap.last_status_at.lock().unwrap().is_none());
-        let snapshot = snap
-            .watch_state
-            .lock()
-            .unwrap()
-            .snapshot_since(None, None)
-            .unwrap();
-        assert!(snapshot.events.is_empty());
-    }
-
-    #[test]
-    fn live_log_update_records_status_transition() {
-        let snap = test_snapshot("Processing...");
-
-        super::set_snapshot_status_from_log(&snap, "Idle", false);
-
-        assert_eq!(*snap.current_status.lock().unwrap(), "Idle");
-        assert!(snap.last_status_at.lock().unwrap().is_some());
-        let snapshot = snap
-            .watch_state
-            .lock()
-            .unwrap()
-            .snapshot_since(None, None)
-            .unwrap();
-        assert_eq!(snapshot.events.len(), 1);
-        assert_eq!(
-            snapshot.events[0]
-                .payload
-                .get("status")
-                .and_then(|value| value.as_str()),
-            Some("idle")
-        );
     }
 
     #[test]

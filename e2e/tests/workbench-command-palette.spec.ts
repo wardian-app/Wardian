@@ -23,7 +23,10 @@ test("keeps workbench commands in a searchable palette separate from Quick Open"
   });
 
   await page.goto("/");
-  await expect(page.getByTestId("workbench-host")).toBeVisible();
+  // The lazy desktop entry can commit the shell before the workbench host on
+  // a cold Vite graph. Wait for that concrete DOM boundary before keyboard
+  // interaction instead of turning startup variance into a false failure.
+  await page.getByTestId("workbench-host").waitFor();
 
   await expect(page.getByTestId("titlebar-center")).toHaveCount(0);
   const topHeaderDragRegion = page.locator(

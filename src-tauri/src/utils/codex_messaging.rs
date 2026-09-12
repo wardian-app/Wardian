@@ -243,12 +243,20 @@ fn reject_link(path: &Path) -> Result<(), String> {
 }
 
 fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let mut temporary =
-        tempfile::NamedTempFile::new_in(path.parent().expect("managed file parent"))
-            .map_err(|e| e.to_string())?;
+    let parent = path.parent().expect("managed file parent");
+    // tempfile persists through Win32 APIs. Keep the existing parent's verbatim
+    // spelling for both paths, including in executables without longPathAware.
+    // Resolve only the parent: the destination may not exist yet.
+    #[cfg(windows)]
+    let parent = parent.canonicalize().map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    let destination = parent.join(path.file_name().expect("managed file name"));
+    #[cfg(not(windows))]
+    let destination = path;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
     temporary.write_all(bytes).map_err(|e| e.to_string())?;
     temporary.as_file().sync_all().map_err(|e| e.to_string())?;
-    temporary.persist(path).map_err(|e| e.to_string())?;
+    temporary.persist(destination).map_err(|e| e.to_string())?;
     Ok(())
 }
 

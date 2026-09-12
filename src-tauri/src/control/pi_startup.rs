@@ -73,9 +73,40 @@ fn pi_line_is_blocking_status(line: &str) -> bool {
         return true;
     }
 
+    let standalone_status = ["loading", "starting", "connecting"].iter().any(|&marker| {
+        normalized == marker
+            || normalized
+                .strip_prefix(marker)
+                .and_then(|suffix| suffix.chars().next())
+                .is_some_and(|first| {
+                    first.is_ascii_whitespace() || matches!(first, ':' | '.' | '…')
+                })
+    });
+    if standalone_status {
+        return true;
+    }
+
     let footer_like = normalized.contains("%/") || normalized.contains("(auto)");
     footer_like
         && ["loading", "starting", "connecting"]
             .iter()
             .any(|marker| normalized.contains(marker))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pi_output_has_startup_ready_prompt;
+
+    #[test]
+    fn loading_status_blocks_readiness_before_and_after_footer() {
+        let before_footer = "pi v0.84.2\n────────────────\nC:\\workspace • Wardian-Pi\nLoading model…\n0.0%/33k (auto) echo";
+        assert!(!pi_output_has_startup_ready_prompt(before_footer));
+
+        let after_footer = "pi v0.84.2\n────────────────\nC:\\workspace • Wardian-Pi\n0.0%/33k (auto) echo\nLoading model…";
+        assert!(!pi_output_has_startup_ready_prompt(after_footer));
+
+        let ready =
+            "pi v0.84.2\n────────────────\nC:\\workspace • Wardian-Pi\n0.0%/33k (auto) echo";
+        assert!(pi_output_has_startup_ready_prompt(ready));
+    }
 }

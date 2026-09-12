@@ -1,3 +1,4 @@
+use super::codex_terminal_theme::CodexTerminalThemeProbeResponder;
 use crate::providers::antigravity::{
     changed_workspace_conversation, AntigravityConversationMessage, AntigravityProvider,
 };
@@ -27,7 +28,7 @@ use super::claude::{
 };
 use super::codex::{codex_provider_session_is_excluded, codex_session_file_path};
 use super::opencode::{
-    opencode_interactive_env, opencode_recent_session_for_workspace, opencode_status_from_title,
+    opencode_interactive_env, opencode_status_from_title, OpenCodeSessionDiscovery,
 };
 use super::session_identity::{
     apply_provider_identity, expected_caller_owned_identity, ProviderIdentityOutcome,
@@ -72,39 +73,6 @@ fn record_pending_memory_injection(
         ));
     }
     true
-}
-
-fn provider_title_has_startup_ready_prompt(provider: &str, title: &str, status: &str) -> bool {
-    if provider != "opencode" || wardian_core::identity::normalize_status(status) != "idle" {
-        return false;
-    }
-    let title = title.trim();
-    title == "OpenCode" || title.starts_with("OC | ")
-}
-
-#[derive(Default)]
-struct OpenCodeStartupMemoryTransition {
-    ready_observed: bool,
-}
-
-impl OpenCodeStartupMemoryTransition {
-    /// Classify the real provider title and promote the pending memory receipt
-    /// exactly once when that title proves the compose surface is ready.
-    fn observe_title(
-        &mut self,
-        pending: &mut Option<PendingMemoryInjection>,
-        provider: &str,
-        title: &str,
-        agent_id: &str,
-    ) -> Option<&'static str> {
-        let status = opencode_status_from_title(title)?;
-        if !self.ready_observed && provider_title_has_startup_ready_prompt(provider, title, status)
-        {
-            self.ready_observed = true;
-            record_pending_memory_injection(pending, agent_id, provider);
-        }
-        Some(status)
-    }
 }
 
 /// Selects the verified Antigravity conversation created by this launch for
@@ -543,106 +511,6 @@ impl AntigravityUserTurnReceiptTracker {
         self.last_step_index = Some(latest_step_index);
         true
     }
-}
-
-#[derive(Default)]
-struct CodexTerminalThemeProbeResponder {
-    answered_light_dark: bool,
-    answered_foreground: bool,
-    answered_background: bool,
-    answered_palette_zero: bool,
-    tail: Vec<u8>,
-}
-
-impl CodexTerminalThemeProbeResponder {
-    fn responses_for_chunk(
-        &mut self,
-        provider_name: &str,
-        chunk: &[u8],
-        theme: &str,
-    ) -> Vec<Vec<u8>> {
-        if provider_name != "codex" || chunk.is_empty() {
-            self.remember_tail(chunk);
-            return Vec::new();
-        }
-
-        let mut data = self.tail.clone();
-        data.extend_from_slice(chunk);
-        let terminal_theme = CodexTerminalTheme::from_wardian_theme(theme);
-        let mut responses = Vec::new();
-
-        if !self.answered_light_dark && contains_bytes(&data, b"\x1b[?996n") {
-            self.answered_light_dark = true;
-            responses.push(
-                format!(
-                    "\x1b[?997;{}n",
-                    if terminal_theme.prefers_light { 2 } else { 1 }
-                )
-                .into_bytes(),
-            );
-        }
-
-        if !self.answered_foreground
-            && (contains_bytes(&data, b"\x1b]10;?\x07")
-                || contains_bytes(&data, b"\x1b]10;?\x1b\\"))
-        {
-            self.answered_foreground = true;
-            responses.push(format!("\x1b]10;rgb:{}\x1b\\", terminal_theme.foreground).into_bytes());
-        }
-
-        if !self.answered_background
-            && (contains_bytes(&data, b"\x1b]11;?\x07")
-                || contains_bytes(&data, b"\x1b]11;?\x1b\\"))
-        {
-            self.answered_background = true;
-            responses.push(format!("\x1b]11;rgb:{}\x1b\\", terminal_theme.background).into_bytes());
-        }
-
-        if !self.answered_palette_zero && contains_bytes(&data, b"\x1b]4;0;?\x07") {
-            self.answered_palette_zero = true;
-            responses.push(format!("\x1b]4;0;rgb:{}\x07", terminal_theme.background).into_bytes());
-        }
-
-        self.remember_tail(&data);
-        responses
-    }
-
-    fn remember_tail(&mut self, data: &[u8]) {
-        const MAX_TERMINAL_PROBE_TAIL: usize = 32;
-        let start = data.len().saturating_sub(MAX_TERMINAL_PROBE_TAIL);
-        self.tail.clear();
-        self.tail.extend_from_slice(&data[start..]);
-    }
-}
-
-struct CodexTerminalTheme {
-    foreground: &'static str,
-    background: &'static str,
-    prefers_light: bool,
-}
-
-impl CodexTerminalTheme {
-    fn from_wardian_theme(theme: &str) -> Self {
-        if theme.trim() == "light" {
-            Self {
-                foreground: "11/18/27",
-                background: "fc/fa/f5",
-                prefers_light: true,
-            }
-        } else {
-            Self {
-                foreground: "ee/f2/ee",
-                background: "02/04/02",
-                prefers_light: false,
-            }
-        }
-    }
-}
-
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|candidate| candidate == needle)
 }
 
 fn codex_cleared_provider_sessions(config: &AgentConfig) -> Vec<String> {
@@ -1380,9 +1248,9 @@ pub async fn spawn_agent(
         let mut opencode_chunks_logged = 0usize;
         let mut codex_terminal_theme_responder = CodexTerminalThemeProbeResponder::default();
         let mut antigravity_turn_completion_gate = AntigravityTurnCompletionGate::default();
-        let mut opencode_startup_memory_transition = OpenCodeStartupMemoryTransition::default();
         let mut claude_startup_readiness = ClaudeStartupReadiness::default();
         let mut startup_prompt_pending = true;
+        let mut codex_choice_pending = false;
         let mut antigravity_workspace_trust_confirmed = false;
         let mut claude_bypass_permissions_confirmed = false;
         let mut pty_decoder = PtyUtf8Decoder::new();
@@ -1390,7 +1258,7 @@ pub async fn spawn_agent(
             std::sync::Arc::new(std::sync::Mutex::new(OutputReadyEmitGate::default()));
         let _codex_exit_guard = codex_reader_owner.map(|(broker, agent_id, generation)| {
             super::codex_shared::CodexAttachGuard::new(broker, agent_id, generation)
-                .for_reader(reader_alive, reader_attachment_ready)
+                .for_reader(reader_alive, reader_attachment_ready.clone())
         });
         loop {
             match reader.read(&mut buf) {
@@ -1458,17 +1326,14 @@ pub async fn spawn_agent(
                         opencode_chunks_logged += 1;
                     }
                     had_pty_output = true;
-                    for response in codex_terminal_theme_responder.responses_for_chunk(
+                    codex_terminal_theme_responder.respond_to_output(
+                        &terminal_sessions,
+                        &sid_for_pty,
+                        reader_runtime_generation,
                         &provider_name_for_pty,
                         &buf[0..n],
                         &terminal_theme_for_pty,
-                    ) {
-                        let _ = terminal_sessions.send_privileged_input_blocking(
-                            &sid_for_pty,
-                            reader_runtime_generation,
-                            response,
-                        );
-                    }
+                    );
                     if let Ok(mut watch_state) = watch_state_clone.lock() {
                         watch_state.push_output(&buf[0..n]);
                     }
@@ -1489,8 +1354,9 @@ pub async fn spawn_agent(
                     } else {
                         None
                     };
-                    let startup_screen = if startup_prompt_pending
-                        && matches!(provider_name_for_pty.as_str(), "codex" | "claude" | "pi")
+                    let startup_screen = if provider_name_for_pty == "codex"
+                        || (startup_prompt_pending
+                            && matches!(provider_name_for_pty.as_str(), "claude" | "opencode" | "pi"))
                     {
                         // Output was applied to the broker above. Read its current
                         // screen so chunk boundaries and erased startup messages
@@ -1606,6 +1472,32 @@ pub async fn spawn_agent(
                             "Action Needed",
                         );
                     }
+                    if provider_name_for_pty == "codex" {
+                        if let Some(screen) = startup_screen.as_deref() {
+                            if crate::delivery::codex_menu::current_screen_requires_choice(screen) {
+                                codex_choice_pending = true;
+                            } else if codex_choice_pending
+                                && reader_attachment_ready
+                                    .load(std::sync::atomic::Ordering::Acquire)
+                                && crate::control::provider_output_has_ready_prompt("codex", screen)
+                            {
+                                codex_choice_pending = false;
+                                let choice_app = pty_app.clone();
+                                let choice_session = sid_for_pty.clone();
+                                let observation = startup_observation.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let state = choice_app.state::<AppState>();
+                                    crate::control::codex_menu_status::restore_after_choice(
+                                        &choice_app,
+                                        state.inner(),
+                                        &choice_session,
+                                        &observation,
+                                    )
+                                    .await;
+                                });
+                            }
+                        }
+                    }
                     if let Ok(mut stamp) = last_output_at_clone.lock() {
                         *stamp = Some(std::time::SystemTime::now());
                     }
@@ -1664,10 +1556,6 @@ pub async fn spawn_agent(
                     }
 
                     if let Some(title) = extract_terminal_titles(&text).into_iter().last() {
-                        let _previous_title = terminal_title_clone
-                            .lock()
-                            .map(|value| value.clone())
-                            .unwrap_or_default();
                         if provider_name_for_pty == "opencode" {
                             log_debug(&format!(
                                 "[Wardian] OpenCode backend title for session {}: {}",
@@ -1678,49 +1566,19 @@ pub async fn spawn_agent(
                             *current_title = title.clone();
                         }
                         if provider_name_for_pty == "opencode" {
-                            if let Some(next_status) = opencode_startup_memory_transition
-                                .observe_title(
-                                    &mut pending_memory_injection,
-                                    &provider_name_for_pty,
-                                    &title,
-                                    &sid_for_pty,
-                                )
+                            // Titles describe turns only after the canonical
+                            // composer has ended startup. A generic title can
+                            // arrive while the resumed session is still loading.
+                            if let Some(next_status) = (!startup_prompt_pending)
+                                .then(|| opencode_status_from_title(&title))
+                                .flatten()
                             {
-                                let was_idle = current_status_clone
-                                    .lock()
-                                    .map(|status| {
-                                        wardian_core::identity::normalize_status(&status) == "idle"
-                                    })
-                                    .unwrap_or(false);
                                 set_agent_status(
                                     &pty_emit_app,
                                     &sid_for_pty,
                                     &current_status_clone,
                                     next_status,
                                 );
-                                if startup_prompt_pending
-                                    && opencode_startup_memory_transition.ready_observed
-                                {
-                                    startup_prompt_pending = false;
-                                    let readiness_app = pty_app.clone();
-                                    let readiness_session_id = sid_for_pty.clone();
-                                    let observation = startup_observation.clone();
-                                    tauri::async_runtime::spawn(async move {
-                                        let state = readiness_app.state::<AppState>();
-                                        crate::control::startup_readiness::publish_startup_readiness(
-                                            Some(&readiness_app), state.inner(), &readiness_session_id,
-                                            &observation, wardian_core::control::ProviderReadyEvidence::TitleDetected,
-                                        ).await;
-                                    });
-                                }
-                                // OpenCode's TUI does not expose a separate
-                                // JSON acknowledgement in interactive mode;
-                                // its provider-owned title changes from
-                                // `OpenCode` to `OC | …` when it accepts a
-                                // submitted turn.
-                                if was_idle && next_status == "Processing..." {
-                                    super::emit_agent_turn_started(&pty_emit_app, &sid_for_pty);
-                                }
                             }
                         } else if provider_name_for_pty == "gemini" {
                             if let Some(next_status) = gemini_status_from_title(&title) {
@@ -2747,7 +2605,9 @@ pub async fn spawn_agent(
         let watcher_config = config_lock.clone();
         let watcher_current_status = current_status.clone();
         let watcher_workspace = cwd.clone();
+        let watcher_session = config.session_id.clone();
         let started_after_ms = chrono::Utc::now().timestamp_millis();
+        let mut discovery = OpenCodeSessionDiscovery::default();
         std::thread::spawn(move || loop {
             let current = watcher_current_status
                 .lock()
@@ -2756,17 +2616,18 @@ pub async fn spawn_agent(
             if current == "Off" {
                 break;
             }
-            if wardian_core::identity::normalize_status(&current) == "processing" {
-                if let Some(provider_session_id) =
-                    opencode_recent_session_for_workspace(&watcher_workspace, started_after_ms)
-                {
-                    if let Ok(mut cfg) = watcher_config.lock() {
-                        cfg.resume_session = Some(provider_session_id);
-                        cfg.fresh_provider_session_id = None;
-                    }
-                    persist_runtime_agent_configs(&watcher_app);
-                    break;
+            if let Some(provider_session_id) = discovery.poll(
+                &current,
+                &watcher_workspace,
+                started_after_ms,
+                &watcher_session,
+            ) {
+                if let Ok(mut cfg) = watcher_config.lock() {
+                    cfg.resume_session = Some(provider_session_id);
+                    cfg.fresh_provider_session_id = None;
                 }
+                persist_runtime_agent_configs(&watcher_app);
+                break;
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
         });
@@ -3271,6 +3132,10 @@ mod tests {
             ("claude", "\x1b[4;1H\x1b[2KHaiku 4.5 | workspace | /rc", true),
             ("pi", "\x1b[2J\x1b[Hpi v0.84.2\r\n────────────────\r\n<workspace-root>/habitat/workspace (test/provider-conformanc...\r\n$0.000 (sub) 0.0%/272k (auto) (openai-codex) gpt-5.4-mini • medium", true),
             ("pi", "\x1b[2J\x1b[Hpi v0.84.2\r\n────────────────\r\n<workspace-root>/habitat/workspace\r\nLoading model…", false),
+            ("opencode", "\x1b[2J\x1b[HLoading session...\r\nAsk anything...\r\nBuild  mimo-v2.5-free\r\nctrl+p commands", false),
+            ("opencode", "\x1b[1;1H\x1b[2K", true),
+            ("opencode", "\x1b[1;1HPermission required", false),
+            ("opencode", "\x1b[1;1H\x1b[2K", true),
         ] {
             let output_broker = broker.clone();
             tokio::task::spawn_blocking(move || {
@@ -3433,7 +3298,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_title_readiness_records_receipt_and_enables_resume_delta() {
+    fn opencode_composer_readiness_records_receipt_and_enables_resume_delta() {
         let temp = tempfile::tempdir().unwrap();
         let store = wardian_core::memory::MemoryStore::open(temp.path().join("memory.db")).unwrap();
         let agent_id = "opencode-memory-agent";
@@ -3471,12 +3336,19 @@ mod tests {
             .into_iter()
             .last()
             .expect("OpenCode title");
-        let mut transition = OpenCodeStartupMemoryTransition::default();
-        assert_eq!(
-            transition.observe_title(&mut pending, "opencode", &title, agent_id,),
-            Some("Idle")
-        );
-        assert!(transition.ready_observed);
+        assert!(!crate::control::provider_output_has_startup_ready_prompt(
+            "opencode", &title
+        ));
+        assert!(pending.is_some());
+        assert!(crate::control::provider_output_has_startup_ready_prompt(
+            "opencode",
+            "Ask anything...\nBuild  mimo-v2.5-free\nctrl+p commands",
+        ));
+        assert!(record_pending_memory_injection(
+            &mut pending,
+            agent_id,
+            "opencode"
+        ));
         assert!(!record_pending_memory_injection(
             &mut pending,
             agent_id,
@@ -3525,53 +3397,5 @@ mod tests {
         );
         assert!(resumed.context_text.contains("Later OpenCode memory"));
         assert!(!resumed.context_text.contains("Initial OpenCode memory"));
-    }
-
-    #[test]
-    fn codex_terminal_theme_probe_responder_answers_light_theme_queries() {
-        let mut responder = CodexTerminalThemeProbeResponder::default();
-
-        let responses = responder.responses_for_chunk(
-            "codex",
-            b"\x1b[?996n\x1b]10;?\x1b\\\x1b]11;?\x1b\\",
-            "light",
-        );
-
-        let responses: Vec<String> = responses
-            .into_iter()
-            .map(|response| String::from_utf8(response).expect("utf8 response"))
-            .collect();
-        assert_eq!(
-            responses,
-            vec![
-                "\x1b[?997;2n".to_string(),
-                "\x1b]10;rgb:11/18/27\x1b\\".to_string(),
-                "\x1b]11;rgb:fc/fa/f5\x1b\\".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn codex_terminal_theme_probe_responder_handles_split_background_query() {
-        let mut responder = CodexTerminalThemeProbeResponder::default();
-
-        assert!(responder
-            .responses_for_chunk("codex", b"\x1b]11", "dark")
-            .is_empty());
-        let responses = responder.responses_for_chunk("codex", b";?\x1b\\", "dark");
-
-        assert_eq!(responses, vec![b"\x1b]11;rgb:02/04/02\x1b\\".to_vec()]);
-        assert!(responder
-            .responses_for_chunk("codex", b"\x1b]11;?\x1b\\", "dark")
-            .is_empty());
-    }
-
-    #[test]
-    fn codex_terminal_theme_probe_responder_ignores_other_providers() {
-        let mut responder = CodexTerminalThemeProbeResponder::default();
-
-        let responses = responder.responses_for_chunk("opencode", b"\x1b]11;?\x1b\\", "light");
-
-        assert!(responses.is_empty());
     }
 }
