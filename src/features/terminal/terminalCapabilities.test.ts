@@ -124,7 +124,7 @@ describe("terminal capability broker", () => {
     ).toBe(output);
   });
 
-  it("does not answer Codex color probes (the modern ConPTY does) but still themes output", () => {
+  it("does not send late Codex color replies but still themes output", () => {
     const data = "\u001b[?996n\u001b]10;?\u001b\\\u001b]11;?\u001b\\";
     const plan = planTerminalCapabilityResponses("codex", data, {
       ...baseContext,
@@ -133,14 +133,14 @@ describe("terminal capability broker", () => {
       foregroundRgb: "11/18/27",
     });
 
-    // Replying here duplicates OpenConsole's answer and leaks into codex's
+    // Replying after the bounded provider query window leaks into codex's
     // composer as stray ]10;rgb / ]11;rgb text.
     expect(plan.outgoingInputs).toEqual([]);
     expect(plan.normalizedOutput).toBe("");
     expect(plan.focusReported).toBe(false);
   });
 
-  it("strips xterm's color/light-dark report replies from Codex input (ConPTY answers natively)", () => {
+  it("strips xterm's color/light-dark report replies from Codex input", () => {
     const ESC = String.fromCharCode(27);
     const ST = ESC + String.fromCharCode(92); // ESC \  (string terminator)
     // The exact reply burst xterm.js auto-emits on maximize/resize; forwarding it
