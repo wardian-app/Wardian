@@ -214,6 +214,30 @@ impl CodexProvider {
         }
     }
 
+    /// Bridge the configured agent's managed instructions independently of
+    /// optional memory. The shared renderer also owns habitat generation, so
+    /// both surfaces preserve common/class/agent ordering without importing
+    /// arbitrary workspace or generated files at developer priority.
+    pub(crate) fn insert_managed_instructions_arg(
+        &self,
+        args: &mut Vec<String>,
+        config: &AgentConfig,
+        memory_instructions: Option<&str>,
+    ) -> Result<(), String> {
+        let home = crate::utils::fs::get_wardian_home().ok_or("Could not find Wardian home")?;
+        let mut instructions = crate::utils::fs::managed_instruction_content(
+            &home,
+            &config.agent_class,
+            Some(&config.session_id),
+        );
+        if let Some(memory) = memory_instructions.filter(|value| !value.trim().is_empty()) {
+            instructions.push('\n');
+            instructions.push_str(memory);
+        }
+        self.insert_developer_instructions_arg(args, &instructions);
+        Ok(())
+    }
+
     /// Inject runtime-owned context at developer priority. Codex discovers
     /// workspace `AGENTS.md` files from the real working directory, while
     /// Wardian keeps generated agent instructions in the isolated habitat.
@@ -228,7 +252,11 @@ impl CodexProvider {
         }
         let insert_at = args
             .iter()
-            .position(|arg| arg == "exec")
+            .position(|arg| matches!(arg.as_str(), "exec" | "app-server"))
+            // Shared-owner policy and startup-overlay parsing require the
+            // app-server header first. Exec still accepts global overrides
+            // before its subcommand.
+            .map(|index| index + usize::from(args[index] == "app-server"))
             .unwrap_or(args.len());
         args.splice(
             insert_at..insert_at,
