@@ -1,3 +1,4 @@
+use super::codex_terminal_theme::CodexTerminalThemeProbeResponder;
 use crate::providers::antigravity::{
     changed_workspace_conversation, AntigravityConversationMessage, AntigravityProvider,
 };
@@ -542,106 +543,6 @@ impl AntigravityUserTurnReceiptTracker {
         self.last_step_index = Some(latest_step_index);
         true
     }
-}
-
-#[derive(Default)]
-struct CodexTerminalThemeProbeResponder {
-    answered_light_dark: bool,
-    answered_foreground: bool,
-    answered_background: bool,
-    answered_palette_zero: bool,
-    tail: Vec<u8>,
-}
-
-impl CodexTerminalThemeProbeResponder {
-    fn responses_for_chunk(
-        &mut self,
-        provider_name: &str,
-        chunk: &[u8],
-        theme: &str,
-    ) -> Vec<Vec<u8>> {
-        if provider_name != "codex" || chunk.is_empty() {
-            self.remember_tail(chunk);
-            return Vec::new();
-        }
-
-        let mut data = self.tail.clone();
-        data.extend_from_slice(chunk);
-        let terminal_theme = CodexTerminalTheme::from_wardian_theme(theme);
-        let mut responses = Vec::new();
-
-        if !self.answered_light_dark && contains_bytes(&data, b"\x1b[?996n") {
-            self.answered_light_dark = true;
-            responses.push(
-                format!(
-                    "\x1b[?997;{}n",
-                    if terminal_theme.prefers_light { 2 } else { 1 }
-                )
-                .into_bytes(),
-            );
-        }
-
-        if !self.answered_foreground
-            && (contains_bytes(&data, b"\x1b]10;?\x07")
-                || contains_bytes(&data, b"\x1b]10;?\x1b\\"))
-        {
-            self.answered_foreground = true;
-            responses.push(format!("\x1b]10;rgb:{}\x1b\\", terminal_theme.foreground).into_bytes());
-        }
-
-        if !self.answered_background
-            && (contains_bytes(&data, b"\x1b]11;?\x07")
-                || contains_bytes(&data, b"\x1b]11;?\x1b\\"))
-        {
-            self.answered_background = true;
-            responses.push(format!("\x1b]11;rgb:{}\x1b\\", terminal_theme.background).into_bytes());
-        }
-
-        if !self.answered_palette_zero && contains_bytes(&data, b"\x1b]4;0;?\x07") {
-            self.answered_palette_zero = true;
-            responses.push(format!("\x1b]4;0;rgb:{}\x07", terminal_theme.background).into_bytes());
-        }
-
-        self.remember_tail(&data);
-        responses
-    }
-
-    fn remember_tail(&mut self, data: &[u8]) {
-        const MAX_TERMINAL_PROBE_TAIL: usize = 32;
-        let start = data.len().saturating_sub(MAX_TERMINAL_PROBE_TAIL);
-        self.tail.clear();
-        self.tail.extend_from_slice(&data[start..]);
-    }
-}
-
-struct CodexTerminalTheme {
-    foreground: &'static str,
-    background: &'static str,
-    prefers_light: bool,
-}
-
-impl CodexTerminalTheme {
-    fn from_wardian_theme(theme: &str) -> Self {
-        if theme.trim() == "light" {
-            Self {
-                foreground: "11/18/27",
-                background: "fc/fa/f5",
-                prefers_light: true,
-            }
-        } else {
-            Self {
-                foreground: "ee/f2/ee",
-                background: "02/04/02",
-                prefers_light: false,
-            }
-        }
-    }
-}
-
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|candidate| candidate == needle)
 }
 
 fn codex_cleared_provider_sessions(config: &AgentConfig) -> Vec<String> {
@@ -1452,17 +1353,14 @@ pub async fn spawn_agent(
                         opencode_chunks_logged += 1;
                     }
                     had_pty_output = true;
-                    for response in codex_terminal_theme_responder.responses_for_chunk(
+                    codex_terminal_theme_responder.respond_to_output(
+                        &terminal_sessions,
+                        &sid_for_pty,
+                        reader_runtime_generation,
                         &provider_name_for_pty,
                         &buf[0..n],
                         &terminal_theme_for_pty,
-                    ) {
-                        let _ = terminal_sessions.send_privileged_input_blocking(
-                            &sid_for_pty,
-                            reader_runtime_generation,
-                            response,
-                        );
-                    }
+                    );
                     if let Ok(mut watch_state) = watch_state_clone.lock() {
                         watch_state.push_output(&buf[0..n]);
                     }
@@ -3471,53 +3369,5 @@ mod tests {
         );
         assert!(resumed.context_text.contains("Later OpenCode memory"));
         assert!(!resumed.context_text.contains("Initial OpenCode memory"));
-    }
-
-    #[test]
-    fn codex_terminal_theme_probe_responder_answers_light_theme_queries() {
-        let mut responder = CodexTerminalThemeProbeResponder::default();
-
-        let responses = responder.responses_for_chunk(
-            "codex",
-            b"\x1b[?996n\x1b]10;?\x1b\\\x1b]11;?\x1b\\",
-            "light",
-        );
-
-        let responses: Vec<String> = responses
-            .into_iter()
-            .map(|response| String::from_utf8(response).expect("utf8 response"))
-            .collect();
-        assert_eq!(
-            responses,
-            vec![
-                "\x1b[?997;2n".to_string(),
-                "\x1b]10;rgb:11/18/27\x1b\\".to_string(),
-                "\x1b]11;rgb:fc/fa/f5\x1b\\".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn codex_terminal_theme_probe_responder_handles_split_background_query() {
-        let mut responder = CodexTerminalThemeProbeResponder::default();
-
-        assert!(responder
-            .responses_for_chunk("codex", b"\x1b]11", "dark")
-            .is_empty());
-        let responses = responder.responses_for_chunk("codex", b";?\x1b\\", "dark");
-
-        assert_eq!(responses, vec![b"\x1b]11;rgb:02/04/02\x1b\\".to_vec()]);
-        assert!(responder
-            .responses_for_chunk("codex", b"\x1b]11;?\x1b\\", "dark")
-            .is_empty());
-    }
-
-    #[test]
-    fn codex_terminal_theme_probe_responder_ignores_other_providers() {
-        let mut responder = CodexTerminalThemeProbeResponder::default();
-
-        let responses = responder.responses_for_chunk("opencode", b"\x1b]11;?\x1b\\", "light");
-
-        assert!(responses.is_empty());
     }
 }
