@@ -26,6 +26,10 @@ use wardian_core::models::chat::{
     AgentChatEvent, AgentChatEventKind, AgentChatRole, AgentChatStatus,
 };
 
+#[path = "chat_archive_identity.rs"]
+pub(crate) mod archive_identity;
+use archive_identity::stable_provider_log_event_id;
+
 const PROVIDER_LOG_TAIL_BYTES: u64 = 2 * 1024 * 1024;
 
 #[path = "chat_opencode_tools.rs"]
@@ -73,7 +77,7 @@ pub async fn load_agent_chat_transcript_for_state(
     let result = archive_agent_chat_events_for_state(state, &session_id).await?;
     let archived_events = state
         .conversation_archive
-        .chat_events_for_active_conversation(&session_id)
+        .chat_events_for_capture(&result.context)
         .unwrap_or_else(|error| {
             manager::log_debug(&format!(
                 "[WARDIAN] conversation archive chat replay failed for {session_id}: {error}"
@@ -84,7 +88,14 @@ pub async fn load_agent_chat_transcript_for_state(
     // Provider logs and the watch snapshot are live, bounded sources. Replay
     // only the active durable archive so a restart or log rotation does not
     // erase current chat rows, while a new provider session starts empty.
-    let mut events = merge_chat_events(result.events, archived_events);
+    let mut events = crate::state::conversation_archive::provenance::merge_current_capture(
+        result.events,
+        archived_events,
+    )
+    .map_err(|error| format!("conversation archive provenance refresh failed: {error}"))?;
+    for event in &mut events {
+        normalize_chat_event_visible_text(event);
+    }
     let conversation_started_at = active_conversation_started_at(state, &session_id);
     events.extend(memory_chat_events(
         &session_id,
@@ -597,7 +608,7 @@ fn load_provider_log_chat_events(
     };
 
     let lines = content.lines().collect::<Vec<_>>();
-    normalize_chat_lines(session_id, provider, lines.iter())
+    let mut events = normalize_chat_lines(session_id, provider, lines.iter())
         .into_iter()
         .map(|mut event| {
             set_metadata(&mut event.metadata, "provider_log", true);
@@ -629,7 +640,14 @@ fn load_provider_log_chat_events(
             }
             event
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // The bridge is available only for a complete, session-headed snapshot.
+    // A bounded tail may use persisted aliases but cannot invent new ones.
+    let complete = std::fs::metadata(path).is_ok_and(|meta| {
+        meta.len() == content.len() as u64 && meta.len() <= PROVIDER_LOG_TAIL_BYTES
+    });
+    archive_identity::attach_native_legacy_aliases(&mut events, path, &content, complete);
+    events
 }
 
 fn claude_legacy_provider_log_event_id(
@@ -752,39 +770,6 @@ fn load_antigravity_database_chat_events(
             event
         })
         .collect()
-}
-
-fn stable_provider_log_event_id(event: &AgentChatEvent, path: &Path) -> String {
-    let mut hash = Sha256::new();
-    hash.update(event.session_id.as_bytes());
-    hash.update(b"\0");
-    hash.update(event.provider.as_bytes());
-    hash.update(b"\0");
-    hash.update(path.to_string_lossy().as_bytes());
-    hash.update(b"\0");
-    hash.update(format!("{:?}", event.kind).as_bytes());
-    hash.update(b"\0");
-    hash.update(format!("{:?}", event.role).as_bytes());
-    hash.update(b"\0");
-    for value in [
-        event.turn_id.as_deref(),
-        event.created_at.as_deref(),
-        event.source.as_deref(),
-        event.title.as_deref(),
-        event.command.as_deref(),
-        event.text.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        hash.update(value.as_bytes());
-        hash.update(b"\0");
-    }
-    format!(
-        "{}:provider_log:{}",
-        event.session_id,
-        hex_prefix(hash.finalize().as_slice(), 16)
-    )
 }
 
 fn hex_prefix(bytes: &[u8], len: usize) -> String {
@@ -1273,29 +1258,19 @@ fn normalize_chat_event_visible_text(event: &mut AgentChatEvent) {
 /// metadata is authoritative, so replay can migrate the presentation role
 /// without rewriting the durable archive or treating the row as a new prompt.
 fn normalize_chat_event_provenance(event: &mut AgentChatEvent) {
-    let input_origin = event
-        .metadata
-        .get("input_origin")
-        .and_then(serde_json::Value::as_str);
-    if event.kind == AgentChatEventKind::Message
-        && event.role == Some(AgentChatRole::User)
-        && matches!(
-            input_origin,
-            Some("context_injection" | "provider_internal")
-        )
-    {
-        event.role = Some(AgentChatRole::System);
-    } else if event.kind == AgentChatEventKind::ToolResult
-        && event.role == Some(AgentChatRole::User)
-    {
-        event.role = Some(AgentChatRole::Tool);
-    }
+    crate::state::conversation_archive::provenance::canonicalize_role(event);
 }
 
 fn should_collapse_provider_message_duplicate(
     existing: &AgentChatEvent,
     candidate: &AgentChatEvent,
 ) -> bool {
+    if existing.metadata["provider_log"] == true
+        && candidate.metadata["provider_log"] == true
+        && !archive_identity::is_codex_stream_completion_pair(existing, candidate)
+    {
+        return false; // Native records with distinct IDs are distinct observations.
+    }
     if existing.kind != AgentChatEventKind::Message || candidate.kind != AgentChatEventKind::Message
     {
         return false;
@@ -1341,6 +1316,12 @@ fn chat_event_dedupe_key(event: &AgentChatEvent) -> String {
         return format!("archive|{conversation_id}|{}", event.id);
     }
 
+    if event.metadata["provider_log"] == true {
+        return format!(
+            "native|{}|{}|{}",
+            event.session_id, event.provider, event.id
+        );
+    }
     if event.kind == AgentChatEventKind::Message {
         return format!(
             "{:?}|{:?}|{}|{}",
@@ -2211,6 +2192,26 @@ Do you want to proceed?
         assert_eq!(
             chat_events[0].text.as_deref(),
             Some("Created #daily-task-list under General.")
+        );
+        // The mirror exception must not collapse two identified observations or
+        // equal answers belonging to different native requests.
+        let mut identified = chat_events[0].clone();
+        identified.id = "other-identified-answer".into();
+        identified.turn_id = Some("other-native-message".into());
+        assert_eq!(
+            merge_chat_events(Vec::new(), vec![chat_events[0].clone(), identified]).len(),
+            2
+        );
+        let mut rooted_stream = chat_events[0].clone();
+        rooted_stream.id = "stream-another-request".into();
+        rooted_stream.turn_id = None;
+        rooted_stream.source = Some("event_msg".into());
+        rooted_stream.metadata["request_root_id"] = serde_json::json!("request-a");
+        let mut rooted_completion = chat_events[0].clone();
+        rooted_completion.metadata["request_root_id"] = serde_json::json!("request-b");
+        assert_eq!(
+            merge_chat_events(Vec::new(), vec![rooted_stream, rooted_completion]).len(),
+            2
         );
     }
 
