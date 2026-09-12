@@ -379,21 +379,188 @@ fn only_a_generation_suffixed_state_database_is_recognised() {
 }
 
 #[test]
-fn a_rollout_path_is_split_at_its_sessions_directory() {
+fn a_rollout_path_is_split_into_platform_neutral_components() {
+    // The provider writes whichever separator its own platform uses, so both
+    // spellings must yield the same components on either host.
     assert_eq!(
-        sessions_tail(r"C:\agents\a\habitat\.codex\sessions\2026\09\r.jsonl").as_deref(),
-        Some(r"2026\09\r.jsonl")
+        sessions_tail(r"C:\agents\a\habitat\.codex\sessions\2026\09\r.jsonl"),
+        Some(vec![
+            "2026".to_owned(),
+            "09".to_owned(),
+            "r.jsonl".to_owned()
+        ])
     );
     assert_eq!(
-        sessions_tail(r"\\?\C:\Users\u\.codex\sessions\2026\r.jsonl").as_deref(),
-        Some(r"2026\r.jsonl")
+        sessions_tail("/home/u/.codex/sessions/2026/09/r.jsonl"),
+        Some(vec![
+            "2026".to_owned(),
+            "09".to_owned(),
+            "r.jsonl".to_owned()
+        ])
     );
     assert_eq!(
-        sessions_tail("/home/u/.codex/sessions/2026/r.jsonl").as_deref(),
-        Some(r"2026\r.jsonl")
+        sessions_tail(r"\?\C:\Users\u\.codex\sessions\2026\r.jsonl"),
+        Some(vec!["2026".to_owned(), "r.jsonl".to_owned()])
     );
-    // A path with no sessions component, or nothing below it, is left alone.
+    // An earlier `sessions` component is used when the rightmost one is part of
+    // a longer name, so the row is rewritten rather than silently skipped.
+    assert_eq!(
+        sessions_tail(r"C:\a\sessions\archived-sessions-2025\r.jsonl"),
+        Some(vec![
+            "archived-sessions-2025".to_owned(),
+            "r.jsonl".to_owned()
+        ])
+    );
+    // No sessions component, nothing below it, or a traversal: left alone.
     assert!(sessions_tail(r"C:\somewhere\rollout.jsonl").is_none());
     assert!(sessions_tail(r"C:\a\sessions").is_none());
     assert!(sessions_tail(r"C:\a\my-sessions-archive\r.jsonl").is_none());
+    assert!(sessions_tail(r"C:\a\sessions\..\..\escape.jsonl").is_none());
+}
+
+#[test]
+fn a_rewritten_path_uses_this_platform_s_separator() {
+    let temp = tempfile::tempdir().expect("temp");
+    let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
+    let warm = home(temp.path(), "warm");
+    thread_database(&warm.join("state_5.sqlite"), 2, 0);
+    refresh(&wardian_home, &warm, &central).expect("publish");
+    let fresh = home(temp.path(), "fresh");
+    seed(&wardian_home, &fresh).expect("seed");
+
+    // A string join with the wrong separator yields one filename rather than a
+    // nested path, which reads as valid but names nothing on disk.
+    for path in rollout_paths(&fresh.join("state_5.sqlite")) {
+        let relative = PathBuf::from(&path)
+            .strip_prefix(central.join("sessions"))
+            .expect("row is under the central tree")
+            .to_owned();
+        assert_eq!(
+            relative.components().count(),
+            2,
+            "expected year and filename components, got {relative:?}"
+        );
+        let filename = relative
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("rewritten row keeps a filename");
+        assert!(
+            filename.starts_with("rollout-") && filename.ends_with(".jsonl"),
+            "filename survived the rewrite intact: {path}"
+        );
+    }
+}
+
+#[test]
+fn a_row_that_cannot_be_rewritten_is_dropped_rather_than_published() {
+    let temp = tempfile::tempdir().expect("temp");
+    let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
+    let warm = home(temp.path(), "warm");
+    let database = warm.join("state_5.sqlite");
+    thread_database(&database, 2, 0);
+    let connection = rusqlite::Connection::open(&database).expect("open");
+    connection
+        .execute(
+            "INSERT INTO threads (id, rollout_path, cwd) VALUES ('odd', ?1, 'w')",
+            [r"C:\agents\publisher\elsewhere\rollout.jsonl"],
+        )
+        .expect("insert unrewritable row");
+    drop(connection);
+
+    refresh(&wardian_home, &warm, &central).expect("publish");
+    let fresh = home(temp.path(), "fresh");
+    seed(&wardian_home, &fresh).expect("seed");
+
+    let seeded = fresh.join("state_5.sqlite");
+    assert_eq!(
+        count(&seeded, "threads"),
+        2,
+        "the odd row was not published"
+    );
+    for path in rollout_paths(&seeded) {
+        assert!(
+            !path.contains("publisher"),
+            "an agent home survived: {path}"
+        );
+    }
+}
+
+#[test]
+fn engine_bookkeeping_tables_do_not_stop_publication() {
+    let temp = tempfile::tempdir().expect("temp");
+    let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
+    let warm = home(temp.path(), "warm");
+    let database = warm.join("state_5.sqlite");
+    thread_database(&database, 3, 0);
+    // ANALYZE materialises sqlite_stat1, which holds rows and is not the
+    // provider's data; refusing on it would disable the cache machine-wide.
+    let connection = rusqlite::Connection::open(&database).expect("open");
+    connection.execute("ANALYZE", []).expect("analyze");
+    drop(connection);
+
+    assert!(refresh(&wardian_home, &warm, &central).expect("publish despite sqlite_stat1"));
+}
+
+#[test]
+fn a_superseded_snapshot_is_reclaimed() {
+    let temp = tempfile::tempdir().expect("temp");
+    let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
+
+    let old = home(temp.path(), "old");
+    thread_database(&old.join("state_5.sqlite"), 2, 0);
+    refresh(&wardian_home, &old, &central).expect("publish generation 5");
+    let upgraded = home(temp.path(), "upgraded");
+    thread_database(&upgraded.join("state_6.sqlite"), 4, 0);
+    refresh(&wardian_home, &upgraded, &central).expect("publish generation 6");
+
+    let cache = cache_directory(&wardian_home);
+    let snapshots: Vec<String> = std::fs::read_dir(&cache)
+        .expect("read cache")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(SNAPSHOT_PREFIX))
+        .collect();
+    assert_eq!(
+        snapshots,
+        vec!["snapshot-state_6.sqlite".to_owned()],
+        "a superseded generation was left behind"
+    );
+}
+
+#[test]
+fn a_home_that_does_not_project_the_central_tree_is_detected() {
+    let temp = tempfile::tempdir().expect("temp");
+    let central = real_codex(temp.path());
+    let projecting = home(temp.path(), "projecting");
+    let isolated = home(temp.path(), "isolated");
+    std::fs::create_dir_all(isolated.join("sessions")).expect("local fallback sessions");
+
+    assert!(
+        !projects_central_sessions(&isolated, &central),
+        "a private local sessions directory must not pass"
+    );
+    // With no sessions entry at all there is nothing to contradict.
+    assert!(projects_central_sessions(&projecting, &central));
+}
+
+#[test]
+fn a_discarded_seed_leaves_the_home_without_a_database() {
+    let temp = tempfile::tempdir().expect("temp");
+    let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
+    let warm = home(temp.path(), "warm");
+    thread_database(&warm.join("state_5.sqlite"), 3, 0);
+    refresh(&wardian_home, &warm, &central).expect("publish");
+
+    let fresh = home(temp.path(), "fresh");
+    assert!(seed(&wardian_home, &fresh).expect("seed"));
+    discard_seed(&wardian_home, &fresh);
+    assert!(
+        !fresh.join("state_5.sqlite").exists(),
+        "the provider must rebuild rather than trust an unusable seed"
+    );
 }

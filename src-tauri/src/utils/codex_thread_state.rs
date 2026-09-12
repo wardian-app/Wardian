@@ -41,7 +41,6 @@ const SHARED_TABLES: &[&str] = &[
     "backfill_state",
     "rollout_migration_skipped_rollouts",
     "rollout_migration_state",
-    "sqlite_sequence",
     "thread_artifacts",
     "thread_dynamic_tools",
     "thread_sections",
@@ -171,8 +170,13 @@ pub(crate) fn seed(wardian_home: &Path, codex_home: &Path) -> Result<bool, Strin
 
     // Hold the lock shared so a concurrent publication cannot replace the file
     // underneath this copy.
+    // Seeding is best effort and runs on the spawn path, so never wait: the
+    // exclusive holder is a publication doing two full VACUUMs. A skipped seed
+    // costs one rebuild, which is the documented fallback.
     let lock = open_lock(&cache)?;
-    lock.lock_shared().map_err(|error| error.to_string())?;
+    if lock.try_lock_shared().is_err() {
+        return Ok(false);
+    }
     let outcome = write_seed(&snapshot, &codex_home.join(&meta.database));
     let _ = FileExt::unlock(&lock);
     outcome
@@ -277,7 +281,24 @@ fn publish(
     }
     std::fs::rename(&meta_staging, cache.join(SNAPSHOT_META_FILE))
         .map_err(|error| error.to_string())?;
+    // A generation bump would otherwise orphan a full-size index forever.
+    sweep_superseded(cache, database);
     Ok(true)
+}
+
+/// Remove published snapshots other than the one just written.
+fn sweep_superseded(cache: &Path, database: &str) {
+    let keep = snapshot_path(cache, database);
+    let Ok(entries) = std::fs::read_dir(cache) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(SNAPSHOT_PREFIX) && path != keep {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn sweep_staging(cache: &Path) {
@@ -313,12 +334,20 @@ fn capture(source: &Path, target: &Path, real_codex_home: &Path) -> Result<i64, 
         .map_err(|error| format!("could not open Codex thread snapshot: {error}"))?;
     refuse_unknown_tables(&writer)?;
     let rewritten = canonicalize_rollout_paths(&writer, real_codex_home)?;
+    // The invariant is that no published row names an agent home. Rows whose
+    // path could not be split are dropped rather than shipped: the seeded agent
+    // re-migrates those few rollouts, and one odd path cannot disable the cache.
+    let root = canonical_root(real_codex_home);
+    let stranded = writer
+        .execute(
+            "DELETE FROM threads WHERE rollout_path IS NULL OR substr(rollout_path, 1, ?2) <> ?1",
+            rusqlite::params![root.as_str(), root.chars().count() as i64],
+        )
+        .map_err(|error| format!("could not drop unrewritable rollout paths: {error}"))?;
     let threads: i64 = writer
         .query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))
         .unwrap_or(0);
-    if rewritten > threads {
-        return Err("Codex thread snapshot rewrote more rows than it holds".into());
-    }
+    let _ = (rewritten, stranded);
     // Reclaim pages the rewrite freed so the seed stays small.
     writer
         .execute("VACUUM", [])
@@ -337,7 +366,9 @@ fn refuse_unknown_tables(connection: &rusqlite::Connection) -> Result<(), String
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     for name in names {
-        if SHARED_TABLES.contains(&name.as_str()) {
+        // SQLite's own bookkeeping (sqlite_sequence, sqlite_stat1 after an
+        // ANALYZE) cannot carry agent data and must not stop publication.
+        if name.starts_with("sqlite_") || SHARED_TABLES.contains(&name.as_str()) {
             continue;
         }
         let rows: i64 = connection
@@ -383,7 +414,11 @@ fn canonicalize_rollout_paths(
         let Some(tail) = sessions_tail(&rollout_path) else {
             continue;
         };
-        let canonical = canonical_root.join(tail).to_string_lossy().into_owned();
+        let canonical = tail
+            .iter()
+            .fold(canonical_root.clone(), |path, part| path.join(part))
+            .to_string_lossy()
+            .into_owned();
         if canonical == rollout_path {
             continue;
         }
@@ -398,18 +433,70 @@ fn canonicalize_rollout_paths(
     Ok(rewritten)
 }
 
-/// The portion of a rollout path below its `sessions` directory.
-fn sessions_tail(rollout_path: &str) -> Option<String> {
-    let lowered = rollout_path.to_ascii_lowercase();
-    let marker = lowered.rfind("sessions")?;
-    let after = marker + "sessions".len();
-    let tail = rollout_path.get(after..)?.trim_start_matches(['\\', '/']);
-    // Guard against a path whose own name merely ends in "sessions".
-    let boundary = rollout_path.as_bytes().get(after).copied();
-    if tail.is_empty() || !matches!(boundary, Some(b'\\') | Some(b'/')) {
-        return None;
+/// The central sessions directory every home is expected to project, as the
+/// string form used for both rewriting and the published-row invariant.
+fn canonical_root(real_codex_home: &Path) -> String {
+    real_codex_home
+        .join("sessions")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Whether this home's `sessions` entry really resolves to the central tree.
+///
+/// The projection falls back to a private local directory when a link cannot be
+/// created. A home on that fallback must not keep a seed whose rows all name the
+/// central tree, because its migration-state rows would stop it rebuilding.
+pub(crate) fn projects_central_sessions(codex_home: &Path, real_codex_home: &Path) -> bool {
+    let resolve = |path: &Path| std::fs::canonicalize(path).ok();
+    match (
+        resolve(&codex_home.join("sessions")),
+        resolve(&real_codex_home.join("sessions")),
+    ) {
+        (Some(projected), Some(central)) => projected == central,
+        // Nothing to contradict: leave the decision to the caller's default.
+        _ => true,
     }
-    Some(tail.replace('/', "\\"))
+}
+
+/// Remove a seed this call wrote after discovering the home cannot use it.
+pub(crate) fn discard_seed(wardian_home: &Path, codex_home: &Path) {
+    let cache = cache_directory(wardian_home);
+    let Some(meta) = read_meta(&cache) else {
+        return;
+    };
+    let _ = std::fs::remove_file(codex_home.join(&meta.database));
+}
+
+/// The components of a rollout path below its `sessions` directory.
+///
+/// The provider writes whichever separator its platform uses, so the tail is
+/// returned as components and rejoined through `PathBuf`; producing a string
+/// with one platform's separator would yield a single filename on the other.
+fn sessions_tail(rollout_path: &str) -> Option<Vec<String>> {
+    let lowered = rollout_path.to_ascii_lowercase();
+    let mut search_from = lowered.len();
+    while let Some(marker) = lowered[..search_from].rfind("sessions") {
+        search_from = marker;
+        let after = marker + "sessions".len();
+        // The component must be exactly `sessions`, not a name ending in it.
+        let separator = |byte: Option<&u8>| matches!(byte, Some(b'\\') | Some(b'/'));
+        let starts_component = marker == 0 || separator(rollout_path.as_bytes().get(marker - 1));
+        if !starts_component || !separator(rollout_path.as_bytes().get(after)) {
+            continue;
+        }
+        let components: Vec<String> = rollout_path[after..]
+            .split(['\\', '/'])
+            .filter(|part| !part.is_empty() && *part != ".")
+            .map(str::to_owned)
+            .collect();
+        // A traversal component would let a rewritten path escape the tree.
+        if components.is_empty() || components.iter().any(|part| part == "..") {
+            return None;
+        }
+        return Some(components);
+    }
+    None
 }
 
 #[cfg(test)]

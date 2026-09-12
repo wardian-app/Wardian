@@ -27,6 +27,7 @@ pub(super) struct OwnerStartTimings {
     managed_messaging: std::time::Duration,
     socket_recovery: std::time::Duration,
     launch_config: std::time::Duration,
+    thread_seed: std::time::Duration,
     child_spawn: std::time::Duration,
     socket_wait: std::time::Duration,
     proxy_connect: std::time::Duration,
@@ -89,7 +90,7 @@ impl OwnerStartTimings {
         crate::utils::logging::log_debug(&format!(
             "[Wardian] Codex owner start agent={agent_id} total_ms={} quiescent_ms={} \
 habitat_ms={} codex_home_ms={} compact_home_ms={} codex_projection_ms={} messaging_ms={} \
-socket_recovery_ms={} launch_config_ms={} child_spawn_ms={} socket_wait_ms={} \
+socket_recovery_ms={} thread_seed_ms={} launch_config_ms={} child_spawn_ms={} socket_wait_ms={} \
 proxy_connect_ms={} initialize_ms={} launch_model_ms={}",
             self.total.as_millis(),
             self.quiescent.as_millis(),
@@ -99,6 +100,7 @@ proxy_connect_ms={} initialize_ms={} launch_model_ms={}",
             self.codex_projection.as_millis(),
             self.managed_messaging.as_millis(),
             self.socket_recovery.as_millis(),
+            self.thread_seed.as_millis(),
             self.launch_config.as_millis(),
             self.child_spawn.as_millis(),
             self.socket_wait.as_millis(),
@@ -140,19 +142,46 @@ fn prepare_owner_habitat(
     // Seed under the preparation lock and before any daemon exists for this
     // agent, so the copy cannot race the provider creating its own database.
     // Optional: without a published snapshot the agent rebuilds, as before.
-    match crate::utils::codex_thread_state::seed(&wardian_home, &codex_home) {
-        Ok(true) => crate::utils::logging::log_debug(&format!(
-            "[Wardian] Seeded Codex thread index for agent {agent_id}"
-        )),
-        Ok(false) => {}
-        Err(error) => crate::utils::logging::log_debug(&format!(
-            "[Wardian] Codex thread index seed unavailable for agent {agent_id}: {error}"
-        )),
-    }
+    let seeded = phase(&mut timings.thread_seed, || {
+        crate::utils::codex_thread_state::seed(&wardian_home, &codex_home)
+    });
+    let seeded = match seeded {
+        Ok(seeded) => {
+            if seeded {
+                crate::utils::logging::log_debug(&format!(
+                    "[Wardian] Seeded Codex thread index for agent {agent_id}"
+                ));
+            }
+            seeded
+        }
+        Err(error) => {
+            crate::utils::logging::log_debug(&format!(
+                "[Wardian] Codex thread index seed unavailable for agent {agent_id}: {error}"
+            ));
+            false
+        }
+    };
     phase(&mut timings.codex_projection, || {
         crate::utils::fs::ensure_codex_home_projection(&habitat, workspace, agent_id)
     })
     .map_err(CodexSharedError::unsupported)?;
+    // The seed assumes this home reads the central session tree. Projection can
+    // fall back to a private local directory, and a seeded home would then hold
+    // migration state saying it is finished over rollouts it cannot see.
+    if seeded {
+        let real_codex_home = dirs::home_dir()
+            .map(|home| home.join(".codex"))
+            .ok_or_else(|| CodexSharedError::unsupported("user home unavailable"))?;
+        if !crate::utils::codex_thread_state::projects_central_sessions(
+            &codex_home,
+            &real_codex_home,
+        ) {
+            crate::utils::codex_thread_state::discard_seed(&wardian_home, &codex_home);
+            crate::utils::logging::log_debug(&format!(
+                "[Wardian] Discarded Codex thread index seed for agent {agent_id}: this home does not project the central session tree"
+            ));
+        }
+    }
     if let crate::utils::codex_messaging::Registration::Unavailable(reason) =
         phase(&mut timings.managed_messaging, || {
             crate::utils::codex_messaging::ensure_managed_messaging(&wardian_home, agent_id)
