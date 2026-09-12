@@ -283,7 +283,8 @@ fn append_chat_events_writes_source_records_for_provider_metadata() {
         "raw_type": "text",
         "cursor": "opencode:part_42",
         "sequence": 42,
-        "offset": 128
+        "offset": 128,
+        "source_path": "<provider-data>/opencode.db"
     });
 
     let appended = archive
@@ -314,8 +315,21 @@ fn append_chat_events_writes_source_records_for_provider_metadata() {
     assert_eq!(sources[0].offset, Some(128));
     assert_eq!(sources[0].row_id.as_deref(), Some("part_42"));
     assert_eq!(sources[0].provider_event_type.as_deref(), Some("text"));
+    assert_eq!(
+        sources[0].source_path.as_deref(),
+        Some("<provider-data>/opencode.db")
+    );
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].source_refs, vec!["src_1".to_string()]);
+
+    let replayed = archive
+        .chat_events_for_active_conversation("agent-1")
+        .expect("replay archived events");
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(
+        replayed[0].metadata["source_path"],
+        "<provider-data>/opencode.db"
+    );
 }
 
 #[test]

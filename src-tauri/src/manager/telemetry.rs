@@ -11,7 +11,8 @@ use super::codex::{codex_log_lookup_session_id, codex_session_file_path, codex_s
 use super::display_log_path;
 use super::opencode::{
     apply_opencode_log_metrics, opencode_last_assistant_text, opencode_log_dirs,
-    opencode_log_path_in, provider_should_fallback_to_idle_after_quiet_period,
+    opencode_log_path_in, opencode_telemetry_session_id,
+    provider_should_fallback_to_idle_after_quiet_period,
 };
 use crate::providers::antigravity::AntigravityProvider;
 use crate::providers::pi::PiProvider;
@@ -1359,7 +1360,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                     provider: config.provider.clone(),
                     folder: config.folder.clone(),
                     is_off: config.is_off,
-                    resume_session: config.resume_session.clone(),
+                    resume_session: opencode_telemetry_session_id(&config),
                     provider_generation: 0,
                     process_id: agent.process_id,
                     query_count: agent.query_count.clone(),
@@ -1471,10 +1472,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 .try_lock()
                 .ok()
                 .and_then(|path| path.as_ref().map(|p| display_log_path(p)));
-            let opencode_session_id = snap
-                .resume_session
-                .as_deref()
-                .filter(|value| value.starts_with("ses_"));
+            let opencode_session_id = snap.resume_session.as_deref();
             let gemini_session_id = snap.resume_session.as_deref();
             let status_before_log_work = snap.current_status.lock().unwrap().clone();
             let mut last_query_timestamp = last_user_query_timestamps.remove(&snap.session_id);

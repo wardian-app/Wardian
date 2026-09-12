@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use tauri::AppHandle;
 use wardian_core::control::{
     ApprovalAction, DeliveryDetail, DeliveryErrorDetail, DeliveryTransportKind, InteractionBodyRef,
@@ -7,8 +8,194 @@ use wardian_core::control::{
 use crate::state::AppState;
 use crate::utils::delivery_transaction::{BrokerTerminalInputSink, TerminalDeliveryError};
 
-type LiveSurfaceTargetResult =
-    Result<(String, String), (Option<LiveSurfaceTarget>, FailedLiveSurfaceAttempt)>;
+type LiveSurfaceTargetResult = Result<
+    (String, String, wardian_core::models::AgentConfig),
+    (Option<LiveSurfaceTarget>, FailedLiveSurfaceAttempt),
+>;
+
+#[derive(Debug, Clone)]
+struct OpenCodeReceiptBaseline {
+    db_path: PathBuf,
+    baseline_part_rowid: i64,
+    provider_session_id: Option<String>,
+    workspace: PathBuf,
+    wardian_session_id: String,
+    created_after_ms: i64,
+    normalized_prompt: String,
+    runtime_generation: u64,
+}
+
+async fn capture_opencode_receipt_baseline(
+    state: &AppState,
+    session_id: &str,
+    prompt: &str,
+    config: &wardian_core::models::AgentConfig,
+) -> Result<OpenCodeReceiptBaseline, String> {
+    let broker_state = state
+        .terminal_sessions
+        .broker_state(session_id)
+        .await
+        .map_err(|error| format!("OpenCode runtime identity unavailable: {error}"))?;
+    let provider_session_id = crate::manager::opencode::opencode_telemetry_session_id(config);
+    if config.resume_session.is_some() && provider_session_id.is_none() {
+        return Err("OpenCode resumed session has no valid provider session identity".to_string());
+    }
+    let workspace = crate::utils::fs::resolve_cwd(&config.folder, &config.session_id);
+    let created_after_ms = chrono::Utc::now().timestamp_millis();
+    let database = tokio::task::spawn_blocking(opencode_database_baseline)
+        .await
+        .map_err(|error| format!("OpenCode receipt baseline task failed: {error}"))??;
+
+    Ok(OpenCodeReceiptBaseline {
+        db_path: database.0,
+        baseline_part_rowid: database.1,
+        provider_session_id,
+        workspace,
+        wardian_session_id: session_id.to_string(),
+        created_after_ms,
+        normalized_prompt: crate::utils::terminal_input::normalize_prompt_for_terminal_submit(
+            prompt,
+        ),
+        runtime_generation: broker_state.runtime_generation,
+    })
+}
+
+fn opencode_database_baseline() -> Result<(PathBuf, i64), String> {
+    let db_path = crate::manager::opencode::opencode_database_path()
+        .ok_or_else(|| "OpenCode database is unavailable".to_string())?;
+    let baseline = opencode_database_baseline_from_path(&db_path)?;
+    Ok((db_path, baseline))
+}
+
+fn opencode_database_baseline_from_path(db_path: &Path) -> Result<i64, String> {
+    let connection =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| error.to_string())?;
+    connection
+        .prepare(
+            "SELECT p.rowid
+             FROM part p
+             JOIN message m ON m.id = p.message_id
+             WHERE p.session_id = m.session_id
+             LIMIT 0",
+        )
+        .map_err(|error| error.to_string())?;
+    let baseline = connection
+        .query_row("SELECT COALESCE(MAX(rowid), 0) FROM part", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(baseline)
+}
+
+async fn wait_for_opencode_receipt(baseline: &OpenCodeReceiptBaseline) -> Result<String, String> {
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+    const RECEIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let started = std::time::Instant::now();
+    while started.elapsed() < RECEIPT_TIMEOUT {
+        let poll = baseline.clone();
+        let result = tokio::task::spawn_blocking(move || poll_opencode_receipt(&poll))
+            .await
+            .map_err(|error| format!("OpenCode receipt poll failed: {error}"))??;
+        if let Some(session_id) = result {
+            return Ok(session_id);
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+    Err("Timed out waiting for OpenCode to persist the submitted user request".to_string())
+}
+
+fn poll_opencode_receipt(baseline: &OpenCodeReceiptBaseline) -> Result<Option<String>, String> {
+    let session_id = baseline.provider_session_id.clone().or_else(|| {
+        crate::manager::opencode::opencode_recent_session_for_workspace(
+            &baseline.workspace,
+            baseline.created_after_ms,
+            &baseline.wardian_session_id,
+        )
+    });
+    let Some(session_id) = session_id else {
+        return Ok(None);
+    };
+    opencode_database_contains_submitted_user_part(
+        &baseline.db_path,
+        baseline.baseline_part_rowid,
+        &session_id,
+        &baseline.normalized_prompt,
+    )
+    .map(|accepted| accepted.then_some(session_id))
+}
+
+fn opencode_database_contains_submitted_user_part(
+    db_path: &Path,
+    baseline_part_rowid: i64,
+    provider_session_id: &str,
+    normalized_prompt: &str,
+) -> Result<bool, String> {
+    let connection =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare(
+            "SELECT p.data, m.data
+             FROM part p
+             JOIN message m ON m.id = p.message_id
+             WHERE p.rowid > ?1
+               AND p.session_id = ?2
+               AND m.session_id = ?2
+             ORDER BY p.rowid
+             LIMIT 128",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(
+            rusqlite::params![baseline_part_rowid, provider_session_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(|error| error.to_string())?;
+
+    for row in rows {
+        let (part_data, message_data) = row.map_err(|error| error.to_string())?;
+        let message: serde_json::Value = serde_json::from_str(&message_data)
+            .map_err(|error| format!("invalid OpenCode message JSON: {error}"))?;
+        if message.get("role").and_then(serde_json::Value::as_str) != Some("user") {
+            continue;
+        }
+        let part: serde_json::Value = serde_json::from_str(&part_data)
+            .map_err(|error| format!("invalid OpenCode part JSON: {error}"))?;
+        if part.get("type").and_then(serde_json::Value::as_str) != Some("text")
+            || part
+                .get("synthetic")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        let metadata = part.get("metadata");
+        let metadata_kind = metadata
+            .and_then(|value| value.get("kind"))
+            .and_then(serde_json::Value::as_str);
+        let input_origin = metadata
+            .and_then(|value| value.get("input_origin"))
+            .and_then(serde_json::Value::as_str);
+        if matches!(metadata_kind, Some("editor_context" | "internal"))
+            || matches!(
+                input_origin,
+                Some("context_injection" | "provider_internal")
+            )
+        {
+            continue;
+        }
+        let Some(text) = part.get("text").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if crate::utils::terminal_input::normalize_prompt_for_terminal_submit(text)
+            == normalized_prompt
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 
 #[derive(Debug, Clone)]
 pub struct LiveSurfacePromptRequest {
@@ -136,7 +323,11 @@ pub async fn submit_live_surface_prompt(
         let agents = state.agents.lock().await;
         if let Some(agent) = agents.get(&request.session_id) {
             match agent.config.lock() {
-                Ok(config) => Ok((config.session_name.clone(), config.provider.clone())),
+                Ok(config) => Ok((
+                    config.session_name.clone(),
+                    config.provider.clone(),
+                    config.clone(),
+                )),
                 Err(_) => Err((
                     Some(LiveSurfaceTarget {
                         name: request.session_id.clone(),
@@ -168,7 +359,7 @@ pub async fn submit_live_surface_prompt(
             ))
         }
     };
-    let (name, provider) = match target_result {
+    let (name, provider, config) = match target_result {
         Ok(target) => target,
         Err((target, failure)) => {
             return Err(record_failed_live_surface_attempt(
@@ -245,13 +436,16 @@ pub async fn submit_live_surface_prompt(
         .payload_sent_detail
         .clone()
         .or_else(|| automatic_payload_started_detail(&request, &interaction_id, &name, &provider));
+    // OpenCode's SQLite acceptance is the provider-owned write boundary even
+    // when the PTY runtime cannot acknowledge individual native writes.
     let requires_provider_turn_receipt = request.require_provider_turn_receipt
-        && native_write_receipts
+        && (native_write_receipts || provider == "opencode")
         && matches!(
             request.input_mode,
             MessageInputMode::Message | MessageInputMode::Command
         );
     let mut turn_start_cursor = None;
+    let mut opencode_receipt_baseline = None;
     let outcome = if let (MessageInputMode::ApprovalAction, Some(action)) =
         (request.input_mode, request.approval_action.as_ref())
     {
@@ -360,6 +554,44 @@ pub async fn submit_live_surface_prompt(
             )
             .await);
         }
+        opencode_receipt_baseline = if requires_provider_turn_receipt && provider == "opencode" {
+            match capture_opencode_receipt_baseline(
+                state,
+                &request.session_id,
+                &request.prompt,
+                &config,
+            )
+            .await
+            {
+                Ok(baseline) => Some(baseline),
+                Err(message) => {
+                    return Err(record_failed_live_surface_attempt(
+                        state,
+                        &request,
+                        &interaction_id,
+                        Some(LiveSurfaceTarget {
+                            name: name.clone(),
+                            provider: provider.clone(),
+                        }),
+                        FailedLiveSurfaceAttempt {
+                            runtime_state: request.runtime_state,
+                            error_code: "opencode_receipt_unavailable",
+                            message,
+                            delivery_phase: Some("receipt_baseline_failed".to_string()),
+                            observed_state: None,
+                            reason: Some(
+                                "OpenCode acceptance could not be bounded before input; no payload was submitted"
+                                    .to_string(),
+                            ),
+                            retry_safe: true,
+                        },
+                    )
+                    .await);
+                }
+            }
+        } else {
+            None
+        };
         if requires_provider_turn_receipt && turn_start_cursor.is_none() {
             turn_start_cursor = match crate::control::provider_turn_start_cursor(
                 state,
@@ -468,6 +700,66 @@ pub async fn submit_live_surface_prompt(
         }
     };
 
+    if let Some(opencode_receipt_baseline) = opencode_receipt_baseline {
+        let accepted_session = match wait_for_opencode_receipt(&opencode_receipt_baseline).await {
+            Ok(session_id) => session_id,
+            Err(message) => {
+                return Err(record_failed_live_surface_attempt(
+                    state,
+                    &request,
+                    &interaction_id,
+                    Some(LiveSurfaceTarget {
+                        name: name.clone(),
+                        provider: provider.clone(),
+                    }),
+                    FailedLiveSurfaceAttempt {
+                        runtime_state: request.runtime_state,
+                        error_code: "opencode_receipt_timeout",
+                        message,
+                        delivery_phase: Some("provider_turn_start_timeout".to_string()),
+                        observed_state: None,
+                        reason: Some(
+                            "OpenCode input was submitted but no session-bound native acceptance receipt was observed; automatic retry is unsafe"
+                                .to_string(),
+                        ),
+                        retry_safe: false,
+                    },
+                )
+                .await);
+            }
+        };
+        if let Err(message) = crate::manager::record_agent_turn_started_for_watch_at_generation(
+            state,
+            &request.session_id,
+            opencode_receipt_baseline.runtime_generation,
+        )
+        .await
+        {
+            return Err(record_failed_live_surface_attempt(
+                state,
+                &request,
+                &interaction_id,
+                Some(LiveSurfaceTarget {
+                    name: name.clone(),
+                    provider: provider.clone(),
+                }),
+                FailedLiveSurfaceAttempt {
+                    runtime_state: request.runtime_state,
+                    error_code: "stale_runtime_receipt",
+                    message: format!("{message}; provider session {accepted_session}"),
+                    delivery_phase: Some("provider_turn_start_stale".to_string()),
+                    observed_state: None,
+                    reason: Some(
+                        "The provider receipt was observed after the Wardian runtime changed; the turn is ambiguous and must be reconciled before retry"
+                            .to_string(),
+                    ),
+                    retry_safe: false,
+                },
+            )
+                .await);
+        }
+    }
+
     let mut detail = wardian_core::control::DeliveryDetail {
         uuid: request.session_id.clone(),
         name,
@@ -558,9 +850,11 @@ pub async fn submit_live_surface_prompt(
         detail.delivery_state = "provider_accepted".to_string();
         detail.delivery_phase = Some("turn_started".to_string());
         detail.observed_state = Some("turn_started".to_string());
-        detail.reason = Some(
-            "provider emitted a turn-start event after native terminal submission".to_string(),
-        );
+        detail.reason = Some(if provider == "opencode" {
+            "OpenCode persisted a new exact user request in the owned session after native terminal submission".to_string()
+        } else {
+            "provider emitted a turn-start event after native terminal submission".to_string()
+        });
         persist_live_surface_delivery_detail(state, &interaction_id, &request.session_id, &detail)
             .await
             .map_err(|message| LiveSurfaceDeliveryError {
@@ -814,5 +1108,173 @@ mod tests {
         request.input_mode = MessageInputMode::ApprovalAction;
 
         assert!(automatic_payload_started_detail(&request, "int_1", "Coder", "codex").is_none());
+    }
+
+    fn receipt_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let temp = tempfile::tempdir().expect("fixture temp dir");
+        let db_path = temp.path().join("opencode.db");
+        let connection = rusqlite::Connection::open(&db_path).expect("fixture database");
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE message (
+                    id text PRIMARY KEY,
+                    session_id text NOT NULL,
+                    time_created integer,
+                    time_updated integer,
+                    data text NOT NULL
+                );
+                CREATE TABLE part (
+                    id text PRIMARY KEY,
+                    message_id text NOT NULL,
+                    session_id text NOT NULL,
+                    time_created integer,
+                    time_updated integer,
+                    data text NOT NULL
+                );
+                "#,
+            )
+            .expect("fixture schema");
+        drop(connection);
+        (temp, db_path)
+    }
+
+    fn insert_user_part(
+        db_path: &Path,
+        message_id: &str,
+        part_id: &str,
+        message_session_id: &str,
+        part_session_id: &str,
+        text: &str,
+        part_data_suffix: &str,
+    ) {
+        let connection = rusqlite::Connection::open(db_path).expect("open fixture database");
+        connection
+            .execute(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, 1, 1, ?3)",
+                rusqlite::params![message_id, message_session_id, r#"{"role":"user"}"#],
+            )
+            .expect("insert fixture message");
+        let part_data = format!(r#"{{"type":"text","text":{text:?}{part_data_suffix}}}"#);
+        connection
+            .execute(
+                "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, 2, 2, ?4)",
+                rusqlite::params![part_id, message_id, part_session_id, part_data],
+            )
+            .expect("insert fixture part");
+    }
+
+    fn fixture_baseline(db_path: &Path) -> i64 {
+        rusqlite::Connection::open(db_path)
+            .expect("open fixture database")
+            .query_row("SELECT COALESCE(MAX(rowid), 0) FROM part", [], |row| {
+                row.get(0)
+            })
+            .expect("read fixture baseline")
+    }
+
+    #[test]
+    fn opencode_receipt_requires_a_new_exact_user_part_on_the_owned_session() {
+        let (_temp, db_path) = receipt_fixture();
+        insert_user_part(
+            &db_path,
+            "old-message",
+            "old-part",
+            "ses-owned",
+            "ses-owned",
+            "repeat me",
+            "",
+        );
+        let baseline = fixture_baseline(&db_path);
+
+        assert!(!opencode_database_contains_submitted_user_part(
+            &db_path,
+            baseline,
+            "ses-owned",
+            "repeat me"
+        )
+        .expect("old row query"));
+
+        insert_user_part(
+            &db_path,
+            "foreign-message",
+            "foreign-part",
+            "ses-foreign",
+            "ses-foreign",
+            "repeat me",
+            "",
+        );
+        assert!(!opencode_database_contains_submitted_user_part(
+            &db_path,
+            baseline,
+            "ses-owned",
+            "repeat me"
+        )
+        .expect("foreign row query"));
+
+        insert_user_part(
+            &db_path,
+            "synthetic-message",
+            "synthetic-part",
+            "ses-owned",
+            "ses-owned",
+            "repeat me",
+            r#", "synthetic":true, "metadata":{"kind":"editor_context"}"#,
+        );
+        assert!(!opencode_database_contains_submitted_user_part(
+            &db_path,
+            baseline,
+            "ses-owned",
+            "repeat me"
+        )
+        .expect("synthetic row query"));
+
+        insert_user_part(
+            &db_path,
+            "accepted-message",
+            "accepted-part",
+            "ses-owned",
+            "ses-owned",
+            " repeat me\r\n",
+            "",
+        );
+        assert!(opencode_database_contains_submitted_user_part(
+            &db_path,
+            baseline,
+            "ses-owned",
+            "repeat me"
+        )
+        .expect("accepted row query"));
+    }
+
+    #[test]
+    fn opencode_receipt_rejects_mismatched_message_and_part_sessions() {
+        let (_temp, db_path) = receipt_fixture();
+        insert_user_part(
+            &db_path,
+            "foreign-message",
+            "foreign-part",
+            "ses-foreign",
+            "ses-owned",
+            "payload",
+            "",
+        );
+
+        assert!(!opencode_database_contains_submitted_user_part(
+            &db_path,
+            0,
+            "ses-owned",
+            "payload"
+        )
+        .expect("session-bound query"));
+    }
+
+    #[test]
+    fn opencode_receipt_baseline_fails_closed_when_schema_is_missing() {
+        let temp = tempfile::tempdir().expect("fixture temp dir");
+        let db_path = temp.path().join("opencode.db");
+        rusqlite::Connection::open(&db_path).expect("empty fixture database");
+
+        assert!(opencode_database_baseline_from_path(&db_path).is_err());
     }
 }

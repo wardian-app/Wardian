@@ -1,6 +1,8 @@
 use super::*;
 
 mod reconciliation;
+#[cfg(windows)]
+mod windows_long_paths;
 
 fn prepare(home: &Path, agent: &str, cli: bool) -> std::path::PathBuf {
     let codex = home.join("agents").join(agent).join("habitat/.codex");

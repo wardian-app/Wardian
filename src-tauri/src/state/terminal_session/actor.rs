@@ -1208,6 +1208,33 @@ impl TerminalSessionBroker {
             .await
     }
 
+    /// Records a provider-confirmed turn start only while the expected runtime
+    /// is still installed. The broker read lock is held through watch
+    /// publication so a replacement cannot slip between validation and the
+    /// event that consumers use as their turn-start receipt.
+    pub(crate) async fn record_turn_started_for_generation(
+        &self,
+        session_id: &str,
+        runtime_generation: u64,
+        watch_state: Arc<Mutex<crate::state::AgentWatchState>>,
+    ) -> Result<(), TerminalBrokerError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(session_id)
+            .ok_or(TerminalBrokerError::SessionNotFound)?;
+        ensure_generation(handle, runtime_generation)?;
+        let mut watch_state = watch_state
+            .lock()
+            .map_err(|_| TerminalBrokerError::RuntimeIo("watch state poisoned".to_string()))?;
+        watch_state.push_event(
+            "turn_started",
+            serde_json::json!({
+                "session_id": session_id,
+            }),
+        );
+        Ok(())
+    }
+
     /// Returns whether privileged input resolves only after the native PTY
     /// writer has flushed it. Live delivery uses this to require a provider
     /// turn-start receipt only on runtimes that can make that write boundary
