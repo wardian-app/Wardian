@@ -141,23 +141,60 @@ fn open_lock(cache: &Path) -> Result<std::fs::File, String> {
         .map_err(|error| error.to_string())
 }
 
+/// Why a seed did or did not happen.
+///
+/// Every skip is legitimate and costs only a rebuild, but they have very
+/// different meanings: a cache nothing has published to yet looks identical to
+/// one this module quietly stopped using. Naming them keeps a permanently
+/// broken cache distinguishable from a healthy one in the spawn log.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SeedOutcome {
+    /// The named database file was written into the home.
+    Seeded(String),
+    /// The provider already owns a thread database here.
+    HomeHasDatabase,
+    /// Nothing is published yet, or what is published is unusable.
+    NoSnapshot,
+    /// A publication holds the cache; this spawn will not wait for it.
+    Busy,
+}
+
+impl SeedOutcome {
+    /// The filename written, for a caller that may need to undo the seed.
+    pub(crate) fn database(&self) -> Option<&str> {
+        match self {
+            Self::Seeded(database) => Some(database),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn reason(&self) -> &'static str {
+        match self {
+            Self::Seeded(_) => "seeded",
+            Self::HomeHasDatabase => "the provider already owns a thread database",
+            Self::NoSnapshot => "no usable published snapshot",
+            Self::Busy => "a publication holds the cache",
+        }
+    }
+}
+
 /// Seed a new agent's Codex home with the published thread index.
 ///
-/// Returns whether a seed was written. A home that already has a thread
-/// database is left alone: the provider owns it from that point on. Call this
-/// only while holding the agent's preparation lock and before its daemon
-/// starts, so the copy cannot race the provider creating its own database.
-pub(crate) fn seed(wardian_home: &Path, codex_home: &Path) -> Result<bool, String> {
+/// A home that already has a thread database is left alone: the provider owns
+/// it from that point on. Call this only while holding the agent's preparation
+/// lock and before its daemon starts, so the copy cannot race the provider
+/// creating its own database.
+pub(crate) fn seed(wardian_home: &Path, codex_home: &Path) -> Result<SeedOutcome, String> {
     if state_database_name(codex_home).is_some() {
-        return Ok(false);
+        return Ok(SeedOutcome::HomeHasDatabase);
     }
     let cache = cache_directory(wardian_home);
     if !cache.is_dir() {
-        return Ok(false);
+        return Ok(SeedOutcome::NoSnapshot);
     }
     super::codex_home::validate_private_root(&cache)?;
     let Some(meta) = read_meta(&cache) else {
-        return Ok(false);
+        return Ok(SeedOutcome::NoSnapshot);
     };
     // The name is read back from disk, so it must stay inside the home.
     if Path::new(&meta.database).components().count() != 1 || generation(&meta.database).is_none() {
@@ -165,21 +202,23 @@ pub(crate) fn seed(wardian_home: &Path, codex_home: &Path) -> Result<bool, Strin
     }
     let snapshot = snapshot_path(&cache, &meta.database);
     if !snapshot.is_file() {
-        return Ok(false);
+        return Ok(SeedOutcome::NoSnapshot);
     }
 
     // Hold the lock shared so a concurrent publication cannot replace the file
-    // underneath this copy.
-    // Seeding is best effort and runs on the spawn path, so never wait: the
-    // exclusive holder is a publication doing two full VACUUMs. A skipped seed
-    // costs one rebuild, which is the documented fallback.
+    // underneath this copy, but never wait for it: the exclusive holder is a
+    // publication running two full VACUUMs, and this runs on the spawn path.
     let lock = open_lock(&cache)?;
     if lock.try_lock_shared().is_err() {
-        return Ok(false);
+        return Ok(SeedOutcome::Busy);
     }
-    let outcome = write_seed(&snapshot, &codex_home.join(&meta.database));
+    let written = write_seed(&snapshot, &codex_home.join(&meta.database));
     let _ = FileExt::unlock(&lock);
-    outcome
+    Ok(match written? {
+        true => SeedOutcome::Seeded(meta.database),
+        // The provider won the race to create its own database.
+        false => SeedOutcome::HomeHasDatabase,
+    })
 }
 
 /// Copy the snapshot in without ever replacing an existing database.
@@ -220,6 +259,14 @@ pub(crate) fn refresh(
     let Some(database) = state_database_name(codex_home) else {
         return Ok(false);
     };
+    // A home that fell back to a private local sessions directory has indexed
+    // almost nothing, yet its migration-state rows claim completion. Publishing
+    // that would seed every later agent with an empty history and suppress the
+    // rebuild that would repair it, and the next publisher would be one of
+    // those agents. Refuse at the source, not only when consuming.
+    if !projects_central_sessions(codex_home, real_codex_home) {
+        return Ok(false);
+    }
     let cache = cache_directory(wardian_home);
     if cache.is_dir() && published(&cache, &database) {
         return Ok(false);
@@ -334,20 +381,29 @@ fn capture(source: &Path, target: &Path, real_codex_home: &Path) -> Result<i64, 
         .map_err(|error| format!("could not open Codex thread snapshot: {error}"))?;
     refuse_unknown_tables(&writer)?;
     let rewritten = canonicalize_rollout_paths(&writer, real_codex_home)?;
-    // The invariant is that no published row names an agent home. Rows whose
-    // path could not be split are dropped rather than shipped: the seeded agent
-    // re-migrates those few rollouts, and one odd path cannot disable the cache.
+    // The invariant is that no published row names an agent home. Dropping the
+    // offenders is not enough to stay honest: the migration-state tables travel
+    // with the snapshot and would tell a seeded home the dropped rollouts were
+    // already indexed, so they would be lost rather than rebuilt, and their
+    // rows in the thread child tables would be orphaned. Refuse instead, and
+    // let the agent rebuild, which is always correct if slower.
     let root = canonical_root(real_codex_home);
-    let stranded = writer
-        .execute(
-            "DELETE FROM threads WHERE rollout_path IS NULL OR substr(rollout_path, 1, ?2) <> ?1",
+    let stranded: i64 = writer
+        .query_row(
+            "SELECT COUNT(*) FROM threads              WHERE rollout_path IS NULL OR substr(rollout_path, 1, ?2) <> ?1",
             rusqlite::params![root.as_str(), root.chars().count() as i64],
+            |row| row.get(0),
         )
-        .map_err(|error| format!("could not drop unrewritable rollout paths: {error}"))?;
+        .map_err(|error| format!("could not audit rewritten rollout paths: {error}"))?;
+    if stranded > 0 {
+        return Err(format!(
+            "{stranded} Codex thread row(s) do not name the central session tree after rewriting; not publishing an index that cannot be rebuilt from"
+        ));
+    }
     let threads: i64 = writer
         .query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))
         .unwrap_or(0);
-    let _ = (rewritten, stranded);
+    let _ = rewritten;
     // Reclaim pages the rewrite freed so the seed stays small.
     writer
         .execute("VACUUM", [])
@@ -460,12 +516,13 @@ pub(crate) fn projects_central_sessions(codex_home: &Path, real_codex_home: &Pat
 }
 
 /// Remove a seed this call wrote after discovering the home cannot use it.
-pub(crate) fn discard_seed(wardian_home: &Path, codex_home: &Path) {
-    let cache = cache_directory(wardian_home);
-    let Some(meta) = read_meta(&cache) else {
-        return;
-    };
-    let _ = std::fs::remove_file(codex_home.join(&meta.database));
+///
+/// Takes the filename `seed` reported rather than re-reading the published
+/// metadata: another agent may publish a new generation in between, and the
+/// undo would then target a file this call never created.
+pub(crate) fn discard_seed(codex_home: &Path, database: &str) -> Result<(), String> {
+    std::fs::remove_file(codex_home.join(database))
+        .map_err(|error| format!("could not discard the seeded Codex thread index: {error}"))
 }
 
 /// The components of a rollout path below its `sessions` directory.

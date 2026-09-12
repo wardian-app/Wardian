@@ -280,14 +280,23 @@ The snapshot is named after the generation it holds
 than seeding a database the new provider will not open; superseded snapshots are
 removed as part of publishing the replacement.
 
-Two guards keep a seeded home honest. A row whose rollout path cannot be
-rewritten to the central tree is dropped from the snapshot rather than published
-with its original location, so the seeded agent re-migrates those rollouts. And
-because the projection can fall back to a private local `sessions/` directory
-when a link cannot be created, a seeded home whose `sessions` entry does not
-resolve to the central tree discards its seed and lets the provider rebuild —
-otherwise it would hold migration state claiming completion over rollouts it
-cannot see.
+The projection can fall back to a private local `sessions/` directory when a
+link cannot be created, and a home in that state has indexed almost nothing
+while its migration-state rows still claim completion. Both sides guard against
+it: such a home never publishes, and a home that has already been seeded when
+its `sessions` entry turns out not to resolve to the central tree discards the
+seed and lets the provider rebuild. Without the publishing guard one badly
+projected home would seed every later agent with an empty history and suppress
+the rebuild that would repair it.
+
+Publication also refuses outright if any row's rollout path cannot be rewritten
+to the central tree. Dropping those rows instead would strand them: the
+migration-state tables travel with the snapshot and would tell a seeded home
+they had already been indexed, so they would be lost rather than rebuilt.
+
+A skipped seed records which of the reasons applied — the provider already owns
+a database, nothing usable is published, or a publication holds the cache — so
+a cache that has quietly stopped working is distinguishable from an empty one.
 
 If Codex starts asking for trust every launch again, first verify that the session was born with the real workspace as `cwd`, not the bootstrap path.
 

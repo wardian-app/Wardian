@@ -8,7 +8,8 @@ fn thread_database(path: &Path, threads: i64, projects: i64) {
     connection
         .execute_batch(
             "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, cwd TEXT);
-             CREATE TABLE thread_sections (id TEXT PRIMARY KEY);
+             CREATE TABLE thread_sections (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL);
+             CREATE TABLE rollout_migration_state (thread_id TEXT PRIMARY KEY);
              CREATE TABLE backfill_state (id INTEGER PRIMARY KEY);
              CREATE TABLE projects (id TEXT PRIMARY KEY, root TEXT);",
         )
@@ -80,7 +81,10 @@ fn a_warm_home_publishes_a_snapshot_that_seeds_a_new_one() {
     assert!(refresh(&wardian_home, &warm, &central).expect("publish snapshot"));
 
     let fresh = home(temp.path(), "fresh");
-    assert!(seed(&wardian_home, &fresh).expect("seed fresh home"));
+    assert!(matches!(
+        seed(&wardian_home, &fresh).expect("seed fresh home"),
+        SeedOutcome::Seeded(_)
+    ));
     let seeded = fresh.join("state_5.sqlite");
     assert!(seeded.is_file(), "seed wrote the provider's own filename");
     assert_eq!(count(&seeded, "threads"), 12);
@@ -130,7 +134,10 @@ fn an_unshared_table_with_rows_refuses_publication() {
     assert!(error.contains("projects"), "{error}");
 
     let fresh = home(temp.path(), "fresh");
-    assert!(!seed(&wardian_home, &fresh).expect("nothing published"));
+    assert_eq!(
+        seed(&wardian_home, &fresh).expect("nothing published"),
+        SeedOutcome::NoSnapshot
+    );
 }
 
 #[test]
@@ -165,7 +172,10 @@ fn a_generation_change_republishes_and_seeds_the_new_name() {
     assert!(refresh(&wardian_home, &upgraded, &central).expect("republish generation 6"));
 
     let fresh = home(temp.path(), "fresh");
-    assert!(seed(&wardian_home, &fresh).expect("seed"));
+    assert!(matches!(
+        seed(&wardian_home, &fresh).expect("seed"),
+        SeedOutcome::Seeded(_)
+    ));
     assert!(fresh.join("state_6.sqlite").is_file());
     assert!(!fresh.join("state_5.sqlite").exists());
     assert_eq!(count(&fresh.join("state_6.sqlite"), "threads"), 9);
@@ -195,7 +205,10 @@ fn a_home_that_already_has_a_thread_database_is_left_alone() {
 
     let existing = home(temp.path(), "existing");
     thread_database(&existing.join("state_5.sqlite"), 1, 0);
-    assert!(!seed(&wardian_home, &existing).expect("seed is skipped"));
+    assert_eq!(
+        seed(&wardian_home, &existing).expect("seed is skipped"),
+        SeedOutcome::HomeHasDatabase
+    );
     assert_eq!(
         count(&existing.join("state_5.sqlite"), "threads"),
         1,
@@ -227,7 +240,10 @@ fn seeding_without_a_published_snapshot_is_not_an_error() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
     let fresh = home(temp.path(), "fresh");
-    assert!(!seed(&wardian_home, &fresh).expect("no snapshot yet"));
+    assert_eq!(
+        seed(&wardian_home, &fresh).expect("no snapshot yet"),
+        SeedOutcome::NoSnapshot
+    );
     assert!(state_database_name(&fresh).is_none());
 }
 
@@ -453,41 +469,6 @@ fn a_rewritten_path_uses_this_platform_s_separator() {
 }
 
 #[test]
-fn a_row_that_cannot_be_rewritten_is_dropped_rather_than_published() {
-    let temp = tempfile::tempdir().expect("temp");
-    let wardian_home = home(temp.path(), "wardian");
-    let central = real_codex(temp.path());
-    let warm = home(temp.path(), "warm");
-    let database = warm.join("state_5.sqlite");
-    thread_database(&database, 2, 0);
-    let connection = rusqlite::Connection::open(&database).expect("open");
-    connection
-        .execute(
-            "INSERT INTO threads (id, rollout_path, cwd) VALUES ('odd', ?1, 'w')",
-            [r"C:\agents\publisher\elsewhere\rollout.jsonl"],
-        )
-        .expect("insert unrewritable row");
-    drop(connection);
-
-    refresh(&wardian_home, &warm, &central).expect("publish");
-    let fresh = home(temp.path(), "fresh");
-    seed(&wardian_home, &fresh).expect("seed");
-
-    let seeded = fresh.join("state_5.sqlite");
-    assert_eq!(
-        count(&seeded, "threads"),
-        2,
-        "the odd row was not published"
-    );
-    for path in rollout_paths(&seeded) {
-        assert!(
-            !path.contains("publisher"),
-            "an agent home survived: {path}"
-        );
-    }
-}
-
-#[test]
 fn engine_bookkeeping_tables_do_not_stop_publication() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
@@ -557,10 +538,145 @@ fn a_discarded_seed_leaves_the_home_without_a_database() {
     refresh(&wardian_home, &warm, &central).expect("publish");
 
     let fresh = home(temp.path(), "fresh");
-    assert!(seed(&wardian_home, &fresh).expect("seed"));
-    discard_seed(&wardian_home, &fresh);
+    let outcome = seed(&wardian_home, &fresh).expect("seed");
+    let database = outcome.database().expect("seeded").to_owned();
+
+    // Another agent publishing a new generation in between must not redirect
+    // the undo: it takes the name this seed wrote, not the current metadata.
+    let upgraded = home(temp.path(), "upgraded");
+    thread_database(&upgraded.join("state_6.sqlite"), 1, 0);
+    let cache = cache_directory(&wardian_home);
+    let mut meta = read_meta(&cache).expect("meta");
+    meta.captured_at = (chrono::Utc::now()
+        - chrono::Duration::seconds(REFRESH_INTERVAL_SECONDS + 60))
+    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    std::fs::write(
+        cache.join(SNAPSHOT_META_FILE),
+        serde_json::to_vec(&meta).expect("encode"),
+    )
+    .expect("age metadata");
+    refresh(&wardian_home, &upgraded, &central).expect("republish a new generation");
+
+    discard_seed(&fresh, &database).expect("discard the file this seed wrote");
     assert!(
         !fresh.join("state_5.sqlite").exists(),
         "the provider must rebuild rather than trust an unusable seed"
+    );
+}
+
+/// A home whose `sessions` really resolves to the central tree.
+fn projecting_home(root: &Path, name: &str, central: &Path) -> PathBuf {
+    let path = home(root, name);
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(central.join("sessions"), path.join("sessions"))
+        .expect("project central sessions");
+    #[cfg(not(windows))]
+    std::os::unix::fs::symlink(central.join("sessions"), path.join("sessions"))
+        .expect("project central sessions");
+    path
+}
+
+#[test]
+fn a_row_that_cannot_be_rewritten_refuses_publication() {
+    let temp = tempfile::tempdir().expect("temp");
+    let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
+    let warm = home(temp.path(), "warm");
+    let database = warm.join("state_5.sqlite");
+    thread_database(&database, 2, 0);
+    let connection = rusqlite::Connection::open(&database).expect("open");
+    connection
+        .execute(
+            "INSERT INTO threads (id, rollout_path, cwd) VALUES ('odd', ?1, 'w')",
+            [r"C:\agents\publisher\elsewhere\rollout.jsonl"],
+        )
+        .expect("insert unrewritable row");
+    drop(connection);
+
+    // Dropping the row would strand it: the migration-state tables travel with
+    // the snapshot and would tell a seeded home it had already been indexed.
+    let error = refresh(&wardian_home, &warm, &central).expect_err("must refuse");
+    assert!(error.contains("central session tree"), "{error}");
+    let fresh = home(temp.path(), "fresh");
+    assert_eq!(
+        seed(&wardian_home, &fresh).expect("nothing published"),
+        SeedOutcome::NoSnapshot
+    );
+}
+
+#[test]
+fn a_home_on_the_local_sessions_fallback_does_not_publish() {
+    let temp = tempfile::tempdir().expect("temp");
+    let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
+
+    // The projection falls back to a private local directory when a link
+    // cannot be created. Such a home has indexed almost nothing, yet its
+    // migration state claims completion; publishing it would seed every later
+    // agent with an empty history and suppress the rebuild that would repair it.
+    let fallback = home(temp.path(), "fallback");
+    std::fs::create_dir_all(fallback.join("sessions")).expect("local sessions");
+    thread_database(&fallback.join("state_5.sqlite"), 1, 0);
+    assert!(!refresh(&wardian_home, &fallback, &central).expect("refuses to publish"));
+
+    let fresh = home(temp.path(), "fresh");
+    assert_eq!(
+        seed(&wardian_home, &fresh).expect("nothing published"),
+        SeedOutcome::NoSnapshot
+    );
+}
+
+#[test]
+fn a_projecting_home_publishes_normally() {
+    let temp = tempfile::tempdir().expect("temp");
+    let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
+    let warm = projecting_home(temp.path(), "projecting-warm", &central);
+    thread_database(&warm.join("state_5.sqlite"), 5, 0);
+
+    // The publishing gate must not reject a home that is projecting correctly.
+    assert!(refresh(&wardian_home, &warm, &central).expect("publishes"));
+    let fresh = home(temp.path(), "fresh");
+    assert!(matches!(
+        seed(&wardian_home, &fresh).expect("seed"),
+        SeedOutcome::Seeded(_)
+    ));
+}
+
+#[test]
+fn a_skipped_seed_says_why() {
+    let temp = tempfile::tempdir().expect("temp");
+    let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
+    let fresh = home(temp.path(), "fresh");
+
+    // Nothing published yet.
+    assert_eq!(
+        seed(&wardian_home, &fresh).expect("no snapshot"),
+        SeedOutcome::NoSnapshot
+    );
+
+    let warm = home(temp.path(), "warm");
+    thread_database(&warm.join("state_5.sqlite"), 2, 0);
+    refresh(&wardian_home, &warm, &central).expect("publish");
+
+    // A publication holding the cache is distinct from an empty one.
+    let cache = cache_directory(&wardian_home);
+    let blocker = open_lock(&cache).expect("lock file");
+    blocker.lock_exclusive().expect("hold exclusively");
+    assert_eq!(
+        seed(&wardian_home, &fresh).expect("busy"),
+        SeedOutcome::Busy
+    );
+    let _ = FileExt::unlock(&blocker);
+
+    // And a home the provider already owns is distinct from both.
+    assert!(matches!(
+        seed(&wardian_home, &fresh).expect("seed"),
+        SeedOutcome::Seeded(_)
+    ));
+    assert_eq!(
+        seed(&wardian_home, &fresh).expect("already owned"),
+        SeedOutcome::HomeHasDatabase
     );
 }

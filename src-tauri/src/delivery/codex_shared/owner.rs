@@ -142,23 +142,24 @@ fn prepare_owner_habitat(
     // Seed under the preparation lock and before any daemon exists for this
     // agent, so the copy cannot race the provider creating its own database.
     // Optional: without a published snapshot the agent rebuilds, as before.
-    let seeded = phase(&mut timings.thread_seed, || {
+    let outcome = phase(&mut timings.thread_seed, || {
         crate::utils::codex_thread_state::seed(&wardian_home, &codex_home)
     });
-    let seeded = match seeded {
-        Ok(seeded) => {
-            if seeded {
-                crate::utils::logging::log_debug(&format!(
-                    "[Wardian] Seeded Codex thread index for agent {agent_id}"
-                ));
-            }
-            seeded
+    // Every skip is legitimate, but they mean different things; say which, so a
+    // cache that quietly stopped working is not mistaken for an empty one.
+    let seeded = match outcome {
+        Ok(outcome) => {
+            crate::utils::logging::log_debug(&format!(
+                "[Wardian] Codex thread index for agent {agent_id}: {}",
+                outcome.reason()
+            ));
+            outcome.database().map(str::to_owned)
         }
         Err(error) => {
             crate::utils::logging::log_debug(&format!(
                 "[Wardian] Codex thread index seed unavailable for agent {agent_id}: {error}"
             ));
-            false
+            None
         }
     };
     phase(&mut timings.codex_projection, || {
@@ -168,7 +169,7 @@ fn prepare_owner_habitat(
     // The seed assumes this home reads the central session tree. Projection can
     // fall back to a private local directory, and a seeded home would then hold
     // migration state saying it is finished over rollouts it cannot see.
-    if seeded {
+    if let Some(database) = seeded.as_deref() {
         let real_codex_home = dirs::home_dir()
             .map(|home| home.join(".codex"))
             .ok_or_else(|| CodexSharedError::unsupported("user home unavailable"))?;
@@ -176,9 +177,13 @@ fn prepare_owner_habitat(
             &codex_home,
             &real_codex_home,
         ) {
-            crate::utils::codex_thread_state::discard_seed(&wardian_home, &codex_home);
+            // Undo by the exact name written, never by re-reading published
+            // metadata: another agent may have published a new generation.
+            let discarded = crate::utils::codex_thread_state::discard_seed(&codex_home, database);
             crate::utils::logging::log_debug(&format!(
-                "[Wardian] Discarded Codex thread index seed for agent {agent_id}: this home does not project the central session tree"
+                "[Wardian] Discarded Codex thread index seed for agent {agent_id}: this home \
+does not project the central session tree ({})",
+                discarded.err().unwrap_or_else(|| "removed".into())
             ));
         }
     }
