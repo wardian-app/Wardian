@@ -5,12 +5,29 @@ use crate::utils::delivery_transaction::TerminalDeliveryError;
 use crate::utils::strip_ansi_controls;
 
 const PAYLOAD_APPLY_TIMEOUT_MS: u64 = 15_000;
+// The canonical snapshot clones the screen and formats scrollback, so it is far
+// more costly than a watch delta. Poll it on its own slower cadence instead of
+// once per 25ms delta iteration; payload application is a multi-second event.
+const CANONICAL_POLL_INTERVAL_MS: u64 = 250;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ObservationScope {
     TransactionDelta,
     ActiveTerminalSnapshot,
     ActivePromptFallback,
+}
+
+/// Canonical composer facts captured *before* Wardian writes the payload.
+///
+/// A canonical observation taken after the write only proves that this write
+/// landed when both hold: the runtime was not replaced underneath it, and the
+/// payload was not already sitting in the composer. Without the generation
+/// fence a foreign runtime could satisfy the gate; without the stale fence a
+/// leftover draft from an earlier attempt could.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComposerWriteBaseline {
+    runtime_generation: u64,
+    payload_already_applied: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +89,27 @@ pub async fn session_has_stalled_composer(
         .map(|output| pending_paste_chars(&output).is_some())
 }
 
+/// Record the canonical composer state before the payload write so a later
+/// canonical observation can be treated as positive proof that *this* write
+/// landed. Returns `None` when no canonical snapshot is available, which keeps
+/// the gate on transaction-delta evidence alone rather than guessing.
+pub async fn capture_composer_write_baseline(
+    state: &AppState,
+    session_id: &str,
+    prompt: &str,
+) -> Option<ComposerWriteBaseline> {
+    let snapshot = state.terminal_sessions.snapshot(session_id).await.ok()?;
+    Some(ComposerWriteBaseline {
+        runtime_generation: snapshot.runtime_generation,
+        payload_already_applied: observe_payload_application(
+            &snapshot.visible_grid,
+            prompt,
+            ObservationScope::ActiveTerminalSnapshot,
+        )
+        .confirms_payload(),
+    })
+}
+
 /// Wait for Codex to prove that it has applied the bracketed paste to its
 /// composer before Wardian sends Return. ConPTY's write receipt only proves
 /// that bytes reached the PTY, not that Codex's event loop consumed them.
@@ -80,6 +118,7 @@ pub async fn wait_for_payload_applied_before_submit(
     session_id: &str,
     since_cursor: &str,
     prompt: &str,
+    baseline: Option<ComposerWriteBaseline>,
 ) -> Result<(), TerminalDeliveryError> {
     let watch_state = {
         let agents = state.agents.lock().await;
@@ -100,6 +139,7 @@ pub async fn wait_for_payload_applied_before_submit(
         session_id,
         since_cursor,
         prompt,
+        baseline,
     )
     .await
 }
@@ -110,8 +150,10 @@ async fn wait_for_watch_payload_applied(
     session_id: &str,
     since_cursor: &str,
     prompt: &str,
+    baseline: Option<ComposerWriteBaseline>,
 ) -> Result<(), TerminalDeliveryError> {
     let started = tokio::time::Instant::now();
+    let mut last_canonical_poll: Option<tokio::time::Instant> = None;
     let mut best_observation = ComposerObservation {
         literal_match_bytes: 0,
         normalized_payload_bytes: normalize_echo_text(prompt).len(),
@@ -155,26 +197,42 @@ async fn wait_for_watch_payload_applied(
             }
         };
         let observation = observe_payload_application(&output, prompt, scope);
-        if observation.confirms_payload() {
+        // A partial diff repaint can redraw the composer without ever emitting
+        // the whole payload contiguously into this transaction delta, so the
+        // delta alone must not decide whether the canonical screen is worth
+        // reading. Poll the canonical screen on its own cadence as well.
+        let canonical_due = last_canonical_poll
+            .map(|polled_at: tokio::time::Instant| {
+                polled_at.elapsed() >= std::time::Duration::from_millis(CANONICAL_POLL_INTERVAL_MS)
+            })
+            .unwrap_or(true);
+        if observation.confirms_payload() || canonical_due {
             if let Ok(snapshot) = terminal_sessions.snapshot(session_id).await {
+                last_canonical_poll = Some(tokio::time::Instant::now());
                 let active_observation = observe_payload_application(
                     &snapshot.visible_grid,
                     prompt,
                     ObservationScope::ActiveTerminalSnapshot,
                 );
-                let confirms_current_composer = match scope {
-                    ObservationScope::TransactionDelta => {
-                        transaction_evidence_matches_active_composer(
-                            &observation,
-                            &active_observation,
-                        )
-                    }
-                    ObservationScope::ActivePromptFallback
-                    | ObservationScope::ActiveTerminalSnapshot => {
-                        active_observation.confirms_payload()
-                    }
-                };
-                if confirms_current_composer {
+                let confirms_current_composer = observation.confirms_payload()
+                    && match scope {
+                        ObservationScope::TransactionDelta => {
+                            transaction_evidence_matches_active_composer(
+                                &observation,
+                                &active_observation,
+                            )
+                        }
+                        ObservationScope::ActivePromptFallback
+                        | ObservationScope::ActiveTerminalSnapshot => {
+                            active_observation.confirms_payload()
+                        }
+                    };
+                let confirms_post_write_canonical = canonical_proof_confirms_write(
+                    &active_observation,
+                    baseline,
+                    snapshot.runtime_generation,
+                );
+                if confirms_current_composer || confirms_post_write_canonical {
                     return Ok(());
                 }
                 if active_observation.literal_match_bytes > best_observation.literal_match_bytes
@@ -308,6 +366,36 @@ pub(crate) fn active_screen_is_starting(screen: &str) -> bool {
                 .and_then(|model| model.split_whitespace().next())
                 == Some("loading")
     })
+}
+
+/// Positive post-write proof that this write reached the composer.
+///
+/// A partial diff repaint can omit payload bytes from the transaction delta
+/// while the canonical screen holds the whole payload, so the delta cannot be
+/// the only admissible evidence. The canonical screen is admissible only inside
+/// these boundaries:
+///
+/// * `active.confirms_payload()` requires the exact, complete payload. It is
+///   built from the text after the last prompt caret, so scrollback history and
+///   an already-submitted turn cannot qualify, and it yields nothing while a
+///   resumed session is still on its startup screen or a model menu.
+/// * The snapshot must come from the runtime generation this write targeted, so
+///   a replaced or foreign runtime cannot satisfy the gate.
+/// * The payload must not already have been applied before the write, so a
+///   stale draft left by an earlier attempt is not mistaken for new evidence.
+///
+/// Without a baseline there is nothing to fence against, so canonical-only
+/// evidence is refused and the gate falls back to transaction-delta proof.
+fn canonical_proof_confirms_write(
+    active: &ComposerObservation,
+    baseline: Option<ComposerWriteBaseline>,
+    snapshot_runtime_generation: u64,
+) -> bool {
+    active.confirms_payload()
+        && baseline.is_some_and(|baseline| {
+            baseline.runtime_generation == snapshot_runtime_generation
+                && !baseline.payload_already_applied
+        })
 }
 
 fn transaction_evidence_matches_active_composer(
@@ -686,9 +774,139 @@ pub(crate) mod tests {
             "agent-1",
             &cursor,
             &"x".repeat(7_000),
+            None,
         )
         .await
         .expect("active composer evidence should survive cursor expiry");
+    }
+
+    /// Sanitized from the observed resume failure: after pause/resume the
+    /// partial diff repaint carried only the first 26 bytes of the 91-byte
+    /// follow-up into the transaction delta ("Without tools, repeat your",
+    /// ending mid-payload before " previous"), while the canonical screen held
+    /// the whole payload in the active composer. The old gate never read the
+    /// canonical screen because the delta had not confirmed, so it timed out
+    /// with literal_match_bytes=26 / normalized_payload_bytes=91 and never sent
+    /// Return.
+    #[tokio::test]
+    async fn partial_repaint_delta_accepts_canonical_active_composer_proof() {
+        const PAYLOAD: &str =
+            "Without tools, repeat your previous final answer in lowercase. Reply only with that answer.";
+        const REPAINTED_PREFIX: &str = "Without tools, repeat your";
+        assert_eq!(PAYLOAD.len(), 91);
+        assert_eq!(REPAINTED_PREFIX.len(), 26);
+
+        let watch_state = Arc::new(Mutex::new(AgentWatchState::new(
+            "agent-1".to_string(),
+            16,
+            262_144,
+        )));
+        let terminal_sessions = Arc::new(TerminalSessionBroker::default());
+        let (input_tx, _input_rx) = tokio::sync::mpsc::channel(1);
+        let generation = terminal_sessions
+            .start_or_replace_runtime(
+                "agent-1",
+                crate::state::terminal_session::TerminalRuntimeHandles::new(input_tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry {
+                    cols: 120,
+                    rows: 24,
+                },
+            )
+            .await
+            .expect("test terminal runtime");
+        let cursor = watch_state.lock().unwrap().latest_cursor();
+
+        // The delta only ever repaints a fragment of the composer line.
+        watch_state
+            .lock()
+            .unwrap()
+            .push_output(format!("\x1b[22;3H{REPAINTED_PREFIX}\x1b[K").as_bytes());
+        let partial = observe_payload_application(
+            &format!("\x1b[22;3H{REPAINTED_PREFIX}\x1b[K"),
+            PAYLOAD,
+            ObservationScope::TransactionDelta,
+        );
+        assert_eq!(partial.literal_match_bytes, 26);
+        assert_eq!(partial.normalized_payload_bytes, 91);
+        assert!(!partial.confirms_payload());
+
+        let canonical =
+            format!("│ model:     gpt-5.4-mini low   /model to change │\r\n\r\n› {PAYLOAD}\r\n");
+        let output_broker = terminal_sessions.clone();
+        let canonical_bytes = canonical.clone().into_bytes();
+        tokio::task::spawn_blocking(move || {
+            output_broker.process_output_blocking("agent-1", generation, canonical_bytes)
+        })
+        .await
+        .expect("terminal output task")
+        .expect("canonical terminal repaint");
+
+        wait_for_watch_payload_applied(
+            watch_state,
+            terminal_sessions,
+            "agent-1",
+            &cursor,
+            PAYLOAD,
+            Some(ComposerWriteBaseline {
+                runtime_generation: generation,
+                payload_already_applied: false,
+            }),
+        )
+        .await
+        .expect("canonical active composer holds the exact payload on this runtime");
+    }
+
+    #[test]
+    fn canonical_proof_holds_only_inside_its_runtime_and_staleness_fences() {
+        const PAYLOAD: &str = "recall the previous answer in lowercase";
+        let applied = observe_payload_application(
+            &format!("│ model: gpt-5.4-mini low /model to change │\r\n› {PAYLOAD}"),
+            PAYLOAD,
+            ObservationScope::ActiveTerminalSnapshot,
+        );
+        assert!(applied.confirms_payload());
+
+        let fresh = ComposerWriteBaseline {
+            runtime_generation: 2,
+            payload_already_applied: false,
+        };
+        assert!(canonical_proof_confirms_write(&applied, Some(fresh), 2));
+
+        // A runtime replaced between the write and the observation makes the
+        // canonical screen a foreign runtime's screen.
+        assert!(!canonical_proof_confirms_write(&applied, Some(fresh), 3));
+
+        // The payload was already sitting in the composer before the write, so
+        // seeing it afterwards proves nothing about this write.
+        assert!(!canonical_proof_confirms_write(
+            &applied,
+            Some(ComposerWriteBaseline {
+                runtime_generation: 2,
+                payload_already_applied: true,
+            }),
+            2,
+        ));
+
+        // No baseline means no fence, so canonical-only evidence is refused.
+        assert!(!canonical_proof_confirms_write(&applied, None, 2));
+
+        // History, a submitted turn, and a still-starting resume never qualify,
+        // even with a clean baseline on the right runtime.
+        for screen in [
+            format!("› {PAYLOAD}\r\nresponse\r\n› Ask Codex to do anything"),
+            format!("│ model:     loading   /model to change │\r\n› {PAYLOAD}"),
+            format!("Resuming session…\r\n› {PAYLOAD}"),
+        ] {
+            let observation = observe_payload_application(
+                &screen,
+                PAYLOAD,
+                ObservationScope::ActiveTerminalSnapshot,
+            );
+            assert!(
+                !canonical_proof_confirms_write(&observation, Some(fresh), 2),
+                "screen must not release Return: {screen}"
+            );
+        }
     }
 
     #[test]

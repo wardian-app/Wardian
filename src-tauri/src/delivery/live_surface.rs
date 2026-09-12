@@ -634,6 +634,19 @@ pub async fn submit_live_surface_prompt(
             crate::utils::terminal_input::normalize_prompt_for_terminal_submit(&request.prompt);
         let apply_cursor = turn_start_cursor.clone();
         let require_payload_apply_evidence = requires_provider_turn_receipt;
+        // Captured before the payload write so the canonical composer screen can
+        // later prove that *this* write landed, rather than a stale draft or a
+        // replaced runtime.
+        let apply_baseline = if provider == "codex" && require_payload_apply_evidence {
+            crate::delivery::codex_composer::capture_composer_write_baseline(
+                state,
+                &request.session_id,
+                &apply_prompt,
+            )
+            .await
+        } else {
+            None
+        };
         match crate::utils::terminal_input::submit_prompt_with_outcome_via_sender_after_payload_and_before_submit(
             &input,
             &request.prompt,
@@ -679,6 +692,7 @@ pub async fn submit_live_surface_prompt(
                     &apply_session_id,
                     cursor,
                     &apply_prompt,
+                    apply_baseline,
                 )
                 .await
             },

@@ -32,6 +32,38 @@ Codex version, and whether evidence came from the transaction delta or active
 prompt fallback. An unknown marker remains unconfirmed and Return remains
 withheld.
 
+## Canonical composer proof after a resumed-session repaint
+
+Issue #1192 exposed the next gap. Both observations above are read from the
+transaction delta, and the canonical screen was consulted only *after* the delta
+had already confirmed the payload. A partial diff repaint following a
+pause/resume can redraw the composer without emitting the whole payload
+contiguously into that delta, so the delta stalls on an incomplete prefix while
+the canonical active composer already holds the exact payload. The recorded
+refusal shows `literal_match_bytes=26` against `normalized_payload_bytes=91`
+with no marker: proof existed, and the gate could not reach it.
+
+Wardian therefore accepts a third observation, taken from the broker's canonical
+screen rather than the delta, admissible only inside all three of these fences:
+
+- the exact, complete payload in the current active composer. This is read only
+  after the last prompt caret, so scrollback history and an already-submitted
+  turn cannot qualify, and a startup screen or model menu yields nothing;
+- the snapshot's runtime generation equal to a baseline captured **before** the
+  payload write, so a replaced or foreign runtime cannot qualify;
+- a baseline in which the payload was **not** already applied, so a stale draft
+  left by an earlier attempt is not mistaken for new evidence.
+
+If no baseline is available there is nothing to fence against, so canonical-only
+evidence is refused and the gate falls back to transaction-delta proof alone.
+The canonical screen is polled on its own slower cadence than the delta because
+it clones the screen and formats scrollback.
+
+This widens the evidence Wardian will accept; it does not weaken what counts as
+proof. Return still requires the complete payload in the current composer on the
+current runtime, the 15-second refusal and `payload_apply_unconfirmed`
+diagnostics are unchanged, and there is still no automatic retry.
+
 ## Production repaint regression
 
 Issue #1068 exposed a fixture gap after the original fix: Codex 0.151.0 can
