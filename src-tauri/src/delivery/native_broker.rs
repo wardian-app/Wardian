@@ -19,6 +19,8 @@ use wardian_core::native_transport::{
 use super::native_session::{NativeProtocolEvent, NativeProtocolEventKind, NativeProviderProtocol};
 use crate::providers::{CodexProvider, PiProvider, ProviderFactory};
 
+mod codex;
+
 const SESSION_COMMAND_CAPACITY: usize = 64;
 const BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const PROTOCOL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
@@ -76,6 +78,8 @@ struct NativeSessionHandle {
     provider: String,
     capabilities: NativeTransportCapabilities,
     tx: mpsc::Sender<SessionCommand>,
+    shared_codex: Option<Arc<super::codex_shared::CodexSharedOwner>>,
+    stopped: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 #[derive(Debug)]
@@ -115,10 +119,114 @@ struct NativeRuntime {
     _memory_capability: Option<wardian_core::memory::MemoryCapabilityLease>,
 }
 
+type CodexCreationRevisionMap =
+    HashMap<(String, u64), std::sync::Weak<tokio::sync::watch::Sender<u64>>>;
+
+/// Tracks only live creation requests, including workers not yet at the owner gate.
+/// Registration and disposal revisions are synchronous; neither holds this lock
+/// across an await. Expired weak entries are pruned rather than kept as tombstones.
+#[derive(Debug, Default)]
+struct CodexCreationRegistry {
+    revisions: std::sync::Mutex<CodexCreationRevisionMap>,
+}
+
+/// Keeps its generation's revision alive until the detached creation worker ends.
+#[derive(Debug)]
+struct CodexCreationRequest {
+    revision: Arc<tokio::sync::watch::Sender<u64>>,
+    observed_revision: u64,
+}
+
+impl CodexCreationRegistry {
+    /// Capture before the creation request's first await or detached spawn.
+    fn register(
+        &self,
+        agent_id: &str,
+        generation: u64,
+    ) -> Result<CodexCreationRequest, &'static str> {
+        let mut revisions = self
+            .revisions
+            .lock()
+            .map_err(|_| "Codex creation registry lock poisoned")?;
+        revisions.retain(|_, revision| revision.strong_count() > 0);
+        let revision = revisions
+            .entry((agent_id.to_owned(), generation))
+            .or_default();
+        let sender = match revision.upgrade() {
+            Some(sender) => sender,
+            None => {
+                let (sender, _) = tokio::sync::watch::channel(0_u64);
+                let sender = Arc::new(sender);
+                *revision = Arc::downgrade(&sender);
+                sender
+            }
+        };
+        let observed_revision = *sender.borrow();
+        Ok(CodexCreationRequest {
+            revision: sender,
+            observed_revision,
+        })
+    }
+
+    /// Cancel requests already registered at this boundary, before awaiting the
+    /// owner gate. An exact-generation stop must not invalidate a newer generation.
+    fn cancel(&self, agent_id: &str, generation: Option<u64>) -> Result<(), &'static str> {
+        let mut revisions = self
+            .revisions
+            .lock()
+            .map_err(|_| "Codex creation registry lock poisoned")?;
+        revisions.retain(|(target, current_generation), revision| {
+            let Some(sender) = revision.upgrade() else {
+                return false;
+            };
+            if target == agent_id && generation.is_none_or(|value| value == *current_generation) {
+                sender.send_modify(|value| *value = value.wrapping_add(1));
+            }
+            true
+        });
+        Ok(())
+    }
+}
+
+impl CodexCreationRequest {
+    fn is_cancelled(&self) -> bool {
+        *self.revision.borrow() != self.observed_revision
+    }
+
+    /// Observe cancellation even if disposal completed before this future started.
+    async fn cancelled(&self) {
+        let mut revision = self.revision.subscribe();
+        let _ = revision
+            .wait_for(|value| *value != self.observed_revision)
+            .await;
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct CodexCreationTestBarrier {
+    reached: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct CodexCreationTestHooks {
+    before_gate: std::sync::Mutex<HashMap<u64, Arc<CodexCreationTestBarrier>>>,
+    reject_start: std::sync::atomic::AtomicBool,
+    start_attempts: std::sync::atomic::AtomicUsize,
+}
+
 #[derive(Debug, Default)]
 pub struct NativeDeliveryBroker {
     mutation_lock: Mutex<()>,
     sessions: Mutex<HashMap<String, NativeSessionHandle>>,
+    owner_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    owner_changes: tokio::sync::Notify,
+    codex_creations: CodexCreationRegistry,
+    #[cfg(test)]
+    codex_creation_test: CodexCreationTestHooks,
+    shutting_down: std::sync::atomic::AtomicBool,
 }
 
 impl NativeDeliveryBroker {
@@ -229,6 +337,11 @@ impl NativeDeliveryBroker {
             ));
         }
         let handle = self.ensure_session(spec).await?;
+        if let Some(owner) = handle.shared_codex {
+            return self
+                .dispatch_shared_codex(owner, record, handle.capabilities)
+                .await;
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
         handle
             .tx
@@ -290,6 +403,42 @@ impl NativeDeliveryBroker {
                 ),
                 true,
             ));
+        }
+        if let Some(owner) = handle.shared_codex.clone() {
+            if handle.generation != record.envelope.generation {
+                return Err(error(
+                    NativeDeliveryErrorCode::StaleGeneration,
+                    "cancellation generation changed",
+                    false,
+                ));
+            }
+            let turn_id = record.provider_turn_id.as_deref().ok_or_else(|| {
+                error(
+                    NativeDeliveryErrorCode::CapabilityUnavailable,
+                    "cancellation lacks an exact native turn",
+                    false,
+                )
+            })?;
+            drop(sessions);
+            let receipt = owner
+                .client
+                .interrupt_expected(Some(turn_id))
+                .await
+                .map_err(codex::shared_error)?;
+            if receipt.interruption_confirmed {
+                return self
+                    .advance(
+                        interaction_id,
+                        NativeDeliveryPhase::Cancelled,
+                        NativeEvidenceSource::ProviderEvent,
+                        None,
+                        receipt.provider_turn_id,
+                        None,
+                        "shared_cancelled",
+                    )
+                    .await;
+            }
+            return self.get(interaction_id);
         }
         let (reply_tx, reply_rx) = oneshot::channel();
         handle
@@ -477,11 +626,9 @@ impl NativeDeliveryBroker {
         wardian_core::db::list_native_delivery_evidence(interaction_id, limit).map_err(db_error)
     }
 
-    pub async fn dispose_agent(&self, target_agent_id: &str) {
-        let handle = self.sessions.lock().await.remove(target_agent_id);
-        if let Some(handle) = handle {
-            let _ = handle.tx.send(SessionCommand::Shutdown).await;
-        }
+    pub async fn dispose_agent(&self, target_agent_id: &str) -> Result<(), NativeBrokerError> {
+        let _gate = self.lock_owner_for_stop(target_agent_id, None).await?;
+        self.stop_registered_owner(target_agent_id, None).await
     }
 
     pub async fn recover_after_restart(
@@ -534,6 +681,11 @@ impl NativeDeliveryBroker {
         self: &Arc<Self>,
         spec: NativeSessionSpec,
     ) -> Result<NativeSessionHandle, NativeBrokerError> {
+        let _gate = self
+            .owner_gate(&spec.target_agent_id)
+            .await
+            .lock_owned()
+            .await;
         let protocol = NativeProviderProtocol::for_provider(&spec.provider).ok_or_else(|| {
             error(
                 NativeDeliveryErrorCode::UnsupportedProvider,
@@ -549,28 +701,39 @@ impl NativeDeliveryBroker {
                 }
             }
         }
+        if spec.provider == "codex" {
+            return Err(error(NativeDeliveryErrorCode::CapabilityUnavailable,
+                "Codex requires a lifecycle-prepared shared owner; embedded sessions require explicit restart", false));
+        }
         let protocol_version = probe_protocol_version(&spec, protocol).await;
-        let mut sessions = self.sessions.lock().await;
+        let sessions = self.sessions.lock().await;
         if let Some(existing) = sessions.get(&spec.target_agent_id) {
             if existing.generation == spec.generation && existing.provider == spec.provider {
                 return Ok(existing.clone());
             }
         }
-        if let Some(replaced) = sessions.remove(&spec.target_agent_id) {
-            let _ = replaced.tx.send(SessionCommand::Shutdown).await;
-        }
+        drop(sessions);
+        self.stop_registered_owner(&spec.target_agent_id, None)
+            .await?;
         let capabilities = protocol.capabilities(protocol_version);
         let (tx, rx) = mpsc::channel(SESSION_COMMAND_CAPACITY);
+        let (stopped_tx, stopped_rx) = tokio::sync::watch::channel(false);
         let handle = NativeSessionHandle {
             generation: spec.generation,
             provider: spec.provider.clone(),
             capabilities: capabilities.clone(),
             tx,
+            shared_codex: None,
+            stopped: Some(stopped_rx),
         };
-        sessions.insert(spec.target_agent_id.clone(), handle.clone());
+        self.sessions
+            .lock()
+            .await
+            .insert(spec.target_agent_id.clone(), handle.clone());
         let broker = self.clone();
         tokio::spawn(async move {
             run_session_actor(broker, spec, protocol, capabilities, rx).await;
+            let _ = stopped_tx.send(true);
         });
         Ok(handle)
     }
@@ -658,6 +821,8 @@ impl Clone for NativeSessionHandle {
             provider: self.provider.clone(),
             capabilities: self.capabilities.clone(),
             tx: self.tx.clone(),
+            shared_codex: self.shared_codex.clone(),
+            stopped: self.stopped.clone(),
         }
     }
 }
@@ -798,7 +963,7 @@ async fn run_session_actor(
                             )
                             .await;
                         let _ = reply.send(Err(failure));
-                        runtime = None;
+                        stop_native_runtime(&mut runtime).await;
                         continue;
                     }
                     let submitted = broker
@@ -1022,7 +1187,7 @@ async fn run_session_actor(
                                     &mut corrections,
                                     "malformed framing after possible correction submission",
                                 ).await;
-                                runtime = None;
+                                stop_native_runtime(&mut runtime).await;
                                 continue;
                             }
                         };
@@ -1056,7 +1221,7 @@ async fn run_session_actor(
                                     &mut corrections,
                                     "invalid event after possible correction submission",
                                 ).await;
-                                runtime = None;
+                                stop_native_runtime(&mut runtime).await;
                                 continue;
                             },
                         };
@@ -1145,15 +1310,34 @@ async fn run_session_actor(
                             &mut corrections,
                             "provider process ended after possible correction submission",
                         ).await;
-                        runtime = None;
+                        stop_native_runtime(&mut runtime).await;
                     }
                 }
             }
         }
     }
-    if let Some(mut opened) = runtime {
-        let _ = opened.child.kill().await;
+    stop_native_runtime(&mut runtime).await;
+}
+
+/// A stopping registry slot cannot be released on a best-effort kill. Keep the
+/// child handle until exit is observed, including EOF/write-failure recovery.
+async fn stop_native_runtime(runtime: &mut Option<NativeRuntime>) {
+    if let Some(opened) = runtime.as_mut() {
+        loop {
+            if matches!(opened.child.try_wait(), Ok(Some(_))) {
+                break;
+            }
+            let _ = opened.child.start_kill();
+            if matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), opened.child.wait()).await,
+                Ok(Ok(_))
+            ) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
     }
+    runtime.take();
 }
 
 async fn fail_corrections(
@@ -2504,7 +2688,7 @@ input.on('line', (line) => {
             .await
             .expect("idempotent replay");
         assert_eq!(replay.envelope.interaction_id, "interaction-one");
-        broker.dispose_agent("agent-native-test").await;
+        broker.dispose_agent("agent-native-test").await.unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2663,7 +2847,7 @@ input.on('line', (line) => {
                 .phase,
             NativeDeliveryPhase::Completed
         );
-        broker.dispose_agent("agent-native-test").await;
+        broker.dispose_agent("agent-native-test").await.unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2792,6 +2976,62 @@ input.on('line', (line) => {
                 NativeDeliveryPhase::Completed
             );
         }
-        broker.dispose_agent(&agent_id).await;
+        broker.dispose_agent(&agent_id).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod codex_creation_revision_tests {
+    use super::CodexCreationRegistry;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn exact_generation_disposal_cancels_existing_requests_only() {
+        let registry = CodexCreationRegistry::default();
+        let old = registry.register("agent", 7).unwrap();
+        let same_generation = registry.register("agent", 7).unwrap();
+        let newer = registry.register("agent", 8).unwrap();
+        let other_agent = registry.register("other", 7).unwrap();
+        registry.cancel("agent", Some(7)).unwrap();
+        assert!(old.is_cancelled());
+        assert!(same_generation.is_cancelled());
+        assert!(!newer.is_cancelled());
+        assert!(!other_agent.is_cancelled());
+        // Subscribe only after disposal: the cancellation must not be lost.
+        tokio::time::timeout(Duration::from_secs(1), old.cancelled())
+            .await
+            .expect("completed disposal must cancel an unpolled request");
+        let later = registry.register("agent", 7).unwrap();
+        assert!(!later.is_cancelled());
+        registry.cancel("agent", Some(7)).unwrap();
+        assert!(later.is_cancelled());
+        assert!(!newer.is_cancelled());
+    }
+
+    #[test]
+    fn agent_disposal_cancels_all_existing_generations_without_affecting_other_agents() {
+        let registry = CodexCreationRegistry::default();
+        let first = registry.register("agent", 7).unwrap();
+        let second = registry.register("agent", 8).unwrap();
+        let other = registry.register("other", 7).unwrap();
+        registry.cancel("agent", None).unwrap();
+        assert!(first.is_cancelled());
+        assert!(second.is_cancelled());
+        assert!(!other.is_cancelled());
+        assert!(!registry.register("agent", 9).unwrap().is_cancelled());
+    }
+
+    #[test]
+    fn completed_creation_revisions_are_pruned_without_generation_tombstones() {
+        let registry = CodexCreationRegistry::default();
+        for generation in 0..100 {
+            let request = registry.register("agent", generation).unwrap();
+            assert_eq!(registry.revisions.lock().unwrap().len(), 1);
+            registry.cancel("agent", Some(generation)).unwrap();
+            assert!(request.is_cancelled());
+        }
+        registry.cancel("agent", None).unwrap();
+        assert!(registry.revisions.lock().unwrap().is_empty());
+        assert!(!registry.register("agent", 0).unwrap().is_cancelled());
     }
 }

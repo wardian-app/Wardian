@@ -26,6 +26,28 @@ npm run setup:e2e:native:windows
 
 Generated driver artifacts belong under `tools/e2e-native/` and are ignored by git.
 
+Native artifact selection is fail-closed. Cargo metadata supplies the effective
+target directory, including `CARGO_TARGET_DIR` and Cargo config overrides; a
+stale repository-local `target/` binary is not selected. Set
+`WARDIAN_NATIVE_APP=<artifact-path>` only when using a deliberate custom app
+artifact. Relative values are resolved from the repository root, and a missing,
+empty, or directory override stops before WebDriver/provider startup. The
+setup script also verifies package-local `@tauri-apps/cli` and
+`selenium-webdriver` resolution before driver setup.
+
+POSIX shell:
+
+```bash
+WARDIAN_NATIVE_APP=<artifact-path> npm run test:e2e:native:fast -- <native-test-file>
+```
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_NATIVE_APP = '<artifact-path>'
+npm run test:e2e:native:fast -- <native-test-file>
+```
+
 `e2e-native/tests/artifact-presentation-native.test.mjs` proves the artifact
 control path with real IPC: an isolated mock agent presents an authorized
 Markdown file through the built CLI, Wardian routes a non-focused Files tab,
@@ -39,6 +61,11 @@ Run the native mock-provider suite:
 ```bash
 npm run test:e2e:native
 ```
+
+On Windows, the harness launches the installed Tauri CLI through Node for
+builds. This preserves the inline build configuration when a test is launched
+directly with Node, without npm's environment variables. The test runner also
+passes test paths directly to Node, including paths containing spaces.
 
 For rapid iteration after you already have a current native build, reuse the
 existing binary instead of rebuilding on every run:
@@ -58,6 +85,66 @@ You can also target a specific file:
 ```bash
 npm run test:e2e:native:fast -- e2e-native/tests/opencode-native.test.mjs
 ```
+
+### Concurrent runs
+
+Two native runs can execute at the same time. Every run claims its own
+resources automatically, so nothing has to be chosen by hand:
+
+- **Ports.** The driver and its child native driver each get a port reserved
+  from the OS at startup, passed through as `--port` and `--native-port`. There
+  is no fixed port any more, so a second run cannot collide with the first.
+- **Home.** Each run gets `wardian-e2e-native-<runId>` under the OS temp
+  directory. The runner pins that value once and hands it to every child, so
+  the runner and harness never disagree about which home is in play.
+- **Cleanup.** A run ends only the process tree it started. It does not search
+  for processes by command line, so an unrelated process is never terminated
+  because its command line happens to mention the home path.
+
+Both `npm run test:e2e:native` and the runner script activate this. Nothing
+needs a free port picked in advance.
+
+#### Using an explicit home
+
+Set `WARDIAN_E2E_NATIVE_HOME` to keep a run's state for inspection:
+
+```bash
+WARDIAN_E2E_NATIVE_HOME=/tmp/wardian-e2e-native-inspect npm run test:e2e:native
+```
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_E2E_NATIVE_HOME = "$env:TEMP\wardian-e2e-native-inspect"
+npm run test:e2e:native
+```
+
+The path must be under the OS temp directory and begin with
+`wardian-e2e-native`, or sit under `.tmp/e2e-native` in the repository. The
+harness resets the home it is given, and that guard is what stops a reset from
+reaching an unrelated directory.
+
+A run writes `.native-e2e-lock.json` into its home and removes it on exit. A
+second run pointed at the same explicit home is refused before anything is
+deleted or terminated. Give each concurrent run its own home, or leave the
+variable unset.
+
+If a previous run crashed, its lock is left behind. The next run reports the
+stale lock and proceeds. It does not terminate processes that run may have
+orphaned, because they cannot be told apart from unrelated processes without
+the kind of command-line matching that caused cross-run kills.
+
+#### Endpoint ownership
+
+A run refuses to use a driver endpoint it cannot prove it owns. After the port
+answers, the harness resolves the pid listening on it and requires that pid to
+be the driver it started or one of that driver's children. A live listener left
+by something else fails the run instead of being adopted, and a driver that
+exits before binding is reported rather than treated as ready.
+
+Some capture and chat helper scripts still assume the old fixed port. They read
+the port from the harness session instead: `harness.driverPort` and
+`harness.nativeDriverPort`.
 
 For manual validation, run the same native harness in visible watch mode:
 
@@ -186,6 +273,96 @@ The provider list also accepts `pi`. Include it in
 `WARDIAN_E2E_RENDERING_PI_MODEL` when the test should use a specific configured
 Pi model.
 
+### Provider function conformance
+
+The [provider function matrix](https://github.com/wardian-app/Wardian/blob/main/docs/research/provider-function-matrix.md) records
+real acceptance separately from fixture tests, setup blockers, and intentional
+omissions. Keep paid provider runs serialized under their execution owner. The
+shared harness allocates per-session WebDriver ports, verifies listener ownership,
+and freezes the app and CLI into the run-owned home. Supply an already packaged
+artifact and an explicit model from
+the current provider catalog. The suite does not build the application or choose
+a default model.
+
+```bash
+WARDIAN_E2E_REAL_CHAT_CONFORMANCE=1 \
+WARDIAN_E2E_CHAT_PROVIDERS=claude \
+WARDIAN_E2E_CHAT_CLAUDE_MODEL='<verified-low-cost-model>' \
+WARDIAN_NATIVE_APP='<absolute-packaged-app-path>' \
+node --test e2e-native/tests/provider-chat-conformance-real-native.test.mjs
+```
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_E2E_REAL_CHAT_CONFORMANCE = '1'
+$env:WARDIAN_E2E_CHAT_PROVIDERS = 'claude'
+$env:WARDIAN_E2E_CHAT_CLAUDE_MODEL = '<verified-low-cost-model>'
+$env:WARDIAN_NATIVE_APP = '<absolute-packaged-app-path>'
+node --test e2e-native/tests/provider-chat-conformance-real-native.test.mjs
+```
+
+Provider selection accepts `claude`, `codex`, `opencode`, `antigravity`, and `pi`.
+Set the corresponding `WARDIAN_E2E_CHAT_<PROVIDER>_MODEL` for every selected
+provider. `WARDIAN_E2E_CHAT_EXTENDED_INPUTS=1` adds multiline, trailing-newline,
+and long-paste assertions. `WARDIAN_E2E_CHAT_CATALOG_ONLY=1` performs discovery
+without starting provider turns. `WARDIAN_E2E_CHAT_CODEX_STARTUP_DIAGNOSTIC=1` allows
+180 seconds instead of 90 before any prompt; it does not change delivery timeouts
+or resolve a model choice automatically.
+
+On Windows, the Codex scratch-read case explicitly uses `cmd.exe`. Native
+evidence showed that the installed WindowsApps PowerShell could not launch
+inside Codex's sandbox. This constraint is recorded with the result; the test
+does not change sandbox or approval policy.
+
+The separate context suite uses `WARDIAN_E2E_REAL_CONTEXT_PERMISSIONS=1`, one
+`WARDIAN_E2E_CONTEXT_PROVIDERS` value, and its explicit
+`WARDIAN_E2E_CONTEXT_<PROVIDER>_MODEL`. It exercises managed class instructions,
+Wardian skill deployment, approval rejection before provider invocation, and
+inherited headless session boundaries. Independent provider-native records bind
+each headless answer to its request and session. Normalized automation output
+or saved agent configuration alone cannot establish that identity.
+
+The native broker suite creates an off agent and checks ordinary `wardian send`
+through the persistent provider transport. It requires provider-backed start and
+completion, second-turn recall of an omitted secret on the same session binding,
+and advertised cancellation followed by another successful turn. A headless
+fallback or a turn that completed before cancellation cannot count as a pass.
+
+```bash
+WARDIAN_E2E_REAL_NATIVE_BROKER=1 \
+WARDIAN_E2E_NATIVE_BROKER_PROVIDER=claude \
+WARDIAN_E2E_NATIVE_BROKER_MODEL='<verified-low-cost-model>' \
+WARDIAN_NATIVE_SKIP_BUILD=1 \
+WARDIAN_NATIVE_APP='<absolute-frozen-app-path>' \
+WARDIAN_E2E_NATIVE_BROKER_CLI='<absolute-adjacent-cli-path>' \
+node --test e2e-native/tests/provider-native-broker-real-native.test.mjs
+```
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_E2E_REAL_NATIVE_BROKER = '1'
+$env:WARDIAN_E2E_NATIVE_BROKER_PROVIDER = 'claude'
+$env:WARDIAN_E2E_NATIVE_BROKER_MODEL = '<verified-low-cost-model>'
+$env:WARDIAN_NATIVE_SKIP_BUILD = '1'
+$env:WARDIAN_NATIVE_APP = '<absolute-frozen-app-path>'
+$env:WARDIAN_E2E_NATIVE_BROKER_CLI = '<absolute-adjacent-cli-path>'
+node --test e2e-native/tests/provider-native-broker-real-native.test.mjs
+```
+
+These suites retain disposable Wardian homes under `.tmp/e2e-native/`, with
+artifact/harness hashes and per-case observations. Raw logs and screenshots stay
+local. Publish only sanitized evidence. A native provider can also write to its
+ordinary session store; do not describe Wardian-home isolation as isolation of
+all provider-owned history.
+
+Freeze a packaged runtime before verification commands that compile Cargo test
+targets. Those commands can replace the same debug executable with a dev-URL
+build. Check the artifact hash when associating a run with a source change.
+
+### Rendering evidence
+
 The run writes Wardian-side evidence under `e2e/screenshots/real-provider-rendering/<run-id>/`. Each provider directory includes JSON and screenshots for `initial`, `settled`, `narrow`, `resized`, `wide`, card-level `card-maximized` and `card-restored`, window-level `minimized`, `restored-after-minimize`, `maximized`, `restored-after-maximize`, `rapid-resize-final`, `scrolled-top`, `cleared-immediate`, `paused`, and `resumed`.
 
 When `WARDIAN_E2E_RENDERING_INPUT_TEXT` is unset, the lab submits a compact default prompt that asks the provider to print exactly 50 lines from `WARDIAN_SCROLL_001` through `WARDIAN_SCROLL_050`. This keeps the typed prompt from polluting scrollback with a second copy of the audit rows while still requiring `WARDIAN_SCROLL_050` in the provider response.
@@ -193,6 +370,14 @@ When `WARDIAN_E2E_RENDERING_INPUT_TEXT` is unset, the lab submits a compact defa
 Each state JSON records the xterm parser rows, DOM rows, card/screen/viewport rectangles, terminal debug columns and rows, renderer cell metrics, native window rectangle, browser viewport metrics, app-shell rectangle, screenshot timestamps, artifact timestamps, and row-stability timing. Resize and disruptive-action states also record before/after native window rectangles, before/after browser viewport metrics, before/after terminal debug geometry, action duration, stable-row duration, and any exposed fit or resize counters.
 
 The full native runner enables `VITE_WARDIAN_TERMINAL_DEBUG=1` while it builds the app for this lab. `test:e2e:native:fast` intentionally reuses a prebuilt native app, so build the debug app with that Vite flag first; otherwise the Wardian-side terminal debug snapshots will be unavailable.
+
+The lab checks the terminal debug API after the Agents overview mounts and
+before spawning audit agents. It records `debug-preflight.json` in the evidence
+directory and fails with the build prerequisite when instrumentation is missing.
+A Rust debug executable can contain a production Vite frontend; setting the flag
+only when launching that executable does not change its compiled assets. Passing
+this preflight proves only that instrumentation is available. Real-provider
+response, presentation ownership, and before/after resize evidence remain required.
 
 When terminal history exists, the lab also captures `<state>-scrollback-top` and, for deeper history, `<state>-scrollback-mid` artifacts. These are intentionally not limited to the visible bottom viewport; use them to diagnose row bleed, wrapped-line corruption, stale geometry, and defects that only appear higher in scrollback after resize, card maximize/restore, clear, pause, or resume flows.
 

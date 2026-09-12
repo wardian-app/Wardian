@@ -1,4 +1,19 @@
 const TERMINAL_HOST_SELECTOR = '[data-testid="agent-terminal-host"]';
+const TERMINAL_DEBUG_BUILD_REQUIREMENT =
+  "Terminal debug API unavailable. Set VITE_WARDIAN_TERMINAL_DEBUG=1 while building "
+  + "the frontend and packaged native app, then select that rebuilt app. "
+  + "Setting the flag only at runtime cannot enable debug APIs in a prebuilt frontend.";
+
+/** Check after the Agents overview has mounted, before spawning audit agents. */
+export async function assertTerminalDebugAvailable(driver) {
+  const missingMethods = await driver.executeScript(() => [
+    "presentationIds", "snapshot", "rawOutputLog",
+    "scrollToTop", "scrollToBottom", "scrollToViewportLine",
+  ].filter((method) => typeof window.__wardianTerminalDebug?.[method] !== "function"));
+  if (missingMethods.length > 0) {
+    throw new Error(`${TERMINAL_DEBUG_BUILD_REQUIREMENT} Missing methods: ${missingMethods.join(", ")}.`);
+  }
+}
 
 function presentationResolutionTimeoutMessage(scope, sessionId) {
   return `Timed out resolving the terminal presentation for ${scope} ${sessionId}`;
@@ -14,7 +29,7 @@ export async function resolveAgentTerminalPresentationId(
   sessionId,
   timeoutMs = 20_000,
 ) {
-  return await driver.wait(async () => await driver.executeScript((sid, hostSelector) => {
+  return await driver.wait(async () => await driver.executeScript((sid, hostSelector, debugRequirement) => {
     const card = document.getElementById(`agent-card-${sid}`);
     if (!card) return false;
     const matchingHosts = [...card.querySelectorAll(hostSelector)].filter(
@@ -23,9 +38,12 @@ export async function resolveAgentTerminalPresentationId(
     if (matchingHosts.length !== 1) return false;
     const presentationId = matchingHosts[0].getAttribute("data-terminal-presentation-id");
     if (!presentationId) return false;
+    if (typeof window.__wardianTerminalDebug?.presentationIds !== "function") {
+      throw new Error(debugRequirement);
+    }
     const presentationIds = window.__wardianTerminalDebug?.presentationIds?.() ?? [];
     return presentationIds.includes(presentationId) ? presentationId : false;
-  }, sessionId, TERMINAL_HOST_SELECTOR), timeoutMs,
+  }, sessionId, TERMINAL_HOST_SELECTOR, TERMINAL_DEBUG_BUILD_REQUIREMENT), timeoutMs,
   presentationResolutionTimeoutMessage("agent", sessionId));
 }
 

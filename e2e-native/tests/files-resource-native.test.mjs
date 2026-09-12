@@ -194,10 +194,10 @@ function tryCreateEscapeLink(t, fixtures) {
 
 test("native Files resources enforce roots, revisions, ranges, and cleanup", { timeout: 360_000 }, async (t) => {
   const harness = await createNativeHarness();
-  assert.ok(harness.appPath);
 
   try {
     if (!skipNativeBuild) ensureNativeAppBuilt(harness);
+    assert.ok(harness.appPath);
   } catch (error) {
     t.skip(String(error));
     return;

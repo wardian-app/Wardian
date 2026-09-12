@@ -8,6 +8,7 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   createNativeHarness,
   ensureNativeAppBuilt,
+  freezeBuiltCliForRun,
   prepareIsolatedHome,
   startNativeSession,
   waitForAppShell,
@@ -33,10 +34,6 @@ const ROUTE_LIVE_ONLY_SESSION_NAME = `E2E-CLI-ROUTE-LIVE-${RUN_ID}`;
 const HEADLESS_SEND_SESSION_NAME = `E2E-CLI-HEADLESS-SEND-${RUN_ID}`;
 const HEADLESS_STRUCTURED_ASK_SESSION_NAME = `E2E-CLI-HEADLESS-ASK-${RUN_ID}`;
 
-function commandName(name) {
-  return process.platform === "win32" ? `${name}.exe` : name;
-}
-
 function buildCli(harness) {
   const result = spawnSync(
     "cargo",
@@ -53,28 +50,7 @@ function buildCli(harness) {
     `cargo build -p wardian-cli failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
   );
 
-  const localCandidate = path.join(harness.repoRoot, "target", "debug", commandName("wardian-cli"));
-  if (existsSync(localCandidate)) {
-    return localCandidate;
-  }
-
-  const metadata = spawnSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], {
-    cwd: harness.repoRoot,
-    encoding: "utf8",
-  });
-  assert.equal(
-    metadata.status,
-    0,
-    `cargo metadata failed\nstdout:\n${metadata.stdout}\nstderr:\n${metadata.stderr}`,
-  );
-  const targetDirectory = JSON.parse(metadata.stdout).target_directory;
-  const metadataCandidate = path.join(targetDirectory, "debug", commandName("wardian-cli"));
-  assert.equal(
-    existsSync(metadataCandidate),
-    true,
-    `wardian-cli binary was not found at ${metadataCandidate}`,
-  );
-  return metadataCandidate;
+  return freezeBuiltCliForRun(harness);
 }
 
 function runCli(cliPath, harness, args) {
@@ -447,12 +423,12 @@ async function waitForCompletedAutomation(runDir, timeoutMs = 30000) {
 
 test("native app-created agent is readable through the CLI", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
-  assert.ok(harness.appPath);
 
   try {
     if (!skipNativeBuild) {
       ensureNativeAppBuilt(harness);
     }
+    assert.ok(harness.appPath);
   } catch (error) {
     t.skip(String(error));
     return;
@@ -532,12 +508,12 @@ test("native app-created agent is readable through the CLI", { timeout: 180000 }
 
 test("native app-created off agent is readable through the CLI", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
-  assert.ok(harness.appPath);
 
   try {
     if (!skipNativeBuild) {
       ensureNativeAppBuilt(harness);
     }
+    assert.ok(harness.appPath);
   } catch (error) {
     t.skip(String(error));
     return;
@@ -583,12 +559,12 @@ test("native app-created off agent is readable through the CLI", { timeout: 1800
 test("native CLI send runs an off agent headlessly and retains its response", { timeout: 180000 }, async (t) => {
   await withMockScenario("headless_delayed", async () => {
     const harness = await createNativeHarness();
-    assert.ok(harness.appPath);
 
     try {
       if (!skipNativeBuild) {
         ensureNativeAppBuilt(harness);
       }
+      assert.ok(harness.appPath);
     } catch (error) {
       t.skip(String(error));
       return;
@@ -689,12 +665,12 @@ test("native CLI send runs an off agent headlessly and retains its response", { 
 test("native CLI structured ask runs an off agent headlessly and records its reply", { timeout: 180000 }, async (t) => {
   await withMockScenario("headless_structured_reply", async () => {
     const harness = await createNativeHarness();
-    assert.ok(harness.appPath);
 
     try {
       if (!skipNativeBuild) {
         ensureNativeAppBuilt(harness);
       }
+      assert.ok(harness.appPath);
     } catch (error) {
       t.skip(String(error));
       return;
@@ -775,12 +751,12 @@ test("native CLI structured ask runs an off agent headlessly and records its rep
 test("native automations run off agents headlessly for resumed and fresh conversations", { timeout: 180000 }, async (t) => {
   await withMockScenario("headless_delayed", async () => {
     const harness = await createNativeHarness();
-    assert.ok(harness.appPath);
 
     try {
       if (!skipNativeBuild) {
         ensureNativeAppBuilt(harness);
       }
+      assert.ok(harness.appPath);
     } catch (error) {
       t.skip(String(error));
       return;
@@ -878,12 +854,12 @@ edges:
 test("native CLI control commands operate through the running app", { timeout: 180000 }, async (t) => {
   await withMockScenario("action_needed", async () => {
     const harness = await createNativeHarness();
-    assert.ok(harness.appPath);
 
     try {
       if (!skipNativeBuild) {
         ensureNativeAppBuilt(harness);
       }
+      assert.ok(harness.appPath);
     } catch (error) {
       t.skip(String(error));
       return;
@@ -1074,12 +1050,12 @@ test("native CLI control commands operate through the running app", { timeout: 1
 test("native CLI ask returns only output after its pre-send cursor", { timeout: 180000 }, async (t) => {
   await withMockScenario("interactive_echo_then_response", async () => {
   const harness = await createNativeHarness();
-  assert.ok(harness.appPath);
 
   try {
     if (!skipNativeBuild) {
       ensureNativeAppBuilt(harness);
     }
+    assert.ok(harness.appPath);
   } catch (error) {
     t.skip(String(error));
     return;
@@ -1180,12 +1156,12 @@ test("native CLI ask returns only output after its pre-send cursor", { timeout: 
 test("native CLI ask output waits ignore the submitted prompt echo", { timeout: 180000 }, async (t) => {
   await withMockScenario("interactive_echo_then_response", async () => {
   const harness = await createNativeHarness();
-  assert.ok(harness.appPath);
 
   try {
     if (!skipNativeBuild) {
       ensureNativeAppBuilt(harness);
     }
+    assert.ok(harness.appPath);
   } catch (error) {
     t.skip(String(error));
     return;
@@ -1294,12 +1270,12 @@ test("native CLI ask output waits ignore the submitted prompt echo", { timeout: 
 
 test("native CLI structured ask completes only on explicit reply", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
-  assert.ok(harness.appPath);
 
   try {
     if (!skipNativeBuild) {
       ensureNativeAppBuilt(harness);
     }
+    assert.ok(harness.appPath);
   } catch (error) {
     t.skip(String(error));
     return;
@@ -1393,12 +1369,12 @@ test("native CLI structured ask completes only on explicit reply", { timeout: 18
 
 test("native CLI send waits for a provider-confirmed live turn", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
-  assert.ok(harness.appPath);
 
   try {
     if (!skipNativeBuild) {
       ensureNativeAppBuilt(harness);
     }
+    assert.ok(harness.appPath);
   } catch (error) {
     t.skip(String(error));
     return;
@@ -1466,12 +1442,12 @@ test("native CLI send waits for a provider-confirmed live turn", { timeout: 1800
 
 test("native PTY write acknowledgements complete before a provider turn starts", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
-  assert.ok(harness.appPath);
 
   try {
     if (!skipNativeBuild) {
       ensureNativeAppBuilt(harness);
     }
+    assert.ok(harness.appPath);
   } catch (error) {
     t.skip(String(error));
     return;
@@ -1541,12 +1517,12 @@ test("native PTY write acknowledgements complete before a provider turn starts",
 
 test("native CLI send routes processing mock by queue policy", { timeout: 180000 }, async (t) => {
     const harness = await createNativeHarness();
-    assert.ok(harness.appPath);
 
     try {
       if (!skipNativeBuild) {
         ensureNativeAppBuilt(harness);
       }
+      assert.ok(harness.appPath);
     } catch (error) {
       t.skip(String(error));
       return;
@@ -1617,12 +1593,12 @@ test("native CLI send routes processing mock by queue policy", { timeout: 180000
 
 test("native CLI watch returns readable output by default and raw output on opt-in", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
-  assert.ok(harness.appPath);
 
   try {
     if (!skipNativeBuild) {
       ensureNativeAppBuilt(harness);
     }
+    assert.ok(harness.appPath);
   } catch (error) {
     t.skip(String(error));
     return;

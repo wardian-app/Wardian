@@ -1096,19 +1096,14 @@ pub async fn obtain_session_id(
         None
     };
 
-    if provider_name == "codex" {
-        if let Some(agent_habitat_root) = habitat_root.as_ref() {
-            let agent_codex_home = habitat_codex_home(agent_habitat_root);
-            let real_codex_home = dirs::home_dir()
-                .ok_or("Could not find user home directory")?
-                .join(".codex");
-            sync_codex_agent_home(
-                &real_codex_home,
-                &agent_codex_home,
-                std::path::Path::new(""),
-            )?;
+    if provider_name == "codex" && habitat_root.is_some() {
+        let agent_id = bootstrap_session_id.ok_or("Codex habitat identity is missing")?;
+        let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
+        let _preparation = crate::utils::codex_home::acquire_preparation(&wardian_home, agent_id)?;
+        let agent_codex_home =
+            crate::utils::codex_home::resolve_managed_home(&wardian_home, agent_id)?;
 
-            match materialize_codex_session_rollout(&agent_codex_home, cwd) {
+        match materialize_codex_session_rollout(&agent_codex_home, cwd) {
                 Ok(session_id) => {
                     let mut identity_config = config.cloned().unwrap_or_else(|| AgentConfig {
                         provider: provider_name.to_string(),
@@ -1122,7 +1117,6 @@ pub async fn obtain_session_id(
                     "[WARDIAN-DEBUG] Codex session rollout materialization unavailable; using legacy bootstrap: {error}"
                 )),
             }
-        }
     }
     let provider_cwd = interactive_provider_cwd(
         provider_name,

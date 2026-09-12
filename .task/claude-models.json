@@ -1,8 +1,0 @@
-{
-  "provider": "claude",
-  "version": "2.1.263",
-  "source": "authenticated_minimal_probe_and_cli_help",
-  "selected_model": "haiku",
-  "resolved_model": "claude-haiku-4-5-20251001",
-  "basis": "haiku alias accepted by the live authenticated CLI and returned the canonical model in JSON output; no catalog command was exposed by claude --help"
-}

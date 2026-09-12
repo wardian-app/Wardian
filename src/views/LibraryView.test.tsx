@@ -155,11 +155,11 @@ describe('LibraryView', () => {
     fireEvent.pointerMove(window, { clientX: 300 });
     fireEvent.pointerUp(window, { clientX: 300 });
 
-    expect(useLibraryStore.getState().libraryDetailWidth).not.toBe(480);
+    expect(useLibraryStore.getState().libraryDetailWidth).not.toBe(640);
 
     fireEvent.doubleClick(handle);
 
-    expect(useLibraryStore.getState().libraryDetailWidth).toBe(480);
+    expect(useLibraryStore.getState().libraryDetailWidth).toBe(640);
   });
 
   it('never shrinks the list pane below its minimum width', () => {

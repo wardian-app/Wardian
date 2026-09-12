@@ -1,0 +1,198 @@
+{
+  "provenance": {
+    "kind": "Sanitized genuine retained v7 field extracts; IDs/paths replaced; native messages are the current session snapshot, not a fabricated intersected cohort. No prompts or tool output retained."
+  },
+  "pi": {
+    "source_provider_session_id": null,
+    "source_last_ingested_at": "2026-09-07T18:46:50.099Z",
+    "run_completed_at": "2026-09-07T18:48:04.415Z",
+    "artifact_sha256": "943f2aa28992825fc156ca828897d0690e1f007c0ed67d1debba6dbfc5a13c97",
+    "harness_sha256": "432924222c5cfdd449e1ee936bfbc7fe142a7fd45924fefdbe7e9302ce08b178",
+    "header": {
+      "type": "session",
+      "version": 3,
+      "timestamp": "2026-09-07T18:46:13.941Z",
+      "id": "pi-session"
+    },
+    "records": [
+      {
+        "type": "message",
+        "id": "pi-record-1",
+        "timestamp": "2026-09-07T18:46:18.919Z",
+        "message": {
+          "role": "assistant",
+          "responseId": "pi-response-1",
+          "usage": {
+            "cost": {
+              "total": 0.0034860000000000004
+            }
+          }
+        }
+      },
+      {
+        "type": "message",
+        "id": "pi-record-2",
+        "timestamp": "2026-09-07T18:46:24.344Z",
+        "message": {
+          "role": "assistant",
+          "responseId": "pi-response-2",
+          "usage": {
+            "cost": {
+              "total": 0.00053745
+            }
+          }
+        }
+      },
+      {
+        "type": "message",
+        "id": "pi-record-3",
+        "timestamp": "2026-09-07T18:47:03.397Z",
+        "message": {
+          "role": "assistant",
+          "responseId": "pi-response-3",
+          "usage": {
+            "cost": {
+              "total": 0.00089955
+            }
+          }
+        }
+      }
+    ],
+    "ingested": [
+      {
+        "turn_id": "pi-response-1",
+        "cost_usd": 0.0034860000000000004
+      },
+      {
+        "turn_id": "pi-response-2",
+        "cost_usd": 0.00053745
+      }
+    ]
+  },
+  "opencode": {
+    "source_provider_session_id": "ses_fresh",
+    "source_last_ingested_at": "2026-09-07T18:41:36.116Z",
+    "run_completed_at": "2026-09-07T18:41:58.550Z",
+    "artifact_sha256": "943f2aa28992825fc156ca828897d0690e1f007c0ed67d1debba6dbfc5a13c97",
+    "harness_sha256": "432924222c5cfdd449e1ee936bfbc7fe142a7fd45924fefdbe7e9302ce08b178",
+    "sessions": [
+      "ses_original",
+      "ses_fresh"
+    ],
+    "native_messages": [
+      {
+        "id": "opencode-message-1",
+        "session_id": "ses_original",
+        "time_created": 1788806354236,
+        "data": {
+          "role": "assistant",
+          "cost": 0,
+          "time": {
+            "created": 1788806354236,
+            "completed": 1788806361883
+          }
+        }
+      },
+      {
+        "id": "opencode-message-2",
+        "session_id": "ses_original",
+        "time_created": 1788806361888,
+        "data": {
+          "role": "assistant",
+          "cost": 0,
+          "time": {
+            "created": 1788806361888,
+            "completed": 1788806364267
+          }
+        }
+      },
+      {
+        "id": "opencode-message-3",
+        "session_id": "ses_original",
+        "time_created": 1788806426524,
+        "data": {
+          "role": "assistant",
+          "cost": 0,
+          "time": {
+            "created": 1788806426524,
+            "completed": 1788806429917
+          }
+        }
+      },
+      {
+        "id": "opencode-message-4",
+        "session_id": "ses_fresh",
+        "time_created": 1788806445199,
+        "data": {
+          "role": "assistant",
+          "cost": 0,
+          "time": {
+            "created": 1788806445199,
+            "completed": 1788806450357
+          }
+        }
+      },
+      {
+        "id": "opencode-message-5",
+        "session_id": "ses_fresh",
+        "time_created": 1788806487301,
+        "data": {
+          "role": "assistant",
+          "cost": 0,
+          "time": {
+            "created": 1788806487301,
+            "completed": 1788806494095
+          }
+        }
+      },
+      {
+        "id": "opencode-message-6",
+        "session_id": "ses_fresh",
+        "time_created": 1788806495808,
+        "data": {
+          "role": "assistant",
+          "cost": 0,
+          "time": {
+            "created": 1788806495808,
+            "completed": 1788806500361
+          }
+        }
+      },
+      {
+        "id": "opencode-message-7",
+        "session_id": "ses_fresh",
+        "time_created": 1788806507851,
+        "data": {
+          "role": "assistant",
+          "cost": 0,
+          "time": {
+            "created": 1788806507851,
+            "completed": 1788806515862
+          }
+        }
+      }
+    ],
+    "ingested": [
+      {
+        "turn_id": "opencode-message-1",
+        "cost_usd": 0.0
+      },
+      {
+        "turn_id": "opencode-message-2",
+        "cost_usd": 0.0
+      },
+      {
+        "turn_id": "opencode-message-3",
+        "cost_usd": 0.0
+      },
+      {
+        "turn_id": "opencode-message-4",
+        "cost_usd": 0.0
+      },
+      {
+        "turn_id": "opencode-message-5",
+        "cost_usd": 0.0
+      }
+    ]
+  }
+}

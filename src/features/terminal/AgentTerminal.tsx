@@ -1,3 +1,4 @@
+import { decodeTerminalSnapshot } from "./terminalSnapshotReplay";
 import { useRef, useState, useEffect, useCallback, memo, type DragEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -1271,28 +1272,6 @@ async function resetTerminalOutputBuffers(
   }
 }
 
-function decodeTerminalSnapshot(snapshot: TerminalSnapshot, useFormattedState: boolean) {
-  const scrollback = snapshot.formatted_scrollback?.length === snapshot.scrollback.length
-    ? snapshot.formatted_scrollback
-    : snapshot.scrollback;
-  if (useFormattedState && snapshot.terminal_state_base64) {
-    try {
-      const binary = atob(snapshot.terminal_state_base64);
-      const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-      // vt100's formatted state restores the visible grid and cursor, but not
-      // the parser's scrollback. Prepend the broker's oldest-first row-local
-      // projection (formatted when available) so every snapshot boundary
-      // retains history without replaying another geometry-bound full frame.
-      return [...scrollback, new TextDecoder().decode(bytes)]
-        .filter(Boolean)
-        .join("\r\n");
-    } catch {
-      // A size-capped snapshot may omit or truncate the formatted state. The
-      // bounded plain-text projection is the recovery fallback.
-    }
-  }
-  return [...scrollback, snapshot.visible_grid].filter(Boolean).join("\r\n");
-}
 
 function reserveRendererScrollbackForSnapshot(
   renderer: TerminalRendererEntry | null,

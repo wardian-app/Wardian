@@ -1,11 +1,15 @@
 // @tier manual — Needs a real provider or a logged-in CLI. Run it deliberately.
 import test from "node:test";
+import { temporaryProviderAssignment, assertTemporaryProviderAnswer } from "../lib/provider-launch-preflight.mjs";
+import { cleanupConformanceSession, pauseConformanceAgents } from "../lib/conformance-cleanup.mjs";
+
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 
 import {
   createNativeHarness,
+  invokeTauri,
   ensureNativeAppBuilt,
   prepareIsolatedHome,
   startNativeSession,
@@ -13,13 +17,6 @@ import {
 } from "../lib/harness.mjs";
 
 const PROVIDERS = ["codex", "claude", "opencode", "antigravity", "pi"];
-const DEFAULT_PROVIDER_MODELS = {
-  codex: "gpt-5.4-mini",
-  claude: "haiku",
-  opencode: "opencode/mimo-v2.5-free",
-  antigravity: "gemini-3.6-flash-low",
-  pi: "openai-codex/gpt-5.4-mini",
-};
 const runRealHeadlessProviders = process.env.WARDIAN_E2E_REAL_HEADLESS_PROVIDERS === "1";
 const allowPartialProviders = process.env.WARDIAN_E2E_HEADLESS_ALLOW_PARTIAL === "1";
 const workspacePath = process.env.WARDIAN_E2E_REAL_WORKSPACE || process.cwd();
@@ -40,20 +37,9 @@ function selectedProviders() {
 
 function providerModel(provider) {
   const envName = `WARDIAN_E2E_HEADLESS_${provider.toUpperCase()}_MODEL`;
-  return process.env[envName]?.trim() || DEFAULT_PROVIDER_MODELS[provider] || null;
-}
-
-function nodeOutputText(output) {
-  if (typeof output === "string") {
-    return output;
-  }
-  if (typeof output?.text === "string") {
-    return output.text;
-  }
-  if (typeof output?.response === "string") {
-    return output.response;
-  }
-  return JSON.stringify(output ?? {});
+  const model = process.env[envName]?.trim();
+  assert.ok(model, `Set ${envName} to an explicitly preflighted current-catalog model`);
+  return model;
 }
 
 async function readDebugTail(harness) {
@@ -96,7 +82,7 @@ edges:
   return automationPath;
 }
 
-async function invokeTemporaryProviderAutomation(driver, { automationPath, provider, workspace }) {
+async function invokeTemporaryProviderAutomation(driver, { automationPath, provider, workspace, model }) {
   const result = await driver.executeAsyncScript((payload, done) => {
     window.__TAURI_INTERNALS__.invoke("automation_run", payload).then(
       (value) => done({ ok: true, value }),
@@ -108,12 +94,7 @@ async function invokeTemporaryProviderAutomation(driver, { automationPath, provi
     workspace,
     input: {},
     assignments: {
-      worker: {
-        target_type: "temporary_provider",
-        provider,
-        workspace,
-        model: providerModel(provider),
-      },
+      worker: temporaryProviderAssignment({ provider, workspace, model }),
     },
   });
 
@@ -121,6 +102,21 @@ async function invokeTemporaryProviderAutomation(driver, { automationPath, provi
   assert.equal(result.value?.ok, true, `automation_run did not start: ${JSON.stringify(result.value)}`);
   assert.equal(result.value?.status, "started");
   assert.equal(typeof result.value?.run_dir, "string");
+  return result.value;
+}
+
+async function readCurrentProviderCatalog(driver, provider) {
+  const result = await driver.executeAsyncScript((provider, done) => {
+    window.__TAURI_INTERNALS__.invoke("list_provider_model_catalog", {
+      provider,
+      forceRefresh: true,
+    }).then(
+      (value) => done({ ok: true, value }),
+      (error) => done({ ok: false, error: String(error) }),
+    );
+  }, provider);
+  assert.equal(result.ok, true, `${provider} model catalog refresh failed: ${result.error}`);
+  assert.equal(result.value?.refresh_error, null, `${provider} model catalog returned a refresh error`);
   return result.value;
 }
 
@@ -193,22 +189,29 @@ test("real temporary-provider automations launch and return output for every sup
     return;
   }
 
+  let session;
+  let startupAttempted = false;
+  let automationUnsettled = false;
+  t.after(() => cleanupConformanceSession({
+    harness, session, startupAttempted,
+    pause: async () => {
+      await pauseConformanceAgents((command, args) => invokeTauri(session.driver, command, args));
+      assert.equal(automationUnsettled, false, "Temporary provider completion is unconfirmed; retain the lock for supervised cleanup");
+    },
+    save: (cleanup) => fs.writeFile(path.join(harness.isolatedHome, "headless-cleanup.json"), JSON.stringify(cleanup, null, 2)),
+  }));
   prepareIsolatedHome(harness);
   const runId = `${process.pid}-${Date.now()}`;
   const codexNonGitWorkspace = path.join(harness.isolatedHome, "codex-non-git-workspace");
   await fs.mkdir(codexNonGitWorkspace, { recursive: true });
 
-  let session;
   try {
+    startupAttempted = true;
     session = await startNativeSession(harness);
   } catch (error) {
     t.skip(String(error));
     return;
   }
-
-  t.after(async () => {
-    await session.close();
-  });
 
   await waitForAppShell(session.driver, 20000);
 
@@ -219,23 +222,29 @@ test("real temporary-provider automations launch and return output for every sup
     const automationPath = await seedAutomation(harness, { automationId, marker });
 
     try {
+      const model = providerModel(provider);
+      const catalog = await readCurrentProviderCatalog(session.driver, provider);
+      assert.ok(
+        catalog.models?.some((entry) => entry.id === model),
+        `${provider} explicit model ${model} is absent from the current Wardian catalog`,
+      );
+      automationUnsettled = true;
       const started = await invokeTemporaryProviderAutomation(session.driver, {
         automationPath,
         provider,
         workspace,
+        model,
       });
       const trace = await readCompletedAutomation(started.run_dir);
-      const output = nodeOutputText(trace.state.registry?.nodes?.["provider-turn"]?.output);
+      automationUnsettled = false;
+      const output = trace.state.registry?.nodes?.["provider-turn"]?.output;
 
       assert.equal(trace.state.nodes?.["provider-turn"], "completed");
       assert.ok(
         trace.events.some((event) => event.kind === "node_completed" && event.node === "provider-turn"),
         `missing provider-turn completion event: ${JSON.stringify(trace.events)}`,
       );
-      assert.ok(
-        output.includes(marker),
-        `${provider} automation output did not include ${marker}: ${output}`,
-      );
+      assertTemporaryProviderAnswer(output, marker);
     } catch (error) {
       const debugTail = await readDebugTail(harness);
       assert.fail(

@@ -166,6 +166,15 @@ applies a fresh bounded broker snapshot, discards events at or below the
 snapshot barrier, and then replays consecutive later events. It must resync
 again on a cursor gap or generation change.
 
+Formatted snapshot replay first advances the broker's oldest-first history into
+xterm scrollback, then restores the absolute visible grid and cursor. Writing
+history only onto the visible screen would let the snapshot's cursor-home and
+erase-display commands delete it, particularly when history is shorter than
+the viewport. Empty history rows remain significant. The pure decoder in
+`terminalSnapshotReplay.ts` is exercised with the actual xterm parser and
+sanitized retained Claude snapshot-write bytes. This repairs replay of existing
+broker history; it does not infer history from provider repaint frames.
+
 ### Redraw and Scrollback Normalization
 
 Some TUIs repaint by moving the cursor home and rewriting the current viewport instead of using the alternate screen buffer. Wardian normalizes the cases that would otherwise diverge from user expectations:

@@ -1,13 +1,17 @@
 // @tier manual — Needs a real provider or a logged-in CLI. Run it deliberately.
 import test from "node:test";
+import { cleanupConformanceSession, pauseConformanceAgents } from "../lib/conformance-cleanup.mjs";
+
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 import {
   createNativeHarness,
   ensureNativeAppBuilt,
+  freezeBuiltCliForRun,
   invokeTauri,
   prepareIsolatedHome,
   startNativeSession,
@@ -17,6 +21,11 @@ import {
 // Gemini is deprecated. Keep the real delivery matrix aligned with the
 // providers Wardian currently supports for new agent sessions.
 export const PROVIDERS = ["codex", "claude", "opencode", "antigravity", "pi"];
+
+function longLabels(marker) {
+  return ["begin", "middle", "end"].map((position) =>
+    createHash("sha256").update(`${marker}/${position}`).digest("hex").slice(0, 16));
+}
 
 export const INPUT_CASES = [
   {
@@ -40,10 +49,13 @@ export const INPUT_CASES = [
   },
   {
     name: "mailbox-long-paste",
-    prompt: (marker) =>
-      "This is Wardian's long bracketed-paste delivery test. The repeated lines are inert test padding.\n" +
-      "Inert delivery padding.\n".repeat(280) +
-      `Reply with exactly this verification marker and nothing else: ${marker}`,
+    prompt: (marker) => {
+      const labels = longLabels(marker);
+      return `No tools. Reply with ${marker} followed by the three LABEL values in source order, separated by |.\n` +
+        `LABEL: ${labels[0]}\n` + "Inert delivery padding.\n".repeat(140) +
+        `LABEL: ${labels[1]}\n` + "Inert delivery padding.\n".repeat(140) + `LABEL: ${labels[2]}\n`;
+    },
+    expectedOutput: (marker) => [marker, ...longLabels(marker)].join("|"),
     expectOutput: true,
   },
 ];
@@ -59,10 +71,6 @@ const verifyFreshTranscript = process.env.WARDIAN_E2E_REAL_FRESH_TRANSCRIPT === 
 const allowPartialDelivery = process.env.WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL === "1";
 const workspacePath = process.env.WARDIAN_E2E_REAL_WORKSPACE || process.cwd();
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
-
-function commandName(name) {
-  return process.platform === "win32" ? `${name}.exe` : name;
-}
 
 function buildCli(harness) {
   const result = spawnSync(
@@ -80,8 +88,7 @@ function buildCli(harness) {
     `cargo build -p wardian-cli failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
   );
 
-  const targetDirectory = process.env.CARGO_TARGET_DIR || path.join(harness.repoRoot, "target");
-  return path.join(targetDirectory, "debug", commandName("wardian-cli"));
+  return freezeBuiltCliForRun(harness);
 }
 
 function runCli(cliPath, harness, args) {
@@ -103,36 +110,6 @@ function runCliOk(cliPath, harness, args) {
     `wardian ${args.join(" ")} failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
   );
   return result;
-}
-
-function runCliWatchOk(cliPath, harness, args) {
-  const watchArgs = [...args];
-  const sinceIndex = watchArgs.indexOf("--since");
-
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const result = runCli(cliPath, harness, watchArgs);
-    if (result.status === 0) {
-      return JSON.parse(result.stdout);
-    }
-
-    let errorResponse;
-    try {
-      errorResponse = JSON.parse(result.stderr);
-    } catch {
-      errorResponse = null;
-    }
-    const oldestAvailableCursor = errorResponse?.error?.details?.oldest_available_cursor;
-    if (sinceIndex < 0 || typeof oldestAvailableCursor !== "string") {
-      assert.equal(
-        result.status,
-        0,
-        `wardian ${args.join(" ")} failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
-      );
-    }
-    watchArgs[sinceIndex + 1] = oldestAvailableCursor;
-  }
-
-  assert.fail(`watch cursor remained expired after recovery attempts: ${watchArgs.join(" ")}`);
 }
 
 function parseCommaList(value, fallback) {
@@ -385,9 +362,10 @@ async function runRealDeliveryCase({
   runId,
 }) {
   const marker = `WARDIAN_REAL_DELIVERY_${provider.toUpperCase()}_${inputCase.name.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_${runId}`;
+  const prompt = inputCase.prompt(marker);
   const queued = runCliOk(cliPath, harness, [
     "send",
-    inputCase.prompt(marker),
+    prompt,
     "--to",
     agentName,
     "--queue-policy",
@@ -413,33 +391,31 @@ async function runRealDeliveryCase({
     await waitForPersistedOpenCodeSession(harness, agentSessionId);
   }
 
+  const conformance = await assertRealChatConformance(driver, agentSessionId, provider, marker);
+
   if (inputCase.expectOutput) {
-    const expected = inputCase.name === "mailbox-multiline" ? `${marker}_LINE_2` : marker;
-    const watchJson = runCliWatchOk(cliPath, harness, [
-      "agent",
-      "watch",
-      agentName,
-      "--since",
-      `${agentSessionId}:0`,
-      "--until",
-      `output:${expected}`,
-      "--include",
-      "status,transcript,output,delivery",
-      "--timeout",
-      "180s",
-    ]);
-    const transcript = watchJson.transcript?.latest_text ?? "";
-    const output = watchJson.output?.text ?? "";
-    const combinedOutput = `${transcript}\n${output}`;
+    const expected = inputCase.expectedOutput?.(marker) ??
+      (inputCase.name === "mailbox-multiline" ? `${marker}_LINE_1\n${marker}_LINE_2` : marker);
     assert.ok(
-      combinedOutput.includes(expected),
-      `${provider} output did not include ${expected}: ${combinedOutput}`,
+      conformance.assistantEvents.some((event) => (event.text ?? "").includes(expected)),
+      `${provider} provider transcript response did not include ${expected}`,
     );
+    assert.ok(conformance.events.some((event) => event.role === "user" &&
+      event.metadata?.provider_log === true && event.text?.includes(prompt.trimEnd())),
+    "Native user evidence must retain the complete submitted payload");
   }
 
-  await assertRealChatConformance(driver, agentSessionId, provider, marker);
-
   return { marker, expected: inputCase.name === "mailbox-multiline" ? `${marker}_LINE_2` : marker };
+}
+
+function isProviderAuthoredAssistantEvent(event, provider, marker) {
+  return event?.provider === provider &&
+    event?.kind === "message" &&
+    event?.role === "assistant" &&
+    event?.metadata?.provider_log === true &&
+    typeof event?.source === "string" &&
+    event.source.trim().length > 0 &&
+    (event.text ?? "").includes(marker);
 }
 
 async function assertRealChatConformance(driver, sessionId, provider, marker) {
@@ -450,7 +426,7 @@ async function assertRealChatConformance(driver, sessionId, provider, marker) {
       const hasUser = candidate.some((event) =>
         event?.role === "user" && (event.text ?? "").includes(marker));
       const hasAssistant = candidate.some((event) =>
-        event?.role === "assistant" && (event.text ?? "").includes(marker));
+        isProviderAuthoredAssistantEvent(event, provider, marker));
       return hasUser && hasAssistant ? candidate : false;
     } catch {
       return false;
@@ -465,7 +441,7 @@ async function assertRealChatConformance(driver, sessionId, provider, marker) {
   assert.ok(userEvents[0].metadata?.request_root_id, `${provider} user request lacks causal provenance`);
 
   const assistantEvents = events.filter((event) =>
-    event?.role === "assistant" && (event.text ?? "").includes(marker));
+    isProviderAuthoredAssistantEvent(event, provider, marker));
   assert.equal(
     assistantEvents.length,
     1,
@@ -491,17 +467,23 @@ async function assertRealChatConformance(driver, sessionId, provider, marker) {
   assert.equal(replay.manifest.agent_id, sessionId);
   assert.equal(replay.manifest.provider, provider);
   assert.ok(
-    replay.conversation.some((record) => (record.text ?? "").includes(marker)),
+    replay.conversation.some((record) =>
+      record.kind === "message" && record.role === "assistant" && (record.text ?? "").includes(marker)),
     `${provider} durable archive replay omitted ${marker}`,
   );
+
+  return { events, assistantEvents };
 }
 
-async function waitForFreshTranscript(driver, sessionId, freshMarker) {
+async function waitForFreshTranscript(driver, sessionId, provider, freshMarker) {
   return await driver.wait(async () => {
     const events = await invokeTauri(driver, "load_agent_chat_transcript", { sessionId });
     if (!Array.isArray(events)) return false;
-    const text = events.map((event) => event?.text ?? "").join("\n");
-    return text.includes(freshMarker) ? { events, text } : false;
+    const assistantEvents = events.filter((event) =>
+      isProviderAuthoredAssistantEvent(event, provider, freshMarker));
+    return assistantEvents.length > 0
+      ? { events, assistantEvents, text: assistantEvents.map((event) => event.text ?? "").join("\n") }
+      : false;
   }, 45_000, "fresh provider transcript never reached chat replay");
 }
 
@@ -540,13 +522,14 @@ async function resumeFreshAndAssertTranscript({
   const transcript = await waitForFreshTranscript(
     driver,
     agentSessionId,
+    provider,
     freshDelivery.expected,
   );
   assert.equal(
-    transcript.text.includes(staleMarker),
+    transcript.assistantEvents.some((event) => (event.text ?? "").includes(staleMarker)),
     false,
     `${provider} fresh resume replayed the previous provider transcript: ${JSON.stringify(
-      transcript.events.filter((event) => (event?.text ?? "").includes(staleMarker)).map((event) => ({
+      transcript.assistantEvents.filter((event) => (event?.text ?? "").includes(staleMarker)).map((event) => ({
         text: event?.text,
         source: event?.source,
         metadata: event?.metadata,
@@ -554,7 +537,7 @@ async function resumeFreshAndAssertTranscript({
     )}`,
   );
   assert.ok(
-    transcript.text.includes(freshDelivery.expected),
+    transcript.assistantEvents.some((event) => (event.text ?? "").includes(freshDelivery.expected)),
     `${provider} fresh resume did not reload the new provider transcript: ${transcript.text}`,
   );
 
@@ -651,22 +634,29 @@ test("real provider delivery validation uses actual provider CLIs", { timeout: 9
     return;
   }
 
+  let session;
+  let startupAttempted = false;
+  let cleanupFailure;
+  t.after(() => cleanupConformanceSession({
+    harness, session, startupAttempted,
+    pause: async () => {
+      await pauseConformanceAgents((command, args) => invokeTauri(session.driver, command, args));
+      if (cleanupFailure) throw cleanupFailure;
+    },
+    save: (cleanup) => fs.writeFile(path.join(harness.isolatedHome, "delivery-cleanup.json"), JSON.stringify(cleanup, null, 2)),
+  }));
   prepareIsolatedHome(harness);
   await enableIsolatedCodexWorkspaceTrust(harness);
   const cliPath = buildCli(harness);
   const runId = `${process.pid}_${Date.now()}`;
 
-  let session;
   try {
+    startupAttempted = true;
     session = await startNativeSession(harness);
   } catch (error) {
     t.skip(String(error));
     return;
   }
-
-  t.after(async () => {
-    await session.close();
-  });
 
   await waitForAppShell(session.driver, 20000);
 
@@ -724,6 +714,7 @@ test("real provider delivery validation uses actual provider CLIs", { timeout: 9
         try {
           await killRealProviderAgent(session.driver, agent.session_id);
         } catch (cleanupError) {
+          cleanupFailure ??= cleanupError;
           providerError ??= cleanupError;
         }
       }

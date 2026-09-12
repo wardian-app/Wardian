@@ -3,16 +3,27 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 
 import {
   createNativeHarness,
   ensureNativeAppBuilt,
+  freezeBuiltCliForRun,
   prepareIsolatedHome,
   startNativeSession,
   waitForAppShell,
 } from "../lib/harness.mjs";
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
+
+function buildCli(harness) {
+  const result = spawnSync("cargo", ["build", "-p", "wardian-cli", "--bin", "wardian-cli"], {
+    cwd: harness.repoRoot,
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, `CLI build failed:\n${result.stdout}\n${result.stderr}`);
+  return freezeBuiltCliForRun(harness);
+}
 
 function writeSingleTurnMockScript(harness, { markerPath }) {
   const mockScript = path.join(harness.isolatedHome, "single-turn-live-mock.cjs");
@@ -215,18 +226,19 @@ async function setAgentStatus(driver, sessionId, status) {
 
 test("automation detects live agent turn completion instead of timing out", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
-  assert.ok(harness.appPath);
 
   try {
     if (!skipNativeBuild) {
       ensureNativeAppBuilt(harness);
     }
+    assert.ok(harness.appPath);
   } catch (error) {
     t.skip(String(error));
     return;
   }
 
   prepareIsolatedHome(harness);
+  const cliPath = buildCli(harness);
 
   const runId = `${process.pid}-${Date.now()}`;
   const automationId = `wf-agent-completion-${runId}`;
@@ -237,6 +249,7 @@ test("automation detects live agent turn completion instead of timing out", { ti
   const previousMockScript = process.env.WARDIAN_MOCK_SCRIPT;
   const previousMockSessionId = process.env.WARDIAN_MOCK_SESSION_ID;
   const previousMockMarker = process.env.WARDIAN_MOCK_MARKER;
+  const previousCli = process.env.WARDIAN_CLI;
   let session;
 
   t.after(async () => {
@@ -258,6 +271,11 @@ test("automation detects live agent turn completion instead of timing out", { ti
     } else {
       process.env.WARDIAN_MOCK_MARKER = previousMockMarker;
     }
+    if (previousCli === undefined) {
+      delete process.env.WARDIAN_CLI;
+    } else {
+      process.env.WARDIAN_CLI = previousCli;
+    }
   });
 
   process.env.WARDIAN_MOCK_SCRIPT = writeSingleTurnMockScript(harness, {
@@ -265,6 +283,7 @@ test("automation detects live agent turn completion instead of timing out", { ti
   });
   process.env.WARDIAN_MOCK_SESSION_ID = providerSessionId;
   process.env.WARDIAN_MOCK_MARKER = markerPath;
+  process.env.WARDIAN_CLI = cliPath;
 
   const automationPath = seedAutomation(harness, { automationId });
 
