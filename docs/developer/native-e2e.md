@@ -315,3 +315,22 @@ The lab sends the configured input text as PTY keystrokes and, by default, submi
 For OpenCode rendering runs, the lab defaults to the free remote OpenCode model `opencode/deepseek-v4-flash-free` so the provider does not fall back to local model backends such as LM Studio. Override `WARDIAN_E2E_RENDERING_OPENCODE_MODEL` only when intentionally testing a different OpenCode model.
 
 The lab fails the run for obvious Wardian-side evidence problems before manual screenshot inspection: non-empty screenshot requirements, missing fixed audit text after resize, unchanged columns when a resize state expects a geometry change, screen rectangle mismatch against xterm cell metrics, paused-buffer mismatch, and rendered rows that do not stabilize before the settle timeout. Outside-terminal parity is still captured separately with `scripts/capture-outside-provider-rendering.ps1` when side-by-side native Windows Terminal evidence is needed.
+## Windows WebView2 profile isolation
+
+Every Windows session started by the native harness creates a unique
+`.webview2-*` directory beneath its locked native test home. The driver child
+receives `WEBVIEW2_USER_DATA_FOLDER` pointing there; the parent environment and
+the desktop app's default profile are unchanged. The same path is passed through
+`tauri:options.webviewOptions.userDataFolder`, because EdgeDriver otherwise
+selects its own temporary profile outside the test home. The home lock must belong to
+the run and have a live owner before the profile is created. Each restart gets
+a fresh browser profile while Wardian's persisted state remains in the same home.
+
+This applies to all native targets using `startNativeSession`, including direct
+test invocations. Profiles follow the existing test-home retention policy; do
+not clear the default desktop profile or close another app to run tests.
+Microsoft documents the [child environment override](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/webview2-idl?view=webview2-1.0.3537.50#createcorewebview2environmentwithoptions)
+as replacing the API's user-data-folder argument. An effective-profile check
+must observe the owned browser child's `--user-data-dir` value; an environment
+value alone does not prove what the runtime used.
+See also Microsoft's [EdgeDriver WebView options](https://learn.microsoft.com/en-us/microsoft-edge/webdriver/capabilities-edge-options#webviewoptions-object).
