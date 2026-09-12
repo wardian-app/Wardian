@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { WHEEL_ZOOM_STEP, wheelZoomFactor } from "./wheelZoom";
 
 describe("wheelZoomFactor", () => {
-  it("uses the same small step for a traditional wheel notch", () => {
+  it("uses the same responsive step for a traditional wheel notch", () => {
+    expect(WHEEL_ZOOM_STEP).toBe(1.08);
     expect(wheelZoomFactor(-120)).toBeCloseTo(WHEEL_ZOOM_STEP);
     expect(wheelZoomFactor(120)).toBeCloseTo(1 / WHEEL_ZOOM_STEP);
   });

@@ -43,6 +43,18 @@ struct FileResourceRuntimeInner {
     fail_recovery_before_manifest: AtomicBool,
     #[cfg(test)]
     refresh_scan_count: AtomicU64,
+    #[cfg(test)]
+    watcher_refresh_enabled: AtomicBool,
+    #[cfg(test)]
+    debounce_wait_probe: StdMutex<Option<DebounceWaitProbe>>,
+}
+
+// Observes the real debounce timer without controlling its completion.
+#[cfg(test)]
+#[derive(Default)]
+struct DebounceWaitProbe {
+    armed: Vec<(u64, tokio::time::Instant)>,
+    completed: Vec<u64>,
 }
 
 #[cfg(test)]
@@ -242,6 +254,10 @@ impl FileResourceRuntime {
                 fail_recovery_before_manifest: AtomicBool::new(false),
                 #[cfg(test)]
                 refresh_scan_count: AtomicU64::new(0),
+                #[cfg(test)]
+                watcher_refresh_enabled: AtomicBool::new(true),
+                #[cfg(test)]
+                debounce_wait_probe: StdMutex::new(None),
             }),
         }
     }
@@ -287,6 +303,8 @@ impl FileResourceRuntime {
                 save_after_validation_hook: Mutex::new(None),
                 fail_recovery_before_manifest: AtomicBool::new(false),
                 refresh_scan_count: AtomicU64::new(0),
+                watcher_refresh_enabled: AtomicBool::new(true),
+                debounce_wait_probe: StdMutex::new(None),
             }),
         }
     }
@@ -1104,6 +1122,15 @@ impl FileResourceRuntime {
                     {
                         return;
                     }
+                    // A controlled timer test disables callbacks before opening its file.
+                    // Check before pending_event so the post-open path stays disabled too.
+                    #[cfg(test)]
+                    if weak
+                        .upgrade()
+                        .is_some_and(|inner| !inner.watcher_refresh_enabled.load(Ordering::Acquire))
+                    {
+                        return;
+                    }
                     pending_event.store(true, Ordering::Release);
                     let Some(inner) = weak.upgrade() else {
                         return;
@@ -1143,22 +1170,50 @@ impl FileResourceRuntime {
     fn schedule_refresh_for_incarnation(&self, resource_id: String, incarnation_id: Uuid) {
         let runtime = self.clone();
         tauri::async_runtime::spawn(async move {
-            let generation = {
-                let mut entries = runtime.inner.entries.lock().await;
-                let Some(entry) = entries.get_mut(&resource_id) else {
-                    return;
-                };
-                if entry.incarnation_id != incarnation_id {
-                    return;
-                }
-                entry.debounce_generation = entry.debounce_generation.saturating_add(1);
-                entry.debounce_generation
-            };
-            tokio::time::sleep(runtime.inner.stability_delay).await;
             runtime
-                .refresh_if_stable(&resource_id, incarnation_id, generation)
+                .refresh_after_stability(resource_id, incarnation_id)
                 .await;
         });
+    }
+
+    // Keep generation registration and the timer in the same future. Production
+    // runs it on Tauri; the timer regression drives it on its own paused clock.
+    async fn refresh_after_stability(&self, resource_id: String, incarnation_id: Uuid) {
+        let generation = {
+            let mut entries = self.inner.entries.lock().await;
+            let Some(entry) = entries.get_mut(&resource_id) else {
+                return;
+            };
+            if entry.incarnation_id != incarnation_id {
+                return;
+            }
+            entry.debounce_generation = entry.debounce_generation.saturating_add(1);
+            entry.debounce_generation
+        };
+        let stability_wait = tokio::time::sleep(self.inner.stability_delay);
+        #[cfg(test)]
+        if let Some(probe) = self
+            .inner
+            .debounce_wait_probe
+            .lock()
+            .expect("debounce wait probe")
+            .as_mut()
+        {
+            probe.armed.push((generation, stability_wait.deadline()));
+        }
+        stability_wait.await;
+        #[cfg(test)]
+        if let Some(probe) = self
+            .inner
+            .debounce_wait_probe
+            .lock()
+            .expect("debounce wait probe")
+            .as_mut()
+        {
+            probe.completed.push(generation);
+        }
+        self.refresh_if_stable(&resource_id, incarnation_id, generation)
+            .await;
     }
 
     async fn refresh_if_stable(&self, resource_id: &str, incarnation_id: Uuid, generation: u64) {

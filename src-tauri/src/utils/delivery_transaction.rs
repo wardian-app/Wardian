@@ -296,11 +296,109 @@ mod tests {
 
     #[test]
     fn plan_uses_literal_when_provider_disables_bracketed_paste() {
-        let profile = delivery_profile("antigravity");
+        // Uses a provider Wardian does not support, so this keeps covering the
+        // conservative fallback profile rather than any one provider's current
+        // capability. Antigravity previously stood in here; it is now known to
+        // support bracketed paste, so it can no longer prove this branch.
+        let profile = delivery_profile("unsupported-provider");
+        assert!(!profile.bracketed_paste.enabled);
+
         let plan = plan_terminal_payload(&profile, "hello\nworld");
 
         assert_eq!(plan.payload_kind, PayloadKind::Literal);
         assert_eq!(plan.payload_bytes, b"hello\nworld".to_vec());
+    }
+
+    /// Antigravity 1.1.27 retained a 6886-byte, 285-line prompt in its editor
+    /// and never produced a turn, because Wardian sent it literally and the
+    /// editor treated the embedded newlines as submits. A native protocol
+    /// experiment against the same build showed raw
+    /// `ESC[200~ payload ESC[201~` collapsing into one editor paste entry,
+    /// followed by a single Return producing a provider-native answer that
+    /// contained all three independent random labels from the payload's
+    /// beginning, middle and end.
+    #[test]
+    fn antigravity_pastes_a_long_multiline_prompt_with_exact_delimiters_and_one_submit() {
+        let profile = delivery_profile("antigravity");
+        let prompt = (0..285)
+            .map(|line| format!("line {line} of the retained prompt"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(prompt.contains('\n'));
+        assert!(prompt.len() > 2048);
+
+        let plan = plan_terminal_payload(&profile, &prompt);
+
+        assert_eq!(plan.payload_kind, PayloadKind::BracketedPaste);
+        // Exact delimiters, payload byte-for-byte between them, and nothing else.
+        assert_eq!(&plan.payload_bytes[..6], b"\x1b[200~");
+        assert_eq!(
+            &plan.payload_bytes[plan.payload_bytes.len() - 6..],
+            b"\x1b[201~"
+        );
+        assert_eq!(
+            &plan.payload_bytes[6..plan.payload_bytes.len() - 6],
+            prompt.as_bytes()
+        );
+        assert_eq!(plan.payload_bytes.len(), prompt.len() + 12);
+        // One Return, sent separately from the payload, never inside it.
+        assert_eq!(plan.submit_key, b"\r".to_vec());
+        assert!(!plan.payload_bytes.ends_with(b"\r"));
+        assert_eq!(plan.submit_delay_ms, 500);
+    }
+
+    #[test]
+    fn antigravity_keeps_simple_input_for_a_short_single_line_prompt() {
+        let profile = delivery_profile("antigravity");
+
+        let plan = plan_terminal_payload(&profile, "hello");
+
+        assert_eq!(plan.payload_kind, PayloadKind::Literal);
+        assert_eq!(plan.payload_bytes, b"hello".to_vec());
+    }
+
+    #[test]
+    fn antigravity_pastes_a_short_multiline_prompt() {
+        let profile = delivery_profile("antigravity");
+
+        let plan = plan_terminal_payload(&profile, "alpha\nbeta");
+
+        assert_eq!(
+            plan.payload_kind,
+            PayloadKind::BracketedPaste,
+            "an embedded newline must not reach the editor as a literal submit"
+        );
+        assert_eq!(plan.payload_bytes, bracketed_paste_bytes("alpha\nbeta"));
+    }
+
+    /// A prompt that merely ends with a newline is not multiline once
+    /// `normalize_prompt_for_terminal_submit` trims it, so it stays on the
+    /// simple literal path. Asserted through the real entry point, because
+    /// `plan_terminal_payload` alone would see the untrimmed text and wrongly
+    /// suggest such prompts get pasted.
+    #[test]
+    fn antigravity_trailing_newline_prompt_normalizes_to_simple_input_and_one_return() {
+        let chunks = crate::utils::terminal_input::provider_submit_chunks("antigravity", "alpha\n")
+            .expect("submit chunks");
+
+        assert_eq!(chunks, vec![b"alpha".to_vec(), b"\r".to_vec()]);
+    }
+
+    /// The real entry point must emit exactly two writes for a long multiline
+    /// prompt: the bracketed payload, then one carriage return.
+    #[test]
+    fn antigravity_long_multiline_prompt_sends_one_paste_then_one_return() {
+        let prompt = (0..285)
+            .map(|line| format!("line {line} of the retained prompt"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let chunks = crate::utils::terminal_input::provider_submit_chunks("antigravity", &prompt)
+            .expect("submit chunks");
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], bracketed_paste_bytes(&prompt));
+        assert_eq!(chunks[1], b"\r".to_vec());
     }
 
     #[tokio::test]

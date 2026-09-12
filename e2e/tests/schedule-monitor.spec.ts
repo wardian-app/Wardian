@@ -7,6 +7,8 @@ const adaptiveCardScreenshotDirectory =
   "e2e/screenshots/automation-monitor-adaptive-cards/2026-07-16T06-18-35Z";
 const agentScopeScreenshotDirectory =
   "e2e/screenshots/automation-agent-scope/2026-09-09T05-15-00Z";
+const agentFilterToggleScreenshotDirectory =
+  "e2e/screenshots/automation-agent-filter-toggle/2026-09-10T04-00-00Z";
 const fixedBrowserTime = "2026-07-16T16:00:00.000Z";
 
 test.use({ locale: "en-US", timezoneId: "America/New_York" });
@@ -257,6 +259,7 @@ async function installScheduleMonitorIpcMock(page: Page) {
 test("schedule a blueprint and prove adaptive Monitor cards", async ({ page }) => {
   await mkdir(adaptiveCardScreenshotDirectory, { recursive: true });
   await mkdir(agentScopeScreenshotDirectory, { recursive: true });
+  await mkdir(agentFilterToggleScreenshotDirectory, { recursive: true });
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
@@ -331,6 +334,26 @@ test("schedule a blueprint and prove adaptive Monitor cards", async ({ page }) =
   await expect(monitor.getByTestId("automation-activity-row-script-only")).toHaveCount(0);
   await expect(page.getByTestId("blueprint-selector").getByRole("option", { name: "Scheduled WF" })).toHaveCount(1);
   await expect(page.getByTestId("blueprint-selector").getByRole("option", { name: "Script Only" })).toHaveCount(0);
+
+  const agentScopeToggle = page.getByTestId("automation-agent-scope-toggle");
+  await expect(agentScopeToggle).toHaveAttribute("aria-pressed", "true");
+  await agentScopeToggle.click();
+  await expect(agentScopeToggle).toHaveAttribute("aria-pressed", "false");
+  await expect(monitor.getByTestId("automation-activity-row-script-only")).toBeVisible();
+  await expect(page.getByTestId("blueprint-selector").getByRole("option", { name: "Script Only" })).toHaveCount(1);
+  await page.getByTestId("app-shell").screenshot({
+    path: `${agentFilterToggleScreenshotDirectory}/all-workflows.png`,
+    animations: "disabled",
+  });
+
+  await page.getByTestId("sidebar-tab-automations").click();
+  await expect(page.getByTestId("automation-sidebar-agent-scope")).toHaveText("Selected agent");
+  await expect(page.getByTestId("automation-glance-row-schedule-script-only")).toHaveCount(0);
+  await surfaceTab(page, "automations").click();
+  await expect(agentScopeToggle).toHaveAttribute("aria-pressed", "false");
+  await agentScopeToggle.click();
+  await expect(agentScopeToggle).toHaveAttribute("aria-pressed", "true");
+  await expect(monitor.getByTestId("automation-activity-row-script-only")).toHaveCount(0);
 
   await monitor.getByRole("button", { name: "History" }).click();
   const historyCard = monitor.getByTestId("automation-history-run-run-completed");

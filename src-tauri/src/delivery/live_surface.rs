@@ -246,12 +246,13 @@ pub async fn submit_live_surface_prompt(
         .clone()
         .or_else(|| automatic_payload_started_detail(&request, &interaction_id, &name, &provider));
     let requires_provider_turn_receipt = request.require_provider_turn_receipt
-        && native_write_receipts
+        && (native_write_receipts || provider == "pi")
         && matches!(
             request.input_mode,
             MessageInputMode::Message | MessageInputMode::Command
         );
     let mut turn_start_cursor = None;
+    let mut pi_ticket = None;
     let outcome = if let (MessageInputMode::ApprovalAction, Some(action)) =
         (request.input_mode, request.approval_action.as_ref())
     {
@@ -360,7 +361,43 @@ pub async fn submit_live_surface_prompt(
             )
             .await);
         }
-        if requires_provider_turn_receipt && turn_start_cursor.is_none() {
+        if requires_provider_turn_receipt && provider == "pi" {
+            let receipt = if request.input_mode == MessageInputMode::Message {
+                crate::manager::pi_receipt::arm(state, &request.session_id, &request.prompt).await
+            } else {
+                Err(
+                    "Pi receipt requires a plain message; commands do not establish a user turn"
+                        .into(),
+                )
+            };
+            match receipt {
+                Ok(ticket) => pi_ticket = Some(ticket),
+                Err(message) => {
+                    return Err(record_failed_live_surface_attempt(
+                        state,
+                        &request,
+                        &interaction_id,
+                        Some(LiveSurfaceTarget {
+                            name: name.clone(),
+                            provider: provider.clone(),
+                        }),
+                        FailedLiveSurfaceAttempt {
+                            runtime_state: request.runtime_state,
+                            error_code: "pi_receipt_unavailable",
+                            message,
+                            delivery_phase: Some("receipt_capability_unavailable".into()),
+                            observed_state: None,
+                            reason: Some(
+                                "Pi receipt unavailable before input; no payload submitted".into(),
+                            ),
+                            retry_safe: true,
+                        },
+                    )
+                    .await)
+                }
+            }
+        }
+        if requires_provider_turn_receipt && provider != "pi" && turn_start_cursor.is_none() {
             turn_start_cursor = match crate::control::provider_turn_start_cursor(
                 state,
                 &request.session_id,
@@ -402,8 +439,12 @@ pub async fn submit_live_surface_prompt(
             crate::utils::terminal_input::normalize_prompt_for_terminal_submit(&request.prompt);
         let apply_cursor = turn_start_cursor.clone();
         let require_payload_apply_evidence = requires_provider_turn_receipt;
+        let sender: &dyn crate::utils::delivery_transaction::TerminalInputSink = pi_ticket
+            .as_ref()
+            .map(|ticket| ticket as &dyn crate::utils::delivery_transaction::TerminalInputSink)
+            .unwrap_or(&input);
         match crate::utils::terminal_input::submit_prompt_with_outcome_via_sender_after_payload_and_before_submit(
-            &input,
+            sender,
             &request.prompt,
             &provider,
             move || async move {
@@ -498,14 +539,18 @@ pub async fn submit_live_surface_prompt(
         })?;
     crate::control::push_delivery_for_delivery_service(state, &request.session_id, &detail).await;
 
-    if let Some(turn_start_cursor) = turn_start_cursor {
-        if let Err(message) = crate::control::wait_for_provider_turn_started_after_submit(
-            state,
-            &request.session_id,
-            &turn_start_cursor,
-        )
-        .await
-        {
+    if turn_start_cursor.is_some() || pi_ticket.is_some() {
+        let receipt = if let Some(ticket) = &pi_ticket {
+            ticket.wait().await
+        } else {
+            crate::control::wait_for_provider_turn_started_after_submit(
+                state,
+                &request.session_id,
+                turn_start_cursor.as_deref().expect("turn cursor"),
+            )
+            .await
+        };
+        if let Err(message) = receipt {
             let composer_stalled = provider == "codex"
                 && crate::delivery::codex_composer::session_has_stalled_composer(
                     state,
@@ -570,7 +615,7 @@ pub async fn submit_live_surface_prompt(
             })?;
         crate::control::push_delivery_for_delivery_service(state, &request.session_id, &detail)
             .await;
-    } else if request.mark_prompt_started {
+    } else if request.mark_prompt_started && provider != "pi" {
         crate::control::mark_delivered_agents_prompt_started_for_delivery_service(
             app,
             state,

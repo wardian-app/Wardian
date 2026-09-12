@@ -111,12 +111,7 @@ impl CodexSharedOwner {
             &spec.target_agent_id,
         )?;
         let socket = attachment::default_socket(&codex_home)?;
-        // Never attach to an existing listener, nor remove another owner's socket.
-        if std::fs::symlink_metadata(&socket).is_ok() {
-            return Err(CodexSharedError::unsupported(
-                "default Codex socket already exists; previous generation must exit first",
-            ));
-        }
+        attachment::recover_stale_socket(&socket)?;
         let provider = ProviderFactory::resolve("codex").map_err(CodexSharedError::unsupported)?;
         let (program, prefix_args) = provider.get_executable();
         let mut args = crate::providers::CodexProvider::new()
@@ -248,7 +243,7 @@ impl CodexSharedOwner {
                 attachment::require_empty(&client).await?;
                 if spec.config.is_off {
                     let response = if let Some(id) = spec.config.resume_session.as_deref().filter(|id| !id.is_empty()) {
-                        client.request_with_timeout("thread/resume", policy.background_resume_params(id), STARTUP_TIMEOUT).await?
+                        client.resume_metadata(policy.background_resume_params(id)).await?
                     } else {
                         client.request_with_timeout("thread/start", json!({"cwd":spec.workspace}), STARTUP_TIMEOUT).await?
                     };
@@ -348,10 +343,7 @@ impl CodexSharedOwner {
             alive()?;
             attachment::inject_initial_context(&self.client, &id, &self.initial_context).await?;
             alive()?;
-            let response = self
-                .client
-                .request_with_timeout("thread/resume", json!({"threadId":id}), STARTUP_TIMEOUT)
-                .await?;
+            let response = self.client.resume_metadata(json!({"threadId":id})).await?;
             if response["thread"]["id"].as_str() != Some(id.as_str()) {
                 return Err(CodexSharedError::unsupported(
                     "attachment resume changed thread identity",

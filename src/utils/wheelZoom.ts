@@ -1,5 +1,5 @@
 /** The zoom factor for one traditional 120-pixel mouse-wheel notch. */
-export const WHEEL_ZOOM_STEP = 1.05;
+export const WHEEL_ZOOM_STEP = 1.08;
 
 /**
  * Convert a browser wheel delta into a multiplicative zoom factor.

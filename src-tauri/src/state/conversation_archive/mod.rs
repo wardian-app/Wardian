@@ -39,7 +39,7 @@ use storage::{
     read_manifest, write_capture_state,
 };
 #[cfg(test)]
-use turns::derive_turn_records;
+pub(crate) use turns::derive_turn_records;
 use turns::{apply_archive_summary_to_manifest, archive_summary, derive_turn_records_with_context};
 
 #[derive(Debug, Default)]

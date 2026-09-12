@@ -9,6 +9,7 @@ describe('useAutomationsView', () => {
     const s = useAutomationsView.getState();
 
     expect(s.mode).toBe('monitor');
+    expect(s.agentScopeEnabled).toBe(true);
     expect(s.blueprintPath).toBeNull();
     expect(s.selectedRunId).toBeNull();
     expect(s.observedBlueprintId).toBeNull();
@@ -19,6 +20,16 @@ describe('useAutomationsView', () => {
     useAutomationsView.getState().setMode('observe');
 
     expect(useAutomationsView.getState().mode).toBe('observe');
+  });
+
+  it('toggles workflow scoping without changing the selected agents', () => {
+    useAutomationsView.getState().setAgentScopeEnabled(false);
+
+    expect(useAutomationsView.getState().agentScopeEnabled).toBe(false);
+
+    useAutomationsView.getState().reset();
+
+    expect(useAutomationsView.getState().agentScopeEnabled).toBe(true);
   });
 
   it('opening a run sets observe mode and remembers the run for that blueprint', () => {

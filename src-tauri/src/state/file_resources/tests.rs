@@ -2960,35 +2960,137 @@
 
     #[tokio::test]
     async fn debounce_waits_for_stability_after_the_last_separated_write() {
+        use std::future::{poll_fn, Future};
+        use std::pin::Pin;
+        use std::task::Poll;
+        use tokio::sync::broadcast::error::TryRecvError;
+        use tokio::time::{advance, Instant as TokioInstant};
+
+        async fn poll_once<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
+            // A depleted task budget must not masquerade as waiting on the timer.
+            tokio::task::unconstrained(poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx)))).await
+        }
+
         let temp = tempfile::tempdir().expect("temp root");
         let path = temp.path().join("separated.txt");
         fs::write(&path, "initial\n").expect("fixture");
         let config = agent_config("agent-a", temp.path());
         let runtime = test_runtime();
+        runtime
+            .inner
+            .watcher_refresh_enabled
+            .store(false, Ordering::Release);
+        *runtime.inner.debounce_wait_probe.lock().expect("probe") =
+            Some(DebounceWaitProbe::default());
         let mut events = runtime.subscribe_events();
         let subscription = runtime
             .open_agent_file("agent-a", &config, &path, None)
             .await
             .expect("open");
+        let incarnation_id =
+            runtime.inner.entries.lock().await[&subscription.resource_id].incarnation_id;
+        tokio::time::pause();
+        let started = TokioInstant::now();
+        let mut refreshes = Vec::new();
 
-        for content in ["first\n", "second\n", "third\n"] {
+        for (index, content) in ["first\n", "second\n", "third\n"].into_iter().enumerate() {
+            if index > 0 {
+                advance(Duration::from_millis(75)).await;
+            }
+            let elapsed = Duration::from_millis(index as u64 * 75);
+            assert_eq!(TokioInstant::now() - started, elapsed);
             fs::write(&path, content).expect("write");
-            runtime.schedule_refresh(subscription.resource_id.clone());
-            sleep(Duration::from_millis(75)).await;
+            let mut refresh = Box::pin(
+                runtime.refresh_after_stability(subscription.resource_id.clone(), incarnation_id),
+            );
+            assert!(poll_once(refresh.as_mut()).await.is_pending());
+            {
+                let probe = runtime.inner.debounce_wait_probe.lock().expect("probe");
+                let probe = probe.as_ref().expect("enabled probe");
+                assert_eq!(
+                    probe.armed.len(),
+                    index + 1,
+                    "timer registration acknowledged"
+                );
+                assert_eq!(
+                    probe.armed[index],
+                    (
+                        index as u64 + 1,
+                        started + elapsed + Duration::from_millis(150)
+                    ),
+                    "each generation must arm the actual full stability timer"
+                );
+                assert!(probe.completed.is_empty(), "an armed timer completed early");
+            }
+            assert!(matches!(events.try_recv(), Err(TryRecvError::Empty)));
+            refreshes.push(refresh);
         }
 
-        assert!(
-            timeout(Duration::from_millis(60), events.recv())
-                .await
-                .is_err(),
-            "revision arrived before 150 ms of last-write stability"
+        // Finish each obsolete generation after its own deadline. One extra
+        // millisecond permits timer granularity without crossing the latest deadline.
+        advance(Duration::from_millis(1)).await;
+        refreshes.remove(0).await;
+        assert_eq!(runtime.inner.refresh_scan_count.load(Ordering::Acquire), 0);
+        assert_eq!(TokioInstant::now() - started, Duration::from_millis(151));
+        assert!(matches!(events.try_recv(), Err(TryRecvError::Empty)));
+        advance(Duration::from_millis(75)).await;
+        refreshes.remove(0).await;
+        assert_eq!(runtime.inner.refresh_scan_count.load(Ordering::Acquire), 0);
+        assert_eq!(TokioInstant::now() - started, Duration::from_millis(226));
+        assert!(matches!(events.try_recv(), Err(TryRecvError::Empty)));
+
+        // At 149 ms after the third write, explicitly poll the latest future.
+        // The probe distinguishes the real timer wait from later snapshot I/O.
+        advance(Duration::from_millis(73)).await;
+        let mut latest = refreshes.pop().expect("latest generation");
+        assert!(poll_once(latest.as_mut()).await.is_pending());
+        assert_eq!(TokioInstant::now() - started, Duration::from_millis(299));
+        {
+            let probe = runtime.inner.debounce_wait_probe.lock().expect("probe");
+            assert_eq!(probe.as_ref().expect("enabled probe").completed, vec![1, 2]);
+        }
+        assert_eq!(runtime.inner.refresh_scan_count.load(Ordering::Acquire), 0);
+        assert_eq!(
+            runtime.inner.entries.lock().await[&subscription.resource_id].revision,
+            1
         );
-        let event = timeout(Duration::from_secs(2), events.recv())
-            .await
-            .expect("stable event timeout")
-            .expect("stable event");
+        assert!(matches!(events.try_recv(), Err(TryRecvError::Empty)));
+        assert_eq!(TokioInstant::now() - started, Duration::from_millis(299));
+
+        // Await actual authorization, snapshot and publication, not just timer expiry.
+        advance(Duration::from_millis(2)).await;
+        latest.await;
+        assert_eq!(TokioInstant::now() - started, Duration::from_millis(301));
+        {
+            let probe = runtime.inner.debounce_wait_probe.lock().expect("probe");
+            assert_eq!(
+                probe.as_ref().expect("enabled probe").completed,
+                vec![1, 2, 3]
+            );
+        }
+        let event = events.try_recv().expect("stable revision was published");
         assert_eq!(event.resource_id, subscription.resource_id);
         assert_eq!(event.revision, 2);
+        assert_eq!(runtime.inner.refresh_scan_count.load(Ordering::Acquire), 1);
+        assert_eq!(
+            runtime
+                .read_text(
+                    &subscription.resource_id,
+                    &subscription.subscription_id,
+                    event.revision,
+                    Some(&config),
+                )
+                .await
+                .expect("latest stable text")
+                .text,
+            "third\n"
+        );
+        assert!(matches!(events.try_recv(), Err(TryRecvError::Empty)));
+        runtime
+            .close(&subscription.subscription_id)
+            .await
+            .expect("close");
+        assert_eq!(runtime.watcher_count().await, 0);
     }
 
     #[tokio::test]

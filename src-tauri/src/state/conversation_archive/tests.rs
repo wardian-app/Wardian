@@ -545,6 +545,157 @@ fn claude_parent_lineage_survives_normalized_conversation_archive_capture() {
 }
 
 #[test]
+fn claude_provider_provenance_keeps_context_and_tool_results_out_of_user_archive_rows() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let lines = [
+        r#"{"type":"user","uuid":"request-1","message":{"role":"user","content":"Inspect the evidence file."}}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01evidence","name":"Read","input":{"file_path":"provider-evidence.txt"}}]}}"#,
+        r#"{"type":"user","isMeta":true,"parent_tool_use_id":"toolu_01evidence","uuid":"context-1","message":{"role":"user","content":[{"type":"text","text":"Native provider context."}]}}"#,
+        r#"{"type":"user","uuid":"tool-result-1","parent_tool_use_id":null,"message":{"role":"user","content":[{"tool_use_id":"toolu_01evidence","type":"tool_result","content":"1\tWARDIAN_CLAUDE_REAL_EVIDENCE\n2\t"}]}}"#,
+        r#"{"type":"user","parentUuid":"request-1","message":{"role":"user","content":"[Request interrupted by user]"}}"#,
+    ];
+    let events = normalize_chat_lines("agent-1", "claude", lines);
+
+    archive
+        .append_chat_events("agent-1", &events)
+        .expect("append Claude events");
+    archive
+        .append_chat_events("agent-1", &events)
+        .expect("replay Claude events idempotently");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let records: Vec<ConversationNarrativeRecord> =
+        read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+            .expect("read narrative records");
+
+    assert_eq!(records.len(), 5);
+    assert_eq!(records[0].role.as_deref(), Some("user"));
+    assert_eq!(
+        records[0].input_origin,
+        Some(ConversationInputOrigin::HumanInput)
+    );
+    assert_eq!(records[2].role.as_deref(), Some("system"));
+    assert_eq!(
+        records[2].input_origin,
+        Some(ConversationInputOrigin::ContextInjection)
+    );
+    assert_eq!(records[3].kind, ConversationRecordKind::ToolResult);
+    assert_eq!(records[3].role.as_deref(), Some("tool"));
+    assert_eq!(records[4].role.as_deref(), Some("system"));
+    assert_eq!(
+        records[4].input_origin,
+        Some(ConversationInputOrigin::ProviderInternal)
+    );
+    assert!(records.iter().skip(1).all(|record| {
+        record.input_origin != Some(ConversationInputOrigin::HumanInput)
+            || record.role.as_deref() == Some("user")
+    }));
+}
+
+#[test]
+fn claude_provenance_aliases_deduplicate_pre_fix_context_archive_events() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let mut context = archive_context("session-one");
+    context.provider = "claude".to_string();
+    context.provider_source_key = Some("claude:session:session-one".to_string());
+
+    let pre_fix_events = [
+        AgentChatEvent {
+            id: "agent-1:provider_log:pre-fix-context".to_string(),
+            session_id: "agent-1".to_string(),
+            provider: "claude".to_string(),
+            kind: AgentChatEventKind::Message,
+            role: Some(AgentChatRole::User),
+            text: Some("Native provider context.".to_string()),
+            title: None,
+            status: None,
+            turn_id: Some("context-1".to_string()),
+            source: Some("stream_json".to_string()),
+            command: None,
+            exit_code: None,
+            path: None,
+            language: None,
+            created_at: None,
+            sequence: Some(1),
+            metadata: serde_json::json!({
+                "input_origin": "context_injection",
+                "input_purpose": "context"
+            }),
+        },
+        AgentChatEvent {
+            id: "agent-1:provider_log:pre-fix-internal".to_string(),
+            session_id: "agent-1".to_string(),
+            provider: "claude".to_string(),
+            kind: AgentChatEventKind::Message,
+            role: Some(AgentChatRole::User),
+            text: Some("[Request interrupted by user]".to_string()),
+            title: None,
+            status: None,
+            turn_id: None,
+            source: Some("stream_json".to_string()),
+            command: None,
+            exit_code: None,
+            path: None,
+            language: None,
+            created_at: None,
+            sequence: Some(2),
+            metadata: serde_json::json!({
+                "input_origin": "provider_internal",
+                "input_purpose": "internal"
+            }),
+        },
+    ];
+    archive
+        .append_chat_events_with_context(context.clone(), &pre_fix_events)
+        .expect("append pre-fix Claude events");
+
+    let replayed_events = pre_fix_events
+        .iter()
+        .enumerate()
+        .map(|(index, event)| {
+            let mut event = event.clone();
+            event.id = format!("agent-1:provider_log:raw-{index}");
+            event.role = Some(AgentChatRole::System);
+            let legacy_id = match index {
+                0 => "agent-1:provider_log:pre-fix-context",
+                1 => "agent-1:provider_log:pre-fix-internal",
+                _ => unreachable!("only the two provenance fixtures are expected"),
+            };
+            event.metadata["legacy_event_ids"] = serde_json::json!([legacy_id]);
+            event
+        })
+        .collect::<Vec<_>>();
+    archive
+        .append_chat_events_with_context(context, &replayed_events)
+        .expect("append post-fix Claude events");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let records: Vec<ConversationNarrativeRecord> =
+        read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+            .expect("read narrative records");
+
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records[0].event_refs,
+        vec!["agent-1:provider_log:pre-fix-context".to_string()]
+    );
+    assert_eq!(
+        records[1].event_refs,
+        vec!["agent-1:provider_log:pre-fix-internal".to_string()]
+    );
+}
+
+#[test]
 fn codex_context_before_and_after_request_does_not_create_fake_turns() {
     let lines = [
         r#"{"type":"response_item","payload":{"type":"message","id":"context-1","role":"user","content":[{"type":"input_text","text":"Host context."}],"internal_chat_message_metadata_passthrough":{"turn_id":"codex-turn-1"}}}"#,

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { BlueprintListResult, BlueprintRef } from '../features/automations/automationTypes';
-import { RefreshCw, X } from 'lucide-react';
+import { Filter, RefreshCw, X } from 'lucide-react';
 import { BlueprintSelector } from '../features/automations/BlueprintSelector';
 import { RunLaunchDialog, type RunInputParam } from '../features/automations/RunLaunchDialog';
 import { BuilderCanvas } from '../features/automations/builder/BuilderCanvas';
@@ -50,11 +50,13 @@ export function AutomationsView({
   selectedAgentIds = EMPTY_AGENT_SCOPE,
 }: AutomationsViewProps) {
   const mode = useAutomationsView((state) => state.mode);
+  const agentScopeEnabled = useAutomationsView((state) => state.agentScopeEnabled);
   const blueprintPath = useAutomationsView((state) => state.blueprintPath);
   const selectedRunId = useAutomationsView((state) => state.selectedRunId);
   const observedBlueprintId = useAutomationsView((state) => state.observedBlueprintId);
   const selectedRunIdsByBlueprint = useAutomationsView((state) => state.selectedRunIdsByBlueprint);
   const setMode = useAutomationsView((state) => state.setMode);
+  const setAgentScopeEnabled = useAutomationsView((state) => state.setAgentScopeEnabled);
   const setBlueprintPath = useAutomationsView((state) => state.setBlueprintPath);
   const observeRun = useAutomationsView((state) => state.observeRun);
   const clearObservedRun = useAutomationsView((state) => state.clearObservedRun);
@@ -95,30 +97,33 @@ export function AutomationsView({
   const activeBlueprintId = mode === 'observe'
     ? observedBlueprintId ?? runState?.blueprint_id ?? runBlueprint?.id ?? blueprint?.id ?? null
     : blueprint?.id ?? runState?.blueprint_id ?? runBlueprint?.id ?? null;
+  const activeAgentScope = agentScopeEnabled && selectedAgentIds.size > 0
+    ? selectedAgentIds
+    : EMPTY_AGENT_SCOPE;
   const schedulesById = useMemo(
     () => new Map(schedules.map((schedule) => [schedule.id, schedule])),
     [schedules],
   );
   const scopedBlueprintIds = useMemo(
-    () => automationBlueprintIdsForAgents([...schedules, ...listeners], selectedAgentIds),
-    [listeners, schedules, selectedAgentIds],
+    () => automationBlueprintIdsForAgents([...schedules, ...listeners], activeAgentScope),
+    [activeAgentScope, listeners, schedules],
   );
   const scopedRuns = useMemo(
     () => runs.filter((run) => automationRunMatchesAgentScope(
       run,
       schedulesById,
       scopedBlueprintIds,
-      selectedAgentIds,
+      activeAgentScope,
     )),
-    [runs, schedulesById, scopedBlueprintIds, selectedAgentIds],
+    [activeAgentScope, runs, schedulesById, scopedBlueprintIds],
   );
   const visibleBlueprintIds = useMemo(() => {
-    if (selectedAgentIds.size === 0) return undefined;
+    if (activeAgentScope.size === 0) return undefined;
     if (mode !== 'observe' || !activeBlueprintId || scopedBlueprintIds.has(activeBlueprintId)) {
       return scopedBlueprintIds;
     }
     return new Set([...scopedBlueprintIds, activeBlueprintId]);
-  }, [activeBlueprintId, mode, scopedBlueprintIds, selectedAgentIds.size]);
+  }, [activeAgentScope.size, activeBlueprintId, mode, scopedBlueprintIds]);
   const filteredRuns = useMemo(
     () => (activeBlueprintId
       ? scopedRuns.filter((run) => run.blueprint_id === activeBlueprintId)
@@ -225,8 +230,8 @@ export function AutomationsView({
         automationBlueprintIdsForAgents([
           ...useSchedulesStore.getState().schedules,
           ...useListenersStore.getState().listeners,
-        ], selectedAgentIds),
-        selectedAgentIds,
+        ], activeAgentScope),
+        activeAgentScope,
       ));
       const rememberedRunId = useAutomationsView.getState().selectedRunIdsByBlueprint[loadedBlueprint.id];
       const targetRun = chooseRunForObserve(loadedBlueprint.id, freshRuns, rememberedRunId);
@@ -336,12 +341,32 @@ export function AutomationsView({
             </div>
           )}
           {selectedAgentIds.size > 0 ? (
-            <span
-              className="shrink-0 rounded border border-[var(--color-wardian-accent)]/40 px-2 py-1 text-[10px] font-bold text-[var(--color-wardian-accent)]"
-              data-testid="automation-view-agent-scope"
-            >
-              {selectedAgentIds.size === 1 ? 'Selected agent' : `${selectedAgentIds.size} selected agents`}
-            </span>
+            <div className="flex shrink-0 items-center gap-1.5">
+              <span
+                className="rounded border border-[var(--color-wardian-accent)]/40 px-2 py-1 text-[10px] font-bold text-[var(--color-wardian-accent)]"
+                data-testid="automation-view-agent-scope"
+              >
+                {selectedAgentIds.size === 1 ? 'Selected agent' : `${selectedAgentIds.size} selected agents`}
+              </span>
+              <button
+                type="button"
+                data-testid="automation-agent-scope-toggle"
+                aria-label={agentScopeEnabled ? 'Workflow scope: selected agents' : 'Workflow scope: all agents'}
+                aria-pressed={agentScopeEnabled}
+                title={agentScopeEnabled
+                  ? 'Showing workflows for selected agents. Click to show all workflows.'
+                  : 'Showing all workflows. Click to scope to selected agents.'}
+                className={`inline-flex h-7 cursor-pointer select-none items-center gap-1 rounded border px-2 text-[10px] font-bold transition-colors ${
+                  agentScopeEnabled
+                    ? 'border-[var(--color-wardian-accent)] bg-[color-mix(in_srgb,var(--color-wardian-accent),transparent_88%)] text-[var(--color-wardian-accent)]'
+                    : 'border-wardian-border text-muted hover:border-[var(--color-wardian-accent)] hover:text-[var(--color-wardian-accent)]'
+                }`}
+                onClick={() => setAgentScopeEnabled(!agentScopeEnabled)}
+              >
+                <Filter className="h-3 w-3" aria-hidden />
+                {agentScopeEnabled ? 'Selected agents' : 'All agents'}
+              </button>
+            </div>
           ) : null}
         </div>
         <div className={`automations-toolbar__actions flex shrink-0 items-center gap-2 ${mode === 'monitor' ? 'flex-nowrap' : ''}`}>
@@ -418,14 +443,14 @@ export function AutomationsView({
             <div className="flex h-full min-h-0 flex-col gap-3">
               <div className="min-h-0 flex-1 overflow-hidden">
                 <AutomationMonitor
-                  selectedAgentIds={selectedAgentIds}
+                  selectedAgentIds={activeAgentScope}
                   listeners={listeners}
                   onOpenRun={(blueprintId, runId) => void openRunForObserve(blueprintId, runId)}
                   onEditSchedule={(schedule) => void openScheduleEditor(schedule)}
                 />
               </div>
               <div className="max-h-[45%] shrink-0 overflow-hidden">
-                <ListenersPanel selectedAgentIds={selectedAgentIds} />
+                <ListenersPanel selectedAgentIds={activeAgentScope} />
               </div>
             </div>
           )}

@@ -4,7 +4,7 @@
 
 Garden and Graph use the same wheel zoom contract:
 
-- A traditional 120-pixel wheel notch changes zoom by 5%.
+- A traditional 120-pixel wheel notch changes zoom by 8%.
 - High-resolution wheel and trackpad deltas scale that factor proportionally.
 - The world point under the pointer remains fixed while the view zooms.
 - Wheel zoom is applied continuously from each input event rather than through

@@ -52,7 +52,7 @@ fn append_record_to_turn<'a>(
 }
 
 #[cfg(test)]
-pub(super) fn derive_turn_records(
+pub(crate) fn derive_turn_records(
     conversation_id: &str,
     records: &[ConversationNarrativeRecord],
     events: &[AgentChatEvent],

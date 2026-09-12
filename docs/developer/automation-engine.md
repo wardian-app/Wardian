@@ -32,6 +32,13 @@ The frontend Observe and Monitor modes read these durable files through
 `automation_list_runs` and `automation_read_run`; automation progress is not driven by
 the old automation system telemetry events.
 
+Checkpoint replacement preserves complete snapshots for concurrent readers.
+On Windows, the workflow store uses `ReplaceFileW` for an existing checkpoint
+so readers sharing deletion can finish reading the old snapshot while the
+driver publishes the next one. Initial creation uses the ordinary atomic move.
+Readers that deny delete sharing still cause a write error; the store does not
+retry, truncate the checkpoint in place, or extend provider timeouts.
+
 ### Invoker
 
 An invoker supplies the context for a run. Manual runs, schedules, and future

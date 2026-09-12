@@ -154,6 +154,11 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
     conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_interactions_created_at
+         ON interactions(created_at DESC, id DESC)",
+        [],
+    )?;
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS interaction_delivery_attempts (
             id TEXT PRIMARY KEY,
             interaction_id TEXT NOT NULL,
@@ -771,17 +776,60 @@ pub fn list_recent_interaction_records_page(
     offset: usize,
 ) -> Result<Vec<InteractionRecord>, Box<dyn std::error::Error>> {
     get_db_conn(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT id, kind, sender_session_id, target_session_ids, status, trigger_policy,
-                body_ref, parent_interaction_id, created_at, updated_at, completed_at
-             FROM interactions
-             ORDER BY created_at DESC, id DESC
-             LIMIT ?1 OFFSET ?2",
-        )?;
-        let rows = stmt.query_map([limit as i64, offset as i64], row_to_interaction_record)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        Ok(list_recent_interaction_records_page_with_conn(
+            conn, limit, offset,
+        )?)
     })
+}
+
+pub fn list_recent_interaction_records_page_with_conn(
+    conn: &Connection,
+    limit: usize,
+    offset: usize,
+) -> rusqlite::Result<Vec<InteractionRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, kind, sender_session_id, target_session_ids, status, trigger_policy,
+            body_ref, parent_interaction_id, created_at, updated_at, completed_at
+         FROM interactions
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?1 OFFSET ?2",
+    )?;
+    let rows = stmt.query_map([limit as i64, offset as i64], row_to_interaction_record)?;
+    rows.collect()
+}
+
+/// Lists interaction records newer than `since`, newest first.
+pub fn list_recent_interaction_records_since_page(
+    limit: usize,
+    offset: usize,
+    since: &str,
+) -> Result<Vec<InteractionRecord>, Box<dyn std::error::Error>> {
+    get_db_conn(|conn| {
+        Ok(list_recent_interaction_records_since_page_with_conn(
+            conn, limit, offset, since,
+        )?)
+    })
+}
+
+fn list_recent_interaction_records_since_page_with_conn(
+    conn: &Connection,
+    limit: usize,
+    offset: usize,
+    since: &str,
+) -> rusqlite::Result<Vec<InteractionRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, kind, sender_session_id, target_session_ids, status, trigger_policy,
+            body_ref, parent_interaction_id, created_at, updated_at, completed_at
+         FROM interactions
+         WHERE created_at >= ?3
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?1 OFFSET ?2",
+    )?;
+    let rows = stmt.query_map(
+        params![limit as i64, offset as i64, since],
+        row_to_interaction_record,
+    )?;
+    rows.collect()
 }
 
 /// Lists a bounded page of interaction records of one kind, newest first.
@@ -1708,6 +1756,52 @@ mod tests {
 
         let records = list_interaction_records_with_conn(&conn).unwrap();
         assert_eq!(records, vec![record]);
+    }
+
+    #[test]
+    fn recent_interaction_page_filters_before_limit() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        let make_record = |id: &str, created_at: &str| InteractionRecord {
+            id: id.to_string(),
+            kind: InteractionKind::Message,
+            sender_session_id: Some("sender-1".to_string()),
+            target_session_ids: vec!["agent-1".to_string()],
+            status: InteractionStatus::Completed,
+            trigger_policy: InteractionTriggerPolicy::NotifyOnly,
+            body_ref: InteractionBodyRef::Inline {
+                body: "activity".to_string(),
+            },
+            parent_interaction_id: None,
+            created_at: created_at.to_string(),
+            updated_at: created_at.to_string(),
+            completed_at: Some(created_at.to_string()),
+        };
+
+        for record in [
+            make_record("old-1", "2026-05-25T00:00:02.000Z"),
+            make_record("old-2", "2026-05-25T00:00:01.000Z"),
+            make_record("recent-1", "2026-05-26T00:00:02.000Z"),
+            make_record("recent-2", "2026-05-26T00:00:01.000Z"),
+        ] {
+            upsert_interaction_record_with_conn(&conn, &record).unwrap();
+        }
+
+        let records = list_recent_interaction_records_since_page_with_conn(
+            &conn,
+            2,
+            0,
+            "2026-05-26T00:00:00.000Z",
+        )
+        .unwrap();
+
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["recent-1", "recent-2"]
+        );
     }
 
     #[test]

@@ -5834,6 +5834,8 @@ mod test_support;
 
 #[cfg(test)]
 mod tests {
+    mod native_receipts;
+
     use super::*;
     use crate::state::ActiveAgent;
     use std::collections::HashMap;
@@ -6300,69 +6302,6 @@ mod tests {
 
         assert_eq!(rx.recv().await.unwrap(), b"hello".to_vec());
         assert_eq!(rx.recv().await.unwrap(), b"\x1b[13u".to_vec());
-    }
-
-    #[tokio::test]
-    async fn native_codex_delivery_waits_for_provider_applied_payload() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "codex".to_string();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-        record_provider_ready_evidence(&state, "agent-1", ProviderReadyEvidence::PromptDetected)
-            .await;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime_with_write_receipts(&state, "agent-1", tx).await;
-
-        let delivery = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "hello",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        );
-        tokio::pin!(delivery);
-
-        let payload = tokio::select! {
-            request = rx.recv() => request.expect("payload write request"),
-            result = &mut delivery => panic!("delivery completed before payload write: {result:?}"),
-        };
-        assert_eq!(payload.bytes, b"\x1b[200~hello\x1b[201~".to_vec());
-        payload.completion.send(Ok(())).expect("payload receipt");
-
-        // The PTY receipt alone must not release Return. Codex's repaint is the
-        // provider-owned proof that its composer consumed the paste.
-        crate::delivery::codex_composer::tests::record_active_composer_repaint(
-            &state,
-            "agent-1",
-            b"\r\n\xe2\x80\xba hello",
-        )
-        .await;
-
-        let submit = tokio::select! {
-            request = rx.recv() => request.expect("submit write request"),
-            result = &mut delivery => panic!("delivery completed before submit write: {result:?}"),
-            _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {
-                panic!("Codex submit did not follow provider-applied payload evidence")
-            }
-        };
-        assert_eq!(submit.bytes, b"\r".to_vec());
-        submit.completion.send(Ok(())).expect("submit receipt");
-
-        crate::manager::record_agent_turn_started_for_watch(&state, "agent-1").await;
-        let delivery = delivery.await.expect("delivered after provider receipt");
-
-        assert_eq!(delivery[0].delivery_state, "provider_accepted");
-        assert_eq!(delivery[0].delivery_phase.as_deref(), Some("turn_started"));
     }
 
     #[tokio::test]

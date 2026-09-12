@@ -5,6 +5,7 @@ pub(crate) mod codex_shared;
 pub(crate) mod codex_stop;
 pub(crate) mod headless;
 pub(crate) mod opencode;
+pub(crate) mod pi_receipt;
 pub(crate) mod session_identity;
 pub(crate) mod spawn;
 #[cfg(test)]

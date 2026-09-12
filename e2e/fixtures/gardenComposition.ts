@@ -37,7 +37,21 @@ const schedule: AutomationSchedule = {
 };
 
 /** All data is synthetic. The shared bridge records calls and implements file resources and CAS persistence. */
-export async function installGardenCompositionMock(page: Page, options: { memoryCount?: number; conversationCount?: number } = {}) {
+export async function installGardenCompositionMock(page: Page, options: {
+  memoryCount?: number;
+  conversationCount?: number;
+  historicalOneOffRunCount?: number;
+} = {}) {
+  const recentTerminalRuns = Array.from({ length: options.historicalOneOffRunCount ?? 0 }, (_, index) => ({
+    run_id: `historical-review-${index}`,
+    blueprint_id: blueprint.id,
+    schedule_id: null,
+    status: index % 2 ? "failed" : "completed",
+    node_count: 2,
+    path: `/synthetic/runs/historical-review-${index}`,
+    started_at: new Date(Date.now() - (index + 1) * 60_000).toISOString(),
+    updated_at: new Date(Date.now() - index * 60_000).toISOString(),
+  }));
   return installWorkbenchIpcMock(page, {
     load_result: { source: "primary", notice: null, durable_revision: 0, durable_token: "garden-token",
       document: makeWorkbenchDocument({ surfaces: [makeWorkbenchSurface("garden-main", "garden")],
@@ -71,7 +85,10 @@ export async function installGardenCompositionMock(page: Page, options: { memory
       load_agent_reach: { schema: 1, agents: [], skipped_turn_records: 0 },
       automation_list_blueprints: { blueprints: [{ id: blueprint.id, path: "/synthetic/library/design-review.md" }], truncated: false, next_offset: null },
       automation_parse: { blueprint }, schedule_list: [schedule],
-      automation_list_runs: { runs: [{ run_id: GARDEN_RUN, blueprint_id: blueprint.id, schedule_id: schedule.id, status: "running", node_count: 2, path: `/synthetic/runs/${GARDEN_RUN}`, started_at: timestamp }], truncated: false, next_offset: null },
+      automation_list_runs: { runs: [
+        { run_id: GARDEN_RUN, blueprint_id: blueprint.id, schedule_id: schedule.id, status: "running", node_count: 2, path: `/synthetic/runs/${GARDEN_RUN}`, started_at: timestamp },
+        ...recentTerminalRuns,
+      ], truncated: false, next_offset: null },
       read_file_preview: JSON.stringify({ workspace: GARDEN_ROOT, schedule_id: schedule.id, assignments }),
       automation_read_run: { blueprint, blueprint_path: "/synthetic/library/design-review.md", state: { run_id: GARDEN_RUN, blueprint_id: blueprint.id, status: "running", nodes: { draft: "completed", review: "running" } }, events: [{ seq: 1, ts: timestamp, kind: "node_completed", node: "draft", output: { artifact: "cutaway-preview", region_count: 5 } }, { seq: 2, ts: timestamp, kind: "node_started", node: "review" }] },
     },

@@ -60,6 +60,15 @@ export function isVisibleGardenRun(run: RunSummary, now: number, recentMs: numbe
   return isActiveGardenRun(run) || (runTime(run) > 0 && runTime(run) >= now - recentMs);
 }
 
+/**
+ * Garden population is durable routine geography plus work happening now.
+ * Terminal one-off runs remain available through Automation Monitor and focused
+ * record retention, but recency alone must not turn each of them into a map unit.
+ */
+export function isGardenPopulationRun(run: RunSummary, now: number, recentMs: number): boolean {
+  return isActiveGardenRun(run) || (!!run.schedule_id && isVisibleGardenRun(run, now, recentMs));
+}
+
 /** Stable topological preview. Cycles retain declaration order after the DAG. */
 function executionNodes(blueprint: Blueprint): BlueprintNode[] {
   const remaining = new Map(blueprint.nodes.map((node) => [node.id, node]));
@@ -113,9 +122,13 @@ export function projectSituatedAutomations(
   const catalog = new Map(blueprints.map((entry) => [entry.blueprint.id, entry]));
   const result: SituatedAutomationInput[] = [];
   const retainedIds = new Set(options.retainedProjectionIds);
-  const visible = runs.filter((run) => isVisibleGardenRun(run.summary, now, recentMs)
-    || retainedIds.has(`run:${run.summary.run_id}`)
-    || retainedIds.has(`schedule:${run.summary.schedule_id ?? run.invocation?.schedule_id}`));
+  const visible = runs.filter((run) => {
+    const scheduleId = run.summary.schedule_id ?? run.invocation?.schedule_id;
+    return isActiveGardenRun(run.summary)
+      || (!!scheduleId && isVisibleGardenRun(run.summary, now, recentMs))
+      || retainedIds.has(`run:${run.summary.run_id}`)
+      || retainedIds.has(`schedule:${scheduleId}`);
+  });
   const build = (id: string, kind: SituatedAutomationInput["projectionKind"], blueprintId: string,
     schedule: AutomationSchedule | null, evidence: GardenRunEvidence[]) => {
     evidence = [...evidence].sort((a, b) => (Date.parse(a.summary.started_at ?? "") || 0) - (Date.parse(b.summary.started_at ?? "") || 0));

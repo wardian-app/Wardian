@@ -81,6 +81,20 @@ Claude runs directly in the real target workspace.
 
 Claude reads `CLAUDE.md`. Wardian enables additional-directory discovery and maintains `.claude/skills` links where needed so Claude can see Wardian-managed common, class, and agent skills without those files living in the repository root.
 
+Keep shared, class, and agent instructions in their canonical `AGENTS.md` files.
+On ordinary Claude bootstrap, Wardian refreshes its existing managed `CLAUDE.md`
+bridges as sibling copies and generates the habitat copy after its memory brief
+is appended. These are snapshots: start a fresh session after editing canonical
+instructions to load the updated text. No separate preparation command is needed.
+
+Generated copies carry an ownership marker and body hash. Wardian preserves
+customized or linked `CLAUDE.md` files; editing a generated copy makes it a custom
+override. To restore automatic refresh for an existing managed bridge, replace
+that override deliberately with the bare `@AGENTS.md` stub. Workspace files and
+user-selected include directories are not rewritten. Nested imports in canonical
+text retain Claude's normal external-import consent; Wardian does not grant
+project-wide approval or change global trust settings.
+
 Wardian also launches Claude-managed terminal surfaces with Claude Code's alternate-screen opt-out enabled. This preserves native terminal scrollback for desktop terminals and mobile PWA drag scrolling while keeping Claude's existing `CLAUDE.md` discovery behavior.
 
 ### Session and Status Handling
@@ -230,6 +244,27 @@ agent UUID. The provider session JSONL is isolated under the agent's Wardian
 directory through `--session-dir`; fresh launches use `--session-id` and resumed
 launches use `--session`. Wardian watches only the JSONL whose header confirms
 that exact ID.
+
+Interactive delivery receipts use a launch-owned extension supplied through Pi's
+supported `--extension` argument. It observes actual native user messages before
+Pi flushes its transcript, so a slow first assistant response does not delay
+input acceptance. A receipt matches the submitted plain text and the current
+launch, provider session, and terminal generation. It confirms input acceptance,
+not model completion. User extensions remain enabled.
+
+Wardian serializes managed submissions. Identical text entered manually at the
+same time remains ambiguous; avoid concurrent manual input while waiting for a
+managed receipt. Commands, extension-handled input, and transformed text cannot
+stand in for the submitted user message. Missing extension readiness rejects
+managed input before writing it. An unconfirmed submission remains uncertain
+after ten seconds and is never automatically replayed.
+
+The bounded receipt stream lives in a new `pi/receipt-<random>/` directory for
+each launch. It contains session identity, sequence numbers, and content hashes,
+not prompt bodies. Extension reload, session changes, or exhausted stream
+capacity require restarting that runtime for further managed receipts. Wardian
+removes the launch files only after the owned process exits and its watcher
+joins; uncertain cleanup retains them. Native JSONL remains the transcript source.
 
 Visible agents use Pi's `regular` TUI mode so xterm retains terminal scrollback.
 Automation execution uses `--mode json` and treats `agent_end` as definitive turn

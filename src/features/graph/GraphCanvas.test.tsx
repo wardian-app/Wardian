@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import Sigma from "sigma";
 import type { AgentGraphProjection } from "./graphProjection";
 import { GraphCanvas } from "./GraphCanvasImpl";
+import { WHEEL_ZOOM_STEP } from "../../utils/wheelZoom";
 
 const mocks = vi.hoisted(() => {
   const edgeIds = new Set<string>();
@@ -351,10 +352,10 @@ describe("GraphCanvas", () => {
     expect(event.defaultPrevented).toBe(true);
     expect(mocks.getViewportZoomedState).toHaveBeenCalledWith(
       { x: 120, y: 80 },
-      expect.closeTo(1 / Math.sqrt(1.05), 8),
+      expect.closeTo(1 / Math.sqrt(WHEEL_ZOOM_STEP), 8),
     );
     expect(mocks.cameraAnimate).toHaveBeenCalledWith(
-      expect.objectContaining({ ratio: expect.closeTo(1 / Math.sqrt(1.05), 8) }),
+      expect.objectContaining({ ratio: expect.closeTo(1 / Math.sqrt(WHEEL_ZOOM_STEP), 8) }),
       { duration: 1, easing: "linear" },
     );
   });

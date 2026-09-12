@@ -47,8 +47,9 @@ export function GardenSpatialCell({ target, bounds, camera, label, status, focus
   const style = {
     left: screen.x, top: screen.y, width: layoutWidth, height: layoutWidth * plane.height / plane.width,
     transform: isContainer ? `scale(${screen.width / CELL_WIDTH})` : undefined, opacity: shell * activation * context,
-    // Coarse agent previews are visual only; Konva owns placement dragging.
-    pointerEvents: context > .1 && activation > .5 && (target.kind !== "agent" || screen.width >= 280) ? "auto" : "none",
+    // Agent shells are visual overlays; Konva owns placement hit-testing and
+    // dragging. A readable interior opts its own controls back in below.
+    pointerEvents: target.kind === "agent" ? "none" : context > .1 && activation > .5 ? "auto" : "none",
     "--garden-status": status, "--garden-regions": regions, "--garden-detail": detail, "--garden-context": context,
     "--garden-object-detail": revealBetween(screen.width, 400, 800) * context,
     // Memory keeps the seed's asymmetric boundary as it grows into a reading plane.
@@ -70,7 +71,7 @@ export function GardenSpatialCell({ target, bounds, camera, label, status, focus
       tabIndex={target.kind !== "agent" && readable ? 0 : undefined}
       role={target.kind !== "agent" ? "region" : undefined}
       aria-label={target.kind !== "agent" ? `${label} reading area` : undefined}
-      style={isAgent ? { opacity: context, visibility: context === 0 ? "hidden" : undefined } : isContainer ? {
+      style={isAgent ? { opacity: context, visibility: context === 0 ? "hidden" : undefined, pointerEvents: readable ? "auto" : "none" } : isContainer ? {
         width: CELL_WIDTH - 80,
       } : {
         width: Math.max(0, Math.min(screen.width - 48, viewport.width - 64, 820)),
