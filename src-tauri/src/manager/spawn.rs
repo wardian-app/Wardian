@@ -26,7 +26,7 @@ use super::claude::{
 };
 use super::codex::{codex_provider_session_is_excluded, codex_session_file_path};
 use super::opencode::{
-    opencode_interactive_env, opencode_recent_session_for_workspace, opencode_status_from_title,
+    opencode_interactive_env, opencode_status_from_title, OpenCodeSessionDiscovery,
 };
 use super::session_identity::{
     apply_provider_identity, expected_caller_owned_identity, ProviderIdentityOutcome,
@@ -2731,7 +2731,9 @@ pub async fn spawn_agent(
         let watcher_config = config_lock.clone();
         let watcher_current_status = current_status.clone();
         let watcher_workspace = cwd.clone();
+        let watcher_session = config.session_id.clone();
         let started_after_ms = chrono::Utc::now().timestamp_millis();
+        let mut discovery = OpenCodeSessionDiscovery::default();
         std::thread::spawn(move || loop {
             let current = watcher_current_status
                 .lock()
@@ -2740,17 +2742,18 @@ pub async fn spawn_agent(
             if current == "Off" {
                 break;
             }
-            if wardian_core::identity::normalize_status(&current) == "processing" {
-                if let Some(provider_session_id) =
-                    opencode_recent_session_for_workspace(&watcher_workspace, started_after_ms)
-                {
-                    if let Ok(mut cfg) = watcher_config.lock() {
-                        cfg.resume_session = Some(provider_session_id);
-                        cfg.fresh_provider_session_id = None;
-                    }
-                    persist_runtime_agent_configs(&watcher_app);
-                    break;
+            if let Some(provider_session_id) = discovery.poll(
+                &current,
+                &watcher_workspace,
+                started_after_ms,
+                &watcher_session,
+            ) {
+                if let Ok(mut cfg) = watcher_config.lock() {
+                    cfg.resume_session = Some(provider_session_id);
+                    cfg.fresh_provider_session_id = None;
                 }
+                persist_runtime_agent_configs(&watcher_app);
+                break;
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
         });
