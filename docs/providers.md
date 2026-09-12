@@ -199,6 +199,19 @@ choice must be resolved before a ready composer can
 receive the queued prompt. Startup readiness belongs to the runtime that
 observed it; delayed observations cannot ready a replacement runtime.
 
+Model choices can also appear after a completed turn. While the current screen
+shows the rate-limit model-switch menu, Wardian keeps `Action Needed` and blocks
+new prompt bytes even if an earlier completion event reported Idle. Resolve the
+choice explicitly in the provider terminal; Wardian does not select a model or
+dismiss the reminder. Delivery can resume after the menu is replaced by the
+current composer. Wardian restores status from the same shared owner's current
+turn activity only after checking both runtime generations; a missing owner or
+incomplete activity evidence does not authorize restoration. A delayed completion
+cannot clear a menu that remains on screen. Quoted or erased menus in history do
+not keep input blocked.
+The provider's claim of lower credit usage is not an API-price comparison;
+Wardian preserves the selected model until the user chooses otherwise.
+
 ### Debug First
 
 If startup reports `list_turns is not supported yet`, the installed Codex

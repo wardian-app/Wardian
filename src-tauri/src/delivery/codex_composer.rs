@@ -272,7 +272,10 @@ async fn wait_for_watch_payload_applied(
 
 pub fn output_has_ready_prompt(output: &str) -> bool {
     let cleaned = strip_ansi_controls(output).replace('\r', "\n");
-    if output_has_workspace_trust_prompt(&cleaned) || pending_paste_chars(&cleaned).is_some() {
+    if crate::delivery::codex_menu::current_screen_requires_choice(&cleaned)
+        || output_has_workspace_trust_prompt(&cleaned)
+        || pending_paste_chars(&cleaned).is_some()
+    {
         return false;
     }
     let mut trailing_metadata_lines = 0usize;

@@ -45,8 +45,8 @@ pub(crate) async fn record_provider_ready_prompt(
     .await
 }
 
-/// OpenCode exposes initial compose readiness through its provider-owned
-/// terminal title rather than a stable prompt marker in the raw PTY stream.
+/// Retains title evidence for callers that also validate the current composer.
+/// An OpenCode title alone cannot authorize startup publication or delivery.
 pub(crate) async fn record_provider_ready_title(
     state: &AppState,
     session_id: &str,
@@ -98,6 +98,24 @@ pub(crate) async fn publish_startup_readiness(
     if !observation.is_current(state, session_id).await {
         return false;
     }
+    let config = {
+        let agents = state.agents.lock().await;
+        agents.get(session_id).map(|agent| agent.config.clone())
+    };
+    let Some(config) = config else {
+        return false;
+    };
+    let opencode = match config.lock() {
+        Ok(config) => config.provider == "opencode",
+        Err(_) => return false,
+    };
+    if opencode
+        && !opencode_current_screen_is_ready(state, session_id)
+            .await
+            .unwrap_or(false)
+    {
+        return false;
+    }
     let ready = match evidence {
         ProviderReadyEvidence::PromptDetected => {
             record_provider_ready_prompt(state, session_id, observation.input_generation).await
@@ -116,12 +134,34 @@ pub(crate) async fn publish_startup_readiness(
     true
 }
 
-/// Recognizes initial compose readiness. Codex and Claude callers must supply
+/// Recognizes initial compose readiness. Codex, Claude and OpenCode callers must supply
 /// the canonical visible screen: raw chunks can omit startup blockers, while
 /// accumulated output retains blockers that a later repaint already removed.
 pub(crate) fn provider_output_has_startup_ready_prompt(provider: &str, output: &str) -> bool {
     let cleaned = strip_ansi_controls(output).replace('\r', "\n");
     match provider {
+        "opencode" => {
+            let lines = cleaned
+                .lines()
+                .map(|line| {
+                    line.trim_matches(|ch: char| ch.is_whitespace() || matches!(ch, '┃' | '│'))
+                })
+                .collect::<Vec<_>>();
+            let Some(composer) = lines
+                .iter()
+                .rposition(|line| line.starts_with("Ask anything"))
+            else {
+                return false;
+            };
+            let footer = lines[composer + 1..].join(" ");
+            let footer = footer.split_whitespace().collect::<Vec<_>>().join(" ");
+            !provider_output_requires_startup_action(provider, &cleaned)
+                && !lines.iter().any(|line| {
+                    let lower = line.to_ascii_lowercase();
+                    lower.starts_with("loading") || lower.starts_with("connecting")
+                })
+                && footer.contains("ctrl+p commands")
+        }
         "codex" => {
             !provider_output_requires_startup_action("codex", &cleaned)
                 && !crate::delivery::codex_composer::output_has_workspace_trust_prompt(&cleaned)
@@ -162,19 +202,494 @@ pub(crate) fn provider_output_requires_startup_action(provider: &str, output: &s
     let cleaned = strip_ansi_controls(output).to_ascii_lowercase();
     match provider {
         "claude" => cleaned.contains("allow external claude.md file imports?"),
-        "codex" => {
-            cleaned.contains("try new model")
-                && cleaned.contains("use existing model")
-                && cleaned.contains("press enter to confirm")
-        }
+        "codex" => crate::delivery::codex_menu::current_screen_requires_choice(
+            &strip_ansi_controls(output),
+        ),
         "antigravity" => cleaned.contains("do you trust the contents of this project?"),
+        "opencode" => cleaned.contains("permission required") || cleaned.contains("do you trust"),
         _ => false,
+    }
+}
+
+/// Validates the current OpenCode composer, never retained watch output or a
+/// generic title. A missing/replaced terminal cannot authorize prompt bytes.
+pub(crate) async fn opencode_current_screen_is_ready(
+    state: &AppState,
+    session_id: &str,
+) -> Result<bool, String> {
+    let generation = state
+        .agents
+        .lock()
+        .await
+        .get(session_id)
+        .and_then(|agent| agent.runtime_generation)
+        .ok_or_else(|| "OpenCode runtime identity unavailable before input".to_string())?;
+    let snapshot = state
+        .terminal_sessions
+        .snapshot(session_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let current_generation = state
+        .agents
+        .lock()
+        .await
+        .get(session_id)
+        .and_then(|agent| agent.runtime_generation);
+    Ok(snapshot.runtime_generation == generation
+        && current_generation == Some(generation)
+        && provider_output_has_startup_ready_prompt("opencode", &snapshot.visible_grid))
+}
+
+/// Read the current runtime's canonical screen before trusting a cached Ready
+/// observation. Missing or replacement-runtime evidence cannot authorize input.
+pub(crate) async fn codex_current_screen_requires_choice(
+    state: &AppState,
+    session_id: &str,
+) -> Result<bool, String> {
+    let generation = state
+        .agents
+        .lock()
+        .await
+        .get(session_id)
+        .and_then(|agent| agent.runtime_generation)
+        .ok_or_else(|| "Codex runtime identity unavailable before input".to_string())?;
+    let snapshot = state
+        .terminal_sessions
+        .snapshot(session_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let current_generation = state
+        .agents
+        .lock()
+        .await
+        .get(session_id)
+        .and_then(|agent| agent.runtime_generation);
+    if snapshot.runtime_generation != generation || current_generation != Some(generation) {
+        return Err("Codex terminal runtime changed before input".to_string());
+    }
+    Ok(crate::delivery::codex_menu::current_screen_requires_choice(
+        &snapshot.visible_grid,
+    ))
+}
+
+/// A delayed completion/log event cannot dismiss a still-visible model menu.
+/// The caller holds the lifecycle lock and rechecks status-Arc identity before
+/// publishing. No provider selection is made and no historical output is read.
+pub(crate) async fn constrain_codex_status_observation(
+    state: &AppState,
+    session_id: &str,
+    status: &str,
+) -> Option<&'static str> {
+    if !matches!(
+        wardian_core::identity::normalize_status(status).as_str(),
+        "idle" | "processing"
+    ) {
+        return None;
+    }
+    let codex = state
+        .agents
+        .lock()
+        .await
+        .get(session_id)
+        .is_some_and(|agent| {
+            agent
+                .config
+                .lock()
+                .is_ok_and(|config| config.provider == "codex")
+        });
+    if codex
+        && codex_current_screen_requires_choice(state, session_id)
+            .await
+            // A failed or stale snapshot cannot prove that a choice was dismissed.
+            .unwrap_or(true)
+    {
+        Some("Action Needed")
+    } else {
+        None
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn assert_opencode_resume_log_append_keeps_unready_work_queued(title: &str) {
+        use super::super::{test_support::TestWardianHome, tests::insert_test_agent};
+        use crate::manager::telemetry::tests::apply_opencode_startup_log_pass;
+        use crate::state::terminal_session::TerminalRuntimeHandles;
+        use std::io::Write;
+        use wardian_core::control::MessageInputMode;
+
+        let fixture = TestWardianHome::new_async().await;
+        let state = AppState::new();
+        let session_id = "opencode-resume-startup";
+        insert_test_agent(&state, session_id, "OpenCodeStartup", "Coder").await;
+        let config = {
+            let mut agents = state.agents.lock().await;
+            let agent = agents.get_mut(session_id).unwrap();
+            // The shared fixture has a sentinel PID; this test owns no process.
+            agent.process_id = None;
+            agent.config.clone()
+        };
+        {
+            let mut config = config.lock().unwrap();
+            config.provider = "opencode".to_string();
+            config.folder = fixture.path().to_string_lossy().into_owned();
+            config.resume_session = Some("ses_fresh".to_string());
+        }
+
+        let mut inputs = Vec::new();
+        for expected_generation in 1..=3 {
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            let runtime_generation = state
+                .terminal_sessions
+                .start_or_replace_runtime(
+                    session_id,
+                    TerminalRuntimeHandles::new_with_write_ack(tx, |_| Ok(())),
+                    wardian_core::models::TerminalGeometry { cols: 80, rows: 24 },
+                )
+                .await
+                .unwrap();
+            state
+                .agents
+                .lock()
+                .await
+                .get_mut(session_id)
+                .unwrap()
+                .runtime_generation = Some(runtime_generation);
+            inputs.push(rx);
+            let input = state
+                .interactions
+                .start_provider_input_generation(session_id, ProviderInputReadiness::Booting, None)
+                .await;
+            assert_eq!(input.generation, expected_generation);
+            if expected_generation < 3 {
+                record_provider_ready_prompt(&state, session_id, input.generation).await;
+            }
+        }
+        let (generation, current_status, terminal_title, watch_state) = {
+            let agents = state.agents.lock().await;
+            let agent = agents.get(session_id).unwrap();
+            (
+                agent.runtime_generation.unwrap(),
+                agent.current_status.clone(),
+                agent.terminal_title.clone(),
+                agent.watch_state.clone(),
+            )
+        };
+        *current_status.lock().unwrap() = "Starting".to_string();
+        *terminal_title.lock().unwrap() = title.to_string();
+        // Retained output is not the current runtime's canonical screen.
+        watch_state
+            .lock()
+            .unwrap()
+            .push_output(b"OpenCode\r\nUSER_previous_answer\r\nBuild  mimo-v2.5-free\r\n");
+        let terminal = state.terminal_sessions.clone();
+        tokio::task::spawn_blocking(move || {
+            terminal.process_output_blocking(
+                session_id,
+                generation,
+                b"\x1b[2J\x1b[HLoading session...".to_vec(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let screen = state.terminal_sessions.snapshot(session_id).await.unwrap();
+        assert_eq!(screen.runtime_generation, generation);
+        assert!(screen.visible_grid.contains("Loading session..."));
+        assert!(!screen.visible_grid.contains("USER_previous_answer"));
+
+        let queued = super::super::deliver_prompt_to_agent(
+            None,
+            &state,
+            session_id,
+            "Recall the previous user marker",
+            MessageInputMode::Message,
+        )
+        .await
+        .unwrap();
+        assert_eq!(queued.delivery_state, "queued");
+        let before = state.mailbox.lock().await.list_for_target(session_id);
+        assert_eq!(before.len(), 1);
+        let receipts_before =
+            wardian_core::db::list_interaction_delivery_attempts(&before[0].interaction_id)
+                .unwrap();
+
+        // A completed turn belongs to generation 2. Generation 3 appends only
+        // startup activity, so re-reading the log cannot prove input readiness.
+        let log_path = fixture.path().join("opencode.log");
+        std::fs::write(
+            &log_path,
+            concat!(
+                "timestamp=2026-09-09T19:38:54.782Z level=INFO run=old message=loop session.id=ses_fresh step=0\n",
+                "timestamp=2026-09-09T19:38:58.512Z level=INFO run=old message=\"exiting loop\" session.id=ses_fresh\n",
+            ),
+        )
+        .unwrap();
+        apply_opencode_startup_log_pass(&state, session_id, &log_path, true).await;
+        assert!(inputs.iter_mut().all(|input| input.try_recv().is_err()));
+        assert_ne!(
+            state
+                .interactions
+                .provider_input_state(session_id)
+                .await
+                .unwrap()
+                .state,
+            ProviderInputReadiness::Ready,
+        );
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .unwrap();
+        writeln!(
+            log,
+            "timestamp=2026-09-09T19:39:08.402Z level=INFO run=resumed message=init"
+        )
+        .unwrap();
+        drop(log);
+        let pass = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            apply_opencode_startup_log_pass(&state, session_id, &log_path, false),
+        )
+        .await;
+        let wrote_input = inputs.iter_mut().any(|input| input.try_recv().is_ok());
+        let after = state.mailbox.lock().await.list_for_target(session_id);
+        let receipts_after =
+            wardian_core::db::list_interaction_delivery_attempts(&before[0].interaction_id)
+                .unwrap();
+        assert!(
+            !wrote_input,
+            "#1177: retained generation-2 Idle plus a generation-3 startup append must not write payload or Return while the current screen is loading (title={title:?})",
+        );
+        assert!(
+            pass.is_ok(),
+            "unready startup must preserve the queue without waiting for a provider receipt"
+        );
+        assert_eq!(
+            serde_json::to_value(after).unwrap(),
+            serde_json::to_value(&before).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(receipts_after).unwrap(),
+            serde_json::to_value(receipts_before).unwrap()
+        );
+        assert_eq!(*current_status.lock().unwrap(), "Starting");
+
+        let observation = ProviderStartupObservation {
+            input_generation: 3,
+            runtime_generation: generation,
+            current_status: current_status.clone(),
+        };
+        // Even an Idle observation or title cannot publish the loading screen.
+        *current_status.lock().unwrap() = "Idle".to_string();
+        assert!(
+            !publish_startup_readiness(
+                None,
+                &state,
+                session_id,
+                &observation,
+                ProviderReadyEvidence::TitleDetected,
+            )
+            .await
+        );
+
+        // Repaint the same generation to its composer, without a new title.
+        // This is a synthetic unit frame, not real-provider acceptance evidence.
+        let terminal = state.terminal_sessions.clone();
+        tokio::task::spawn_blocking(move || {
+            terminal.process_output_blocking(
+                session_id,
+                generation,
+                b"\x1b[2J\x1b[HAsk anything...\r\nBuild  mimo-v2.5-free\r\nctrl+p commands"
+                    .to_vec(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            publish_startup_readiness(
+                None,
+                &state,
+                session_id,
+                &observation,
+                ProviderReadyEvidence::PromptDetected,
+            )
+            .await
+        );
+        // A retained provider event must not satisfy the new submit's receipt.
+        crate::manager::record_agent_turn_started_for_watch(&state, session_id).await;
+        let drain =
+            super::super::drain_next_mailbox_message_for_idle_agent(None, &state, session_id);
+        tokio::pin!(drain);
+        let input = inputs.last_mut().unwrap();
+        let payload = tokio::select! {
+            request = input.recv() => request.unwrap(),
+            result = &mut drain => panic!("drain completed before payload: {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => panic!("ready composer did not release queued payload"),
+        };
+        assert_eq!(payload.bytes, b"Recall the previous user marker");
+        payload.completion.send(Ok(())).unwrap();
+        let submit = tokio::select! {
+            request = input.recv() => request.unwrap(),
+            result = &mut drain => panic!("drain completed before Return: {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => panic!("Return missing after payload acknowledgement"),
+        };
+        assert_eq!(submit.bytes, b"\x1b[13u");
+        submit.completion.send(Ok(())).unwrap();
+        tokio::select! {
+            result = &mut drain => panic!("write acknowledgements and an old event are not provider acceptance: {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        }
+        assert!(
+            !wardian_core::db::list_interaction_delivery_attempts(&before[0].interaction_id)
+                .unwrap()
+                .iter()
+                .any(|receipt| receipt.delivery_state == "provider_accepted")
+        );
+        crate::manager::record_agent_turn_started_for_watch(&state, session_id).await;
+        let delivered = tokio::time::timeout(std::time::Duration::from_secs(2), &mut drain)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivered.message_id.as_deref(), Some(before[0].id.as_str()));
+        assert_eq!(delivered.delivery_state, "provider_accepted");
+        assert_eq!(delivered.delivery_phase.as_deref(), Some("turn_started"));
+        *current_status.lock().unwrap() = "Idle".to_string();
+        assert!(
+            super::super::drain_next_mailbox_message_for_idle_agent(None, &state, session_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(inputs.iter_mut().all(|input| input.try_recv().is_err()));
+        assert!(!wardian_core::db::list_mailbox_messages()
+            .unwrap()
+            .iter()
+            .any(|record| record.id == before[0].id));
+        state
+            .terminal_sessions
+            .terminate_and_remove_runtime(session_id, generation)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn opencode_startup_composer_rejects_partial_loading_and_consent_screens() {
+        let ready = "Ask anything...\nBuild  mimo-v2.5-free\nctrl+p commands";
+        assert!(provider_output_has_startup_ready_prompt("opencode", ready));
+        for blocked in [
+            "OpenCode",
+            "Ask anything...",
+            "ctrl+p commands",
+            "Ask anything...\nLoading session...\nctrl+p commands",
+            "Permission required\nAsk anything...\nctrl+p commands",
+            "Do you trust this directory?\nAsk anything...\nctrl+p commands",
+        ] {
+            assert!(
+                !provider_output_has_startup_ready_prompt("opencode", blocked),
+                "{blocked}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn opencode_resume_startup_log_append_does_not_drain_before_current_screen() {
+        assert_opencode_resume_log_append_keeps_unready_work_queued("").await;
+    }
+
+    #[tokio::test]
+    async fn opencode_resume_startup_log_append_title_does_not_override_loading_screen() {
+        assert_opencode_resume_log_append_keeps_unready_work_queued("OpenCode").await;
+    }
+
+    #[tokio::test]
+    async fn current_rate_limit_screen_blocks_payload_and_late_idle_until_repaint() {
+        use super::super::{test_support::TestWardianHome, tests::insert_test_agent};
+        use crate::delivery::{submit_live_surface_prompt, LiveSurfacePromptRequest};
+        use crate::state::terminal_session::TerminalRuntimeHandles;
+        let _home = TestWardianHome::new_async().await;
+        let state = AppState::new();
+        insert_test_agent(&state, "menu-agent", "Menu", "Coder").await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let generation = state
+            .terminal_sessions
+            .start_or_replace_runtime(
+                "menu-agent",
+                TerminalRuntimeHandles::new(tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry {
+                    cols: 190,
+                    rows: 51,
+                },
+            )
+            .await
+            .unwrap();
+        {
+            let mut agents = state.agents.lock().await;
+            let agent = agents.get_mut("menu-agent").unwrap();
+            agent.runtime_generation = Some(generation);
+            agent.config.lock().unwrap().provider = "codex".to_string();
+            *agent.current_status.lock().unwrap() = "Idle".to_string();
+        }
+        let retained = include_str!("../delivery/fixtures/codex-rate-limit-menu.txt");
+        let terminal = state.terminal_sessions.clone();
+        let bytes = format!("\x1b[2J\x1b[H{}", retained.replace('\n', "\r\n")).into_bytes();
+        tokio::task::spawn_blocking(move || {
+            terminal.process_output_blocking("menu-agent", generation, bytes)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        record_provider_ready_evidence(
+            &state,
+            "menu-agent",
+            0,
+            ProviderReadyEvidence::ProviderEvent,
+        )
+        .await;
+        let result = submit_live_surface_prompt(
+            None,
+            &state,
+            LiveSurfacePromptRequest::message("menu-agent", "must not enter model menu"),
+        )
+        .await;
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("explicit Codex model choice"));
+        assert!(
+            rx.try_recv().is_err(),
+            "No payload, Return, or model-choice keys may be written"
+        );
+        assert_eq!(
+            constrain_codex_status_observation(&state, "menu-agent", "Idle").await,
+            Some("Action Needed")
+        );
+        assert_eq!(
+            constrain_codex_status_observation(&state, "menu-agent", "Processing...").await,
+            Some("Action Needed")
+        );
+        let terminal = state.terminal_sessions.clone();
+        tokio::task::spawn_blocking(move || {
+            terminal.process_output_blocking(
+                "menu-agent",
+                generation,
+                b"\x1b[2J\x1b[H\xe2\x80\xba Ask Codex to do anything".to_vec(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!codex_current_screen_requires_choice(&state, "menu-agent")
+            .await
+            .unwrap());
+        assert_eq!(
+            constrain_codex_status_observation(&state, "menu-agent", "Idle").await,
+            None
+        );
+    }
 
     #[tokio::test]
     async fn stale_startup_generation_cannot_ready_replacement() {
