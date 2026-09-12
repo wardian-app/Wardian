@@ -5,6 +5,162 @@ use std::task::Poll;
 use tauri::Manager;
 use wardian_core::models::{AgentConfig, AgentSessionPersistenceOverride, ProviderConfig};
 
+#[tokio::test]
+async fn failed_restore_exposes_provider_error_to_late_terminal_presentations() {
+    use crate::state::terminal_session::{TerminalClientIdentity, TerminalRuntimeHandles};
+    use wardian_core::models::*;
+
+    for provider in ["codex", "claude"] {
+        let state = AppState::new();
+        let session_id = format!("failed-{provider}");
+        let config = AgentConfig {
+            session_id: session_id.clone(),
+            provider: provider.into(),
+            ..Default::default()
+        };
+        let publication = RestorePublication::begin(&state, &session_id)
+            .await
+            .unwrap();
+        publication
+            .publish(
+                &state,
+                crate::restored_agent_without_process(
+                    config.clone(),
+                    "Restoring",
+                    String::new(),
+                    None,
+                    None,
+                ),
+            )
+            .await;
+        let error =
+            format!("Wardian could not restore this agent.\r\n{provider}: launch failed\r\n");
+        publication
+            .publish(
+                &state,
+                crate::restored_agent_without_process(config, "Error", error, None, None),
+            )
+            .await;
+
+        let broker = &state.terminal_sessions;
+        let failed = broker.broker_state(&session_id).await.unwrap();
+        assert_eq!(failed.runtime_state, TerminalRuntimeState::Paused);
+        assert!(
+            state.agents.lock().await[&session_id]
+                .runtime_generation
+                .is_none(),
+            "a diagnostic presentation must not impersonate a native child"
+        );
+        for presentation_id in ["first-view", "reopened-view"] {
+            broker
+                .register_presentation(
+                    TerminalPresentationRegistration {
+                        presentation_id: presentation_id.into(),
+                        session_id: session_id.clone(),
+                        client_kind: TerminalClientKind::Desktop,
+                        desired_geometry: None,
+                        visibility: TerminalVisibility::Visible,
+                        render_state: TerminalRenderState::Mounted,
+                        requested_interaction: TerminalRequestedInteraction::Interactive,
+                        observed_lease_epoch: failed.lease_epoch,
+                    },
+                    TerminalClientIdentity::trusted_desktop(),
+                )
+                .await
+                .unwrap();
+            let snapshot = broker.snapshot(&session_id).await.unwrap();
+            assert!(snapshot
+                .visible_grid
+                .contains(&format!("{provider}: launch failed")));
+            let activation = broker
+                .begin_activation(TerminalActivationBeginRequest {
+                    session_id: session_id.clone(),
+                    presentation_id: presentation_id.into(),
+                    runtime_generation: failed.runtime_generation,
+                    observed_lease_epoch: failed.lease_epoch,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                activation.decision.status,
+                TerminalLeaseDecisionStatus::Rejected
+            );
+            broker
+                .unregister_presentation(&session_id, presentation_id, failed.runtime_generation)
+                .await
+                .unwrap();
+        }
+
+        let (input, _receiver) = tokio::sync::mpsc::channel(1);
+        let replacement = broker
+            .start_or_replace_runtime(
+                &session_id,
+                TerminalRuntimeHandles::new(input, |_| Ok(())),
+                TerminalGeometry { cols: 80, rows: 24 },
+            )
+            .await
+            .unwrap();
+        assert!(replacement > failed.runtime_generation);
+        assert_eq!(
+            broker
+                .broker_state(&session_id)
+                .await
+                .unwrap()
+                .runtime_state,
+            TerminalRuntimeState::Live
+        );
+        assert!(!broker
+            .snapshot(&session_id)
+            .await
+            .unwrap()
+            .visible_grid
+            .contains("launch failed"));
+        broker
+            .terminate_and_remove_runtime(&session_id, replacement)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn failed_restore_terminal_cleanup_needs_no_native_generation() {
+    let state = AppState::new();
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let config = AgentConfig {
+        session_id: session_id.clone(),
+        session_name: "Failed restore".into(),
+        provider: "claude".into(),
+        ..Default::default()
+    };
+    let publication = RestorePublication::begin(&state, &session_id)
+        .await
+        .unwrap();
+    publication
+        .publish(
+            &state,
+            crate::restored_agent_without_process(
+                config,
+                "Error",
+                "Provider launch failed\r\n".into(),
+                None,
+                None,
+            ),
+        )
+        .await;
+    assert!(state.terminal_sessions.snapshot(&session_id).await.is_ok());
+
+    state
+        .terminal_sessions
+        .remove_agent_session(&session_id, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        state.terminal_sessions.snapshot(&session_id).await,
+        Err(crate::state::terminal_session::TerminalBrokerError::SessionNotFound)
+    );
+}
+
 struct TestHome {
     previous: Option<std::ffi::OsString>,
     directory: tempfile::TempDir,

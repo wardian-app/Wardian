@@ -655,6 +655,12 @@ struct DeferredPresentationGeometry {
     sequence: u64,
 }
 
+struct TerminalSessionSeed<'a> {
+    runtime: Option<TerminalRuntimeHandles>,
+    geometry: TerminalGeometry,
+    initial_output: &'a [u8],
+}
+
 impl Default for TerminalSessionBroker {
     fn default() -> Self {
         Self::with_timer(Arc::new(TokioTerminalTimer))
@@ -692,6 +698,33 @@ impl TerminalSessionBroker {
         runtime: TerminalRuntimeHandles,
         geometry: TerminalGeometry,
     ) -> Result<u64, TerminalBrokerError> {
+        self.start_or_replace_session(session_id, Some(runtime), geometry, &[])
+            .await
+    }
+
+    /// Retain launch diagnostics in a readable terminal without inventing a PTY.
+    /// The caller must hold the agent lifecycle gate and have no live provider.
+    /// A later real runtime replaces this paused generation normally.
+    pub async fn start_failure_terminal(
+        &self,
+        session_id: &str,
+        output: &[u8],
+    ) -> Result<u64, TerminalBrokerError> {
+        let geometry = self
+            .spawn_geometry(session_id)
+            .await?
+            .unwrap_or(TerminalGeometry { cols: 80, rows: 24 });
+        self.start_or_replace_session(session_id, None, geometry, output)
+            .await
+    }
+
+    async fn start_or_replace_session(
+        &self,
+        session_id: &str,
+        runtime: Option<TerminalRuntimeHandles>,
+        geometry: TerminalGeometry,
+        initial_output: &[u8],
+    ) -> Result<u64, TerminalBrokerError> {
         validate_id(session_id, "session_id")?;
         let geometry = clamp_geometry(geometry, TerminalClientKind::Desktop);
         let (replaced, runtime_generation) = {
@@ -716,8 +749,11 @@ impl TerminalSessionBroker {
                 session_id.to_string(),
                 runtime_generation,
                 initial_lease_epoch,
-                runtime,
-                geometry,
+                TerminalSessionSeed {
+                    runtime,
+                    geometry,
+                    initial_output,
+                },
             );
             (
                 sessions.insert(session_id.to_string(), handle),
@@ -1225,6 +1261,30 @@ impl TerminalSessionBroker {
         Ok(())
     }
 
+    /// Remove an agent's terminal under its lifecycle gate. Failed restoration
+    /// owns a paused diagnostic session without a native runtime generation.
+    pub async fn remove_agent_session(
+        &self,
+        session_id: &str,
+        runtime_generation: Option<u64>,
+    ) -> Result<(), TerminalBrokerError> {
+        let generation = match runtime_generation {
+            Some(generation) => Some(generation),
+            None => match self.broker_state(session_id).await {
+                Ok(state) if state.runtime_state == TerminalRuntimeState::Paused => {
+                    Some(state.runtime_generation)
+                }
+                Ok(_) | Err(TerminalBrokerError::SessionNotFound) => None,
+                Err(error) => return Err(error),
+            },
+        };
+        if let Some(generation) = generation {
+            self.terminate_and_remove_runtime(session_id, generation)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Terminates one exact runtime generation and removes its broker entry.
     /// A concurrent replacement cannot be removed by an older kill request.
     pub async fn terminate_and_remove_runtime(
@@ -1364,27 +1424,29 @@ impl TerminalSessionBroker {
         session_id: String,
         runtime_generation: u64,
         lease_epoch_value: u64,
-        runtime: TerminalRuntimeHandles,
-        geometry: TerminalGeometry,
+        seed: TerminalSessionSeed<'_>,
     ) -> TerminalSessionHandle {
         let (tx, rx) = mpsc::channel(TERMINAL_SESSION_ACTOR_CAPACITY);
         let control = Arc::new(TerminalControlPlane::default());
         let lease_epoch = Arc::new(AtomicU64::new(lease_epoch_value));
         let latest_sequence = Arc::new(AtomicU64::new(0));
         let terminated = Arc::new(AtomicBool::new(false));
-        let actor = TerminalSessionActor::new(
+        let mut actor = TerminalSessionActor::new(
             session_id,
             runtime_generation,
             lease_epoch.clone(),
             latest_sequence.clone(),
             terminated.clone(),
-            runtime,
-            geometry,
+            seed.runtime,
+            seed.geometry,
             control.clone(),
             self.wake_tx.clone(),
             self.lifecycle_tx.clone(),
             self.timer.clone(),
         );
+        // Seed before publishing the handle or lifecycle notification so even
+        // the first presentation snapshot contains the failure explanation.
+        actor.parser.process(seed.initial_output);
         let task = tokio::spawn(actor.run(rx));
         let abort_handle = task.abort_handle();
         drop(task);
@@ -1692,7 +1754,7 @@ impl TerminalSessionActor {
         lease_epoch: Arc<AtomicU64>,
         latest_sequence: Arc<AtomicU64>,
         terminated: Arc<AtomicBool>,
-        runtime: TerminalRuntimeHandles,
+        runtime: Option<TerminalRuntimeHandles>,
         geometry: TerminalGeometry,
         control: Arc<TerminalControlPlane>,
         wake_tx: broadcast::Sender<TerminalEventsReady>,
@@ -1701,17 +1763,26 @@ impl TerminalSessionActor {
     ) -> Self {
         let initial_lease_epoch = lease_epoch.load(Ordering::SeqCst);
         let output_filter = TerminalOutputFilter::new(
-            runtime.ignore_scrollback_erase,
-            runtime.reset_parser_on_scrollback_erase,
+            runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.ignore_scrollback_erase),
+            runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.reset_parser_on_scrollback_erase),
         );
+        let runtime_state = if runtime.is_some() {
+            TerminalRuntimeState::Live
+        } else {
+            TerminalRuntimeState::Paused
+        };
         Self {
             session_id,
             runtime_generation,
             lease_epoch_shared: lease_epoch,
             latest_sequence_shared: latest_sequence,
             terminated,
-            runtime: Some(runtime),
-            runtime_state: TerminalRuntimeState::Live,
+            runtime,
+            runtime_state,
             parser: vt100::Parser::new(geometry.rows, geometry.cols, 1_000),
             output_filter,
             replay: ReplayRing::new(),
