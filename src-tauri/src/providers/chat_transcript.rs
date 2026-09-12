@@ -1151,7 +1151,7 @@ fn normalize_gemini(
     }
 }
 
-fn normalize_antigravity(
+pub(super) fn normalize_antigravity(
     session_id: &str,
     provider: &str,
     parsed: &Value,

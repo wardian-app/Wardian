@@ -32,6 +32,9 @@ use archive_identity::stable_provider_log_event_id;
 
 const PROVIDER_LOG_TAIL_BYTES: u64 = 2 * 1024 * 1024;
 
+#[cfg(test)]
+#[path = "chat_antigravity_tests.rs"]
+mod antigravity_tests;
 #[path = "chat_opencode_tools.rs"]
 mod opencode_tools;
 
@@ -738,7 +741,7 @@ fn load_antigravity_database_chat_events(
         return Vec::new();
     };
 
-    messages
+    let mut events: Vec<_> = messages
         .into_iter()
         .enumerate()
         .map(|(index, message)| {
@@ -747,7 +750,7 @@ fn load_antigravity_database_chat_events(
                 session_id: session_id.to_string(),
                 provider: provider.to_string(),
                 kind: AgentChatEventKind::Message,
-                role: Some(message.role),
+                role: Some(message.role.clone()),
                 text: Some(message.text),
                 title: None,
                 status: None,
@@ -766,10 +769,50 @@ fn load_antigravity_database_chat_events(
                     "step_index": message.step_index,
                 }),
             };
+            // Preserve the previous database message identity even when an
+            // explicit provider source corrects its display role below.
             event.id = stable_provider_log_event_id(&event, path);
+            if message.role == AgentChatRole::User
+                && message.source.is_some_and(|source| source != 4)
+            {
+                event.role = Some(AgentChatRole::System);
+            }
+            if let Some(source) = message.source {
+                event.metadata["provider_step_source"] = serde_json::json!(source);
+            }
+            if message.role == AgentChatRole::User {
+                // Only USER_MESSAGE steps reach this role. Source 4 is
+                // USER_EXPLICIT in paired provider SQLite/JSONL records.
+                // Retain the legacy fallback when source is unreported, but
+                // never promote an explicitly different source to a request.
+                let is_request = message.source.is_none_or(|source| source == 4);
+                event.metadata["input_origin"] = serde_json::json!(if is_request {
+                    "human_input"
+                } else {
+                    "provider_internal"
+                });
+                event.metadata["input_purpose"] =
+                    serde_json::json!(if is_request { "request" } else { "internal" });
+                event.metadata["context_observation"] = serde_json::json!("unreported");
+                if is_request {
+                    event.metadata["request_root_id"] = serde_json::json!(&event.id);
+                }
+            }
             event
         })
-        .collect()
+        .collect();
+    if let Ok(tools) =
+        crate::providers::antigravity::chat_tools::load_tools(session_id, provider, path)
+    {
+        events.extend(tools);
+    }
+    // Stable sort keeps a planner's existing message before its wire-ordered
+    // calls. Message IDs were assigned before this projection and stay intact.
+    events.sort_by_key(|event| event.metadata["step_index"].as_u64().unwrap_or_default());
+    for (index, event) in events.iter_mut().enumerate() {
+        event.sequence = Some(index as u64 + 1);
+    }
+    events
 }
 
 fn hex_prefix(bytes: &[u8], len: usize) -> String {
@@ -2601,9 +2644,12 @@ Do you want to proceed?
                 "CREATE TABLE steps (idx INTEGER, step_type INTEGER, step_payload BLOB);",
             )
             .expect("create steps");
-        // field 19.2 is the current Antigravity user message; field 20.1 is
-        // the completed planner response in its SQLite step payload.
-        let user = vec![0x9a, 0x01, 0x05, 0x12, 0x03, b'h', b'i', b'!'];
+        // Field 5.3 is metadata.source (4 = USER_EXPLICIT, 2 = MODEL),
+        // field 19.2 is the user message, and 20.1 is the planner response.
+        // These source values match the paired SQLite/JSONL QA recording.
+        let legacy_user = vec![0x9a, 0x01, 0x05, 0x12, 0x03, b'h', b'i', b'!'];
+        let mut user = vec![0x2a, 0x02, 0x18, 0x04];
+        user.extend(&legacy_user);
         let assistant = vec![0xa2, 0x01, 0x05, 0x0a, 0x03, b'o', b'k', b'!'];
         connection
             .execute(
@@ -2617,14 +2663,69 @@ Do you want to proceed?
                 rusqlite::params![assistant],
             )
             .expect("insert assistant");
+        for (step, source) in [(2, 2), (3, 99)] {
+            let mut payload = vec![0x2a, 0x02, 0x18, source];
+            payload.extend(&legacy_user);
+            connection
+                .execute(
+                    "INSERT INTO steps VALUES (?1, 14, ?2)",
+                    rusqlite::params![step, payload],
+                )
+                .expect("insert non-user source with user-shaped text");
+        }
+        for (step, kind, payload) in [
+            (4, 14, legacy_user.clone()),
+            (5, 999, user.clone()),
+            (6, 14, vec![0x2a, 0x02, 0x18, 0x04]),
+            (7, 14, user),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO steps VALUES (?1, ?2, ?3)",
+                    rusqlite::params![step, kind, payload],
+                )
+                .expect("insert compatibility and repeated-request fixtures");
+        }
 
         let events = load_antigravity_database_chat_events("agent-1", "antigravity", &database);
 
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 6);
         assert_eq!(events[0].role, Some(AgentChatRole::User));
         assert_eq!(events[0].text.as_deref(), Some("hi!"));
+        assert_eq!(events[0].metadata["input_origin"], "human_input");
+        assert_eq!(events[0].metadata["input_purpose"], "request");
+        assert_eq!(events[0].metadata["context_observation"], "unreported");
+        assert_eq!(events[0].metadata["request_root_id"], events[0].id);
+        assert_eq!(events[0].metadata["provider_step_source"], 4);
         assert_eq!(events[1].role, Some(AgentChatRole::Assistant));
         assert_eq!(events[1].text.as_deref(), Some("ok!"));
+        assert!(events[1].metadata.get("input_origin").is_none());
+        assert!(events[1].metadata.get("request_root_id").is_none());
+        for (event, source) in [(&events[2], 2), (&events[3], 99)] {
+            assert_eq!(event.role, Some(AgentChatRole::System));
+            let mut legacy = event.clone();
+            legacy.role = Some(AgentChatRole::User);
+            assert_eq!(event.id, stable_provider_log_event_id(&legacy, &database));
+            assert_eq!(event.text.as_deref(), Some("hi!"));
+            assert_eq!(event.metadata["provider_step_source"], source);
+            assert_eq!(event.metadata["input_origin"], "provider_internal");
+            assert_eq!(event.metadata["input_purpose"], "internal");
+            assert!(event.metadata.get("request_root_id").is_none());
+        }
+        for event in [&events[4], &events[5]] {
+            assert_eq!(event.metadata["input_origin"], "human_input");
+            assert_eq!(event.metadata["input_purpose"], "request");
+            assert_eq!(event.metadata["request_root_id"], event.id);
+            assert_ne!(
+                event.metadata["request_root_id"],
+                events[0].metadata["request_root_id"]
+            );
+        }
+        let replay = load_antigravity_database_chat_events("agent-1", "antigravity", &database);
+        for (original, replayed) in events.iter().zip(&replay) {
+            assert_eq!(original.id, replayed.id);
+            assert_eq!(original.metadata, replayed.metadata);
+        }
         assert_eq!(
             events[1].metadata["log_source"],
             "antigravity_conversation_database"
