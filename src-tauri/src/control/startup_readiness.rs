@@ -321,6 +321,9 @@ mod tests {
         use wardian_core::control::MessageInputMode;
 
         let fixture = TestWardianHome::new_async().await;
+        let receipt_fixture =
+            super::super::test_support::opencode_receipt_fixture(fixture.path(), "ses_fresh");
+        let receipt_db = receipt_fixture.db_path.clone();
         let state = AppState::new();
         let session_id = "opencode-resume-startup";
         insert_test_agent(&state, session_id, "OpenCodeStartup", "Coder").await;
@@ -549,6 +552,17 @@ mod tests {
                 .any(|receipt| receipt.delivery_state == "provider_accepted")
         );
         crate::manager::record_agent_turn_started_for_watch(&state, session_id).await;
+        tokio::select! {
+            result = &mut drain => panic!("a watch event without a SQLite receipt must not deliver: {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        }
+        super::super::test_support::insert_opencode_user_receipt(
+            &receipt_db,
+            "ses_fresh",
+            "message-1",
+            "part-1",
+            "Recall the previous user marker",
+        );
         let delivered = tokio::time::timeout(std::time::Duration::from_secs(2), &mut drain)
             .await
             .unwrap()
