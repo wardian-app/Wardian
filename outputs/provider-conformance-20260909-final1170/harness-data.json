@@ -1,0 +1,90 @@
+[
+  {
+    "build": "39d996c896de2e5a4883ff325984889c851348e2",
+    "case": "codex,claude,opencode,antigravity,pi in one native app run",
+    "evidence": "combined run started Codex and reached Claude but run state remained running after a filesystem Access is denied error; every provider passes in isolated one-provider runs",
+    "failure": "cross-provider automation run lifecycle interference; isolate providers for trustworthy baseline",
+    "function": "headless_automation_combined_run",
+    "model": "explicit per-provider models",
+    "phase": "after",
+    "provider": "all",
+    "resolved_model": null,
+    "status": "blocked",
+    "version": null
+  },
+  {
+    "build": "39d996c896de2e5a4883ff325984889c851348e2",
+    "case": "dedicated-CARGO_TARGET_DIR",
+    "evidence": "buildCli resolves CARGO_TARGET_DIR/debug/wardian-cli; focused node syntax check passed",
+    "failure": null,
+    "function": "delivery_cli_path_isolation",
+    "model": null,
+    "phase": "after",
+    "provider": "all",
+    "resolved_model": null,
+    "status": "pass",
+    "version": null
+  },
+  {
+    "build": "39d996c896de2e5a4883ff325984889c851348e2",
+    "case": "dedicated-CARGO_TARGET_DIR",
+    "evidence": "provider-delivery-real-native.test.mjs built wardian-cli under CARGO_TARGET_DIR but invoked the repository default target path",
+    "failure": "spawnSync could not locate the isolated CLI",
+    "function": "delivery_cli_path_isolation",
+    "model": null,
+    "phase": "before",
+    "provider": "all",
+    "resolved_model": null,
+    "status": "fail",
+    "version": null
+  },
+  {
+    "build": "39d996c896de2e5a4883ff325984889c851348e2",
+    "case": "mailbox-long-paste",
+    "evidence": "real provider emitted the expected marker but watch pinned --since to cursor zero",
+    "failure": "gap_detected: watch cursor expired while waiting",
+    "function": "delivery_watch_cursor",
+    "model": "openai-codex/gpt-5.4-mini",
+    "phase": "before",
+    "provider": "pi",
+    "resolved_model": "gpt-5.4-mini",
+    "status": "fail",
+    "version": "0.84.2"
+  },
+  {
+    "build": "39d996c896de2e5a4883ff325984889c851348e2",
+    "case": "mailbox-long-paste",
+    "evidence": "watch recovery retries from oldest_available_cursor; isolated real run passed",
+    "failure": null,
+    "function": "delivery_watch_cursor",
+    "model": "openai-codex/gpt-5.4-mini",
+    "phase": "after",
+    "provider": "pi",
+    "resolved_model": "gpt-5.4-mini",
+    "status": "pass",
+    "version": "0.84.2"
+  },
+  {
+    "build": "39d996c896de2e5a4883ff325984889c851348e2; debug",
+    "case": "real-provider-rendering-native; claude",
+    "evidence": "initial run failed because harness requested nonexistent RenderingAudit class; class corrected to maintained QA; rerun timed out resolving terminal presentation",
+    "failure": "harness/UI setup blocker before provider rendering capture",
+    "function": "rendering",
+    "model": "claude=haiku",
+    "phase": "after",
+    "provider": "all",
+    "resolved_model": "claude-haiku-4-5-20251001",
+    "status": "blocked",
+    "version": "2.1.263"
+  },
+  {
+    "case": "cheaper local model read-tool probe",
+    "evidence": "The real Pi JSON stream returned textual tool-call markup and toolResults=[]; the scratch file was not read. Text access worked, but the candidate cannot run the requested tool conformance stimulus.",
+    "failure": "Local model/server route does not produce native tool calls. gpt-5.4-mini retained as tested fallback.",
+    "function": "model_candidate_tools",
+    "mode": "direct CLI",
+    "model": "lmstudio/gemma-4-31b-unslop-good-lora-v1-i1",
+    "provider": "pi",
+    "status": "blocked"
+  }
+]

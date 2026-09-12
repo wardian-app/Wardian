@@ -1,9 +1,12 @@
 // @tier manual — Needs a real provider or a logged-in CLI. Run it deliberately.
 import test from "node:test";
+import { cleanupConformanceSession, pauseConformanceAgents } from "../lib/conformance-cleanup.mjs";
+
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 import {
   createNativeHarness,
@@ -18,6 +21,11 @@ import {
 // Gemini is deprecated. Keep the real delivery matrix aligned with the
 // providers Wardian currently supports for new agent sessions.
 export const PROVIDERS = ["codex", "claude", "opencode", "antigravity", "pi"];
+
+function longLabels(marker) {
+  return ["begin", "middle", "end"].map((position) =>
+    createHash("sha256").update(`${marker}/${position}`).digest("hex").slice(0, 16));
+}
 
 export const INPUT_CASES = [
   {
@@ -41,10 +49,13 @@ export const INPUT_CASES = [
   },
   {
     name: "mailbox-long-paste",
-    prompt: (marker) =>
-      "This is Wardian's long bracketed-paste delivery test. The repeated lines are inert test padding.\n" +
-      "Inert delivery padding.\n".repeat(280) +
-      `Reply with exactly this verification marker and nothing else: ${marker}`,
+    prompt: (marker) => {
+      const labels = longLabels(marker);
+      return `No tools. Reply with ${marker} followed by the three LABEL values in source order, separated by |.\n` +
+        `LABEL: ${labels[0]}\n` + "Inert delivery padding.\n".repeat(140) +
+        `LABEL: ${labels[1]}\n` + "Inert delivery padding.\n".repeat(140) + `LABEL: ${labels[2]}\n`;
+    },
+    expectedOutput: (marker) => [marker, ...longLabels(marker)].join("|"),
     expectOutput: true,
   },
 ];
@@ -341,6 +352,7 @@ async function waitForPersistedOpenCodeSession(harness, sessionId, timeoutMs = 1
 }
 
 async function runRealDeliveryCase({
+  driver,
   cliPath,
   harness,
   provider,
@@ -350,9 +362,10 @@ async function runRealDeliveryCase({
   runId,
 }) {
   const marker = `WARDIAN_REAL_DELIVERY_${provider.toUpperCase()}_${inputCase.name.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_${runId}`;
+  const prompt = inputCase.prompt(marker);
   const queued = runCliOk(cliPath, harness, [
     "send",
-    inputCase.prompt(marker),
+    prompt,
     "--to",
     agentName,
     "--queue-policy",
@@ -378,40 +391,115 @@ async function runRealDeliveryCase({
     await waitForPersistedOpenCodeSession(harness, agentSessionId);
   }
 
+  const conformance = await assertRealChatConformance(driver, agentSessionId, provider, marker);
+
   if (inputCase.expectOutput) {
-    const expected = inputCase.name === "mailbox-multiline" ? `${marker}_LINE_2` : marker;
-    const watched = runCliOk(cliPath, harness, [
-      "agent",
-      "watch",
-      agentName,
-      "--since",
-      `${agentSessionId}:0`,
-      "--until",
-      `output:${expected}`,
-      "--include",
-      "status,transcript,output,delivery",
-      "--timeout",
-      "180s",
-    ]);
-    const watchJson = JSON.parse(watched.stdout);
-    const transcript = watchJson.transcript?.latest_text ?? "";
-    const output = watchJson.output?.text ?? "";
-    const combinedOutput = `${transcript}\n${output}`;
+    const expected = inputCase.expectedOutput?.(marker) ??
+      (inputCase.name === "mailbox-multiline" ? `${marker}_LINE_1\n${marker}_LINE_2` : marker);
     assert.ok(
-      combinedOutput.includes(expected),
-      `${provider} output did not include ${expected}: ${combinedOutput}`,
+      conformance.assistantEvents.some((event) => (event.text ?? "").includes(expected)),
+      `${provider} provider transcript response did not include ${expected}`,
     );
+    assert.ok(conformance.events.some((event) => event.role === "user" &&
+      event.metadata?.provider_log === true && event.text?.includes(prompt.trimEnd())),
+    "Native user evidence must retain the complete submitted payload");
   }
 
   return { marker, expected: inputCase.name === "mailbox-multiline" ? `${marker}_LINE_2` : marker };
 }
 
-async function waitForFreshTranscript(driver, sessionId, freshMarker) {
+function isProviderAuthoredAssistantEvent(event, provider, marker) {
+  return event?.provider === provider &&
+    event?.kind === "message" &&
+    event?.role === "assistant" &&
+    event?.metadata?.provider_log === true &&
+    typeof event?.source === "string" &&
+    event.source.trim().length > 0 &&
+    (event.text ?? "").includes(marker);
+}
+
+async function assertRealChatConformance(driver, sessionId, provider, marker) {
+  const events = await driver.wait(async () => {
+    try {
+      const candidate = await invokeTauri(driver, "load_agent_chat_transcript", { sessionId });
+      if (!Array.isArray(candidate)) return false;
+      const hasUser = candidate.some((event) =>
+        event?.role === "user" && (event.text ?? "").includes(marker));
+      const hasAssistant = candidate.some((event) =>
+        isProviderAuthoredAssistantEvent(event, provider, marker));
+      return hasUser && hasAssistant ? candidate : false;
+    } catch {
+      return false;
+    }
+  }, 20_000, `${provider} chat replay did not settle for ${marker}`);
+
+  const userEvents = events.filter((event) =>
+    event?.role === "user" && (event.text ?? "").includes(marker));
+  assert.equal(userEvents.length, 1, `${provider} chat replay did not retain one user request for ${marker}`);
+  assert.equal(userEvents[0].metadata?.input_origin, "human_input");
+  assert.equal(userEvents[0].metadata?.input_purpose, "request");
+  assert.ok(userEvents[0].metadata?.request_root_id, `${provider} user request lacks causal provenance`);
+
+  const assistantEvents = events.filter((event) =>
+    isProviderAuthoredAssistantEvent(event, provider, marker));
+  assert.equal(
+    assistantEvents.length,
+    1,
+    `${provider} chat replay duplicated or omitted the assistant response for ${marker}`,
+  );
+  assert.equal(new Set(events.map((event) => event.id)).size, events.length, `${provider} chat replay contains duplicate event IDs`);
+
+  const metrics = await invokeTauri(driver, "list_agent_metrics");
+  const metric = metrics.find((entry) => entry.session_id === sessionId);
+  assert.ok(metric?.log_path, `${provider} did not publish a chat-log link after delivery`);
+
+  const conversations = await invokeTauri(driver, "list_conversations", {
+    agent: sessionId,
+    scopeAll: false,
+  });
+  const archive = conversations.conversations?.find((entry) =>
+    entry.agent_id === sessionId && entry.provider === provider && entry.record_count > 0);
+  assert.ok(archive, `${provider} did not materialize a durable conversation archive for ${marker}`);
+
+  const replay = await invokeTauri(driver, "show_conversation", {
+    conversationId: archive.conversation_id,
+  });
+  assert.equal(replay.manifest.agent_id, sessionId);
+  assert.equal(replay.manifest.provider, provider);
+  assert.ok(
+    replay.conversation.some((record) =>
+      record.kind === "message" && record.role === "assistant" && (record.text ?? "").includes(marker)),
+    `${provider} durable archive replay omitted ${marker}`,
+  );
+
+  return { events, assistantEvents };
+}
+
+function assertNoStaleTranscript(events, staleMarker) {
+  assert.equal(events.some((event) => (event?.text ?? "").includes(staleMarker)), false,
+    "Fresh resume replayed the previous provider transcript, including archive/fallback rows");
+}
+
+test("delivery deterministic: fresh readiness cannot filter away separate stale answers", () => {
+  const fresh = { provider: "codex", kind: "message", role: "assistant", text: "NEW",
+    source: "response_item", metadata: { provider_log: true } };
+  for (const source of ["response_item", "conversation_archive", "terminal_fallback"]) {
+    const events = [{ ...fresh, source, text: "OLD" }, fresh];
+    assert.equal(events.filter((event) => isProviderAuthoredAssistantEvent(event, "codex", "NEW")).length, 1);
+    assert.throws(() => assertNoStaleTranscript(events, "OLD"), /previous provider transcript/);
+  }
+  assertNoStaleTranscript([fresh], "OLD");
+});
+
+async function waitForFreshTranscript(driver, sessionId, provider, freshMarker) {
   return await driver.wait(async () => {
     const events = await invokeTauri(driver, "load_agent_chat_transcript", { sessionId });
     if (!Array.isArray(events)) return false;
-    const text = events.map((event) => event?.text ?? "").join("\n");
-    return text.includes(freshMarker) ? { events, text } : false;
+    const assistantEvents = events.filter((event) =>
+      isProviderAuthoredAssistantEvent(event, provider, freshMarker));
+    return assistantEvents.length > 0
+      ? { events, assistantEvents, text: assistantEvents.map((event) => event.text ?? "").join("\n") }
+      : false;
   }, 45_000, "fresh provider transcript never reached chat replay");
 }
 
@@ -438,6 +526,7 @@ async function resumeFreshAndAssertTranscript({
   await invokeTauri(driver, "resume_agent", { sessionId: agentSessionId });
 
   const freshDelivery = await runRealDeliveryCase({
+    driver,
     cliPath,
     harness,
     provider,
@@ -449,21 +538,12 @@ async function resumeFreshAndAssertTranscript({
   const transcript = await waitForFreshTranscript(
     driver,
     agentSessionId,
+    provider,
     freshDelivery.expected,
   );
-  assert.equal(
-    transcript.text.includes(staleMarker),
-    false,
-    `${provider} fresh resume replayed the previous provider transcript: ${JSON.stringify(
-      transcript.events.filter((event) => (event?.text ?? "").includes(staleMarker)).map((event) => ({
-        text: event?.text,
-        source: event?.source,
-        metadata: event?.metadata,
-      })),
-    )}`,
-  );
+  assertNoStaleTranscript(transcript.events, staleMarker);
   assert.ok(
-    transcript.text.includes(freshDelivery.expected),
+    transcript.assistantEvents.some((event) => (event.text ?? "").includes(freshDelivery.expected)),
     `${provider} fresh resume did not reload the new provider transcript: ${transcript.text}`,
   );
 
@@ -560,22 +640,29 @@ test("real provider delivery validation uses actual provider CLIs", { timeout: 9
     return;
   }
 
+  let session;
+  let startupAttempted = false;
+  let cleanupFailure;
+  t.after(() => cleanupConformanceSession({
+    harness, session, startupAttempted,
+    pause: async () => {
+      await pauseConformanceAgents((command, args) => invokeTauri(session.driver, command, args));
+      if (cleanupFailure) throw cleanupFailure;
+    },
+    save: (cleanup) => fs.writeFile(path.join(harness.isolatedHome, "delivery-cleanup.json"), JSON.stringify(cleanup, null, 2)),
+  }));
   prepareIsolatedHome(harness);
   await enableIsolatedCodexWorkspaceTrust(harness);
   const cliPath = buildCli(harness);
   const runId = `${process.pid}_${Date.now()}`;
 
-  let session;
   try {
+    startupAttempted = true;
     session = await startNativeSession(harness);
   } catch (error) {
     t.skip(String(error));
     return;
   }
-
-  t.after(async () => {
-    await session.close();
-  });
 
   await waitForAppShell(session.driver, 20000);
 
@@ -599,6 +686,7 @@ test("real provider delivery validation uses actual provider CLIs", { timeout: 9
       const deliveredCases = [];
       for (const inputCase of selectedCases) {
         deliveredCases.push(await runRealDeliveryCase({
+          driver: session.driver,
           cliPath,
           harness,
           provider,
@@ -632,6 +720,7 @@ test("real provider delivery validation uses actual provider CLIs", { timeout: 9
         try {
           await killRealProviderAgent(session.driver, agent.session_id);
         } catch (cleanupError) {
+          cleanupFailure ??= cleanupError;
           providerError ??= cleanupError;
         }
       }
