@@ -106,4 +106,3 @@ async fn message_delivery_writes_terminal_bytes_after_opencode_is_ready() {
 
     receiver.await.expect("receive OpenCode input");
 }
-
