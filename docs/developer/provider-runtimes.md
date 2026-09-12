@@ -23,8 +23,9 @@ This document captures the practical runtime differences between Wardian's suppo
 ### Native transport compatibility
 
 OpenCode ACP starts with its own command arguments. Wardian applies the selected
-model through `session/set_model` after binding either a new or resumed session;
-a rejected model selection stops bootstrap before a prompt is submitted.
+model through `session/set_model` and the configured agent through
+`session/set_mode` after binding either a new or resumed session; a rejected
+selection stops bootstrap before a prompt is submitted.
 Only ACP `agent_message_chunk` text contributes to the assistant answer. Thoughts,
 user echoes, and tool updates remain progress signals. Native answer chunks retain
 their whitespace, including whitespace-only chunks, so streaming preserves words

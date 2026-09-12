@@ -1605,9 +1605,9 @@ async fn start_runtime(
             apply_bootstrap_request(&mut runtime, protocol, &spec.provider, &replacement).await?;
         }
     }
-    // OpenCode's ACP command takes no model flag, so the operator's model is
-    // applied over the protocol once the session exists. Skipping this would
-    // silently run the provider's default model instead.
+    // OpenCode's ACP command takes no model or agent flags, so the operator's
+    // selections are applied over the protocol once the session exists.
+    // Skipping either would silently use the provider's defaults.
     if protocol == NativeProviderProtocol::OpenCodeAcp {
         if let (Some(session_id), Some(model)) = (
             runtime.binding.provider_session_id.clone(),
@@ -1623,6 +1623,40 @@ async fn start_runtime(
                 "method": "session/set_model",
                 "params": {"sessionId": session_id, "modelId": model}
             });
+            apply_bootstrap_request(&mut runtime, protocol, &spec.provider, &request).await?;
+        }
+        if let Some(agent) = spec
+            .config
+            .opencode_config()
+            .agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|agent| !agent.is_empty())
+        {
+            let session_id = runtime
+                .binding
+                .provider_session_id
+                .as_deref()
+                .ok_or_else(|| {
+                    error(
+                        NativeDeliveryErrorCode::TransportUnavailable,
+                        "OpenCode ACP did not bind a session before configured agent selection",
+                        false,
+                    )
+                })?;
+            let request = protocol
+                .set_session_mode_request(
+                    &format!("wardian:agent:{}", spec.target_agent_id),
+                    Some(session_id),
+                    agent,
+                )
+                .map_err(|failure| {
+                    error(
+                        NativeDeliveryErrorCode::TransportUnavailable,
+                        format!("OpenCode ACP agent selection could not be prepared: {failure}"),
+                        false,
+                    )
+                })?;
             apply_bootstrap_request(&mut runtime, protocol, &spec.provider, &request).await?;
         }
     }
@@ -1814,8 +1848,7 @@ fn native_command(
             push_flag_value(&mut args, "--permission-prompt-tool", "stdio");
         }
         NativeProviderProtocol::CodexAppServer => {
-            CodexProvider::new().append_common_args(&mut args, &config, false);
-            args.push("app-server".to_string());
+            args.extend(codex_app_server_args(&config)?);
         }
         NativeProviderProtocol::AntigravityStreamJson => {
             args.extend(provider.get_spawn_args(&config, is_resume));
@@ -2282,7 +2315,8 @@ fn habitat_root(config: &AgentConfig) -> Option<PathBuf> {
 /// `--model` (and `--agent`, `--auto`, `--session`) in front of it, so the CLI
 /// rejected the unknown option, printed its usage and exited before the
 /// initialize handshake could run. The model is not dropped: it is applied over
-/// the protocol with `session/set_model` once the session exists.
+/// the protocol with `session/set_model` and `session/set_mode` once the
+/// session exists.
 fn opencode_acp_args(config: &AgentConfig) -> Vec<String> {
     let mut args = Vec::new();
     if config.debug.unwrap_or(false) {
@@ -2290,6 +2324,12 @@ fn opencode_acp_args(config: &AgentConfig) -> Vec<String> {
     }
     args.push("acp".to_string());
     args
+}
+
+fn codex_app_server_args(config: &AgentConfig) -> Result<Vec<String>, NativeBrokerError> {
+    CodexProvider::new()
+        .shared_server_args(config)
+        .map_err(|message| error(NativeDeliveryErrorCode::UnsupportedProvider, message, false))
 }
 
 fn push_flag(args: &mut Vec<String>, flag: &str) {
@@ -2436,6 +2476,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn codex_app_server_command_uses_config_override_for_model() {
+        let config = AgentConfig {
+            provider: "codex".into(),
+            model: Some("gpt-5.6-luna".into()),
+            provider_config: wardian_core::models::ProviderConfig::Codex(
+                wardian_core::models::CodexProviderConfig {
+                    reasoning_effort: Some("high".into()),
+                    sandbox_mode: Some("workspace-write".into()),
+                    approval_policy: Some("on-request".into()),
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        };
+
+        let args = codex_app_server_args(&config).expect("Codex app-server arguments");
+        assert_eq!(args.first().map(String::as_str), Some("app-server"));
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair[0] == "-c" && pair[1] == "model=\"gpt-5.6-luna\"" }));
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair[0] == "-c" && pair[1] == "model_reasoning_effort=\"high\"" }));
+        assert!(!args.iter().any(|arg| arg == "--model"));
+    }
+
     /// A bootstrap stall in `initialize` and one in `thread/resume` have
     /// entirely different causes, so the recorded diagnostic must name which.
     #[test]
@@ -2473,6 +2540,100 @@ mod tests {
             ),
             vec!["--offline"]
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn opencode_agent_selection_failure_prevents_prompt_submission() {
+        let _lock = crate::utils::wardian_test_env_lock_async().await;
+        let temp = tempfile::tempdir().expect("native broker tempdir");
+        wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
+            .expect("initialize native broker db");
+        let script = temp.path().join("opencode-provider.cjs");
+        let log = temp.path().join("opencode-bootstrap.log");
+        std::fs::write(
+            &script,
+            r#"const fs = require('node:fs');
+const readline = require('node:readline');
+const input = readline.createInterface({ input: process.stdin });
+input.on('line', (line) => {
+  fs.appendFileSync(process.env.WARDIAN_NATIVE_TEST_LOG, line + '\n');
+  const request = JSON.parse(line);
+  let response;
+  if (request.method === 'initialize') {
+    response = { jsonrpc: '2.0', id: request.id, result: { protocolVersion: 1 } };
+  } else if (request.method === 'session/new') {
+    response = { jsonrpc: '2.0', id: request.id, result: { sessionId: 'ses-test' } };
+  } else if (request.method === 'session/set_mode') {
+    response = { jsonrpc: '2.0', id: request.id,
+      error: { code: -32000, message: 'configured agent is unavailable' } };
+  } else if (request.method === 'session/prompt') {
+    fs.appendFileSync(process.env.WARDIAN_NATIVE_TEST_LOG, 'PROMPT_SUBMITTED\n');
+    process.exit(17);
+  }
+  if (response) console.log(JSON.stringify(response));
+});
+"#,
+        )
+        .expect("write OpenCode provider fixture");
+        unsafe {
+            std::env::set_var("WARDIAN_NATIVE_TEST_SCRIPT", &script);
+            std::env::set_var("WARDIAN_NATIVE_TEST_LOG", &log);
+        }
+        let _script_guard = NativeTestScriptGuard;
+
+        let broker = Arc::new(NativeDeliveryBroker::new());
+        let mut admission = test_admission("opencode-agent", "opencode-agent-key", "review");
+        admission.provider = "opencode".into();
+        let record = broker.admit(admission).await.expect("admit turn");
+        let config = AgentConfig {
+            provider: "opencode".into(),
+            session_id: "agent-native-test".into(),
+            folder: temp.path().display().to_string(),
+            provider_config: wardian_core::models::ProviderConfig::OpenCode(
+                wardian_core::models::OpenCodeProviderConfig {
+                    agent: Some("reviewer".into()),
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        };
+        let failure = broker
+            .dispatch(
+                NativeSessionSpec {
+                    target_agent_id: "agent-native-test".into(),
+                    provider: "opencode".into(),
+                    generation: 1,
+                    workspace: temp.path().to_path_buf(),
+                    config,
+                },
+                record,
+            )
+            .await
+            .expect_err("selection failure must stop bootstrap");
+
+        assert_eq!(failure.code, NativeDeliveryErrorCode::TransportUnavailable);
+        assert_eq!(
+            broker
+                .get("opencode-agent")
+                .expect("failed delivery record")
+                .phase,
+            NativeDeliveryPhase::FailedBeforeSubmit
+        );
+        let requests = std::fs::read_to_string(&log)
+            .expect("bootstrap request log")
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .collect::<Vec<_>>();
+        assert!(requests.iter().any(|request| {
+            request["method"] == "session/set_mode" && request["params"]["modeId"] == "reviewer"
+        }));
+        assert!(!requests
+            .iter()
+            .any(|request| request["method"] == "session/prompt"));
+        broker
+            .dispose_agent("agent-native-test")
+            .await
+            .expect("dispose failed test session");
     }
 
     #[test]

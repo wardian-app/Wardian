@@ -225,6 +225,34 @@ impl NativeProviderProtocol {
         }
     }
 
+    pub fn set_session_mode_request(
+        self,
+        request_id: &str,
+        provider_session_id: Option<&str>,
+        mode_id: &str,
+    ) -> Result<Value, NativeProtocolError> {
+        if self != Self::OpenCodeAcp {
+            return Err(NativeProtocolError::UnsupportedOperation {
+                provider: self.provider().to_string(),
+                operation: "set_session_mode".to_string(),
+            });
+        }
+        let session_id = required_session_id(provider_session_id, self)?;
+        let mode_id = mode_id.trim();
+        if mode_id.is_empty() {
+            return Err(NativeProtocolError::UnsupportedOperation {
+                provider: self.provider().to_string(),
+                operation: "set_session_mode with an empty mode".to_string(),
+            });
+        }
+        Ok(json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "session/set_mode",
+            "params": {"sessionId": session_id, "modeId": mode_id}
+        }))
+    }
+
     pub fn cancel_request(
         self,
         interaction_id: &str,
@@ -989,6 +1017,45 @@ mod tests {
                 None,
             ),
             Err(NativeProtocolError::MissingProviderTurn { .. })
+        ));
+    }
+
+    #[test]
+    fn opencode_agent_selection_uses_session_mode_before_prompt() {
+        let mode = NativeProviderProtocol::OpenCodeAcp
+            .set_session_mode_request("wardian:agent:agent-1", Some("ses-1"), "reviewer")
+            .expect("OpenCode session mode request");
+        assert_eq!(mode["method"], "session/set_mode");
+        assert_eq!(mode["params"]["sessionId"], "ses-1");
+        assert_eq!(mode["params"]["modeId"], "reviewer");
+
+        let prompt = NativeProviderProtocol::OpenCodeAcp
+            .submit_request(
+                &envelope(NativeMessageOperation::StartTurn),
+                Some("ses-1"),
+                None,
+            )
+            .expect("OpenCode prompt");
+        assert_ne!(mode["id"], prompt["id"]);
+    }
+
+    #[test]
+    fn session_mode_selection_requires_a_nonempty_mode_and_opencode() {
+        assert!(matches!(
+            NativeProviderProtocol::OpenCodeAcp.set_session_mode_request(
+                "mode",
+                Some("ses-1"),
+                "  "
+            ),
+            Err(NativeProtocolError::UnsupportedOperation { .. })
+        ));
+        assert!(matches!(
+            NativeProviderProtocol::CodexAppServer.set_session_mode_request(
+                "mode",
+                Some("thread-1"),
+                "reviewer"
+            ),
+            Err(NativeProtocolError::UnsupportedOperation { .. })
         ));
     }
 
