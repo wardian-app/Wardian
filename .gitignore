@@ -82,3 +82,8 @@ coverage/
 # Native E2E tooling
 tools/e2e-native/
 
+
+# Raw native acceptance records carry absolute local paths; publish the
+# sanitized summary instead.
+.task/*acceptance*.json
+.task/two-runner-acceptance/

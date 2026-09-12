@@ -8,6 +8,7 @@ mod macos_window;
 pub mod manager;
 pub mod providers;
 pub mod remote;
+mod startup_restore;
 pub mod state;
 mod topology_audit;
 mod topology_watch;
@@ -27,6 +28,19 @@ use wardian_core::models::AgentConfig;
 
 const TELEMETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 const TELEMETRY_TICK_SLOW_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(30);
+
+async fn publish_restored_agent(
+    app: &AppHandle,
+    publication: &startup_restore::RestorePublication,
+    session_id: &str,
+    agent: crate::state::ActiveAgent,
+) {
+    let state = app.state::<AppState>();
+    let status = publication.publish(&state, agent).await;
+    manager::publish_agent_status(app, session_id, &status);
+    crate::control::spawn_mailbox_drain_after_restore(app, session_id);
+    let _ = app.emit("agents-updated", ());
+}
 
 fn schedule_restored_agent_archive_sync(app_handle: AppHandle, session_id: String) {
     tauri::async_runtime::spawn(async move {
@@ -390,36 +404,6 @@ pub fn run() {
                     let state_path = app_dir.join("settings/state.json");
                     if let Ok(data) = std::fs::read_to_string(state_path) {
                         if let Ok(configs) = serde_json::from_str::<Vec<AgentConfig>>(&data) {
-                            // Insert each restored agent as it becomes ready instead of
-                            // holding the agents/order locks across every provider spawn;
-                            // otherwise list_agents (and the whole UI) blocks until the
-                            // last agent has been restored.
-                            let insert_restored_agent =
-                                |session_id: String, agent: crate::state::ActiveAgent| {
-                                    let app_handle = app_handle.clone();
-                                    async move {
-                                        let state = app_handle.state::<AppState>();
-                                        let status = agent.current_status.clone();
-                                        let mut agents_map = state.agents.lock().await;
-                                        let mut order_map = state.agent_order.lock().await;
-                                        if !order_map.contains(&session_id) {
-                                            order_map.push(session_id.clone());
-                                        }
-                                        agents_map.insert(session_id.clone(), agent);
-                                        drop(agents_map);
-                                        drop(order_map);
-                                        manager::publish_agent_status(
-                                            &app_handle,
-                                            &session_id,
-                                            &status,
-                                        );
-                                        crate::control::spawn_mailbox_drain_after_restore(
-                                            &app_handle,
-                                            &session_id,
-                                        );
-                                        let _ = app_handle.emit("agents-updated", ());
-                                    }
-                                };
                             let mut seen_names = std::collections::HashSet::new();
                             // Fetch latest status from DB for all agents
                             let db_agents = wardian_core::db::get_all_agents().unwrap_or_default();
@@ -437,9 +421,28 @@ pub fn run() {
                             // as inert "Restoring" placeholders so the watchlist shows
                             // the complete list instead of agents streaming in one by
                             // one as each provider spawn completes.
-                            type PendingSpawn = (AgentConfig, Option<String>);
+                            type PendingSpawn = (
+                                startup_restore::RestorePublication,
+                                AgentConfig,
+                                Option<String>,
+                            );
                             let mut pending_spawns: Vec<PendingSpawn> = Vec::new();
-                            for mut config in configs {
+                            let mut seen_ids = std::collections::HashSet::new();
+                            for saved_config in configs {
+                                // A duplicate saved ID must not wait on a claim
+                                // this same pass already carries into pass 2.
+                                if !seen_ids.insert(saved_config.session_id.clone()) {
+                                    continue;
+                                }
+                                let Some(publication) = startup_restore::RestorePublication::begin(
+                                    &state,
+                                    &saved_config.session_id,
+                                ).await else {
+                                    continue;
+                                };
+                                // Only an unregistered agent may select the
+                                // startup snapshot, while holding its claim.
+                                let mut config = saved_config;
                                 // Sanitize name
                                 let mut sanitized_name = config
                                     .session_name
@@ -492,7 +495,9 @@ pub fn run() {
                                         None,
                                         None,
                                     );
-                                    insert_restored_agent(config.session_id.clone(), agent).await;
+                                    publish_restored_agent(
+                                        &app_handle, &publication, &config.session_id, agent,
+                                    ).await;
                                     continue;
                                 }
                                 let (last_status, last_pid, last_born) = db_status_map
@@ -508,7 +513,9 @@ pub fn run() {
                                         last_pid,
                                         last_born,
                                     );
-                                    insert_restored_agent(config.session_id.clone(), agent).await;
+                                    publish_restored_agent(
+                                        &app_handle, &publication, &config.session_id, agent,
+                                    ).await;
                                 } else {
                                     let placeholder = restored_agent_without_process(
                                         config.clone(),
@@ -517,9 +524,10 @@ pub fn run() {
                                         None,
                                         last_born.clone(),
                                     );
-                                    insert_restored_agent(config.session_id.clone(), placeholder)
-                                        .await;
-                                    pending_spawns.push((config, last_born));
+                                    publish_restored_agent(
+                                        &app_handle, &publication, &config.session_id, placeholder,
+                                    ).await;
+                                    pending_spawns.push((publication, config, last_born));
                                 }
                             }
 
@@ -535,7 +543,7 @@ pub fn run() {
                                 RESTORE_SPAWN_CONCURRENCY,
                             ));
                             let mut restore_tasks = tokio::task::JoinSet::new();
-                            for (mut config, last_born) in pending_spawns {
+                            for (publication, mut config, last_born) in pending_spawns {
                                 let app_handle = app_handle.clone();
                                 let restore_slots = restore_slots.clone();
                                 restore_tasks.spawn(async move {
@@ -563,6 +571,10 @@ pub fn run() {
                                                 "Failed to restore agent {}: {}",
                                                 config.session_id, error
                                             );
+                                            utils::logging::log_debug(&format!(
+                                                "[Wardian] Failed to restore agent {}: {}",
+                                                config.session_id, error
+                                            ));
                                             let _ = wardian_core::db::update_agent_status(
                                                 &config.session_id,
                                                 "Error",
@@ -581,15 +593,7 @@ pub fn run() {
                                         }
                                     };
                                     let state = app_handle.state::<AppState>();
-                                    let status = agent.current_status.clone();
-                                    let mut agents_map = state.agents.lock().await;
-                                    let mut order_map = state.agent_order.lock().await;
-                                    if !order_map.contains(&config.session_id) {
-                                        order_map.push(config.session_id.clone());
-                                    }
-                                    agents_map.insert(config.session_id.clone(), agent);
-                                    drop(agents_map);
-                                    drop(order_map);
+                                    let status = publication.publish(&state, agent).await;
                                     manager::publish_agent_status(
                                         &app_handle,
                                         &config.session_id,
@@ -607,11 +611,11 @@ pub fn run() {
                                 });
                             }
                             while restore_tasks.join_next().await.is_some() {}
-                            let agents_map = state.agents.lock().await;
-                            let order_map = state.agent_order.lock().await;
-                            manager::save_state(&app_handle, &agents_map, &order_map);
-                            drop(agents_map);
-                            drop(order_map);
+                            if let Err(error) = startup_restore::persist_roster(&state).await {
+                                manager::log_debug(&format!(
+                                    "[WARDIAN] Failed to persist state snapshot: {error}",
+                                ));
+                            }
                             let _ = app_handle.emit("agents-updated", ());
                         }
                     }
@@ -956,6 +960,11 @@ pub fn run() {
                 // Headless browsers are child processes; leaving them running
                 // after the app quits would strand them with no owner.
                 state.browser_sessions.shutdown_all().await;
+                if let Err(error) = state.native_delivery.shutdown_all().await {
+                    crate::utils::logging::log_debug(&format!(
+                        "Native owner exit cleanup: {error}"
+                    ));
+                }
             });
         }
     });

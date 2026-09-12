@@ -1,4 +1,5 @@
 pub mod codex_composer;
+pub mod codex_shared;
 pub mod headless_process;
 pub mod live_surface;
 pub mod native_broker;

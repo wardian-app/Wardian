@@ -64,10 +64,12 @@ sha2 = { workspace = true }
 subtle = { workspace = true }
 toml_edit = "0.25.11"
 tempfile = "3.26.0"
+socket2 = "0.6.3"
 
 [target.'cfg(windows)'.dependencies]
+junction = "1"
 win32job = "2.0.3"
-winapi = { version = "0.3.9", features = ["processthreadsapi", "winnt", "handleapi", "jobapi2"] }
+winapi = { version = "0.3.9", features = ["processthreadsapi", "winnt", "handleapi", "jobapi2", "fileapi"] }
 windows = { version = "0.58.0", features = [
     "Win32_Foundation",
     "Win32_UI_Shell", 
@@ -91,6 +93,10 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWi
 
 [dev-dependencies]
 anyhow = "1"
+tokio = { version = "1.49.0", features = ["test-util"] }
 tauri = { version = "=2.11.2", features = ["test"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+uds_windows = "1.2.1"
 
 # Optimize Disk Space for Debug Builds

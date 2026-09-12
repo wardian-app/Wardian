@@ -9,6 +9,7 @@ import { By } from "selenium-webdriver";
 import {
   createNativeHarness,
   ensureNativeAppBuilt,
+  freezeBuiltCliForRun,
   invokeTauri,
   prepareIsolatedHome,
   startNativeSession,
@@ -21,10 +22,6 @@ const RUN_ID = `${process.pid}-${Date.now()}`;
 const MODEL_TOKEN_SUFFIX = RUN_ID.replace(/\D/g, "");
 const SCREENSHOT_DATE = "2026-08-23";
 
-function commandName(name) {
-  return process.platform === "win32" ? `${name}.exe` : name;
-}
-
 function buildCli(harness) {
   const result = spawnSync("cargo", ["build", "-p", "wardian-cli", "--bin", "wardian-cli"], {
     cwd: harness.repoRoot,
@@ -35,7 +32,7 @@ function buildCli(harness) {
     0,
     `cargo build -p wardian-cli failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
   );
-  return path.join(harness.repoRoot, "target", "debug", commandName("wardian-cli"));
+  return freezeBuiltCliForRun(harness);
 }
 
 function runCli(cliPath, harness, args) {
