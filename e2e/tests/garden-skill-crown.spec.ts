@@ -143,7 +143,7 @@ async function installCrownIpcMock(page: Page) {
         if (command === "dismiss_onboarding_hint") {
           return { dismissed_hint_ids: ["spawn-agent-first-run:v1"] };
         }
-        if (command === "list_automations") return [];
+        if (command === "list_automations" || command === "schedule_list") return [];
         if (command === "automation_list_blueprints") {
           return { blueprints: [
             { id: "trident-alerts", path: "/w/library/automations/trident/trident-alerts.md" },
@@ -215,10 +215,8 @@ test.describe("Garden skill crown", () => {
       });
     }
 
-    // The districting claim, asserted rather than eyeballed: the Trident
-    // blueprints name a directory two agents live in, so they must land in that
-    // workspace district, while the blueprint naming nothing stays in the
-    // commons.
+    // Workspace territories come from agents. Undeployed blueprints do not
+    // acquire independent Garden objects merely by naming a workspace.
     const districts = await page.evaluate(
       () =>
         JSON.parse(localStorage.getItem("wardian-garden") ?? "{}")?.state?.scene?.districts
@@ -227,8 +225,13 @@ test.describe("Garden skill crown", () => {
     expect(Object.keys(districts)).toContain("workspace:d:/trading/trident");
 
     await expect(garden.getByTestId("garden-selection-summary")).toContainText(
-      "Select a unit to view its status.",
+      "Select to inspect",
     );
+    await expect(garden.locator('[data-garden-object^="automation:"]')).toHaveCount(0);
+    await garden.locator('[data-garden-object="agent:hw-01"]').press("Enter");
+    const capabilities = garden.getByRole("region", { name: "Skills", exact: true });
+    await expect(capabilities).toContainText("KiCad Review");
+    await expect(capabilities).toContainText("Class-inherited");
     await page.close();
   });
 });

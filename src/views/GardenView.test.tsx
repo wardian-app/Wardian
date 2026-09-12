@@ -1,5 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, render, screen } from "@testing-library/react";
+import type { ComponentProps } from "react";
+import type { GardenCamera } from "../features/garden/gardenNavigation";
+import type { GardenEntityRef } from "../features/garden/garden.types";
 
 const gardenAutomationSpy = vi.hoisted(() => vi.fn(() => (
   {
@@ -23,6 +26,9 @@ vi.mock("../features/garden/GardenCanvas", () => ({
     onOpenAgent,
     onResetLayout,
     onMoveUnit,
+    camera,
+    onCameraChange,
+    onSelect,
   }: {
     agentUnits: ReadonlyArray<{ ref: { id: string }; position: { x: number; y: number } }>;
     automationUnits: readonly unknown[];
@@ -30,6 +36,9 @@ vi.mock("../features/garden/GardenCanvas", () => ({
     onOpenAgent: (agentId: string) => void;
     onResetLayout: () => void;
     onMoveUnit: (key: string, x: number, y: number) => void;
+    camera?: GardenCamera;
+    onCameraChange: (camera: GardenCamera) => void;
+    onSelect: (ref: GardenEntityRef) => void;
   }) => {
     canvasRenders.count += 1;
     const first = agentUnits[0];
@@ -38,11 +47,14 @@ vi.mock("../features/garden/GardenCanvas", () => ({
       data-testid="garden-canvas"
       data-selected-key={selectedKey ?? "none"}
       data-first-position={first ? `${Math.round(first.position.x)},${Math.round(first.position.y)}` : "none"}
+      data-camera={JSON.stringify(camera)}
     >
       {agentUnits.length}:{automationUnits.length}
       <button type="button" onClick={() => onOpenAgent("a1")}>Open Agent</button>
       <button type="button" onClick={onResetLayout}>Reset Layout</button>
       <button type="button" onClick={() => onMoveUnit("agent:a1", 50_000, 50_000)}>Drag Far</button>
+      <button type="button" onClick={() => onCameraChange({ position: { x: (camera?.position.x ?? 0) + 10, y: (camera?.position.y ?? 0) - 5 }, scale: (camera?.scale ?? 1) * 1.1 })}>Move Camera</button>
+      <button type="button" onClick={() => onSelect({ kind: "agent", id: "a1" })}>Select Agent</button>
     </div>
     );
   },
@@ -66,7 +78,79 @@ beforeEach(() => {
   });
 });
 
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
+
+function renderPersistenceView(onSurfaceStateChange: ComponentProps<typeof GardenView>["onSurfaceStateChange"]) {
+  return render(<GardenView
+    initialSurfaceState={{ selected_unit_key: null, camera: { position: { x: 0, y: 0 }, scale: 1 } }}
+    onSurfaceStateChange={onSurfaceStateChange}
+    filteredAgents={[{ session_id: "a1", session_name: "Alpha" } as AgentConfig]}
+    telemetry={{}} teams={[]} activeList={null} interactions={{}}
+    selectedAgentIds={new Set()} offAgentIds={new Set()}
+    onSelectionChange={vi.fn()} onOpenAgent={vi.fn()}
+  />);
+}
+
 describe("GardenView", () => {
+  it("persists only the final camera after 250ms without another camera update", () => {
+    vi.useFakeTimers();
+    const persist = vi.fn();
+    renderPersistenceView(persist);
+    persist.mockClear(); // Initial navigation state is published immediately.
+
+    for (let update = 0; update < 3; update++) {
+      act(() => screen.getByRole("button", { name: "Move Camera" }).click());
+      act(() => vi.advanceTimersByTime(200));
+      expect(persist).not.toHaveBeenCalled();
+    }
+    act(() => vi.advanceTimersByTime(49));
+    expect(persist).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(1));
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(persist).toHaveBeenLastCalledWith(expect.objectContaining({
+      camera: { position: { x: 30, y: -15 }, scale: 1.1 * 1.1 * 1.1 },
+    }));
+    act(() => vi.advanceTimersByTime(1_000));
+    expect(persist).toHaveBeenCalledTimes(1);
+  });
+
+  it("flushes the latest pending camera on unmount and cancels its delayed save", () => {
+    vi.useFakeTimers();
+    const persist = vi.fn();
+    const view = renderPersistenceView(persist);
+    persist.mockClear();
+    act(() => screen.getByRole("button", { name: "Move Camera" }).click());
+    act(() => vi.advanceTimersByTime(200));
+    act(() => screen.getByRole("button", { name: "Move Camera" }).click());
+    expect(persist).not.toHaveBeenCalled();
+
+    view.unmount();
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(persist).toHaveBeenLastCalledWith(expect.objectContaining({
+      camera: { position: { x: 20, y: -10 }, scale: 1.1 * 1.1 },
+    }));
+    act(() => vi.advanceTimersByTime(1_000));
+    expect(persist).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists selection immediately with the latest camera during an unsettled gesture", () => {
+    vi.useFakeTimers();
+    const persist = vi.fn();
+    renderPersistenceView(persist);
+    persist.mockClear();
+    act(() => screen.getByRole("button", { name: "Move Camera" }).click());
+    act(() => vi.advanceTimersByTime(100));
+    expect(persist).not.toHaveBeenCalled();
+    act(() => screen.getByRole("button", { name: "Select Agent" }).click());
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(persist).toHaveBeenLastCalledWith(expect.objectContaining({
+      selected_unit_key: "agent:a1", camera: { position: { x: 10, y: -5 }, scale: 1.1 },
+    }));
+  });
+
   it("passes one agent unit and one automation unit to the canvas", () => {
     const agents = [{ session_id: "a1", session_name: "Alpha" } as AgentConfig];
     render(
@@ -84,16 +168,21 @@ describe("GardenView", () => {
     );
     expect(screen.getByTestId("garden-canvas")).toHaveTextContent("1:1");
     expect(screen.getByRole("region", { name: "Garden status legend" })).toHaveTextContent("Action Required");
-    expect(screen.getByTestId("garden-selection-summary")).toHaveTextContent("Select a unit to view its status.");
+    expect(screen.getByTestId("garden-selection-summary")).toHaveTextContent("Select to inspect");
   });
 
-  it("shows when the automation catalog is partial", () => {
-    gardenAutomationSpy.mockReturnValue({
+  it.each([
+    { nextOffset: 500, runsNextOffset: null, action: "Load more definitions", copy: "More automation definitions are available." },
+    { nextOffset: null, runsNextOffset: 200, action: "Check more runs", copy: "Some run records loaded. Some active or recent runs may be missing." },
+    { nextOffset: 500, runsNextOffset: 200, action: "Expand map coverage", copy: "More automation definitions are available." },
+  ])("explains partial map coverage with $action", ({ nextOffset, runsNextOffset, action, copy }) => {
+    const loadMore = vi.fn();
+    gardenAutomationSpy.mockReturnValue(Object.assign({
       automations: [{ id: "w1", label: "Build", runStatus: "none", nodeCount: 1 }],
       truncated: true,
-      nextOffset: 500,
-      loadMore: vi.fn(),
-    });
+      nextOffset,
+      loadMore,
+    }, { runsNextOffset }));
     const agents = [{ session_id: "a1", session_name: "Alpha" } as AgentConfig];
 
     render(
@@ -110,7 +199,13 @@ describe("GardenView", () => {
       />,
     );
 
-    expect(screen.getByRole("status")).toHaveTextContent("catalog is limited to the first 500");
+    const coverage = screen.getByText("Map coverage").closest("details")!;
+    expect(coverage).not.toHaveAttribute("open");
+    act(() => screen.getByText("Map coverage").click());
+    expect(screen.getByText(copy)).toBeVisible();
+    act(() => screen.getByRole("button", { name: action }).click());
+    expect(loadMore).toHaveBeenCalledOnce();
+    expect(screen.queryByText("Load next page")).not.toBeInTheDocument();
   });
 
 
@@ -244,7 +339,7 @@ describe("GardenView", () => {
       />,
     );
 
-    expect(gardenAutomationSpy).toHaveBeenCalledWith(false);
+    expect(gardenAutomationSpy).toHaveBeenCalledWith(false, { retainedProjectionIds: [] });
     expect(screen.queryByTestId("garden-canvas")).not.toBeInTheDocument();
     expect(screen.getByText(/renderer paused while hidden/i)).toBeInTheDocument();
   });
@@ -392,7 +487,8 @@ describe("GardenView", () => {
     );
 
     expect(screen.getByTestId("garden-canvas")).toHaveAttribute("data-selected-key", "agent:a1");
-    expect(screen.getByTestId("garden-selection-summary")).toHaveTextContent("Selected: Alpha · Idle");
-    expect(onSurfaceStateChange).toHaveBeenCalledWith({ selected_unit_key: "agent:a1" });
+    expect(screen.getByTestId("garden-selection-summary")).toHaveTextContent("AlphaIdle");
+    expect(screen.getByRole("button", { name: "Open agent session" })).toBeVisible();
+    expect(onSurfaceStateChange).toHaveBeenCalledWith(expect.objectContaining({ selected_unit_key: "agent:a1", trail: [], time_lens: "recent" }));
   });
 });

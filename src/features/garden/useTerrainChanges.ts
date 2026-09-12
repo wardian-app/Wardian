@@ -85,6 +85,8 @@ export interface TerrainChangeEntry {
 }
 
 export interface TerrainChangesResult {
+  /** Failed reads remain visible as a limitation, rather than an empty activity claim. */
+  errors: ReadonlyMap<string, string>;
   /** Normalized absolute path -> paint, including every changed path's ancestors. */
   paint: ReadonlyMap<string, TerrainPaint>;
   /** Normalized absolute path -> the change entry itself, for changed files only. */
@@ -148,6 +150,7 @@ export function useTerrainChanges(options: TerrainChangesOptions): TerrainChange
     () => new Map<string, HeldChangeSet>(),
   );
   const [withoutGit, setWithoutGit] = useState<ReadonlySet<string>>(() => new Set<string>());
+  const [errors, setErrors] = useState<ReadonlyMap<string, string>>(() => new Map());
   const inFlight = useRef(new Set<string>());
 
   const rootKey = useMemo(() => [...roots].sort().join(ROOT_KEY_SEPARATOR), [roots]);
@@ -192,6 +195,7 @@ export function useTerrainChanges(options: TerrainChangesOptions): TerrainChange
               request: { cwd: root, baseline, agent_id: null },
             });
             if (!response) continue;
+            setErrors((current) => { if (!current.has(root)) return current; const next = new Map(current); next.delete(root); return next; });
             setWithoutGit((current) => {
               const next = new Set(current);
               if (response.git_available) next.delete(root);
@@ -213,7 +217,8 @@ export function useTerrainChanges(options: TerrainChangesOptions): TerrainChange
               });
               return next;
             });
-          } catch {
+          } catch (error) {
+            setErrors((current) => new Map(current).set(root, String(error)));
             // A root that cannot be reviewed renders as unpainted ground. The
             // change-review spec is explicit that a failure here degrades the
             // view rather than becoming the view.
@@ -299,6 +304,7 @@ export function useTerrainChanges(options: TerrainChangesOptions): TerrainChange
   }, [enabled, changes, baseline]);
 
   return {
+    errors,
     paint,
     entries,
     baseline,

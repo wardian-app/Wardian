@@ -18,6 +18,7 @@ import type { SelectedAgentGitStatus } from "../features/git/useSelectedAgentGit
 import { ChangesPanel } from "../features/changes/ChangesPanel";
 import { useRunStore } from "../features/automations/run/useRunStore";
 import { useSchedulesStore } from "../store/useSchedulesStore";
+import { useListenersStore } from "../store/useListenersStore";
 import { useAutomationsView } from "../store/useAutomationsView";
 
 interface SidebarContentPaneProps {
@@ -125,7 +126,11 @@ export const SidebarContentPane: React.FC<SidebarContentPaneProps> = ({
           />
         )}
         {activeTab === "automations" && (
-          <AutomationsGlancePane agents={agents} onOpenSurface={onOpenSurface} />
+          <AutomationsGlancePane
+            agents={agents}
+            selectedAgentIds={selectedAgentIds}
+            onOpenSurface={onOpenSurface}
+          />
         )}
 
       </div>
@@ -163,15 +168,23 @@ function SidebarPaneHeader({
 
 interface AutomationsGlancePaneProps {
   agents: AgentConfig[];
+  selectedAgentIds: ReadonlySet<string>;
   onOpenSurface: (request: OpenSurfaceRequest) => void;
 }
 
-const AutomationsGlancePane: React.FC<AutomationsGlancePaneProps> = ({ agents, onOpenSurface }) => {
+const AutomationsGlancePane: React.FC<AutomationsGlancePaneProps> = ({
+  agents,
+  selectedAgentIds,
+  onOpenSurface,
+}) => {
   const schedules = useSchedulesStore((state) => state.schedules);
   const loadSchedules = useSchedulesStore((state) => state.load);
   const pauseSchedule = useSchedulesStore((state) => state.pause);
   const resumeSchedule = useSchedulesStore((state) => state.resume);
   const runScheduleNow = useSchedulesStore((state) => state.runNow);
+  const listeners = useListenersStore((state) => state.listeners);
+  const loadListeners = useListenersStore((state) => state.load);
+  const subscribeListeners = useListenersStore((state) => state.subscribe);
   const runs = useRunStore((state) => state.runs);
   const loadRuns = useRunStore((state) => state.loadRuns);
   const openRun = useRunStore((state) => state.openRun);
@@ -188,9 +201,20 @@ const AutomationsGlancePane: React.FC<AutomationsGlancePaneProps> = ({ agents, o
     return () => window.clearInterval(timer);
   }, [loadRuns, loadSchedules, schedules.length]);
 
+  useEffect(() => {
+    void loadListeners();
+    let unlisten: (() => void) | undefined;
+    void subscribeListeners().then((listener) => {
+      unlisten = listener;
+    });
+    return () => unlisten?.();
+  }, [loadListeners, subscribeListeners]);
+
   return (
     <AutomationMonitorGlance
       agents={agents}
+      selectedAgentIds={selectedAgentIds}
+      listeners={listeners}
       schedules={schedules}
       activeRuns={activeRuns}
       onOpenRun={(blueprintId, runId) => {

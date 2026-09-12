@@ -6,6 +6,9 @@ import type { BlueprintListResult, BlueprintRef } from '../automationTypes';
 import { useListenersStore } from '../../../store/useListenersStore';
 import { ListenerEditor, defaultTrigger } from '../ListenerEditor';
 import { ListenersTable } from './ListenersTable';
+import { automationRecordMatchesAgentScope } from '../agentScope';
+
+const EMPTY_AGENT_SCOPE = new Set<string>();
 
 function blankListener(blueprintId: string): AutomationListener {
   return {
@@ -31,11 +34,13 @@ function blankListener(blueprintId: string): AutomationListener {
   };
 }
 
-export function ListenersPanel() {
+export function ListenersPanel({
+  selectedAgentIds = EMPTY_AGENT_SCOPE,
+}: {
+  selectedAgentIds?: ReadonlySet<string>;
+}) {
   const listeners = useListenersStore((state) => state.listeners);
   const error = useListenersStore((state) => state.error);
-  const load = useListenersStore((state) => state.load);
-  const subscribe = useListenersStore((state) => state.subscribe);
   const save = useListenersStore((state) => state.save);
   const remove = useListenersStore((state) => state.remove);
   const setEnabled = useListenersStore((state) => state.setEnabled);
@@ -47,15 +52,6 @@ export function ListenersPanel() {
   const [revealedSecret, setRevealedSecret] = useState<string | null>(null);
 
   useEffect(() => {
-    void load();
-    let dispose: (() => void) | undefined;
-    void subscribe().then((unlisten) => {
-      dispose = unlisten;
-    });
-    return () => dispose?.();
-  }, [load, subscribe]);
-
-  useEffect(() => {
     void invoke<BlueprintListResult>('automation_list_blueprints')
       .then((result) => setBlueprints(result.blueprints))
       .catch(() => setBlueprints([]));
@@ -64,6 +60,10 @@ export function ListenersPanel() {
   const blueprintOptions = useMemo(
     () => blueprints.slice().sort((left, right) => left.name.localeCompare(right.name)),
     [blueprints],
+  );
+  const visibleListeners = useMemo(
+    () => listeners.filter((listener) => automationRecordMatchesAgentScope(listener, selectedAgentIds)),
+    [listeners, selectedAgentIds],
   );
 
   const startNew = useCallback(() => {
@@ -97,7 +97,8 @@ export function ListenersPanel() {
         <div className="min-w-0">
           <h3 className="text-xs font-bold text-[var(--color-wardian-text)]">Listeners</h3>
           <div className="mt-0.5 truncate text-[10px] text-muted">
-            {listeners.length} event {listeners.length === 1 ? 'listener' : 'listeners'}
+            {visibleListeners.length} event {visibleListeners.length === 1 ? 'listener' : 'listeners'}
+            {selectedAgentIds.size > 0 ? ' for selected agents' : ''}
           </div>
         </div>
         <button
@@ -138,7 +139,7 @@ export function ListenersPanel() {
 
       <div className="min-h-0 flex-1 overflow-auto px-3 pb-3">
         <ListenersTable
-          listeners={listeners}
+          listeners={visibleListeners}
           onSetEnabled={(id, enabled) => void setEnabled(id, enabled)}
           onRemove={(id) => void remove(id)}
           onEdit={(listener: ListenerView) => {

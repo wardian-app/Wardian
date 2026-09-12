@@ -225,6 +225,29 @@ Structured replies attach to the parent task interaction and carry the reply sta
 }
 ```
 
+### Chat transcript provenance
+
+`AgentChatEvent.role` is the normalized presentation and turn-segmentation
+role, not a copy of a provider's native message role. Provider adapters must
+classify provenance before emitting chat events:
+
+- genuine operator or agent prompts are `kind: "message"`, `role: "user"`,
+  with `metadata.input_origin` set to `human_input` or `agent_input`;
+- provider-supplied context and provider-internal messages are `kind:
+  "message"`, `role: "system"`, with an explicit `input_origin` such as
+  `context_injection` or `provider_internal`;
+- tool results are `kind: "tool_result"`, `role: "tool"`, and retain their
+  provider tool identity in `turn_id` or metadata.
+
+Some providers, including Claude, encode all three cases in native `user`
+records. Consumers must use the normalized role and provenance metadata rather
+than the raw provider role or text to identify prompts and turn boundaries.
+Desktop and remote chat both use the shared backend transcript loader and
+archive replay path, so provider provenance must be corrected there once. The
+replay boundary also canonicalizes legacy archived roles from their persisted
+`input_origin` metadata; historical archive files do not need a destructive
+rewrite to display the corrected classification.
+
 ### Provider Input State
 
 Live delivery readiness is tracked per provider runtime generation. The generation increments when a provider process is spawned, resumed, cleared, or reattached. Delivery may drain queued work only after readiness evidence for the current generation.

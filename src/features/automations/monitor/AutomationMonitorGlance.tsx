@@ -1,13 +1,22 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import type { AgentConfig } from '../../../types';
-import type { AutomationSchedule } from '../../../types/automation';
+import type { AutomationSchedule, ListenerView } from '../../../types/automation';
 import type { RunSummary } from '../run/runTypes';
 import { AutomationGlanceCard } from './AutomationGlanceCard';
 import { buildAgentLabelMap, automationAssignmentItems } from './assignmentPresentation';
 import { scheduleStatusLabel } from './scheduleStatus';
+import {
+  automationBlueprintIdsForAgents,
+  automationRecordMatchesAgentScope,
+  automationRunMatchesAgentScope,
+} from '../agentScope';
+
+const EMPTY_AGENT_SCOPE = new Set<string>();
 
 interface GlanceProps {
   agents: AgentConfig[];
+  selectedAgentIds?: ReadonlySet<string>;
+  listeners?: readonly ListenerView[];
   schedules: AutomationSchedule[];
   activeRuns: RunSummary[];
   onOpenRun: (blueprintId: string, runId: string) => void;
@@ -19,6 +28,8 @@ interface GlanceProps {
 
 export function AutomationMonitorGlance({
   agents,
+  selectedAgentIds = EMPTY_AGENT_SCOPE,
+  listeners = [],
   schedules,
   activeRuns,
   onOpenRun,
@@ -29,15 +40,35 @@ export function AutomationMonitorGlance({
 }: GlanceProps) {
   const [query, setQuery] = useState('');
   const normalizedQuery = query.trim().toLowerCase();
-  const matchesQuery = (text: string) => !normalizedQuery || text.toLowerCase().includes(normalizedQuery);
+  const matchesQuery = useCallback(
+    (text: string) => !normalizedQuery || text.toLowerCase().includes(normalizedQuery),
+    [normalizedQuery],
+  );
   const agentLabels = useMemo(() => buildAgentLabelMap(agents), [agents]);
   const schedulesById = useMemo(
     () => new Map(schedules.map((schedule) => [schedule.id, schedule])),
     [schedules],
   );
+  const scopedBlueprintIds = useMemo(
+    () => automationBlueprintIdsForAgents([...schedules, ...listeners], selectedAgentIds),
+    [listeners, schedules, selectedAgentIds],
+  );
+  const scopedSchedules = useMemo(
+    () => schedules.filter((schedule) => automationRecordMatchesAgentScope(schedule, selectedAgentIds)),
+    [schedules, selectedAgentIds],
+  );
+  const scopedRuns = useMemo(
+    () => activeRuns.filter((run) => automationRunMatchesAgentScope(
+      run,
+      schedulesById,
+      scopedBlueprintIds,
+      selectedAgentIds,
+    )),
+    [activeRuns, schedulesById, scopedBlueprintIds, selectedAgentIds],
+  );
 
   const visibleRuns = useMemo(
-    () => activeRuns.filter((run) => {
+    () => scopedRuns.filter((run) => {
       const schedule = run.schedule_id ? schedulesById.get(run.schedule_id) : undefined;
       const assignmentLabels = schedule
         ? automationAssignmentItems(schedule.assignments, schedule.bindings, schedule.provider, agentLabels)
@@ -53,10 +84,10 @@ export function AutomationMonitorGlance({
         assignmentLabels,
       ].filter(Boolean).join(' '));
     }),
-    [activeRuns, agentLabels, normalizedQuery, schedulesById],
+    [agentLabels, matchesQuery, schedulesById, scopedRuns],
   );
   const visibleSchedules = useMemo(
-    () => schedules.filter((schedule) => {
+    () => scopedSchedules.filter((schedule) => {
       const assignmentLabels = automationAssignmentItems(
         schedule.assignments,
         schedule.bindings,
@@ -71,7 +102,7 @@ export function AutomationMonitorGlance({
         assignmentLabels,
       ].filter(Boolean).join(' '));
     }),
-    [agentLabels, normalizedQuery, schedules],
+    [agentLabels, matchesQuery, scopedSchedules],
   );
 
   const attentionRuns = visibleRuns.filter((run) => run.status === 'awaiting_approval');
@@ -83,8 +114,15 @@ export function AutomationMonitorGlance({
 
   return (
     <div className="flex min-h-0 flex-col gap-3">
-      <div className="flex items-center justify-between gap-2">
-        <h2 className="text-sm font-bold text-primary">Automations</h2>
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h2 className="text-sm font-bold text-primary">Automations</h2>
+          {selectedAgentIds.size > 0 ? (
+            <p className="mt-0.5 truncate text-[10px] text-muted" data-testid="automation-sidebar-agent-scope">
+              {selectedAgentIds.size === 1 ? 'Selected agent' : `${selectedAgentIds.size} selected agents`}
+            </p>
+          ) : null}
+        </div>
         <button
           type="button"
           onClick={onOpenMonitor}
