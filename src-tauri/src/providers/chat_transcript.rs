@@ -220,7 +220,8 @@ fn normalize_pi(
                     AgentChatRole::User,
                     text_from_value(message)?,
                     msg_type.into(),
-                    turn_id_from(message),
+                    super::pi::provenance::message_entry_id(parsed)
+                        .or_else(|| turn_id_from(message)),
                     "message",
                 ),
                 "assistant" => {
@@ -232,7 +233,8 @@ fn normalize_pi(
                             AgentChatRole::Assistant,
                             text,
                             msg_type.into(),
-                            turn_id_from(message),
+                            super::pi::provenance::message_entry_id(parsed)
+                                .or_else(|| turn_id_from(message)),
                             "message",
                         );
                     }
@@ -1149,7 +1151,7 @@ fn normalize_gemini(
     }
 }
 
-fn normalize_antigravity(
+pub(super) fn normalize_antigravity(
     session_id: &str,
     provider: &str,
     parsed: &Value,
