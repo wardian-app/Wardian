@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 import {
   createNativeHarness,
   ensureNativeAppBuilt,
+  freezeBuiltCliForRun,
   prepareIsolatedHome,
   startNativeSession,
   waitForAppShell,
@@ -18,10 +19,6 @@ const RUN_ID = `${process.pid}-${Date.now()}`;
 const PROVIDER_SESSION_ID = `e2e-worktree-${RUN_ID}`;
 const SESSION_NAME = `E2E-Worktree-${RUN_ID}`;
 const WORKTREE_NAME = `review-${RUN_ID}`;
-
-function commandName(name) {
-  return process.platform === "win32" ? `${name}.exe` : name;
-}
 
 function normalizeForWardianRecords(workspacePath) {
   return workspacePath.split(path.sep).join("/");
@@ -71,9 +68,7 @@ function buildCli(harness) {
     cwd: harness.repoRoot,
   });
 
-  const candidate = path.join(harness.repoRoot, "target", "debug", commandName("wardian-cli"));
-  assert.equal(fs.existsSync(candidate), true, `wardian-cli binary was not found at ${candidate}`);
-  return candidate;
+  return freezeBuiltCliForRun(harness);
 }
 
 function runCli(cliPath, harness, args) {
@@ -121,12 +116,12 @@ async function spawnOffMockAgent(driver, repoPath) {
 
 test("CLI worktree mode enables, lists, and disables without deleting the physical worktree", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
-  assert.ok(harness.appPath);
 
   try {
     if (!skipNativeBuild) {
       ensureNativeAppBuilt(harness);
     }
+    assert.ok(harness.appPath);
   } catch (error) {
     t.skip(String(error));
     return;

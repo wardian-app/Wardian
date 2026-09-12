@@ -4,11 +4,12 @@ import type { BlueprintListResult, BlueprintRef } from './automationTypes';
 
 interface BlueprintSelectorProps {
   selectedPath?: string | null;
+  visibleBlueprintIds?: ReadonlySet<string>;
   onOpen: (path: string) => void;
   onNew: () => void;
 }
 
-export function BlueprintSelector({ selectedPath, onOpen, onNew }: BlueprintSelectorProps) {
+export function BlueprintSelector({ selectedPath, visibleBlueprintIds, onOpen, onNew }: BlueprintSelectorProps) {
   const [blueprints, setBlueprints] = useState<BlueprintRef[]>([]);
   const [blueprintsTruncated, setBlueprintsTruncated] = useState(false);
   const [nextOffset, setNextOffset] = useState<number | null>(null);
@@ -44,6 +45,11 @@ export function BlueprintSelector({ selectedPath, onOpen, onNew }: BlueprintSele
       setLoadingMore(false);
     }
   }, [loadingMore, nextOffset]);
+  const visibleBlueprints = blueprints.filter((blueprint) => (
+    !visibleBlueprintIds
+    || visibleBlueprintIds.has(blueprint.id)
+    || blueprint.path === selectedPath
+  ));
 
   return (
     <div className="blueprint-selector flex items-center gap-2" data-testid="blueprint-selector" data-tour-target="automation-blueprint-selector">
@@ -67,9 +73,11 @@ export function BlueprintSelector({ selectedPath, onOpen, onNew }: BlueprintSele
         }}
       >
         <option value="" disabled>
-          Open blueprint...
+          {visibleBlueprintIds && visibleBlueprints.length === 0
+            ? 'No workflows for selected agents'
+            : 'Open blueprint...'}
         </option>
-        {blueprints.map((blueprint) => (
+        {visibleBlueprints.map((blueprint) => (
           <option key={blueprint.path} value={blueprint.path}>
             {blueprint.name}
           </option>

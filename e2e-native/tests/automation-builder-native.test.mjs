@@ -28,12 +28,12 @@ async function invokeTauri(driver, command, args = {}) {
 
 test("native blueprint commands parse, validate, and write round-trip", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
-  assert.ok(harness.appPath);
 
   try {
     if (!skipNativeBuild) {
       ensureNativeAppBuilt(harness);
     }
+    assert.ok(harness.appPath);
   } catch (error) {
     t.skip(String(error));
     return;

@@ -278,6 +278,13 @@ Runtime commands are explicit and backend-owned:
 Persisted workbench tabs are not pruned when a runtime disappears. They restore
 as unavailable placeholders and can recover when the resource returns.
 
+When a provider fails during startup restoration, the backend publishes its
+launch error into a paused terminal session with no PTY or input handles. The
+error is included in the first snapshot, so existing views and terminals opened
+later can show it. A successful restart replaces that diagnostic generation
+with the real runtime and clears the old error. The agent watch output retains
+the same launch explanation; the terminal is a presentation of that failure.
+
 ## Compatibility Boundary
 
 Legacy raw desktop input/resize and remote v1 paths are temporary adapters to

@@ -4,6 +4,11 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import {
+  assertNativeNodeDependencies,
+  resolveExplicitNativeApp,
+} from "../e2e-native/lib/native-artifact-resolution.mjs";
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "..");
@@ -192,6 +197,31 @@ function ensureCargo() {
   return cargo;
 }
 
+/**
+ * Checks package-local native test dependencies before any driver setup or
+ * native test can be attempted.
+ */
+export function validateNativeSetupDependencies({
+  root = repoRoot,
+  requireResolve,
+} = {}) {
+  return assertNativeNodeDependencies({
+    repoRoot: root,
+    requireResolve,
+  });
+}
+
+/**
+ * Validates an explicitly supplied app artifact without requiring a build.
+ * An unset override is valid during setup because the app may be built later.
+ */
+export function validateNativeSetupArtifact({
+  root = repoRoot,
+  env = process.env,
+} = {}) {
+  return resolveExplicitNativeApp({ repoRoot: root, env });
+}
+
 function ensureTauriDriver(options) {
   if (options.skipTauriDriver) {
     console.log("Skipping tauri-driver setup.");
@@ -307,6 +337,8 @@ export function main(argv = process.argv.slice(2)) {
   }
 
   ensureCargo();
+  validateNativeSetupDependencies();
+  validateNativeSetupArtifact();
   ensureTauriDriver(options);
   ensureNativeDriver(options);
 

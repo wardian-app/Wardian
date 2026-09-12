@@ -12,6 +12,16 @@ impl Default for CodexProvider {
 }
 
 impl CodexProvider {
+    /// A no-turn host inbox append has no originating model call. Its body is
+    /// deliberately irrelevant: quoted packets or model tool results cannot
+    /// opt out of activity tracking by mentioning this operation.
+    pub(crate) fn is_nonwaking_inbox_output(item: &serde_json::Value) -> bool {
+        item["type"] == "function_call_output"
+            && item["name"] == "wardian_inbox_delivery"
+            && item["namespace"] == "wardian"
+            && item.get("call_id").is_none_or(serde_json::Value::is_null)
+    }
+
     pub fn new() -> Self {
         CodexProvider
     }
@@ -114,6 +124,60 @@ impl CodexProvider {
     ) {
         let runtime_policy = crate::utils::load_codex_runtime_policy().unwrap_or_default();
         self.append_common_args_with_runtime_policy(args, config, is_exec_mode, &runtime_policy);
+    }
+
+    /// App-server owns execution policy; the attached TUI must not replace it.
+    /// Reject launch forms whose semantics have not been verified for remote mode.
+    pub(crate) fn shared_server_args(&self, config: &AgentConfig) -> Result<Vec<String>, String> {
+        let codex = config.codex_config();
+        if codex
+            .profile
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            || config
+                .custom_args
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+        {
+            return Err("shared Codex does not yet support profile/custom launch arguments".into());
+        }
+        let global = crate::utils::load_codex_runtime_policy().unwrap_or_default();
+        let policy = effective_codex_runtime_policy(&codex, &global);
+        if policy.approval_policy == "untrusted" && !policy.full_auto {
+            return Err(
+                "installed Codex rejects untrusted; choose an explicit supported policy".into(),
+            );
+        }
+        let mut args = vec!["app-server".to_owned()];
+        let mut set = |key: &str, value: &str| {
+            args.extend(["-c".into(), format!("{key}={}", toml_basic_string(value))]);
+        };
+        if let Some(model) = &config.model {
+            set("model", model);
+        }
+        if let Some(effort) = &codex.reasoning_effort {
+            set("model_reasoning_effort", effort);
+        }
+        if policy.full_auto {
+            set("sandbox_mode", "danger-full-access");
+            set("approval_policy", "never");
+        } else if policy.approval_policy == "approve-for-me" {
+            set("sandbox_mode", "workspace-write");
+            set("approval_policy", "on-request");
+            set("approvals_reviewer", "guardian_subagent");
+        } else {
+            set("sandbox_mode", &policy.sandbox_mode);
+            set("approval_policy", &policy.approval_policy);
+        }
+        if codex.search.unwrap_or(false) {
+            set("web_search", "live");
+        }
+        if policy.trust_workspaces {
+            if let Some(project) = codex_trusted_project_override(&config.folder) {
+                args.extend(["-c".into(), project]);
+            }
+        }
+        Ok(args)
     }
 
     /// Append the flags that are valid before the `exec` subcommand.
@@ -543,6 +607,9 @@ impl AgentProvider for CodexProvider {
             }
             "response_item" => {
                 let payload = parsed.get("payload")?;
+                if Self::is_nonwaking_inbox_output(payload) {
+                    return Some(AgentEvent::Unknown);
+                }
                 let payload_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 match payload_type {
                     "function_call" => {
@@ -562,6 +629,15 @@ impl AgentProvider for CodexProvider {
                         let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("");
                         match role {
                             "assistant" => Some(AgentEvent::Unknown),
+                            "user"
+                                if super::chat_transcript::codex_response_item_user_context(
+                                    payload,
+                                    "response_item",
+                                    &wardian_core::models::chat::AgentChatRole::User,
+                                ) =>
+                            {
+                                Some(AgentEvent::Unknown)
+                            }
                             "user" => Some(AgentEvent::UserQuery),
                             _ => Some(AgentEvent::Unknown),
                         }
@@ -611,6 +687,8 @@ impl AgentProvider for CodexProvider {
 mod tests {
     use super::*;
     use wardian_core::models::ProviderConfig;
+
+    mod status;
 
     fn make_provider() -> CodexProvider {
         CodexProvider::new()
@@ -1115,120 +1193,5 @@ SET dp0=%~dp0
 
         assert_eq!(executable, "node");
         assert_eq!(args, vec![codex_js.to_string_lossy().to_string()]);
-    }
-
-    #[test]
-    fn parse_output_thread_started_event() {
-        let p = make_provider();
-        let line = r#"{"type":"thread.started","thread_id":"abc-123"}"#;
-        let event = p.parse_output(line).unwrap();
-        assert_eq!(
-            event,
-            AgentEvent::Init {
-                session_id: "abc-123".into(),
-                timestamp: None,
-            }
-        );
-    }
-
-    #[test]
-    fn parse_output_turn_started_event() {
-        let p = make_provider();
-        let line = r#"{"type":"turn.started"}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::UserQuery);
-    }
-
-    #[test]
-    fn parse_output_turn_completed_event() {
-        let p = make_provider();
-        let line = r#"{"type":"turn.completed","usage":{"input_tokens":1}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::TurnCompleted);
-    }
-
-    #[test]
-    fn parse_output_agent_message_event() {
-        let p = make_provider();
-        let line = r#"{"type":"item.completed","item":{"type":"agent_message","text":"hello"}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Unknown);
-    }
-
-    #[test]
-    fn parse_output_task_started_event() {
-        let p = make_provider();
-        let line = r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"abc"}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
-    }
-
-    #[test]
-    fn parse_output_task_complete_event() {
-        let p = make_provider();
-        let line = r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"abc"}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::TurnCompleted);
-    }
-
-    #[test]
-    fn parse_output_interrupted_turn_event() {
-        let p = make_provider();
-        let line = r#"{"type":"turn.aborted"}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::TurnInterrupted);
-    }
-
-    #[test]
-    fn parse_output_agent_message_does_not_change_status() {
-        let p = make_provider();
-        let line = r#"{"type":"event_msg","payload":{"type":"agent_message","message":"Waiting for approval"}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Unknown);
-    }
-
-    #[test]
-    fn parse_output_exec_command_begin_sets_generating() {
-        let p = make_provider();
-        let line = r#"{"type":"event_msg","payload":{"type":"exec_command_begin","command":"git status"}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
-    }
-
-    #[test]
-    fn parse_output_function_call_output_resumes_processing() {
-        let p = make_provider();
-        let line =
-            r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"abc"}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
-    }
-
-    #[test]
-    fn parse_output_live_activity_response_items_set_generating() {
-        let p = make_provider();
-        for payload_type in [
-            "reasoning",
-            "function_call",
-            "custom_tool_call",
-            "custom_tool_call_output",
-        ] {
-            let line = format!(
-                r#"{{"type":"response_item","payload":{{"type":"{}","call_id":"abc"}}}}"#,
-                payload_type
-            );
-
-            assert_eq!(p.parse_output(&line).unwrap(), AgentEvent::Generating);
-        }
-    }
-
-    #[test]
-    fn parse_output_response_item_function_call_requires_approval() {
-        let p = make_provider();
-        let line = r#"{"type":"response_item","payload":{"type":"function_call","arguments":"{\"command\":\"Get-Content foo\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Allow reading foo?\"}"}}"#;
-        assert_eq!(
-            p.parse_output(line).unwrap(),
-            AgentEvent::ActionRequired {
-                message: "Allow reading foo?".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn parse_output_response_item_function_call_without_approval_sets_generating() {
-        let p = make_provider();
-        let line = r#"{"type":"response_item","payload":{"type":"function_call","arguments":"{\"command\":\"Get-Content foo\"}"}}"#;
-        assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
     }
 }

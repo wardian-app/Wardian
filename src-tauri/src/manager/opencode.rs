@@ -81,6 +81,24 @@ pub(crate) fn opencode_database_path() -> Option<std::path::PathBuf> {
         .find(|path| path.exists())
 }
 
+pub(crate) fn opencode_telemetry_session_id(config: &AgentConfig) -> Option<String> {
+    if config.provider != "opencode" {
+        return config.resume_session.clone();
+    }
+    config
+        .resume_session
+        .as_deref()
+        .filter(|value| value.starts_with("ses_"))
+        .map(ToString::to_string)
+        .or_else(|| {
+            config
+                .fresh_provider_session_id
+                .as_deref()
+                .filter(|value| value.starts_with("ses_"))
+                .map(ToString::to_string)
+        })
+}
+
 /// Captures the OpenCode session created by this Wardian launch. OpenCode's
 /// session list is global to the provider data root, so a directory/time match
 /// alone is not ownership evidence when multiple agents share a workspace.
@@ -109,6 +127,53 @@ pub(crate) fn opencode_recent_session_for_workspace(
     }
 
     (candidates.len() == 1).then(|| candidates.into_iter().next().expect("one candidate"))
+}
+
+type OpenCodeLogRevision = Vec<(std::path::PathBuf, u64, Option<std::time::SystemTime>)>;
+
+/// Discovers an owned session independently of title-derived activity. Unchanged
+/// logs require metadata checks only, including while an idle agent awaits input.
+#[derive(Default)]
+pub(crate) struct OpenCodeSessionDiscovery {
+    previous: Option<OpenCodeLogRevision>,
+}
+
+impl OpenCodeSessionDiscovery {
+    pub(crate) fn poll(
+        &mut self,
+        status: &str,
+        workspace: &std::path::Path,
+        created_after_ms: i64,
+        wardian_session_id: &str,
+    ) -> Option<String> {
+        let mut revision = opencode_log_dirs()
+            .iter()
+            .flat_map(|directory| opencode_log_files_in(directory))
+            .filter_map(|path| {
+                let metadata = std::fs::metadata(&path).ok()?;
+                Some((path, metadata.len(), metadata.modified().ok()))
+            })
+            .collect::<Vec<_>>();
+        revision.sort_by(|left, right| left.0.cmp(&right.0));
+        self.poll_with(status, revision, || {
+            opencode_recent_session_for_workspace(workspace, created_after_ms, wardian_session_id)
+        })
+    }
+
+    fn poll_with(
+        &mut self,
+        status: &str,
+        revision: OpenCodeLogRevision,
+        lookup: impl FnOnce() -> Option<String>,
+    ) -> Option<String> {
+        if wardian_core::identity::normalize_status(status) == "off"
+            || self.previous.as_ref() == Some(&revision)
+        {
+            return None;
+        }
+        self.previous = Some(revision);
+        lookup()
+    }
 }
 
 fn normalize_opencode_workspace(path: &str) -> String {
@@ -680,6 +745,26 @@ mod tests {
     }
 
     #[test]
+    fn opencode_telemetry_prefers_a_valid_resume_or_fresh_session() {
+        let mut config = AgentConfig {
+            provider: "opencode".to_string(),
+            resume_session: Some("wardian-agent-id".to_string()),
+            fresh_provider_session_id: Some("ses_fresh".to_string()),
+            ..AgentConfig::default()
+        };
+        assert_eq!(
+            opencode_telemetry_session_id(&config).as_deref(),
+            Some("ses_fresh")
+        );
+
+        config.resume_session = Some("ses_resume".to_string());
+        assert_eq!(
+            opencode_telemetry_session_id(&config).as_deref(),
+            Some("ses_resume")
+        );
+    }
+
+    #[test]
     fn opencode_session_recovery_requires_the_agent_owned_launch_run() {
         let workspace = if cfg!(windows) {
             std::path::PathBuf::from(r"D:\work\project")
@@ -701,6 +786,40 @@ mod tests {
         assert_eq!(
             select_opencode_session_from_launch_log(&log, &workspace, 250, "agent-1").as_deref(),
             Some("ses_owner")
+        );
+        let mut discovery = OpenCodeSessionDiscovery::default();
+        let revision = vec![(
+            std::path::PathBuf::from("opencode.log"),
+            log.len() as u64,
+            None,
+        )];
+        assert_eq!(
+            discovery
+                .poll_with("Idle", revision.clone(), || {
+                    select_opencode_session_from_launch_log(&log, &workspace, 250, "agent-1")
+                })
+                .as_deref(),
+            Some("ses_owner"),
+            "A completed owned session must be discovered without a Processing title"
+        );
+        assert_eq!(
+            discovery.poll_with("Idle", revision.clone(), || panic!("unchanged log reread")),
+            None
+        );
+        let changed = vec![(
+            std::path::PathBuf::from("opencode.log"),
+            log.len() as u64 + 1,
+            None,
+        )];
+        assert_eq!(
+            discovery.poll_with("Off", changed.clone(), || panic!("stopped owner scanned")),
+            None
+        );
+        assert_eq!(
+            discovery
+                .poll_with("Idle", changed, || Some("ses_next".into()))
+                .as_deref(),
+            Some("ses_next")
         );
     }
 
