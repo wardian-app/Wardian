@@ -359,6 +359,7 @@ This is how OpenCode sees Wardian-managed class and agent context without forcin
 - Resume uses `--session <session_id>`.
 - Wardian resolves OpenCode's database and rolling log from `XDG_DATA_HOME` first, then the platform data directories. This matters on Windows as well: OpenCode honors the XDG override, so using only `%LOCALAPPDATA%` can associate a session with another installation's transcript.
 - Once that launch-scoped identity is available, transcript refresh reads OpenCode's SQLite `message`/`part` rows and retains the database path as `source_path` provenance metadata; later rows are visible on the next refresh without restarting the agent.
+- SQLite tool parts expose native call IDs, names, structured input, and completed or failed output. Pending parts do not create placeholder results. Tool output has the Tool role; tool events never create human prompts. Tool IDs remain stable across refreshes, and adding previously omitted tools preserves existing text-event IDs. The retained fixture covers OpenCode 1.18.29; unknown states and conflicting native identities are omitted.
 
 ### Headless prompt input
 
