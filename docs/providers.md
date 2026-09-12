@@ -103,6 +103,11 @@ Wardian assigns fresh Claude session IDs up front and uses explicit resume flags
 
 Visible Claude agents run through Claude Code's interactive mode. Do not pass `--input-format stream-json` or `--output-format stream-json` to interactive launches; Claude Code treats those as print-mode flags. Wardian keeps stream-json output only for headless/bootstrap flows that also pass `--print`.
 
+Startup readiness requires a composer and its footer on the current terminal
+screen. The external `CLAUDE.md` import consent menu is `Action Needed`, not an
+idle composer. Queued prompts remain pending until the consent is resolved and
+the composer appears. Wardian does not accept external imports automatically.
+
 ### Debug First
 
 If Claude appears blocked, inspect the permission hook output, `CLAUDE.md` discovery, and resume flags before treating the issue as a generic PTY failure. If mobile or remote drag scrolling fails only for Claude, verify that the managed launch environment still includes Claude Code's alternate-screen opt-out.
@@ -179,6 +184,33 @@ identifies the physical home; include that target when backing up provider
 state. Startup reports an error if no secure location fits. This temporary
 workaround is tracked for removal in
 [#1235](https://github.com/wardian-app/Wardian/issues/1235).
+
+Startup delivery for Codex uses the current terminal screen and keeps messages
+queued while the model banner is loading or the session is resuming. Codex can
+also display a pasted draft while its session is still loading. Automated
+delivery withholds Return while the current terminal screen shows the loading
+model banner or `Resuming session…`, even when the complete draft is visible.
+The existing composer-confirmation timeout still applies; no automatic retry
+or second paste occurs.
+
+Codex model-migration choices are `Action Needed`, not a composer. Wardian
+does not select a replacement model or send queued text into that menu. A
+choice must be resolved before a ready composer can
+receive the queued prompt. Startup readiness belongs to the runtime that
+observed it; delayed observations cannot ready a replacement runtime.
+
+Model choices can also appear after a completed turn. While the current screen
+shows the rate-limit model-switch menu, Wardian keeps `Action Needed` and blocks
+new prompt bytes even if an earlier completion event reported Idle. Resolve the
+choice explicitly in the provider terminal; Wardian does not select a model or
+dismiss the reminder. Delivery can resume after the menu is replaced by the
+current composer. Wardian restores status from the same shared owner's current
+turn activity only after checking both runtime generations; a missing owner or
+incomplete activity evidence does not authorize restoration. A delayed completion
+cannot clear a menu that remains on screen. Quoted or erased menus in history do
+not keep input blocked.
+The provider's claim of lower credit usage is not an API-price comparison;
+Wardian preserves the selected model until the user chooses otherwise.
 
 ### Debug First
 

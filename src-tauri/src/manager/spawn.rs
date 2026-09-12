@@ -13,7 +13,7 @@ use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AgentWatchState, AppState};
 use crate::utils::fs::*;
 use crate::utils::logging::{log_debug, log_terminal_trace_bytes, log_terminal_trace_note};
-use crate::utils::{strip_ansi_controls, PtyUtf8Decoder};
+use crate::utils::PtyUtf8Decoder;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Seek, Write};
@@ -72,39 +72,6 @@ fn record_pending_memory_injection(
         ));
     }
     true
-}
-
-fn provider_title_has_startup_ready_prompt(provider: &str, title: &str, status: &str) -> bool {
-    if provider != "opencode" || wardian_core::identity::normalize_status(status) != "idle" {
-        return false;
-    }
-    let title = title.trim();
-    title == "OpenCode" || title.starts_with("OC | ")
-}
-
-#[derive(Default)]
-struct OpenCodeStartupMemoryTransition {
-    ready_observed: bool,
-}
-
-impl OpenCodeStartupMemoryTransition {
-    /// Classify the real provider title and promote the pending memory receipt
-    /// exactly once when that title proves the compose surface is ready.
-    fn observe_title(
-        &mut self,
-        pending: &mut Option<PendingMemoryInjection>,
-        provider: &str,
-        title: &str,
-        agent_id: &str,
-    ) -> Option<&'static str> {
-        let status = opencode_status_from_title(title)?;
-        if !self.ready_observed && provider_title_has_startup_ready_prompt(provider, title, status)
-        {
-            self.ready_observed = true;
-            record_pending_memory_injection(pending, agent_id, provider);
-        }
-        Some(status)
-    }
 }
 
 /// Selects the verified Antigravity conversation created by this launch for
@@ -396,39 +363,6 @@ fn antigravity_database_watermark(path: &std::path::Path) -> Option<AntigravityD
     let file_name = path.file_name()?.to_string_lossy();
     let wal = antigravity_file_watermark(&path.with_file_name(format!("{file_name}-wal")));
     Some(AntigravityDatabaseWatermark { database, wal })
-}
-
-#[derive(Default)]
-struct ClaudeStartupReadiness {
-    compose_prompt_seen: bool,
-    remote_connection_pending: bool,
-}
-
-impl ClaudeStartupReadiness {
-    fn observe(&mut self, output: &str) -> bool {
-        let compact = strip_ansi_controls(output)
-            .chars()
-            .filter(|character| character.is_ascii_alphanumeric())
-            .flat_map(char::to_lowercase)
-            .collect::<String>();
-        if crate::control::provider_output_has_startup_ready_prompt("claude", output) {
-            self.compose_prompt_seen = true;
-            self.remote_connection_pending = compact.contains("rcconnecting");
-            if !self.remote_connection_pending {
-                return true;
-            }
-        }
-
-        if self.remote_connection_pending
-            && compact.contains("httpsclaudeaicodesession")
-            && self.compose_prompt_seen
-        {
-            self.remote_connection_pending = false;
-            return true;
-        }
-
-        false
-    }
 }
 
 impl AntigravityTranscriptTracker {
@@ -1217,6 +1151,11 @@ pub async fn spawn_agent(
     // accepting mailbox input races the provider's own startup sequence.
     let current_status = std::sync::Arc::new(std::sync::Mutex::new("Starting".to_string()));
     let current_status_clone = current_status.clone();
+    let startup_observation = crate::control::startup_readiness::ProviderStartupObservation {
+        input_generation: provider_generation,
+        runtime_generation,
+        current_status: current_status.clone(),
+    };
     let watch_state = std::sync::Arc::new(std::sync::Mutex::new(AgentWatchState::new(
         config.session_id.clone(),
         4096,
@@ -1275,9 +1214,8 @@ pub async fn spawn_agent(
         let mut opencode_chunks_logged = 0usize;
         let mut codex_terminal_theme_responder = CodexTerminalThemeProbeResponder::default();
         let mut antigravity_turn_completion_gate = AntigravityTurnCompletionGate::default();
-        let mut opencode_startup_memory_transition = OpenCodeStartupMemoryTransition::default();
-        let mut claude_startup_readiness = ClaudeStartupReadiness::default();
         let mut startup_prompt_pending = true;
+        let mut codex_choice_pending = false;
         let mut antigravity_workspace_trust_confirmed = false;
         let mut claude_bypass_permissions_confirmed = false;
         let mut pty_decoder = PtyUtf8Decoder::new();
@@ -1285,7 +1223,7 @@ pub async fn spawn_agent(
             std::sync::Arc::new(std::sync::Mutex::new(OutputReadyEmitGate::default()));
         let _codex_exit_guard = codex_reader_owner.map(|(broker, agent_id, generation)| {
             super::codex_shared::CodexAttachGuard::new(broker, agent_id, generation)
-                .for_reader(reader_alive, reader_attachment_ready)
+                .for_reader(reader_alive, reader_attachment_ready.clone())
         });
         loop {
             match reader.read(&mut buf) {
@@ -1381,18 +1319,31 @@ pub async fn spawn_agent(
                     } else {
                         None
                     };
-                    let startup_ready = if provider_name_for_pty == "codex" {
-                        false // Only the owner attachment gate publishes Codex readiness.
-                    } else if provider_name_for_pty == "claude" {
-                        claude_startup_readiness.observe(&text)
+                    let startup_screen = if provider_name_for_pty == "codex"
+                        || (startup_prompt_pending
+                            && matches!(provider_name_for_pty.as_str(), "claude" | "opencode"))
+                    {
+                        // Output was applied to the broker above. Read its current
+                        // screen so chunk boundaries and erased startup messages
+                        // cannot promote readiness or keep it blocked forever.
+                        tauri::async_runtime::block_on(terminal_sessions.snapshot(&sid_for_pty))
+                            .ok()
+                            .filter(|snapshot| {
+                                snapshot.runtime_generation == reader_runtime_generation
+                            })
+                            .map(|snapshot| snapshot.visible_grid)
                     } else {
-                        startup_output.as_deref().is_some_and(|output| {
+                        startup_output.clone()
+                    };
+                    // Codex readiness belongs exclusively to the verified shared owner.
+                    let startup_ready = provider_name_for_pty != "codex"
+                        && startup_prompt_pending
+                        && startup_screen.as_deref().is_some_and(|output| {
                             crate::control::provider_output_has_startup_ready_prompt(
                                 &provider_name_for_pty,
                                 output,
                             )
-                        })
-                    };
+                        });
                     if startup_ready {
                         startup_prompt_pending = false;
                         record_pending_memory_injection(
@@ -1403,18 +1354,17 @@ pub async fn spawn_agent(
                         set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, "Idle");
                         let readiness_app = pty_app.clone();
                         let readiness_session_id = sid_for_pty.clone();
+                        let observation = startup_observation.clone();
                         tauri::async_runtime::spawn(async move {
                             let state = readiness_app.state::<AppState>();
-                            crate::control::record_provider_ready_prompt(
+                            crate::control::startup_readiness::publish_startup_readiness(
+                                Some(&readiness_app),
                                 state.inner(),
                                 &readiness_session_id,
+                                &observation,
+                                wardian_core::control::ProviderReadyEvidence::PromptDetected,
                             )
                             .await;
-                            crate::control::spawn_mailbox_drain_if_idle(
-                                &readiness_app,
-                                &readiness_session_id,
-                                "Idle",
-                            );
                         });
                     } else if startup_output.as_deref().is_some_and(|output| {
                         should_auto_confirm_claude_bypass_permissions(
@@ -1470,7 +1420,7 @@ pub async fn spawn_agent(
                                 );
                             }
                         }
-                    } else if startup_output.as_deref().is_some_and(|output| {
+                    } else if startup_screen.as_deref().is_some_and(|output| {
                         crate::control::provider_output_requires_startup_action(
                             &provider_name_for_pty,
                             output,
@@ -1482,6 +1432,32 @@ pub async fn spawn_agent(
                             &current_status_clone,
                             "Action Needed",
                         );
+                    }
+                    if provider_name_for_pty == "codex" {
+                        if let Some(screen) = startup_screen.as_deref() {
+                            if crate::delivery::codex_menu::current_screen_requires_choice(screen) {
+                                codex_choice_pending = true;
+                            } else if codex_choice_pending
+                                && reader_attachment_ready
+                                    .load(std::sync::atomic::Ordering::Acquire)
+                                && crate::control::provider_output_has_ready_prompt("codex", screen)
+                            {
+                                codex_choice_pending = false;
+                                let choice_app = pty_app.clone();
+                                let choice_session = sid_for_pty.clone();
+                                let observation = startup_observation.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let state = choice_app.state::<AppState>();
+                                    crate::control::codex_menu_status::restore_after_choice(
+                                        &choice_app,
+                                        state.inner(),
+                                        &choice_session,
+                                        &observation,
+                                    )
+                                    .await;
+                                });
+                            }
+                        }
                     }
                     if let Ok(mut stamp) = last_output_at_clone.lock() {
                         *stamp = Some(std::time::SystemTime::now());
@@ -1551,13 +1527,12 @@ pub async fn spawn_agent(
                             *current_title = title.clone();
                         }
                         if provider_name_for_pty == "opencode" {
-                            if let Some(next_status) = opencode_startup_memory_transition
-                                .observe_title(
-                                    &mut pending_memory_injection,
-                                    &provider_name_for_pty,
-                                    &title,
-                                    &sid_for_pty,
-                                )
+                            // Titles describe turns only after the canonical
+                            // composer has ended startup. A generic title can
+                            // arrive while the resumed session is still loading.
+                            if let Some(next_status) = (!startup_prompt_pending)
+                                .then(|| opencode_status_from_title(&title))
+                                .flatten()
                             {
                                 set_agent_status(
                                     &pty_emit_app,
@@ -1565,26 +1540,6 @@ pub async fn spawn_agent(
                                     &current_status_clone,
                                     next_status,
                                 );
-                                if startup_prompt_pending
-                                    && opencode_startup_memory_transition.ready_observed
-                                {
-                                    startup_prompt_pending = false;
-                                    let readiness_app = pty_app.clone();
-                                    let readiness_session_id = sid_for_pty.clone();
-                                    tauri::async_runtime::spawn(async move {
-                                        let state = readiness_app.state::<AppState>();
-                                        crate::control::record_provider_ready_title(
-                                            state.inner(),
-                                            &readiness_session_id,
-                                        )
-                                        .await;
-                                        crate::control::spawn_mailbox_drain_if_idle(
-                                            &readiness_app,
-                                            &readiness_session_id,
-                                            "Idle",
-                                        );
-                                    });
-                                }
                             }
                         } else if provider_name_for_pty == "gemini" {
                             if let Some(next_status) = gemini_status_from_title(&title) {
@@ -3099,19 +3054,62 @@ mod tests {
 
     #[test]
     fn claude_startup_readiness_waits_for_pending_remote_connection() {
-        let mut readiness = ClaudeStartupReadiness::default();
-        assert!(!readiness.observe(
-            "Claude Code v2.1.251\r\n❯ Try ask Claude\r\nshift+tab to cycle ·\x1b[174G/rc\x1b[178Gconnecting…",
+        use crate::control::provider_output_has_startup_ready_prompt as ready;
+        assert!(!ready(
+            "claude",
+            "Claude Code v2.1.263\n❯ Try ask Claude\nshift+tab to cycle · /rc connecting…",
         ));
-        assert!(!readiness.observe("weekly limit resets at midnight"));
-        assert!(readiness.observe("https://claude.ai/code/session_01ABC?from=cli /rc",));
+        assert!(!ready(
+            "claude",
+            "https://claude.ai/code/session_01ABC?from=cli /rc"
+        ));
+        assert!(ready(
+            "claude",
+            "Claude Code v2.1.263\n❯ Try ask Claude\nshift+tab to cycle · /rc",
+        ));
     }
 
-    #[test]
-    fn claude_startup_readiness_accepts_local_compose_prompt_without_connection_wait() {
-        let mut readiness = ClaudeStartupReadiness::default();
+    #[tokio::test]
+    async fn startup_readiness_tracks_canonical_screen_across_partial_repaints() {
+        let broker =
+            std::sync::Arc::new(crate::state::terminal_session::TerminalSessionBroker::default());
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(1);
+        let generation = broker
+            .start_or_replace_runtime(
+                "startup",
+                crate::state::terminal_session::TerminalRuntimeHandles::new(input_tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry {
+                    cols: 120,
+                    rows: 24,
+                },
+            )
+            .await
+            .unwrap();
+        for (provider, repaint, expected_ready) in [
+            ("codex", "│ model: loading │\r\nResuming session…\r\n›", false),
+            ("codex", "\x1b[1;10Hgpt-5.4-mini\x1b[K\x1b[2;1H\x1b[2K", true),
+            ("claude", "\x1b[2J\x1b[HClaude Code v2.1.263\r\n❯ Try fix typecheck errors", false),
+            ("claude", "\r\n────────\r\nHaiku 4.5 | workspace | /rc connecting…\r\n⏵⏵ bypass permissions on (shift+tab to cycle)", false),
+            ("claude", "\x1b[4;1H\x1b[2KHaiku 4.5 | workspace | /rc", true),
+            ("opencode", "\x1b[2J\x1b[HLoading session...\r\nAsk anything...\r\nBuild  mimo-v2.5-free\r\nctrl+p commands", false),
+            ("opencode", "\x1b[1;1H\x1b[2K", true),
+            ("opencode", "\x1b[1;1HPermission required", false),
+            ("opencode", "\x1b[1;1H\x1b[2K", true),
+        ] {
+            let output_broker = broker.clone();
+            tokio::task::spawn_blocking(move || {
+                output_broker.process_output_blocking("startup", generation, repaint.as_bytes().to_vec())
+            }).await.unwrap().unwrap();
+            let screen = broker.snapshot("startup").await.unwrap();
+            assert_eq!(
+                crate::control::provider_output_has_startup_ready_prompt(provider, &screen.visible_grid),
+                expected_ready,
+                "{provider}: {}", screen.visible_grid,
+            );
+        }
         assert!(
-            readiness.observe("Claude Code v2.1.251\r\n❯ Try ask Claude\r\nshift+tab to cycle",)
+            input_rx.try_recv().is_err(),
+            "observing startup never submits input"
         );
     }
 
@@ -3259,7 +3257,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_title_readiness_records_receipt_and_enables_resume_delta() {
+    fn opencode_composer_readiness_records_receipt_and_enables_resume_delta() {
         let temp = tempfile::tempdir().unwrap();
         let store = wardian_core::memory::MemoryStore::open(temp.path().join("memory.db")).unwrap();
         let agent_id = "opencode-memory-agent";
@@ -3297,12 +3295,19 @@ mod tests {
             .into_iter()
             .last()
             .expect("OpenCode title");
-        let mut transition = OpenCodeStartupMemoryTransition::default();
-        assert_eq!(
-            transition.observe_title(&mut pending, "opencode", &title, agent_id,),
-            Some("Idle")
-        );
-        assert!(transition.ready_observed);
+        assert!(!crate::control::provider_output_has_startup_ready_prompt(
+            "opencode", &title
+        ));
+        assert!(pending.is_some());
+        assert!(crate::control::provider_output_has_startup_ready_prompt(
+            "opencode",
+            "Ask anything...\nBuild  mimo-v2.5-free\nctrl+p commands",
+        ));
+        assert!(record_pending_memory_injection(
+            &mut pending,
+            agent_id,
+            "opencode"
+        ));
         assert!(!record_pending_memory_injection(
             &mut pending,
             agent_id,
