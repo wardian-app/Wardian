@@ -1,21 +1,27 @@
 use super::*;
 
+const REAL_SESSIONS_PARENT: &str = "real-codex";
+
 /// Build a database shaped like the provider's thread index.
 fn thread_database(path: &Path, threads: i64, projects: i64) {
     let connection = rusqlite::Connection::open(path).expect("open fixture database");
     connection
         .execute_batch(
-            "CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT);
-             CREATE TABLE projects (id TEXT PRIMARY KEY, root TEXT);
-             CREATE TABLE project_roots (id TEXT PRIMARY KEY);
-             CREATE TABLE remote_control_enrollments (id TEXT PRIMARY KEY);",
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, cwd TEXT);
+             CREATE TABLE thread_sections (id TEXT PRIMARY KEY);
+             CREATE TABLE backfill_state (id INTEGER PRIMARY KEY);
+             CREATE TABLE projects (id TEXT PRIMARY KEY, root TEXT);",
         )
         .expect("create fixture schema");
     for index in 0..threads {
         connection
             .execute(
-                "INSERT INTO threads (id, cwd) VALUES (?1, ?2)",
-                [format!("thread-{index}"), "workspace".to_owned()],
+                "INSERT INTO threads (id, rollout_path, cwd) VALUES (?1, ?2, ?3)",
+                [
+                    format!("thread-{index}"),
+                    format!("C:\\agents\\publisher\\habitat\\.codex\\sessions\\2026\\rollout-{index}.jsonl"),
+                    "workspace".to_owned(),
+                ],
             )
             .expect("insert thread");
     }
@@ -26,12 +32,6 @@ fn thread_database(path: &Path, threads: i64, projects: i64) {
                 [format!("project-{index}"), "private".to_owned()],
             )
             .expect("insert project");
-        connection
-            .execute(
-                "INSERT INTO remote_control_enrollments (id) VALUES (?1)",
-                [format!("enrolment-{index}")],
-            )
-            .expect("insert enrolment");
     }
 }
 
@@ -44,9 +44,28 @@ fn count(path: &Path, table: &str) -> i64 {
         .expect("count rows")
 }
 
+fn rollout_paths(path: &Path) -> Vec<String> {
+    let connection = rusqlite::Connection::open(path).expect("open database");
+    let mut statement = connection
+        .prepare("SELECT rollout_path FROM threads ORDER BY id")
+        .expect("prepare");
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect");
+    rows
+}
+
 fn home(root: &Path, name: &str) -> PathBuf {
     let path = root.join(name);
     std::fs::create_dir_all(&path).expect("create home");
+    path
+}
+
+fn real_codex(root: &Path) -> PathBuf {
+    let path = root.join(REAL_SESSIONS_PARENT);
+    std::fs::create_dir_all(path.join("sessions")).expect("create central sessions");
     path
 }
 
@@ -54,10 +73,11 @@ fn home(root: &Path, name: &str) -> PathBuf {
 fn a_warm_home_publishes_a_snapshot_that_seeds_a_new_one() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
     let warm = home(temp.path(), "warm");
     thread_database(&warm.join("state_5.sqlite"), 12, 0);
 
-    assert!(refresh(&wardian_home, &warm).expect("publish snapshot"));
+    assert!(refresh(&wardian_home, &warm, &central).expect("publish snapshot"));
 
     let fresh = home(temp.path(), "fresh");
     assert!(seed(&wardian_home, &fresh).expect("seed fresh home"));
@@ -67,31 +87,111 @@ fn a_warm_home_publishes_a_snapshot_that_seeds_a_new_one() {
 }
 
 #[test]
-fn per_agent_rows_never_travel_between_homes() {
+fn a_published_snapshot_names_no_agent_home() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
+    let warm = home(temp.path(), "warm");
+    thread_database(&warm.join("state_5.sqlite"), 3, 0);
+
+    refresh(&wardian_home, &warm, &central).expect("publish snapshot");
+    let fresh = home(temp.path(), "fresh");
+    seed(&wardian_home, &fresh).expect("seed");
+
+    // Left alone, every row would point into the publishing agent's own home,
+    // which dangles as soon as that agent is removed.
+    for path in rollout_paths(&fresh.join("state_5.sqlite")) {
+        assert!(
+            !path.contains("publisher"),
+            "seeded row still names the publishing agent: {path}"
+        );
+        assert!(
+            path.starts_with(&central.join("sessions").to_string_lossy().into_owned()),
+            "seeded row does not name the central tree: {path}"
+        );
+        assert!(
+            path.ends_with(".jsonl"),
+            "rollout identity was lost: {path}"
+        );
+    }
+}
+
+#[test]
+fn an_unshared_table_with_rows_refuses_publication() {
+    let temp = tempfile::tempdir().expect("temp");
+    let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
     let warm = home(temp.path(), "warm");
     thread_database(&warm.join("state_5.sqlite"), 4, 3);
 
-    refresh(&wardian_home, &warm).expect("publish snapshot");
-    let fresh = home(temp.path(), "fresh");
-    seed(&wardian_home, &fresh).expect("seed fresh home");
+    // `projects` is not on the allow-list and holds rows, so publishing it
+    // would carry one agent's private rows into every other home.
+    let error = refresh(&wardian_home, &warm, &central).expect_err("must refuse");
+    assert!(error.contains("projects"), "{error}");
 
-    let seeded = fresh.join("state_5.sqlite");
-    assert_eq!(count(&seeded, "threads"), 4, "shared history is retained");
-    assert_eq!(count(&seeded, "projects"), 0);
-    assert_eq!(count(&seeded, "remote_control_enrollments"), 0);
-    // The warm home keeps its own rows; only the published copy is stripped.
-    assert_eq!(count(&warm.join("state_5.sqlite"), "projects"), 3);
+    let fresh = home(temp.path(), "fresh");
+    assert!(!seed(&wardian_home, &fresh).expect("nothing published"));
+}
+
+#[test]
+fn an_unshared_but_empty_table_is_cleared_rather_than_refused() {
+    let temp = tempfile::tempdir().expect("temp");
+    let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
+    let warm = home(temp.path(), "warm");
+    thread_database(&warm.join("state_5.sqlite"), 2, 0);
+
+    assert!(refresh(&wardian_home, &warm, &central).expect("publish"));
+    let fresh = home(temp.path(), "fresh");
+    seed(&wardian_home, &fresh).expect("seed");
+    assert_eq!(count(&fresh.join("state_5.sqlite"), "projects"), 0);
+    assert_eq!(count(&fresh.join("state_5.sqlite"), "threads"), 2);
+}
+
+#[test]
+fn a_generation_change_republishes_and_seeds_the_new_name() {
+    let temp = tempfile::tempdir().expect("temp");
+    let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
+
+    let old = home(temp.path(), "old");
+    thread_database(&old.join("state_5.sqlite"), 2, 0);
+    assert!(refresh(&wardian_home, &old, &central).expect("publish generation 5"));
+
+    // A provider upgrade moves to a new generation well inside the refresh
+    // interval; the cache must follow rather than serve an unusable file.
+    let upgraded = home(temp.path(), "upgraded");
+    thread_database(&upgraded.join("state_6.sqlite"), 9, 0);
+    assert!(refresh(&wardian_home, &upgraded, &central).expect("republish generation 6"));
+
+    let fresh = home(temp.path(), "fresh");
+    assert!(seed(&wardian_home, &fresh).expect("seed"));
+    assert!(fresh.join("state_6.sqlite").is_file());
+    assert!(!fresh.join("state_5.sqlite").exists());
+    assert_eq!(count(&fresh.join("state_6.sqlite"), "threads"), 9);
+}
+
+#[test]
+fn the_live_generation_is_selected_when_an_old_one_remains() {
+    let temp = tempfile::tempdir().expect("temp");
+    let codex_home = home(temp.path(), "home");
+    thread_database(&codex_home.join("state_5.sqlite"), 1, 0);
+    thread_database(&codex_home.join("state_12.sqlite"), 1, 0);
+    assert_eq!(
+        state_database_name(&codex_home).as_deref(),
+        Some("state_12.sqlite"),
+        "highest generation wins regardless of directory order"
+    );
 }
 
 #[test]
 fn a_home_that_already_has_a_thread_database_is_left_alone() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
     let warm = home(temp.path(), "warm");
     thread_database(&warm.join("state_5.sqlite"), 9, 0);
-    refresh(&wardian_home, &warm).expect("publish snapshot");
+    refresh(&wardian_home, &warm, &central).expect("publish snapshot");
 
     let existing = home(temp.path(), "existing");
     thread_database(&existing.join("state_5.sqlite"), 1, 0);
@@ -101,6 +201,25 @@ fn a_home_that_already_has_a_thread_database_is_left_alone() {
         1,
         "the provider's own database is never overwritten"
     );
+}
+
+#[test]
+fn a_database_created_after_the_guard_is_never_clobbered() {
+    let temp = tempfile::tempdir().expect("temp");
+    let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
+    let warm = home(temp.path(), "warm");
+    thread_database(&warm.join("state_5.sqlite"), 6, 0);
+    refresh(&wardian_home, &warm, &central).expect("publish");
+
+    // Stand in for the provider winning the race between the emptiness check
+    // and the copy: the write must refuse rather than replace.
+    let racing = home(temp.path(), "racing");
+    thread_database(&racing.join("state_5.sqlite"), 1, 0);
+    let cache = cache_directory(&wardian_home);
+    let snapshot = snapshot_path(&cache, "state_5.sqlite");
+    assert!(!write_seed(&snapshot, &racing.join("state_5.sqlite")).expect("refuses"));
+    assert_eq!(count(&racing.join("state_5.sqlite"), "threads"), 1);
 }
 
 #[test]
@@ -116,37 +235,43 @@ fn seeding_without_a_published_snapshot_is_not_an_error() {
 fn a_home_without_a_thread_database_publishes_nothing() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
     let cold = home(temp.path(), "cold");
-    assert!(!refresh(&wardian_home, &cold).expect("nothing to publish"));
+    assert!(!refresh(&wardian_home, &cold, &central).expect("nothing to publish"));
 }
 
 #[test]
-fn a_recent_snapshot_is_not_republished() {
+fn a_recent_snapshot_of_the_same_generation_is_not_republished() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
     let warm = home(temp.path(), "warm");
     thread_database(&warm.join("state_5.sqlite"), 2, 0);
-    assert!(refresh(&wardian_home, &warm).expect("first publication"));
+    assert!(refresh(&wardian_home, &warm, &central).expect("first publication"));
 
-    // Change the source; a snapshot inside its interval must not follow it.
     let connection =
         rusqlite::Connection::open(warm.join("state_5.sqlite")).expect("reopen database");
     connection
         .execute("DELETE FROM threads", [])
         .expect("empty the source");
     drop(connection);
-    assert!(!refresh(&wardian_home, &warm).expect("second call"));
-    let cache = cache_directory(&wardian_home);
-    assert_eq!(read_meta(&cache).expect("meta").threads, 2);
+    assert!(!refresh(&wardian_home, &warm, &central).expect("second call"));
+    assert_eq!(
+        read_meta(&cache_directory(&wardian_home))
+            .expect("meta")
+            .threads,
+        2
+    );
 }
 
 #[test]
 fn a_stale_snapshot_is_replaced() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
     let warm = home(temp.path(), "warm");
     thread_database(&warm.join("state_5.sqlite"), 2, 0);
-    refresh(&wardian_home, &warm).expect("first publication");
+    refresh(&wardian_home, &warm, &central).expect("first publication");
 
     let cache = cache_directory(&wardian_home);
     let mut meta = read_meta(&cache).expect("meta");
@@ -161,7 +286,7 @@ fn a_stale_snapshot_is_replaced() {
 
     std::fs::remove_file(warm.join("state_5.sqlite")).expect("replace database");
     thread_database(&warm.join("state_5.sqlite"), 7, 0);
-    assert!(refresh(&wardian_home, &warm).expect("republication"));
+    assert!(refresh(&wardian_home, &warm, &central).expect("republication"));
     assert_eq!(read_meta(&cache).expect("meta").threads, 7);
 }
 
@@ -169,6 +294,7 @@ fn a_stale_snapshot_is_replaced() {
 fn a_snapshot_captured_from_a_live_writer_is_complete() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
     let warm = home(temp.path(), "warm");
     let database = warm.join("state_5.sqlite");
     thread_database(&database, 5, 0);
@@ -178,24 +304,44 @@ fn a_snapshot_captured_from_a_live_writer_is_complete() {
     live.pragma_update(None, "journal_mode", "WAL")
         .expect("enable write-ahead log");
     live.execute(
-        "INSERT INTO threads (id, cwd) VALUES ('live', 'workspace')",
+        "INSERT INTO threads (id, rollout_path, cwd) VALUES ('live', 'C:\\a\\sessions\\x.jsonl', 'w')",
         [],
     )
     .expect("live insert");
 
-    assert!(refresh(&wardian_home, &warm).expect("publish while open"));
+    assert!(refresh(&wardian_home, &warm, &central).expect("publish while open"));
     let fresh = home(temp.path(), "fresh");
     seed(&wardian_home, &fresh).expect("seed");
     assert_eq!(count(&fresh.join("state_5.sqlite"), "threads"), 6);
 }
 
 #[test]
+fn an_abandoned_staging_file_is_reclaimed() {
+    let temp = tempfile::tempdir().expect("temp");
+    let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
+    let warm = home(temp.path(), "warm");
+    thread_database(&warm.join("state_5.sqlite"), 3, 0);
+
+    // A publication interrupted mid-capture leaves a full-size file behind.
+    let cache = private_cache(&wardian_home).expect("cache");
+    let abandoned = cache.join(format!(
+        "{SNAPSHOT_PREFIX}state_5.sqlite.9999{STAGING_SUFFIX}"
+    ));
+    std::fs::write(&abandoned, vec![0u8; 4096]).expect("write abandoned staging");
+
+    refresh(&wardian_home, &warm, &central).expect("publish");
+    assert!(!abandoned.exists(), "staging file was not reclaimed");
+}
+
+#[test]
 fn a_cached_name_that_escapes_its_home_is_refused() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
     let warm = home(temp.path(), "warm");
     thread_database(&warm.join("state_5.sqlite"), 1, 0);
-    refresh(&wardian_home, &warm).expect("publish");
+    refresh(&wardian_home, &warm, &central).expect("publish");
 
     let cache = cache_directory(&wardian_home);
     let mut meta = read_meta(&cache).expect("meta");
@@ -230,4 +376,24 @@ fn only_a_generation_suffixed_state_database_is_recognised() {
         state_database_name(&codex_home).as_deref(),
         Some("state_12.sqlite")
     );
+}
+
+#[test]
+fn a_rollout_path_is_split_at_its_sessions_directory() {
+    assert_eq!(
+        sessions_tail(r"C:\agents\a\habitat\.codex\sessions\2026\09\r.jsonl").as_deref(),
+        Some(r"2026\09\r.jsonl")
+    );
+    assert_eq!(
+        sessions_tail(r"\\?\C:\Users\u\.codex\sessions\2026\r.jsonl").as_deref(),
+        Some(r"2026\r.jsonl")
+    );
+    assert_eq!(
+        sessions_tail("/home/u/.codex/sessions/2026/r.jsonl").as_deref(),
+        Some(r"2026\r.jsonl")
+    );
+    // A path with no sessions component, or nothing below it, is left alone.
+    assert!(sessions_tail(r"C:\somewhere\rollout.jsonl").is_none());
+    assert!(sessions_tail(r"C:\a\sessions").is_none());
+    assert!(sessions_tail(r"C:\a\my-sessions-archive\r.jsonl").is_none());
 }

@@ -246,6 +246,39 @@ Current sequence:
 
 Legacy bootstrap migration remains available as a fallback when local rollout materialization is unavailable. It merges a new rollout into an existing projected `sessions/**` tree instead of discarding it.
 
+#### Shared thread index
+
+`codex app-server` migrates legacy rollout files into paginated thread history
+before it opens its control socket. Every agent home projects the same central
+`sessions/` tree but starts with an empty thread database, so without help each
+new agent repeats the whole migration; on a large history that dominates spawn
+latency.
+
+Wardian publishes one snapshot of an already-migrated thread database to
+`<wardian-home>/codex/thread-state/` and seeds it into homes that do not have
+one yet. Both halves are best effort: a home that cannot be seeded, or a
+snapshot that cannot be published, costs a rebuild and never a failed launch.
+
+- **Seeded** under the agent's preparation lock, before its daemon starts, and
+  only into a home with no `state_<generation>.sqlite`. An existing provider
+  database is never replaced.
+- **Published** after a successful owner start, at most once every six hours per
+  generation. A stale snapshot is harmless because the provider migrates only
+  the rollouts it has not already indexed.
+- **Captured** with SQLite `VACUUM INTO`, because resident daemons hold the
+  database open with a write-ahead log.
+- **Filtered** through an allow-list of tables that describe the shared rollout
+  history. A table the writer has not been taught about stops publication rather
+  than travelling between agents.
+- **Canonicalized** so `threads.rollout_path` names the central tree every home
+  projects. As the provider writes it, that column names the *publishing*
+  agent's own projected directory, which would otherwise point every seeded
+  agent at one agent's home and dangle when that agent is removed.
+
+The snapshot is named after the generation it holds
+(`snapshot-state_<generation>.sqlite`), so a provider upgrade republishes rather
+than seeding a database the new provider will not open.
+
 If Codex starts asking for trust every launch again, first verify that the session was born with the real workspace as `cwd`, not the bootstrap path.
 
 Wardian also exposes an off-by-default global **Trust launch workspaces** Codex

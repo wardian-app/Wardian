@@ -43,6 +43,47 @@ fn phase<T>(slot: &mut std::time::Duration, work: impl FnOnce() -> T) -> T {
     outcome
 }
 
+/// Emits the phase line when it goes out of scope.
+///
+/// Startup has many early returns that give up before the provider is ever
+/// launched, and those are exactly the ones worth measuring. Reporting on drop
+/// makes every exit emit, rather than only the paths that reach the end.
+struct OwnerStartReport {
+    agent_id: String,
+    started_at: std::time::Instant,
+    timings: OwnerStartTimings,
+}
+
+impl OwnerStartReport {
+    fn new(agent_id: &str) -> Self {
+        Self {
+            agent_id: agent_id.to_owned(),
+            started_at: std::time::Instant::now(),
+            timings: OwnerStartTimings::default(),
+        }
+    }
+}
+
+impl std::ops::Deref for OwnerStartReport {
+    type Target = OwnerStartTimings;
+    fn deref(&self) -> &Self::Target {
+        &self.timings
+    }
+}
+
+impl std::ops::DerefMut for OwnerStartReport {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.timings
+    }
+}
+
+impl Drop for OwnerStartReport {
+    fn drop(&mut self) {
+        self.timings.total = self.started_at.elapsed();
+        self.timings.log(&self.agent_id);
+    }
+}
+
 impl OwnerStartTimings {
     fn log(&self, agent_id: &str) {
         crate::utils::logging::log_debug(&format!(
@@ -96,6 +137,18 @@ fn prepare_owner_habitat(
     })
     .map_err(CodexSharedError::unsupported)?;
     let codex_home = attachment::canonical_home(&compact_home)?;
+    // Seed under the preparation lock and before any daemon exists for this
+    // agent, so the copy cannot race the provider creating its own database.
+    // Optional: without a published snapshot the agent rebuilds, as before.
+    match crate::utils::codex_thread_state::seed(&wardian_home, &codex_home) {
+        Ok(true) => crate::utils::logging::log_debug(&format!(
+            "[Wardian] Seeded Codex thread index for agent {agent_id}"
+        )),
+        Ok(false) => {}
+        Err(error) => crate::utils::logging::log_debug(&format!(
+            "[Wardian] Codex thread index seed unavailable for agent {agent_id}: {error}"
+        )),
+    }
     phase(&mut timings.codex_projection, || {
         crate::utils::fs::ensure_codex_home_projection(&habitat, workspace, agent_id)
     })
@@ -165,10 +218,8 @@ impl CodexSharedOwner {
         .map_err(CodexSharedError::unsupported)?;
         let wardian_home = crate::utils::get_wardian_home()
             .ok_or_else(|| CodexSharedError::unsupported("Wardian home unavailable"))?;
-        // Phase timing is emitted on every outcome, including failures, because
-        // a startup that gives up late is exactly the one worth measuring.
-        let mut timings = OwnerStartTimings::default();
-        let started_at = std::time::Instant::now();
+        // Reports on drop, so every exit from this function is measured.
+        let mut timings = OwnerStartReport::new(&spec.target_agent_id);
         tokio::pin!(cancelled);
         let quiescent_at = std::time::Instant::now();
         tokio::select! {
@@ -352,8 +403,6 @@ impl CodexSharedOwner {
                 result = initialize => result,
             }
         }.await;
-        timings.total = started_at.elapsed();
-        timings.log(&spec.target_agent_id);
         if start.is_ok() {
             // The socket is open, so this home's thread index is current for the
             // projected session tree. Publishing it lets the next agent skip the
@@ -364,8 +413,14 @@ impl CodexSharedOwner {
                 let Some(wardian_home) = crate::utils::get_wardian_home() else {
                     return;
                 };
-                if let Err(error) = crate::utils::codex_thread_state::refresh(&wardian_home, &home)
-                {
+                let Some(real_codex_home) = dirs::home_dir().map(|home| home.join(".codex")) else {
+                    return;
+                };
+                if let Err(error) = crate::utils::codex_thread_state::refresh(
+                    &wardian_home,
+                    &home,
+                    &real_codex_home,
+                ) {
                     crate::utils::logging::log_debug(&format!(
                         "[Wardian] Codex thread index publication skipped: {error}"
                     ));
