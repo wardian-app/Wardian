@@ -1,3 +1,6 @@
+mod pi_startup;
+use pi_startup::pi_output_has_startup_ready_prompt;
+
 pub(crate) mod codex_menu_status;
 pub(crate) mod startup_readiness;
 use startup_readiness::record_provider_ready_evidence;
@@ -3304,22 +3307,6 @@ fn gemini_output_has_ready_prompt(output: &str) -> bool {
 
 fn gemini_output_has_api_key_prompt(output: &str) -> bool {
     output.contains("Enter Gemini API Key") || output.contains("Paste your API key here")
-}
-
-fn pi_output_has_startup_ready_prompt(output: &str) -> bool {
-    let cleaned = strip_ansi_controls(output).replace('\r', "\n");
-    if cleaned.contains("No models available") || cleaned.contains("Error: Model") {
-        return false;
-    }
-
-    let lines = cleaned
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    lines.windows(2).any(|pair| {
-        pair[0].contains(" • ") && pair[1].contains("%/") && pair[1].split_whitespace().count() >= 2
-    })
 }
 
 pub(crate) fn antigravity_output_has_ready_prompt(output: &str) -> bool {

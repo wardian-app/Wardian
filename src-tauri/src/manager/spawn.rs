@@ -13,6 +13,7 @@ use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AgentWatchState, AppState};
 use crate::utils::fs::*;
 use crate::utils::logging::{log_debug, log_terminal_trace_bytes, log_terminal_trace_note};
+use crate::utils::strip_ansi_controls;
 use crate::utils::PtyUtf8Decoder;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::collections::HashMap;
@@ -363,6 +364,39 @@ fn antigravity_database_watermark(path: &std::path::Path) -> Option<AntigravityD
     let file_name = path.file_name()?.to_string_lossy();
     let wal = antigravity_file_watermark(&path.with_file_name(format!("{file_name}-wal")));
     Some(AntigravityDatabaseWatermark { database, wal })
+}
+
+#[derive(Default)]
+struct ClaudeStartupReadiness {
+    compose_prompt_seen: bool,
+    remote_connection_pending: bool,
+}
+
+impl ClaudeStartupReadiness {
+    fn observe(&mut self, output: &str) -> bool {
+        let compact = strip_ansi_controls(output)
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect::<String>();
+        if crate::control::provider_output_has_startup_ready_prompt("claude", output) {
+            self.compose_prompt_seen = true;
+            self.remote_connection_pending = compact.contains("rcconnecting");
+            if !self.remote_connection_pending {
+                return true;
+            }
+        }
+
+        if self.remote_connection_pending
+            && compact.contains("httpsclaudeaicodesession")
+            && self.compose_prompt_seen
+        {
+            self.remote_connection_pending = false;
+            return true;
+        }
+
+        false
+    }
 }
 
 impl AntigravityTranscriptTracker {
@@ -1214,6 +1248,7 @@ pub async fn spawn_agent(
         let mut opencode_chunks_logged = 0usize;
         let mut codex_terminal_theme_responder = CodexTerminalThemeProbeResponder::default();
         let mut antigravity_turn_completion_gate = AntigravityTurnCompletionGate::default();
+        let mut claude_startup_readiness = ClaudeStartupReadiness::default();
         let mut startup_prompt_pending = true;
         let mut codex_choice_pending = false;
         let mut antigravity_workspace_trust_confirmed = false;
@@ -1321,7 +1356,7 @@ pub async fn spawn_agent(
                     };
                     let startup_screen = if provider_name_for_pty == "codex"
                         || (startup_prompt_pending
-                            && matches!(provider_name_for_pty.as_str(), "claude" | "opencode"))
+                            && matches!(provider_name_for_pty.as_str(), "claude" | "opencode" | "pi"))
                     {
                         // Output was applied to the broker above. Read its current
                         // screen so chunk boundaries and erased startup messages
@@ -1335,15 +1370,19 @@ pub async fn spawn_agent(
                     } else {
                         startup_output.clone()
                     };
-                    // Codex readiness belongs exclusively to the verified shared owner.
-                    let startup_ready = provider_name_for_pty != "codex"
-                        && startup_prompt_pending
-                        && startup_screen.as_deref().is_some_and(|output| {
-                            crate::control::provider_output_has_startup_ready_prompt(
-                                &provider_name_for_pty,
-                                output,
-                            )
-                        });
+                    let startup_ready = if provider_name_for_pty == "codex" {
+                        false // Only the owner attachment gate publishes Codex readiness.
+                    } else if provider_name_for_pty == "claude" {
+                        claude_startup_readiness.observe(&text)
+                    } else {
+                        startup_prompt_pending
+                            && startup_screen.as_deref().is_some_and(|output| {
+                                crate::control::provider_output_has_startup_ready_prompt(
+                                    &provider_name_for_pty,
+                                    output,
+                                )
+                            })
+                    };
                     if startup_ready {
                         startup_prompt_pending = false;
                         record_pending_memory_injection(
@@ -3091,6 +3130,8 @@ mod tests {
             ("claude", "\x1b[2J\x1b[HClaude Code v2.1.263\r\n❯ Try fix typecheck errors", false),
             ("claude", "\r\n────────\r\nHaiku 4.5 | workspace | /rc connecting…\r\n⏵⏵ bypass permissions on (shift+tab to cycle)", false),
             ("claude", "\x1b[4;1H\x1b[2KHaiku 4.5 | workspace | /rc", true),
+            ("pi", "\x1b[2J\x1b[Hpi v0.84.2\r\n────────────────\r\n<workspace-root>/habitat/workspace (test/provider-conformanc...\r\n$0.000 (sub) 0.0%/272k (auto) (openai-codex) gpt-5.4-mini • medium", true),
+            ("pi", "\x1b[2J\x1b[Hpi v0.84.2\r\n────────────────\r\n<workspace-root>/habitat/workspace\r\nLoading model…", false),
             ("opencode", "\x1b[2J\x1b[HLoading session...\r\nAsk anything...\r\nBuild  mimo-v2.5-free\r\nctrl+p commands", false),
             ("opencode", "\x1b[1;1H\x1b[2K", true),
             ("opencode", "\x1b[1;1HPermission required", false),

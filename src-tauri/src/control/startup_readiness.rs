@@ -134,8 +134,8 @@ pub(crate) async fn publish_startup_readiness(
     true
 }
 
-/// Recognizes initial compose readiness. Codex, Claude and OpenCode callers must supply
-/// the canonical visible screen: raw chunks can omit startup blockers, while
+/// Recognizes initial compose readiness. Codex, Claude, OpenCode and Pi callers
+/// must supply the canonical visible screen: raw chunks can omit startup blockers, while
 /// accumulated output retains blockers that a later repaint already removed.
 pub(crate) fn provider_output_has_startup_ready_prompt(provider: &str, output: &str) -> bool {
     let cleaned = strip_ansi_controls(output).replace('\r', "\n");
@@ -909,6 +909,62 @@ mod tests {
         assert!(!provider_output_has_startup_ready_prompt(
             "pi",
             "No models available. Use /login to log into a provider.",
+        ));
+    }
+
+    #[test]
+    fn startup_ready_prompt_accepts_pi_truncated_long_workspace_footer() {
+        assert!(provider_output_has_startup_ready_prompt(
+            "pi",
+            "pi v0.84.2\n────────────────\n<workspace-root>/habitat/workspace (test/provider-conformanc...\n$0.000 (sub) 0.0%/272k (auto) (openai-codex) gpt-5.4-mini • medium",
+        ));
+    }
+
+    #[test]
+    fn startup_ready_prompt_accepts_pi_wrapped_footer_and_rejects_non_editor_frames() {
+        assert!(provider_output_has_startup_ready_prompt(
+            "pi",
+            "pi v0.84.2\n────────────────\n<workspace-root>/habitat/workspace (test/provider-conformanc...\n$0.000 (sub) 0.0%/272k (auto)\n(openai-codex) gpt-5.4-mini • medium",
+        ));
+        assert!(!provider_output_has_startup_ready_prompt(
+            "pi",
+            "pi v0.84.2\n────────────────\n<workspace-root>/habitat/workspace\n$0.000 (sub) 0.0%/272k (auto)\nmodel: loading",
+        ));
+        assert!(!provider_output_has_startup_ready_prompt(
+            "pi",
+            "pi v0.84.2\n────────────────\n<workspace-root>/habitat/workspace\nError: provider authentication failed",
+        ));
+        assert!(!provider_output_has_startup_ready_prompt(
+            "pi",
+            "pi v0.84.2\n────────────────\n<workspace-root>/habitat/workspace • old-session\nError: provider authentication failed\n0.0%/33k (auto) echo",
+        ));
+        assert!(provider_output_has_startup_ready_prompt(
+            "pi",
+            "pi v0.84.2\n────────────────\n<workspace-root>/starting-project • active\n0.0%/33k (auto) echo",
+        ));
+        assert!(!provider_output_has_startup_ready_prompt(
+            "pi",
+            "pi v0.84.2\n────────────────\n<workspace-root>/habitat/workspace\nWrite a message here",
+        ));
+        assert!(!provider_output_has_startup_ready_prompt(
+            "pi",
+            "pi v0.84.2\n────────────────\n0.0%/272k (auto) • arbitrary",
+        ));
+        assert!(!provider_output_has_startup_ready_prompt(
+            "pi",
+            "pi v0.84.2\n────────────────\nDraft text • arbitrary\n0.0%/272k (auto) echo",
+        ));
+        assert!(!provider_output_has_startup_ready_prompt(
+            "pi",
+            "pi v0.84.2\n────────────────\nDraft text / arbitrary\n0.0%/272k (auto) echo",
+        ));
+        assert!(!provider_output_has_startup_ready_prompt(
+            "pi",
+            "pi v0.84.2\n────────────────\n<workspace-root>/habitat/workspace • old-session\n0.0%/33k (auto) echo\npi v0.84.2\n────────────────\n<workspace-root>/habitat/workspace\nDrafting a new prompt",
+        ));
+        assert!(!provider_output_has_startup_ready_prompt(
+            "pi",
+            "pi v0.84.2\n────────────────\n<workspace-root>/habitat/workspace • old-session\n0.0%/33k (auto) echo\nDrafting a new prompt",
         ));
     }
 

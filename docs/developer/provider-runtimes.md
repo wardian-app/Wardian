@@ -440,6 +440,11 @@ version 3 session JSONL for user messages, assistant stop reasons, tool calls,
 tool results, and definitive completion. Headless automations use `--mode json`;
 `agent_end`, not a transient assistant message, is the final automation boundary.
 
+Startup readiness uses the current generation's visible terminal frame. The Pi
+footer may wrap or truncate a long workspace path; readiness still requires its
+workspace and model context. Loading, error, and stale historical frames cannot
+release queued input.
+
 Pi's `--approve` and `--no-approve` flags control project-local configuration,
 extensions, and skills. They do not sandbox the shell tool or extensions.
 
