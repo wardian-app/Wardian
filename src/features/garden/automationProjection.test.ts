@@ -68,10 +68,11 @@ describe("projectSituatedAutomations", () => {
     expect(projection).toMatchObject({ placement: "workspace", agentIds: [], workspacePaths: ["/temporary"] });
     expect(projectSituatedAutomations(catalog, [schedule("empty", { assignments: {}, workspace: null })], [])).toEqual([]);
   });
-  it("only retains active or recent manual runs and restores dormant schedule assignments", () => {
+  it("shows active manual runs without turning terminal one-offs into map units", () => {
+    const active = run("active");
     const recent = run("recent"); recent.summary.status = "completed"; recent.summary.updated_at = "2026-09-07T11:00:00Z";
     const old = run("old"); old.summary.status = "failed"; old.summary.updated_at = "2026-09-01T11:00:00Z";
-    expect(projectSituatedAutomations(catalog, [], [recent, old], { now }).map((item) => item.id)).toEqual(["run:recent"]);
+    expect(projectSituatedAutomations(catalog, [], [active, recent, old], { now }).map((item) => item.id)).toEqual(["run:active"]);
     recent.summary.schedule_id = "daily";
     const [projection] = projectSituatedAutomations(catalog, [schedule()], [recent], { now });
     expect(projection.agentIds).toEqual(["z", "a"]);

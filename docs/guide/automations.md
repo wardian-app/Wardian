@@ -106,7 +106,11 @@ left automation rail show all automation activity. With one or more agents
 selected in the roster or an agent surface, they show schedules, listeners, and
 runs whose saved role assignments include any selected agent. The automation
 picker follows the same deployed-workflow scope; an already open blueprint stays
-available so changing selection cannot hide an editing context.
+available so changing selection cannot hide an editing context. When agents are
+selected, use the **Selected agents** / **All agents** control in the workflow
+surface to switch that surface between the scoped and unscoped views. This
+control affects the workflow picker, Monitor, and listeners; the left automation
+rail remains scoped to the selected agents.
 
 This is a lens over saved invoker assignments, not a second ownership record.
 Blueprint roles remain reusable and do not identify an agent until a schedule or

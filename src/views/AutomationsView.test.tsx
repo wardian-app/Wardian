@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 const invokeMock = vi.fn();
 const blueprintSelectorMock = vi.hoisted(() => vi.fn());
+const automationMonitorScopeMock = vi.hoisted(() => vi.fn());
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args: unknown[]) => invokeMock(...args) }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => vi.fn()) }));
 
@@ -94,11 +95,17 @@ vi.mock('../features/automations/monitor/AutomationMonitor', () => ({
   AutomationMonitor: ({
     onEditSchedule,
     onOpenRun,
+    selectedAgentIds,
   }: {
     onEditSchedule: (schedule: unknown) => void;
     onOpenRun: (blueprintId: string, runId: string) => void;
+    selectedAgentIds?: ReadonlySet<string>;
   }) => (
-    <div data-testid="automation-monitor">
+    <div
+      data-testid="automation-monitor"
+      data-selected-agent-count={selectedAgentIds?.size ?? 0}
+    >
+      {automationMonitorScopeMock(selectedAgentIds)}
       <button type="button" onClick={() => onOpenRun('other', 'run-other-old')}>
         Open mocked run
       </button>
@@ -310,6 +317,42 @@ describe('AutomationsView', () => {
     fireEvent.click(screen.getByRole('button', { name: /show runs/i }));
     expect(screen.getByRole('button', { name: 'Open wf run-selected' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Open other run-other' })).toBeNull();
+  });
+
+  it('toggles the workflow surface between selected agents and all workflows', async () => {
+    seedBuilderWithEmptyBlueprint();
+    const schedules = [
+      scopedSchedule('schedule-selected', 'wf', 'agent-1'),
+      scopedSchedule('schedule-other', 'other', 'agent-2'),
+    ];
+    const runs = [
+      scopedRun('run-selected', 'wf', 'schedule-selected'),
+      scopedRun('run-other', 'other', 'schedule-other'),
+    ];
+    useSchedulesStore.setState({ schedules });
+    useRunStore.setState({ runs });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'automation_list_runs') return runPage(runs);
+      if (command === 'schedule_list') return schedules;
+      if (command === 'listener_list') return [];
+      if (command === 'automation_validate') return { ok: true, diagnostics: [] };
+      return null;
+    });
+    useAutomationsView.setState({ mode: 'monitor' });
+
+    render(<AutomationsView theme="dark" selectedAgentIds={new Set(['agent-1'])} />);
+
+    const toggle = screen.getByTestId('automation-agent-scope-toggle');
+    expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    expect(blueprintSelectorMock).toHaveBeenLastCalledWith(new Set(['wf']));
+
+    fireEvent.click(toggle);
+
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    expect(toggle).toHaveTextContent('All agents');
+    expect(blueprintSelectorMock).toHaveBeenLastCalledWith(undefined);
+    expect(screen.getByTestId('automation-monitor')).toHaveAttribute('data-selected-agent-count', '0');
+    expect(automationMonitorScopeMock).toHaveBeenLastCalledWith(new Set());
   });
 
   it('keeps a directly observed workflow visible when it falls outside a new agent scope', async () => {
