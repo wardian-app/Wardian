@@ -1,0 +1,6 @@
+{"type":"session_meta","payload":{"id":"fixture-session"}}
+{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"Sanitized developer context."}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions\nSanitized host instructions."},{"type":"input_text","text":"<environment_context>Sanitized environment.</environment_context>"}],"internal_chat_message_metadata_passthrough":{"turn_id":"auto-compact-1","content_item_kinds":["agents_md.instructions","environments.environment_context"]}}}
+{"type":"world_state","payload":{}}
+{"type":"turn_context","payload":{"turn_id":"auto-compact-1"}}
+{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"Additional sanitized developer context."}]}}

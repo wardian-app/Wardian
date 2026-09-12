@@ -95,6 +95,12 @@ fn refresh_inner(root: &Path, boundary: &Path, create: bool) -> io::Result<()> {
         return Ok(());
     }
     // Publish a complete sibling file; never truncate a canonical or linked file.
+    // Windows needs the existing parent's verbatim path for both siblings.
+    // Do not canonicalize the destination leaf or bypass the guards above.
+    #[cfg(windows)]
+    let root = fs::canonicalize(root)?;
+    #[cfg(windows)]
+    let target = root.join("CLAUDE.md");
     let mut temporary = tempfile::NamedTempFile::new_in(root)?;
     temporary.write_all(&projected)?;
     temporary.persist(&target).map_err(|error| error.error)?;
@@ -152,6 +158,9 @@ fn has_multiple_links(path: &Path) -> io::Result<bool> {
         Ok(true)
     }
 }
+
+#[cfg(all(test, windows))]
+mod windows_long_paths;
 
 #[cfg(test)]
 mod tests {
