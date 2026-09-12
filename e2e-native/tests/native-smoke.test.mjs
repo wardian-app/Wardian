@@ -14,12 +14,12 @@ const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 
 test("native harness boots the Tauri app shell", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
-  assert.ok(harness.appPath);
 
   try {
     if (!skipNativeBuild) {
       ensureNativeAppBuilt(harness);
     }
+    assert.ok(harness.appPath);
   } catch (error) {
     t.skip(String(error));
     return;

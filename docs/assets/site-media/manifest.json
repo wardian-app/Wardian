@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-06T07:37:26.135Z",
+  "generated_at": "2026-09-07T08:53:34.786Z",
   "app_version": "0.6.0",
   "clips": [
     {
@@ -9,8 +9,8 @@
       "poster": "hero.png",
       "width": 1280,
       "height": 800,
-      "duration_ms": 9948,
-      "bytes_mp4": 190610
+      "duration_ms": 9883,
+      "bytes_mp4": 199085
     },
     {
       "id": "graph",
@@ -19,8 +19,8 @@
       "poster": "graph.png",
       "width": 1280,
       "height": 800,
-      "duration_ms": 8487,
-      "bytes_mp4": 115273
+      "duration_ms": 8644,
+      "bytes_mp4": 112277
     },
     {
       "id": "inbox",
@@ -29,8 +29,8 @@
       "poster": "inbox.png",
       "width": 1280,
       "height": 800,
-      "duration_ms": 8236,
-      "bytes_mp4": 179426
+      "duration_ms": 8239,
+      "bytes_mp4": 145853
     },
     {
       "id": "workflows",
@@ -39,8 +39,8 @@
       "poster": "workflows.png",
       "width": 1280,
       "height": 800,
-      "duration_ms": 9390,
-      "bytes_mp4": 128459
+      "duration_ms": 9400,
+      "bytes_mp4": 152477
     },
     {
       "id": "dashboard",
@@ -49,28 +49,8 @@
       "poster": "dashboard.png",
       "width": 1280,
       "height": 800,
-      "duration_ms": 7808,
-      "bytes_mp4": 209315
-    },
-    {
-      "id": "markdown-truth",
-      "mp4": "markdown-truth.mp4",
-      "webm": "markdown-truth.webm",
-      "poster": "markdown-truth.png",
-      "width": 1280,
-      "height": 800,
-      "duration_ms": 9822,
-      "bytes_mp4": 172556
-    },
-    {
-      "id": "classes",
-      "mp4": "classes.mp4",
-      "webm": "classes.webm",
-      "poster": "classes.png",
-      "width": 1280,
-      "height": 800,
-      "duration_ms": 8591,
-      "bytes_mp4": 106481
+      "duration_ms": 7793,
+      "bytes_mp4": 201979
     },
     {
       "id": "garden",
@@ -79,8 +59,28 @@
       "poster": "garden.png",
       "width": 1280,
       "height": 800,
-      "duration_ms": 7961,
-      "bytes_mp4": 117984
+      "duration_ms": 8021,
+      "bytes_mp4": 129192
+    },
+    {
+      "id": "markdown-truth",
+      "mp4": "markdown-truth.mp4",
+      "webm": "markdown-truth.webm",
+      "poster": "markdown-truth.png",
+      "width": 1280,
+      "height": 800,
+      "duration_ms": 9817,
+      "bytes_mp4": 167006
+    },
+    {
+      "id": "classes",
+      "mp4": "classes.mp4",
+      "webm": "classes.webm",
+      "poster": "classes.png",
+      "width": 1280,
+      "height": 800,
+      "duration_ms": 8560,
+      "bytes_mp4": 113689
     }
   ]
 }

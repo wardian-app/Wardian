@@ -4,8 +4,8 @@ import type { GardenSkillGlyph } from "./skillGlyphs";
 /**
  * Kinds the Garden can address.
  *
- * A subset of `EntityRef`'s vocabulary. Only `agent` and `automation` are
- * *placed*: `skill` is addressable so a glyph can be selected and deep-linked,
+ * Agents have authored placement. Situated automations derive their locations
+ * from participants or workspace anchors. `skill` is addressable and deep-linked,
  * but a skill has no position of its own — it renders on the agents that carry
  * it. See `skillGlyphs.ts` for why.
  *
@@ -15,7 +15,13 @@ import type { GardenSkillGlyph } from "./skillGlyphs";
  * and never enters the layout. Its id is a normalized absolute path, so the
  * key space stays the one `entityRef.ts` established.
  */
-export type GardenEntityKind = "agent" | "automation" | "skill" | "path";
+export type GardenEntityKind = "agent" | "automation" | "skill" | "path" | "district" | "workspace" | "memory" | "stage" | "identity";
+
+/** Persisted world-to-screen transform shared by canvas and DOM cutaways. */
+export interface GardenCamera {
+  scale: number;
+  position: GardenPosition;
+}
 
 export interface GardenEntityRef {
   kind: GardenEntityKind;

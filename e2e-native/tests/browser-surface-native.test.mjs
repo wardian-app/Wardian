@@ -5,12 +5,12 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
 import { By, Key, until } from "selenium-webdriver";
 
 import {
   createNativeHarness,
   ensureNativeAppBuilt,
+  freezeBuiltCliForRun,
   invokeTauri,
   invokeTauriResult,
   prepareIsolatedHome,
@@ -94,10 +94,6 @@ async function requireInvoke(driver, command, args = {}) {
   return await invokeTauri(driver, command, args);
 }
 
-function commandName(name) {
-  return process.platform === "win32" ? `${name}.exe` : name;
-}
-
 /** Builds `wardian-cli` and returns its path, matching the CLI shared-state test. */
 function buildCli(harness) {
   const build = spawnSync("cargo", ["build", "-p", "wardian-cli", "--bin", "wardian-cli"], {
@@ -106,21 +102,7 @@ function buildCli(harness) {
   });
   assert.equal(build.status, 0, `cargo build -p wardian-cli failed
 ${build.stderr}`);
-  const local = path.join(harness.repoRoot, "target", "debug", commandName("wardian-cli"));
-  if (existsSync(local)) return local;
-  const metadata = spawnSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], {
-    cwd: harness.repoRoot,
-    encoding: "utf8",
-  });
-  assert.equal(metadata.status, 0, `cargo metadata failed
-${metadata.stderr}`);
-  const candidate = path.join(
-    JSON.parse(metadata.stdout).target_directory,
-    "debug",
-    commandName("wardian-cli"),
-  );
-  assert.equal(existsSync(candidate), true, `wardian-cli was not found at ${candidate}`);
-  return candidate;
+  return freezeBuiltCliForRun(harness);
 }
 
 /**

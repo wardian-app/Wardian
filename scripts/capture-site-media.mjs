@@ -92,6 +92,7 @@ const REQUIRED_CLIPS = [
   "inbox",
   "workflows",
   "dashboard",
+  "garden",
   "markdown-truth",
   "classes",
 ];
@@ -100,14 +101,19 @@ const REQUIRED_CLIPS = [
  * Clips that are nice to have. A stretch clip that cannot be driven is
  * reported and skipped rather than failing the run or shipping something empty.
  *
- * `terminal-mirrors` is deliberately absent. The Owner/Mirror/Connecting badge
- * only appears once two surfaces are bound to the same agent session, and the
- * Open Surface palette stops offering `agent-session` once one is open — a
- * second one needs a split-group duplicate gesture this harness does not drive.
- * The surface is real; filming it is not a cheap extension, so the section goes
- * without a clip rather than with an empty one.
+ * Empty today. `garden` was here while no section used it; now that the site
+ * has a Garden section, a skipped capture would publish a section with no
+ * media, so it is required.
+ *
+ * `terminal-mirrors` is deliberately absent from both lists. The
+ * Owner/Mirror/Connecting badge only appears once two surfaces are bound to the
+ * same agent session, and the Open Surface palette stops offering
+ * `agent-session` once one is open — a second one needs a split-group duplicate
+ * gesture this harness does not drive. The surface is real; filming it is not a
+ * cheap extension, so the section goes without a clip rather than with an empty
+ * one.
  */
-const STRETCH_CLIPS = ["garden"];
+const STRETCH_CLIPS = [];
 
 const EXPECTED_CLIPS = [...REQUIRED_CLIPS, ...STRETCH_CLIPS];
 
@@ -670,7 +676,6 @@ const CLIPS = [
   },
   {
     id: "garden",
-    stretch: true,
     mock: {},
     async prepare(page) {
       await openSurface(page, "garden");

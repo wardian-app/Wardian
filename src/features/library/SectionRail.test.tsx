@@ -113,6 +113,6 @@ describe('SectionRail', () => {
     // Regression guard: the rail must be wide enough (and the label's
     // tracking loose enough) that "Automations" doesn't clip to "Automation".
     const rail = screen.getByTestId('library-section-rail');
-    expect(rail.className).toContain('w-20');
+    expect(rail.className).toContain('w-24');
   });
 });

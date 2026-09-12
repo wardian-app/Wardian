@@ -1,6 +1,8 @@
 pub(crate) mod classes;
 pub(crate) mod claude;
 pub(crate) mod codex;
+pub(crate) mod codex_shared;
+pub(crate) mod codex_stop;
 pub(crate) mod headless;
 pub(crate) mod opencode;
 pub(crate) mod session_identity;

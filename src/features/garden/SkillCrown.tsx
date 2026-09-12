@@ -5,6 +5,9 @@ import {
   CROWN_CAP,
   GLYPH_RADIUS,
   crownPositions,
+  crownReveal,
+  crownLabelLayout,
+  crownConvergence,
   type GardenDetail,
   type GardenSkillGlyph,
 } from "./skillGlyphs";
@@ -22,6 +25,10 @@ function glyphColor(hue: number): string {
 interface SkillCrownProps {
   crown: readonly GardenSkillGlyph[];
   detail: GardenDetail;
+  /** Camera scale enables smooth disclosure; omitted retains detail caps. */
+  scale?: number;
+  /** Eased 0..1 progress from the crown into the cell's Capabilities rows. */
+  convergence?: number;
   theme: GardenTheme;
   /** entry_ref of the selected skill, so its glyph rings on every carrier. */
   selectedEntryRef: string | null;
@@ -39,12 +46,14 @@ interface SkillCrownProps {
 export const SkillCrown: React.FC<SkillCrownProps> = ({
   crown,
   detail,
+  scale,
+  convergence = 0,
   theme,
   selectedEntryRef,
   onSelect,
   onOpen,
 }) => {
-  const cap = CROWN_CAP[detail];
+  const cap = scale === undefined ? CROWN_CAP[detail] : CROWN_CAP.near;
   if (cap <= 0 || crown.length === 0) return null;
 
   const shown = crown.slice(0, cap);
@@ -61,6 +70,9 @@ export const SkillCrown: React.FC<SkillCrownProps> = ({
   return (
     <Group listening>
       {shown.map((glyph, index) => {
+        const reveal = scale === undefined ? null : crownReveal(scale, index);
+        const migration = crownConvergence(positions[index], index, convergence);
+        const glyphScale = (reveal?.glyphScale ?? 1) * migration.glyphScale;
         const color = glyphColor(glyph.hue);
         const filled = glyph.provenance !== "global";
         const selected = selectedEntryRef !== null &&
@@ -68,8 +80,13 @@ export const SkillCrown: React.FC<SkillCrownProps> = ({
         return (
           <Group
             key={glyph.entryRef}
-            x={positions[index].x}
-            y={positions[index].y}
+            x={migration.x}
+            y={migration.y}
+            opacity={reveal?.opacity ?? 1}
+            // Opacity zero alone still draws Konva children and their buffers.
+            // Keep keyed marks positioned for reverse zoom, but skip invisible paint.
+            visible={!reveal || reveal.opacity > 0}
+            listening={!reveal || reveal.opacity > 0}
             onMouseEnter={(event) => {
               event.target.getStage()?.container().style.setProperty("cursor", "pointer");
             }}
@@ -93,34 +110,52 @@ export const SkillCrown: React.FC<SkillCrownProps> = ({
               onOpen(glyph);
             }}
           >
-            {selected && (
-              <Circle radius={GLYPH_RADIUS + 3.5} stroke={theme.selection} strokeWidth={1.5} />
-            )}
-            {/* An inherited skill gets a second ring: it belongs to the agent's
-                class, so it can change without the agent being touched. */}
-            {glyph.provenance === "class" && (
-              <Circle radius={GLYPH_RADIUS + 2} stroke={color} strokeWidth={1} opacity={0.7} />
-            )}
-            <Circle
-              radius={GLYPH_RADIUS}
-              fill={filled ? color : theme.labelBackdrop}
-              stroke={color}
-              strokeWidth={1}
-              // A copy is a fork whose edits never sync back to the library.
-              dash={glyph.copied ? [2, 2] : undefined}
-            />
-            <Text
-              text={glyph.monogram}
-              fontSize={8}
-              fontStyle="bold"
+            <Group scaleX={glyphScale} scaleY={glyphScale}>
+              {selected && (
+                <Circle radius={GLYPH_RADIUS + 3.5} stroke={theme.selection} strokeWidth={1.5} />
+              )}
+              {/* An inherited skill gets a second ring: it belongs to the agent's
+                  class, so it can change without the agent being touched. */}
+              {glyph.provenance === "class" && (
+                <Circle radius={GLYPH_RADIUS + 2} stroke={color} strokeWidth={1} opacity={0.7} />
+              )}
+              <Circle
+                radius={GLYPH_RADIUS}
+                // A simple disk needs no full-stage fill/stroke compositing buffer
+                // while its parent crown fades. Keep this local to the glyph shell.
+                perfectDrawEnabled={false}
+                fill={filled ? color : theme.labelBackdrop}
+                stroke={color}
+                strokeWidth={1}
+                // A copy is a fork whose edits never sync back to the library.
+                dash={glyph.copied ? [2, 2] : undefined}
+              />
+              {(!reveal || reveal.monogramOpacity > 0) && <Text
+                text={glyph.monogram}
+                fontSize={8}
+                fontStyle="bold"
+                fontFamily={theme.font}
+                fill={filled ? theme.labelBackdrop : color}
+                width={GLYPH_RADIUS * 4}
+                offsetX={GLYPH_RADIUS * 2}
+                offsetY={4}
+                align="center"
+                listening={false}
+                opacity={reveal?.monogramOpacity ?? 1}
+              />}
+            </Group>
+            {reveal && reveal.labelOpacity > 0 && scale !== undefined && <Text
+              {...crownLabelLayout(positions[index], scale, crown.length)}
+              text={glyph.label}
               fontFamily={theme.font}
-              fill={filled ? theme.labelBackdrop : color}
-              width={GLYPH_RADIUS * 4}
-              offsetX={GLYPH_RADIUS * 2}
-              offsetY={4}
-              align="center"
+              fill={theme.label}
+              opacity={reveal.labelOpacity * migration.labelOpacity}
+              wrap="none"
+              ellipsis
               listening={false}
-            />
+              shadowColor={theme.labelBackdrop}
+              shadowBlur={2 / scale}
+            />}
           </Group>
         );
       })}
@@ -137,6 +172,8 @@ export const SkillCrown: React.FC<SkillCrownProps> = ({
           offsetY={5}
           align="center"
           listening={false}
+          opacity={(scale === undefined ? 1 : crownReveal(scale, CROWN_CAP.near).opacity) *
+            crownConvergence(positions[positions.length - 1], CROWN_CAP.near, convergence).labelOpacity}
         />
       )}
     </Group>

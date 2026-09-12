@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Star, Pencil, Trash2, Tag } from 'lucide-react';
 import { useLibraryStore } from '../../store/useLibraryStore';
 import { useConfirm } from '../../components/ConfirmDialog';
 import {
@@ -119,7 +120,7 @@ const DetailHeader: React.FC<DetailHeaderProps> = ({ entry, onToggleStar, onRena
     };
 
     return (
-        <div data-testid="detail-header" className="flex flex-col gap-2 px-3 py-2 border-b border-wardian-border">
+        <div data-testid="detail-header" className="flex shrink-0 flex-col gap-3 p-4 border-b border-wardian-border">
             <div className="flex items-center gap-2 min-w-0">
                 <button
                     type="button"
@@ -127,11 +128,12 @@ const DetailHeader: React.FC<DetailHeaderProps> = ({ entry, onToggleStar, onRena
                     aria-pressed={entry.is_starred}
                     title={entry.is_starred ? 'Unstar' : 'Star'}
                     onClick={onToggleStar}
-                    className={`shrink-0 text-base leading-none transition-colors ${
+                    aria-label={entry.is_starred ? 'Unstar' : 'Star'}
+                    className={`wardian-icon-button shrink-0 ${
                         entry.is_starred ? 'text-[var(--color-wardian-accent)]' : 'text-muted-neutral hover:text-primary'
                     }`}
                 >
-                    {entry.is_starred ? '★' : '☆'}
+                    <Star size={18} fill={entry.is_starred ? 'currentColor' : 'none'} aria-hidden="true" />
                 </button>
                 {renaming ? (
                     <div className="flex flex-1 min-w-0 items-center gap-1">
@@ -173,9 +175,10 @@ const DetailHeader: React.FC<DetailHeaderProps> = ({ entry, onToggleStar, onRena
                                 data-testid="detail-rename-button"
                                 title="Rename"
                                 onClick={() => setRenaming(true)}
-                                className="shrink-0 text-muted-neutral hover:text-primary"
+                                aria-label="Rename"
+                                className="wardian-icon-button wardian-icon-button--secondary shrink-0"
                             >
-                                Rename
+                                <Pencil size={14} aria-hidden="true" />
                             </button>
                         )}
                     </>
@@ -186,15 +189,20 @@ const DetailHeader: React.FC<DetailHeaderProps> = ({ entry, onToggleStar, onRena
                         data-testid="detail-delete-button"
                         title="Delete"
                         onClick={onDelete}
-                        className="shrink-0 text-muted-neutral hover:text-[var(--color-wardian-error)]"
+                        aria-label="Delete"
+                        className="wardian-icon-button wardian-icon-button--secondary shrink-0 hover:text-[var(--color-wardian-error)]"
                     >
-                        Delete
+                        <Trash2 size={14} aria-hidden="true" />
                     </button>
                 )}
             </div>
+            {entry.description && <p className="text-xs leading-5 text-muted">{entry.description}</p>}
+            <label className="flex items-center gap-2 text-muted-neutral">
+            <Tag size={14} className="shrink-0" aria-hidden="true" />
             <input
                 type="text"
                 data-testid="detail-tags-input"
+                aria-label="Tags, comma separated"
                 value={tagsValue}
                 placeholder="tags, comma, separated"
                 onChange={(e) => setTagsValue(e.target.value)}
@@ -202,6 +210,7 @@ const DetailHeader: React.FC<DetailHeaderProps> = ({ entry, onToggleStar, onRena
                 onKeyDown={(e) => e.key === 'Enter' && commitTags()}
                 className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-2 py-1 text-xs text-primary focus:outline-none focus:border-[var(--color-wardian-accent)]"
             />
+            </label>
         </div>
     );
 };

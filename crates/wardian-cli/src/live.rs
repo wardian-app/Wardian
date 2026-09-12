@@ -1,3 +1,5 @@
+pub(crate) mod messaging;
+
 use std::{
     fmt, io,
     time::{Duration, Instant},

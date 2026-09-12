@@ -48,6 +48,8 @@ This file is an agent-readable index for the public Wardian documentation. Use t
 
 ## CLI and Agent Communication
 
+- https://docs.wardian.org/developer/agent-messaging-tools - Use structured peer messaging, follow-up tasks, receiving, and correlated replies through managed Codex tools.
+
 - https://docs.wardian.org/guide/cli - Use the Wardian CLI for agent inspection, live control, inter-agent messages, worktree assignment, and automation commands.
 - https://docs.wardian.org/developer/ipc-events - Understand frontend/backend event contracts and runtime telemetry surfaces.
 - https://docs.wardian.org/developer/tauri-command-reference - Reference Tauri command boundaries used by the UI and native runtime.
