@@ -3,7 +3,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::manager::{self, opencode::opencode_database_path};
+use crate::manager::{
+    self,
+    opencode::{opencode_database_path, opencode_log_dirs, opencode_log_path_in},
+};
 use crate::providers::antigravity::AntigravityProvider;
 use crate::providers::chat_transcript::{
     legacy_visible_chat_text_for_provider, normalize_chat_lines, visible_chat_text,
@@ -28,6 +31,9 @@ pub(crate) mod archive_identity;
 use archive_identity::stable_provider_log_event_id;
 
 const PROVIDER_LOG_TAIL_BYTES: u64 = 2 * 1024 * 1024;
+
+#[path = "chat_opencode_tools.rs"]
+mod opencode_tools;
 
 #[derive(Clone)]
 pub(crate) struct AgentArchiveCaptureSnapshot {
@@ -310,6 +316,23 @@ pub(crate) async fn agent_archive_capture_snapshot(
             }
         }
     }
+    if provider == "opencode" && log_path.is_none() {
+        let provider_session_id = opencode_session_id(
+            &config.session_id,
+            config.resume_session.as_deref(),
+            config.fresh_provider_session_id.as_deref(),
+        );
+        if let Some(path) = provider_session_id.and_then(|provider_session_id| {
+            opencode_log_dirs()
+                .into_iter()
+                .find_map(|directory| opencode_log_path_in(&directory, &provider_session_id))
+        }) {
+            log_path = Some(path.clone());
+            if let Ok(mut agent_log_path) = agent.log_path.lock() {
+                *agent_log_path = Some(path);
+            }
+        }
+    }
 
     Ok(AgentArchiveCaptureSnapshot {
         session_id,
@@ -340,8 +363,12 @@ pub(crate) fn collect_agent_chat_events_for_archive(
     if snapshot.provider == "opencode" {
         provider_events.extend(load_opencode_db_chat_events(
             &snapshot.session_id,
-            opencode_session_id(&snapshot.session_id, snapshot.resume_session.as_deref())
-                .as_deref(),
+            opencode_session_id(
+                &snapshot.session_id,
+                snapshot.resume_session.as_deref(),
+                snapshot.fresh_provider_session_id.as_deref(),
+            )
+            .as_deref(),
         ));
     }
     collect_agent_chat_events_with_provider_events(snapshot, provider_events, false)
@@ -1126,18 +1153,39 @@ fn load_opencode_db_chat_events_from_db(
 
     let mut events = Vec::new();
     let mut request_root_id = None;
+    let mut text_sequence = 0;
     for row in rows {
         let row = row.map_err(|err| err.to_string())?;
+        events.extend(opencode_tools::project(
+            wardian_session_id,
+            opencode_session_id,
+            &row,
+            request_root_id.as_deref(),
+            db_path,
+            events.len() as u64 + 1,
+        ));
         let Some(event) = opencode_db_part_to_chat_event(
             wardian_session_id,
             opencode_session_id,
-            events.len() as u64 + 1,
+            text_sequence + 1,
             row,
             request_root_id.as_deref(),
         )?
         else {
             continue;
         };
+        let mut event = event;
+        // Keep legacy text IDs stable when previously omitted tool parts appear.
+        text_sequence += 1;
+        event.sequence = Some(events.len() as u64 + 1);
+        event.created_at = event.metadata["part_time_created"]
+            .as_i64()
+            .or_else(|| event.metadata["message_time_created"].as_i64())
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|time| time.to_rfc3339());
+        // `source_path` is part of the archive source-record contract and is
+        // retained when events are replayed after a restart.
+        event.metadata["source_path"] = serde_json::json!(db_path.to_string_lossy());
         if event.role == Some(AgentChatRole::User)
             && event.metadata["input_origin"] != "context_injection"
         {
@@ -1260,15 +1308,22 @@ fn opencode_db_part_to_chat_event(
     }))
 }
 
-fn opencode_session_id(wardian_session_id: &str, resume_session: Option<&str>) -> Option<String> {
+fn opencode_session_id(
+    wardian_session_id: &str,
+    resume_session: Option<&str>,
+    fresh_provider_session_id: Option<&str>,
+) -> Option<String> {
     resume_session
         .map(str::trim)
         .filter(|session| session.starts_with("ses_"))
         .or_else(|| {
-            wardian_session_id
-                .trim()
-                .starts_with("ses_")
-                .then_some(wardian_session_id)
+            fresh_provider_session_id
+                .map(str::trim)
+                .filter(|session| session.starts_with("ses_"))
+        })
+        .or_else(|| {
+            let session = wardian_session_id.trim();
+            session.starts_with("ses_").then_some(session)
         })
         .map(ToString::to_string)
 }
@@ -3076,21 +3131,49 @@ Do you want to proceed?
         assert_eq!(chat_events[2].metadata["opencode_session_id"], "ses_test");
         assert_eq!(chat_events[2].metadata["part_id"], "part-assistant");
         assert_eq!(chat_events[2].metadata["raw_type"], "text");
+        assert_eq!(
+            chat_events[2].metadata["source_path"],
+            db_path.to_string_lossy().as_ref()
+        );
+
+        conn.execute(
+            "INSERT INTO message VALUES ('msg-later', 'ses_test', 7, 7, '{\"role\":\"assistant\"}')",
+            [],
+        )
+        .expect("append message");
+        conn.execute(
+            "INSERT INTO part VALUES ('part-later', 'msg-later', 'ses_test', 8, 8, '{\"type\":\"text\",\"text\":\"A later reply\"}')",
+            [],
+        )
+        .expect("append part");
+
+        let refreshed = load_opencode_db_chat_events_from_db(&db_path, "agent-1", "ses_test")
+            .expect("refresh db");
+        assert_eq!(refreshed.len(), 4);
+        assert_eq!(refreshed[3].text.as_deref(), Some("A later reply"));
     }
 
     #[test]
     fn opencode_session_id_prefers_real_resume_session() {
         assert_eq!(
-            opencode_session_id("wardian-uuid", Some("ses_real")).as_deref(),
+            opencode_session_id("wardian-uuid", Some("ses_real"), None).as_deref(),
             Some("ses_real")
         );
         assert_eq!(
-            opencode_session_id("ses_from_agent", None).as_deref(),
+            opencode_session_id("ses_from_agent", None, None).as_deref(),
             Some("ses_from_agent")
         );
         assert_eq!(
-            opencode_session_id("wardian-uuid", Some("stale-uuid")),
+            opencode_session_id("wardian-uuid", Some("stale-uuid"), Some("ses_fresh")),
+            Some("ses_fresh".to_string())
+        );
+        assert_eq!(
+            opencode_session_id("wardian-uuid", Some("stale-uuid"), Some("fresh-uuid")),
             None
+        );
+        assert_eq!(
+            opencode_session_id("wardian-uuid", None, Some("ses_fresh")).as_deref(),
+            Some("ses_fresh")
         );
     }
 
