@@ -97,6 +97,29 @@ describe('DetailPane', () => {
     expect(screen.getByTestId('library-detail-empty')).toBeInTheDocument();
   });
 
+  it('shows class contents, separates global skills, and navigates to an included skill', async () => {
+    const index = buildIndex();
+    index.deployments = {
+      'skills/planner': [{ target_type: 'class', target_id: 'Architect', linked: true }],
+      'skills/copied': [{ target_type: 'class', target_id: 'Architect', linked: false }],
+      'skills/global-helper': [{ target_type: 'user', target_id: 'global', linked: true }],
+      'skills/other-class': [{ target_type: 'class', target_id: 'Coder', linked: true }],
+    };
+    index.orphans = [{ target_type: 'class', target_id: 'Architect', skill_name: 'missing-source' }];
+    useLibraryStore.setState({ index, selection: { section: 'classes', entryRef: 'classes/Architect' }, selectedContent: '# Instructions' });
+    render(<DetailPane selectedAgentIds={new Set()} />);
+    expect(await screen.findByText('2 class skills')).toBeVisible();
+    expect(screen.getByText('Linked · source edits sync')).toBeVisible();
+    expect(screen.getByText("copied — edits won't sync")).toBeVisible();
+    expect(screen.getByText('Shared with all agents · 1 skill')).toBeVisible();
+    expect(screen.getByText('missing-source — source unavailable')).toBeVisible();
+    expect(screen.queryByText('other-class')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'planner' }));
+    expect(useLibraryStore.getState().select).toHaveBeenCalledWith('skills/planner');
+    fireEvent.click(screen.getByRole('button', { name: 'Remove copied from class' }));
+    expect(useLibraryStore.getState().setSkillDeployments).toHaveBeenCalledWith('copied', []);
+  });
+
   it('shows the MCP stub when the active section is mcps, regardless of selection', () => {
     useLibraryStore.setState({ activeSection: 'mcps' });
     render(<DetailPane selectedAgentIds={new Set()} />);
@@ -205,6 +228,7 @@ describe('DetailPane', () => {
       });
       render(<DetailPane selectedAgentIds={new Set()} />);
 
+      fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
       const textarea = await screen.findByTestId('markdown-editor-textarea');
       fireEvent.keyDown(textarea, { key: 's', ctrlKey: true });
 
@@ -228,6 +252,7 @@ describe('DetailPane', () => {
       expect(resolveStale).toHaveBeenCalledTimes(1);
       expect(useLibraryStore.getState().contentStale).toBe(false);
 
+      fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
       const textarea = screen.getByTestId('markdown-editor-textarea');
       fireEvent.keyDown(textarea, { key: 's', ctrlKey: true });
 
@@ -246,6 +271,7 @@ describe('DetailPane', () => {
       });
       render(<DetailPane selectedAgentIds={new Set()} />);
 
+      fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
       const textarea = await screen.findByTestId('markdown-editor-textarea');
       fireEvent.keyDown(textarea, { key: 's', ctrlKey: true });
 
@@ -269,6 +295,7 @@ describe('DetailPane', () => {
         registerEditorCloseActions,
       });
       render(<DetailPane selectedAgentIds={new Set()} />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
       const textarea = await screen.findByTestId('markdown-editor-textarea');
       fireEvent.change(textarea, { target: { value: '# first draft' } });
 
@@ -300,7 +327,7 @@ describe('DetailPane', () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Reload' }));
 
       await waitFor(() =>
-        expect(screen.getByTestId('markdown-editor-textarea')).toHaveValue('# updated on disk'),
+        expect(screen.getByRole('heading', { name: 'updated on disk' })).toBeVisible(),
       );
     });
   });

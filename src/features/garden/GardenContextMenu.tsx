@@ -5,7 +5,7 @@ import { useContextMenuSurface } from "../../components/useContextMenuSurface";
 interface GardenContextMenuProps {
   x: number;
   y: number;
-  /** Set when the menu was opened over an agent unit; enables "Open in Grid". */
+  /** Set when the menu was opened over an agent unit; enables its canonical session action. */
   agentId: string | null;
   onOpenAgent: (agentId: string) => void;
   onResetLayout: () => void;
@@ -15,7 +15,7 @@ interface GardenContextMenuProps {
 /**
  * Right-click menu for the Garden canvas. Mirrors the app's other context menus
  * (shared `.context-menu` styling) but with Garden-scoped actions: open an agent
- * in Grid, and reset the locally-persisted layout back to the seed spiral.
+ * session, and reset the locally-persisted layout back to the derived arrangement.
  */
 export const GardenContextMenu: React.FC<GardenContextMenuProps> = ({
   x,
@@ -70,7 +70,7 @@ export const GardenContextMenu: React.FC<GardenContextMenuProps> = ({
             }}
           >
             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
-            Open in Grid
+            Open agent session
           </button>
           <div className="context-menu-divider" />
         </>

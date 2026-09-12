@@ -9,6 +9,12 @@ future tools operate against the same app-owned state as the desktop UI without
 screen scraping or duplicating private state. Prefer CLI/backend commands when
 building repeatable automation around Wardian.
 
+MCP-capable managed agents can use `wardian mcp serve` for structured
+information delivery, follow-up tasks, receiving, and correlated replies.
+These tools use the same running app and canonical interaction store. See
+[Agent Messaging Tools](../developer/agent-messaging-tools.md) for the tool
+contract, Codex configuration, and current limitations.
+
 ## When to Use It
 
 - Let a managed agent identify itself with `wardian agent`.

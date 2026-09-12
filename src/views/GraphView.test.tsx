@@ -168,7 +168,7 @@ describe("GraphView", () => {
     expect(screen.getByTestId("mock-graph-node")).toBeInTheDocument();
   });
 
-  it("shows when communication activity is partial", async () => {
+  it("does not show a status banner when communication activity is partial", async () => {
     const { invoke } = await import("@tauri-apps/api/core");
     vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === "get_topology") {
@@ -182,9 +182,9 @@ describe("GraphView", () => {
 
     render(<GraphView {...defaultProps} />);
 
-    expect(await screen.findByRole("status")).toHaveTextContent("recent communication activity only");
-    fireEvent.click(screen.getByRole("button", { name: /load next page/i }));
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_pair_activity", { offset: 5_000 }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_pair_activity"));
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /load next page/i })).not.toBeInTheDocument();
   });
 
   it("shows a first-use tip for deliberate topology changes", () => {

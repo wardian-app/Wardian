@@ -98,7 +98,7 @@ function canRenderMarkdown(descriptor: FileRendererProps["snapshot"]["descriptor
     && descriptor.line_count <= MARKDOWN_MAX_LINE_COUNT;
 }
 
-function isLocalTarget(raw: string) {
+export function isLocalMarkdownTarget(raw: string) {
   return raw.startsWith("file:")
     || /^[A-Za-z]:[\\/]/.test(raw)
     || raw.startsWith("/")
@@ -106,6 +106,8 @@ function isLocalTarget(raw: string) {
     || raw.startsWith("../")
     || (!/^[A-Za-z][A-Za-z0-9+.-]*:/.test(raw) && !raw.startsWith("#"));
 }
+
+const isLocalTarget = isLocalMarkdownTarget;
 
 function windowsPathRoot(path: string): string | null {
   const verbatimUnc = path.match(/^\/\/\?\/UNC\/([^/]+)\/([^/]+)(?:\/|$)/i);
@@ -544,18 +546,21 @@ export default function MarkdownRenderer({
   if (text === null) return <div className="files-resource-state" role="status">Loading Markdown…</div>;
   return (
     <article ref={articleRef} className="files-markdown-renderer">
-      <Markdown
-        components={components}
-        rehypePlugins={[
-          rehypeRaw,
-          [rehypeSanitize, MARKDOWN_SANITIZE_SCHEMA],
-          rehypeMarkdownHeadingIds,
-        ]}
-        remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
-        urlTransform={filesMarkdownUrlTransform}
-      >
-        {text}
-      </Markdown>
+      <MarkdownDocument text={text} components={components} />
     </article>
+  );
+}
+
+/** Shared document presentation. Callers own resource access and link handling. */
+export function MarkdownDocument({ text, components }: { text: string; components: Components }) {
+  return (
+    <Markdown
+      components={{ pre: MarkdownCodeBlock, table: MarkdownTable, ...components }}
+      rehypePlugins={[rehypeRaw, [rehypeSanitize, MARKDOWN_SANITIZE_SCHEMA], rehypeMarkdownHeadingIds]}
+      remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
+      urlTransform={filesMarkdownUrlTransform}
+    >
+      {text}
+    </Markdown>
   );
 }

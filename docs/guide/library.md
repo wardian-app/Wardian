@@ -37,7 +37,7 @@ self-contained three-pane surface that does not replace the global left sidebar:
   collapsible folder groups (browsing) or a flattened, ranked list of matches
   (searching). Its toolbar has a search box, a starred-only filter, a **New**
   menu (new item / new folder), and a reveal-in-file-manager shortcut.
-- **Detail pane** — the right pane. Selecting a row opens an inline editor and
+- **Detail pane** — the right pane. Selecting a row opens a Markdown preview and
   a panel specific to that entry's kind (skill, prompt, class, or automation).
   There are no more modals: everything you need to inspect or change an entry
   happens in this pane.
@@ -178,10 +178,10 @@ Classes do not have folders — the classes list is always flat.
 
 ## Deploying Skills from the Detail Pane
 
-Opening a skill shows a **Deploy to** checklist in the lower half of the
-detail pane, listing every possible target: the global user profile, every
-class, and every persisted agent. Check or uncheck targets and click
-**Apply** to deploy or remove the skill from those targets in one operation.
+Opening a skill shows its deployment targets below the document. Choose
+**Add target…** to search the global user profile, classes, and persisted agents.
+Select a target to deploy the skill, or use a target chip's remove control to
+remove that deployment.
 
 - **Deployed and healthy** — the list row shows an emerald `●<n>` badge with
   the deployment count once a skill has at least one target.
@@ -202,9 +202,16 @@ deployments.
 
 ## Editing and Saving
 
-Every detail pane uses the same inline, monospace markdown editor:
+Documents open in **Preview**, using the same Markdown presentation as Files:
+headings, tables, task lists, expandable sections, and code blocks with copy
+controls. Frontmatter stays available under **Document metadata**. Local file
+references are shown as text; use **Open in local file system** to inspect their
+files. External links open in your browser.
 
-- **Ctrl+S** (or **Cmd+S** on macOS) saves. There is no autosave — skills are
+Choose **Edit** to work on the full Markdown source, including frontmatter.
+Switch back to **Preview** to inspect the current draft without saving it.
+
+- **Save**, **Ctrl+S** (or **Cmd+S** on macOS) saves. There is no autosave — skills are
   live-linked into running agent sessions, so a half-typed autosave could
   propagate instantly to a deployed target.
 - A dirty indicator and "Unsaved changes" label show while the draft differs
@@ -217,6 +224,16 @@ Every detail pane uses the same inline, monospace markdown editor:
   show the warning again).
 
 ## Managing Entries
+
+Class rows show their instruction file, class skill count, and a summary of
+included skill names. Opening a class shows **Included skills** above its
+instructions, with descriptions, source paths, and linked/copied status. Select
+a skill name to inspect it. **Shared with all agents** lists global deployments
+separately; unresolved class deployments remain visible as warnings. This view
+reflects the Library deployment index; class instructions remain owned by the
+class's `AGENTS.md` file on disk.
+
+![Library class contents showing included skills, sync status, and rendered instructions](../assets/screenshots/library/library-view.png)
 
 - **Rename**: the detail header's rename control also moves the entry (a
   rename to a different folder path is the same underlying operation as a
