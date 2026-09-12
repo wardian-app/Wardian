@@ -275,7 +275,15 @@ impl CodexSharedClient {
         let observations = observation.clone();
         let proxy_stop = proxy.as_ref().map(proxy::OwnedProxy::stop_signal);
         let task = tokio::spawn(async move {
-            while let Some(Ok(message)) = reader.next().await {
+            let mut close_reason = "provider connection ended".to_owned();
+            while let Some(message) = reader.next().await {
+                let message = match message {
+                    Ok(message) => message,
+                    Err(error) => {
+                        close_reason = format!("provider connection ended: {error}");
+                        break;
+                    }
+                };
                 match message {
                     Message::Text(text) => {
                         let Ok(value) = serde_json::from_str::<Value>(&text) else {
@@ -304,9 +312,7 @@ impl CodexSharedClient {
             }
             observations.send_modify(Observation::close);
             for (_, reply) in replies.lock().unwrap().drain() {
-                let _ = reply.send(Err(CodexSharedError::uncertain(
-                    "provider connection ended",
-                )));
+                let _ = reply.send(Err(CodexSharedError::uncertain(close_reason.clone())));
             }
             if let Some(stop) = proxy_stop {
                 stop.send_replace(true);
@@ -321,6 +327,14 @@ impl CodexSharedClient {
             reader: Mutex::new(Some(task)),
             proxy,
         })
+    }
+
+    /// Attach using identity, policy and live state without transferring archived
+    /// turns. The normal TUI and Wardian archive own history presentation.
+    async fn resume_metadata(&self, mut params: Value) -> Result<Value, CodexSharedError> {
+        params["excludeTurns"] = json!(true);
+        self.request_with_timeout("thread/resume", params, STARTUP_TIMEOUT)
+            .await
     }
 
     /// Initialize one connection and verify the installed version and exact owned home.

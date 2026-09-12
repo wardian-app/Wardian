@@ -1015,6 +1015,9 @@ pub async fn spawn_agent(
             provider_args.extend(["resume".into(), id.clone()]);
         }
         provider_args.push("--no-alt-screen".into());
+        // A saved thread can have another historical cwd. Explicitly select the
+        // configured workspace so Codex cannot block attachment on its cwd picker.
+        provider_args.extend(["--cd".into(), provider_cwd.to_string_lossy().into_owned()]);
         Some(attachment)
     } else {
         None
@@ -1813,7 +1816,19 @@ pub async fn spawn_agent(
             .await;
         if let Err(error) = finalized {
             child.stop().await;
-            return Err(error.to_string());
+            // Failed attachment otherwise discards the only TUI evidence (for
+            // example a blocking startup picker). Preserve a bounded plain tail.
+            let output = watch_state
+                .lock()
+                .ok()
+                .and_then(|state| state.snapshot_since(None, Some(4096)).ok())
+                .map(|snapshot| snapshot.output.text)
+                .unwrap_or_default();
+            return Err(if output.trim().is_empty() {
+                error.to_string()
+            } else {
+                format!("{error}\nProvider terminal output:\n{output}")
+            });
         }
         if let Err(error) = child.alive() {
             child.stop().await;

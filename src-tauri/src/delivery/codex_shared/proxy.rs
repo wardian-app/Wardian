@@ -220,6 +220,84 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn metadata_resume_keeps_policy_without_hydrating_history() {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let mut socket = tokio_tungstenite::accept_async(server_io).await.unwrap();
+            let request: Value =
+                serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap())
+                    .unwrap();
+            assert_eq!(request["method"], "thread/resume");
+            assert_eq!(
+                request["params"],
+                json!({
+                    "threadId":"large-history", "model":"configured",
+                    "config":{"model_reasoning_effort":"low"}, "excludeTurns":true,
+                })
+            );
+            socket
+                .send(Message::Text(
+                    json!({"id":request["id"],"result":{
+                        "thread":{"id":"large-history","turns":[],"canAcceptDirectInput":true},
+                        "model":"configured","reasoningEffort":"low",
+                    }})
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let (socket, _) = tokio_tungstenite::client_async("ws://localhost", client_io)
+            .await
+            .unwrap();
+        let client = CodexSharedClient::from_connected("test".into(), 7, socket, None);
+        let response = client
+            .resume_metadata(json!({
+                "threadId":"large-history","model":"configured",
+                "config":{"model_reasoning_effort":"low"},
+            }))
+            .await
+            .unwrap();
+        assert_eq!(response["thread"]["id"], "large-history");
+        assert_eq!(response["thread"]["canAcceptDirectInput"], true);
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_reply_retains_the_transport_failure_reason() {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let mut socket = tokio_tungstenite::accept_async(server_io).await.unwrap();
+            let _request = socket.next().await.unwrap().unwrap();
+            socket
+                .send(Message::Text("x".repeat(2048).into()))
+                .await
+                .unwrap();
+        });
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(1024));
+        let (socket, _) =
+            tokio_tungstenite::client_async_with_config("ws://localhost", client_io, Some(config))
+                .await
+                .unwrap();
+        let client = CodexSharedClient::from_connected("test".into(), 7, socket, None);
+        let error = client
+            .request("test/oversized", json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "submitted_unconfirmed");
+        assert!(
+            error.message.contains("Message too long"),
+            "{}",
+            error.message
+        );
+        assert!(error.provider_boundary_crossed);
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn joined_pipes_preserve_websocket_rpc_and_uncertain_disconnect() {
         tokio::time::timeout(Duration::from_secs(5), async {
             let (client_io, server_io) = tokio::io::duplex(4096);
