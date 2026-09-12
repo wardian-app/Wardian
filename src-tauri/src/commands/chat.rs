@@ -395,8 +395,12 @@ pub(crate) fn collect_agent_chat_events_for_boundary(
     if snapshot.provider == "opencode" {
         provider_events.extend(load_opencode_db_chat_events(
             &snapshot.session_id,
-            opencode_session_id(&snapshot.session_id, snapshot.resume_session.as_deref())
-                .as_deref(),
+            opencode_session_id(
+                &snapshot.session_id,
+                snapshot.resume_session.as_deref(),
+                snapshot.fresh_provider_session_id.as_deref(),
+            )
+            .as_deref(),
         ));
     }
     collect_agent_chat_events_with_provider_events(snapshot, provider_events, false)
