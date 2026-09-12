@@ -6149,6 +6149,8 @@ mod tests {
         assert!(error.contains("wardian agent restart agent-1"));
     }
 
+    include!("control/opencode_receipt_tests.rs");
+
     #[tokio::test]
     async fn native_codex_delivery_waits_for_provider_applied_payload() {
         let _home = TestWardianHome::new_async().await;

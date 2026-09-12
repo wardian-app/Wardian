@@ -83,7 +83,7 @@ Switching codex to the modern ConPTY surfaced a regression: codex's composer was
 
 Fix (`terminalCapabilities.ts`), validated by the audit (garbage lines 644 → **0**, scrollback unchanged):
 1. `respondsToThemeColorQueries()` (opencode/antigravity only, **codex excluded**) now gates the OSC 10/11/palette + light-dark replies — codex no longer gets Wardian's frontend reply. `supportsTerminalThemeResponses()` still includes codex so its composer-background **output** normalization continues.
-2. `stripTerminalColorQueries()` removes codex's OSC 10/11/4 + `ESC[?996n` probes from its output **before** it reaches xterm.js, suppressing xterm's auto-reply. (Codex does not block on these probes, and OpenConsole answers them anyway.)
+2. `stripTerminalColorQueries()` removes codex's OSC 10/11/4 + `ESC[?996n` probes from its output **before** it reaches xterm.js, suppressing xterm's auto-reply. The original inference that OpenConsole answers color probes was incorrect: a later controlled-child capture verified query forwarding without automatic responses. Codex's bounded Windows OSC 10/11 probe falls back to its console palette; see the [current capability policy](../developer/pty-lifecycle.md#capability-handling).
 
 ## Related findings (separate changes)
 

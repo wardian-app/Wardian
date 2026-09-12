@@ -46,7 +46,7 @@ async fn opencode_control_send_accepts_current_composer_with_idle_oc_title() {
 }
 
 #[tokio::test]
-async fn message_delivery_writes_terminal_bytes_after_opencode_is_ready() {
+async fn message_delivery_writes_terminal_bytes_after_opencode_startup_is_ready() {
     let _home = TestWardianHome::new_async().await;
     let state = AppState::new();
     insert_test_agent(&state, "agent-1", "OpenCodeOne", "Coder").await;
