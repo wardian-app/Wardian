@@ -1362,14 +1362,54 @@ impl BrowserSession {
         let Some(presented) = presented else {
             return Ok(());
         };
-        // `Target.targetDestroyed` does the rest, the same way it does when a
-        // popup closes itself.
-        self.connection
+        // Normal closure arrives as `Target.targetDestroyed`; the inventory
+        // confirmation below covers a delayed or lost destruction event.
+        let result = self
+            .connection
             .call(
                 "Target.closeTarget",
                 json!({ "targetId": presented.target_id }),
             )
             .await?;
+        // The close reply acknowledges the request, but the target can still
+        // be present while Chromium finishes the close. Confirm absence from
+        // the browser's inventory before changing the presented-target stack.
+        // The destruction event remains the normal path; this closes the gap
+        // when it is delayed or lost.
+        if result.get("success").and_then(Value::as_bool) != Some(false) {
+            self.restore_popup_after_confirmed_close(&presented.target_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Restores the target behind a popup only after the browser confirms that
+    /// the closed target is absent. A successful `Target.closeTarget` reply is
+    /// not sufficient: it can arrive before the target inventory changes.
+    async fn restore_popup_after_confirmed_close(
+        &self,
+        target_id: &str,
+    ) -> Result<(), BrowserError> {
+        let inventory = self.connection.call("Target.getTargets", json!({})).await?;
+        let target_infos = inventory
+            .get("targetInfos")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                BrowserError::Cdp(CdpError::Malformed {
+                    method: "Target.getTargets".to_string(),
+                    detail: "missing targetInfos".to_string(),
+                })
+            })?;
+        if target_infos.iter().any(|info| {
+            info.get("targetId")
+                .and_then(Value::as_str)
+                .is_some_and(|candidate| candidate == target_id)
+        }) {
+            return Ok(());
+        }
+
+        self.state.write().await.known_targets.remove(target_id);
+        self.release_popup(target_id, &self.events).await;
         Ok(())
     }
 
@@ -3002,6 +3042,10 @@ pub(crate) fn normalize_console_level(level: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     #[tokio::test]
     async fn browser_reap_timeout_is_reported_without_waiting_indefinitely() {
@@ -3480,5 +3524,146 @@ mod tests {
             !broker.download_root.starts_with(&broker.profile_root),
             "a profile is deleted on close; downloads must not be inside one"
         );
+    }
+
+    async fn fake_cdp_for_popup_close(
+        target_present_after_close: bool,
+    ) -> (Arc<CdpConnection>, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let endpoint = format!("ws://{}", listener.local_addr().expect("address"));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut socket = accept_async(stream).await.expect("websocket");
+            let mut close_requested = false;
+            while let Some(Ok(message)) = socket.next().await {
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let request: Value = serde_json::from_str(text.as_ref()).expect("JSON-RPC request");
+                let id = request["id"].as_u64().expect("request id");
+                let method = request["method"].as_str().expect("request method");
+                let result = match method {
+                    "Target.closeTarget" => {
+                        close_requested = true;
+                        json!({ "success": true })
+                    }
+                    "Target.getTargets" => {
+                        assert!(close_requested, "inventory must follow close confirmation");
+                        let mut target_infos = vec![json!({ "targetId": "base-target" })];
+                        if target_present_after_close {
+                            target_infos.push(json!({ "targetId": "popup-target" }));
+                        }
+                        json!({ "targetInfos": target_infos })
+                    }
+                    "Page.getFrameTree" => {
+                        json!({ "frameTree": { "frame": { "id": "base-frame" } } })
+                    }
+                    "Runtime.evaluate" => {
+                        let expression = request["params"]["expression"]
+                            .as_str()
+                            .expect("evaluation expression");
+                        match expression {
+                            "window.location.href" => {
+                                json!({ "result": { "type": "string", "value": "http://fixture/popup-host" } })
+                            }
+                            "document.title" => {
+                                json!({ "result": { "type": "string", "value": "Popup Host" } })
+                            }
+                            _ => json!({ "result": { "type": "undefined" } }),
+                        }
+                    }
+                    _ => panic!("unexpected fake CDP method: {method}"),
+                };
+                socket
+                    .send(Message::Text(
+                        json!({ "id": id, "result": result }).to_string().into(),
+                    ))
+                    .await
+                    .expect("send response");
+            }
+        });
+        let connection = CdpConnection::connect(&endpoint).await.expect("connect");
+        (connection, server)
+    }
+
+    fn fake_popup_session(connection: Arc<CdpConnection>) -> Arc<BrowserSession> {
+        let (events, _) = broadcast::channel(8);
+        let known_targets = ["base-target", "popup-target"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        Arc::new(BrowserSession {
+            browser_id: "browser-test".to_string(),
+            short_ref: 1,
+            owner_agent_id: None,
+            workspace: None,
+            engine: EngineKind::Edge,
+            connection,
+            targets: RwLock::new(vec![
+                AttachedTarget {
+                    target_id: "base-target".to_string(),
+                    cdp_session_id: "base-session".to_string(),
+                },
+                AttachedTarget {
+                    target_id: "popup-target".to_string(),
+                    cdp_session_id: "popup-session".to_string(),
+                },
+            ]),
+            profile_dir: PathBuf::new(),
+            download_dir: PathBuf::new(),
+            child: Mutex::new(None),
+            state: RwLock::new(SessionState {
+                url: "http://fixture/second".to_string(),
+                title: "Second".to_string(),
+                main_frame_id: Some("popup-frame".to_string()),
+                known_targets,
+                ..SessionState::default()
+            }),
+            screencast_transition: Mutex::new(()),
+            events,
+        })
+    }
+
+    #[tokio::test]
+    async fn close_popup_restores_opener_when_destroy_event_is_absent() {
+        let (connection, server) = fake_cdp_for_popup_close(false).await;
+        let session = fake_popup_session(connection);
+
+        session.close_popup(None).await.expect("close popup");
+        let summary = session.summary().await;
+        assert!(!summary.popup, "confirmed closure must restore the opener");
+        assert_eq!(summary.url, "http://fixture/popup-host");
+        assert_eq!(summary.title, "Popup Host");
+
+        // A delayed destruction event is harmless after inventory-based
+        // restoration: it must not remove the restored opener or panic.
+        handle_protocol_event(
+            &session,
+            &session.events,
+            CdpEvent {
+                session_id: None,
+                method: "Target.targetDestroyed".to_string(),
+                params: json!({ "targetId": "popup-target" }),
+            },
+        )
+        .await;
+        assert!(!session.summary().await.popup);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn close_popup_keeps_a_target_that_remains_in_inventory() {
+        let (connection, server) = fake_cdp_for_popup_close(true).await;
+        let session = fake_popup_session(connection);
+
+        session
+            .close_popup(None)
+            .await
+            .expect("close popup request");
+        assert!(
+            session.summary().await.popup,
+            "a still-present target must not be popped optimistically"
+        );
+        server.abort();
     }
 }
