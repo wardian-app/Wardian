@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tauri::AppHandle;
 use wardian_core::control::{
     ApprovalAction, DeliveryDetail, DeliveryErrorDetail, DeliveryTransportKind, InteractionBodyRef,
@@ -446,6 +447,9 @@ pub async fn submit_live_surface_prompt(
         );
     let mut turn_start_cursor = None;
     let mut opencode_receipt_baseline = None;
+    let payload_apply_proof = Arc::new(Mutex::new(
+        None::<crate::delivery::codex_composer::PayloadApplicationProof>,
+    ));
     let outcome = if let (MessageInputMode::ApprovalAction, Some(action)) =
         (request.input_mode, request.approval_action.as_ref())
     {
@@ -634,6 +638,7 @@ pub async fn submit_live_surface_prompt(
             crate::utils::terminal_input::normalize_prompt_for_terminal_submit(&request.prompt);
         let apply_cursor = turn_start_cursor.clone();
         let require_payload_apply_evidence = requires_provider_turn_receipt;
+        let payload_apply_proof_for_hook = Arc::clone(&payload_apply_proof);
         // Captured before the payload write so the canonical composer screen can
         // later prove that *this* write landed, rather than a stale draft or a
         // replaced runtime.
@@ -687,14 +692,21 @@ pub async fn submit_live_surface_prompt(
                         ),
                     )
                 })?;
-                crate::delivery::codex_composer::wait_for_payload_applied_before_submit(
+                let proof = crate::delivery::codex_composer::wait_for_payload_applied_before_submit(
                     state,
                     &apply_session_id,
                     cursor,
                     &apply_prompt,
                     apply_baseline,
                 )
-                .await
+                .await?;
+                *payload_apply_proof_for_hook.lock().map_err(|_| {
+                    TerminalDeliveryError::terminal_state_unknown(
+                        "payload_apply_proof_unavailable",
+                        "payload proof diagnostic lock was poisoned".to_string(),
+                    )
+                })? = Some(proof);
+                Ok(())
             },
         )
         .await
@@ -863,7 +875,14 @@ pub async fn submit_live_surface_prompt(
 
         detail.delivery_state = "provider_accepted".to_string();
         detail.delivery_phase = Some("turn_started".to_string());
-        detail.observed_state = Some("turn_started".to_string());
+        let proof = payload_apply_proof
+            .lock()
+            .ok()
+            .and_then(|proof| (*proof).map(|proof| proof.as_str()));
+        detail.observed_state = Some(match proof {
+            Some(proof) => format!("turn_started;payload_application_proof={proof}"),
+            None => "turn_started".to_string(),
+        });
         detail.reason = Some(if provider == "opencode" {
             "OpenCode persisted a new exact user request in the owned session after native terminal submission".to_string()
         } else {

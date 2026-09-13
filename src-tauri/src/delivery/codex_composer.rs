@@ -17,6 +17,25 @@ enum ObservationScope {
     ActivePromptFallback,
 }
 
+/// The proof source that allowed the composer gate to release the submit key.
+/// This is a content-free diagnostic; it never includes the prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayloadApplicationProof {
+    TransactionDelta,
+    ActivePromptFallback,
+    PostWriteCanonical,
+}
+
+impl PayloadApplicationProof {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TransactionDelta => "transaction_delta",
+            Self::ActivePromptFallback => "active_prompt_fallback",
+            Self::PostWriteCanonical => "post_write_canonical",
+        }
+    }
+}
+
 /// Canonical composer facts captured *before* Wardian writes the payload.
 ///
 /// A canonical observation taken after the write only proves that this write
@@ -119,7 +138,7 @@ pub async fn wait_for_payload_applied_before_submit(
     since_cursor: &str,
     prompt: &str,
     baseline: Option<ComposerWriteBaseline>,
-) -> Result<(), TerminalDeliveryError> {
+) -> Result<PayloadApplicationProof, TerminalDeliveryError> {
     let watch_state = {
         let agents = state.agents.lock().await;
         agents
@@ -151,7 +170,7 @@ async fn wait_for_watch_payload_applied(
     since_cursor: &str,
     prompt: &str,
     baseline: Option<ComposerWriteBaseline>,
-) -> Result<(), TerminalDeliveryError> {
+) -> Result<PayloadApplicationProof, TerminalDeliveryError> {
     let started = tokio::time::Instant::now();
     let mut last_canonical_poll: Option<tokio::time::Instant> = None;
     let mut best_observation = ComposerObservation {
@@ -214,26 +233,14 @@ async fn wait_for_watch_payload_applied(
                     prompt,
                     ObservationScope::ActiveTerminalSnapshot,
                 );
-                let confirms_current_composer = observation.confirms_payload()
-                    && match scope {
-                        ObservationScope::TransactionDelta => {
-                            transaction_evidence_matches_active_composer(
-                                &observation,
-                                &active_observation,
-                            )
-                        }
-                        ObservationScope::ActivePromptFallback
-                        | ObservationScope::ActiveTerminalSnapshot => {
-                            active_observation.confirms_payload()
-                        }
-                    };
-                let confirms_post_write_canonical = canonical_proof_confirms_write(
+                if let Some(proof) = classify_payload_application(
+                    &observation,
+                    scope,
                     &active_observation,
                     baseline,
                     snapshot.runtime_generation,
-                );
-                if confirms_current_composer || confirms_post_write_canonical {
-                    return Ok(());
+                ) {
+                    return Ok(proof);
                 }
                 if active_observation.literal_match_bytes > best_observation.literal_match_bytes
                     || (best_observation.marker_format == "absent"
@@ -396,6 +403,34 @@ fn canonical_proof_confirms_write(
             baseline.runtime_generation == snapshot_runtime_generation
                 && !baseline.payload_already_applied
         })
+}
+
+fn classify_payload_application(
+    transaction: &ComposerObservation,
+    scope: ObservationScope,
+    active_composer: &ComposerObservation,
+    baseline: Option<ComposerWriteBaseline>,
+    snapshot_runtime_generation: u64,
+) -> Option<PayloadApplicationProof> {
+    let confirms_current_composer = transaction.confirms_payload()
+        && match scope {
+            ObservationScope::TransactionDelta => {
+                transaction_evidence_matches_active_composer(transaction, active_composer)
+            }
+            ObservationScope::ActivePromptFallback | ObservationScope::ActiveTerminalSnapshot => {
+                active_composer.confirms_payload()
+            }
+        };
+    if confirms_current_composer {
+        return Some(match scope {
+            ObservationScope::TransactionDelta => PayloadApplicationProof::TransactionDelta,
+            ObservationScope::ActivePromptFallback => PayloadApplicationProof::ActivePromptFallback,
+            ObservationScope::ActiveTerminalSnapshot => PayloadApplicationProof::PostWriteCanonical,
+        });
+    }
+
+    canonical_proof_confirms_write(active_composer, baseline, snapshot_runtime_generation)
+        .then_some(PayloadApplicationProof::PostWriteCanonical)
 }
 
 fn transaction_evidence_matches_active_composer(
@@ -907,6 +942,77 @@ pub(crate) mod tests {
                 "screen must not release Return: {screen}"
             );
         }
+    }
+
+    #[test]
+    fn payload_application_proof_reports_canonical_success_without_cursor_expiry() {
+        const PAYLOAD: &str = "recall the previous answer in lowercase";
+        let partial_delta = observe_payload_application(
+            "\x1b[22;3Hrecall the previous",
+            PAYLOAD,
+            ObservationScope::TransactionDelta,
+        );
+        let active = observe_payload_application(
+            &format!("│ model: gpt-5.4-mini low /model to change │\r\n› {PAYLOAD}"),
+            PAYLOAD,
+            ObservationScope::ActiveTerminalSnapshot,
+        );
+
+        assert_eq!(
+            classify_payload_application(
+                &partial_delta,
+                ObservationScope::TransactionDelta,
+                &active,
+                Some(ComposerWriteBaseline {
+                    runtime_generation: 7,
+                    payload_already_applied: false,
+                }),
+                7,
+            ),
+            Some(PayloadApplicationProof::PostWriteCanonical),
+        );
+        assert_eq!(
+            PayloadApplicationProof::PostWriteCanonical.as_str(),
+            "post_write_canonical"
+        );
+    }
+
+    #[test]
+    fn payload_application_proof_keeps_transaction_and_active_prompt_sources_distinct() {
+        const PAYLOAD: &str = "reply exactly once";
+        let transaction =
+            observe_payload_application(PAYLOAD, PAYLOAD, ObservationScope::TransactionDelta);
+        let active = observe_payload_application(
+            &format!("│ model: gpt-5.4-mini low │\r\n› {PAYLOAD}"),
+            PAYLOAD,
+            ObservationScope::ActiveTerminalSnapshot,
+        );
+        assert_eq!(
+            classify_payload_application(
+                &transaction,
+                ObservationScope::TransactionDelta,
+                &active,
+                None,
+                3,
+            ),
+            Some(PayloadApplicationProof::TransactionDelta),
+        );
+
+        let fallback = observe_payload_application(
+            &format!("\r\n› {PAYLOAD}"),
+            PAYLOAD,
+            ObservationScope::ActivePromptFallback,
+        );
+        assert_eq!(
+            classify_payload_application(
+                &fallback,
+                ObservationScope::ActivePromptFallback,
+                &active,
+                None,
+                3,
+            ),
+            Some(PayloadApplicationProof::ActivePromptFallback),
+        );
     }
 
     #[test]
