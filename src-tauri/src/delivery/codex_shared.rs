@@ -24,6 +24,8 @@ mod owner;
 mod proxy;
 #[cfg(test)]
 mod startup_tests;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod version;
 pub use owner::{CodexSharedOwner, CodexTuiAttachment};
 

@@ -214,7 +214,10 @@ async fn wait_for_watch_payload_applied(
 
 pub fn output_has_ready_prompt(output: &str) -> bool {
     let cleaned = strip_ansi_controls(output).replace('\r', "\n");
-    if output_has_workspace_trust_prompt(&cleaned) || pending_paste_chars(&cleaned).is_some() {
+    if crate::delivery::codex_menu::current_screen_requires_choice(&cleaned)
+        || output_has_workspace_trust_prompt(&cleaned)
+        || pending_paste_chars(&cleaned).is_some()
+    {
         return false;
     }
     let mut trailing_metadata_lines = 0usize;
@@ -249,11 +252,17 @@ fn observe_payload_application(
     scope: ObservationScope,
 ) -> ComposerObservation {
     let cleaned = strip_ansi_controls(output).replace('\r', "\n");
+    // Codex can paint the complete draft while still loading a resumed session.
+    // Composer application alone must not release Return on that startup screen.
+    // Check only the canonical screen, never retained raw startup history.
+    let starting =
+        scope == ObservationScope::ActiveTerminalSnapshot && active_screen_is_starting(&cleaned);
     let observed = match scope {
         // A transaction delta can nominate evidence, but the caller must
         // cross-check it against the broker's canonical active screen before
         // treating it as current-composer proof.
         ObservationScope::TransactionDelta => cleaned.as_str(),
+        ObservationScope::ActiveTerminalSnapshot if starting => "",
         ObservationScope::ActiveTerminalSnapshot => {
             cleaned.rsplit_once('›').map_or("", |(_, tail)| tail)
         }
@@ -267,7 +276,9 @@ fn observe_payload_application(
     ComposerObservation {
         literal_match_bytes: longest_prefix_match_bytes(&normalized_observed, &token),
         normalized_payload_bytes: token.len(),
-        marker_format: if marker_chars.is_some() {
+        marker_format: if starting {
+            "startup_in_progress"
+        } else if marker_chars.is_some() {
             "pasted_content_chars"
         } else if marker_like_text(observed) {
             "unrecognized_marker_like"
@@ -282,6 +293,21 @@ fn observe_payload_application(
             ObservationScope::ActivePromptFallback => "active_prompt_fallback",
         },
     }
+}
+
+pub(crate) fn active_screen_is_starting(screen: &str) -> bool {
+    let Some((before_composer, _)) = screen.rsplit_once('›') else {
+        return false;
+    };
+    before_composer.lines().map(str::trim).any(|line| {
+        matches!(line, "Resuming session…" | "Resuming session...")
+            || line
+                .strip_prefix('│')
+                .map(str::trim_start)
+                .and_then(|line| line.strip_prefix("model:"))
+                .and_then(|model| model.split_whitespace().next())
+                == Some("loading")
+    })
 }
 
 fn transaction_evidence_matches_active_composer(
@@ -473,6 +499,60 @@ pub(crate) mod tests {
             ObservationScope::ActivePromptFallback
         )
         .confirms_payload());
+    }
+
+    #[test]
+    fn startup_screen_does_not_release_submit_for_an_applied_draft() {
+        for draft in ["verification marker", "[Pasted Content 6479 chars]"] {
+            let transaction =
+                observe_payload_application(draft, draft, ObservationScope::TransactionDelta);
+            for startup in [
+                "│ model:     loading   /model to change │\r\nResuming session…",
+                "│ model:     loading   /model to change │",
+                "Resuming session...",
+            ] {
+                let active = observe_payload_application(
+                    &format!("OpenAI Codex (v0.153.4)\r\n{startup}\r\n› {draft}"),
+                    draft,
+                    ObservationScope::ActiveTerminalSnapshot,
+                );
+                assert!(!transaction_evidence_matches_active_composer(
+                    &transaction,
+                    &active
+                ));
+                assert_eq!(active.marker_format, "startup_in_progress");
+            }
+            // The same pending draft can qualify when the current screen has
+            // finished startup; no second paste or fixed delay is necessary.
+            let active = observe_payload_application(
+                &format!("│ model: gpt-5.4-mini /model to change │\r\n› {draft}"),
+                draft,
+                ObservationScope::ActiveTerminalSnapshot,
+            );
+            assert!(transaction_evidence_matches_active_composer(
+                &transaction,
+                &active
+            ));
+        }
+    }
+
+    #[test]
+    fn startup_history_and_prompt_text_do_not_block_the_current_composer() {
+        let prompt = "Explain this message:\nResuming session…";
+        let transaction = observe_payload_application(
+            &format!("Resuming session…\r\n› {prompt}"),
+            prompt,
+            ObservationScope::TransactionDelta,
+        );
+        let active = observe_payload_application(
+            &format!("│ model: gpt-5.4-mini /model to change │\r\n› {prompt}"),
+            prompt,
+            ObservationScope::ActiveTerminalSnapshot,
+        );
+        assert!(transaction_evidence_matches_active_composer(
+            &transaction,
+            &active
+        ));
     }
 
     #[test]
