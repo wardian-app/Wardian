@@ -10,7 +10,7 @@ use crate::manager::{
 use crate::providers::antigravity::AntigravityProvider;
 use crate::providers::chat_transcript::{
     legacy_visible_chat_text_for_provider, normalize_chat_lines, visible_chat_text,
-    visible_chat_text_for_provider,
+    visible_chat_text_for_provider, PROVIDER_RAW_LINE_METADATA_KEY,
 };
 use crate::providers::pi::PiProvider;
 use crate::state::conversation_archive::{
@@ -58,6 +58,7 @@ pub(crate) struct AgentArchiveCaptureSnapshot {
 pub(crate) struct ArchiveCaptureResult {
     pub(crate) events: Vec<AgentChatEvent>,
     pub(crate) context: ConversationArchiveContext,
+    pub(crate) continue_immediately: bool,
 }
 
 #[tauri::command]
@@ -356,12 +357,6 @@ pub(crate) async fn agent_archive_capture_snapshot(
 pub(crate) fn collect_agent_chat_events_for_archive(
     snapshot: &AgentArchiveCaptureSnapshot,
 ) -> Result<ArchiveCaptureResult, String> {
-    let watch_snapshot = snapshot
-        .watch_state
-        .lock()
-        .map_err(|_| "watch state lock poisoned".to_string())?
-        .snapshot_since(None, None)
-        .map_err(|error| format!("watch state error: {} {}", error.code(), error.details()))?;
     let mut provider_events = load_provider_log_chat_events(
         &snapshot.session_id,
         &snapshot.provider,
@@ -379,6 +374,52 @@ pub(crate) fn collect_agent_chat_events_for_archive(
             .as_deref(),
         ));
     }
+    collect_agent_chat_events_with_provider_events(snapshot, provider_events, false)
+}
+
+pub(crate) fn collect_agent_chat_events_for_boundary(
+    snapshot: &AgentArchiveCaptureSnapshot,
+) -> Result<ArchiveCaptureResult, String> {
+    let mut provider_events = if snapshot.provider == "antigravity"
+        && snapshot
+            .log_path
+            .as_deref()
+            .is_some_and(|path| path.extension().is_some_and(|extension| extension == "db"))
+    {
+        load_provider_log_chat_events(
+            &snapshot.session_id,
+            &snapshot.provider,
+            snapshot.log_path.as_deref(),
+            &snapshot.cleared_provider_sessions,
+        )
+    } else {
+        Vec::new()
+    };
+    if snapshot.provider == "opencode" {
+        provider_events.extend(load_opencode_db_chat_events(
+            &snapshot.session_id,
+            opencode_session_id(
+                &snapshot.session_id,
+                snapshot.resume_session.as_deref(),
+                snapshot.fresh_provider_session_id.as_deref(),
+            )
+            .as_deref(),
+        ));
+    }
+    collect_agent_chat_events_with_provider_events(snapshot, provider_events, false)
+}
+
+fn collect_agent_chat_events_with_provider_events(
+    snapshot: &AgentArchiveCaptureSnapshot,
+    provider_events: Vec<AgentChatEvent>,
+    continue_immediately: bool,
+) -> Result<ArchiveCaptureResult, String> {
+    let watch_snapshot = snapshot
+        .watch_state
+        .lock()
+        .map_err(|_| "watch state lock poisoned".to_string())?
+        .snapshot_since(None, None)
+        .map_err(|error| format!("watch state error: {} {}", error.code(), error.details()))?;
     let provider_has_transcript = has_transcript_events(&provider_events);
     let watch_events = map_watch_snapshot_to_chat_events(WatchSnapshotChatInput {
         session_id: &snapshot.session_id,
@@ -395,7 +436,11 @@ pub(crate) fn collect_agent_chat_events_for_archive(
     let events = merge_chat_events(watch_events, provider_events);
     let context = conversation_archive_context_from_snapshot(snapshot);
 
-    Ok(ArchiveCaptureResult { events, context })
+    Ok(ArchiveCaptureResult {
+        events,
+        context,
+        continue_immediately,
+    })
 }
 
 pub(crate) async fn archive_agent_chat_events_for_state(
@@ -403,35 +448,221 @@ pub(crate) async fn archive_agent_chat_events_for_state(
     session_id: &str,
 ) -> Result<ArchiveCaptureResult, String> {
     let snapshot = agent_archive_capture_snapshot(state, session_id).await?;
-    let result = collect_agent_chat_events_for_archive(&snapshot)?;
+    // Lock order is global roster snapshot (above), policy gate, then the
+    // archive's per-agent gate. No caller may hold `state.agents` here.
+    let _policy_guard = state.conversation_capture_policy_lock.lock().await;
     let global_conversation_logging = crate::utils::shell::load_shell_settings()
         .unwrap_or_default()
         .conversation_logging;
-    if effective_conversation_logging(
+    let logging_enabled = effective_conversation_logging(
         global_conversation_logging,
         snapshot.agent_conversation_logging,
-    ) == ConversationLoggingSetting::Enabled
-    {
-        if let Err(error) = state
+    ) == ConversationLoggingSetting::Enabled;
+    let context = conversation_archive_context_from_snapshot(&snapshot);
+
+    if let (Some(path), Some(provider_source_key)) = (
+        append_only_provider_log_path(&snapshot),
+        context.provider_source_key.as_deref(),
+    ) {
+        let trust_source_from_start =
+            snapshot.resume_session.is_none() && snapshot.fresh_provider_session_id.is_some();
+        let previous = state
+            .conversation_archive
+            .provider_log_capture_state(&snapshot.session_id, provider_source_key)
+            .map_err(|error| format!("provider-log capture state read failed: {error}"))?;
+        let policy =
+            super::provider_log_acquisition::observe_provider_log_policy_with_initial_absence(
+                path,
+                provider_source_key,
+                previous.clone(),
+                logging_enabled,
+                trust_source_from_start,
+            )
+            .map_err(|error| format!("provider-log policy observation failed: {error}"))?;
+        if let Some(policy) = policy {
+            if previous.as_ref() != Some(&policy.next) {
+                state
+                    .conversation_archive
+                    .append_provider_log_batch_with_context(
+                        context.clone(),
+                        &[],
+                        previous.as_ref(),
+                        &policy.next,
+                    )
+                    .map_err(|error| format!("provider-log policy commit failed: {error}"))?;
+            }
+            let mut batch = super::provider_log_acquisition::acquire_provider_log_batch(
+                &snapshot.session_id,
+                &snapshot.provider,
+                path,
+                provider_source_key,
+                Some(policy.next),
+                trust_source_from_start,
+            )
+            .map_err(|error| format!("provider-log acquisition failed: {error}"))?;
+            let _consumed_provider_log_bytes = batch.consumed_bytes;
+            decorate_forward_provider_log_events(&mut batch.events, &snapshot.provider, path);
+            state
+                .conversation_archive
+                .append_provider_log_batch_with_context(
+                    context.clone(),
+                    &batch.events,
+                    batch.previous.as_ref(),
+                    &batch.next,
+                )
+                .map_err(|error| format!("provider-log archive append failed: {error}"))?;
+
+            let result = collect_agent_chat_events_with_provider_events(
+                &snapshot,
+                batch.events,
+                batch.continue_immediately,
+            )?;
+            let watch_only = result
+                .events
+                .iter()
+                .filter(|event| event.metadata["provider_log"] != true)
+                .cloned()
+                .collect::<Vec<_>>();
+            if logging_enabled {
+                state
+                    .conversation_archive
+                    .append_chat_events_with_context(context, &watch_only)
+                    .map_err(|error| {
+                        format!("conversation archive watch append failed: {error}")
+                    })?;
+            } else {
+                state
+                    .conversation_archive
+                    .discard_agent_with_context(context, &watch_only)
+                    .map_err(|error| {
+                        format!("conversation archive disabled cutoff failed: {error}")
+                    })?;
+            }
+            return Ok(result);
+        }
+    }
+
+    let result = collect_agent_chat_events_for_archive(&snapshot)?;
+    if logging_enabled {
+        state
             .conversation_archive
             .append_chat_events_with_context(result.context.clone(), &result.events)
-        {
-            manager::log_debug(&format!(
-                "[WARDIAN] conversation archive append failed for {}: {error}",
-                snapshot.session_id
-            ));
-        }
-    } else if let Err(error) = state
-        .conversation_archive
-        .discard_agent_with_context(result.context.clone(), &result.events)
-    {
-        manager::log_debug(&format!(
-            "[WARDIAN] conversation archive disabled cutoff failed for {}: {error}",
-            snapshot.session_id
-        ));
+            .map_err(|error| format!("conversation archive append failed: {error}"))?;
+    } else {
+        state
+            .conversation_archive
+            .discard_agent_with_context(result.context.clone(), &result.events)
+            .map_err(|error| format!("conversation archive disabled cutoff failed: {error}"))?;
     }
 
     Ok(result)
+}
+
+/// Drains consecutive bounded provider-log batches for owners that already
+/// run outside the UI request path. Each pass yields before reacquiring policy
+/// and per-agent gates so settings transitions and other agents can proceed.
+pub(crate) async fn archive_agent_chat_events_until_stable_for_state(
+    state: &AppState,
+    session_id: &str,
+) -> Result<ArchiveCaptureResult, String> {
+    loop {
+        let result = archive_agent_chat_events_for_state(state, session_id).await?;
+        if !result.continue_immediately {
+            return Ok(result);
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+fn append_only_provider_log_path(snapshot: &AgentArchiveCaptureSnapshot) -> Option<&Path> {
+    let path = snapshot.log_path.as_deref()?;
+    if provider_log_path_is_cleared(
+        &snapshot.provider,
+        path,
+        &snapshot.cleared_provider_sessions,
+    ) || (snapshot.provider == "antigravity"
+        && path.extension().is_some_and(|extension| extension == "db"))
+    {
+        None
+    } else {
+        Some(path)
+    }
+}
+
+pub(crate) fn record_provider_log_policy_for_snapshot(
+    state: &AppState,
+    snapshot: &AgentArchiveCaptureSnapshot,
+    logging_enabled: bool,
+) -> Result<(), String> {
+    let context = conversation_archive_context_from_snapshot(snapshot);
+    let (Some(path), Some(provider_source_key)) = (
+        append_only_provider_log_path(snapshot),
+        context.provider_source_key.as_deref(),
+    ) else {
+        return Ok(());
+    };
+    let trust_source_from_start =
+        snapshot.resume_session.is_none() && snapshot.fresh_provider_session_id.is_some();
+    let previous = state
+        .conversation_archive
+        .provider_log_capture_state(&snapshot.session_id, provider_source_key)
+        .map_err(|error| format!("provider-log capture state read failed: {error}"))?;
+    let policy = super::provider_log_acquisition::observe_provider_log_policy_with_initial_absence(
+        path,
+        provider_source_key,
+        previous.clone(),
+        logging_enabled,
+        trust_source_from_start,
+    )
+    .map_err(|error| format!("provider-log policy observation failed: {error}"))?;
+    let Some(policy) = policy else {
+        return Ok(());
+    };
+    if previous.as_ref() != Some(&policy.next) {
+        state
+            .conversation_archive
+            .append_provider_log_batch_with_context(context, &[], previous.as_ref(), &policy.next)
+            .map_err(|error| format!("provider-log policy commit failed: {error}"))?;
+    }
+    Ok(())
+}
+
+fn decorate_forward_provider_log_events(
+    events: &mut [AgentChatEvent],
+    provider: &str,
+    path: &Path,
+) {
+    for event in events {
+        let raw_line = event
+            .metadata
+            .as_object_mut()
+            .and_then(|metadata| metadata.remove(PROVIDER_RAW_LINE_METADATA_KEY))
+            .and_then(|value| value.as_str().map(str::to_string));
+        set_metadata(&mut event.metadata, "provider_log", true);
+        set_metadata(&mut event.metadata, "log_source", "active_agent_log_path");
+        set_metadata(
+            &mut event.metadata,
+            "log_path",
+            path.to_string_lossy().to_string(),
+        );
+        if provider.eq_ignore_ascii_case("claude") {
+            if let Some(raw_line) = raw_line.as_deref() {
+                let legacy_id = claude_legacy_provider_log_event_id(event, path, raw_line);
+                event.id = stable_provider_log_event_id_from_raw_line(event, path, raw_line);
+                if event.id != legacy_id {
+                    set_metadata(
+                        &mut event.metadata,
+                        "legacy_event_ids",
+                        serde_json::json!([legacy_id]),
+                    );
+                }
+            } else {
+                event.id = stable_provider_log_event_id(event, path);
+            }
+        } else {
+            event.id = stable_provider_log_event_id(event, path);
+        }
+    }
 }
 
 struct WatchSnapshotChatInput<'a> {
@@ -1860,6 +2091,230 @@ Do you want to proceed?
             chat_events[0].metadata["log_path"].as_str(),
             Some(log_path.to_string_lossy().as_ref())
         );
+    }
+
+    #[tokio::test]
+    async fn provider_log_capture_keeps_relationships_before_an_unseen_two_mib_burst() {
+        let _guard = crate::utils::wardian_test_env_lock_async().await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: ConversationLoggingSetting::Enabled,
+            ..Default::default()
+        })
+        .expect("save enabled logging setting");
+        let log_path = temp.path().join("codex.jsonl");
+        let tool_call = r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"shell_command","call_id":"call-leading","input":{"command":"npm test"}}}"#;
+        let filler = format!(r#"{{"type":"ignored","padding":"{}"}}"#, "x".repeat(1024));
+        let tool_result = r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-leading","output":"tests passed"}}"#;
+        let answer = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Finished after the burst"}]}}"#;
+        let mut content = String::from(tool_call);
+        content.push('\n');
+        while content.len() <= PROVIDER_LOG_TAIL_BYTES as usize + filler.len() {
+            content.push_str(&filler);
+            content.push('\n');
+        }
+        content.push_str(tool_result);
+        content.push('\n');
+        content.push_str(answer);
+        content.push('\n');
+        std::fs::write(&log_path, content).expect("write oversized provider log");
+
+        let state = AppState::new();
+        state.agents.lock().await.insert(
+            "agent-1".to_string(),
+            crate::state::ActiveAgent {
+                config: Arc::new(Mutex::new(wardian_core::models::AgentConfig {
+                    session_id: "agent-1".to_string(),
+                    session_name: "Agent One".to_string(),
+                    agent_class: "Coder".to_string(),
+                    provider: "codex".to_string(),
+                    folder: temp.path().to_string_lossy().to_string(),
+                    fresh_provider_session_id: Some("codex-session-one".to_string()),
+                    conversation_logging: AgentConversationLoggingSetting::Default,
+                    ..Default::default()
+                })),
+                child_process: None,
+                background_processes: Vec::new(),
+                memory_capability: None,
+                runtime_generation: None,
+                process_id: None,
+                query_count: Arc::new(Mutex::new(0)),
+                init_timestamp: Arc::new(Mutex::new(None)),
+                last_query_timestamp: Arc::new(Mutex::new(None)),
+                current_status: Arc::new(Mutex::new("Idle".to_string())),
+                last_status_at: Arc::new(Mutex::new(None)),
+                watch_state: Arc::new(Mutex::new(AgentWatchState::new(
+                    "agent-1".to_string(),
+                    32,
+                    4096,
+                ))),
+                terminal_title: Arc::new(Mutex::new(String::new())),
+                last_output_at: Arc::new(Mutex::new(None)),
+                log_path: Arc::new(Mutex::new(Some(log_path.clone()))),
+                log_last_modified: Arc::new(Mutex::new(None)),
+                #[cfg(windows)]
+                job_object: None,
+            },
+        );
+
+        archive_agent_chat_events_until_stable_for_state(&state, "agent-1")
+            .await
+            .expect("drain bounded provider batches");
+        let snapshot = agent_archive_capture_snapshot(&state, "agent-1")
+            .await
+            .expect("capture snapshot");
+        let context = conversation_archive_context_from_snapshot(&snapshot);
+        let events = state
+            .conversation_archive
+            .chat_events_for_capture(&context)
+            .expect("read archived provider events");
+
+        assert!(events.iter().any(|event| {
+            event.kind == AgentChatEventKind::ToolCall
+                && event.turn_id.as_deref() == Some("call-leading")
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == AgentChatEventKind::ToolResult
+                && event.turn_id.as_deref() == Some("call-leading")
+        }));
+        assert!(events.iter().any(|event| {
+            event.role == Some(AgentChatRole::Assistant)
+                && event.text.as_deref() == Some("Finished after the burst")
+        }));
+        let capture = state
+            .conversation_archive
+            .provider_log_capture_state("agent-1", "codex:session:codex-session-one")
+            .expect("read provider cursor")
+            .expect("provider cursor");
+        assert_eq!(capture.status, "complete");
+        assert_eq!(
+            capture.committed_offset,
+            std::fs::metadata(&log_path).unwrap().len()
+        );
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[tokio::test]
+    async fn initially_disabled_fresh_provider_prefix_is_not_archived() {
+        let _guard = crate::utils::wardian_test_env_lock_async().await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: ConversationLoggingSetting::Disabled,
+            ..Default::default()
+        })
+        .expect("save disabled logging setting");
+        let log_path = temp.path().join("codex.jsonl");
+        std::fs::write(
+            &log_path,
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"SECRET_BEFORE_FIRST_CAPTURE\"}}\n",
+        )
+        .expect("write pre-existing provider event");
+        let existing_len = std::fs::metadata(&log_path)
+            .expect("provider metadata")
+            .len();
+
+        let state = AppState::new();
+        state.agents.lock().await.insert(
+            "agent-1".to_string(),
+            crate::state::ActiveAgent {
+                config: Arc::new(Mutex::new(wardian_core::models::AgentConfig {
+                    session_id: "agent-1".to_string(),
+                    session_name: "Agent One".to_string(),
+                    agent_class: "Coder".to_string(),
+                    provider: "codex".to_string(),
+                    folder: temp.path().to_string_lossy().to_string(),
+                    fresh_provider_session_id: Some("codex-session-one".to_string()),
+                    conversation_logging: AgentConversationLoggingSetting::Default,
+                    ..Default::default()
+                })),
+                child_process: None,
+                background_processes: Vec::new(),
+                memory_capability: None,
+                runtime_generation: None,
+                process_id: None,
+                query_count: Arc::new(Mutex::new(0)),
+                init_timestamp: Arc::new(Mutex::new(None)),
+                last_query_timestamp: Arc::new(Mutex::new(None)),
+                current_status: Arc::new(Mutex::new("Idle".to_string())),
+                last_status_at: Arc::new(Mutex::new(None)),
+                watch_state: Arc::new(Mutex::new(AgentWatchState::new(
+                    "agent-1".to_string(),
+                    32,
+                    4096,
+                ))),
+                terminal_title: Arc::new(Mutex::new(String::new())),
+                last_output_at: Arc::new(Mutex::new(None)),
+                log_path: Arc::new(Mutex::new(Some(log_path))),
+                log_last_modified: Arc::new(Mutex::new(None)),
+                #[cfg(windows)]
+                job_object: None,
+            },
+        );
+
+        archive_agent_chat_events_until_stable_for_state(&state, "agent-1")
+            .await
+            .expect("observe initially disabled source");
+        let snapshot = agent_archive_capture_snapshot(&state, "agent-1")
+            .await
+            .expect("capture snapshot");
+        let context = conversation_archive_context_from_snapshot(&snapshot);
+        let events = state
+            .conversation_archive
+            .chat_events_for_capture(&context)
+            .expect("read archived provider events");
+        assert!(events
+            .iter()
+            .all(|event| event.text.as_deref() != Some("SECRET_BEFORE_FIRST_CAPTURE")));
+        let capture = state
+            .conversation_archive
+            .provider_log_capture_state("agent-1", "codex:session:codex-session-one")
+            .expect("read provider cursor")
+            .expect("provider cursor");
+        assert_eq!(capture.committed_offset, existing_len);
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn lifecycle_boundary_does_not_reimport_append_only_log_tail() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_path = temp.path().join("codex.jsonl");
+        std::fs::write(
+            &log_path,
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Must come through the cursor\"}}\n",
+        )
+        .expect("write provider log");
+        let snapshot = AgentArchiveCaptureSnapshot {
+            session_id: "agent-1".to_string(),
+            provider: "codex".to_string(),
+            resume_session: Some("provider-session-1".to_string()),
+            fresh_provider_session_id: None,
+            cleared_provider_sessions: Vec::new(),
+            current_status: "Idle".to_string(),
+            last_status_at: None,
+            log_path: Some(log_path),
+            agent_name: "Agent One".to_string(),
+            agent_class: "Coder".to_string(),
+            workspace: temp.path().to_string_lossy().to_string(),
+            agent_conversation_logging: AgentConversationLoggingSetting::Default,
+            watch_state: Arc::new(Mutex::new(AgentWatchState::new(
+                "agent-1".to_string(),
+                32,
+                4096,
+            ))),
+        };
+
+        let capture = collect_agent_chat_events_for_boundary(&snapshot)
+            .expect("collect lifecycle boundary events");
+        assert!(capture
+            .events
+            .iter()
+            .all(|event| event.text.as_deref() != Some("Must come through the cursor")));
+        assert!(capture
+            .events
+            .iter()
+            .all(|event| event.metadata["provider_log"] != true));
     }
 
     #[test]

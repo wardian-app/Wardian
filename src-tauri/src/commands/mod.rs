@@ -18,6 +18,7 @@ pub mod library;
 pub mod listener;
 pub mod memory;
 pub mod patch;
+pub(crate) mod provider_log_acquisition;
 pub mod remote;
 pub mod settings;
 pub mod telemetry;

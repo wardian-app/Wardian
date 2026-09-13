@@ -85,7 +85,7 @@ impl ConversationArchiveContext {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 struct ConversationCaptureState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     skip_events_at_or_before: Option<String>,
@@ -93,9 +93,11 @@ struct ConversationCaptureState {
     skip_event_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     skip_event_scopes: Vec<ConversationCaptureEventScope>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    provider_log_sources: Vec<crate::commands::provider_log_acquisition::ProviderLogCaptureState>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 struct ConversationCaptureEventScope {
     provider_source_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -407,7 +409,7 @@ impl ConversationArchiveState {
 
     pub fn append_chat_events_with_context(
         &self,
-        mut context: ConversationArchiveContext,
+        context: ConversationArchiveContext,
         events: &[AgentChatEvent],
     ) -> io::Result<usize> {
         if !events
@@ -428,6 +430,20 @@ impl ConversationArchiveState {
         }
         let agent_lock = agent_lock_for(&self.agent_locks, &context.agent_id)?;
         let _agent_guard = lock_agent_archive(&agent_lock)?;
+        self.append_chat_events_with_context_locked(context, events)
+    }
+
+    fn append_chat_events_with_context_locked(
+        &self,
+        mut context: ConversationArchiveContext,
+        events: &[AgentChatEvent],
+    ) -> io::Result<usize> {
+        if !events
+            .iter()
+            .any(|event| record_kind_from_chat_event_kind(&event.kind).is_some())
+        {
+            return Ok(0);
+        }
         let provider_source_key = context
             .provider_source_key
             .clone()
@@ -656,6 +672,71 @@ impl ConversationArchiveState {
             .len()
             .saturating_add(merged_existing_count)
             .saturating_add(usize::from(refreshed)))
+    }
+
+    pub(crate) fn provider_log_capture_state(
+        &self,
+        agent_id: &str,
+        provider_source_key: &str,
+    ) -> io::Result<Option<crate::commands::provider_log_acquisition::ProviderLogCaptureState>>
+    {
+        let agent_lock = agent_lock_for(&self.agent_locks, agent_id)?;
+        let _agent_guard = lock_agent_archive(&agent_lock)?;
+        Ok(read_capture_state(agent_id)?
+            .provider_log_sources
+            .into_iter()
+            .find(|state| state.provider_source_key == provider_source_key))
+    }
+
+    /// Publishes one provider-log batch and advances its private cursor as one
+    /// per-agent operation. The archive append must succeed before the cursor
+    /// compare-and-set is written. Multi-file archive publication remains
+    /// retryable rather than transactional; that separate limit is #1183.
+    pub(crate) fn append_provider_log_batch_with_context(
+        &self,
+        context: ConversationArchiveContext,
+        events: &[AgentChatEvent],
+        expected: Option<&crate::commands::provider_log_acquisition::ProviderLogCaptureState>,
+        next: &crate::commands::provider_log_acquisition::ProviderLogCaptureState,
+    ) -> io::Result<usize> {
+        if events
+            .iter()
+            .any(|event| event.session_id != context.agent_id)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "capture events must belong to the archive agent",
+            ));
+        }
+        if context.provider_source_key.as_deref() != Some(next.provider_source_key.as_str()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "provider-log cursor source does not match archive context",
+            ));
+        }
+
+        let agent_lock = agent_lock_for(&self.agent_locks, &context.agent_id)?;
+        let _agent_guard = lock_agent_archive(&agent_lock)?;
+        let mut capture_state = read_capture_state(&context.agent_id)?;
+        let current_index = capture_state
+            .provider_log_sources
+            .iter()
+            .position(|state| state.provider_source_key == next.provider_source_key);
+        let current = current_index.map(|index| &capture_state.provider_log_sources[index]);
+        if current != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "provider-log capture state changed before cursor commit",
+            ));
+        }
+        let appended = self.append_chat_events_with_context_locked(context.clone(), events)?;
+        if let Some(index) = current_index {
+            capture_state.provider_log_sources[index] = next.clone();
+        } else {
+            capture_state.provider_log_sources.push(next.clone());
+        }
+        write_capture_state(&context.agent_id, &capture_state)?;
+        Ok(appended)
     }
 
     pub fn append_delivered_input(
