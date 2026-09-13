@@ -442,6 +442,8 @@ edges:
             std::env::set_var("WARDIAN_MOCK_SCENARIO", "basic");
             std::env::set_var("WARDIAN_MOCK_DELAY_MS", "0");
             std::env::set_var("WARDIAN_MOCK_SCRIPT", mock_script);
+            wardian_core::db::init_db_at_path(&home.join("state.db"))
+                .expect("initialize automation schedule database");
 
             guard
         }

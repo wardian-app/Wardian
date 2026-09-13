@@ -19,18 +19,21 @@ pub struct HeadlessProcessPromptRequest {
     pub interaction_id: Option<String>,
     pub timeout: Duration,
     pub lease_owner: Option<ConversationLeaseOwner>,
+    pub cancellation_marker: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
 pub struct HeadlessProcessPromptResult {
     pub interaction: InteractionRecord,
     pub response: String,
+    /// Provider-native conversation identity when the provider emitted one.
+    pub provider_session_id: Option<String>,
 }
 
 pub async fn run_headless_process_prompt(
     state: &crate::state::AppState,
     request: HeadlessProcessPromptRequest,
-) -> Result<HeadlessProcessPromptResult, String> {
+) -> Result<HeadlessProcessPromptResult, crate::manager::HeadlessRunError> {
     let interaction = match request.interaction_id.clone() {
         Some(id) => state
             .interactions
@@ -61,11 +64,17 @@ pub async fn run_headless_process_prompt(
         config_override: request.config_override.as_ref(),
         timeout: request.timeout,
         lease_owner: request.lease_owner.clone(),
+        cancellation_marker: request.cancellation_marker.as_deref(),
     })
     .await;
 
     match value {
         Ok(value) => {
+            let provider_session_id = value
+                .get("thread_id")
+                .or_else(|| value.get("session_id"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
             let response = value
                 .get("response")
                 .and_then(|value| value.as_str())
@@ -86,13 +95,26 @@ pub async fn run_headless_process_prompt(
                     Some(format!("headless run {}", request.node)),
                     None,
                 )
-                .await?;
+                .await
+                .map_err(crate::manager::HeadlessRunError::uncertain)?;
             Ok(HeadlessProcessPromptResult {
                 interaction,
                 response,
+                provider_session_id,
             })
         }
         Err(error) => {
+            let (delivery_state, process_state) = match error.kind() {
+                crate::manager::HeadlessRunErrorKind::DefiniteFailure => {
+                    ("failed", "process_failed")
+                }
+                crate::manager::HeadlessRunErrorKind::Uncertain => {
+                    ("unknown", "process_outcome_uncertain")
+                }
+                crate::manager::HeadlessRunErrorKind::Cancelled => {
+                    ("cancelled", "process_cancelled")
+                }
+            };
             state
                 .interactions
                 .record_delivery_attempt_durable(
@@ -101,16 +123,21 @@ pub async fn run_headless_process_prompt(
                     DeliveryTransportKind::HeadlessProcess,
                     0,
                     "headless_process",
-                    "failed",
-                    Some("process_failed".to_string()),
-                    None,
+                    delivery_state,
+                    Some(process_state.to_string()),
+                    Some(process_state.to_string()),
                     Some(format!("headless run {}", request.node)),
                     Some(DeliveryErrorDetail {
                         code: "headless_process_failed".to_string(),
-                        message: sanitize_headless_error(&error, &request.prompt),
+                        message: sanitize_headless_error(error.message(), &request.prompt),
                     }),
                 )
-                .await?;
+                .await
+                .map_err(|persist_error| {
+                    error.with_context(format!(
+                        "failed to persist the delivery outcome: {persist_error}"
+                    ))
+                })?;
             Err(error)
         }
     }
@@ -220,6 +247,7 @@ mod tests {
             interaction_id: Some("int-1".to_string()),
             timeout: crate::manager::DEFAULT_HEADLESS_RUN_TIMEOUT,
             lease_owner: None,
+            cancellation_marker: None,
         };
 
         assert_eq!(request.provider, "mock");
@@ -249,6 +277,7 @@ mod tests {
                 interaction_id: None,
                 timeout: crate::manager::DEFAULT_HEADLESS_RUN_TIMEOUT,
                 lease_owner: None,
+                cancellation_marker: None,
             },
         )
         .await
@@ -311,6 +340,7 @@ mod tests {
                 interaction_id: Some(interaction.id.clone()),
                 timeout: crate::manager::DEFAULT_HEADLESS_RUN_TIMEOUT,
                 lease_owner: None,
+                cancellation_marker: None,
             },
         )
         .await
@@ -332,7 +362,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn headless_process_times_out_and_persists_a_failed_attempt() {
+    async fn headless_process_timeout_preserves_an_uncertain_attempt() {
         if !node_available() {
             return;
         }
@@ -368,17 +398,26 @@ mod tests {
                 interaction_id: Some(interaction.id.clone()),
                 timeout: Duration::from_millis(25),
                 lease_owner: None,
+                cancellation_marker: None,
             },
         )
         .await
         .expect_err("headless process should time out");
 
+        assert_eq!(
+            error.kind(),
+            crate::manager::HeadlessRunErrorKind::Uncertain
+        );
         assert!(error.contains("exceeded its"));
         assert!(started.elapsed() < Duration::from_secs(2));
         let attempts = wardian_core::db::list_interaction_delivery_attempts(&interaction.id)
             .expect("attempts");
         assert_eq!(attempts.len(), 1);
-        assert_eq!(attempts[0].delivery_state, "failed");
+        assert_eq!(attempts[0].delivery_state, "unknown");
+        assert_eq!(
+            attempts[0].observed_state.as_deref(),
+            Some("process_outcome_uncertain")
+        );
     }
 
     #[test]

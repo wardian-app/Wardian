@@ -458,6 +458,75 @@ describe("TerminalSessionClient", () => {
     expect(__terminalSessionClientTesting.clientCount()).toBe(0);
   });
 
+  it("does not let delayed cleanup remove a remounted presentation binding", async () => {
+    const replacementRegistration = deferred<ReturnType<typeof registeredResult>>();
+    const oldOwnerToken = Symbol("old-owner");
+    const replacementOwnerToken = Symbol("replacement-owner");
+    let registrationCalls = 0;
+    const commands: string[] = [];
+    tauri.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      commands.push(command);
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      if (command === "register_terminal_presentation") {
+        registrationCalls += 1;
+        if (registrationCalls === 2) {
+          return replacementRegistration.promise;
+        }
+        return registeredResult(request?.presentation_id ?? "same-presentation");
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: brokerState(), initial_snapshot: snapshot() };
+      }
+      if (command === "update_terminal_presentation") {
+        return registeredResult(request?.presentation_id ?? "same-presentation");
+      }
+      if (command === "unregister_terminal_presentation") return brokerState();
+      if (command === "unsubscribe_terminal_events") return undefined;
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const client = terminalSessionClientFor("agent-1");
+    await client.registerPresentation(
+      registration("same-presentation"),
+      {
+        applySnapshot: () => undefined,
+        applyEvents: () => undefined,
+      },
+      { ownerToken: oldOwnerToken },
+    );
+
+    const remounting = client.registerPresentation(
+      registration("same-presentation"),
+      {
+        applySnapshot: () => undefined,
+        applyEvents: () => undefined,
+      },
+      { ownerToken: replacementOwnerToken },
+    );
+    await vi.waitFor(() => expect(registrationCalls).toBe(2));
+
+    // This is the old component's delayed unmount cleanup. The replacement
+    // binding has already been installed locally, but its transport is held.
+    const delayedCleanup = client.unregisterPresentation(
+      "same-presentation",
+      oldOwnerToken,
+    );
+    replacementRegistration.resolve(registeredResult("same-presentation"));
+    await Promise.all([remounting, delayedCleanup]);
+
+    expect(commands).not.toContain("unregister_terminal_presentation");
+    expect(client.presentationCount).toBe(1);
+    await expect(client.updatePresentation("same-presentation", {
+      desired_geometry: geometry(100, 30),
+      visibility: "visible",
+      render_state: "mounted",
+      requested_interaction: "interactive",
+      observed_lease_epoch: 0,
+    })).resolves.toMatchObject({
+      presentation: { presentation_id: "same-presentation" },
+    });
+  });
+
   it("runs the pre-snapshot hook inside the serialized registration transaction", async () => {
     const hookGate = deferred<void>();
     const order: string[] = [];

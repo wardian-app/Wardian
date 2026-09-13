@@ -1,5 +1,38 @@
+use std::ffi::OsString;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
+
+pub(super) struct TestWardianHome {
+    _temp: tempfile::TempDir,
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+    previous_home: Option<OsString>,
+}
+
+impl TestWardianHome {
+    pub(super) async fn new_async() -> Self {
+        let lock = crate::utils::wardian_test_env_lock_async().await;
+        let temp = tempfile::tempdir().expect("temp wardian home");
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let fixture = Self {
+            _lock: lock,
+            previous_home,
+            _temp: temp,
+        };
+        wardian_core::db::init_db_at_path(&fixture._temp.path().join("state.db"))
+            .expect("init test database");
+        fixture
+    }
+}
+
+impl Drop for TestWardianHome {
+    fn drop(&mut self) {
+        match self.previous_home.take() {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+    }
+}
 
 /// Owns deliberate contention on a separate thread, never on the async executor.
 /// Construction waits until the mutex is held; dropping releases and joins the

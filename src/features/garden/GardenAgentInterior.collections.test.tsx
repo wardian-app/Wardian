@@ -57,19 +57,32 @@ describe("Garden collections", () => {
 
   it.each([34, 300])("preserves all %i memory anchors in the existing scroll region", async (count) => {
     const memories = Array.from({ length: count }, (_, index) => memory(index + 1));
-    const { container, onSelect, onEnter } = setup(memories, []);
+    const { onSelect, onEnter } = setup(memories, []);
     const region = screen.getByLabelText("Memory contents");
     expect(region).toHaveAttribute("tabindex", "0");
     expect(within(region).getByText(`${count} loaded memories`)).toBeInTheDocument();
-    expect(region.querySelectorAll('[data-garden-ref^="memory:"]')).toHaveLength(count);
+    const anchorNodes = region.querySelectorAll<HTMLElement>('[data-garden-ref^="memory:"]');
+    expect(anchorNodes).toHaveLength(count);
+    const anchors = new Map<string, HTMLButtonElement>();
+    for (const anchor of anchorNodes) {
+      expect(anchor).toBeInstanceOf(HTMLButtonElement);
+      expect(anchor).toHaveRole("button");
+      const ref = anchor.dataset.gardenRef;
+      if (ref) anchors.set(ref, anchor as HTMLButtonElement);
+    }
+    expect(anchors.size).toBe(count);
     if (count === 34) expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
     for (const entry of memories) {
-      expect(container.querySelector(`[data-garden-ref="memory:${entry.memory_id}"]`)).toHaveAccessibleName(`${entry.text} Revision 1`);
+      const anchor = anchors.get(`memory:${entry.memory_id}`);
+      expect(anchor).toBeDefined();
+      expect(anchor!).toHaveAccessibleName(`${entry.text} Revision 1`);
     }
-    const last = within(region).getByRole("button", { name: `${memories[count - 1].text} Revision 1` });
-    fireEvent.click(last);
+    const last = anchors.get(`memory:m${count}`);
+    expect(last).toBeDefined();
+    expect(last).toBeInstanceOf(HTMLButtonElement);
+    fireEvent.click(last!);
     expect(onSelect).toHaveBeenCalledWith({ kind: "memory", id: `m${count}` });
-    fireEvent.keyDown(last, { key: "Enter" });
+    fireEvent.keyDown(last!, { key: "Enter" });
     expect(onEnter).toHaveBeenCalledWith({ kind: "memory", id: `m${count}` });
     await waitFor(() => expect(screen.queryByText("Loading Inbox…")).not.toBeInTheDocument());
   });

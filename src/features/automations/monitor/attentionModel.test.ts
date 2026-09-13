@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { automationAttention } from './attentionModel';
+import { buildMonitorModel } from './monitorModel';
 
 describe('automationAttention', () => {
   it('keeps approval runs and unsuperseded failures in attention', () => {
@@ -58,5 +59,48 @@ describe('automationAttention', () => {
     ]);
 
     expect([...result.scheduleIds]).toEqual(['unrecovered']);
+  });
+
+  it('keeps a run visible when a temporary worker needs attention', () => {
+    const result = automationAttention([{
+      run_id: 'completed-with-worker',
+      blueprint_id: 'audit',
+      status: 'completed',
+      updated_at: '2026-09-13T00:00:00Z',
+      worker_attention_count: 1,
+    }], []);
+
+    expect([...result.runIds]).toEqual(['completed-with-worker']);
+  });
+
+  it('projects worker attention as its own monitor activity even after run completion', () => {
+    const model = buildMonitorModel([{
+      run_id: 'completed-with-worker',
+      blueprint_id: 'audit',
+      status: 'completed',
+      node_count: 1,
+      path: '/runs/completed-with-worker',
+      worker_attention_count: 2,
+    }], []);
+
+    expect(model.activities[0]).toMatchObject({
+      activityId: 'run:completed-with-worker',
+      section: 'attention',
+      statusLabel: 'Worker attention',
+      issue: '2 temporary workers need attention',
+    });
+  });
+
+  it('uses singular worker-attention grammar', () => {
+    const model = buildMonitorModel([{
+      run_id: 'completed-with-one-worker',
+      blueprint_id: 'audit',
+      status: 'completed',
+      node_count: 1,
+      path: '/runs/completed-with-one-worker',
+      worker_attention_count: 1,
+    }], []);
+
+    expect(model.activities[0]?.issue).toBe('1 temporary worker needs attention');
   });
 });
