@@ -124,8 +124,17 @@ The path must be under the OS temp directory and begin with
 harness resets the home it is given, and that guard is what stops a reset from
 reaching an unrelated directory.
 
-A run writes `.native-e2e-lock.json` into its home and removes it on exit. A
-second run pointed at the same explicit home is refused before anything is
+A run writes `.native-e2e-lock/owner.json` into its home and removes it on exit.
+The harness snapshots the lock object returned by `acquireHomeLock(...).lock`.
+When a supervised child finishes a proven shutdown, it releases the lock only
+if the current claim is its own. A live claim with the same run id and the
+same pid as that snapshot is the upstream runner's claim; the child records
+`home_lock_released: false` and `home_lock_release_deferred: true`, then the
+runner releases the claim after the child exits. A normal child-owned release
+records `home_lock_release_deferred: false`. A foreign, malformed, or changed
+claim remains locked and fails cleanup confirmation.
+
+A second run pointed at the same explicit home is refused before anything is
 deleted or terminated. Give each concurrent run its own home, or leave the
 variable unset.
 
