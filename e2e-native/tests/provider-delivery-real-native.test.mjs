@@ -288,11 +288,9 @@ async function waitForPersistedOpenCodeSession(harness, sessionId, timeoutMs = 1
 
 async function runRealDeliveryCase({
   driver,
-  cliPath,
   harness,
   provider,
   agentSessionId,
-  agentName,
   inputCase,
   runId,
 }) {
@@ -686,8 +684,8 @@ test("human composer delivery uses actual providers; not peer messaging", { time
       if (nativeProviders.includes(provider)) {
         // Establish a real session through the existing human path before disabling it.
         // Setup is not native task acceptance and never substitutes for the case below.
-        await runRealDeliveryCase({ driver: session.driver, cliPath, harness, provider,
-          agentSessionId: agent.session_id, agentName, inputCase: INPUT_CASES[0], runId: `setup-${runId}` });
+        await runRealDeliveryCase({ driver: session.driver, harness, provider,
+          agentSessionId: agent.session_id, inputCase: INPUT_CASES[0], runId: `setup-${runId}` });
         const capability = JSON.parse(runCliOk(cliPath, harness, ["delivery", "capabilities", agent.session_id]).stdout);
         const identity = assertProviderNativeSession(provider, capability, agent.session_id);
         await invokeTauri(session.driver, "debug_remove_agent_input_sender", { sessionId: agent.session_id });

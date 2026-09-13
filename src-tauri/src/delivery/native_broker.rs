@@ -749,7 +749,7 @@ impl NativeDeliveryBroker {
         }
     }
 
-    pub async fn opencode_http_eligibility(
+    pub(crate) async fn opencode_http_eligibility(
         &self,
         target_agent_id: &str,
         generation: u64,

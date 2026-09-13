@@ -1,7 +1,6 @@
 // @tier nightly — Runs on the nightly schedule; too slow or too broad for every pull request.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -14,7 +13,6 @@ import path from "node:path";
 import {
   createNativeHarness,
   ensureNativeAppBuilt,
-  freezeBuiltCliForRun,
   invokeTauri,
   prepareIsolatedHome,
   startNativeSession,
@@ -30,20 +28,6 @@ const providerCommands = {
   antigravity: "agy",
   opencode: "opencode",
 };
-
-function buildCli(harness) {
-  const result = spawnSync("cargo", ["build", "-p", "wardian-cli", "--bin", "wardian-cli"], {
-    cwd: harness.repoRoot,
-    encoding: "utf8",
-  });
-  assert.equal(
-    result.status,
-    0,
-    `cargo build -p wardian-cli failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
-  );
-
-  return freezeBuiltCliForRun(harness);
-}
 
 function recorderSource(provider) {
   return `
@@ -351,7 +335,6 @@ test("per-agent advanced config reaches off-agent automation and interactive pro
 
   prepareIsolatedHome(harness);
   const { binDir, captureDir } = seedProviderShims(harness);
-  const cliPath = buildCli(harness);
   const previousPath = process.env.PATH;
   const previousPathExt = process.env.PATHEXT;
   const previousCaptureDir = process.env.WARDIAN_PROVIDER_ARGV_DIR;
