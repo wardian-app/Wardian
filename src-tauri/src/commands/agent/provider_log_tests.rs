@@ -1,7 +1,59 @@
+use super::agent_lifecycle::fresh_pi_session_for_initial_capture;
 use super::tests::{make_test_agent, WardianHomeGuard};
-use super::{lifecycle_config_for_session, persist_agent_config_while_lifecycle_locked};
+use super::{
+    lifecycle_config_for_session, persist_agent_config_while_lifecycle_locked,
+    promote_fresh_provider_session_after_resume,
+};
 use crate::state::AppState;
 use wardian_core::conversations::{AgentConversationLoggingSetting, ConversationLoggingSetting};
+use wardian_core::models::AgentConfig;
+
+#[test]
+fn pi_fresh_provider_session_promotion_retains_launch_provenance() {
+    let mut new_active = make_test_agent();
+    {
+        let mut config = new_active.config.lock().unwrap();
+        config.fresh_provider_session_id = Some("pi-fresh-session".to_string());
+        config.resume_session = None;
+    }
+
+    promote_fresh_provider_session_after_resume("pi", &mut new_active);
+
+    let config = new_active.config.lock().unwrap();
+    assert_eq!(config.resume_session.as_deref(), Some("pi-fresh-session"));
+    assert_eq!(
+        config.fresh_provider_session_id.as_deref(),
+        Some("pi-fresh-session")
+    );
+}
+
+#[test]
+fn pi_initial_capture_provenance_requires_the_launch_owned_identity() {
+    let fresh_config = AgentConfig {
+        provider: "pi".to_string(),
+        fresh_provider_session_id: Some("pi-fresh-session".to_string()),
+        ..AgentConfig::default()
+    };
+    assert_eq!(
+        fresh_pi_session_for_initial_capture(&fresh_config, Some("pi-fresh-session")),
+        Some("pi-fresh-session".to_string())
+    );
+    assert_eq!(
+        fresh_pi_session_for_initial_capture(&fresh_config, Some("different-session")),
+        None
+    );
+
+    let resumed_config = AgentConfig {
+        provider: "pi".to_string(),
+        resume_session: Some("pi-resumed-session".to_string()),
+        fresh_provider_session_id: Some("pi-fresh-session".to_string()),
+        ..AgentConfig::default()
+    };
+    assert_eq!(
+        fresh_pi_session_for_initial_capture(&resumed_config, Some("pi-resumed-session")),
+        None
+    );
+}
 
 #[tokio::test]
 async fn agent_logging_transition_excludes_provider_bytes_written_while_disabled() {

@@ -1104,19 +1104,6 @@ fn persisted_resume_session_for_provider(actual_resume: Option<String>) -> Optio
     actual_resume.filter(|value| !value.trim().is_empty())
 }
 
-fn fresh_pi_session_for_initial_capture(
-    config: &AgentConfig,
-    actual_resume: Option<&str>,
-) -> Option<String> {
-    if config.provider != "pi" || config.resume_session.is_some() {
-        return None;
-    }
-    let fresh_provider_session_id = config.fresh_provider_session_id.as_deref()?.trim();
-    let actual_resume = actual_resume?.trim();
-    (!fresh_provider_session_id.is_empty() && fresh_provider_session_id == actual_resume)
-        .then(|| actual_resume.to_string())
-}
-
 fn provider_uses_manual_session_id(provider_name: &str) -> bool {
     matches!(provider_name, "claude" | "gemini" | "pi" | "mock")
 }
@@ -1175,20 +1162,7 @@ fn promote_fresh_provider_session_after_resume(
 
     let promoted = {
         let mut new_config = new_active.config.lock().unwrap();
-        if let Some(fresh_provider_session_id) = new_config.fresh_provider_session_id.take() {
-            new_config.resume_session = Some(fresh_provider_session_id.clone());
-            if provider == "pi" {
-                // Keep the existing runtime-only launch provenance alongside
-                // the promoted resume identity. The archive uses equality of
-                // these fields to distinguish this fresh launch from a real
-                // resumed session; persisted config never serializes the
-                // fresh field.
-                new_config.fresh_provider_session_id = Some(fresh_provider_session_id);
-            }
-            true
-        } else {
-            false
-        }
+        agent_lifecycle::promote_fresh_provider_session_fields(provider, &mut new_config)
     };
 
     if promoted {
@@ -2407,11 +2381,6 @@ async fn register_new_agent(
     let active_agent =
         pending.attach(manager::spawn_agent(app.clone(), config.clone(), false, None).await?);
     // Propagate any fields that spawn_agent may have auto-assigned (e.g. opencode_port).
-    let persisted_resume = persisted_resume_session_for_provider(actual_resume);
-    let fresh_pi_session =
-        fresh_pi_session_for_initial_capture(&config, persisted_resume.as_deref());
-    config.resume_session = persisted_resume.clone();
-    config.fresh_provider_session_id = fresh_pi_session.clone();
 
     {
         let mut cfg = active_agent.config.lock().unwrap();
@@ -2424,8 +2393,7 @@ async fn register_new_agent(
                 target.port = opencode.port;
             }
         }
-        cfg.resume_session = persisted_resume;
-        cfg.fresh_provider_session_id = fresh_pi_session;
+        agent_lifecycle::sync_registered_provider_session(&mut config, &mut cfg, actual_resume);
     }
 
     let mut agents = state.agents.lock().await;
@@ -8395,53 +8363,6 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         assert_eq!(config.fresh_provider_session_id, None);
         assert_eq!(*new_active.log_path.lock().unwrap(), None);
         assert_eq!(*new_active.log_last_modified.lock().unwrap(), None);
-    }
-
-    #[test]
-    fn pi_fresh_provider_session_promotion_retains_launch_provenance() {
-        let mut new_active = make_test_agent();
-        {
-            let mut config = new_active.config.lock().unwrap();
-            config.fresh_provider_session_id = Some("pi-fresh-session".to_string());
-            config.resume_session = None;
-        }
-
-        promote_fresh_provider_session_after_resume("pi", &mut new_active);
-
-        let config = new_active.config.lock().unwrap();
-        assert_eq!(config.resume_session.as_deref(), Some("pi-fresh-session"));
-        assert_eq!(
-            config.fresh_provider_session_id.as_deref(),
-            Some("pi-fresh-session")
-        );
-    }
-
-    #[test]
-    fn pi_initial_capture_provenance_requires_the_launch_owned_identity() {
-        let fresh_config = AgentConfig {
-            provider: "pi".to_string(),
-            fresh_provider_session_id: Some("pi-fresh-session".to_string()),
-            ..AgentConfig::default()
-        };
-        assert_eq!(
-            fresh_pi_session_for_initial_capture(&fresh_config, Some("pi-fresh-session")),
-            Some("pi-fresh-session".to_string())
-        );
-        assert_eq!(
-            fresh_pi_session_for_initial_capture(&fresh_config, Some("different-session")),
-            None
-        );
-
-        let resumed_config = AgentConfig {
-            provider: "pi".to_string(),
-            resume_session: Some("pi-resumed-session".to_string()),
-            fresh_provider_session_id: Some("pi-fresh-session".to_string()),
-            ..AgentConfig::default()
-        };
-        assert_eq!(
-            fresh_pi_session_for_initial_capture(&resumed_config, Some("pi-resumed-session")),
-            None
-        );
     }
 
     #[test]
