@@ -147,20 +147,22 @@ pub(crate) fn provider_output_has_startup_ready_prompt(provider: &str, output: &
                     line.trim_matches(|ch: char| ch.is_whitespace() || matches!(ch, '┃' | '│'))
                 })
                 .collect::<Vec<_>>();
-            let Some(composer) = lines
+            let has_placeholder_composer = lines
                 .iter()
                 .rposition(|line| line.starts_with("Ask anything"))
-            else {
-                return false;
-            };
-            let footer = lines[composer + 1..].join(" ");
-            let footer = footer.split_whitespace().collect::<Vec<_>>().join(" ");
+                .map(|composer| {
+                    let footer = lines[composer + 1..].join(" ");
+                    let footer = footer.split_whitespace().collect::<Vec<_>>().join(" ");
+                    footer.contains("ctrl+p commands")
+                })
+                .unwrap_or(false);
+            let has_restored_composer = opencode_has_restored_composer(&lines);
             !provider_output_requires_startup_action(provider, &cleaned)
                 && !lines.iter().any(|line| {
                     let lower = line.to_ascii_lowercase();
                     lower.starts_with("loading") || lower.starts_with("connecting")
                 })
-                && footer.contains("ctrl+p commands")
+                && (has_placeholder_composer || has_restored_composer)
         }
         "codex" => {
             !provider_output_requires_startup_action("codex", &cleaned)
@@ -193,6 +195,35 @@ pub(crate) fn provider_output_has_startup_ready_prompt(provider: &str, output: &
         "pi" => pi_output_has_startup_ready_prompt(&cleaned),
         _ => false,
     }
+}
+
+/// OpenCode removes the placeholder text while a resumed conversation is on
+/// screen. Its empty composer is still represented by the bottom border, but
+/// the fixed-width footer can wrap `ctrl+p` and `commands` onto adjacent rows
+/// when the workspace path occupies the left side of the terminal.
+fn opencode_has_restored_composer(lines: &[&str]) -> bool {
+    let Some(border_index) = lines.iter().rposition(|line| {
+        let line = line.trim_matches(|ch: char| ch.is_whitespace() || matches!(ch, '┃' | '│'));
+        line.starts_with('╹') && line.contains("▀▀")
+    }) else {
+        return false;
+    };
+
+    let footer = &lines[border_index + 1..];
+    let Some(ctrl_row) = footer.iter().rposition(|line| line.contains("ctrl+p")) else {
+        return false;
+    };
+    let provider_row_limit = (ctrl_row + 3).min(footer.len());
+    let footer_rows = &footer[ctrl_row..provider_row_limit];
+    let has_commands = footer_rows.iter().enumerate().any(|(offset, line)| {
+        if offset == 0 {
+            line.split_once("ctrl+p")
+                .is_some_and(|(_, after)| after.contains("commands"))
+        } else {
+            line.contains("commands")
+        }
+    });
+    has_commands && footer_rows.iter().any(|line| line.contains("OpenCode"))
 }
 
 /// Provider startup can require an explicit account or workspace decision
@@ -594,6 +625,35 @@ mod tests {
     fn opencode_startup_composer_rejects_partial_loading_and_consent_screens() {
         let ready = "Ask anything...\nBuild  mimo-v2.5-free\nctrl+p commands";
         assert!(provider_output_has_startup_ready_prompt("opencode", ready));
+
+        // A resumed conversation can replace the placeholder with an empty
+        // composer border. The fixed-width footer may wrap around the
+        // workspace path, so `ctrl+p` and `commands` can occupy adjacent rows.
+        let mut composer_border = "  ╹".to_string();
+        composer_border.extend(std::iter::repeat('▀').take(190 - composer_border.chars().count()));
+        let footer_row = |suffix: &str| {
+            let mut row = format!("{:<133}{}", "<workspace>/long-path", suffix);
+            row.extend(std::iter::repeat(' ').take(190 - row.chars().count()));
+            row
+        };
+        let ctrl_row = footer_row("ctrl+p");
+        let commands_row = footer_row("commands • OpenCode 1.18.30");
+        assert_eq!(composer_border.chars().count(), 190);
+        assert_eq!(ctrl_row.find("ctrl+p"), Some(133));
+        assert_eq!(commands_row.find("commands"), Some(133));
+        let mut restored_rows = vec![String::new(); 51];
+        restored_rows[1] = "New session - resumed".to_string();
+        restored_rows[2] = "USER_marker".to_string();
+        restored_rows[10] = "Build · MiMo V2.5 Free".to_string();
+        restored_rows[30] = "Getting started".to_string();
+        restored_rows[47] = composer_border;
+        restored_rows[48] = ctrl_row;
+        restored_rows[49] = commands_row;
+        let restored = restored_rows.join("\n");
+        assert_eq!(restored_rows.len(), 51);
+        assert!(provider_output_has_startup_ready_prompt(
+            "opencode", restored
+        ));
         for blocked in [
             "OpenCode",
             "Ask anything...",
@@ -601,6 +661,9 @@ mod tests {
             "Ask anything...\nLoading session...\nctrl+p commands",
             "Permission required\nAsk anything...\nctrl+p commands",
             "Do you trust this directory?\nAsk anything...\nctrl+p commands",
+            "Loading session...\n╹▀▀▀▀▀▀▀▀▀▀\nctrl+p commands • OpenCode 1.18.30",
+            "╹▀▀▀▀▀▀▀▀▀▀\nctrl+p commands",
+            "Restored transcript\nUSER_marker\ncommands • OpenCode 1.18.30",
         ] {
             assert!(
                 !provider_output_has_startup_ready_prompt("opencode", blocked),
