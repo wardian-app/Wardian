@@ -293,6 +293,8 @@ async function runRealDeliveryCase({
   agentSessionId,
   inputCase,
   runId,
+  report,
+  save,
 }) {
   const marker = `WARDIAN_REAL_DELIVERY_${provider.toUpperCase()}_${inputCase.name.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_${runId}`;
   const prompt = inputCase.prompt(marker);
@@ -309,7 +311,7 @@ async function runRealDeliveryCase({
     await waitForPersistedOpenCodeSession(harness, agentSessionId);
   }
 
-  const conformance = await assertRealChatConformance(driver, agentSessionId, provider, marker);
+  const conformance = await assertRealChatConformance(driver, agentSessionId, provider, marker, { report, save });
   if (inputCase.expectOutput) {
     const expected = inputCase.expectedOutput?.(marker) ??
       (inputCase.name === "prompt-multiline" ? `${marker}_LINE_1\n${marker}_LINE_2` : marker);
@@ -401,23 +403,165 @@ function isProviderAuthoredAssistantEvent(event, provider, marker) {
     (event.text ?? "").includes(marker);
 }
 
-async function assertRealChatConformance(driver, sessionId, provider, marker) {
-  const events = await driver.wait(async () => {
-    try {
-      const candidate = await invokeTauri(driver, "load_agent_chat_transcript", { sessionId });
-      if (!Array.isArray(candidate)) return false;
-      const hasUser = candidate.some((event) =>
-        event?.role === "user" && (event.text ?? "").includes(marker));
-      const hasAssistant = candidate.some((event) =>
-        isProviderAuthoredAssistantEvent(event, provider, marker));
-      return hasUser && hasAssistant ? candidate : false;
-    } catch {
-      return false;
-    }
-  }, 20_000, `${provider} chat replay did not settle for ${marker}`);
+const SAFE_IPC_ERROR_NAMES = new Set([
+  "DOMException",
+  "Error",
+  "JavascriptError",
+  "NoSuchWindowError",
+  "TimeoutError",
+  "TypeError",
+  "WebDriverError",
+]);
+const KNOWN_SOURCE_CATEGORIES = new Set([
+  "conversation_archive",
+  "gemini_log",
+  "headless_process",
+  "response_item",
+  "terminal_fallback",
+]);
+
+function diagnosticProvider(provider) {
+  if (typeof provider !== "string" || !provider.trim()) return "absent";
+  return PROVIDERS.includes(provider.trim()) ? provider.trim() : "unknown";
+}
+
+function diagnosticSource(source) {
+  if (typeof source !== "string" || !source.trim()) return "absent";
+  const value = source.trim();
+  return KNOWN_SOURCE_CATEGORIES.has(value) ? value : "other";
+}
+
+function diagnosticEventSource(source) {
+  if (source === "opencode_db" || source === "provider_session") return source;
+  return diagnosticSource(source);
+}
+
+function transcriptUserEvidence(event) {
+  const text = typeof event?.text === "string" ? event.text : "";
+  const metadata = event?.metadata ?? {};
+  return {
+    id: typeof event?.id === "string" ? event.id : null,
+    provider: diagnosticProvider(event?.provider),
+    kind: event?.kind === "message" ? "message" : typeof event?.kind === "string" ? "other" : "absent",
+    role: ["assistant", "system", "tool", "user"].includes(event?.role) ? event.role : "other",
+    source: diagnosticEventSource(event?.source),
+    provider_log: typeof metadata.provider_log === "boolean" ? metadata.provider_log : "absent",
+    native_identity: {
+      session_id: typeof metadata.opencode_session_id === "string"
+        ? metadata.opencode_session_id
+        : typeof metadata.provider_session_id === "string" ? metadata.provider_session_id : null,
+      message_id: typeof metadata.message_id === "string" ? metadata.message_id
+        : typeof event?.turn_id === "string" ? event.turn_id : null,
+      turn_id: typeof metadata.turn_id === "string" ? metadata.turn_id
+        : typeof event?.turn_id === "string" ? event.turn_id : null,
+      part_id: typeof metadata.part_id === "string" ? metadata.part_id : null,
+    },
+    timestamp: event?.created_at ?? metadata.part_time_created ?? metadata.message_time_created ?? null,
+    text_sha256: createHash("sha256").update(text).digest("hex"),
+    text_byte_count: Buffer.byteLength(text, "utf8"),
+  };
+}
+
+function classifyIpcError(error) {
+  const name = typeof error?.name === "string" && SAFE_IPC_ERROR_NAMES.has(error.name)
+    ? error.name
+    : "unknown";
+  return { classification: "transcript_invoke_rejected", name };
+}
+
+function summarizeTranscript(candidate, provider, marker) {
+  const events = Array.isArray(candidate) ? candidate : [];
+  const textEvents = events.filter((event) => typeof event?.text === "string");
+  const userEvents = events.filter((event) =>
+    event?.role === "user" && (event.text ?? "").includes(marker));
+  const assistantEvents = events.filter((event) => event?.role === "assistant");
+  const providerEvents = events.filter((event) => event?.provider === provider);
+  const messageEvents = events.filter((event) => event?.kind === "message");
+  const providerLogEvents = events.filter((event) => event?.metadata?.provider_log === true);
+  const sourceEvents = events.filter((event) => typeof event?.source === "string" && event.source.trim());
+  const markerEvents = textEvents.filter((event) => event.text.includes(marker));
+  const last = events.at(-1);
+
+  return {
+    hasUser: userEvents.length > 0,
+    hasAssistant: events.some((event) => isProviderAuthoredAssistantEvent(event, provider, marker)),
+    counts: {
+      events: events.length,
+      user_marker: userEvents.length,
+      assistant_role: assistantEvents.length,
+      provider_match: providerEvents.length,
+      message_kind: messageEvents.length,
+      provider_log_true: providerLogEvents.length,
+      source_present: sourceEvents.length,
+      marker: markerEvents.length,
+    },
+    provider: [...new Set(events.map((event) => diagnosticProvider(event?.provider)))],
+    source: [...new Set(sourceEvents.map((event) => diagnosticSource(event.source)))],
+    provider_log: [...new Set(events.map((event) => {
+      const value = event?.metadata?.provider_log;
+      return typeof value === "boolean" ? value : "absent";
+    }))],
+    last_event: last ? {
+      kind: last.kind === "message" ? "message" : typeof last.kind === "string" ? "other" : "absent",
+      role: ["assistant", "system", "tool", "user"].includes(last.role) ? last.role : "other",
+      provider: diagnosticProvider(last.provider),
+      source: diagnosticSource(last.source),
+      provider_log: typeof last?.metadata?.provider_log === "boolean" ? last.metadata.provider_log : "absent",
+      text_length: typeof last.text === "string" ? last.text.length : 0,
+      marker: typeof last.text === "string" && last.text.includes(marker),
+    } : null,
+  };
+}
+
+async function assertRealChatConformance(driver, sessionId, provider, marker, { report, save } = {}) {
+  const diagnostics = {
+    hasUser: false,
+    hasAssistant: false,
+    counts: { events: 0, user_marker: 0, assistant_role: 0, provider_match: 0,
+      message_kind: 0, provider_log_true: 0, source_present: 0, marker: 0 },
+    provider: [],
+    source: [],
+    provider_log: [],
+    last_event: null,
+    ipc_error_count: 0,
+    last_ipc_error: null,
+    last_result_type: null,
+  };
+  let events;
+  try {
+    events = await driver.wait(async () => {
+      try {
+        const candidate = await invokeTauri(driver, "load_agent_chat_transcript", { sessionId });
+        diagnostics.last_result_type = Array.isArray(candidate) ? "array" : typeof candidate;
+        if (!Array.isArray(candidate)) return false;
+        Object.assign(diagnostics, summarizeTranscript(candidate, provider, marker));
+        return diagnostics.hasUser && diagnostics.hasAssistant ? candidate : false;
+      } catch (error) {
+        diagnostics.ipc_error_count += 1;
+        diagnostics.last_ipc_error = classifyIpcError(error);
+        throw error;
+      }
+    }, 120_000, `${provider} chat replay did not settle for ${marker}`);
+  } catch (error) {
+    const isWaitTimeout = error?.name === "TimeoutError" &&
+      /Wait timed out after \d+ms/i.test(String(error.message ?? ""));
+    if (!isWaitTimeout) throw error;
+    throw new Error(
+      `${provider} chat replay did not settle for ${marker}; timeout_diagnostics=${JSON.stringify(diagnostics)}`,
+      { cause: error },
+    );
+  }
 
   const userEvents = events.filter((event) =>
     event?.role === "user" && (event.text ?? "").includes(marker));
+  if (report && save) {
+    report.transcript_user_evidence ??= [];
+    report.transcript_user_evidence.push({
+      provider,
+      candidates: userEvents.map(transcriptUserEvidence),
+    });
+    await save();
+  }
   assert.equal(userEvents.length, 1, `${provider} chat replay did not retain one user request for ${marker}`);
   assert.equal(userEvents[0].metadata?.input_origin, "human_input");
   assert.equal(userEvents[0].metadata?.input_purpose, "request");
@@ -472,6 +616,35 @@ test("delivery deterministic: fresh readiness cannot filter away separate stale 
     assert.throws(() => assertNoStaleTranscript(events, "OLD"), /previous provider transcript/);
   }
   assertNoStaleTranscript([fresh], "OLD");
+});
+
+test("transcript timeout diagnostics retain incomplete provider metadata without raw errors", () => {
+  const summary = summarizeTranscript([
+    { provider: "opencode", kind: "message", role: "user", text: "MARKER",
+      source: "provider_session", metadata: { provider_log: true } },
+    { provider: "opencode", kind: "message", role: "assistant", text: "MARKER",
+      source: "provider_session", metadata: { provider_log: false } },
+  ], "opencode", "MARKER");
+  assert.equal(summary.hasUser, true);
+  assert.equal(summary.hasAssistant, false);
+  assert.deepEqual(summary.counts, {
+    events: 2,
+    user_marker: 1,
+    assistant_role: 1,
+    provider_match: 2,
+    message_kind: 2,
+    provider_log_true: 1,
+    source_present: 2,
+    marker: 2,
+  });
+  assert.deepEqual(summary.provider, ["opencode"]);
+  assert.deepEqual(summary.source, ["other"]);
+  assert.deepEqual(summary.provider_log, [true, false]);
+  assert.equal(summary.last_event.source, "other");
+
+  const classified = classifyIpcError(new Error("private IPC details are excluded"));
+  assert.deepEqual(classified, { classification: "transcript_invoke_rejected", name: "Error" });
+  assert.equal(Object.hasOwn(classified, "message"), false);
 });
 
 async function waitForFreshTranscript(driver, sessionId, provider, freshMarker) {
@@ -685,7 +858,7 @@ test("human composer delivery uses actual providers; not peer messaging", { time
         // Establish a real session through the existing human path before disabling it.
         // Setup is not native task acceptance and never substitutes for the case below.
         await runRealDeliveryCase({ driver: session.driver, harness, provider,
-          agentSessionId: agent.session_id, inputCase: INPUT_CASES[0], runId: `setup-${runId}` });
+          agentSessionId: agent.session_id, inputCase: INPUT_CASES[0], runId: `setup-${runId}`, report, save });
         const capability = JSON.parse(runCliOk(cliPath, harness, ["delivery", "capabilities", agent.session_id]).stdout);
         const identity = assertProviderNativeSession(provider, capability, agent.session_id);
         await invokeTauri(session.driver, "debug_remove_agent_input_sender", { sessionId: agent.session_id });
@@ -714,6 +887,8 @@ test("human composer delivery uses actual providers; not peer messaging", { time
           agentName,
           inputCase,
           runId,
+          report,
+          save,
         }));
       }
       if (verifyFreshTranscript) {
