@@ -630,7 +630,10 @@ mod tests {
         // composer border. The fixed-width footer may wrap around the
         // workspace path, so `ctrl+p` and `commands` can occupy adjacent rows.
         let mut composer_border = "  ╹".to_string();
-        composer_border.extend(std::iter::repeat_n('▀', 190 - composer_border.chars().count()));
+        composer_border.extend(std::iter::repeat_n(
+            '▀',
+            190 - composer_border.chars().count(),
+        ));
         let footer_row = |suffix: &str| {
             let mut row = format!("{:<133}{}", "<workspace>/long-path", suffix);
             row.extend(std::iter::repeat_n(' ', 190 - row.chars().count()));
