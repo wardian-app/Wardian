@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -17,6 +18,7 @@ import {
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const MAX_CHILD_ROLLOUT_BYTES = 64 * 1024 * 1024;
 const childIngestionOnly = process.env.WARDIAN_E2E_CHILD_INGESTION_ONLY === "1";
+const childPreflightOnly = process.env.WARDIAN_E2E_CHILD_PREFLIGHT_ONLY === "1";
 
 async function invokeRaw(driver, command, args = {}) {
   return await driver.executeAsyncScript((commandName, payload, done) => {
@@ -163,10 +165,35 @@ function readBoundedCodexChild(sourcePath, binding) {
   const basename = path.basename(resolvedSource);
   assert.match(
     basename,
-    new RegExp(`${binding.child_provider_session_id.replaceAll("-", "\\-")}\\.jsonl$`, "u"),
+    new RegExp(`${binding.child_provider_session_id}\\.jsonl$`, "u"),
     "Codex child source filename must retain the provider session identity",
   );
   return { resolvedSource, basename, bytes, sha256: digest, meta };
+}
+
+if (childPreflightOnly) {
+  test("offline frozen Codex child preflight validates the real binding and rejects a valid UUID filename mismatch", () => {
+    const binding = readPrivateChildBinding();
+    const sourcePath = process.env.WARDIAN_E2E_CODEX_CHILD_SOURCE ?? binding.source_path;
+    const child = readBoundedCodexChild(sourcePath, binding);
+    assert.equal(child.sha256, binding.source_sha256);
+    assert.equal(child.basename, path.basename(sourcePath));
+
+    const mismatchDir = fs.mkdtempSync(path.join(os.tmpdir(), "wardian-child-preflight-"));
+    try {
+      const mismatchPath = path.join(
+        mismatchDir,
+        "00000000-0000-0000-0000-000000000001.jsonl",
+      );
+      fs.copyFileSync(child.resolvedSource, mismatchPath);
+      assert.throws(
+        () => readBoundedCodexChild(mismatchPath, binding),
+        /filename must retain the provider session identity/,
+      );
+    } finally {
+      fs.rmSync(mismatchDir, { recursive: true, force: true });
+    }
+  });
 }
 
 function copyFrozenCodexChild(harness, ownerSessionId, child) {
@@ -206,7 +233,7 @@ function isolateNativeProviderHome(harness) {
   };
 }
 
-if (!childIngestionOnly) {
+if (!childPreflightOnly && !childIngestionOnly) {
   test(
     "native automation registers an inspectable temporary worker without roster enrollment",
     { timeout: 120000 },
@@ -353,10 +380,11 @@ if (!childIngestionOnly) {
   );
 }
 
-test(
-  "native telemetry ingests one genuine Codex child rollout under an off parent",
-  { timeout: 120000 },
-  async (t) => {
+if (!childPreflightOnly) {
+  test(
+    "native telemetry ingests one genuine Codex child rollout under an off parent",
+    { timeout: 120000 },
+    async (t) => {
     const binding = readPrivateChildBinding();
     const sourcePath = process.env.WARDIAN_E2E_CODEX_CHILD_SOURCE ?? binding.source_path;
 
@@ -370,7 +398,7 @@ test(
     const runToken = `${process.pid}-${Date.now()}`;
     const workspace = path.join(harness.isolatedHome, "codex-child-ingestion-workspace");
     fs.mkdirSync(workspace, { recursive: true });
-    const child = readBoundedCodexChild(sourcePath);
+    const child = readBoundedCodexChild(sourcePath, binding);
     const restoreProviderHome = isolateNativeProviderHome(harness);
     let session = null;
 
@@ -495,5 +523,6 @@ test(
       root,
       "repeated refresh must not duplicate the provider child",
     );
-  },
-);
+    },
+  );
+}
