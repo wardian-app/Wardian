@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import type { AgentConfig, AgentTelemetry, AgentsOverviewMode, CloneMode } from "../types";
 import { AgentChatView } from "../features/grid/AgentChatView";
 import { AgentTerminal } from "../features/terminal/AgentTerminal";
@@ -18,6 +19,10 @@ import {
 } from "../features/grid/agentsOverviewLayout";
 import { ContextMenu, ContextMenuItem } from "../components/ContextMenu";
 import { normalizeAgentStatus } from "../utils/statusUtils";
+import {
+  RootTemporaryWorkerInspector,
+  type RootWorkerSummary,
+} from "../features/agents/RootTemporaryWorkerInspector";
 
 type GridCardMode = "terminal" | "chat";
 
@@ -193,6 +198,27 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
   const [cardModeOverrides, setCardModeOverrides] = useState<Record<string, GridCardMode>>({});
   const [chatDrafts, setChatDrafts] = useState<Record<string, string>>({});
   const [composerFocusAgentId, setComposerFocusAgentId] = useState<string | null>(null);
+  const [workerSummaries, setWorkerSummaries] = useState<Record<string, RootWorkerSummary>>({});
+
+  useEffect(() => {
+    let disposed = false;
+    const refresh = async () => {
+      try {
+        const result = await invoke<{ summaries: RootWorkerSummary[] }>('temporary_worker_root_summaries');
+        if (!disposed) {
+          setWorkerSummaries(Object.fromEntries(result.summaries.map((summary) => [summary.root_agent_id, summary])));
+        }
+      } catch {
+        // Older backends and startup migration windows have no child summary.
+      }
+    };
+    void refresh();
+    const interval = window.setInterval(() => void refresh(), 60_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, []);
 
   const [bgContextMenu, setBgContextMenu] = useState<{ x: number; y: number; visible: boolean }>({
     x: 0, y: 0, visible: false
@@ -457,6 +483,7 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
         const modeLabel = cardMode === 'chat' ? 'Chat' : 'Terminal';
         const nextMode: GridCardMode = cardMode === 'chat' ? 'terminal' : 'chat';
         const nextModeLabel = nextMode === 'chat' ? 'Chat' : 'Terminal';
+        const workerSummary = workerSummaries[agentId];
         const visibleWorkspacePath =
           agent.git_worktree && agent.git_worktree_folder?.trim()
             ? agent.git_worktree_folder
@@ -516,6 +543,12 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
                     {agent.session_name} <span className="text-xs leading-4 text-muted-neutral font-normal">({agent.agent_class})</span>
                   </h3>
                 )}
+                {workerSummary?.total ? (
+                  <RootTemporaryWorkerInspector
+                    agentName={agent.session_name}
+                    summary={workerSummary}
+                  />
+                ) : null}
               </div>
               <div className="flex items-center gap-1 flex-shrink-0">
                    <button

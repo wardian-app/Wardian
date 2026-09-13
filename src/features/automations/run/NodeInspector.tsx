@@ -1,5 +1,6 @@
-import type { NodeStatusKind, RunEvent, RunState } from './runTypes';
+import type { NodeStatusKind, RunEvent, RunState, TemporaryWorker, TemporaryWorkerTelemetry } from './runTypes';
 import { formatNodeStatus } from './statusLabels';
+import { TemporaryWorkerList } from './TemporaryWorkerList';
 
 interface NodeInspectorProps {
   selectedNodeId: string | null;
@@ -7,6 +8,8 @@ interface NodeInspectorProps {
   currentStatuses: Record<string, NodeStatusKind>;
   events: RunEvent[];
   scrubIndex: number;
+  workers?: TemporaryWorker[];
+  workerTelemetry?: Record<string, TemporaryWorkerTelemetry>;
 }
 
 function nodePayload(events: RunEvent[], nodeId: string, scrubIndex: number): { output?: unknown; error?: string } {
@@ -49,7 +52,7 @@ function inspectorDisplayValue(value: unknown, key?: string): unknown {
   return value;
 }
 
-export function NodeInspector({ selectedNodeId, state, currentStatuses, events, scrubIndex }: NodeInspectorProps) {
+export function NodeInspector({ selectedNodeId, state, currentStatuses, events, scrubIndex, workers = [], workerTelemetry = {} }: NodeInspectorProps) {
   if (!selectedNodeId) {
     return (
       <div className="rounded-lg border border-dashed border-wardian-border p-4 text-center text-xs text-[var(--color-wardian-text-muted)]">
@@ -61,6 +64,7 @@ export function NodeInspector({ selectedNodeId, state, currentStatuses, events, 
   const status = currentStatuses[selectedNodeId] ?? state?.nodes[selectedNodeId] ?? 'pending';
   const payload = nodePayload(events, selectedNodeId, scrubIndex);
   const output = payload.output === undefined ? null : JSON.stringify(inspectorDisplayValue(payload.output), null, 2);
+  const nodeWorkers = workers.filter((worker) => worker.node_id === selectedNodeId);
 
   return (
     <aside className="flex h-full min-h-0 select-text flex-col gap-4 rounded-lg border border-wardian-border bg-[var(--color-wardian-card)] p-4">
@@ -77,6 +81,19 @@ export function NodeInspector({ selectedNodeId, state, currentStatuses, events, 
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mb-4">
+          <div className="mb-2 flex items-center justify-between gap-2 text-[10px] font-bold text-[var(--color-wardian-text-muted)]">
+            <span>Workers</span>
+            <span>{nodeWorkers.length}</span>
+          </div>
+          {nodeWorkers.length ? (
+            <TemporaryWorkerList workers={nodeWorkers} telemetry={workerTelemetry} />
+          ) : (
+            <div className="rounded border border-dashed border-wardian-border p-3 text-xs text-[var(--color-wardian-text-muted)]">
+              No temporary workers recorded.
+            </div>
+          )}
+        </div>
         <div className="mb-2 text-[10px] font-bold text-[var(--color-wardian-text-muted)]">Output</div>
         {output ? (
           <pre className="overflow-x-auto rounded border border-wardian-border bg-[var(--color-wardian-bg)] p-3 text-[11px] text-[var(--color-wardian-text)]">

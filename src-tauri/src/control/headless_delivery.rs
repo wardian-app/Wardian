@@ -177,6 +177,7 @@ pub(super) async fn deliver_headless_message(
             interaction_id: Some(interaction_id.to_string()),
             timeout,
             lease_owner: Some(lease_guard.owner().clone()),
+            cancellation_marker: None,
         },
     )
     .await;
@@ -230,7 +231,7 @@ pub(super) async fn deliver_headless_message(
         }
         Err(error) => {
             let diagnostic =
-                crate::delivery::headless_process::sanitize_headless_error(&error, prompt);
+                crate::delivery::headless_process::sanitize_headless_error(error.message(), prompt);
             let mut detail = headless_message_failure_detail(
                 &current_info,
                 interaction_id,
