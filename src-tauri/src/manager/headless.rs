@@ -506,9 +506,15 @@ pub async fn run_headless_with_options(
         resume_session,
         effective_provider_config.as_ref(),
     );
-    if provider_name == "codex" && memory_enabled && memory_agent_id.is_some() {
-        CodexProvider::new()
-            .insert_developer_instructions_arg(&mut provider_args, &memory_runtime_instructions);
+    if provider_name == "codex" {
+        let config = effective_provider_config
+            .as_ref()
+            .ok_or("Codex headless launch requires an effective configuration")?;
+        CodexProvider::new().insert_managed_instructions_arg(
+            &mut provider_args,
+            config,
+            Some(&memory_runtime_instructions),
+        )?;
     }
     if let Some(hook) = claude_hook.as_ref() {
         if provider_name == "claude" {
@@ -2427,6 +2433,127 @@ mod tests {
 
         assert!(args.contains(&"--print".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
+    }
+
+    #[test]
+    fn codex_managed_instructions_survive_disabled_memory_and_inherited_launches() {
+        let test_home = TestWardianHome::new();
+        let workspace = tempfile::tempdir().unwrap();
+        let sources = [
+            (
+                test_home._home.path().join("common/AGENTS.md"),
+                "COMMON_SENTINEL",
+            ),
+            (
+                test_home._home.path().join("classes/Builder/AGENTS.md"),
+                "CLASS_SENTINEL",
+            ),
+            (
+                test_home._home.path().join("agents/owner/AGENTS.md"),
+                "AGENT_SENTINEL",
+            ),
+            (
+                test_home._home.path().join("agents/worker/AGENTS.md"),
+                "WRONG_WORKER",
+            ),
+            (
+                test_home
+                    ._home
+                    .path()
+                    .join("agents/owner/habitat/AGENTS.md"),
+                "UNTRUSTED_GENERATED_FILE",
+            ),
+            (workspace.path().join("AGENTS.md"), "WORKSPACE_ONLY"),
+        ];
+        for (path, text) in &sources {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let owner = AgentConfig {
+            session_id: "owner".into(),
+            provider: "codex".into(),
+            agent_class: "Builder".into(),
+            model: Some("configured-model".into()),
+            system_include_directories: Some(vec![workspace.path().to_string_lossy().into()]),
+            provider_config: wardian_core::models::ProviderConfig::Codex(
+                wardian_core::models::CodexProviderConfig {
+                    reasoning_effort: Some("low".into()),
+                    approval_policy: Some("on-request".into()),
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        };
+        let provider = CodexProvider::new();
+        let memory = wardian_memory_instructions(Some("MEMORY_SENTINEL"));
+        for inherited in [false, true] {
+            let config = effective_headless_provider_config(
+                "codex",
+                workspace.path(),
+                "worker",
+                None,
+                inherited.then_some(&owner),
+                (!inherited).then_some(&owner),
+            )
+            .unwrap();
+            assert_eq!(config.session_id, "owner");
+            for mode in ["interactive", "exec", "app-server"] {
+                for memory_context in [None, Some(memory.as_str())] {
+                    let mut args = match mode {
+                        "exec" => headless_provider_args(
+                            "codex",
+                            &provider,
+                            workspace.path(),
+                            "task",
+                            "json",
+                            None,
+                            Some(&config),
+                        ),
+                        "app-server" => provider.shared_server_args(&config).unwrap(),
+                        _ => provider.get_spawn_args(&config, false),
+                    };
+                    let original = args.clone();
+                    provider
+                        .insert_managed_instructions_arg(&mut args, &config, memory_context)
+                        .unwrap();
+                    let index = args
+                        .iter()
+                        .position(|arg| arg.starts_with("developer_instructions="))
+                        .unwrap();
+                    assert_eq!(args[index - 1], "-c");
+                    let parsed = args[index].parse::<toml_edit::DocumentMut>().unwrap();
+                    let text = parsed["developer_instructions"].as_str().unwrap();
+                    let common = text.find("COMMON_SENTINEL").unwrap();
+                    let class = text.find("CLASS_SENTINEL").unwrap();
+                    let agent = text.find("AGENT_SENTINEL").unwrap();
+                    assert!(common < class && class < agent);
+                    for unexpected in ["WRONG_WORKER", "UNTRUSTED_GENERATED_FILE", "WORKSPACE_ONLY"]
+                    {
+                        assert!(!text.contains(unexpected));
+                    }
+                    assert_eq!(
+                        text.matches("## Wardian memory").count(),
+                        usize::from(memory_context.is_some())
+                    );
+                    assert_eq!(
+                        text.matches("MEMORY_SENTINEL").count(),
+                        usize::from(memory_context.is_some())
+                    );
+                    if mode == "exec" {
+                        assert!(index < args.iter().position(|arg| arg == mode).unwrap());
+                    } else if mode == "app-server" {
+                        assert_eq!(args.first().map(String::as_str), Some("app-server"));
+                        assert!(index > 1);
+                    }
+                    args.drain(index - 1..=index);
+                    // Every original argument survives, including cwd, model, effort and task.
+                    assert_eq!(args, original);
+                }
+            }
+        }
+        for (path, text) in &sources {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), *text);
+        }
     }
 
     #[test]

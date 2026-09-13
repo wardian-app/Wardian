@@ -16,6 +16,7 @@ use wardian_core::conversations::{
 };
 use wardian_core::models::chat::AgentChatEvent;
 
+pub(crate) mod provenance;
 mod records;
 mod storage;
 #[cfg(test)]
@@ -230,6 +231,8 @@ impl ConversationArchiveState {
                     format!("conversation not found: {conversation_id}"),
                 )
             })?;
+        let agent_lock = agent_lock_for(&self.agent_locks, &entry.agent_id)?;
+        let _guard = lock_agent_archive(&agent_lock)?;
         let conversation_dir = conversation_dir(&entry.agent_id, &entry.conversation_id)?;
         let manifest =
             read_manifest(&conversation_dir.join("manifest.json"))?.ok_or_else(|| {
@@ -252,6 +255,8 @@ impl ConversationArchiveState {
     ) -> io::Result<Vec<(ConversationIndexEntry, ConversationTurnRecord)>> {
         let mut records = Vec::new();
         for entry in entries {
+            let agent_lock = agent_lock_for(&self.agent_locks, &entry.agent_id)?;
+            let _guard = lock_agent_archive(&agent_lock)?;
             let directory = conversation_dir(&entry.agent_id, &entry.conversation_id)?;
             let turns: Vec<ConversationTurnRecord> =
                 read_jsonl_records(&directory.join("turns.jsonl"))?;
@@ -270,6 +275,8 @@ impl ConversationArchiveState {
         let mut records = Vec::new();
         let mut skipped_records = 0;
         for entry in entries {
+            let agent_lock = agent_lock_for(&self.agent_locks, &entry.agent_id)?;
+            let _guard = lock_agent_archive(&agent_lock)?;
             let directory = conversation_dir(&entry.agent_id, &entry.conversation_id)?;
             let (turns, skipped) = read_jsonl_records_resilient(&directory.join("turns.jsonl"))?;
             skipped_records += skipped;
@@ -282,6 +289,8 @@ impl ConversationArchiveState {
     /// by one agent, oldest conversation first. The live chat surface uses
     /// this as durable history when a provider log rotates or is unavailable.
     pub fn chat_events_for_agent(&self, agent_id: &str) -> io::Result<Vec<AgentChatEvent>> {
+        let agent_lock = agent_lock_for(&self.agent_locks, agent_id)?;
+        let _guard = lock_agent_archive(&agent_lock)?;
         let agent_id = agent_id.trim();
         if agent_id.is_empty() {
             return Err(io::Error::new(
@@ -300,8 +309,7 @@ impl ConversationArchiveState {
         let mut events = Vec::new();
         for entry in entries {
             let directory = conversation_dir(&entry.agent_id, &entry.conversation_id)?;
-            let mut conversation_events: Vec<AgentChatEvent> =
-                read_jsonl_records(&directory.join("events.jsonl"))?;
+            let mut conversation_events: Vec<AgentChatEvent> = read_chat_events(&directory)?;
             for event in &mut conversation_events {
                 if let Some(metadata) = event.metadata.as_object_mut() {
                     metadata.insert(
@@ -323,6 +331,8 @@ impl ConversationArchiveState {
         &self,
         agent_id: &str,
     ) -> io::Result<Vec<AgentChatEvent>> {
+        let agent_lock = agent_lock_for(&self.agent_locks, agent_id)?;
+        let _guard = lock_agent_archive(&agent_lock)?;
         let agent_id = agent_id.trim();
         if agent_id.is_empty() {
             return Err(io::Error::new(
@@ -335,7 +345,7 @@ impl ConversationArchiveState {
             return Ok(Vec::new());
         };
         let directory = conversation_dir(agent_id, &handle.conversation_id)?;
-        let mut events: Vec<AgentChatEvent> = read_jsonl_records(&directory.join("events.jsonl"))?;
+        let mut events: Vec<AgentChatEvent> = read_chat_events(&directory)?;
         for event in &mut events {
             if let Some(metadata) = event.metadata.as_object_mut() {
                 metadata.insert(
@@ -345,6 +355,42 @@ impl ConversationArchiveState {
             }
         }
         Ok(events)
+    }
+
+    /// Read the open archive for an explicitly bound capture, including after
+    /// logging was disabled and its in-memory active handle was discarded.
+    /// Unknown sources and closed conversations are never resurrected.
+    pub fn chat_events_for_capture(
+        &self,
+        context: &ConversationArchiveContext,
+    ) -> io::Result<Vec<AgentChatEvent>> {
+        if context.provider_source_key.is_none() {
+            return self.chat_events_for_active_conversation(&context.agent_id);
+        }
+        let Some(source) = context.provider_source_key.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let agent_lock = agent_lock_for(&self.agent_locks, &context.agent_id)?;
+        let _guard = lock_agent_archive(&agent_lock)?;
+        for entry in read_agent_index(&context.agent_id)? {
+            let directory = conversation_dir(&context.agent_id, &entry.conversation_id)?;
+            let Some(manifest) = read_manifest(&directory.join("manifest.json"))? else {
+                continue;
+            };
+            if manifest.status != wardian_core::conversations::ConversationStatus::Open
+                || manifest.provider != context.provider
+                || manifest.provider_source_key.as_deref() != Some(source)
+            {
+                continue;
+            }
+            let mut events: Vec<AgentChatEvent> = read_chat_events(&directory)?;
+            for event in &mut events {
+                event.metadata["conversation_archive_id"] =
+                    serde_json::json!(entry.conversation_id);
+            }
+            return Ok(events);
+        }
+        Ok(Vec::new())
     }
 
     pub fn append_chat_events(
@@ -371,6 +417,15 @@ impl ConversationArchiveState {
             return Ok(0);
         }
 
+        if events
+            .iter()
+            .any(|event| event.session_id != context.agent_id)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "capture events must belong to the archive agent",
+            ));
+        }
         let agent_lock = agent_lock_for(&self.agent_locks, &context.agent_id)?;
         let _agent_guard = lock_agent_archive(&agent_lock)?;
         let provider_source_key = context
@@ -393,6 +448,49 @@ impl ConversationArchiveState {
         let capture_state = read_capture_state(&context.agent_id)?;
         let mut existing_records: Vec<ConversationNarrativeRecord> =
             read_jsonl_records(&conversation_path)?;
+        let mut existing_events: Vec<AgentChatEvent> = read_jsonl_records(&events_path)?;
+        // Cutoffs suppress new capture, not enrichment of an observation
+        // already archived while logging was enabled. This never adds a row.
+        let events_refreshed = provenance::refresh_events(&mut existing_events, events)?;
+        let delivered_refreshed =
+            provenance::bind_delivered_inputs(&mut existing_events, &existing_records)?;
+        let events_refreshed = events_refreshed || delivered_refreshed;
+        let old_records = existing_records.clone();
+        let observed = existing_events
+            .iter()
+            .filter(|event| {
+                events
+                    .iter()
+                    .any(|current| provenance::same_observation(event, current))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        provenance::refresh_records(&mut existing_records, &observed);
+        for record in &mut existing_records {
+            if !old_records.contains(record) {
+                materialize_record_text(&conversation_dir, record)?;
+            }
+        }
+        for event in &mut existing_events {
+            if provenance::completed_native_tool(event) {
+                if let Some(record) = existing_records
+                    .iter()
+                    .find(|record| record.event_refs.contains(&event.id))
+                {
+                    *event = event_record_for_jsonl(event, record);
+                }
+            }
+        }
+        let records_refreshed = old_records != existing_records;
+        let refreshed = events_refreshed || records_refreshed;
+        // Each file keeps its previous snapshot on failed publication. Retry
+        // also repairs a narrative left behind after events were published.
+        if events_refreshed {
+            write_jsonl_atomic(&events_path, &existing_events)?;
+        }
+        if records_refreshed {
+            write_jsonl_atomic(&conversation_path, &existing_records)?;
+        }
         let mut seen_event_ids = existing_records
             .iter()
             .flat_map(|record| record.event_refs.iter().cloned())
@@ -471,7 +569,18 @@ impl ConversationArchiveState {
             appended.push(record);
         }
 
-        if appended.is_empty() && merged_existing_count == 0 {
+        if appended.is_empty()
+            && merged_existing_count == 0
+            && !refreshed
+            && (observed.is_empty()
+                || projection_is_current(
+                    &conversation_dir,
+                    &effective_context,
+                    &handle,
+                    &existing_records,
+                    &existing_events,
+                )?)
+        {
             handle.next_seq = next_seq;
             lock_active(&self.active)?.insert(context.agent_id.clone(), handle);
             return Ok(0);
@@ -504,7 +613,10 @@ impl ConversationArchiveState {
             .chain(appended.iter())
             .cloned()
             .collect::<Vec<_>>();
-        let all_events: Vec<AgentChatEvent> = read_jsonl_records(&events_path)?;
+        let mut all_events: Vec<AgentChatEvent> = read_jsonl_records(&events_path)?;
+        if provenance::bind_delivered_inputs(&mut all_events, &all_records)? {
+            write_jsonl_atomic(&events_path, &all_events)?;
+        }
         let all_sources: Vec<ConversationSourceRecord> = read_jsonl_records(&sources_path)?;
         let turns = derive_turn_records_with_context(
             &handle.conversation_id,
@@ -540,7 +652,10 @@ impl ConversationArchiveState {
 
         handle.next_seq = next_seq;
         lock_active(&self.active)?.insert(context.agent_id.clone(), handle);
-        Ok(appended.len().saturating_add(merged_existing_count))
+        Ok(appended
+            .len()
+            .saturating_add(merged_existing_count)
+            .saturating_add(usize::from(refreshed)))
     }
 
     pub fn append_delivered_input(
@@ -660,7 +775,10 @@ impl ConversationArchiveState {
             .chain(std::iter::once(&record))
             .cloned()
             .collect::<Vec<_>>();
-        let all_events: Vec<AgentChatEvent> = read_jsonl_records(&events_path)?;
+        let mut all_events: Vec<AgentChatEvent> = read_jsonl_records(&events_path)?;
+        if provenance::bind_delivered_inputs(&mut all_events, &all_records)? {
+            write_jsonl_atomic(&events_path, &all_events)?;
+        }
         let all_sources: Vec<ConversationSourceRecord> = read_jsonl_records(&sources_path)?;
         let turns = derive_turn_records_with_context(
             &handle.conversation_id,
@@ -849,4 +967,66 @@ fn event_identity_ids(event: &AgentChatEvent) -> Vec<&str> {
         ids.extend(aliases.iter().filter_map(serde_json::Value::as_str));
     }
     ids
+}
+#[cfg(test)]
+mod completion_tests;
+#[cfg(test)]
+mod provenance_tests;
+
+fn read_chat_events(directory: &std::path::Path) -> io::Result<Vec<AgentChatEvent>> {
+    let mut events = read_jsonl_records(&directory.join("events.jsonl"))?;
+    let records = read_jsonl_records(&directory.join("conversation.jsonl"))?;
+    provenance::bind_delivered_inputs(&mut events, &records)?;
+    Ok(events)
+}
+
+// A previous repair may have published events/narrative before a derived file
+// failed. Do not let the ordinary duplicate fast path strand that snapshot.
+fn projection_is_current(
+    directory: &std::path::Path,
+    context: &ConversationArchiveContext,
+    handle: &ActiveConversationHandle,
+    records: &[ConversationNarrativeRecord],
+    events: &[AgentChatEvent],
+) -> io::Result<bool> {
+    let (Some(first), Some(last)) = (records.first(), records.last()) else {
+        return Ok(true);
+    };
+    let sources: Vec<ConversationSourceRecord> =
+        read_jsonl_records(&directory.join("sources.jsonl"))?;
+    let turns = derive_turn_records_with_context(
+        &handle.conversation_id,
+        records,
+        events,
+        &sources,
+        true,
+        Some(&context.provider),
+        &context.provider_session_ids,
+    );
+    let stored_turns: Vec<ConversationTurnRecord> =
+        read_jsonl_records(&directory.join("turns.jsonl"))?;
+    if turns != stored_turns {
+        return Ok(false);
+    }
+    let mut manifest = open_manifest(
+        context,
+        &handle.conversation_id,
+        first.at.clone(),
+        last.at.clone(),
+    );
+    apply_archive_summary_to_manifest(&mut manifest, &archive_summary(records, &turns, &sources));
+    if read_manifest(&directory.join("manifest.json"))?.as_ref() != Some(&manifest) {
+        return Ok(false);
+    }
+    let expected = index_entry_from_manifest(
+        &manifest,
+        None,
+        excerpt_from_record(first),
+        excerpt_from_record(last),
+        records.len() as u64,
+        artifact_count_for_records(records.iter()),
+    );
+    Ok(read_agent_index(&context.agent_id)?
+        .iter()
+        .any(|entry| entry == &expected))
 }

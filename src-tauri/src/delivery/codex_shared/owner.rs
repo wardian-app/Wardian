@@ -467,32 +467,40 @@ fn append_runtime_context(
     habitat: &std::path::Path,
     codex_home: &std::path::Path,
 ) -> Result<(), CodexSharedError> {
-    if crate::utils::memory_feature_enabled() {
-        let brief = wardian_core::memory::MemoryStore::from_default_home()
-            .ok()
-            .and_then(|store| {
-                store
-                    .compile_brief(
-                        &wardian_core::memory::MemoryActor::agent(&spec.target_agent_id),
-                        &spec.target_agent_id,
-                        Some(spec.workspace.to_string_lossy().as_ref()),
-                        "codex",
-                        &format!("codex-shared:{}", spec.generation),
-                        spec.config.resume_session.is_some(),
-                        12_000,
-                    )
-                    .ok()
-            });
-        let text = brief
-            .as_ref()
-            .and_then(|brief| (!brief.is_empty).then_some(brief.context_text.as_str()));
+    let memory_instructions = if crate::utils::memory_feature_enabled() {
+        let store = wardian_core::memory::MemoryStore::from_default_home().map_err(|error| {
+            CodexSharedError::unsupported(format!(
+                "cannot initialize Codex memory context: {error}"
+            ))
+        })?;
+        let brief = store
+            .compile_brief(
+                &wardian_core::memory::MemoryActor::agent(&spec.target_agent_id),
+                &spec.target_agent_id,
+                Some(spec.workspace.to_string_lossy().as_ref()),
+                "codex",
+                &format!("codex-shared:{}", spec.generation),
+                spec.config.resume_session.is_some(),
+                12_000,
+            )
+            .map_err(|error| {
+                CodexSharedError::unsupported(format!(
+                    "cannot compile Codex memory context: {error}"
+                ))
+            })?;
+        let text = (!brief.is_empty).then_some(brief.context_text.as_str());
         crate::utils::fs::append_habitat_memory_instructions(habitat, text)
             .map_err(CodexSharedError::unsupported)?;
-        crate::providers::CodexProvider::new().insert_developer_instructions_arg(
-            args,
-            &crate::utils::fs::wardian_memory_instructions(text),
-        );
-    }
+        Some(crate::utils::fs::wardian_memory_instructions(text))
+    } else {
+        None
+    };
+    // The owner supplies both daemon arguments and the temporary TUI config
+    // overlay. Managed instructions must not depend on optional memory or a
+    // TUI -c argument, which would bypass ordinary local-daemon discovery.
+    crate::providers::CodexProvider::new()
+        .insert_managed_instructions_arg(args, &spec.config, memory_instructions.as_deref())
+        .map_err(CodexSharedError::unsupported)?;
     if let Some(directories) = spec
         .config
         .include_directories

@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use wardian_core::models::provider::{AgentEvent, AgentProvider};
 use wardian_core::models::AgentConfig;
 
+pub(super) mod provenance;
+
 pub struct PiProvider;
 
 impl Default for PiProvider {

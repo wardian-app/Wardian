@@ -1,0 +1,93 @@
+{
+  "evidence": {
+    "cascade_id": "1b7cc6a3-7c7d-43ce-9d22-fdd8e6362a25",
+    "step_payload_sha256": "6dc56b14463bc1f8d51d3e62b8a1a16e5f4c8234fb54dbc11ca0574d982ce546",
+    "result_path": [
+      140,
+      2,
+      1
+    ],
+    "native_status": 3,
+    "native_source": 2,
+    "result_utf8_hex": "0a54686520636f6d6d616e6420657869746564207769746820636f646520302e0a4f75747075743a0a70726f62652d323366626237313161316136323463300d0a0a"
+  },
+  "running": {
+    "id": "0572131b-1246-4559-a00c-bba28aeae20c:antigravity_tool:74ff4378b838f834c13127e4fdf94f8a2f678c7b659faf2c42244bf511eaff84",
+    "session_id": "0572131b-1246-4559-a00c-bba28aeae20c",
+    "provider": "antigravity",
+    "kind": "tool_result",
+    "role": "tool",
+    "text": "Step is still running",
+    "title": "Generic action",
+    "status": "unknown",
+    "turn_id": "2",
+    "source": "conversation_database",
+    "command": null,
+    "exit_code": null,
+    "path": null,
+    "language": null,
+    "created_at": null,
+    "sequence": 4,
+    "metadata": {
+      "raw_type": "GENERIC",
+      "provider_log": true,
+      "log_source": "antigravity_conversation_database",
+      "log_path": "/isolated/antigravity/conversations/1b7cc6a3-7c7d-43ce-9d22-fdd8e6362a25.db",
+      "step_index": 2,
+      "provider_step_type": 132,
+      "provider_step_source": 2,
+      "provider_step_status": 2,
+      "tool_ordinal": 0
+    }
+  },
+  "completed": {
+    "id": "0572131b-1246-4559-a00c-bba28aeae20c:antigravity_tool:74ff4378b838f834c13127e4fdf94f8a2f678c7b659faf2c42244bf511eaff84",
+    "session_id": "0572131b-1246-4559-a00c-bba28aeae20c",
+    "provider": "antigravity",
+    "kind": "tool_result",
+    "role": "tool",
+    "text": "\nThe command exited with code 0.\nOutput:\nprobe-23fbb711a1a624c0\r\n\n",
+    "title": "Generic action",
+    "status": "unknown",
+    "turn_id": "2",
+    "source": "conversation_database",
+    "command": null,
+    "exit_code": null,
+    "path": null,
+    "language": null,
+    "created_at": null,
+    "sequence": 4,
+    "metadata": {
+      "raw_type": "GENERIC",
+      "provider_log": true,
+      "log_source": "antigravity_conversation_database",
+      "log_path": "/isolated/antigravity/conversations/1b7cc6a3-7c7d-43ce-9d22-fdd8e6362a25.db",
+      "step_index": 2,
+      "provider_step_type": 132,
+      "provider_step_source": 2,
+      "provider_step_status": 3,
+      "tool_ordinal": 0
+    }
+  },
+  "narrative": {
+    "schema": 1,
+    "seq": 4,
+    "turn_id": "2",
+    "at": "2026-09-07T10:46:14.978Z",
+    "kind": "tool_result",
+    "role": "tool",
+    "speaker_type": "tool",
+    "text": "Step is still running",
+    "tool": "Generic action",
+    "status": "unknown",
+    "summary": "Generic action",
+    "excerpt": null,
+    "event_refs": [
+      "0572131b-1246-4559-a00c-bba28aeae20c:antigravity_tool:74ff4378b838f834c13127e4fdf94f8a2f678c7b659faf2c42244bf511eaff84"
+    ],
+    "source_refs": [
+      "src_4"
+    ],
+    "artifact_refs": []
+  }
+}
