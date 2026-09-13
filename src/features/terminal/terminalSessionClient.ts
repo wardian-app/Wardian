@@ -83,9 +83,11 @@ export type TerminalPresentationRegistrationOptions = {
   beforeInitialSnapshot?: (
     result: TerminalPresentationRegistrationResult,
   ) => void | Promise<void>;
+  ownerToken?: symbol;
 };
 
 type PresentationBinding = {
+  ownerToken: symbol;
   callbacks: TerminalPresentationCallbacks;
   registration: TerminalPresentationRegistration;
   state: TerminalPresentationState | null;
@@ -125,7 +127,7 @@ export class TerminalSessionClient {
   readonly sessionId: string;
   readonly #consumerId: string;
   readonly #presentations = new Map<string, PresentationBinding>();
-  readonly #closingPresentations = new Set<string>();
+  readonly #closingPresentations = new Map<string, symbol | null>();
   #brokerState: TerminalBrokerState | null = null;
   #replacementOwnerCandidate: string | null = null;
   #lastOwnerPresentationId: string | null = null;
@@ -170,10 +172,14 @@ export class TerminalSessionClient {
   rebindPresentation(
     presentationId: string,
     callbacks: TerminalPresentationCallbacks,
+    ownerToken?: symbol,
   ): boolean {
     const binding = this.#presentations.get(presentationId);
     if (!binding) return false;
     binding.callbacks = callbacks;
+    if (ownerToken) {
+      binding.ownerToken = ownerToken;
+    }
     return true;
   }
 
@@ -189,6 +195,7 @@ export class TerminalSessionClient {
       await this.#ensureListeners();
       this.#destroyed = false;
       const binding: PresentationBinding = {
+        ownerToken: options?.ownerToken ?? Symbol("terminal-presentation"),
         callbacks,
         registration,
         state: null,
@@ -284,15 +291,23 @@ export class TerminalSessionClient {
     return result;
   }
 
-  async unregisterPresentation(presentationId: string) {
-    if (this.#closingPresentations.has(presentationId)) {
+  async unregisterPresentation(presentationId: string, ownerToken?: symbol) {
+    const currentBinding = this.#presentations.get(presentationId);
+    if (currentBinding && ownerToken && currentBinding.ownerToken !== ownerToken) {
       return;
     }
-    this.#closingPresentations.add(presentationId);
+    const closingOwnerToken = ownerToken ?? currentBinding?.ownerToken ?? null;
+    if (this.#closingPresentations.get(presentationId) === closingOwnerToken) {
+      return;
+    }
+    this.#closingPresentations.set(presentationId, closingOwnerToken);
     try {
       return await this.#serialize(async () => {
         await this.#inputOperation;
         const binding = this.#presentations.get(presentationId);
+        if (!binding || (closingOwnerToken && binding.ownerToken !== closingOwnerToken)) {
+          return;
+        }
         this.#presentations.delete(presentationId);
         try {
           if (binding) {
@@ -318,7 +333,9 @@ export class TerminalSessionClient {
         }
       });
     } finally {
-      this.#closingPresentations.delete(presentationId);
+      if (this.#closingPresentations.get(presentationId) === closingOwnerToken) {
+        this.#closingPresentations.delete(presentationId);
+      }
     }
   }
 
@@ -1090,10 +1107,16 @@ export class TerminalSessionClient {
   }
 
   #assertPresentationAcceptsInput(presentationId: string) {
-    if (this.#closingPresentations.has(presentationId)) {
+    const binding = this.#presentations.get(presentationId);
+    const closingOwnerToken = this.#closingPresentations.get(presentationId);
+    if (
+      binding &&
+      this.#closingPresentations.has(presentationId) &&
+      (closingOwnerToken === null || closingOwnerToken === binding.ownerToken)
+    ) {
       throw new Error(`Terminal presentation is closing: ${presentationId}`);
     }
-    if (this.#destroyed || !this.#presentations.has(presentationId)) {
+    if (this.#destroyed || !binding) {
       throw new Error(`Terminal presentation not registered: ${presentationId}`);
     }
   }
