@@ -12,6 +12,7 @@ import {
   createNativeE2eRunPlans,
   createOwnedTreeTerminationPlan,
   createWindowsSupervisorPlan,
+  runNativeE2eTargets,
   resolveRunNativeHome,
 } from "../../scripts/native-e2e-runner.mjs";
 import { HOME_LOCK_DIRECTORY, HOME_LOCK_FILE, acquireHomeLock, readHomeLock, releaseHomeLock } from "../lib/sessionHome.mjs";
@@ -231,6 +232,70 @@ function expectPath(value) {
   return value;
 }
 
+test("a supervised child defers the runner claim and the runner releases it after zero exit", { timeout: 30000 }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wardian-native-supervised-cleanup-"));
+  const home = path.join(root, "home");
+  const target = path.join(root, "supervised-cleanup-fixture.test.mjs");
+  const resultPath = path.join(home, "cleanup-result.json");
+  const cleanupUrl = new URL("../lib/conformance-cleanup.mjs", import.meta.url).href;
+  const sessionHomeUrl = new URL("../lib/sessionHome.mjs", import.meta.url).href;
+  fs.writeFileSync(target, `
+    import test from "node:test";
+    import assert from "node:assert/strict";
+    import fs from "node:fs";
+    import { cleanupConformanceSession } from ${JSON.stringify(cleanupUrl)};
+    import { acquireHomeLock, readHomeLock } from ${JSON.stringify(sessionHomeUrl)};
+
+    test("child reports deferred runner-owned cleanup", async () => {
+      const home = process.env.WARDIAN_E2E_NATIVE_HOME;
+      const runId = process.env.WARDIAN_E2E_RUN_ID;
+      const claim = acquireHomeLock({ home, runId });
+      const harness = { isolatedHome: home, runId, homeLock: claim.lock };
+      const session = {
+        tauriDriver: { exitCode: null, signalCode: null },
+        close: async () => { session.tauriDriver.exitCode = 0; },
+      };
+      const cleanup = await cleanupConformanceSession({
+        harness,
+        session,
+        startupAttempted: true,
+        pause: async () => {},
+        save: async (value) => fs.writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify(value)),
+      });
+      assert.deepEqual(cleanup, {
+        shutdown_confirmed: true,
+        home_lock_released: false,
+        home_lock_release_deferred: true,
+      });
+      assert.equal(readHomeLock(home).runId, runId);
+      assert.notEqual(readHomeLock(home).pid, process.pid);
+    });
+  `);
+
+  try {
+    const childEnv = { ...process.env };
+    delete childEnv.NODE_TEST_CONTEXT;
+    const exitCode = await runNativeE2eTargets({
+      requestedTargets: [target],
+      defaultTargets: [],
+      env: {
+        ...childEnv,
+        WARDIAN_E2E_NATIVE_HOME: home,
+        WARDIAN_E2E_RUN_ID: `supervised-${process.pid}-${Date.now()}`,
+      },
+    });
+    assert.equal(exitCode, 0);
+    assert.deepEqual(JSON.parse(fs.readFileSync(resultPath, "utf8")), {
+      shutdown_confirmed: true,
+      home_lock_released: false,
+      home_lock_release_deferred: true,
+    });
+    assert.equal(readHomeLock(home), null, "the runner must release its claim after the child exits");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("simultaneous explicit-home starts have one atomic owner", { timeout: 15000 }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "wardian-native-lock-race-"));
   const home = path.join(root, "home");
@@ -305,6 +370,11 @@ test("Windows Job Object cleanup removes a grandchild after root exit", { skip: 
     createWindowsSupervisorPlan({ command: process.execPath, args: ["-e", childSource] }, "win32").args,
     { stdio: "ignore" },
   );
+  // Subscribe before polling the marker: the supervised root may exit first.
+  const supervisorExit = new Promise((resolve, reject) => {
+    supervisor.once("exit", resolve);
+    supervisor.once("error", reject);
+  });
   try {
     const deadline = Date.now() + 5000;
     while (!fs.existsSync(marker)) {
@@ -312,10 +382,8 @@ test("Windows Job Object cleanup removes a grandchild after root exit", { skip: 
       await delay(25);
     }
     const grandchildPid = Number(fs.readFileSync(marker, "utf8"));
-    await new Promise((resolve, reject) => {
-      supervisor.once("exit", resolve);
-      supervisor.once("error", reject);
-    });
+    await supervisorExit;
+
     const goneBy = Date.now() + 5000;
     while (Date.now() < goneBy) {
       try {
