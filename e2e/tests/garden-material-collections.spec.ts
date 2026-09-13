@@ -38,14 +38,13 @@ test("large collections remain findable without moving the agent geography", asy
   const firstBox = await first.boundingBox();
   const searchBox = await memory.locator(".garden-memory-search").boundingBox();
   expect(firstBox!.y).toBeGreaterThanOrEqual(searchBox!.y + searchBox!.height);
-  const work = cell.getByRole("region", { name: "Automations, Conversations, Inbox", exact: true });
-  await work.getByText("Conversations", { exact: true }).click();
-  const conversation = work.locator(".garden-conversation-summary").last();
+  const conversations = cell.getByRole("region", { name: "Conversations", exact: true });
+  const conversation = conversations.locator(".garden-conversation-summary").last();
   await conversation.scrollIntoViewIfNeeded();
   await conversation.press("Enter");
-  await expect(work.locator(".garden-conversation-detail")).toHaveCount(1);
-  await expect(work.locator(".garden-conversation-detail")).toContainText("Conversation 59:");
-  await expect(work.locator(".garden-conversation-object")).toHaveCount(60);
+  await expect(conversations.locator(".garden-conversation-detail")).toHaveCount(1);
+  await expect(conversations.locator(".garden-conversation-detail")).toContainText("Conversation 59:");
+  await expect(conversations.locator(".garden-conversation-object")).toHaveCount(60);
   await expect(cell).toHaveAttribute("data-garden-world", world!);
   // Persistent camera controls stay above enlarged cells after a viewport resize.
   await page.setViewportSize({ width: 640, height: 700 });

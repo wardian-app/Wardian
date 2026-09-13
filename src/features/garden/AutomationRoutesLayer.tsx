@@ -18,12 +18,23 @@ export function AutomationRoutesLayer({ routes, theme, scale, selectedKey, onSel
   /** Keep route hits below agents and stage attention above their bodies. */
   mode?: "all" | "routes" | "markers";
 }) {
+  const attachmentCounts = new Map<string, number>();
+  for (const route of routes) {
+    const key = route.points.map((point) => `${point.x},${point.y}`).join("→");
+    attachmentCounts.set(key, (attachmentCounts.get(key) ?? 0) + 1);
+  }
   return <>{routes.map(({ input, points, anchor, presentation }) => {
     const ref: GardenEntityRef = { kind: "automation", id: input.id };
     const selected = selectedKey === `automation:${input.id}`;
     const routeOpacity = selected || !continuousZoom ? 1 : revealBetween(scale, .45, 1.2);
-    const labelOpacity = selected || !continuousZoom ? 1 : revealBetween(scale, .8, 1.8);
+    const attachmentKey = points.map((point) => `${point.x},${point.y}`).join("→");
+    const denseAttachment = (attachmentCounts.get(attachmentKey) ?? 0) > 8;
+    const labelOpacity = selected || !continuousZoom ? 1
+      : revealBetween(scale, denseAttachment ? 3.8 : 1.4, denseAttachment ? 5.2 : 2.6);
     const anchorVisible = pointInCanvasViewport(anchor, viewport, 200 / scale);
+    const labelOnLeft = anchor.x < points[0].x;
+    const labelWidth = 150 / scale;
+    const labelX = anchor.x + (labelOnLeft ? -labelWidth - 10 / scale : 10 / scale);
     const markerRows = new Map<string, number>();
     return <Group key={input.id} onClick={() => onSelect(ref)} onTap={() => onSelect(ref)} onDblClick={() => onOpen(ref)}>
       {mode !== "markers" && <Group name="automation-route" opacity={routeOpacity} visible={routeOpacity > 0} listening={routeOpacity > 0}>
@@ -35,8 +46,8 @@ export function AutomationRoutesLayer({ routes, theme, scale, selectedKey, onSel
         dash={presentation.paused ? [7 / scale, 4 / scale, 1 / scale, 4 / scale] : !presentation.live ? [5 / scale, 4 / scale] : undefined}
         pointerLength={5 / scale} pointerWidth={5 / scale} />
       {anchorVisible && <Circle perfectDrawEnabled={false} x={anchor.x} y={anchor.y} radius={6 / scale} fill={theme.groundFile} stroke={selected ? theme.selection : theme.labelMuted} />}
-      {anchorVisible && labelOpacity > 0 && <Text opacity={labelOpacity} x={anchor.x + 10 / scale} y={anchor.y - 6 / scale} text={presentation.summary}
-        width={200 / scale} wrap="none" ellipsis fontFamily={theme.font} fontSize={12 / scale} fill={theme.label} />}</Group>}
+      {anchorVisible && labelOpacity > 0 && <Text opacity={labelOpacity} x={labelX} y={anchor.y - 6 / scale} text={presentation.summary}
+        width={labelWidth} align={labelOnLeft ? "right" : "left"} wrap="none" ellipsis fontFamily={theme.font} fontSize={12 / scale} fill={theme.label} />}</Group>}
       {mode !== "routes" && presentation.markers.map((marker) => {
         const positionKey = `${marker.position.x}:${marker.position.y}`;
         const labelRow = markerRows.get(positionKey) ?? 0;
@@ -49,12 +60,9 @@ export function AutomationRoutesLayer({ routes, theme, scale, selectedKey, onSel
           {marker.temporary && <Rect name="temporary-provider" x={-10 / scale} y={-10 / scale} width={20 / scale} height={20 / scale}
             perfectDrawEnabled={false}
             cornerRadius={5 / scale} fill={theme.groundFile} stroke={color} strokeWidth={1.5 / scale} dash={[3 / scale, 3 / scale]} />}
-          {marker.attention && <>
-            {/* Covers the route at the actual assignment, producing a local interruption. */}
-            <Circle name="stage-attention" radius={24 / scale} stroke={color} strokeWidth={3 / scale} />
-            <Text x={16 / scale} y={-28 / scale} text={marker.attention === "failed" ? "×" : "!"}
-              fontSize={18 / scale} fontFamily={theme.font} fill={color} />
-          </>}
+          {marker.attention === "awaiting_approval" && <Circle name="stage-attention" radius={18 / scale} stroke={color} strokeWidth={2 / scale} />}
+          {marker.attention && <Text x={10 / scale} y={-18 / scale} text={marker.attention === "failed" ? "×" : "!"}
+            fontSize={15 / scale} fontFamily={theme.font} fill={color} />}
           {labelOpacity > 0 && <Text opacity={labelOpacity} width={200 / scale} wrap="none" ellipsis x={28 / scale} y={(-24 + labelRow * 16) / scale} text={marker.label}
             fontFamily={theme.font} fontSize={12 / scale} fill={color}
             shadowColor={theme.labelBackdrop} shadowBlur={4 / scale} shadowOpacity={1} />}
