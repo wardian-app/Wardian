@@ -117,6 +117,23 @@ rejected until nested-loop replay semantics exist.
    state.
 5. Observe and Monitor refresh durable run state through `automation_read_run`.
 
+Ephemeral provider routes register a durable worker attempt before launch using
+the blueprint, run, node, and numeric attempt as separate fields. The synthetic
+Wardian runtime session and the provider-native conversation ID remain separate.
+The numeric attempt also seeds the worker runtime generation. Lifecycle writes use
+the worker id, owner instance, generation, and active state as compare-and-set
+guards, so a stale completion cannot overwrite restart reconciliation.
+Provider-spawned Codex children are attributed only when raw rollout metadata forms
+a `parent_thread_id` chain to a recorded root session; workspace paths and owner
+labels are not ownership evidence. Exact verified child sources join the existing
+telemetry ingest and canonical source-key deduplication path.
+
+Terminal attempts have seven days of resume eligibility and 30 days of detailed
+registry/source-reference retention, measured from completion or the last accepted
+follow-up. These windows do not keep provider processes alive and do not delete
+transcripts, conversation archives, telemetry facts, usage evidence, or user-owned
+resources. Active and unknown records stay available for reconciliation.
+
 Resume, startup recovery, and human approval use the same durable run records:
 
 - `automation_resume` resumes an explicitly resumed durable run, such as one
@@ -130,9 +147,17 @@ Resume, startup recovery, and human approval use the same durable run records:
 - scheduler resolution or validation failures persist a one-event terminal
   launch-failure artifact; CLI replay recognizes it without loading a blueprint;
 - `automation_approve` grants or rejects an approval gate;
-- `automation_cancel` writes a cancellation marker; the engine consumes it at the
-  next dispatch boundary, or immediately records a durable `run_failed`
-  cancellation event when the run is parked for approval.
+- `automation_cancel` writes a cancellation marker. An active automation-owned
+  headless worker observes it, terminates and reaps its exact child process, and
+  records a generation-guarded cancelled outcome before the command reports worker
+  acknowledgement. Runs without an active provider worker consume the marker at
+  the next dispatch boundary. A run parked for approval immediately records a
+  durable `run_failed` cancellation event.
+
+Headless execution separates definite failures from uncertain outcomes. A rejected
+launch or observed non-zero exit fails the worker. A timeout, lost observation, or
+post-submit response failure leaves it unknown for reconciliation and is not
+replayed automatically.
 
 The append-only event sequence is validated identically by replay and resume.
 New `run_started` events carry the durable run id, allowing recovery to retain

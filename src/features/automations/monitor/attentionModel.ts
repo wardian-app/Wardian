@@ -7,6 +7,7 @@ export interface AutomationAttentionRun {
   started_at?: string | null;
   updated_at?: string | null;
   completed_at?: string | null;
+  worker_attention_count?: number;
 }
 
 export interface AutomationAttentionSchedule {
@@ -48,6 +49,7 @@ export function automationAttention(
 
   for (const run of runs) {
     if (run.status === 'awaiting_approval') runIds.add(run.run_id);
+    if ((run.worker_attention_count ?? 0) > 0) runIds.add(run.run_id);
     const currentBlueprint = newestByBlueprint.get(run.blueprint_id);
     if (!currentBlueprint || isNewer(run, currentBlueprint)) {
       newestByBlueprint.set(run.blueprint_id, run);
