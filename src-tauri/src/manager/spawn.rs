@@ -1356,8 +1356,10 @@ pub async fn spawn_agent(
                     };
                     let startup_screen = if provider_name_for_pty == "codex"
                         || (startup_prompt_pending
-                            && matches!(provider_name_for_pty.as_str(), "claude" | "opencode" | "pi"))
-                    {
+                            && matches!(
+                                provider_name_for_pty.as_str(),
+                                "claude" | "opencode" | "pi"
+                            )) {
                         // Output was applied to the broker above. Read its current
                         // screen so chunk boundaries and erased startup messages
                         // cannot promote readiness or keep it blocked forever.
