@@ -652,7 +652,7 @@ mod tests {
         let restored = restored_rows.join("\n");
         assert_eq!(restored_rows.len(), 51);
         assert!(provider_output_has_startup_ready_prompt(
-            "opencode", restored
+            "opencode", &restored
         ));
         for blocked in [
             "OpenCode",
