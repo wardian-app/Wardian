@@ -371,13 +371,9 @@ fn temporary_worker_error_state(
     error: &crate::manager::HeadlessRunError,
 ) -> Option<TemporaryWorkerState> {
     match error.kind() {
-        crate::manager::HeadlessRunErrorKind::DefiniteFailure => {
-            Some(TemporaryWorkerState::Failed)
-        }
+        crate::manager::HeadlessRunErrorKind::DefiniteFailure => Some(TemporaryWorkerState::Failed),
         crate::manager::HeadlessRunErrorKind::Uncertain => None,
-        crate::manager::HeadlessRunErrorKind::Cancelled => {
-            Some(TemporaryWorkerState::Cancelled)
-        }
+        crate::manager::HeadlessRunErrorKind::Cancelled => Some(TemporaryWorkerState::Cancelled),
     }
 }
 

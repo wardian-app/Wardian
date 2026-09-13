@@ -314,9 +314,7 @@ pub fn register_automation_worker(
     })
 }
 
-pub fn mark_running(
-    worker: &TemporaryWorkerRecord,
-) -> Result<bool, Box<dyn std::error::Error>> {
+pub fn mark_running(worker: &TemporaryWorkerRecord) -> Result<bool, Box<dyn std::error::Error>> {
     let observed = now();
     crate::db::get_db_conn(|conn| Ok(mark_running_with_conn(conn, worker, &observed)?))
 }
@@ -327,16 +325,16 @@ fn mark_running_with_conn(
     observed: &str,
 ) -> rusqlite::Result<bool> {
     let changed = conn.execute(
-            "UPDATE temporary_workers SET state = 'running', started_at = COALESCE(started_at, ?2),
+        "UPDATE temporary_workers SET state = 'running', started_at = COALESCE(started_at, ?2),
              last_observed_at = ?2 WHERE worker_id = ?1 AND state = 'requested'
              AND owner_instance_id = ?3 AND runtime_generation = ?4",
-            params![
-                worker.worker_id,
-                observed,
-                worker.owner_instance_id,
-                worker.runtime_generation,
-            ],
-        )?;
+        params![
+            worker.worker_id,
+            observed,
+            worker.owner_instance_id,
+            worker.runtime_generation,
+        ],
+    )?;
     Ok(changed == 1)
 }
 
@@ -346,7 +344,13 @@ pub fn mark_unknown(
     error: Option<&str>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     crate::db::get_db_conn(|conn| {
-        Ok(mark_unknown_with_conn(conn, worker, coverage, error, &now())?)
+        Ok(mark_unknown_with_conn(
+            conn,
+            worker,
+            coverage,
+            error,
+            &now(),
+        )?)
     })
 }
 
@@ -358,19 +362,19 @@ fn mark_unknown_with_conn(
     observed: &str,
 ) -> rusqlite::Result<bool> {
     let changed = conn.execute(
-            "UPDATE temporary_workers SET state = 'unknown', coverage = ?2,
+        "UPDATE temporary_workers SET state = 'unknown', coverage = ?2,
              error = COALESCE(?3, error), last_observed_at = ?4 WHERE worker_id = ?1
              AND owner_instance_id = ?5 AND runtime_generation = ?6
              AND state IN ('requested', 'running')",
-            params![
-                worker.worker_id,
-                coverage,
-                error,
-                observed,
-                worker.owner_instance_id,
-                worker.runtime_generation,
-            ],
-        )?;
+        params![
+            worker.worker_id,
+            coverage,
+            error,
+            observed,
+            worker.owner_instance_id,
+            worker.runtime_generation,
+        ],
+    )?;
     Ok(changed == 1)
 }
 
@@ -421,29 +425,29 @@ fn mark_terminal_with_conn(
         crate::telemetry::identity::source_key(&worker.provider, &worker.worker_id, path)
     });
     let changed = conn.execute(
-            "UPDATE temporary_workers SET state = ?2, outcome = ?3,
+        "UPDATE temporary_workers SET state = ?2, outcome = ?3,
              provider_session_id = COALESCE(?4, provider_session_id),
              source_key = COALESCE(?5, source_key), source_path = COALESCE(?6, source_path),
              terminal_at = ?7, last_observed_at = ?7, resumable_until = ?8,
              detail_retained_until = ?9, coverage = ?10, error = ?11
              WHERE worker_id = ?1 AND owner_instance_id = ?12
              AND runtime_generation = ?13 AND state IN ('requested', 'running')",
-            params![
-                worker.worker_id,
-                state.as_str(),
-                outcome,
-                provider_session_id,
-                source_key,
-                source_path,
-                observed_at,
-                resumable_until,
-                detail_retained_until,
-                coverage,
-                error,
-                worker.owner_instance_id,
-                worker.runtime_generation,
-            ],
-        )?;
+        params![
+            worker.worker_id,
+            state.as_str(),
+            outcome,
+            provider_session_id,
+            source_key,
+            source_path,
+            observed_at,
+            resumable_until,
+            detail_retained_until,
+            coverage,
+            error,
+            worker.owner_instance_id,
+            worker.runtime_generation,
+        ],
+    )?;
     Ok(changed == 1)
 }
 
@@ -678,7 +682,7 @@ fn list_for_root_with_conn(
     observed_at: &str,
 ) -> rusqlite::Result<Vec<TemporaryWorkerRecord>> {
     let mut statement = conn.prepare(
-            "SELECT worker_id, kind, provider, workspace, root_agent_id, parent_worker_id,
+        "SELECT worker_id, kind, provider, workspace, root_agent_id, parent_worker_id,
              parent_provider_session_id, blueprint_id, run_id, node_id, attempt,
              runtime_session_id, provider_session_id, runtime_generation, state, outcome,
              capabilities_json, coverage, source_key, source_path, requested_at, started_at,
@@ -688,10 +692,10 @@ fn list_for_root_with_conn(
                state IN ('requested', 'running', 'waiting', 'unknown') OR detail_retained_until > ?2
              )
              ORDER BY requested_at, worker_id",
-        )?;
+    )?;
     let records = statement
-            .query_map(params![root_agent_id, observed_at], record_from_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        .query_map(params![root_agent_id, observed_at], record_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(records)
 }
 
@@ -803,9 +807,7 @@ pub fn telemetry_for_root(
     })
 }
 
-fn telemetry_from_row(
-    row: &Row<'_>,
-) -> rusqlite::Result<(String, TemporaryWorkerTelemetry)> {
+fn telemetry_from_row(row: &Row<'_>) -> rusqlite::Result<(String, TemporaryWorkerTelemetry)> {
     let worker_id: String = row.get(0)?;
     Ok((
         worker_id.clone(),
@@ -1334,8 +1336,7 @@ mod tests {
         unrelated.state = TemporaryWorkerState::Running;
         insert_record(&conn, &unrelated).unwrap();
 
-        let details = list_for_root_with_conn(&conn, "root-a", "2026-09-13T00:00:00Z")
-            .unwrap();
+        let details = list_for_root_with_conn(&conn, "root-a", "2026-09-13T00:00:00Z").unwrap();
         assert_eq!(
             details
                 .iter()

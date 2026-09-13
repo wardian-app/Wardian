@@ -1025,15 +1025,18 @@ async fn await_owned_worker_cancellation(
 ) -> Result<(RunStatus, bool), String> {
     let workers = wardian_core::temporary_workers::list_for_run(blueprint_id, run_id)
         .map_err(|error| error.to_string())?;
-    let requested_worker_ids = workers.iter().filter_map(|worker| {
-        (worker.kind == wardian_core::temporary_workers::TemporaryWorkerKind::Automation
-            && matches!(
-                worker.state,
-                wardian_core::temporary_workers::TemporaryWorkerState::Requested
-                    | wardian_core::temporary_workers::TemporaryWorkerState::Running
-            ))
+    let requested_worker_ids = workers
+        .iter()
+        .filter_map(|worker| {
+            (worker.kind == wardian_core::temporary_workers::TemporaryWorkerKind::Automation
+                && matches!(
+                    worker.state,
+                    wardian_core::temporary_workers::TemporaryWorkerState::Requested
+                        | wardian_core::temporary_workers::TemporaryWorkerState::Running
+                ))
             .then(|| worker.worker_id.clone())
-    }).collect::<Vec<_>>();
+        })
+        .collect::<Vec<_>>();
     if requested_worker_ids.is_empty() {
         let status = read_checkpoint(run_root)
             .map_err(|error| error.to_string())?

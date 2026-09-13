@@ -133,9 +133,11 @@ pub async fn run_headless_process_prompt(
                     }),
                 )
                 .await
-                .map_err(|persist_error| error.with_context(format!(
-                    "failed to persist the delivery outcome: {persist_error}"
-                )))?;
+                .map_err(|persist_error| {
+                    error.with_context(format!(
+                        "failed to persist the delivery outcome: {persist_error}"
+                    ))
+                })?;
             Err(error)
         }
     }
@@ -402,7 +404,10 @@ mod tests {
         .await
         .expect_err("headless process should time out");
 
-        assert_eq!(error.kind(), crate::manager::HeadlessRunErrorKind::Uncertain);
+        assert_eq!(
+            error.kind(),
+            crate::manager::HeadlessRunErrorKind::Uncertain
+        );
         assert!(error.contains("exceeded its"));
         assert!(started.elapsed() < Duration::from_secs(2));
         let attempts = wardian_core::db::list_interaction_delivery_attempts(&interaction.id)

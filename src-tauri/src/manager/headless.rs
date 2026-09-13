@@ -921,8 +921,12 @@ pub async fn run_headless_with_options(
     } else if provider_name == "pi" {
         normalize_pi_headless_output(&output, output_format).map_err(HeadlessRunError::uncertain)
     } else if output_format == "json" {
-        serde_json::from_str(&output)
-            .map_err(|e| HeadlessRunError::uncertain(format!("Failed to parse JSON output: {}. Raw: {}", e, output)))
+        serde_json::from_str(&output).map_err(|e| {
+            HeadlessRunError::uncertain(format!(
+                "Failed to parse JSON output: {}. Raw: {}",
+                e, output
+            ))
+        })
     } else {
         Ok(serde_json::json!({ "text": output }))
     }
