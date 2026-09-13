@@ -413,6 +413,30 @@ pub(crate) fn observe_provider_log_policy(
     })
 }
 
+/// An optional provider log may not exist before its first observation, such
+/// as for a mock runtime that only exposes terminal events. Once a source has
+/// produced capture state, its disappearance remains an error so replacement
+/// and deletion cannot be mistaken for an empty source.
+pub(crate) fn observe_provider_log_policy_with_initial_absence(
+    path: &Path,
+    provider_source_key: &str,
+    previous: Option<ProviderLogCaptureState>,
+    logging_enabled: bool,
+    trust_source_from_start: bool,
+) -> io::Result<Option<ProviderLogBatch>> {
+    match observe_provider_log_policy(
+        path,
+        provider_source_key,
+        previous.clone(),
+        logging_enabled,
+        trust_source_from_start,
+    ) {
+        Ok(batch) => Ok(Some(batch)),
+        Err(error) if previous.is_none() && error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 impl ProviderLogCaptureState {
     fn normalizer_has_pending_events(&self) -> bool {
         self.normalizer.has_pending_events()
@@ -716,6 +740,52 @@ mod tests {
             event.metadata["request_root_id"] != "context-before-disable"
                 && event.metadata["provider_turn_id"] != "codex-turn-old"
         }));
+    }
+
+    #[test]
+    fn an_initially_absent_provider_log_is_optional_without_capture_state() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.jsonl");
+
+        let observed = observe_provider_log_policy_with_initial_absence(
+            &path,
+            "mock:session:one",
+            None,
+            true,
+            true,
+        )
+        .expect("initially absent source is optional");
+
+        assert!(observed.is_none());
+    }
+
+    #[test]
+    fn a_missing_provider_log_after_observation_remains_an_error() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.jsonl");
+        std::fs::write(&path, "{}\n").expect("write provider log");
+
+        let observed = observe_provider_log_policy_with_initial_absence(
+            &path,
+            "codex:session:one",
+            None,
+            true,
+            true,
+        )
+        .expect("observe existing source")
+        .expect("existing source returns capture state");
+        std::fs::remove_file(&path).expect("remove provider log");
+
+        let error = observe_provider_log_policy_with_initial_absence(
+            &path,
+            "codex:session:one",
+            Some(observed.next),
+            true,
+            true,
+        )
+        .expect_err("observed source disappearance must remain an error");
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]

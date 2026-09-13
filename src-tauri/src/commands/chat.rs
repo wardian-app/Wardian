@@ -467,69 +467,76 @@ pub(crate) async fn archive_agent_chat_events_for_state(
             .conversation_archive
             .provider_log_capture_state(&snapshot.session_id, provider_source_key)
             .map_err(|error| format!("provider-log capture state read failed: {error}"))?;
-        let policy = super::provider_log_acquisition::observe_provider_log_policy(
-            path,
-            provider_source_key,
-            previous.clone(),
-            logging_enabled,
-            trust_source_from_start,
-        )
-        .map_err(|error| format!("provider-log policy observation failed: {error}"))?;
-        if previous.as_ref() != Some(&policy.next) {
+        let policy =
+            super::provider_log_acquisition::observe_provider_log_policy_with_initial_absence(
+                path,
+                provider_source_key,
+                previous.clone(),
+                logging_enabled,
+                trust_source_from_start,
+            )
+            .map_err(|error| format!("provider-log policy observation failed: {error}"))?;
+        if let Some(policy) = policy {
+            if previous.as_ref() != Some(&policy.next) {
+                state
+                    .conversation_archive
+                    .append_provider_log_batch_with_context(
+                        context.clone(),
+                        &[],
+                        previous.as_ref(),
+                        &policy.next,
+                    )
+                    .map_err(|error| format!("provider-log policy commit failed: {error}"))?;
+            }
+            let mut batch = super::provider_log_acquisition::acquire_provider_log_batch(
+                &snapshot.session_id,
+                &snapshot.provider,
+                path,
+                provider_source_key,
+                Some(policy.next),
+                trust_source_from_start,
+            )
+            .map_err(|error| format!("provider-log acquisition failed: {error}"))?;
+            let _consumed_provider_log_bytes = batch.consumed_bytes;
+            decorate_forward_provider_log_events(&mut batch.events, &snapshot.provider, path);
             state
                 .conversation_archive
                 .append_provider_log_batch_with_context(
                     context.clone(),
-                    &[],
-                    previous.as_ref(),
-                    &policy.next,
+                    &batch.events,
+                    batch.previous.as_ref(),
+                    &batch.next,
                 )
-                .map_err(|error| format!("provider-log policy commit failed: {error}"))?;
-        }
-        let mut batch = super::provider_log_acquisition::acquire_provider_log_batch(
-            &snapshot.session_id,
-            &snapshot.provider,
-            path,
-            provider_source_key,
-            Some(policy.next),
-            trust_source_from_start,
-        )
-        .map_err(|error| format!("provider-log acquisition failed: {error}"))?;
-        let _consumed_provider_log_bytes = batch.consumed_bytes;
-        decorate_forward_provider_log_events(&mut batch.events, &snapshot.provider, path);
-        state
-            .conversation_archive
-            .append_provider_log_batch_with_context(
-                context.clone(),
-                &batch.events,
-                batch.previous.as_ref(),
-                &batch.next,
-            )
-            .map_err(|error| format!("provider-log archive append failed: {error}"))?;
+                .map_err(|error| format!("provider-log archive append failed: {error}"))?;
 
-        let result = collect_agent_chat_events_with_provider_events(
-            &snapshot,
-            batch.events,
-            batch.continue_immediately,
-        )?;
-        let watch_only = result
-            .events
-            .iter()
-            .filter(|event| event.metadata["provider_log"] != true)
-            .cloned()
-            .collect::<Vec<_>>();
-        if logging_enabled {
-            state
-                .conversation_archive
-                .append_chat_events_with_context(context, &watch_only)
-                .map_err(|error| format!("conversation archive watch append failed: {error}"))?;
-        } else {
-            state
-                .conversation_archive
-                .discard_agent_with_context(context, &watch_only)
-                .map_err(|error| format!("conversation archive disabled cutoff failed: {error}"))?;
+            let result = collect_agent_chat_events_with_provider_events(
+                &snapshot,
+                batch.events,
+                batch.continue_immediately,
+            )?;
+            let watch_only = result
+                .events
+                .iter()
+                .filter(|event| event.metadata["provider_log"] != true)
+                .cloned()
+                .collect::<Vec<_>>();
+            if logging_enabled {
+                state
+                    .conversation_archive
+                    .append_chat_events_with_context(context, &watch_only)
+                    .map_err(|error| {
+                        format!("conversation archive watch append failed: {error}")
+                    })?;
+            } else {
+                state
+                    .conversation_archive
+                    .discard_agent_with_context(context, &watch_only)
+                    .map_err(|error| {
+                        format!("conversation archive disabled cutoff failed: {error}")
+                    })?;
+            }
+            return Ok(result);
         }
-        return Ok(result);
     }
 
     let result = collect_agent_chat_events_for_archive(&snapshot)?;
@@ -597,7 +604,7 @@ pub(crate) fn record_provider_log_policy_for_snapshot(
         .conversation_archive
         .provider_log_capture_state(&snapshot.session_id, provider_source_key)
         .map_err(|error| format!("provider-log capture state read failed: {error}"))?;
-    let policy = super::provider_log_acquisition::observe_provider_log_policy(
+    let policy = super::provider_log_acquisition::observe_provider_log_policy_with_initial_absence(
         path,
         provider_source_key,
         previous.clone(),
@@ -605,6 +612,9 @@ pub(crate) fn record_provider_log_policy_for_snapshot(
         trust_source_from_start,
     )
     .map_err(|error| format!("provider-log policy observation failed: {error}"))?;
+    let Some(policy) = policy else {
+        return Ok(());
+    };
     if previous.as_ref() != Some(&policy.next) {
         state
             .conversation_archive
