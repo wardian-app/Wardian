@@ -125,7 +125,7 @@ pub async fn run_headless_process_prompt(
                     "headless_process",
                     delivery_state,
                     Some(process_state.to_string()),
-                    None,
+                    Some(process_state.to_string()),
                     Some(format!("headless run {}", request.node)),
                     Some(DeliveryErrorDetail {
                         code: "headless_process_failed".to_string(),
