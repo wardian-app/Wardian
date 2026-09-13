@@ -5,9 +5,7 @@ use std::pin::Pin;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
-use wardian_core::control::{
-    InteractionBodyRef, ProviderInputReadiness, ProviderReadyEvidence, ReplyStatus,
-};
+use wardian_core::control::ReplyStatus;
 use wardian_core::conversation_lease::ConversationLeaseOwner;
 use wardian_core::models::AgentConfig;
 
@@ -38,6 +36,8 @@ pub struct AgentRunSpec {
 /// What the executor needs to route one prompt into an already-running agent.
 #[derive(Debug, Clone)]
 pub struct LiveAgentRunSpec {
+    /// Trusted execution owner supplied by the host executor, never a managed agent ID.
+    pub run_id: String,
     pub node: String,
     pub session_id: String,
     pub prompt: String,
@@ -52,7 +52,7 @@ pub trait AgentRunner: Send + Sync {
 }
 
 /// Boundary for active-agent execution. Unlike headless runs, this uses the
-/// existing live PTY and completes only through the structured `wardian reply`
+/// canonical v2 task claim and completes only through the correlated reply
 /// contract. Idle terminal status and printed reply commands are not
 /// completion evidence.
 pub trait LiveAgentRunner: Send + Sync {
@@ -277,263 +277,54 @@ async fn run_live_agent_prompt(
     spec: LiveAgentRunSpec,
 ) -> Result<String, String> {
     let state = app.state::<crate::state::AppState>();
-
     let watch_state = {
         let agents = state.agents.lock().await;
-        let agent = agents
+        agents
             .get(&spec.session_id)
-            .ok_or_else(|| format!("Agent {} not found or is off", spec.session_id))?;
-        agent.watch_state.clone()
+            .ok_or_else(|| format!("Agent {} not found", spec.session_id))?
+            .watch_state
+            .clone()
     };
-
-    let initial_cursor = watch_state
+    let cursor = watch_state
         .lock()
-        .map_err(|_| format!("Agent {} watch state lock poisoned", spec.session_id))?
+        .map_err(|_| "watch state lock poisoned")?
         .latest_cursor();
-
     let task = state
         .interactions
-        .create_task(
-            None,
-            spec.session_id.clone(),
-            InteractionBodyRef::Inline {
-                body: spec.prompt.clone(),
-            },
-        )
-        .await;
-    if let Err(error) = (|| {
-        let mut guard = watch_state
-            .lock()
-            .map_err(|_| format!("Agent {} watch state lock poisoned", spec.session_id))?;
-        guard.push_event(
-            "request",
-            serde_json::json!({
-                "request_id": &task.id,
-                "target_session_id": &spec.session_id,
-                "status": "pending",
-                "created_at": &task.created_at,
-                "automation_node": &spec.node,
-            }),
-        );
-        Ok::<(), String>(())
-    })() {
-        fail_live_automation_task(
-            &state,
-            &watch_state,
-            &task.id,
-            &spec.session_id,
-            &error,
-            false,
-        )
-        .await;
-        return Err(error);
-    }
-
-    let prompt = prompt_with_structured_reply_instruction(&spec.prompt, &task.id);
-    if let Err(error) = crate::delivery::submit_live_surface_prompt(
-        Some(app),
-        &state,
-        automation_live_surface_prompt_request(&spec.session_id, prompt, &task.id),
-    )
-    .await
-    .map(|_| ())
-    {
-        let message = format!(
-            "failed to submit automation node {} to live agent {}: {}",
-            spec.node, spec.session_id, error
-        );
-        fail_live_automation_task(
-            &state,
-            &watch_state,
-            &task.id,
-            &spec.session_id,
-            &message,
-            false,
-        )
-        .await;
-        return Err(message);
-    }
-    let provider_input_generation = state
-        .interactions
-        .current_provider_input_generation(&spec.session_id)
+        .admit_host_automation_task(&spec.run_id, &spec.node, &spec.session_id, &spec.prompt)
         .await
-        .unwrap_or(0);
-
-    let reply = match wait_for_live_agent_reply(
+        .map_err(|error| error.to_string())?;
+    crate::control::spawn_agent_messaging_after_restore(app, &spec.session_id);
+    // A timeout is a waiter outcome, not recipient-authored completion, cancellation,
+    // or permission to replay uncertain work. The exact task remains inspectable.
+    let reply = wait_for_live_agent_reply(
         &state,
-        watch_state.clone(),
-        initial_cursor,
-        &task.id,
+        watch_state,
+        cursor,
+        &task.record.id,
         &spec.session_id,
         spec.timeout,
     )
     .await
-    {
-        Ok(reply) => reply,
-        Err(error) => {
-            fail_live_automation_task(
-                &state,
-                &watch_state,
-                &task.id,
-                &spec.session_id,
-                &error,
-                true,
-            )
-            .await;
-            return Err(error);
-        }
-    };
-    let response = match reply.status {
-        ReplyStatus::Done => reply.body,
-        ReplyStatus::Blocked | ReplyStatus::Failed => {
-            release_live_agent_provider_input(&state, &spec.session_id).await;
-            return Err(format!(
-                "live agent {} returned {:?} for automation node {}: {}",
-                spec.session_id, reply.status, spec.node, reply.body
-            ));
-        }
-    };
-    if response.trim().is_empty() {
-        release_live_agent_provider_input(&state, &spec.session_id).await;
-        Err(format!(
-            "live agent {} completed automation node {} without readable output",
-            spec.session_id, spec.node
-        ))
-    } else if let Err(error) = wait_for_live_agent_provider_ready(
-        &state,
-        &spec.session_id,
-        provider_input_generation,
-        Duration::from_secs(30),
-    )
-    .await
-    {
-        release_live_agent_provider_input(&state, &spec.session_id).await;
-        Err(error)
-    } else {
-        Ok(response)
-    }
+    .map_err(|error| {
+        format!(
+            "automation run {} node {} task {}: {error}",
+            spec.run_id, spec.node, task.record.id
+        )
+    })?;
+    automation_reply_result(&spec.node, reply)
 }
 
-fn prompt_with_structured_reply_instruction(prompt: &str, request_id: &str) -> String {
-    format!(
-        "{prompt}\n\nWardian automation request id: {request_id}\nWhen this automation node is fully complete, execute this command from your shell/tool with the final automation output on stdin:\nwardian reply {request_id} --status done --stdin\nUse --status blocked or --status failed if you cannot complete it. Do not print the command as your final answer; run it so Wardian can record the structured reply."
-    )
-}
-
-fn automation_live_surface_prompt_request(
-    session_id: &str,
-    prompt: String,
-    interaction_id: &str,
-) -> crate::delivery::LiveSurfacePromptRequest {
-    crate::delivery::LiveSurfacePromptRequest {
-        session_id: session_id.to_string(),
-        prompt,
-        interaction_id: Some(interaction_id.to_string()),
-        input_mode: wardian_core::control::MessageInputMode::Message,
-        queue_policy: wardian_core::control::QueuePolicy::LiveOnly,
-        approval_action: None,
-        origin: None,
-        runtime_state: "automation_live_agent",
-        mark_prompt_started: true,
-        require_provider_turn_receipt: true,
-        payload_sent_detail: None,
-        delivery_message_id: None,
-    }
-}
-
-async fn fail_live_automation_task(
-    app_state: &crate::state::AppState,
-    watch_state: &std::sync::Arc<Mutex<crate::state::AgentWatchState>>,
-    request_id: &str,
-    target_session_id: &str,
-    reason: &str,
-    release_provider_input: bool,
-) {
-    if release_provider_input {
-        release_live_agent_provider_input(app_state, target_session_id).await;
-    }
-
-    let Ok(reply) = app_state
-        .interactions
-        .fail_task_with_reply(request_id, target_session_id, reason)
-        .await
-    else {
-        return;
-    };
-
-    if let Ok(mut guard) = watch_state.lock() {
-        guard.push_event(
-            "reply",
-            serde_json::json!({
-                "request_id": reply.request_id,
-                "status": reply.status,
-                "target_session_id": reply.target_session_id,
-                "source_session_id": reply.source_session_id,
-                "replied_at": reply.replied_at,
-            }),
-        );
-    }
-}
-
-async fn release_live_agent_provider_input(
-    app_state: &crate::state::AppState,
-    target_session_id: &str,
-) {
-    if let Some(generation) = app_state
-        .interactions
-        .current_provider_input_generation(target_session_id)
-        .await
-    {
-        app_state
-            .interactions
-            .record_provider_input_state(
-                target_session_id,
-                generation,
-                ProviderInputReadiness::Unknown,
-                None,
-            )
-            .await;
-    }
-}
-
-async fn wait_for_live_agent_provider_ready(
-    app_state: &crate::state::AppState,
-    target_session_id: &str,
-    generation: u64,
-    timeout: Duration,
-) -> Result<(), String> {
-    let started = std::time::Instant::now();
-    loop {
-        if let Some(input_state) = app_state
-            .interactions
-            .provider_input_state(target_session_id)
-            .await
-        {
-            if input_state.generation >= generation
-                && input_state.state == ProviderInputReadiness::Ready
-                && input_state.ready_evidence == Some(ProviderReadyEvidence::ProviderEvent)
-            {
-                return Ok(());
-            }
-            if input_state.generation >= generation
-                && matches!(
-                    input_state.state,
-                    ProviderInputReadiness::ActionRequired | ProviderInputReadiness::Unavailable
-                )
-            {
-                return Err(format!(
-                    "live agent {target_session_id} did not return to input-ready state after automation reply"
-                ));
-            }
-        }
-
-        let elapsed = started.elapsed();
-        if elapsed >= timeout {
-            return Err(format!(
-                "timed out waiting for live agent {target_session_id} to return to input-ready state"
-            ));
-        }
-        tokio::time::sleep((timeout - elapsed).min(Duration::from_millis(25))).await;
+fn automation_reply_result(
+    node: &str,
+    reply: wardian_core::control::StructuredReply,
+) -> Result<String, String> {
+    match reply.status {
+        ReplyStatus::Done => Ok(reply.body),
+        ReplyStatus::Blocked | ReplyStatus::Failed => Err(format!(
+            "automation node {node} task {}: {}",
+            reply.request_id, reply.body
+        )),
     }
 }
 
@@ -770,6 +561,7 @@ mod tests {
 
     #[tokio::test]
     async fn live_agent_reply_wait_completes_only_after_structured_reply() {
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
         let app_state = crate::state::AppState::new();
         let watch_state = Arc::new(Mutex::new(crate::state::AgentWatchState::new(
             "agent-1".to_string(),
@@ -787,15 +579,10 @@ mod tests {
         }
         let task = app_state
             .interactions
-            .create_task_with_id(
-                "wf_test_reply".to_string(),
-                None,
-                "agent-1".to_string(),
-                InteractionBodyRef::Inline {
-                    body: "write the file".to_string(),
-                },
-            )
-            .await;
+            .admit_host_automation_task("wf_test_reply", "test-node", "agent-1", "write the file")
+            .await
+            .unwrap()
+            .record;
         let task_id = task.id.clone();
 
         let wait = wait_for_live_agent_reply(
@@ -810,12 +597,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
             app_state
                 .interactions
-                .complete_task_with_reply(
-                    &task_id,
-                    Some("agent-1"),
-                    ReplyStatus::Done,
-                    "{\"ok\":true}",
-                )
+                .reply_agent_message("agent-1", &task_id, ReplyStatus::Done, "{\"ok\":true}")
                 .await
                 .expect("complete automation task")
         };
@@ -829,6 +611,7 @@ mod tests {
 
     #[tokio::test]
     async fn live_agent_reply_wait_ignores_printed_reply_command_after_idle() {
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
         let app_state = crate::state::AppState::new();
         let watch_state = Arc::new(Mutex::new(crate::state::AgentWatchState::new(
             "agent-1".to_string(),
@@ -841,15 +624,10 @@ mod tests {
             .latest_cursor();
         let task = app_state
             .interactions
-            .create_task_with_id(
-                "wf_test_marker".to_string(),
-                None,
-                "agent-1".to_string(),
-                InteractionBodyRef::Inline {
-                    body: "write the file".to_string(),
-                },
-            )
-            .await;
+            .admit_host_automation_task("wf_test_marker", "test-node", "agent-1", "write the file")
+            .await
+            .unwrap()
+            .record;
         let task_id = task.id.clone();
         {
             let mut guard = watch_state.lock().expect("watch state lock");
@@ -886,6 +664,7 @@ mod tests {
 
     #[tokio::test]
     async fn live_agent_reply_wait_survives_watch_cursor_rollover() {
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
         let app_state = crate::state::AppState::new();
         let watch_state = Arc::new(Mutex::new(crate::state::AgentWatchState::new(
             "agent-1".to_string(),
@@ -898,15 +677,15 @@ mod tests {
             .latest_cursor();
         let task = app_state
             .interactions
-            .create_task_with_id(
-                "wf_test_cursor_rollover".to_string(),
-                None,
-                "agent-1".to_string(),
-                InteractionBodyRef::Inline {
-                    body: "write the file".to_string(),
-                },
+            .admit_host_automation_task(
+                "wf_test_cursor_rollover",
+                "test-node",
+                "agent-1",
+                "write the file",
             )
-            .await;
+            .await
+            .unwrap()
+            .record;
         let task_id = task.id.clone();
         {
             let mut guard = watch_state.lock().expect("watch state lock");
@@ -933,12 +712,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
             app_state
                 .interactions
-                .complete_task_with_reply(
-                    &task_id,
-                    Some("agent-1"),
-                    ReplyStatus::Done,
-                    "{\"ok\":true}",
-                )
+                .reply_agent_message("agent-1", &task_id, ReplyStatus::Done, "{\"ok\":true}")
                 .await
                 .expect("complete automation task")
         };
@@ -949,138 +723,127 @@ mod tests {
         assert_eq!(reply.status, ReplyStatus::Done);
         assert_eq!(reply.body, "{\"ok\":true}");
     }
-
     #[tokio::test]
-    async fn live_agent_failure_cleanup_closes_task_and_releases_input_generation() {
-        let app_state = crate::state::AppState::new();
-        let watch_state = Arc::new(Mutex::new(crate::state::AgentWatchState::new(
-            "agent-1".to_string(),
+    async fn canonical_automation_timeout_preserves_uncertainty_and_accepts_late_reply() {
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
+        let state = crate::state::AppState::new();
+        let task = state
+            .interactions
+            .admit_host_automation_task("timeout-run", "node", "receiver", "work")
+            .await
+            .unwrap();
+        let claim = state
+            .interactions
+            .claim_agent_task("receiver", 0)
+            .await
+            .unwrap()
+            .unwrap();
+        state
+            .interactions
+            .finish_agent_task(&claim, "uncertain")
+            .await
+            .unwrap();
+        let watch = Arc::new(Mutex::new(crate::state::AgentWatchState::new(
+            "receiver".into(),
             16,
             4096,
         )));
-        let task = app_state
+        let cursor = watch.lock().unwrap().latest_cursor();
+        let before = state
             .interactions
-            .create_task_with_id(
-                "wf_test_cleanup".to_string(),
-                None,
-                "agent-1".to_string(),
-                InteractionBodyRef::Inline {
-                    body: "write the file".to_string(),
-                },
-            )
-            .await;
-        app_state
-            .interactions
-            .start_provider_input_generation("agent-1", ProviderInputReadiness::Busy, None)
-            .await;
-
-        fail_live_automation_task(
-            &app_state,
-            &watch_state,
-            &task.id,
-            "agent-1",
-            "timed out",
-            true,
+            .interaction(&task.record.id)
+            .await
+            .unwrap();
+        let error = wait_for_live_agent_reply(
+            &state,
+            watch.clone(),
+            cursor.clone(),
+            &task.record.id,
+            "receiver",
+            Duration::ZERO,
         )
-        .await;
-
+        .await
+        .unwrap_err();
+        assert!(error.contains(&task.record.id));
         assert_eq!(
-            app_state
+            state
                 .interactions
-                .interaction(&task.id)
+                .interaction(&task.record.id)
+                .await
+                .unwrap(),
+            before
+        );
+        assert!(state
+            .interactions
+            .structured_reply(&task.record.id)
+            .await
+            .is_none());
+        assert!(
+            state
+                .interactions
+                .claim_agent_task("receiver", 0)
                 .await
                 .unwrap()
-                .status,
-            wardian_core::control::InteractionStatus::Failed
+                .is_none(),
+            "timeout cannot replay uncertain work"
         );
+        assert!(state
+            .interactions
+            .receive_agent_messages("receiver", None, None, 100)
+            .await
+            .unwrap()
+            .messages
+            .is_empty());
+        state
+            .interactions
+            .reply_agent_message(
+                "receiver",
+                &task.record.id,
+                ReplyStatus::Done,
+                "late correlated result",
+            )
+            .await
+            .unwrap();
+        let reply = wait_for_live_agent_reply(
+            &state,
+            watch,
+            cursor,
+            &task.record.id,
+            "receiver",
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
         assert_eq!(
-            app_state
-                .interactions
-                .structured_reply(&task.id)
-                .await
-                .unwrap()
-                .status,
-            ReplyStatus::Failed
+            automation_reply_result("node", reply).unwrap(),
+            "late correlated result"
         );
-        assert_eq!(
-            app_state
-                .interactions
-                .provider_input_state("agent-1")
-                .await
-                .unwrap()
-                .state,
-            ProviderInputReadiness::Unknown
-        );
-        let snapshot = watch_state
-            .lock()
-            .expect("watch state lock")
-            .snapshot_since(None, None)
-            .expect("watch snapshot");
-        assert!(snapshot.events.iter().any(|event| {
-            event.kind == "reply"
-                && event
-                    .payload
-                    .get("request_id")
-                    .and_then(|value| value.as_str())
-                    == Some("wf_test_cleanup")
-                && event.payload.get("status").and_then(|value| value.as_str()) == Some("failed")
-        }));
     }
 
     #[tokio::test]
-    async fn live_agent_success_waits_for_provider_ready_evidence() {
-        let app_state = crate::state::AppState::new();
-        let input = app_state
-            .interactions
-            .start_provider_input_generation("agent-1", ProviderInputReadiness::Busy, None)
-            .await;
-
-        let wait = wait_for_live_agent_provider_ready(
-            &app_state,
-            "agent-1",
-            input.generation,
-            Duration::from_secs(1),
-        );
-        let ready = async {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-            app_state
+    async fn canonical_automation_reply_status_controls_node_result() {
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
+        let state = crate::state::AppState::new();
+        for status in [ReplyStatus::Done, ReplyStatus::Blocked, ReplyStatus::Failed] {
+            let task = state
                 .interactions
-                .record_provider_input_state(
-                    "agent-1",
-                    input.generation,
-                    ProviderInputReadiness::Ready,
-                    Some(ProviderReadyEvidence::ProviderEvent),
-                )
-                .await;
-        };
-
-        let (result, _) = tokio::join!(wait, ready);
-
-        result.expect("provider event readiness should release live automation delivery");
-    }
-
-    #[test]
-    fn automation_prompt_tells_agent_to_execute_reply_command() {
-        let prompt = prompt_with_structured_reply_instruction("write the file", "wf_test");
-
-        assert!(prompt.contains("execute this command"));
-        assert!(prompt.contains("wardian reply wf_test --status done --stdin"));
-        assert!(prompt.contains("Do not print the command"));
-    }
-
-    #[test]
-    fn automation_live_surface_request_marks_prompt_started_after_delivery() {
-        let request = automation_live_surface_prompt_request(
-            "agent-1",
-            "prompt".to_string(),
-            "wf_test_processing",
-        );
-
-        assert!(request.mark_prompt_started);
-        assert_eq!(request.runtime_state, "automation_live_agent");
-        assert_eq!(
-            request.queue_policy,
-            wardian_core::control::QueuePolicy::LiveOnly
-        );
+                .admit_host_automation_task("status-run", "node", "receiver", "work")
+                .await
+                .unwrap();
+            let replied = state
+                .interactions
+                .reply_agent_message("receiver", &task.record.id, status.clone(), "node output")
+                .await
+                .unwrap();
+            let result = automation_reply_result("node", replied.reply);
+            match status {
+                ReplyStatus::Done => assert_eq!(result.unwrap(), "node output"),
+                ReplyStatus::Blocked | ReplyStatus::Failed => {
+                    let error = result.unwrap_err();
+                    assert!(error.contains(&task.record.id));
+                    assert!(error.contains("node output"));
+                }
+            }
+        }
     }
 }

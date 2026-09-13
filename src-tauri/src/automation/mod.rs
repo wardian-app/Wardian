@@ -325,6 +325,7 @@ impl LiveStepExecutor {
                 ));
                 live_runner
                     .run_live(LiveAgentRunSpec {
+                        run_id: self.owner_id.clone(),
                         node: node.to_string(),
                         session_id: agent.session_id.clone(),
                         prompt,

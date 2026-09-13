@@ -1,5 +1,6 @@
 use super::super::test_support::TestWardianHome;
 use super::*;
+use wardian_core::control::ReplyStatus;
 
 async fn agent(state: &AppState, id: &str) {
     let agent = super::super::tests::test_agent(id, id, "Test");

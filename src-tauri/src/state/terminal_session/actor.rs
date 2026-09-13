@@ -692,6 +692,26 @@ impl TerminalSessionBroker {
         self.lifecycle_tx.subscribe()
     }
 
+    /// Return the generation that the next real runtime for this session will
+    /// receive. Spawn callers use this while holding the session lifecycle
+    /// boundary so launch proofs can be created before the PTY exists.
+    pub async fn next_runtime_generation(
+        &self,
+        session_id: &str,
+    ) -> Result<u64, TerminalBrokerError> {
+        validate_id(session_id, "session_id")?;
+        self.runtime_generation_tombstones
+            .read()
+            .await
+            .get(session_id)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| {
+                TerminalBrokerError::RuntimeIo("terminal runtime generation exhausted".to_string())
+            })
+    }
+
     pub async fn start_or_replace_runtime(
         &self,
         session_id: &str,

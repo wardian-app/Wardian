@@ -61,7 +61,7 @@ Remove-Item Env:\WARDIAN_E2E_HEADLESS_PROVIDERS
 Remove-Item Env:\WARDIAN_E2E_REAL_WORKSPACE
 ```
 
-Run the delivery matrix to prove that each provider can launch as an agent, receive a mailbox-delivered `wardian send`, and expose the reply through `wardian agent watch`:
+Run the delivery matrix to verify that each selected provider can launch as an agent and complete the maintained human-composer delivery cases:
 
 ```bash
 WARDIAN_E2E_REAL_DELIVERY=1 WARDIAN_E2E_DELIVERY_PROVIDERS=codex,claude,opencode,antigravity,pi npm run test:e2e:native:fast -- e2e-native/tests/provider-delivery-real-native.test.mjs
@@ -75,6 +75,40 @@ $env:WARDIAN_E2E_DELIVERY_PROVIDERS = "codex,claude,opencode,antigravity,pi"
 npm run test:e2e:native:fast -- e2e-native/tests/provider-delivery-real-native.test.mjs
 Remove-Item Env:\WARDIAN_E2E_REAL_DELIVERY
 Remove-Item Env:\WARDIAN_E2E_DELIVERY_PROVIDERS
+```
+
+The default delivery matrix uses the provider's human composer. To qualify an
+existing-session native route, set
+`WARDIAN_E2E_DELIVERY_NATIVE_PROVIDERS` to a subset of the selected providers.
+The candidate route must establish the provider session first, disable its
+owned PTY runtime, preserve the provider session and generation, and complete
+one canonical `wardian message followup` with an exact correlated reply. A
+missing native capability or delivery fails that candidate; it does not fall
+back to the composer or classify the provider as unsupported. Providers that
+are not selected as candidates retain the human-composer matrix.
+
+Example Codex candidate run:
+
+```bash
+WARDIAN_E2E_REAL_DELIVERY=1 \
+WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL=1 \
+WARDIAN_E2E_DELIVERY_PROVIDERS=codex \
+WARDIAN_E2E_DELIVERY_NATIVE_PROVIDERS=codex \
+npm run test:e2e:native:fast -- e2e-native/tests/provider-delivery-real-native.test.mjs
+```
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_E2E_REAL_DELIVERY = "1"
+$env:WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL = "1"
+$env:WARDIAN_E2E_DELIVERY_PROVIDERS = "codex"
+$env:WARDIAN_E2E_DELIVERY_NATIVE_PROVIDERS = "codex"
+npm run test:e2e:native:fast -- e2e-native/tests/provider-delivery-real-native.test.mjs
+Remove-Item Env:\WARDIAN_E2E_REAL_DELIVERY
+Remove-Item Env:\WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL
+Remove-Item Env:\WARDIAN_E2E_DELIVERY_PROVIDERS
+Remove-Item Env:\WARDIAN_E2E_DELIVERY_NATIVE_PROVIDERS
 ```
 
 The delivery test enables Codex workspace trust only inside its isolated
@@ -102,7 +136,7 @@ Remove-Item Env:\WARDIAN_E2E_DELIVERY_PROVIDERS
 
 When either real-provider environment switch is set, unknown provider names fail the corresponding test. The complete five-provider matrix is required unless its matching `*_ALLOW_PARTIAL=1` flag is also set.
 
-By default the real delivery test runs one short mailbox-only prompt per selected provider. Use `WARDIAN_E2E_DELIVERY_CASES=all` for the full input case set, or a comma list such as `mailbox-short,mailbox-multiline`.
+By default the real delivery test runs `prompt-short` through the human composer for each selected provider. Use `WARDIAN_E2E_DELIVERY_CASES=all` for the full input case set, or a comma list such as `prompt-short,prompt-multiline`. The maintained case names are `prompt-short`, `prompt-multiline`, `prompt-trailing-newline`, and `prompt-long-paste`.
 
 Use cheap or fast model overrides where the provider exposes a model flag. The delivery test defaults Claude to `haiku` and OpenCode to `opencode/deepseek-v4-flash-free`. Override these with provider-specific environment variables:
 

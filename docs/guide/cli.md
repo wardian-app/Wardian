@@ -294,9 +294,8 @@ Wardian maintains a communication topology that shapes which agents you see and 
 
 **Why it matters:**
 - `wardian agent list` shows your neighbors by default — the agents you're connected to — so you work within your context.
-- `wardian send --to all` broadcasts within your neighbors, not globally.
-- `wardian send --to class:Coder` resolves within your neighbors.
-- Bare-name targets resolve neighbors-first; explicit UUIDs and exact names always work regardless of topology.
+- `wardian message list` discovers peers visible to the managed sender.
+- Messaging targets are one exact name or UUID; broadcasts and ambiguous names are rejected.
 
 **Scope modes for `wardian agent list`:**
 - `--scope auto` (default): neighbors when `WARDIAN_SESSION_ID` is set (inside a Wardian agent terminal), else workspace.
@@ -435,14 +434,11 @@ wardian conversation list
 wardian conversation list --agent <agent-id-or-name>
 wardian conversation list --scope all
 wardian conversation show <conversation-id>
-wardian ask reviewer-a1 --stdin --timeout 10m
-wardian ask reviewer-a1 "review this" --targets reviewer-a2,reviewer-a3 --timeout 10m
-wardian reply ask_0123456789abcdef --status done --stdin
-wardian send "review this" --to coder-a1
-wardian send --as-command "/goal test" --to coder-a1
-wardian send "review this" --to reviewer-a1 --wait-until idle --timeout 10m
-wardian send "status?" --to class:Coder
-wardian send "stand down" --to all
+wardian message list
+wardian message followup reviewer-a1 --stdin
+wardian message reply ask_0123456789abcdef --status done --stdin
+wardian message send coder-a1 "The review evidence is available"
+wardian message receive --limit 20 --timeout-ms 60000
 wardian notify update "The migration is ready for review" --title "Inbox refactor"
 wardian notify approval "Production deployment is prepared" --title "Deploy production" --action "Run the production deployment" --risk "This changes live traffic" --choice "Deploy" --choice "Do not deploy" --wait
 ```
@@ -504,33 +500,32 @@ Inspect the full roster when coordinating across multiple neighbor sets:
 wardian agent list --scope all --fields name,class,provider,workspace,status,status_source
 ```
 
-Hand a bounded review task to a peer and wait for response evidence:
+Admit a bounded review task to a peer and retain the returned request ID:
 
 ```bash
-wardian ask reviewer-a1 --file review-prompt.md --timeout 10m
+wardian message followup reviewer-a1 --file review-prompt.md
 ```
 
-Ask several named peers for individually accountable replies. The initial target
-and each comma-separated `--targets` value are explicit names or UUIDs; `all`
-and `class:<ClassName>` are not accepted:
+Read replies from the managed sender's inbox. Match the reply's
+`parent_interaction_id` to the original request ID. An empty wait does not
+cancel the task or authorize resending it:
 
 ```bash
-wardian ask reviewer-a1 --file review-prompt.md --targets reviewer-a2,reviewer-a3 --timeout 10m
+wardian message receive --limit 20 --timeout-ms 60000
 ```
 
-Answer a structured ask from inside the target agent session:
+Answer a task from inside its authorized recipient session:
 
 ```bash
-cat <<'EOF' | wardian reply ask_0123456789abcdef --status done --stdin
+cat <<'EOF' | wardian message reply ask_0123456789abcdef --status done --stdin
 Reviewed the patch. No blocking findings.
 EOF
 ```
 
-Send a prompt to an existing agent and wait for provider-confirmed completion
-of that delivered turn:
+Send information without starting or interrupting a turn:
 
 ```bash
-wardian send --file prompt.md --to coder-a1 --wait-until idle --timeout 10m
+wardian message send coder-a1 --file status-note.md
 ```
 
 Watch retained readable output for a deterministic marker:
@@ -699,41 +694,33 @@ Team mutation validation rejects duplicate team names, unknown agents, ambiguous
 
 Add `--until` to block until `status:<status>`, `output:<substring>`, `event:<kind>`, or `delivery:<state>` is observed. `watch` accepts only one name or UUID in this slice. `--follow` is reserved and returns `not_supported`.
 
-`ask <target>` sends one prompt to one Wardian-managed agent and creates a durable task interaction with a backend-owned `request_id`. When the target is off, normal message delivery uses that agent's headless provider transport; the target is shown as `Headless` while its agent-level lease is active, whether the provider turn resumes an existing session or starts fresh. Wardian appends reply instructions to the delivered prompt and waits for the target to execute `wardian reply <request-id> --status done --stdin`. The structured ask path completes only when the task interaction receives an explicit reply interaction. Echoed request IDs, terminal repaint text, and output markers do not complete the ask.
+`message` exposes the same canonical peer protocol as Wardian MCP. It requires
+a managed sender and the matching running application; it does not let a caller
+impersonate another agent. Targets are one exact agent name or UUID.
 
-Add comma-separated `--targets <name-or-uuid,...>` to fan the same structured request out to several explicitly named peers. Wardian appends reply instructions to each delivered prompt and waits for every target to execute `wardian reply <request-id> --status done --stdin`. The structured ask path completes only when each task interaction receives an explicit reply interaction. Echoed request IDs, terminal repaint text, and output markers do not complete an ask.
+- `message send` admits information without waking or interrupting the recipient.
+- `message followup` admits a task and returns its canonical `request_id` without
+  waiting for completion. Use `--idempotency-key` to identify one logical admission.
+- `message receive` reads a bounded inbox page. Reuse `next_cursor` to continue;
+  pass `ack_cursor` only for a page already consumed. An empty wait does not cancel
+  a task, consume a reply, or authorize a resend.
+- `message reply <request-id> --status done|blocked|failed` completes that request
+  as its authorized recipient. Final prose, echoed IDs, and Idle status are not replies.
+- `message interrupt <target>` explicitly requests interruption when supported.
 
-Single-target JSON responses include `request_id`, `reply.status`, `reply.body`, delivery evidence, watch events, and retained output. Multi-target responses contain `targets[]`, with a separate `request_id`, delivery evidence, reply/watch evidence, and outcome for each target. Outcomes are `completed`, `timed_out`, `delivery_failed`, or `cancelled`. Wardian delivers all multi-target requests before waiting; the shared timeout closes outstanding interactions with a failed reply, and cancelled requests are closed the same way, so late replies are rejected. `reply.status` can be `done`, `blocked`, or `failed`. If a target runtime is booting, busy, action-required, or missing a safe input channel, Wardian keeps the interaction queued and reports the delivery state instead of relying on a fixed sleep before terminal injection.
+Send, follow-up and reply bodies accept literal text, `--stdin`, or `--file`.
+`receive` accepts `--limit` from 1 to 100 and `--timeout-ms` from 0 to 60000.
+Replies are information records whose `parent_interaction_id` identifies the task.
 
-Use `--until output:<token>` only when you explicitly need the older output-substring mode, such as manual provider output matching or compatibility with agents that cannot run `wardian reply`. Output markers are weaker evidence than structured replies because they are derived from transcript or terminal output. Other explicit watch conditions such as `status:<status>`, `event:<kind>`, and `delivery:<state>` also preserve the watch-based behavior. Multi-target asks require the default `--until reply` mode. `ask` rejects `all`, `class:<ClassName>`, and reserved `--thread` usage with `not_supported`.
+Automatic dispatch and manual receive use the same durable task claim. Codex
+delivery uses the negotiated native connection; it never pastes a peer message
+into the terminal composer. Information push does not start a turn. Provider
+acceptance and task completion remain separate recorded outcomes.
 
-`reply <request-id> --status done|blocked|failed --stdin` records a structured reply through the live control endpoint. Wardian resolves the request ID against the interaction store. Unknown request IDs fail deterministically, and duplicate replies are rejected unless a future explicit idempotency policy says otherwise. When run from a Wardian-managed agent terminal, `WARDIAN_SESSION_ID` is used to verify that the reply came from the target agent for that request. Replies submitted outside a Wardian-managed session are accepted for this first live-control slice so a human terminal can unblock a request, but that caller identity is not authenticated.
-
-`send` submits a provider-aware message into the target agent runtime. Targets can be an agent name, UUID, `class:<ClassName>`, or `all`. By default:
-- `--to all` broadcasts within your **neighbors**, not globally.
-- `--to class:ClassName` resolves within your neighbors.
-- Bare agent names resolve neighbors-first; explicit UUIDs always work globally.
-
-For an ordinary `send`, the default `queue-if-busy` policy uses a live provider surface when it is safe. If the target is off or errored, Wardian instead runs the target agent headlessly. The target receives an agent-level lease for that turn, which makes it appear purple as `Headless`; a saved provider session is resumed when one exists, while fresh runs do not invent one. The response is retained in `wardian agent watch` and the conversation archive. `--timeout` bounds a headless delivery (up to 15 minutes); timeout or cancellation stops the provider's full process tree before its lease is released. If another sender acquires the lease first, the message is queued rather than retried against the provider. Resume, clear, pause, and remove take the same durable lease before their local lifecycle gate; if an active headless turn owns it, the lifecycle action stops before changing the agent. Use `--queue-policy mailbox-only` when the message must wait for a later interactive turn. `--as-command` stays mailbox-delivered while an agent is off because a provider slash command requires an interactive surface.
-
-Use `--scope all` to broadcast/resolve globally (orchestration across multiple neighbor sets only). `--stdin` reads the message from standard input, and `--file <path>` reads it from a file. By default, Wardian keeps inter-agent attribution and delivers messages with a `From <sender>:` prefix when sender context is available. Use `--as-command` for provider slash commands that must start at the first input token:
-
-```bash
-wardian send --as-command "/goal test" --to coder-a1
-printf '%s' '/status' | wardian send --stdin --as-command --to coder-a1
-```
-
-PowerShell:
-
-```powershell
-"/status" | wardian send --stdin --as-command --to coder-a1
-```
-
-`--as-command` sends the exact message body without the attribution prefix while still using the normal provider-aware submit path. It accepts only one explicit agent name or UUID, rejects `all` and `class:<ClassName>` with `not_supported`, and cannot be combined with `--thread`.
-
-`--wait-until <status>` is available for single-agent targets. A normal live send first waits for its own `submit_started` delivery boundary; `--wait-until idle` then waits for that exact provider turn's `turn_completed` event, rather than a retained or transient Idle observation. For an offline headless turn, `--wait-until idle` waits for that turn's durable `provider_applied` delivery event instead: the returned agent snapshot correctly remains `off` rather than inventing a live Idle session. `--thread` is reserved but not implemented yet; when the app is running, using it returns `not_supported`.
-
-Successful `send` responses include `input_mode` and `delivery[]`; command sends also include `delivery[].input_mode` so automation can confirm command delivery. Failed or partial delivery returns a nonzero exit with JSON on stderr and `details.delivery[]`, including `runtime_state`, `delivery_state`, and provider-specific input errors.
+The old top-level send/ask/reply commands, terminal queue policies, broadcast
+selectors, output-marker asks and messaging slash-command injection are removed.
+Historical legacy mailbox records are preserved but never drained or converted
+into new tasks. Use the human terminal directly for interactive provider commands.
 
 List filters:
 

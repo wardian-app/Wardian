@@ -114,7 +114,17 @@ impl NativeDeliveryBroker {
         // Fence queued Codex startups before taking the registry snapshot.
         self.shutting_down
             .store(true, std::sync::atomic::Ordering::Release);
-        let agents: Vec<_> = self.sessions.lock().await.keys().cloned().collect();
+        let mut agents: Vec<_> = self.sessions.lock().await.keys().cloned().collect();
+        for agent_id in self.pi_bridges.lock().await.keys() {
+            if !agents.iter().any(|known| known == agent_id) {
+                agents.push(agent_id.clone());
+            }
+        }
+        for agent_id in self.opencode_http.lock().await.keys() {
+            if !agents.iter().any(|known| known == agent_id) {
+                agents.push(agent_id.clone());
+            }
+        }
         let mut first_error = None;
         for agent in agents {
             if let Err(error) = self.dispose_agent(&agent).await {

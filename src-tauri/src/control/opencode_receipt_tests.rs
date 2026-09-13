@@ -1,6 +1,6 @@
 // Receipt integration regression included in control::tests to share its fixture.
 #[tokio::test]
-async fn message_delivery_writes_terminal_bytes_after_opencode_is_ready() {
+async fn human_prompt_waits_for_opencode_receipt() {
     let _home = TestWardianHome::new_async().await;
     let xdg_data_home = _home.path().join("xdg-data");
     let opencode_dir = xdg_data_home.join("opencode");
@@ -79,17 +79,12 @@ async fn message_delivery_writes_terminal_bytes_after_opencode_is_ready() {
         .expect("insert OpenCode receipt");
     });
 
-    let delivery = deliver_message_to_target(
+    let delivery = deliver_prompt_to_agent(
         None,
         &state,
         "OpenCodeOne",
         "hello",
-        None,
         MessageInputMode::Message,
-        QueuePolicy::QueueIfBusy,
-        None,
-        None,
-        false,
     );
     tokio::pin!(delivery);
     tokio::select! {

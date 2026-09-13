@@ -289,6 +289,36 @@ impl OpenCodeHttpOwner {
         })
     }
 
+    /// Prove that the launch listener does not accept an ambient unauthenticated
+    /// request. A healthy response here would mean that the child-only writer
+    /// credential is not an effective boundary, so registration fails closed.
+    pub async fn verify_unauthenticated_probe(&self) -> Result<(), OpenCodeHttpError> {
+        self.ensure_open()?;
+        let response = self
+            .client
+            .get(self.root_url("global/health")?)
+            .send()
+            .await
+            .map_err(|_| {
+                OpenCodeHttpError::new(
+                    OpenCodeHttpErrorCode::TransportUnavailable,
+                    false,
+                    None,
+                    "OpenCode unauthenticated probe could not reach the listener",
+                )
+            })?;
+        let status = response.status();
+        if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            return Ok(());
+        }
+        Err(OpenCodeHttpError::new(
+            OpenCodeHttpErrorCode::AuthenticationFailed,
+            false,
+            Some(status.as_u16()),
+            "OpenCode listener accepted an unauthenticated request",
+        ))
+    }
+
     pub async fn session_activity(&self) -> Result<OpenCodeSessionActivity, OpenCodeHttpError> {
         self.ensure_open()?;
         let value = self.get_json(self.root_url("session/status")?).await?;
@@ -601,8 +631,35 @@ fn same_directory(remote: &str, expected: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+    use std::net::TcpListener;
+
     use super::*;
-    use crate::delivery::opencode_http::{OpenCodeHttpLaunchPlan, OpenCodePromptOptions};
+    use crate::delivery::opencode_http::{
+        OpenCodeHttpLaunchPlan, OpenCodeHttpLaunchProof, OpenCodePromptOptions,
+    };
+
+    fn owner_for_test(port: u16, generation: u64, runtime_generation: u64) -> OpenCodeHttpOwner {
+        let workspace = std::env::current_dir().expect("test workspace");
+        let plan =
+            OpenCodeHttpLaunchPlan::new(generation, runtime_generation, port).expect("launch plan");
+        let binding = plan
+            .bind(OpenCodeHttpLaunchProof {
+                agent_id: "agent-1".into(),
+                provider_session_id: "ses_test".into(),
+                process_identity: "pid:1".into(),
+                listener_identity: "listener:1".into(),
+                workspace,
+                config_fingerprint: "config-fingerprint".into(),
+                server_version: None,
+            })
+            .expect("launch proof");
+        OpenCodeHttpOwner::bind(binding).expect("owner binding")
+    }
+
+    fn prompt_for_test() -> OpenCodePrompt {
+        OpenCodePrompt::new("msg_test", "native task", Default::default()).expect("prompt")
+    }
 
     #[test]
     fn launch_plan_only_adds_loopback_network_arguments() {
@@ -651,5 +708,57 @@ mod tests {
         };
         assert!(message.is_exact_user_prompt("ses_1", &prompt));
         assert!(!message.is_exact_user_prompt("ses_2", &prompt));
+    }
+
+    #[tokio::test]
+    async fn submit_rejects_stale_session_generation_before_network() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let owner = owner_for_test(port, 7, 11);
+
+        let error = owner
+            .submit_once(8, 11, &prompt_for_test())
+            .await
+            .expect_err("stale generation");
+
+        assert_eq!(error.code, OpenCodeHttpErrorCode::StaleGeneration);
+        assert!(!error.provider_boundary_crossed);
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        assert!(
+            listener.accept().is_err(),
+            "stale request touched the network"
+        );
+    }
+
+    #[tokio::test]
+    async fn uncertain_submission_marks_message_attempted_and_forbids_replay() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request accepted");
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            drop(stream);
+        });
+        let owner = owner_for_test(port, 7, 11);
+        let prompt = prompt_for_test();
+
+        let first = owner
+            .submit_once(7, 11, &prompt)
+            .await
+            .expect_err("closed owner response is uncertain");
+        assert_eq!(first.code, OpenCodeHttpErrorCode::SubmittedUnconfirmed);
+        assert!(first.provider_boundary_crossed);
+
+        let second = owner
+            .submit_once(7, 11, &prompt)
+            .await
+            .expect_err("uncertain message must not replay");
+        assert_eq!(second.code, OpenCodeHttpErrorCode::ReplayRefused);
+        assert!(!second.provider_boundary_crossed);
+
+        server.join().expect("server thread");
     }
 }

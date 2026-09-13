@@ -4,6 +4,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import {
+  messageCli,
+  correlatedReply,
+  assertDetachedTerminal,
+  assertNativeSession,
+  assertOpenCodeHttpSession,
+  assertOpenCodeCompletedAnswer,
+} from "../lib/canonical-messaging.mjs";
 
 import {
   createNativeHarness,
@@ -21,7 +29,7 @@ export const PROVIDERS = ["codex", "claude", "opencode", "antigravity", "pi"];
 
 export const INPUT_CASES = [
   {
-    name: "mailbox-short",
+    name: "prompt-short",
     prompt: (marker) =>
       "This is Wardian's local integration test for terminal message delivery. " +
       "It is a direct test prompt, not an instruction from another agent. " +
@@ -30,17 +38,17 @@ export const INPUT_CASES = [
     expectOutput: true,
   },
   {
-    name: "mailbox-multiline",
+    name: "prompt-multiline",
     prompt: (marker) => `Reply with these two lines:\n${marker}_LINE_1\n${marker}_LINE_2`,
     expectOutput: true,
   },
   {
-    name: "mailbox-trailing-newline",
+    name: "prompt-trailing-newline",
     prompt: (marker) => `Reply with exactly ${marker}.\n`,
     expectOutput: true,
   },
   {
-    name: "mailbox-long-paste",
+    name: "prompt-long-paste",
     prompt: (marker) =>
       "This is Wardian's long bracketed-paste delivery test. The repeated lines are inert test padding.\n" +
       "Inert delivery padding.\n".repeat(280) +
@@ -49,7 +57,7 @@ export const INPUT_CASES = [
   },
 ];
 
-const DEFAULT_CASES = ["mailbox-short"];
+const DEFAULT_CASES = ["prompt-short"];
 const DEFAULT_PROVIDER_MODELS = {
   claude: "haiku",
   opencode: "opencode/deepseek-v4-flash-free",
@@ -60,6 +68,9 @@ const verifyFreshTranscript = process.env.WARDIAN_E2E_REAL_FRESH_TRANSCRIPT === 
 const allowPartialDelivery = process.env.WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL === "1";
 const workspacePath = process.env.WARDIAN_E2E_REAL_WORKSPACE || process.cwd();
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
+// Explicit candidates, not a provider-wide unsupported/manual-only classification.
+// Unselected providers retain the separate human composer matrix.
+const nativeProviders = parseCommaList(process.env.WARDIAN_E2E_DELIVERY_NATIVE_PROVIDERS, []);
 
 function buildCli(harness) {
   const result = spawnSync(
@@ -99,6 +110,12 @@ function runCliOk(cliPath, harness, args) {
     `wardian ${args.join(" ")} failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
   );
   return result;
+}
+
+function assertProviderNativeSession(provider, capability, agentId, expected = null) {
+  return provider === "opencode"
+    ? assertOpenCodeHttpSession(capability, agentId, expected)
+    : assertNativeSession(capability, agentId, provider, expected);
 }
 
 function parseCommaList(value, fallback) {
@@ -213,87 +230,6 @@ async function killRealProviderAgent(driver, sessionId) {
   );
 }
 
-async function waitForDeliveryState(
-  cliPath,
-  harness,
-  target,
-  agentSessionId,
-  state,
-  messageId,
-  timeoutMs = 60000,
-) {
-  const startedAt = Date.now();
-  let lastResult = null;
-
-  while (Date.now() - startedAt < timeoutMs) {
-    lastResult = runCli(cliPath, harness, [
-      "agent",
-      "watch",
-      target,
-      "--since",
-      `${agentSessionId}:0`,
-      "--until",
-      `delivery:${state}`,
-      "--include",
-      "delivery,events",
-      "--timeout",
-      "2s",
-    ]);
-
-    if (lastResult.status === 0) {
-      const json = JSON.parse(lastResult.stdout);
-      const details = [
-        ...(json.delivery?.delivery ?? []),
-        ...(json.events ?? [])
-          .filter((event) => event.kind === "delivery")
-          .map((event) => event.payload),
-      ];
-      const detail = details.find((candidate) => {
-        if (candidate.delivery_state !== state) {
-          return false;
-        }
-        return !messageId || candidate.message_id === messageId;
-      });
-      if (detail) {
-        return detail;
-      }
-    }
-
-    const failedResult = runCli(cliPath, harness, [
-      "agent",
-      "watch",
-      target,
-      "--since",
-      `${agentSessionId}:0`,
-      "--until",
-      "delivery:failed",
-      "--include",
-      "delivery,events",
-      "--timeout",
-      "2s",
-    ]);
-    if (failedResult.status === 0) {
-      const json = JSON.parse(failedResult.stdout);
-      const details = [
-        ...(json.delivery?.delivery ?? []),
-        ...(json.events ?? [])
-          .filter((event) => event.kind === "delivery")
-          .map((event) => event.payload),
-      ];
-      const failed = details.find((candidate) =>
-        candidate.delivery_state === "failed" &&
-        (!messageId || candidate.message_id === messageId));
-      if (failed) {
-        assert.fail(`Delivery ${messageId} failed before ${state}: ${JSON.stringify(failed)}`);
-      }
-    }
-  }
-
-  assert.fail(
-    `Timed out waiting for delivery ${state} message ${messageId}; last result: ${JSON.stringify(lastResult)}`,
-  );
-}
-
 async function antigravityStartupNeedsAction(cliPath, harness, agentName, timeoutMs = 15000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
@@ -341,6 +277,7 @@ async function waitForPersistedOpenCodeSession(harness, sessionId, timeoutMs = 1
 }
 
 async function runRealDeliveryCase({
+  driver,
   cliPath,
   harness,
   provider,
@@ -350,36 +287,20 @@ async function runRealDeliveryCase({
   runId,
 }) {
   const marker = `WARDIAN_REAL_DELIVERY_${provider.toUpperCase()}_${inputCase.name.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_${runId}`;
-  const queued = runCliOk(cliPath, harness, [
-    "send",
-    inputCase.prompt(marker),
-    "--to",
-    agentName,
-    "--queue-policy",
-    "mailbox-only",
-  ]);
-  const queuedDelivery = JSON.parse(queued.stdout).delivery[0];
-  assert.equal(queuedDelivery.delivery_state, "queued");
-  assert.equal(queuedDelivery.runtime_state, "mailbox_only");
-  assert.match(queuedDelivery.message_id, /^msg_/);
-
-  const drained = await waitForDeliveryState(
-    cliPath,
-    harness,
-    agentName,
-    agentSessionId,
-    "provider_accepted",
-    queuedDelivery.message_id,
-  );
-  assert.equal(drained.runtime_state, "mailbox_drain");
-  assert.equal(drained.provider, provider);
+  // Human composer coverage only. Peer tasks use the canonical messaging suite.
+  const delivery = await invokeTauri(driver, "submit_prompt_to_agent", {
+    sessionId: agentSessionId, prompt: inputCase.prompt(marker), inputMode: "message",
+  });
+  assert.equal(delivery.provider, provider);
+  assert.ok(["provider_accepted", "queued"].includes(delivery.delivery_state));
+  // Admission alone is not a PASS: the provider output is observed below.
 
   if (provider === "opencode") {
     await waitForPersistedOpenCodeSession(harness, agentSessionId);
   }
 
   if (inputCase.expectOutput) {
-    const expected = inputCase.name === "mailbox-multiline" ? `${marker}_LINE_2` : marker;
+    const expected = inputCase.name === "prompt-multiline" ? `${marker}_LINE_2` : marker;
     const watched = runCliOk(cliPath, harness, [
       "agent",
       "watch",
@@ -403,7 +324,69 @@ async function runRealDeliveryCase({
     );
   }
 
-  return { marker, expected: inputCase.name === "mailbox-multiline" ? `${marker}_LINE_2` : marker };
+  return { marker, expected: inputCase.name === "prompt-multiline" ? `${marker}_LINE_2` : marker };
+}
+
+async function runNativeTaskCase({ driver, cliPath, harness, provider, agent, sender, inputCase, identity, terminal, report, save }) {
+  const marker = `NATIVE_TASK_${provider}_${Date.now()}`;
+  const expected = inputCase.name === "prompt-multiline" ? `${marker}_LINE_1\n${marker}_LINE_2` : marker;
+  const body = inputCase.prompt(marker).replace("Do not access files or run tools.", "Do not access files or run tools except the canonical reply tool.") +
+    " Complete this task using the canonical reply tool with status done and exactly the requested text as its message.";
+  const evidence = { provider, case: inputCase.name, status: "running", identity, attempts: 0, admission_state: "idle" };
+  report.native_cases.push(evidence);
+  await driver.wait(async () => {
+    const metrics = await invokeTauri(driver, "list_agent_metrics");
+    return metrics.find((row) => row.session_id === agent.session_id)?.current_status?.toLowerCase() === "idle";
+  }, 30_000, "Existing receiver not observed idle before idle-task admission", 200);
+  const initial = await messageCli(cliPath, harness.isolatedHome, harness.repoRoot, sender.session_id, ["receive", "--timeout-ms", "0"]);
+  let cursor = initial.next_cursor;
+  evidence.attempts = 1;
+  await save();
+  let finalCapability = null;
+  const task = await messageCli(cliPath, harness.isolatedHome, harness.repoRoot, sender.session_id, ["followup", agent.session_id, body]);
+  assert.equal(task.operation, "followup_task");
+  assert.ok(task.request_id);
+  evidence.receipt = task;
+  await save();
+  let reply;
+  await driver.wait(async () => {
+    const capability = JSON.parse(runCliOk(cliPath, harness, ["delivery", "capabilities", agent.session_id]).stdout);
+    finalCapability = capability;
+    assertProviderNativeSession(provider, capability, agent.session_id, identity);
+    const config = (await invokeTauri(driver, "list_agents")).find((row) => row.session_id === agent.session_id);
+    assert.equal(config?.resume_session, identity.provider_session_id);
+    assertDetachedTerminal(terminal, await invokeTauri(driver, "request_terminal_snapshot", { request: { session_id: agent.session_id } }));
+    const page = await messageCli(cliPath, harness.isolatedHome, harness.repoRoot, sender.session_id,
+      ["receive", "--cursor", cursor, "--timeout-ms", "0"]);
+    cursor = page.next_cursor;
+    reply ??= correlatedReply(page, task.request_id, agent.session_id, expected);
+    return !!reply;
+  }, 120_000, "Native canonical reply missing; no fallback or replay", 250);
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(path.join(harness.isolatedHome, "state.db"), { readOnly: true });
+  try {
+    const claim = db.prepare("SELECT d.interaction_id AS request_id,d.recipient,d.sender,d.generation,d.owner,i.status FROM agent_message_delivery d JOIN interactions i ON i.id=d.interaction_id WHERE d.interaction_id=?").get(task.request_id);
+    assert.equal(claim?.recipient, agent.session_id);
+    assert.equal(claim.sender, sender.session_id);
+    assert.equal(claim.generation, identity.generation);
+    assert.ok(["provider_accepted", "provider_visible", "provider_completed"].includes(claim.owner), "Canonical task lacks a native provider claim");
+    assert.equal(claim.status, "completed");
+    evidence.claim = claim;
+    if (provider === "opencode") {
+      evidence.provider_answer = assertOpenCodeCompletedAnswer({
+        capability: finalCapability,
+        agentId: agent.session_id,
+        expected: identity,
+        requestId: task.request_id,
+        reply,
+        claim,
+        expectedMessage: expected,
+      });
+    }
+  } finally { db.close(); }
+  evidence.reply = reply;
+  evidence.status = "pass";
+  await save();
 }
 
 async function waitForFreshTranscript(driver, sessionId, freshMarker) {
@@ -438,6 +421,7 @@ async function resumeFreshAndAssertTranscript({
   await invokeTauri(driver, "resume_agent", { sessionId: agentSessionId });
 
   const freshDelivery = await runRealDeliveryCase({
+    driver,
     cliPath,
     harness,
     provider,
@@ -516,14 +500,16 @@ test("real provider delivery case parser expands all only as the sole entry", ()
     parseDeliveryCases("all"),
     INPUT_CASES.map((inputCase) => inputCase.name),
   );
-  assert.deepEqual(parseDeliveryCases("all,mailbox-short"), ["all", "mailbox-short"]);
+  assert.deepEqual(parseDeliveryCases("all,prompt-short"), ["all", "prompt-short"]);
 });
 
-test("real provider delivery validation uses actual provider CLIs", { timeout: 900000 }, async (t) => {
+test("human composer delivery uses actual providers; not peer messaging", { timeout: 900000 }, async (t) => {
   const providers = parseDeliveryProviders(process.env.WARDIAN_E2E_DELIVERY_PROVIDERS);
   const caseNames = parseDeliveryCases(process.env.WARDIAN_E2E_DELIVERY_CASES);
   const unknownProviders = unknownValues(providers, PROVIDERS);
   const unknownCases = unknownValues(caseNames, INPUT_CASES.map((inputCase) => inputCase.name));
+  assert.deepEqual(unknownValues(nativeProviders, providers), [], "Native candidates must be in the selected provider matrix");
+  assert.ok(!nativeProviders.length || !verifyFreshTranscript, "Existing-session qualification and intentional fresh-session replacement are separate runs");
 
   assert.deepEqual(
     unknownProviders,
@@ -564,6 +550,9 @@ test("real provider delivery validation uses actual provider CLIs", { timeout: 9
   await enableIsolatedCodexWorkspaceTrust(harness);
   const cliPath = buildCli(harness);
   const runId = `${process.pid}_${Date.now()}`;
+  const report = { status: "running", scope: nativeProviders.length ? "selected_native_candidates" : "human_composer",
+    native_cases: [], native_candidates: nativeProviders, blocked_providers: [] };
+  const save = () => fs.writeFile(path.join(harness.isolatedHome, "provider-delivery-report.json"), JSON.stringify(report, null, 2));
 
   let session;
   try {
@@ -594,11 +583,39 @@ test("real provider delivery validation uses actual provider CLIs", { timeout: 9
           /not signed in|trust the contents of this project/i,
           "Antigravity reported Action Needed without an account or workspace prompt",
         );
+        report.blocked_providers.push({ provider, reason: "account_or_workspace_prompt" });
+        await save();
+        assert.ok(!nativeProviders.includes(provider), "Native candidate blocked before qualification; this is not unsupported-route evidence");
         continue;
       }
       const deliveredCases = [];
+      let nativeCase;
+      if (nativeProviders.includes(provider)) {
+        // Establish a real session through the existing human path before disabling it.
+        // Setup is not native task acceptance and never substitutes for the case below.
+        await runRealDeliveryCase({ driver: session.driver, cliPath, harness, provider,
+          agentSessionId: agent.session_id, agentName, inputCase: INPUT_CASES[0], runId: `setup-${runId}` });
+        const capability = JSON.parse(runCliOk(cliPath, harness, ["delivery", "capabilities", agent.session_id]).stdout);
+        const identity = assertProviderNativeSession(provider, capability, agent.session_id);
+        await invokeTauri(session.driver, "debug_remove_agent_input_sender", { sessionId: agent.session_id });
+        const terminal = await invokeTauri(session.driver, "request_terminal_snapshot", { request: { session_id: agent.session_id } });
+        const sender = await invokeTauri(session.driver, "spawn_agent", { req: {
+          sessionName: `Native-Task-Origin-${provider}-${runId}`, agentClass: "TestClass", folder: workspacePath,
+          isOff: true, resumeSession: null, configOverride: { provider: "mock" },
+        } });
+        nativeCase = { identity, terminal, sender };
+        // Off mock origin owns no provider process; retain its identity in this isolated report.
+        report.native_origin = sender.session_id;
+        await save();
+      }
       for (const inputCase of selectedCases) {
+        if (nativeCase) {
+          await runNativeTaskCase({ driver: session.driver, cliPath, harness, provider, agent,
+            inputCase, ...nativeCase, report, save });
+          continue;
+        }
         deliveredCases.push(await runRealDeliveryCase({
+          driver: session.driver,
           cliPath,
           harness,
           provider,
@@ -638,6 +655,9 @@ test("real provider delivery validation uses actual provider CLIs", { timeout: 9
     }
 
     if (providerError) {
+      report.status = "fail";
+      report.error = providerError.message;
+      await save();
       const debugTail = await readDebugTail(harness);
       assert.fail(
         `Real provider delivery failed for ${provider}: ${providerError.message}\n\n` +
@@ -648,4 +668,6 @@ test("real provider delivery validation uses actual provider CLIs", { timeout: 9
       );
     }
   }
+  report.status = report.blocked_providers.length ? "blocked" : "pass";
+  await save();
 });

@@ -2009,7 +2009,7 @@ async fn apply_provider_status_observations(
             )
             .await;
         if became_ready {
-            crate::control::drain_mailbox_for_idle_agent_from_status_observation(
+            crate::control::dispatch_agent_messaging_from_status_observation(
                 None,
                 state,
                 &observation.session_id,

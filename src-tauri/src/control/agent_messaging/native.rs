@@ -149,13 +149,38 @@ pub(super) async fn dispatch_attached_task(
         .current_provider_input_generation(&info.uuid)
         .await
         .unwrap_or(0);
-    if state
-        .native_delivery
-        .codex_binding(&info.uuid, generation)
-        .await
-        .is_err()
-    {
-        return Ok(());
+    match info.provider.as_str() {
+        "codex" => {
+            if state
+                .native_delivery
+                .codex_binding(&info.uuid, generation)
+                .await
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+        "pi" => {
+            if state
+                .native_delivery
+                .pi_binding(&info.uuid, generation)
+                .await
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+        "opencode" => {
+            if state
+                .native_delivery
+                .opencode_http_admission(&info.uuid, generation, &info.config, &info.cwd)
+                .await
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+        _ => return Ok(()),
     }
     let Some(claim) = state
         .interactions
@@ -169,16 +194,38 @@ pub(super) async fn dispatch_attached_task(
     drop(lifecycle);
     // The actor revalidates this generation before writing. No lifecycle lock
     // is held while waiting for native protocol acknowledgement.
-    let result = state
-        .native_delivery
-        .codex_followup(&info.uuid, generation, &claim.record.id, &context)
-        .await;
+    let result = match info.provider.as_str() {
+        "codex" => state
+            .native_delivery
+            .codex_followup(&info.uuid, generation, &claim.record.id, &context)
+            .await
+            .map(|receipt| receipt.delivery_state),
+        "pi" => state
+            .native_delivery
+            .pi_followup(&info.uuid, generation, &claim.record.id, &context)
+            .await
+            .map(|receipt| receipt.delivery_state),
+        "opencode" => {
+            state
+                .native_delivery
+                .opencode_http_followup(
+                    &info.uuid,
+                    generation,
+                    &claim.record.id,
+                    &context,
+                    &info.config,
+                    &info.cwd,
+                )
+                .await
+        }
+        _ => return Ok(()),
+    };
     settle(
         state,
         &claim,
         result
             .as_ref()
-            .map(|receipt| receipt.delivery_state.as_str())
+            .map(String::as_str)
             .map_err(|error| error.provider_boundary_crossed),
     )
     .await?;

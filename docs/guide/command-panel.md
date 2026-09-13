@@ -54,11 +54,13 @@ Broadcast sends freeform text from the textarea to:
 
 Behavior:
 
-- prompt injection uses Wardian's structured prompt delivery path, not raw
-  terminal keystrokes
-- delivery evidence is recorded in the same shape as CLI `wardian send`
-  delivery evidence
+- human prompt submission uses Wardian's provider delivery adapter
+- delivery evidence records the selected target and submission outcome
 - one submission fan-outs to all chosen agent sessions
+
+This is an explicit human submission. Automatic peer tasks and active-agent
+automation use the canonical messaging service; Codex receives those tasks
+through its native connection without pasting into the terminal composer.
 
 ## Selection Rules
 

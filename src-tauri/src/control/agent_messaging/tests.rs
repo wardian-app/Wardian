@@ -2,6 +2,7 @@
 use super::super::test_support::TestWardianHome;
 use super::*;
 use wardian_core::agent_messaging::{AgentMessagePage, TaskDeliveryOwner};
+use wardian_core::control::ReplyStatus;
 
 async fn agent(state: &AppState, id: &str, name: &str) {
     let agent = super::super::tests::test_agent(id, name, "Test");
@@ -70,6 +71,14 @@ fn stored_status(id: &str) -> String {
         )
     })
     .unwrap()
+}
+
+#[test]
+fn prepared_opencode_attached_task_selects_native_before_surface_fallback() {
+    assert!(native_attached_owner_is_selected("opencode", true));
+    assert!(!native_attached_owner_is_selected("opencode", false));
+    assert!(!native_attached_owner_is_selected("pi", false));
+    assert!(!native_attached_owner_is_selected("claude", true));
 }
 
 fn count(table: &str) -> i64 {
@@ -727,122 +736,6 @@ async fn startup_failure_after_deletion_does_not_recreate_claim_or_reply() {
 }
 
 #[tokio::test]
-async fn legacy_reply_to_v2_task_uses_atomic_available_reply() {
-    let _home = TestWardianHome::new_async().await;
-    let state = AppState::new();
-    agent(&state, "sender", "Sender").await;
-    agent(&state, "receiver", "Receiver").await;
-    let task = task(&state).await;
-    let request_id = &task.record.id;
-    for caller in [None, Some(origin("sender"))] {
-        assert_eq!(
-            submit_structured_reply(
-                &state,
-                request_id,
-                ReplyStatus::Done,
-                "legacy\nλ",
-                caller.as_ref(),
-                None
-            )
-            .await
-            .unwrap_err()
-            .code,
-            "unauthorized"
-        );
-    }
-    store::with_db(|conn| {
-        conn.execute_batch("CREATE TRIGGER fail_reply_available BEFORE INSERT ON agent_message_availability BEGIN SELECT RAISE(ABORT,'injected'); END;")?; Ok(())
-    }).unwrap();
-    assert!(submit_structured_reply(
-        &state,
-        request_id,
-        ReplyStatus::Done,
-        "legacy\nλ",
-        Some(&origin("receiver")),
-        None
-    )
-    .await
-    .is_err());
-    assert_eq!(stored_status(request_id), "awaiting_reply");
-    assert_eq!(
-        state.interactions.interaction(request_id).await.unwrap(),
-        task.record
-    );
-    assert!(state
-        .interactions
-        .structured_reply(request_id)
-        .await
-        .is_none());
-    assert_eq!(count("interactions"), 1);
-    assert_eq!(count("structured_replies"), 0);
-    assert_eq!(count("agent_message_availability"), 1);
-    store::with_db(|conn| {
-        conn.execute_batch("DROP TRIGGER fail_reply_available")?;
-        Ok(())
-    })
-    .unwrap();
-    let reply = submit_structured_reply(
-        &state,
-        request_id,
-        ReplyStatus::Done,
-        "legacy\nλ",
-        Some(&origin("receiver")),
-        None,
-    )
-    .await
-    .unwrap();
-    assert_eq!(reply.request_id, *request_id);
-    assert_eq!(reply.source_session_id.as_deref(), Some("receiver"));
-    assert_eq!(reply.body, "legacy\nλ");
-    assert_eq!(stored_status(request_id), "completed");
-    assert_eq!(
-        state
-            .interactions
-            .structured_reply(request_id)
-            .await
-            .unwrap(),
-        reply
-    );
-    let page = receive(&state, "sender").await;
-    assert_eq!(page.messages.len(), 1);
-    assert_eq!(
-        page.messages[0].parent_interaction_id.as_deref(),
-        Some(request_id.as_str())
-    );
-    assert_eq!(page.messages[0].message, reply.body);
-    assert_eq!(
-        submit_structured_reply(
-            &state,
-            request_id,
-            ReplyStatus::Done,
-            "legacy\nλ",
-            Some(&origin("receiver")),
-            None
-        )
-        .await
-        .unwrap(),
-        reply
-    );
-    assert_eq!(
-        submit_structured_reply(
-            &state,
-            request_id,
-            ReplyStatus::Done,
-            "different",
-            Some(&origin("receiver")),
-            None
-        )
-        .await
-        .unwrap_err()
-        .code,
-        "conflicting_reply"
-    );
-    assert_eq!(count("structured_replies"), 1);
-    assert_eq!(count("interactions"), 2);
-    assert_eq!(receive(&state, "sender").await, page);
-}
-
-#[tokio::test]
 async fn discovery_uses_normal_neighbors_including_self_and_excludes_unrelated_roster() {
     let home = TestWardianHome::new_async().await;
     let state = AppState::new();
@@ -885,6 +778,7 @@ async fn deleted_receiver_cannot_recreate_cursor_metadata_after_authentication()
     authenticate(&state, "receiver").await.unwrap();
     let page = receive(&state, "receiver").await;
     assert_eq!(page.messages[0].interaction_id, task.record.id);
+    assert!(page.messages[0].host_automation.is_none());
     assert!(count("agent_message_cursors") > 0);
     // Model an already-authenticated call retaining a roster entry while durable
     // deletion commits. InteractionState's own fence must reject the late read.
@@ -1338,4 +1232,254 @@ async fn context_failure_releases_claim_before_any_provider_boundary() {
     .unwrap();
     assert_eq!(owner, "stored");
     assert!(!store::with_db(|conn| store::owns_claim(conn, &claim)).unwrap());
+}
+
+#[tokio::test]
+async fn retired_records_survive_restore_and_idle_without_pty_or_v2_replay() {
+    use wardian_core::control::{MailboxDeliveryPhase, MailboxMessageRecord, MailboxMessageStatus};
+    let _home = TestWardianHome::new_async().await;
+    let original = AppState::new();
+    for (index, (status, phase)) in [
+        (MailboxMessageStatus::Pending, MailboxDeliveryPhase::Queued),
+        (
+            MailboxMessageStatus::InFlight,
+            MailboxDeliveryPhase::Dispatching,
+        ),
+        (
+            MailboxMessageStatus::InFlight,
+            MailboxDeliveryPhase::Submitted,
+        ),
+        (
+            MailboxMessageStatus::Delivered,
+            MailboxDeliveryPhase::Terminal,
+        ),
+        (MailboxMessageStatus::Failed, MailboxDeliveryPhase::Terminal),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let message = original
+            .interactions
+            .create_message_durable(
+                Some("old-sender".into()),
+                vec!["receiver".into()],
+                InteractionBodyRef::Inline {
+                    body: format!("old payload {index}"),
+                },
+            )
+            .await
+            .unwrap();
+        wardian_core::db::upsert_mailbox_message(&MailboxMessageRecord {
+            id: format!("legacy-{index}"),
+            interaction_id: message.id,
+            target_session_id: "receiver".into(),
+            body: format!("old payload {index}"),
+            input_mode: MessageInputMode::Message,
+            queue_policy: QueuePolicy::QueueIfBusy,
+            approval_action: None,
+            origin: Some(origin("old-sender")),
+            created_at: "2020-01-01T00:00:00Z".into(),
+            status,
+            phase,
+        })
+        .unwrap();
+    }
+    original
+        .interactions
+        .create_task(
+            None,
+            "receiver".into(),
+            InteractionBodyRef::Inline {
+                body: "old automation".into(),
+            },
+        )
+        .await;
+    let rows = wardian_core::db::list_mailbox_messages().unwrap();
+    let interactions = wardian_core::db::list_interaction_records().unwrap();
+    for _ in 0..2 {
+        let restored = AppState::new();
+        agent(&restored, "receiver", "Receiver").await;
+        {
+            let agents = restored.agents.lock().await;
+            let recipient = agents.get("receiver").unwrap();
+            recipient.config.lock().unwrap().provider = "codex".into();
+            *recipient.current_status.lock().unwrap() = "Idle".into();
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        restored
+            .terminal_sessions
+            .start_or_replace_runtime(
+                "receiver",
+                crate::state::terminal_session::TerminalRuntimeHandles::new(tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry { cols: 80, rows: 24 },
+            )
+            .await
+            .unwrap();
+        restored.interactions.hydrate_from_persistence().await;
+        super::super::dispatch_agent_messaging_from_status_observation(None, &restored, "receiver")
+            .await;
+        assert!(
+            rx.try_recv().is_err(),
+            "legacy restore/idle must never write PTY"
+        );
+        assert!(receive(&restored, "receiver").await.messages.is_empty());
+        assert!(
+            store::with_db(|conn| store::next_pending_task_id(conn, "receiver"))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(wardian_core::db::list_mailbox_messages().unwrap(), rows);
+        assert_eq!(
+            wardian_core::db::list_interaction_records().unwrap(),
+            interactions
+        );
+        for record in &interactions {
+            assert_eq!(
+                restored.interactions.interaction(&record.id).await.as_ref(),
+                Some(record)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn host_automation_uses_canonical_manual_claim_and_authorized_correlated_reply() {
+    let _home = TestWardianHome::new_async().await;
+    let state = AppState::new();
+    agent(&state, "receiver", "Receiver").await;
+    agent(&state, "other", "Other").await;
+    let task = state
+        .interactions
+        .admit_host_automation_task("run-1288", "review", "receiver", "host work")
+        .await
+        .unwrap();
+    assert_eq!(task.record.sender_session_id, None);
+    assert_eq!(
+        store::with_db(|conn| store::host_automation_provenance(conn, &task.record.id)).unwrap(),
+        Some(wardian_core::agent_messaging::HostAutomationProvenance {
+            run_id: "run-1288".into(),
+            node: "review".into()
+        })
+    );
+    assert_eq!(
+        state.agents.lock().await.len(),
+        2,
+        "host is not a fake agent"
+    );
+    let page = receive(&state, "receiver").await;
+    assert_eq!(page.messages.len(), 1);
+    assert_eq!(page.messages[0].interaction_id, task.record.id);
+    assert_eq!(
+        page.messages[0].host_automation.as_ref().unwrap().run_id,
+        "run-1288"
+    );
+    assert!(
+        state
+            .interactions
+            .claim_agent_task("receiver", 0)
+            .await
+            .unwrap()
+            .is_none(),
+        "manual receive owns the exact canonical task"
+    );
+    let request = || Request::Reply {
+        request_id: task.record.id.clone(),
+        status: ReplyStatus::Done,
+        message: "exact host result".into(),
+    };
+    assert_eq!(
+        handle_in_state(None, &state, request(), origin("other"))
+            .await
+            .unwrap_err()
+            .code,
+        "unauthorized"
+    );
+    assert!(
+        handle_in_state(None, &state, request(), origin("host:automation:run-1288"))
+            .await
+            .is_err()
+    );
+    handle_in_state(None, &state, request(), origin("receiver"))
+        .await
+        .unwrap();
+    handle_in_state(None, &state, request(), origin("receiver"))
+        .await
+        .unwrap();
+    let reply = state
+        .interactions
+        .structured_reply(&task.record.id)
+        .await
+        .unwrap();
+    assert_eq!(reply.source_session_id.as_deref(), Some("receiver"));
+    assert_eq!(reply.body, "exact host result");
+    assert_eq!(count("structured_replies"), 1);
+    assert_eq!(
+        count("agent_message_availability"),
+        1,
+        "host reply is durable without a fake recipient inbox"
+    );
+}
+
+#[tokio::test]
+async fn host_automation_native_claim_keeps_provenance_and_atomic_reply() {
+    let _home = TestWardianHome::new_async().await;
+    let state = AppState::new();
+    let task = state
+        .interactions
+        .admit_host_automation_task("run-native", "build", "receiver", "work")
+        .await
+        .unwrap();
+    let claim = state
+        .interactions
+        .claim_agent_task("receiver", 0)
+        .await
+        .unwrap()
+        .unwrap();
+    let frame: serde_json::Value =
+        serde_json::from_str(&prepare_claim_context(&state, &claim).await.unwrap()).unwrap();
+    assert_eq!(frame["host_automation"]["run_id"], "run-native");
+    assert_eq!(frame["host_automation"]["node"], "build");
+    assert!(state
+        .interactions
+        .receive_agent_messages("receiver", None, None, 100)
+        .await
+        .unwrap()
+        .messages
+        .is_empty());
+    store::with_db(|conn| { conn.execute_batch("CREATE TRIGGER fail_host_reply BEFORE INSERT ON structured_replies BEGIN SELECT RAISE(ABORT,'injected'); END;")?; Ok(()) }).unwrap();
+    assert!(state
+        .interactions
+        .reply_agent_message("receiver", &task.record.id, ReplyStatus::Done, "result")
+        .await
+        .is_err());
+    assert_eq!(stored_status(&task.record.id), "awaiting_reply");
+    assert!(state
+        .interactions
+        .structured_reply(&task.record.id)
+        .await
+        .is_none());
+    store::with_db(|conn| {
+        conn.execute_batch("DROP TRIGGER fail_host_reply")?;
+        Ok(())
+    })
+    .unwrap();
+    state
+        .interactions
+        .finish_agent_task(&claim, "provider_visible")
+        .await
+        .unwrap();
+    state
+        .interactions
+        .reply_agent_message("receiver", &task.record.id, ReplyStatus::Done, "result")
+        .await
+        .unwrap();
+    assert_eq!(
+        state
+            .interactions
+            .structured_reply(&task.record.id)
+            .await
+            .unwrap()
+            .body,
+        "result"
+    );
 }

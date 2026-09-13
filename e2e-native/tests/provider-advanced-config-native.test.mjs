@@ -45,17 +45,6 @@ function buildCli(harness) {
   return freezeBuiltCliForRun(harness);
 }
 
-function runCli(cliPath, harness, args) {
-  const env = { ...process.env, WARDIAN_HOME: harness.isolatedHome };
-  delete env.WARDIAN_SESSION_ID;
-  return spawnSync(cliPath, args, {
-    cwd: harness.repoRoot,
-    env,
-    encoding: "utf8",
-    timeout: 60000,
-  });
-}
-
 function recorderSource(provider) {
   return `
 const fs = require("node:fs");
@@ -347,7 +336,7 @@ async function spawnOffAgent(driver, harness, testCase) {
   });
 }
 
-test("per-agent advanced config survives persistence and reaches native provider argv", { timeout: 420000 }, async (t) => {
+test("per-agent advanced config reaches off-agent automation and interactive provider argv", { timeout: 420000 }, async (t) => {
   const harness = await createNativeHarness();
 
   try {
@@ -419,30 +408,26 @@ test("per-agent advanced config survives persistence and reaches native provider
       .find((entry) => entry.session_id === agent.session_id);
     assert.deepEqual(reloaded.provider_config, testCase.providerConfig);
 
+    // Preserve off-agent argv coverage through the maintained automation runner.
+    // This recorder is launch/configuration evidence, not native peer acceptance.
+    const automationPath = path.join(harness.isolatedHome, `argv-${testCase.id}.md`);
+    writeFileSync(automationPath, `---\nschema: 2\nid: argv-${testCase.id}\nname: Argv fixture\nnodes:\n  - id: trigger\n    type: manual_trigger\n  - id: task\n    type: task\n    fields:\n      agent: role:worker\n      prompt: NATIVE_ARGV_${testCase.id}\nedges:\n  - from: trigger\n    to: task\n---\n`, "utf8");
     rmSync(capturePath(captureDir, testCase.provider, "headless", agent.session_id), { force: true });
-    const send = runCli(cliPath, harness, [
-      "send",
-      `NATIVE_ARGV_${testCase.id}`,
-      "--to",
-      agent.session_name,
-      "--wait-until",
-      "idle",
-      "--timeout",
-      "30s",
-    ]);
-    assert.equal(
-      send.status,
-      0,
-      `${testCase.id} headless delivery failed\nstdout:\n${send.stdout}\nstderr:\n${send.stderr}`,
-    );
-    const headlessCapture = await waitForCapture(
-      captureDir,
-      testCase.provider,
-      "headless",
-      agent.session_id,
-    );
+    const started = await invokeTauri(session.driver, "automation_run", {
+      path: automationPath, provider: testCase.provider, workspace: harness.isolatedHome, input: {},
+      assignments: { worker: { target_type: "agent", agent_id: agent.session_id, conversation: "current", busy_policy: "wait" } },
+    });
+    assert.equal(started.ok, true, "Off-agent argv automation did not start");
+    const headlessCapture = await waitForCapture(captureDir, testCase.provider, "headless", agent.session_id);
     assertProviderArgs(testCase, "headless", headlessCapture.argv);
-
+    assert.ok(started.run_id);
+    await session.driver.wait(async () => {
+      const run = await invokeTauri(session.driver, "automation_read_run", {
+        blueprintId: `argv-${testCase.id}`, runId: started.run_id,
+      });
+      assert.ok(!["failed", "cancelled"].includes(run.state.status), "Off-agent argv automation failed");
+      return run.state.status === "completed";
+    }, 30_000, "Off-agent argv run did not finish before interactive coverage", 200);
     rmSync(capturePath(captureDir, testCase.provider, "interactive", agent.session_id), { force: true });
     await invokeTauri(session.driver, "resume_agent", { sessionId: agent.session_id });
     const interactiveCapture = await waitForCapture(

@@ -100,7 +100,9 @@ async fn handle_in_state(
                 .map_err(control_error)?;
             if let Some(app) = app {
                 let _ = app.emit("pair-activity-changed", ());
-                native::spawn_information(app, &replied.record.target_session_ids[0]);
+                if let Some(recipient) = replied.record.target_session_ids.first() {
+                    native::spawn_information(app, recipient);
+                }
             }
             Ok(Response::Reply {
                 request_id,
@@ -328,7 +330,7 @@ pub(crate) fn spawn_pending_tasks(app: &AppHandle, recipient: &str) {
 /// After a completed dispatch returns, its lease/execution guard has dropped.
 /// A changed queue head is distinct admitted work. An unchanged head means busy
 /// or unsupported and stops this opportunity without polling or replay.
-async fn dispatch_pending_queue(
+pub(super) async fn dispatch_pending_queue(
     app: Option<&AppHandle>,
     state: &AppState,
     recipient: &str,
@@ -353,6 +355,13 @@ async fn dispatch_pending_queue(
     }
 }
 
+/// A prepared native owner is selected before the surface fallback checks the
+/// terminal broker. This is the support boundary for existing OpenCode and Pi
+/// sessions; an unprepared owner keeps the existing unsupported-case fallback.
+fn native_attached_owner_is_selected(provider: &str, owner_prepared: bool) -> bool {
+    owner_prepared && matches!(provider, "opencode" | "pi")
+}
+
 async fn dispatch_one(
     app: Option<&AppHandle>,
     state: &AppState,
@@ -370,6 +379,43 @@ async fn dispatch_one(
         }
         return native::dispatch_attached_task(state, &info).await;
     }
+    if info.provider == "pi" && !status_uses_headless_delivery(&info.status) {
+        let generation = state
+            .interactions
+            .current_provider_input_generation(&info.uuid)
+            .await
+            .unwrap_or(0);
+        let owner_prepared = state
+            .native_delivery
+            .pi_bridge_prepared(&info.uuid, generation)
+            .await;
+        if native_attached_owner_is_selected(&info.provider, owner_prepared) {
+            // A prepared Pi owner may still be handshaking; native dispatch
+            // retains the pending claim until that exact owner is ready.
+            return native::dispatch_attached_task(state, &info).await;
+        }
+        // No exact resumed session bridge exists, so the existing surface
+        // exception remains available for this demonstrably unsupported case.
+    }
+    if info.provider == "opencode" && !status_uses_headless_delivery(&info.status) {
+        let generation = state
+            .interactions
+            .current_provider_input_generation(&info.uuid)
+            .await
+            .unwrap_or(0);
+        let owner_prepared = state
+            .native_delivery
+            .opencode_http_prepared(&info.uuid, generation)
+            .await;
+        if native_attached_owner_is_selected(&info.provider, owner_prepared) {
+            // A registered HTTP owner is the exact same-session path. If its
+            // busy/config/generation proof is not current, leave the task
+            // pending instead of sending it through the composer.
+            return native::dispatch_attached_task(state, &info).await;
+        }
+        // Fresh or otherwise unprepared OpenCode sessions retain the existing
+        // composer exception until an exact provider session is available.
+    }
     if status_uses_headless_delivery(&info.status) {
         return dispatch_background_task(app, state, &info).await;
     }
@@ -380,7 +426,7 @@ async fn dispatch_one(
     };
     let info = delivery_target_info(state, recipient).await?;
     if info.status != "idle"
-        || provider_input_blocks_mailbox_drain(state, recipient).await
+        || provider_input_blocks_task_dispatch(state, recipient).await
         || active_conversation_lease_for_delivery(&info)
     {
         return Ok(());
@@ -567,36 +613,6 @@ async fn dispatch_background_task(
     Ok(())
 }
 
-/// Legacy `wardian reply` to a v2 request uses the same atomic completion path.
-pub(super) async fn legacy_reply(
-    state: &AppState,
-    request_id: &str,
-    status: ReplyStatus,
-    body: &str,
-    origin: Option<&MessageOrigin>,
-    app: Option<&AppHandle>,
-) -> Result<Option<StructuredReply>, ControlError> {
-    if !store::with_db(|conn| store::is_task(conn, request_id)).map_err(control_error)? {
-        return Ok(None);
-    }
-    let Some(MessageOrigin::WardianAgent { session_id }) = origin else {
-        return Err(ControlError::coded(
-            "unauthorized",
-            "A managed reply origin is required.",
-        ));
-    };
-    authenticate(state, session_id).await?;
-    let result = state
-        .interactions
-        .reply_agent_message(session_id, request_id, status, body)
-        .await
-        .map_err(control_error)?;
-    if let Some(app) = app {
-        native::spawn_information(app, &result.record.target_session_ids[0]);
-    }
-    Ok(Some(result.reply))
-}
-
 /// Framing precedes provider I/O. Failure explicitly releases the exact claim
 /// rather than leaving a message permanently owned without crossing a boundary.
 async fn prepare_claim_context(
@@ -639,9 +655,9 @@ fn control_error(error: AgentMessagingError) -> ControlError {
     ControlError::coded(code, error.message)
 }
 
-pub(super) fn message_with_structured_reply_instruction(message: &str, request_id: &str) -> String {
+pub(crate) fn message_with_structured_reply_instruction(message: &str, request_id: &str) -> String {
     format!(
-        "{message}\n\nWardian request id: {request_id}\nWhen finished, execute this command from your shell/tool with the reply body on stdin:\nwardian reply {request_id} --status done --stdin\nUse --status blocked or --status failed if you cannot complete it. Do not print the command as your final answer; run it so Wardian can record the structured reply."
+        "{message}\n\nWardian request id: {request_id}\nWhen finished, use the canonical reply tool with request_id {request_id}, status done, and message containing your reply, or run wardian message reply {request_id} --status done --stdin with the reply body on stdin. Use status blocked or failed if you cannot complete it. Printing a final answer alone does not record the structured reply."
     )
 }
 

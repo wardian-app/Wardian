@@ -1,4 +1,4 @@
-use super::codex_terminal_theme::CodexTerminalThemeProbeResponder;
+use crate::delivery::opencode_http::OpenCodeHttpLaunchPlan;
 use crate::providers::antigravity::{
     changed_workspace_conversation, AntigravityConversationMessage, AntigravityProvider,
 };
@@ -20,6 +20,8 @@ use std::io::{BufRead, Read, Seek, Write};
 use tauri::{AppHandle, Emitter, Manager};
 use wardian_core::control::{ProviderInputReadiness, WatchTranscriptMessage};
 use wardian_core::models::{AgentChatRole, AgentConfig, AgentEvent, ProviderConfig};
+
+use super::codex_terminal_theme::CodexTerminalThemeProbeResponder;
 
 use super::claude::{
     claude_log_paths, claude_permission_hook_matches_session, claude_project_dir_name,
@@ -50,6 +52,51 @@ type PendingMemoryInjection = (
     String,
     String,
 );
+
+/// Retain Pi generation cleanup across fallible PTY setup after the bridge
+/// plan has transferred ownership to the broker. The reader thread disarms
+/// this guard once it can dispose the generation on process exit.
+struct PiBridgeSpawnGuard {
+    broker: std::sync::Arc<crate::delivery::native_broker::NativeDeliveryBroker>,
+    agent_id: String,
+    generation: u64,
+    armed: bool,
+}
+
+impl PiBridgeSpawnGuard {
+    fn new(
+        broker: std::sync::Arc<crate::delivery::native_broker::NativeDeliveryBroker>,
+        agent_id: String,
+        generation: u64,
+    ) -> Self {
+        Self {
+            broker,
+            agent_id,
+            generation,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PiBridgeSpawnGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let broker = self.broker.clone();
+        let agent_id = self.agent_id.clone();
+        let generation = self.generation;
+        tauri::async_runtime::spawn(async move {
+            let _ = broker
+                .dispose_pi_generation(&agent_id, Some(generation))
+                .await;
+        });
+    }
+}
 
 fn record_pending_memory_injection(
     pending: &mut Option<PendingMemoryInjection>,
@@ -85,6 +132,102 @@ fn provider_title_has_startup_ready_prompt(provider: &str, title: &str, status: 
 #[derive(Default)]
 struct OpenCodeStartupMemoryTransition {
     ready_observed: bool,
+}
+
+fn opencode_http_conflicting_custom_arg(argument: &str) -> bool {
+    let argument = argument.trim().to_ascii_lowercase();
+    matches!(
+        argument.as_str(),
+        "serve"
+            | "attach"
+            | "run"
+            | "acp"
+            | "--hostname"
+            | "--port"
+            | "--session"
+            | "--continue"
+            | "--fork"
+            | "--dir"
+            | "--config"
+    ) || argument.starts_with("--hostname=")
+        || argument.starts_with("--port=")
+        || argument.starts_with("--session=")
+        || argument.starts_with("--dir=")
+        || argument.starts_with("--config=")
+}
+
+/// Reserve the per-generation listener before the ordinary TUI spawn. Only a
+/// restored/existing provider session gets this overlay; a fresh OpenCode TUI
+/// has no exact session identity until its first provider turn creates one.
+async fn prepare_opencode_http_launch(
+    app_state: &AppState,
+    config: &AgentConfig,
+    provider_generation: u64,
+) -> Option<OpenCodeHttpLaunchPlan> {
+    if config.provider != "opencode"
+        || config.resume_session.as_deref().is_none_or(|session| {
+            !session.starts_with("ses_")
+                || session.len() > 256
+                || !session
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        })
+    {
+        return None;
+    }
+    let custom_args = match config.custom_args.as_deref().map(str::trim) {
+        Some(custom) if !custom.is_empty() => shlex::split(custom)?,
+        _ => Vec::new(),
+    };
+    if custom_args
+        .iter()
+        .any(|argument| opencode_http_conflicting_custom_arg(argument))
+    {
+        return None;
+    }
+    let runtime_generation = app_state
+        .terminal_sessions
+        .next_runtime_generation(&config.session_id)
+        .await
+        .ok()?;
+    let requested_port = config
+        .opencode_config()
+        .port
+        .or(config.opencode_port)
+        .filter(|port| *port != 0);
+    let listener = std::net::TcpListener::bind(("127.0.0.1", requested_port.unwrap_or(0))).ok()?;
+    let port = listener.local_addr().ok()?.port();
+    drop(listener);
+    let plan = OpenCodeHttpLaunchPlan::new(provider_generation, runtime_generation, port).ok()?;
+    Some(plan)
+}
+
+async fn wait_for_opencode_http_listener(
+    app: &AppHandle,
+    agent_id: &str,
+    runtime_generation: u64,
+    endpoint: &reqwest::Url,
+) -> bool {
+    let Some(port) = endpoint.port() else {
+        return false;
+    };
+    let address = format!("127.0.0.1:{port}");
+    for _ in 0..120 {
+        let runtime_matches = app
+            .state::<AppState>()
+            .terminal_sessions
+            .broker_state(agent_id)
+            .await
+            .is_ok_and(|state| state.runtime_generation == runtime_generation);
+        if !runtime_matches {
+            return false;
+        }
+        if tokio::net::TcpStream::connect(&address).await.is_ok() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    false
 }
 
 impl OpenCodeStartupMemoryTransition {
@@ -952,6 +1095,20 @@ pub async fn spawn_agent(
     }
     provider_args = interactive_provider_args(&config.provider, &provider_cwd, &cwd, provider_args);
 
+    let mut opencode_http_plan = if config.provider == "opencode" && is_resume {
+        prepare_opencode_http_launch(&app_state, &config, provider_generation).await
+    } else {
+        None
+    };
+    if let Some(plan) = opencode_http_plan.as_ref() {
+        provider_args.extend(plan.network_args());
+    }
+    let opencode_http_config_fingerprint = opencode_http_plan.as_ref().map(|_| {
+        let mut binding_config = config.clone();
+        binding_config.folder = expected_folder.clone();
+        crate::delivery::native_broker::opencode_http_config_fingerprint(&binding_config, &cwd)
+    });
+
     let mut codex_attach_guard = None;
     let codex_attachment = if config.provider == "codex" {
         let attachment = app_state
@@ -989,6 +1146,70 @@ pub async fn spawn_agent(
     } else {
         None
     };
+    let mut pi_attachment = if config.provider == "pi" && is_restored {
+        let session_file = config
+            .resume_session
+            .as_deref()
+            .map(str::trim)
+            .filter(|session_id| !session_id.is_empty())
+            .and_then(|provider_session_id| {
+                PiProvider::session_dir(&config.session_id).and_then(|session_dir| {
+                    PiProvider::session_file(&session_dir, provider_session_id)
+                })
+            });
+        if let Some(session_file) = session_file {
+            let extension_path =
+                match crate::delivery::pi_bridge::PiBridgeLaunchPlan::materialize_extension(
+                    &session_file,
+                    provider_generation,
+                ) {
+                    Ok(path) => Some(path),
+                    Err(error) => {
+                        log_debug(&format!(
+                            "[Wardian] Pi bridge unavailable for {}: {}",
+                            config.session_id, error
+                        ));
+                        None
+                    }
+                };
+            if let Some(extension_path) = extension_path {
+                match app_state
+                    .native_delivery
+                    .prepare_pi_tui(
+                        crate::delivery::native_broker::NativeSessionSpec {
+                            target_agent_id: config.session_id.clone(),
+                            provider: "pi".into(),
+                            generation: provider_generation,
+                            workspace: provider_cwd.clone(),
+                            config: config.clone(),
+                        },
+                        session_file,
+                        extension_path,
+                    )
+                    .await
+                {
+                    Ok(plan) => Some(plan),
+                    Err(error) => {
+                        log_debug(&format!(
+                            "[Wardian] Pi bridge unavailable for {}: {}",
+                            config.session_id, error
+                        ));
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(attachment) = pi_attachment.as_ref() {
+        provider_args.push("-e".into());
+        provider_args.push(attachment.extension_path().to_string_lossy().into_owned());
+    }
     let launch_spec = interactive_provider_launch(&config.provider, &bin, &provider_args)?;
     log_debug(&format!(
         "[Wardian] PTY spawn: provider={} exe={} arg_count={} cwd={}",
@@ -1021,9 +1242,16 @@ pub async fn spawn_agent(
 
     if let Some(attachment) = &codex_attachment {
         cmd.env("CODEX_HOME", &attachment.codex_home);
+    } else if let Some(attachment) = pi_attachment.as_ref() {
+        cmd.env(crate::delivery::pi_bridge::ENV_CONFIG, attachment.config());
     } else if config.provider == "opencode" {
         for (key, value) in opencode_interactive_env(&provider_cwd, &config)? {
             cmd.env(key, value);
+        }
+        if let Some(plan) = opencode_http_plan.as_ref() {
+            for (key, value) in plan.environment() {
+                cmd.env(key, value);
+            }
         }
     } else if config.provider == "mock" {
         let provider_session_id = expected_caller_owned_identity(&config).ok_or_else(|| {
@@ -1087,10 +1315,15 @@ pub async fn spawn_agent(
     // unable to write, then start the watcher from that exact byte offset.
     let pi_log_baseline = restored_pi_log_baseline(&config, is_restored);
 
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| format!("Failed to spawn command: {}", e))?;
+    let child = match pair.slave.spawn_command(cmd) {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(attachment) = pi_attachment.as_ref() {
+                attachment.owner().close();
+            }
+            return Err(format!("Failed to spawn command: {}", error));
+        }
+    };
 
     let mut child = super::codex_shared::StartingCodexTui::new(
         child,
@@ -1107,6 +1340,27 @@ pub async fn spawn_agent(
         guard.attached();
     }
     let process_id = child.process_id();
+    if let Some(attachment) = pi_attachment.as_mut() {
+        if let Some(process_id) = process_id {
+            attachment.register_process(process_id);
+            attachment.attached();
+        } else {
+            attachment.owner().close();
+            let _ = app_state
+                .native_delivery
+                .dispose_pi_generation(&config.session_id, Some(provider_generation))
+                .await;
+        }
+    }
+    let mut pi_spawn_guard = pi_attachment.as_ref().and_then(|_| {
+        process_id.map(|_| {
+            PiBridgeSpawnGuard::new(
+                app_state.native_delivery.clone(),
+                config.session_id.clone(),
+                provider_generation,
+            )
+        })
+    });
 
     // Phase 2: Record/Update status in SQLite with the real PID
     let _ = wardian_core::db::update_agent_status(
@@ -1166,6 +1420,54 @@ pub async fn spawn_agent(
         .await
         .map_err(|error| format!("Failed to start terminal session broker: {error}"))?;
     child.runtime(app_state.terminal_sessions.clone(), runtime_generation);
+
+    if let (Some(plan), Some(process_id), Some(provider_session_id), Some(config_fingerprint)) = (
+        opencode_http_plan.take(),
+        process_id,
+        config.resume_session.clone(),
+        opencode_http_config_fingerprint,
+    ) {
+        let registration_app = app.clone();
+        let registration_broker = app_state.native_delivery.clone();
+        let registration_agent_id = config.session_id.clone();
+        let registration_workspace = cwd.clone();
+        let registration_endpoint = plan.endpoint().clone();
+        let registration_runtime_generation = runtime_generation;
+        tauri::async_runtime::spawn(async move {
+            if !wait_for_opencode_http_listener(
+                &registration_app,
+                &registration_agent_id,
+                registration_runtime_generation,
+                &registration_endpoint,
+            )
+            .await
+            {
+                return;
+            }
+            let process_identity =
+                format!("pid:{process_id}:runtime:{registration_runtime_generation}");
+            let listener_identity = format!(
+                "loopback:127.0.0.1:{}:pid:{process_id}:runtime:{registration_runtime_generation}",
+                registration_endpoint.port().unwrap_or_default()
+            );
+            if let Err(error) = registration_broker
+                .register_opencode_http(
+                    registration_agent_id,
+                    plan,
+                    provider_session_id,
+                    process_identity,
+                    listener_identity,
+                    registration_workspace,
+                    config_fingerprint,
+                )
+                .await
+            {
+                log_debug(&format!(
+                    "[Wardian] OpenCode HTTP owner unavailable after launch: {error}"
+                ));
+            }
+        });
+    }
     let sid_for_input = config.session_id.clone();
     let provider_name_for_input = config.provider.clone();
 
@@ -1268,6 +1570,10 @@ pub async fn spawn_agent(
             == "bypassPermissions";
     let mut pending_memory_injection = memory_setup
         .map(|(store, brief)| (store, brief, expected_folder.clone(), memory_process_key));
+    let pi_exit_broker = pi_attachment
+        .as_ref()
+        .map(|_| app_state.native_delivery.clone());
+    let pi_exit_generation = provider_generation;
     std::thread::spawn(move || {
         let mut buf = [0; 4096];
         let mut current_line = String::new();
@@ -1410,7 +1716,7 @@ pub async fn spawn_agent(
                                 &readiness_session_id,
                             )
                             .await;
-                            crate::control::spawn_mailbox_drain_if_idle(
+                            crate::control::spawn_agent_messaging_if_idle(
                                 &readiness_app,
                                 &readiness_session_id,
                                 "Idle",
@@ -1578,7 +1884,7 @@ pub async fn spawn_agent(
                                             &readiness_session_id,
                                         )
                                         .await;
-                                        crate::control::spawn_mailbox_drain_if_idle(
+                                        crate::control::spawn_agent_messaging_if_idle(
                                             &readiness_app,
                                             &readiness_session_id,
                                             "Idle",
@@ -1709,7 +2015,20 @@ pub async fn spawn_agent(
         }
         // Process terminated (EOF or error) — mark status as Off
         set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, "Off");
+        if provider_name_for_pty == "pi" {
+            if let Some(broker) = pi_exit_broker {
+                let agent_id = sid_for_pty.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = broker
+                        .dispose_pi_generation(&agent_id, Some(pi_exit_generation))
+                        .await;
+                });
+            }
+        }
     });
+    if let Some(guard) = pi_spawn_guard.as_mut() {
+        guard.disarm();
+    }
 
     if let Some(attachment) = &codex_attachment {
         let finalized = app_state

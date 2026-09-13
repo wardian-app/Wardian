@@ -168,14 +168,12 @@ resolver:
 Headless execution uses the provider adapters behind
 `run_headless_with_options`, with structured output parsed into node outputs.
 
-Active-agent execution uses the visible agent PTY, but completion is still an
-explicit structured contract. Wardian creates a task interaction for the
-automation node, appends a `wardian reply <request-id> --status ... --stdin`
-instruction to the delivered prompt, and waits for that reply before completing
-the node. Terminal `idle` status alone is not completion, and a printed
-`wardian reply ...` command in the transcript is treated as ordinary assistant
-text. `blocked` and `failed` replies fail the node with the reply body as the
-diagnostic.
+Active-agent execution admits a canonical task through the same messaging
+service used by peer follow-ups. The application retains the automation's host
+provenance and waits for the task's correlated reply before completing the node.
+Codex receives structured native task context, never a terminal paste. Terminal
+`idle` status and a printed reply command are not completion evidence.
+`blocked` and `failed` replies fail the node with the reply body as the diagnostic.
 
 ## Old Automation System
 

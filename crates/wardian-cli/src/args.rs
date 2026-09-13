@@ -43,16 +43,12 @@ pub enum Command {
     Telemetry(TelemetryArgs),
     /// Inspect and edit agent communication boundaries.
     Graph(GraphArgs),
-    /// Deliver a message or provider command to agents.
-    Send(SendArgs),
+    /// Canonical managed-agent information, tasks, replies, and receipt.
+    Message(MessageCommandArgs),
     /// Inspect, wait for, or cancel a queued delivery.
     Delivery(DeliveryArgs),
     /// Send a user-facing update or approval request to Inbox.
     Notify(NotifyArgs),
-    /// Request an accountable done, blocked, or failed reply from one peer.
-    Ask(AskArgs),
-    /// Complete an ask request with a structured result.
-    Reply(ReplyArgs),
 }
 
 // ---------------------------------------------------------------------------
@@ -1173,69 +1169,54 @@ pub enum NotifyCommand {
 }
 
 #[derive(Debug, Args)]
-pub struct SendArgs {
-    /// Message text (omit when using --stdin or --file)
+pub struct MessageCommandArgs {
+    #[command(subcommand)]
+    pub command: MessageCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MessageCommand {
+    /// List agents visible to the authenticated sender.
+    List,
+    /// Admit information without waking or interrupting the receiver.
+    Send(MessageArgs),
+    /// Admit one task; return its canonical request ID and allow receiver wake.
+    Followup(MessageArgs),
+    /// Receive a bounded page; acknowledge only previously consumed pages.
+    Receive(ReceiveMessagesArgs),
+    /// Reply as the authorized task recipient using its exact canonical ID.
+    Reply(ReplyArgs),
+    /// Explicitly interrupt one receiver's current turn.
+    Interrupt { target: String },
+}
+
+#[derive(Debug, Args)]
+pub struct MessageArgs {
+    /// One exact agent name or UUID; no broadcast or class selectors.
+    pub target: String,
+    /// Literal message body (omit with --stdin or --file).
     pub message: Option<String>,
-
-    /// Target: agent name, UUID, "class:<ClassName>", or "all"
-    #[arg(long)]
-    pub to: String,
-
-    /// Read message from stdin
     #[arg(long, conflicts_with = "message")]
     pub stdin: bool,
-
-    /// Read message from a file
     #[arg(long, conflicts_with_all = ["message", "stdin"])]
     pub file: Option<String>,
-
-    /// Reserved; thread delivery is not supported. Use --to for delivery.
+    /// Stable canonical admission key; does not authorize automatic replay.
     #[arg(long)]
-    pub thread: Option<String>,
-
-    /// Send the message body as a provider slash command without sender attribution
-    #[arg(long = "as-command")]
-    pub as_command: bool,
-
-    /// Queue policy to use when the target is not safe for live delivery
-    #[arg(long = "queue-policy", value_enum, default_value = "queue-if-busy")]
-    pub queue_policy: QueuePolicyArg,
-
-    /// Send an explicit approval action instead of a normal message
-    #[arg(long, value_enum, conflicts_with = "as_command")]
-    pub approval: Option<ApprovalArg>,
-
-    /// Wait for the delivered target turn to reach this status; idle uses provider-confirmed turn completion
-    #[arg(long = "wait-until")]
-    pub wait_until: Option<String>,
-
-    /// Maximum time to wait for a headless delivery or --wait-until, e.g. 30s, 10m, or 1000ms
-    #[arg(long, default_value = "10m")]
-    pub timeout: String,
-
-    /// Target resolution scope for broadcast/class targets: neighbors (default) or all
-    #[arg(long, value_parser = ["neighbors", "all"], default_value = "neighbors")]
-    pub scope: String,
-
-    /// Caller-owned key used to make a delivery request idempotent.
-    #[arg(long = "idempotency-key")]
     pub idempotency_key: Option<String>,
+}
 
-    /// Absolute RFC3339 deadline after which queued delivery expires.
-    #[arg(long, conflicts_with = "expires_in")]
-    pub deadline: Option<String>,
-
-    /// Relative delivery lifetime, for example 30s or 5m.
-    #[arg(long = "expires-in", conflicts_with = "deadline")]
-    pub expires_in: Option<String>,
-
-    /// Reject delivery unless the target is still on this Wardian generation.
-    #[arg(long = "expected-generation")]
-    pub expected_generation: Option<u64>,
-
-    /// Exceptionally steer an active turn because its premise is invalid.
-    #[arg(long = "invalidate-premise")]
-    pub invalidate_premise: bool,
+#[derive(Debug, Args)]
+pub struct ReceiveMessagesArgs {
+    /// Opaque next_cursor from the previous page; keep it after a timeout.
+    #[arg(long)]
+    pub cursor: Option<String>,
+    /// Acknowledge only a page already consumed by this recipient.
+    #[arg(long)]
+    pub ack_cursor: Option<String>,
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=100))]
+    pub limit: u32,
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u64).range(0..=60000))]
+    pub timeout_ms: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -1260,97 +1241,8 @@ pub enum DeliveryCommand {
     Cancel { interaction_id: String },
     /// Withdraw work that has not crossed the provider submission boundary.
     Withdraw { interaction_id: String },
-    /// Atomically supersede queued work with a new message.
-    Replace {
-        interaction_id: String,
-        message: Option<String>,
-        #[arg(long, conflicts_with = "message")]
-        stdin: bool,
-        #[arg(long, conflicts_with_all = ["message", "stdin"])]
-        file: Option<String>,
-        #[arg(long = "idempotency-key")]
-        idempotency_key: String,
-        #[arg(long, conflicts_with = "expires_in")]
-        deadline: Option<String>,
-        #[arg(long = "expires-in", conflicts_with = "deadline")]
-        expires_in: Option<String>,
-    },
     /// Show native transport capabilities for a Wardian agent.
     Capabilities { target: String },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum QueuePolicyArg {
-    QueueIfBusy,
-    LiveOnly,
-    MailboxOnly,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum ApprovalArg {
-    Accept,
-    Reject,
-}
-
-// ---------------------------------------------------------------------------
-// wardian ask
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Args)]
-pub struct AskArgs {
-    /// Target agent name or UUID. Broadcast and class targets are not supported.
-    pub target: String,
-
-    /// Additional explicit target names or UUIDs, separated by commas. Broadcast and class targets are not supported.
-    #[arg(long, value_delimiter = ',')]
-    pub targets: Vec<String>,
-
-    /// Message text (omit when using --stdin or --file)
-    pub message: Option<String>,
-
-    /// Read message from stdin
-    #[arg(long, conflicts_with = "message")]
-    pub stdin: bool,
-
-    /// Read message from a file
-    #[arg(long, conflicts_with_all = ["message", "stdin"])]
-    pub file: Option<String>,
-
-    /// Completion condition: reply, status:<status>, output:<substring>, event:<kind>, delivery:<state>, or a bare status
-    #[arg(long, default_value = "reply")]
-    pub until: Option<String>,
-
-    /// Maximum time to wait, e.g. 30s, 10m, or 1000ms
-    #[arg(long, default_value = "10m")]
-    pub timeout: String,
-
-    /// Maximum output bytes to return from the response snapshot
-    #[arg(long, default_value_t = 65536)]
-    pub tail: usize,
-
-    /// Thread name for grouped conversations
-    #[arg(long)]
-    pub thread: Option<String>,
-
-    /// Caller-owned key used to make a delivery request idempotent.
-    #[arg(long = "idempotency-key")]
-    pub idempotency_key: Option<String>,
-
-    /// Absolute RFC3339 deadline after which queued delivery expires.
-    #[arg(long, conflicts_with = "expires_in")]
-    pub deadline: Option<String>,
-
-    /// Relative delivery lifetime, for example 30s or 5m.
-    #[arg(long = "expires-in", conflicts_with = "deadline")]
-    pub expires_in: Option<String>,
-
-    /// Reject delivery unless the target is still on this Wardian generation.
-    #[arg(long = "expected-generation")]
-    pub expected_generation: Option<u64>,
-
-    /// Exceptionally steer an active turn because its premise is invalid.
-    #[arg(long = "invalidate-premise")]
-    pub invalidate_premise: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1359,7 +1251,7 @@ pub struct AskArgs {
 
 #[derive(Debug, Args)]
 pub struct ReplyArgs {
-    /// Structured ask request id.
+    /// Exact canonical request_id returned by followup_task.
     pub request_id: String,
 
     /// Reply status.
@@ -2489,94 +2381,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_send_as_command() {
-        let cli = Cli::try_parse_from([
-            "wardian",
-            "send",
-            "--to",
-            "Wardian-Codex",
-            "--as-command",
-            "/goal test",
-        ])
-        .unwrap();
-        let Command::Send(args) = cli.command else {
-            panic!("expected Send command")
-        };
-
-        assert!(args.as_command);
-        assert_eq!(args.to, "Wardian-Codex");
-        assert_eq!(args.message.as_deref(), Some("/goal test"));
-    }
-
-    #[test]
-    fn parses_send_queue_policy() {
-        let cli = Cli::try_parse_from([
-            "wardian",
-            "send",
-            "hello",
-            "--to",
-            "agent-1",
-            "--queue-policy",
-            "live-only",
-        ])
-        .unwrap();
-        let Command::Send(args) = cli.command else {
-            panic!("expected Send command")
-        };
-
-        assert_eq!(args.queue_policy, QueuePolicyArg::LiveOnly);
-    }
-
-    #[test]
-    fn parses_send_approval_action() {
-        let cli =
-            Cli::try_parse_from(["wardian", "send", "--approval", "accept", "--to", "agent-1"])
-                .unwrap();
-        let Command::Send(args) = cli.command else {
-            panic!("expected Send command")
-        };
-
-        assert_eq!(args.approval, Some(ApprovalArg::Accept));
-        assert_eq!(args.message, None);
-    }
-
-    #[test]
-    fn send_approval_conflicts_with_as_command() {
-        let err = Cli::try_parse_from([
-            "wardian",
-            "send",
-            "--approval",
-            "accept",
-            "--to",
-            "agent-1",
-            "--as-command",
-            "/status",
-        ])
-        .unwrap_err();
-
-        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
-    }
-
-    #[test]
-    fn parses_send_scope_all() {
-        let cli = Cli::try_parse_from(["wardian", "send", "hi", "--to", "all", "--scope", "all"])
-            .unwrap();
-        let Command::Send(args) = cli.command else {
-            panic!("expected Send command")
-        };
-        assert_eq!(args.scope, "all");
-    }
-
-    #[test]
-    fn send_scope_defaults_to_neighbors() {
-        let cli = Cli::try_parse_from(["wardian", "send", "hi", "--to", "agent-1"]).unwrap();
-        let Command::Send(args) = cli.command else {
-            panic!("expected Send command")
-        };
-        assert_eq!(args.scope, "neighbors");
-    }
-
-    #[test]
     fn parses_agent_show_explicit_target() {
         let cli = Cli::try_parse_from(["wardian", "agent", "show", "coder-a1"]).unwrap();
         let Command::Agent(args) = cli.command else {
@@ -3025,157 +2829,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_send_wait_until_status() {
-        let cli = Cli::try_parse_from([
-            "wardian",
-            "send",
-            "review this",
-            "--to",
-            "reviewer-a1",
-            "--wait-until",
-            "idle",
-            "--timeout",
-            "10m",
-        ])
-        .unwrap();
-        let Command::Send(args) = cli.command else {
-            panic!()
-        };
-        assert_eq!(args.message.as_deref(), Some("review this"));
-        assert_eq!(args.wait_until.as_deref(), Some("idle"));
-        assert_eq!(args.timeout, "10m");
-    }
-
-    #[test]
-    fn parses_native_delivery_policy_on_send() {
-        let cli = Cli::try_parse_from([
-            "wardian",
-            "send",
-            "premise changed",
-            "--to",
-            "reviewer-a1",
-            "--idempotency-key",
-            "request-7",
-            "--expires-in",
-            "5m",
-            "--expected-generation",
-            "3",
-            "--invalidate-premise",
-        ])
-        .unwrap();
-        let Command::Send(args) = cli.command else {
-            panic!("expected Send command")
-        };
-        assert_eq!(args.idempotency_key.as_deref(), Some("request-7"));
-        assert_eq!(args.expires_in.as_deref(), Some("5m"));
-        assert_eq!(args.expected_generation, Some(3));
-        assert!(args.invalidate_premise);
-    }
-
-    #[test]
-    fn parses_delivery_inspection_and_replacement() {
-        let show = Cli::try_parse_from([
-            "wardian",
-            "delivery",
-            "show",
-            "interaction-1",
-            "--evidence-limit",
-            "25",
-        ])
-        .unwrap();
-        assert!(matches!(
-            show.command,
-            Command::Delivery(DeliveryArgs {
-                command: DeliveryCommand::Show {
-                    ref interaction_id,
-                    evidence_limit: 25
-                }
-            }) if interaction_id == "interaction-1"
-        ));
-
-        let replace = Cli::try_parse_from([
-            "wardian",
-            "delivery",
-            "replace",
-            "interaction-1",
-            "corrected",
-            "--idempotency-key",
-            "replacement-1",
-        ])
-        .unwrap();
-        assert!(matches!(
-            replace.command,
-            Command::Delivery(DeliveryArgs {
-                command: DeliveryCommand::Replace {
-                    ref interaction_id,
-                    ref idempotency_key,
-                    ..
-                }
-            }) if interaction_id == "interaction-1" && idempotency_key == "replacement-1"
-        ));
-    }
-
-    #[test]
-    fn parses_ask_with_inline_message_and_defaults() {
-        let cli = Cli::try_parse_from(["wardian", "ask", "reviewer-a1", "review this"]).unwrap();
-        let Command::Ask(args) = cli.command else {
-            panic!("expected Ask command")
-        };
-        assert_eq!(args.target, "reviewer-a1");
-        assert_eq!(args.message.as_deref(), Some("review this"));
-        assert!(!args.stdin);
-        assert_eq!(args.file, None);
-        assert_eq!(args.until.as_deref(), Some("reply"));
-        assert_eq!(args.timeout, "10m");
-        assert_eq!(args.tail, 65536);
-    }
-
-    #[test]
-    fn parses_ask_with_explicit_additional_targets() {
-        let cli = Cli::try_parse_from([
-            "wardian",
-            "ask",
-            "reviewer-a1",
-            "review this",
-            "--targets",
-            "reviewer-a2,reviewer-a3",
-        ])
-        .unwrap();
-        let Command::Ask(args) = cli.command else {
-            panic!("expected Ask command")
-        };
-        assert_eq!(args.targets, vec!["reviewer-a2", "reviewer-a3"]);
-    }
-
-    #[test]
-    fn parses_ask_with_output_condition_and_stdin() {
-        let cli = Cli::try_parse_from([
-            "wardian",
-            "ask",
-            "reviewer-a1",
-            "--stdin",
-            "--until",
-            "output:REVIEW_DONE",
-            "--tail",
-            "131072",
-            "--timeout",
-            "30s",
-        ])
-        .unwrap();
-        let Command::Ask(args) = cli.command else {
-            panic!("expected Ask command")
-        };
-        assert_eq!(args.target, "reviewer-a1");
-        assert!(args.stdin);
-        assert_eq!(args.until.as_deref(), Some("output:REVIEW_DONE"));
-        assert_eq!(args.tail, 131072);
-        assert_eq!(args.timeout, "30s");
-    }
-
-    #[test]
     fn parses_reply_with_done_status_and_stdin() {
         let cli = Cli::try_parse_from([
             "wardian",
+            "message",
             "reply",
             "ask_0123456789abcdef",
             "--status",
@@ -3183,7 +2840,10 @@ mod tests {
             "--stdin",
         ])
         .unwrap();
-        let Command::Reply(args) = cli.command else {
+        let Command::Message(MessageCommandArgs {
+            command: MessageCommand::Reply(args),
+        }) = cli.command
+        else {
             panic!("expected Reply command")
         };
         assert_eq!(args.request_id, "ask_0123456789abcdef");
@@ -3195,6 +2855,7 @@ mod tests {
     fn reply_rejects_unknown_status() {
         let err = Cli::try_parse_from([
             "wardian",
+            "message",
             "reply",
             "ask_0123456789abcdef",
             "--status",
@@ -3203,20 +2864,6 @@ mod tests {
         ])
         .unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
-    }
-
-    #[test]
-    fn ask_rejects_stdin_and_file_together() {
-        let err = Cli::try_parse_from([
-            "wardian",
-            "ask",
-            "reviewer-a1",
-            "--stdin",
-            "--file",
-            "prompt.md",
-        ])
-        .unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

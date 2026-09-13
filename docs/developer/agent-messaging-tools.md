@@ -41,8 +41,9 @@ Reply takes `request_id`, `status` (`done`, `blocked`, or `failed`), and
 agent's final prose does not, by itself, complete a correlated request.
 
 Only an assigned task with an explicit `request_id` requires MCP `reply`.
-An ordinary chat message or `wardian send` completes through the agent's
-assistant response. Its delivery interaction ID is not a task request ID.
+An ordinary human chat message completes through the agent's assistant
+response. Its delivery interaction ID is not a task request ID. Informational
+peer messages do not create an obligation to start a turn or reply.
 
 An MCP tool error is returned with `isError: true`. A failed or lost send
 response can leave delivery uncertain; neither the server nor the caller
@@ -54,6 +55,42 @@ records. The tool does not accept an arbitrary sender argument. Informational
 records never enter the runnable prompt queue. Follow-up work uses the
 receiver's supported delivery boundary. Interruption is separate from sending
 a correction, pausing the agent, or destroying its provider process.
+
+Native delivery must reach the same running provider conversation. Provider
+adapters may retain composer delivery for specific configurations where native
+attachment is unavailable; those exceptions require a documented capability
+limit. An uncertain native submission must not be retried through the composer.
+
+## Automatic task delivery
+
+`followup_task` first persists the task and returns its request ID. Manual
+receive and automatic dispatch share a durable claim: only one may expose that
+task as new work. Startup and readiness observations give pending tasks another
+dispatch opportunity; they do not replay a task whose delivery is uncertain.
+
+For an attached Codex session, Wardian validates its native owner and runtime
+generation, then sends `turn/start` with a structured `wardian_task_delivery`
+item on the existing thread. No terminal paste or Return key is involved.
+Provider acceptance and task completion are recorded separately. The recipient
+completes the task using `reply` with the original request ID.
+
+Information and replies use the same canonical interaction store. A capable
+Codex session can receive them through `thread/inject_items` as
+`wardian_inbox_delivery`, without starting a turn. Explicit receive remains
+available when native push is unavailable.
+
+## Legacy delivery retirement
+
+The legacy send/ask control operations and live-surface mailbox scheduler are
+removed. Old client requests cannot reactivate terminal delivery. Historical
+mailbox records remain evidence; startup, restore, and idle observations do not
+dispatch them or convert them into canonical tasks. An uncertain old submission
+must not be automatically replayed.
+
+Human terminal input remains available. Codex peer messaging requires its
+native connection and never falls back to the composer. The updated behavior
+requires the updated runtime; source changes do not alter an already running
+older instance.
 
 ## Codex configuration
 

@@ -433,7 +433,7 @@ fn schedule_agent_status_observation(
                 "current_status": status.clone(),
             }),
         );
-        crate::control::spawn_mailbox_drain_if_idle(&status_app, &status_session_id, &status);
+        crate::control::spawn_agent_messaging_if_idle(&status_app, &status_session_id, &status);
     });
 }
 

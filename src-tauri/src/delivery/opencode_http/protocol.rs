@@ -96,26 +96,9 @@ impl OpenCodeHttpLaunchPlan {
 
     pub(crate) fn bind(
         self,
-        agent_id: String,
-        provider_session_id: String,
-        process_identity: String,
-        listener_identity: String,
-        workspace: PathBuf,
-        config_fingerprint: String,
-        server_version: Option<String>,
+        proof: OpenCodeHttpLaunchProof,
     ) -> Result<OpenCodeHttpBinding, String> {
-        OpenCodeHttpBinding::from_launch(
-            self,
-            OpenCodeHttpLaunchProof {
-                agent_id,
-                provider_session_id,
-                process_identity,
-                listener_identity,
-                workspace,
-                config_fingerprint,
-                server_version,
-            },
-        )
+        OpenCodeHttpBinding::from_launch(self, proof)
     }
 }
 
