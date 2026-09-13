@@ -596,7 +596,9 @@ pub(crate) fn record_provider_log_policy_for_snapshot(
             state
                 .conversation_archive
                 .close_agent_capture_disabled_window(context)
-                .map_err(|error| format!("conversation archive disabled window close failed: {error}"))?;
+                .map_err(|error| {
+                    format!("conversation archive disabled window close failed: {error}")
+                })?;
         }
         return Ok(());
     };
@@ -619,7 +621,9 @@ pub(crate) fn record_provider_log_policy_for_snapshot(
             state
                 .conversation_archive
                 .close_agent_capture_disabled_window(context)
-                .map_err(|error| format!("conversation archive disabled window close failed: {error}"))?;
+                .map_err(|error| {
+                    format!("conversation archive disabled window close failed: {error}")
+                })?;
         }
         return Ok(());
     };
@@ -638,7 +642,9 @@ pub(crate) fn record_provider_log_policy_for_snapshot(
         state
             .conversation_archive
             .close_agent_capture_disabled_window(context)
-            .map_err(|error| format!("conversation archive disabled window close failed: {error}"))?;
+            .map_err(|error| {
+                format!("conversation archive disabled window close failed: {error}")
+            })?;
     }
     Ok(())
 }
@@ -2229,8 +2235,8 @@ Do you want to proceed?
     }
 
     #[tokio::test]
-    async fn incremental_opencode_capture_persists_bound_db_events_once_and_respects_disabled_logging()
-    {
+    async fn incremental_opencode_capture_persists_bound_db_events_once_and_respects_disabled_logging(
+    ) {
         let _guard = crate::utils::wardian_test_env_lock_async().await;
         let temp = tempfile::tempdir().expect("temp dir");
         let provider_data = temp.path().join("provider-data");

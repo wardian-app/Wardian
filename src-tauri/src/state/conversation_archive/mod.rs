@@ -127,9 +127,12 @@ impl ConversationCaptureState {
             {
                 return true;
             }
-            let is_canonical_opencode_db_event =
-                event.source.as_deref() == Some("opencode_db")
-                    && event.metadata.get("part_id").and_then(|value| value.as_str()).is_some();
+            let is_canonical_opencode_db_event = event.source.as_deref() == Some("opencode_db")
+                && event
+                    .metadata
+                    .get("part_id")
+                    .and_then(|value| value.as_str())
+                    .is_some();
             // A closed policy interval classifies canonical DB rows by their
             // own creation time. The byte-log cutoff remains the fallback for
             // legacy state and non-canonical provider observations.
@@ -138,10 +141,10 @@ impl ConversationCaptureState {
                 .as_deref()
                 .zip(event.created_at.as_deref())
                 .is_some_and(|(cutoff, created_at)| {
-                    !is_canonical_opencode_db_event
-                        || (scope.disabled_from.is_none()
+                    created_at <= cutoff
+                        && (!is_canonical_opencode_db_event
+                            || scope.disabled_from.is_none()
                             || scope.disabled_until.is_none())
-                            && created_at <= cutoff
                 });
             let disabled_window_match = match (
                 scope.disabled_from.as_deref(),
@@ -1081,11 +1084,9 @@ impl ConversationArchiveState {
         let agent_lock = agent_lock_for(&self.agent_locks, &context.agent_id)?;
         let _agent_guard = lock_agent_archive(&agent_lock)?;
         let mut capture_state = read_capture_state(&context.agent_id)?;
-        let Some(scope) = capture_state
-            .skip_event_scopes
-            .iter_mut()
-            .find(|scope| scope.provider_source_key.as_deref() == Some(provider_source_key.as_str()))
-        else {
+        let Some(scope) = capture_state.skip_event_scopes.iter_mut().find(|scope| {
+            scope.provider_source_key.as_deref() == Some(provider_source_key.as_str())
+        }) else {
             return Ok(());
         };
         if scope.disabled_from.is_some() && scope.disabled_until.is_none() {
