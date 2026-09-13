@@ -61,12 +61,12 @@ labels keep their centre and width while their outlines grow smoothly in
 height into reading planes. Zooming out reverses the change, keeping the
 surrounding geography connected.
 
-![Agent cell with Identity, Skills, Memory, Automations, Conversations, Inbox, Workspace, Teams, and Agents anchored inside its membrane](../assets/screenshots/garden/agent-cutaway.png)
+![Agent cell with Identity, Skills, Memory, Automations, and Conversations anchored inside its membrane](../assets/screenshots/garden/agent-cutaway.png)
 
 *Zoom into an agent cell to reveal contained objects, then approach a record to read it.*
 
 Colored trays, defined rims and shallow raised objects distinguish the five
-regions. Their material colors identify regions; status markings still show
+direct organelles. Their material colors identify regions; status markings still show
 Idle, Processing, Action Required, Off and Error. Each region keeps its place
 as its collection grows, so a busy agent remains recognizable.
 
@@ -77,8 +77,8 @@ seeds keep Stable/Current and scope grouping; enter one for its full text and
 evidence. Collections show loaded counts. With more than 48 loaded memories,
 **Find memory** searches their text; Enter or **Find next memory** focuses the
 next match without rearranging the collection. Enter that object to read its
-evidence. **Conversations** exposes every loaded conversation summary, with
-dates and expandable excerpts, alongside notification details.
+evidence. **Conversations** exposes every loaded conversation summary directly,
+with dates and expandable excerpts.
 Skill provenance remains in its accessible label and hover description, with
 canonical details available through the skill record.
 
@@ -97,15 +97,14 @@ plane and geography.
 | Region | Contents |
 | --- | --- |
 | Identity | Purpose, class, provider, model, saved permission settings, and **Open agent session** |
-| Skills and Tools | Deployed skills with direct, class-inherited, or global provenance; linked or copied state; configured tools |
+| Skills | Deployed skills with direct, class-inherited, or global provenance and linked or copied state |
 | Memory | Stable and Current records, grouped by agent-wide or workspace-bound scope |
-| Automations, Conversations, and Inbox | Current/recent conversation excerpts, assigned routines, active manual runs, and loaded Inbox items attributed by agent session ID |
-| Workspace, Teams, and Agents | Workspace, team membership, and peers sharing a team or workspace |
+| Automations | Assigned routines and active manual runs |
+| Conversations | Current and previous conversation summaries with dates and expandable excerpts |
 
-Saved permission and tool settings describe configuration; runtime application
-may require a restart. Related agents share a workspace or team; these links do not imply exclusive ownership.
-Following a peer or workspace keeps a breadcrumb back to the originating agent.
-Peer links travel to that peer's cell in its own place in the world.
+Saved permission settings describe configuration; runtime application may
+require a restart. Workspace, team and peer relationships remain visible in
+the district geography rather than being repeated inside every agent.
 
 Memory records show full text, scope, evidence, sources, verification time, and
 revision history. Skill records expose **Open in Library**. File records show
@@ -158,7 +157,8 @@ unscheduled run. Separate schedules of one blueprint remain separate objects;
 scheduled runs contribute to their schedule's projection. A `role:` or `class:`
 requirement alone does not locate a blueprint.
 
-- One concrete agent: an attached routine.
+- One concrete agent: an attached routine, packed into deterministic expanding
+  rings with its sibling routines rather than a linear list.
 - Several concrete agents: a directed route through participants in execution
   order, retaining returns to an earlier agent.
 - No concrete agent, but a configured workspace: a workspace routine.
@@ -175,7 +175,10 @@ back on the map. Historical evidence also remains available in Automation
 Monitor.
 
 Ordinary connections recede at the habitat overview and return as you zoom
-closer. A selected route stays visible, as do local attention indicators.
+closer. Dense attachment labels wait until the rings have enough screen
+circumference; selecting a routine always reveals its label. A failed stage is
+marked with a compact local × rather than a halo around the agent. Approval
+attention remains distinct.
 
 Enter a routine or route to inspect its schedule and separate run lanes. A
 stage record shows assignment, state, inputs, and recorded outputs/events;

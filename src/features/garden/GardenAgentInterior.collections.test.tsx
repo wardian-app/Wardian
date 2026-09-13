@@ -1,6 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useQueueStore } from "../../store/useQueueStore";
+import { describe, expect, it, vi } from "vitest";
 import { GardenAgentInterior } from "./GardenAgentInterior";
 import { useGardenAgentContents, type GardenConversationEntry, type GardenMemoryRecord } from "./useGardenAgentContents";
 
@@ -28,26 +27,20 @@ function memory(index: number): GardenMemoryRecord {
 function setup(memories: GardenMemoryRecord[], conversations: GardenConversationEntry[]) {
   vi.mocked(useGardenAgentContents).mockReturnValue({ memories: loaded(memories), conversations: loaded(conversations), refresh: vi.fn() });
   const callbacks = { onSelect: vi.fn(), onEnter: vi.fn(), onOpenAgent: vi.fn() };
-  const view = render(<GardenAgentInterior agent={agent} status="idle" crown={[]} agents={[agent]} teams={[]} automations={[]} selectedKey="memory:m1" {...callbacks} />);
+  const view = render(<GardenAgentInterior agent={agent} status="idle" crown={[]} automations={[]} selectedKey="memory:m1" {...callbacks} />);
   return { ...view, ...callbacks };
 }
-beforeEach(() => {
-  useQueueStore.setState({ items: [], loadItems: vi.fn().mockResolvedValue(undefined), inboxNotificationsTruncated: false });
-});
-
 describe("Garden collections", () => {
   it("uses singular counts for one loaded memory, scope memory and conversation", async () => {
     setup([memory(1)], [conversation(1)]);
     expect(screen.getByText("1 loaded memory")).toBeInTheDocument();
     expect(screen.getByText("1 memory")).toBeInTheDocument();
     expect(screen.getByText("1 loaded conversation")).toBeInTheDocument();
-    await waitFor(() => expect(screen.queryByText("Loading Inbox…")).not.toBeInTheDocument());
   });
   it("exposes all 60 conversations and mounts only expanded excerpts, including entries beyond three", async () => {
     const conversations = Array.from({ length: 60 }, (_, index) => conversation(index + 1));
     const { container } = setup([], conversations);
     expect(screen.getByText("60 loaded conversations")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("Conversations", { selector: "summary" }));
     expect(container.querySelectorAll(".garden-conversation-object")).toHaveLength(60);
     expect(container.querySelectorAll(".garden-conversation-detail")).toHaveLength(0);
     for (const index of [3, 59]) {
@@ -86,7 +79,7 @@ describe("Garden collections", () => {
       memories: { data: null, loading: false, error: "Offline", stale: false },
       conversations: { data: null, loading: false, error: "Offline", stale: false }, refresh: vi.fn(),
     });
-    render(<GardenAgentInterior agent={agent} status="idle" crown={[]} agents={[]} teams={[]} automations={[]} projectedWidth={100}
+    render(<GardenAgentInterior agent={agent} status="idle" crown={[]} automations={[]} projectedWidth={100}
       onSelect={vi.fn()} onEnter={vi.fn()} onOpenAgent={vi.fn()} />);
     expect(screen.queryByText("0 loaded memories")).not.toBeInTheDocument();
     expect(screen.queryByText("0 loaded conversations")).not.toBeInTheDocument();
@@ -134,12 +127,10 @@ describe("Garden collections", () => {
     fireEvent.change(input, { target: { value: "" } });
     expect(search.queryByRole("button", { name: "Find next memory" })).not.toBeInTheDocument();
     expect(screen.getByText("300 loaded memories")).toBeInTheDocument();
-    await waitFor(() => expect(screen.queryByText("Loading Inbox…")).not.toBeInTheDocument());
   });
 
   it.each([48, 49])("offers search only above 48 loaded records (%i)", async (count) => {
     setup(Array.from({ length: count }, (_, index) => memory(index + 1)), []);
     expect(screen.queryAllByRole("searchbox", { name: "Find memory" })).toHaveLength(count > 48 ? 1 : 0);
-    await waitFor(() => expect(screen.queryByText("Loading Inbox…")).not.toBeInTheDocument());
   });
 });

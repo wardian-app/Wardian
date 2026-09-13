@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentLabelWidths, districtBand, districtPopulations, situatedRoutes } from "./canvasHierarchy";
+import { agentLabelWidths, districtBand, districtPopulations, radialAttachmentPosition, situatedRoutes } from "./canvasHierarchy";
 import type { GardenAgentUnit } from "./garden.types";
 
 describe("canvas hierarchy", () => {
@@ -34,7 +34,16 @@ describe("canvas hierarchy", () => {
     const districts = new Map([["d", { roots: ["/workspace"], origin: { x: 500, y: 0 }, radius: 100 }]]);
     const routes = situatedRoutes([{ ...input, agentIds: ["a"] }, { ...input, id: "route", agentIds: ["b", "a"] }, { ...input, id: "workspace", workspacePaths: ["/workspace"] }], agents, districts);
     expect(routes[0].points).toEqual([agents[0].position]);
+    expect(routes[0].anchor).toEqual({ x: 46, y: 0 });
     expect(routes[1].points).toEqual([agents[1].position, agents[0].position]);
     expect(routes[2].points[0].x).toBe(500);
+  });
+  it("packs dense single-agent automations into deterministic expanding rings", () => {
+    const positions = Array.from({ length: 20 }, (_, slot) => radialAttachmentPosition(agents[0].position, slot));
+    expect(new Set(positions.map(({ x, y }) => `${x.toFixed(4)},${y.toFixed(4)}`)).size).toBe(20);
+    for (const position of positions.slice(0, 8)) expect(Math.hypot(position.x, position.y)).toBeCloseTo(46);
+    for (const position of positions.slice(8)) expect(Math.hypot(position.x, position.y)).toBeCloseTo(76);
+    const routes = situatedRoutes(Array.from({ length: 20 }, (_, index) => ({ ...input, id: `routine-${index}`, agentIds: ["a"] })), agents, new Map());
+    expect(routes.map((route) => route.anchor)).toEqual(positions);
   });
 });
