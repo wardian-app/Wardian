@@ -62,7 +62,23 @@ describe("canvas aggregate and route paint", () => {
     expect(screen.getByText(routes[0].presentation.summary)).toBeInTheDocument();
   });
 
-  it("retains local attention hits outside the invisible route group in both paint modes", () => {
+  it("defers dense orbit labels until there is enough screen circumference", () => {
+    const inputs: CanvasAutomationInput[] = Array.from({ length: 9 }, (_, index) => ({
+      id: `routine-${index}`, label: `Routine ${index}`, nodeCount: 1, agentIds: ["a"], runStatus: "none",
+    }));
+    const routes = situatedRoutes(inputs, agents, districts);
+    const { rerender } = render(<AutomationRoutesLayer routes={routes} theme={theme} scale={3.2} continuousZoom
+      selectedKey={null} onSelect={vi.fn()} onOpen={vi.fn()} />);
+    expect(screen.queryByText(routes[0].presentation.summary)).not.toBeInTheDocument();
+    rerender(<AutomationRoutesLayer routes={routes} theme={theme} scale={3.2} continuousZoom
+      selectedKey="automation:routine-0" onSelect={vi.fn()} onOpen={vi.fn()} />);
+    expect(screen.getByText(routes[0].presentation.summary)).toBeInTheDocument();
+    rerender(<AutomationRoutesLayer routes={routes} theme={theme} scale={5.2} continuousZoom
+      selectedKey={null} onSelect={vi.fn()} onOpen={vi.fn()} />);
+    expect(screen.getByText(routes[0].presentation.summary)).toBeInTheDocument();
+  });
+
+  it("retains a compact failed-stage hit without drawing the failed attention ring", () => {
     const input: CanvasAutomationInput = { id: "attention", label: "Attention", nodeCount: 1, agentIds: ["a"], runStatus: "failed",
       stages: [{ nodeId: "step", agentId: "a", status: "failed" }] };
     const routes = situatedRoutes([input], agents, districts);
@@ -72,10 +88,11 @@ describe("canvas aggregate and route paint", () => {
     for (const mode of ["all", "markers"] as const) {
       rerender(<AutomationRoutesLayer routes={routes} theme={theme} scale={.32} continuousZoom mode={mode}
         selectedKey={null} onSelect={onSelect} onOpen={onOpen} />);
-      const attention = container.querySelector('[data-name="stage-attention"]')!;
+      const attention = container.querySelector('[data-id="stages:step:a"]')!;
       expect(attention).not.toBeNull();
-      expect(attention.closest('[data-listening="false"]')).toBeNull();
       expect(attention.closest('[data-name="automation-route"]')).toBeNull();
+      expect(attention.querySelector('[data-name="stage-attention"]')).toBeNull();
+      expect(attention).toHaveTextContent("×");
       fireEvent.click(attention); fireEvent.doubleClick(attention);
       expect(onSelect).toHaveBeenLastCalledWith({ kind: "automation", id: "attention" });
       expect(onOpen).toHaveBeenLastCalledWith({ kind: "automation", id: "attention" });
@@ -109,7 +126,7 @@ describe("canvas aggregate and route paint", () => {
     expect(container.querySelector('[data-shape="Arrow"]')).toHaveAttribute("data-dash", "7,4,1,4");
     expect(container.querySelector('[data-id="r:failed-step:b"]')).toHaveAttribute("data-x", "10");
     expect(container.querySelector('[data-id="r:failed-step:b"]')).toHaveAttribute("data-y", "0");
-    expect(container.querySelector('[data-name="stage-attention"]')).not.toBeNull();
+    expect(container.querySelector('[data-name="stage-attention"]')).toBeNull();
     expect(container.querySelector('[data-id="r:temp:provider"]')).toHaveAttribute("data-y", "65");
     expect(container.querySelector('[data-name="temporary-provider"]')).not.toBeNull();
     expect(screen.getByText(/failed-step · Failed/)).toBeInTheDocument();

@@ -36,6 +36,8 @@ const result: RunReadResult = {
   events,
   blueprint: { schema: 2, id: 'wf', name: 'Automation', nodes: [], edges: [] },
   blueprint_path: '/library/automations/wf.md',
+  workers: [],
+  worker_telemetry: {},
 };
 
 describe('useRunStore', () => {

@@ -338,12 +338,29 @@ where
     retained.sort_by(compare_run_summaries);
     let page_end = offset.saturating_add(MAX_AUTOMATION_RUNS);
     let truncated = retained.len() > page_end;
+    let mut runs = retained
+        .into_iter()
+        .skip(offset)
+        .take(MAX_AUTOMATION_RUNS)
+        .collect::<Vec<_>>();
+    let worker_attention =
+        wardian_core::temporary_workers::attention_counts_by_run().unwrap_or_default();
+    for run in &mut runs {
+        let blueprint_id = run
+            .get("blueprint_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let run_id = run
+            .get("run_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        run["worker_attention_count"] = serde_json::json!(worker_attention
+            .get(&(blueprint_id.to_string(), run_id.to_string()))
+            .copied()
+            .unwrap_or(0));
+    }
     Ok(AutomationRunListResult {
-        runs: retained
-            .into_iter()
-            .skip(offset)
-            .take(MAX_AUTOMATION_RUNS)
-            .collect(),
+        runs,
         truncated,
         next_offset: truncated.then_some(page_end),
     })
@@ -485,12 +502,46 @@ pub fn automation_read_run(
     };
     let blueprint_path =
         resolve_blueprint_path(&blueprint_id).map(|path| path.to_string_lossy().to_string());
+    let workers = wardian_core::temporary_workers::list_for_run(&blueprint_id, &run_id)
+        .map_err(|error| error.to_string())?;
+    let worker_telemetry =
+        wardian_core::temporary_workers::telemetry_for_run(&blueprint_id, &run_id)
+            .map_err(|error| error.to_string())?;
 
     Ok(serde_json::json!({
         "state": state,
         "events": events,
         "blueprint": blueprint,
-        "blueprint_path": blueprint_path
+        "blueprint_path": blueprint_path,
+        "workers": workers,
+        "worker_telemetry": worker_telemetry
+    }))
+}
+
+/// Compact child-worker counts for owner-linked agent surfaces. Temporary
+/// workers remain outside the permanent roster and watchlist.
+#[tauri::command]
+pub fn temporary_worker_root_summaries() -> Result<serde_json::Value, String> {
+    let summaries = wardian_core::temporary_workers::root_agent_summaries()
+        .map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({ "summaries": summaries }))
+}
+
+/// Detailed observe-only child-worker evidence for one permanent root agent.
+/// This does not grant follow-up, interruption, or resume capabilities.
+#[tauri::command]
+pub fn temporary_worker_root_details(root_agent_id: String) -> Result<serde_json::Value, String> {
+    if root_agent_id.trim().is_empty() {
+        return Err("root_agent_id is required".to_string());
+    }
+    let workers = wardian_core::temporary_workers::list_for_root(&root_agent_id)
+        .map_err(|error| error.to_string())?;
+    let worker_telemetry = wardian_core::temporary_workers::telemetry_for_root(&root_agent_id)
+        .map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({
+        "root_agent_id": root_agent_id,
+        "workers": workers,
+        "worker_telemetry": worker_telemetry
     }))
 }
 
@@ -925,11 +976,11 @@ pub async fn approve_automation_for_surface(
     }
 }
 
-/// Record a durable cancel request. The engine consumes the marker at its next
-/// dispatch boundary, or immediately persists cancellation for an approval-
-/// parked run.
+/// Record a durable cancel request. An active temporary worker observes this
+/// run-owned marker, terminates and reaps its provider process tree, and writes
+/// a guarded cancellation acknowledgement before the engine settles the run.
 #[tauri::command]
-pub fn automation_cancel(
+pub async fn automation_cancel(
     blueprint_id: String,
     run_id: String,
 ) -> Result<serde_json::Value, String> {
@@ -940,7 +991,13 @@ pub fn automation_cancel(
         if state.status == RunStatus::Running {
             std::fs::write(run_root.join("cancel.marker"), "cancelled")
                 .map_err(|error| error.to_string())?;
-            return Ok(serde_json::json!({ "ok": true, "status": state.status }));
+            let (status, worker_cancellation_acknowledged) =
+                await_owned_worker_cancellation(&blueprint_id, &run_id, &run_root).await?;
+            return Ok(serde_json::json!({
+                "ok": true,
+                "status": status,
+                "worker_cancellation_acknowledged": worker_cancellation_acknowledged
+            }));
         }
         if matches!(state.status, RunStatus::Completed | RunStatus::Failed) {
             let _ = std::fs::remove_file(run_root.join("cancel.marker"));
@@ -959,6 +1016,86 @@ pub fn automation_cancel(
     let state = wardian_core::engine::Engine::cancel(&blueprint, &run_root)
         .map_err(|error| error.to_string())?;
     Ok(serde_json::json!({ "ok": true, "status": state.status }))
+}
+
+async fn await_owned_worker_cancellation(
+    blueprint_id: &str,
+    run_id: &str,
+    run_root: &Path,
+) -> Result<(RunStatus, bool), String> {
+    let workers = wardian_core::temporary_workers::list_for_run(blueprint_id, run_id)
+        .map_err(|error| error.to_string())?;
+    let requested_worker_ids = workers
+        .iter()
+        .filter(|worker| {
+            worker.kind == wardian_core::temporary_workers::TemporaryWorkerKind::Automation
+                && matches!(
+                    worker.state,
+                    wardian_core::temporary_workers::TemporaryWorkerState::Requested
+                        | wardian_core::temporary_workers::TemporaryWorkerState::Running
+                )
+        })
+        .map(|worker| worker.worker_id.clone())
+        .collect::<Vec<_>>();
+    if requested_worker_ids.is_empty() {
+        let status = read_checkpoint(run_root)
+            .map_err(|error| error.to_string())?
+            .map(|state| state.status)
+            .unwrap_or(RunStatus::Running);
+        return Ok((status, false));
+    }
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let workers = wardian_core::temporary_workers::list_for_run(blueprint_id, run_id)
+            .map_err(|error| error.to_string())?;
+        let acknowledged = requested_worker_ids.iter().all(|worker_id| {
+            workers
+                .iter()
+                .find(|worker| worker.worker_id == *worker_id)
+                .is_some_and(worker_has_cancellation_acknowledgement)
+        });
+        let active = requested_worker_ids.iter().any(|worker_id| {
+            workers
+                .iter()
+                .find(|worker| worker.worker_id == *worker_id)
+                .is_some_and(|worker| {
+                    matches!(
+                        worker.state,
+                        wardian_core::temporary_workers::TemporaryWorkerState::Requested
+                            | wardian_core::temporary_workers::TemporaryWorkerState::Running
+                    )
+                })
+        });
+        let status = read_checkpoint(run_root)
+            .map_err(|error| error.to_string())?
+            .map(|state| state.status)
+            .unwrap_or(RunStatus::Running);
+        if acknowledged {
+            return Ok((status, true));
+        }
+        if !active {
+            return Ok((status, false));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok((status, false));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+fn worker_has_cancellation_acknowledgement(
+    worker: &wardian_core::temporary_workers::TemporaryWorkerRecord,
+) -> bool {
+    is_cancellation_acknowledgement(worker.state, &worker.coverage)
+}
+
+fn is_cancellation_acknowledgement(
+    state: wardian_core::temporary_workers::TemporaryWorkerState,
+    coverage: &str,
+) -> bool {
+    state == wardian_core::temporary_workers::TemporaryWorkerState::Cancelled
+        && coverage == "run_cancellation_acknowledged"
 }
 
 fn now_ms() -> u64 {
@@ -1383,25 +1520,50 @@ mod tests {
         assert_eq!(refreshed.runs[0]["status"], "completed");
     }
 
-    #[test]
-    fn automation_cancel_marks_running_run_without_loading_blueprint() {
+    #[tokio::test]
+    async fn automation_cancel_marks_running_run_without_loading_blueprint() {
         let temp = tempfile::tempdir().unwrap();
-        let _guard = EnvGuard::set(temp.path());
+        let _guard = EnvGuard::set_async(temp.path()).await;
+        wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
+            .expect("initialize automation command database");
         let blueprint_id = "missing-blueprint";
         let run_id = "run-cancel";
         let run_root = wardian_core::paths::automation_run_dir(blueprint_id, run_id).unwrap();
         write_checkpoint(&run_root, &RunState::new(run_id, blueprint_id)).unwrap();
 
-        let result = automation_cancel(blueprint_id.into(), run_id.into()).unwrap();
+        let result = automation_cancel(blueprint_id.into(), run_id.into())
+            .await
+            .unwrap();
 
         assert_eq!(result["status"], "running");
+        assert_eq!(result["worker_cancellation_acknowledged"], false);
         assert!(run_root.join("cancel.marker").exists());
+    }
+
+    #[test]
+    fn cancellation_acknowledgement_requires_cancelled_state_and_owned_coverage() {
+        use wardian_core::temporary_workers::TemporaryWorkerState;
+
+        assert!(is_cancellation_acknowledgement(
+            TemporaryWorkerState::Cancelled,
+            "run_cancellation_acknowledged",
+        ));
+        assert!(!is_cancellation_acknowledgement(
+            TemporaryWorkerState::Succeeded,
+            "run_cancellation_acknowledged",
+        ));
+        assert!(!is_cancellation_acknowledgement(
+            TemporaryWorkerState::Cancelled,
+            "provider_observation_adapter_unavailable",
+        ));
     }
 
     #[test]
     fn automation_read_run_prefers_the_immutable_blueprint_snapshot() {
         let temp = tempfile::tempdir().unwrap();
         let _guard = EnvGuard::set(temp.path());
+        wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
+            .expect("initialize automation command database");
         seed_automation_blueprint(temp.path());
         let run_root = wardian_core::paths::automation_run_dir("wf", "run-snapshot").unwrap();
         let snapshot = Blueprint {

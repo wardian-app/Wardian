@@ -51,6 +51,14 @@ function respondWith(data: Partial<TelemetryMatrix> = {}, limits: unknown[] = []
   });
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 beforeEach(() => {
   invokeMock.mockReset();
 });
@@ -263,9 +271,23 @@ describe("AnalyticsView", () => {
   it("says what the shading means", async () => {
     // A heat ramp with no anchor asks the reader to infer the mapping from the
     // data, which they cannot: the curve is square-rooted on purpose.
-    respondWith({ max_cell: 4 });
+    const telemetry = deferred<TelemetryMatrix>();
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "telemetry_matrix") return telemetry.promise;
+      if (command === "telemetry_overview") return Promise.resolve({ limits: [] });
+      if (command === "telemetry_refresh") return Promise.resolve({ advanced: 1 });
+      return Promise.reject(new Error(`unexpected command ${command}`));
+    });
     const { container } = render(<AnalyticsView />);
-    await screen.findByText(/Alpha|Agent/);
+
+    // The old readiness regex can satisfy from the static Rows option before
+    // telemetry resolves, so it is not a data-ready signal.
+    const earlyMatch = await screen.findByText(/Alpha|Agent/);
+    expect(earlyMatch.textContent).toBe("Agent");
+    expect(container.querySelector(".analytics-view__scale")).toBeNull();
+
+    telemetry.resolve(matrix({ max_cell: 4 }));
+    await screen.findByText(/busiest/);
 
     const scale = container.querySelector(".analytics-view__scale");
     expect(scale).not.toBeNull();

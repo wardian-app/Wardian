@@ -129,7 +129,8 @@ Each section uses a card hierarchy suited to the operator's question:
   started and was last updated.
 - **Needs attention** leads with ownership, the action required, and the latest
   status update. It includes approval gates, unsuperseded failed runs, and
-  schedule launch failures that do not have a newer retained run.
+  schedule launch failures that do not have a newer retained run. A run also
+  remains here while one of its temporary workers is failed, waiting, or unknown.
 - **All** preserves those section-specific priorities instead of forcing every
   activity into one universal row layout.
 
@@ -139,6 +140,19 @@ assignment. When an automation has more assignments, the accessible **+N agents*
 control expands the complete role map without making every collapsed card
 taller. Stored agent ids remain visible if an assigned agent is no longer in the
 roster.
+
+Open a run and select a node to inspect its temporary worker attempts. The node
+inspector distinguishes the automation attempt from verified provider-spawned
+children and reports the provider, lifecycle state, ancestry/source coverage, and
+available capabilities. It labels each worker's own usage separately from its
+descendant combined usage. **Observe only** means Wardian can read the recorded
+work but has no verified follow-up, resume, or interruption transport for that worker.
+Temporary workers do not become permanent agents or watchlist rows.
+
+Cancelling a run asks its currently active automation-owned headless worker to stop
+and waits briefly for process termination and registry acknowledgement. Provider
+timeouts and lost post-submit observation remain **Unknown** for reconciliation;
+Wardian does not treat them as safe failures to retry.
 
 Run and schedule times use local, calendar-aware labels such as **Today**,
 **Tomorrow**, a nearby weekday and date, or a full date for more distant

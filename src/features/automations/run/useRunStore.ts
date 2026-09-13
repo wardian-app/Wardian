@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import { nodeStatusesAt } from './replay';
 import type { Blueprint } from '../builder/blueprintTypes';
-import type { NodeStatusKind, RunEvent, RunReadResult, RunState, RunSummary, RunSummaryListResult } from './runTypes';
+import type { NodeStatusKind, RunEvent, RunReadResult, RunState, RunSummary, RunSummaryListResult, TemporaryWorker, TemporaryWorkerTelemetry } from './runTypes';
 
 interface RunStoreState {
   runs: RunSummary[];
@@ -13,6 +13,8 @@ interface RunStoreState {
   events: RunEvent[];
   blueprint: Blueprint | null;
   blueprintPath: string | null;
+  workers: TemporaryWorker[];
+  workerTelemetry: Record<string, TemporaryWorkerTelemetry>;
   scrubIndex: number;
   loadRuns: () => Promise<void>;
   loadMoreRuns: () => Promise<void>;
@@ -32,6 +34,8 @@ const initialState = {
   events: [],
   blueprint: null,
   blueprintPath: null,
+  workers: [],
+  workerTelemetry: {},
   scrubIndex: 0,
 };
 
@@ -89,6 +93,8 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
       events,
       blueprint: result.blueprint,
       blueprintPath: result.blueprint_path ?? summaryPath ?? null,
+      workers: result.workers ?? [],
+      workerTelemetry: result.worker_telemetry ?? {},
       scrubIndex: Math.max(0, events.length - 1),
     });
   },
@@ -98,6 +104,8 @@ export const useRunStore = create<RunStoreState>((set, get) => ({
       events: [],
       blueprint: null,
       blueprintPath: null,
+      workers: [],
+      workerTelemetry: {},
       scrubIndex: 0,
     });
   },
@@ -133,5 +141,6 @@ function runSummaryEqual(left: RunSummary, right: RunSummary) {
     && left.updated_at === right.updated_at
     && left.completed_at === right.completed_at
     && left.failure === right.failure
-    && left.schedule_id === right.schedule_id;
+    && left.schedule_id === right.schedule_id
+    && left.worker_attention_count === right.worker_attention_count;
 }

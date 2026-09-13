@@ -2271,6 +2271,7 @@ export const AgentTerminal = memo(function AgentTerminal({
   ) => void;
 }) {
   const terminalKey = presentationId;
+  const presentationOwnerTokenRef = useRef(Symbol("terminal-presentation-owner"));
   const terminalRef = useRef<HTMLDivElement>(null);
   const [isFileDragOver, setIsFileDragOver] = useState(false);
   const fileDragCounterRef = useRef(0);
@@ -3081,7 +3082,11 @@ export const AgentTerminal = memo(function AgentTerminal({
         await awaitBackendReadyAndFit();
         try {
           const registrationLifecycle = presentationLifecycleRef.current;
-          const rebound = session.terminalClient.rebindPresentation(presentationId, callbacks);
+          const rebound = session.terminalClient.rebindPresentation(
+            presentationId,
+            callbacks,
+            presentationOwnerTokenRef.current,
+          );
           if (rebound) {
             await awaitBackendReadyAndFit();
             const reconciled = await session.terminalClient.updatePresentation(presentationId, {
@@ -3113,7 +3118,10 @@ export const AgentTerminal = memo(function AgentTerminal({
                 observed_lease_epoch: session.brokerState?.lease_epoch ?? 0,
               },
               callbacks,
-              { beforeInitialSnapshot: awaitBackendReadyAndFit },
+              {
+                beforeInitialSnapshot: awaitBackendReadyAndFit,
+                ownerToken: presentationOwnerTokenRef.current,
+              },
             );
             if (!isMounted) {
               return;
@@ -3280,9 +3288,12 @@ export const AgentTerminal = memo(function AgentTerminal({
   useEffect(() => () => {
     const entry = terminalSessionMap.get(terminalKey);
     if (entry && !entry.legacyMode) {
-      void entry.terminalClient.unregisterPresentation(presentationId).catch(() => undefined);
+      void entry.terminalClient.unregisterPresentation(
+        presentationId,
+        presentationOwnerTokenRef.current,
+      ).catch(() => undefined);
     }
-  }, [presentationId, sessionId, terminalKey]);
+  }, [presentationId, presentationOwnerTokenRef, sessionId, terminalKey]);
 
   useEffect(() => {
     const entry = terminalSessionMap.get(terminalKey);

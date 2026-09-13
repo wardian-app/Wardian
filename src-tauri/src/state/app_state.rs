@@ -75,6 +75,10 @@ pub struct AppState {
     /// Wardian-owned persistent provider-session actors. Provider identities
     /// remain generation-bound diagnostics behind this broker.
     pub native_delivery: Arc<crate::delivery::native_broker::NativeDeliveryBroker>,
+    /// Orders provider-log policy observations before per-agent archive cursor
+    /// commits. Callers must snapshot the global agent roster before taking
+    /// this gate, then acquire per-agent archive locks only after it.
+    pub conversation_capture_policy_lock: Mutex<()>,
     pub conversation_archive: ConversationArchiveState,
     // Serializes and coalesces per-turn change snapshots, one slot per workspace.
     pub change_snapshots: ChangeSnapshotRuntime,
@@ -496,6 +500,7 @@ impl Default for AppState {
             ask_requests: Mutex::new(HashMap::new()),
             interactions: InteractionState::default(),
             native_delivery: Arc::new(crate::delivery::native_broker::NativeDeliveryBroker::new()),
+            conversation_capture_policy_lock: Mutex::new(()),
             conversation_archive: ConversationArchiveState::default(),
             change_snapshots: ChangeSnapshotRuntime::new(),
             remote_runtime: Mutex::new(crate::remote::models::RemoteRuntimeState::default()),
@@ -533,6 +538,7 @@ mod tests {
         assert!(state.workbench_io_lock.try_lock().is_ok());
         assert!(state.queue_io_lock.try_lock().is_ok());
         assert!(state.queue_loaded_snapshot.try_lock().is_ok());
+        assert!(state.conversation_capture_policy_lock.try_lock().is_ok());
         assert!(state
             .terminal_sessions
             .subscribe_wakeups()

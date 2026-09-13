@@ -1,0 +1,786 @@
+{
+  "provenance": {
+    "description": "Minimal retained native projections; unrelated fields, opaque payloads and local paths omitted. SQLite fixtures re-encode only observed protobuf fields. No provider executed."
+  },
+  "opencode": {
+    "session": {
+      "id": "ses_f832ddc1cffea8Q2b1BlECvzDh",
+      "directory": "<owned-workspace>"
+    },
+    "messages": [
+      {
+        "id": "msg_07cd2ccf5001ilB01PiJH0Nuqd",
+        "session_id": "ses_f832ddc1cffea8Q2b1BlECvzDh",
+        "time_created": 1788800584949,
+        "time_updated": 1788800629297,
+        "data": {
+          "role": "user",
+          "time": {
+            "created": 1788800584949
+          }
+        }
+      },
+      {
+        "id": "msg_07cd2cd00001Us5ixaNTlWHDJs",
+        "session_id": "ses_f832ddc1cffea8Q2b1BlECvzDh",
+        "time_created": 1788800584960,
+        "time_updated": 1788800629182,
+        "data": {
+          "role": "assistant",
+          "parentID": "msg_07cd2ccf5001ilB01PiJH0Nuqd",
+          "time": {
+            "created": 1788800584960,
+            "completed": 1788800629181
+          },
+          "finish": "stop"
+        }
+      },
+      {
+        "id": "msg_07cd39992001rEI2uAyND12weO",
+        "session_id": "ses_f832ddc1cffea8Q2b1BlECvzDh",
+        "time_created": 1788800637330,
+        "time_updated": 1788800637920,
+        "data": {
+          "role": "user",
+          "time": {
+            "created": 1788800637330
+          }
+        }
+      },
+      {
+        "id": "msg_07cd39ab1001GHj2m6uXh9STIv",
+        "session_id": "ses_f832ddc1cffea8Q2b1BlECvzDh",
+        "time_created": 1788800637617,
+        "time_updated": 1788800650723,
+        "data": {
+          "role": "assistant",
+          "parentID": "msg_07cd39992001rEI2uAyND12weO",
+          "time": {
+            "created": 1788800637617,
+            "completed": 1788800650722
+          },
+          "finish": "stop"
+        }
+      }
+    ],
+    "parts": [
+      {
+        "id": "prt_07cd2ccf5002k7tmAhVrwwnImS",
+        "session_id": "ses_f832ddc1cffea8Q2b1BlECvzDh",
+        "message_id": "msg_07cd2ccf5001ilB01PiJH0Nuqd",
+        "time_created": 1788800584952,
+        "time_updated": 1788800584953,
+        "data": {
+          "type": "text",
+          "text": "Remember this ephemeral phrase for the next turn: WARDIAN_CONTEXT_EPHEMERAL_RESUME_SECRET_61604_1788800584336_1b18ea. Do not repeat it now; reply exactly WARDIAN_CONTEXT_EPHEMERAL_ACK_61604_1788800584337_07a885."
+        }
+      },
+      {
+        "id": "prt_07cd377c7001GR9RmZ2bkVAYNd",
+        "session_id": "ses_f832ddc1cffea8Q2b1BlECvzDh",
+        "message_id": "msg_07cd2cd00001Us5ixaNTlWHDJs",
+        "time_created": 1788800628680,
+        "time_updated": 1788800628832,
+        "data": {
+          "type": "text",
+          "text": "WARDIAN_CONTEXT_EPHEMERAL_ACK_61604_1788800584337_07a885",
+          "time": {
+            "start": 1788800628679,
+            "end": 1788800628830
+          }
+        }
+      },
+      {
+        "id": "prt_07cd39993001UN1pV95oJQjbPP",
+        "session_id": "ses_f832ddc1cffea8Q2b1BlECvzDh",
+        "message_id": "msg_07cd39992001rEI2uAyND12weO",
+        "time_created": 1788800637607,
+        "time_updated": 1788800637608,
+        "data": {
+          "type": "text",
+          "text": "\"Repeat the ephemeral phrase from the immediately previous turn, followed by | and exactly WARDIAN_CONTEXT_HEADLESS_RESUME_61604_1788800633007_922614. Do not use tools.\""
+        }
+      },
+      {
+        "id": "prt_07cd3cc13001dY6PWS8HbgI8jL",
+        "session_id": "ses_f832ddc1cffea8Q2b1BlECvzDh",
+        "message_id": "msg_07cd39ab1001GHj2m6uXh9STIv",
+        "time_created": 1788800650259,
+        "time_updated": 1788800650345,
+        "data": {
+          "type": "text",
+          "text": "WARDIAN_CONTEXT_EPHEMERAL_ACK_61604_1788800584337_07a885",
+          "time": {
+            "start": 1788800650259,
+            "end": 1788800650344
+          }
+        }
+      }
+    ],
+    "baseline_message_ids": [
+      "msg_07cd2ccf5001ilB01PiJH0Nuqd",
+      "msg_07cd2cd00001Us5ixaNTlWHDJs"
+    ]
+  },
+  "antigravity": {
+    "session": "4b7e2a3f-8b6c-4123-8d3d-4465356d84c3",
+    "steps": [
+      {
+        "idx": 6,
+        "step_type": 14,
+        "status": 3,
+        "source": 4,
+        "text": "Remember this ephemeral phrase for the next turn: WARDIAN_CONTEXT_EPHEMERAL_RESUME_SECRET_69084_1788800677536_6b24df. Do not repeat it now; reply exactly WARDIAN_CONTEXT_EPHEMERAL_ACK_69084_1788800677536_b5bd88.",
+        "original_payload_sha256": "f4191ee06754e4d04bedadb9b4baf1df262f9ffddaa62a1f72610769dcf98049"
+      },
+      {
+        "idx": 7,
+        "step_type": 15,
+        "status": 3,
+        "source": 2,
+        "text": "WARDIAN_CONTEXT_EPHEMERAL_ACK_69084_1788800677536_b5bd88",
+        "original_payload_sha256": "edb61e7421418bed3eafbc23d738f23f97dcb7c0a2f426976f5b37ea05382265"
+      },
+      {
+        "idx": 8,
+        "step_type": 14,
+        "status": 3,
+        "source": 4,
+        "text": "Repeat the ephemeral phrase from the immediately previous turn, followed by | and exactly WARDIAN_CONTEXT_HEADLESS_RESUME_69084_1788800686102_1ee7b2. Do not use tools.",
+        "original_payload_sha256": "5e3336b4aafb7f6b6c802bbc83362b0bcd6fc6fadd436ac86c163a7a4d46f053"
+      },
+      {
+        "idx": 9,
+        "step_type": 101,
+        "status": 3,
+        "source": 5,
+        "text": "",
+        "original_payload_sha256": "83fddfdb6654fe0b474ec08f99f7200e80a34d54f4527d2b385bcb781e5f2e65"
+      },
+      {
+        "idx": 10,
+        "step_type": 15,
+        "status": 3,
+        "source": 2,
+        "text": "WARDIAN_CONTEXT_EPHEMERAL_RESUME_SECRET_69084_1788800677536_6b24df|WARDIAN_CONTEXT_HEADLESS_RESUME_69084_1788800686102_1ee7b2",
+        "original_payload_sha256": "72f6764a120b8fe1bf7869a085e873c206c82cc5325c9a3af40b2e3dbd877d77"
+      }
+    ],
+    "baseline_last_step": 7
+  },
+  "claude": {
+    "session": "c83a69f1-27d8-4b57-853c-863f6048036c",
+    "rows": [
+      {
+        "type": "attachment",
+        "uuid": "adcd90f6-abf5-4855-acaf-102eeddae245",
+        "parentUuid": "45a3265c-451e-45ca-a50c-e0a8efb56cdb",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "session_id": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "attachment",
+        "uuid": "17d3b89d-edff-4e44-b187-cbb1bb51fc5f",
+        "parentUuid": "adcd90f6-abf5-4855-acaf-102eeddae245",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "session_id": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "attachment",
+        "uuid": "035206e7-a2d6-4da4-858c-34ddd8abce46",
+        "parentUuid": "17d3b89d-edff-4e44-b187-cbb1bb51fc5f",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "session_id": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "attachment",
+        "uuid": "80bf16ee-7726-4afd-ac63-93f7847e4c0c",
+        "parentUuid": "035206e7-a2d6-4da4-858c-34ddd8abce46",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "session_id": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "attachment",
+        "uuid": "403d41a0-9c94-4cea-8ce7-1b61c28db8ca",
+        "parentUuid": "80bf16ee-7726-4afd-ac63-93f7847e4c0c",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "session_id": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "user",
+        "uuid": "05a14141-67c8-41d7-8ce6-4a6174864ea2",
+        "parentUuid": null,
+        "isSidechain": false,
+        "origin": {
+          "kind": "human"
+        },
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>",
+        "message": {
+          "role": "user",
+          "content": "Return only the managed instruction sentinel from your startup instructions. Do not open or search files or invoke skills. Do not modify files."
+        }
+      },
+      {
+        "type": "attachment",
+        "uuid": "815f0e2b-45c8-4b92-8ec4-b90f4c759c72",
+        "parentUuid": "05a14141-67c8-41d7-8ce6-4a6174864ea2",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "attachment",
+        "uuid": "08d0761d-449d-4a2c-ae8f-c79277afbcc2",
+        "parentUuid": "815f0e2b-45c8-4b92-8ec4-b90f4c759c72",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "attachment",
+        "uuid": "c62868f0-28d3-4eec-a7bc-09b5ec2baf31",
+        "parentUuid": "08d0761d-449d-4a2c-ae8f-c79277afbcc2",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "attachment",
+        "uuid": "dbbcf46a-119f-4e4e-89b5-cfde4c63723c",
+        "parentUuid": "c62868f0-28d3-4eec-a7bc-09b5ec2baf31",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "attachment",
+        "uuid": "e89d26ed-3d61-4a85-8c9d-b210af1d0d8d",
+        "parentUuid": "dbbcf46a-119f-4e4e-89b5-cfde4c63723c",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "attachment",
+        "uuid": "ef7b29d7-c2a7-4a6e-a9bc-92ab11dc771a",
+        "parentUuid": "e89d26ed-3d61-4a85-8c9d-b210af1d0d8d",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "attachment",
+        "uuid": "45a3265c-451e-45ca-a50c-e0a8efb56cdb",
+        "parentUuid": "ef7b29d7-c2a7-4a6e-a9bc-92ab11dc771a",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "assistant",
+        "uuid": "41fc9243-cec8-47be-9b91-65bdf9558a24",
+        "parentUuid": "403d41a0-9c94-4cea-8ce7-1b61c28db8ca",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "session_id": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>",
+        "message": {
+          "id": "msg_011CepLo8W2BpKtfjmE8JPcz",
+          "role": "assistant",
+          "stop_reason": "end_turn",
+          "content": []
+        }
+      },
+      {
+        "type": "assistant",
+        "uuid": "29b078c3-3731-4711-9c37-ac6b315a832c",
+        "parentUuid": "41fc9243-cec8-47be-9b91-65bdf9558a24",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "session_id": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>",
+        "message": {
+          "id": "msg_011CepLo8W2BpKtfjmE8JPcz",
+          "role": "assistant",
+          "stop_reason": "end_turn",
+          "content": [
+            {
+              "type": "text",
+              "text": "WARDIAN_CONTEXT_MANAGED_INSTRUCTION_42416_1788796098207_5e0168"
+            }
+          ]
+        }
+      },
+      {
+        "type": "attachment",
+        "uuid": "9c2caf72-3878-4d81-94a3-3ec901dca6a0",
+        "parentUuid": "29b078c3-3731-4711-9c37-ac6b315a832c",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "session_id": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "system",
+        "uuid": "c708987c-2836-4ef1-a36b-856c4ef41871",
+        "parentUuid": "9c2caf72-3878-4d81-94a3-3ec901dca6a0",
+        "isMeta": false,
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "user",
+        "uuid": "562687bf-35de-4727-869e-8fefb16536c0",
+        "parentUuid": "c708987c-2836-4ef1-a36b-856c4ef41871",
+        "isSidechain": false,
+        "origin": {
+          "kind": "human"
+        },
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>",
+        "message": {
+          "role": "user",
+          "content": "Use your assigned context-sentinel skill and return only its sentinel. You may load that assigned skill normally; do not modify files."
+        }
+      },
+      {
+        "type": "attachment",
+        "uuid": "3d38b141-f424-4574-955e-e2961b0e8b68",
+        "parentUuid": "562687bf-35de-4727-869e-8fefb16536c0",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "assistant",
+        "uuid": "5e425e72-8bce-4a63-bbc2-2bc4a1505e3a",
+        "parentUuid": "3d38b141-f424-4574-955e-e2961b0e8b68",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "session_id": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>",
+        "message": {
+          "id": "msg_011CepLov9tqDZVDj7L2w675",
+          "role": "assistant",
+          "stop_reason": "tool_use",
+          "content": []
+        }
+      },
+      {
+        "type": "assistant",
+        "uuid": "305b3a9d-4f70-47ad-9f7b-a8272cea9245",
+        "parentUuid": "5e425e72-8bce-4a63-bbc2-2bc4a1505e3a",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "session_id": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>",
+        "message": {
+          "id": "msg_011CepLov9tqDZVDj7L2w675",
+          "role": "assistant",
+          "stop_reason": "tool_use",
+          "content": []
+        }
+      },
+      {
+        "type": "user",
+        "uuid": "0da4c68b-06d4-45c1-b5af-22a47a1f60c1",
+        "parentUuid": "305b3a9d-4f70-47ad-9f7b-a8272cea9245",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "session_id": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>",
+        "message": {
+          "role": "user",
+          "content": []
+        }
+      },
+      {
+        "type": "user",
+        "uuid": "fb5d8554-b506-4ae5-8917-6e3741ee5ec7",
+        "parentUuid": "0da4c68b-06d4-45c1-b5af-22a47a1f60c1",
+        "isMeta": true,
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "session_id": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>",
+        "message": {
+          "role": "user",
+          "content": []
+        }
+      },
+      {
+        "type": "attachment",
+        "uuid": "69104489-aab9-40db-8f80-4ef484edca61",
+        "parentUuid": "fb5d8554-b506-4ae5-8917-6e3741ee5ec7",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "session_id": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "attachment",
+        "uuid": "c0cf5e4c-2f68-4d5a-890e-02eead6baad0",
+        "parentUuid": "69104489-aab9-40db-8f80-4ef484edca61",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "session_id": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "assistant",
+        "uuid": "d772ece8-33e9-451e-8a7c-f54d4a312f88",
+        "parentUuid": "c0cf5e4c-2f68-4d5a-890e-02eead6baad0",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "session_id": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>",
+        "message": {
+          "id": "msg_011CepLp4bQ7mGzUzhUUPmRC",
+          "role": "assistant",
+          "stop_reason": "end_turn",
+          "content": []
+        }
+      },
+      {
+        "type": "assistant",
+        "uuid": "0051ca8c-2012-4ced-9897-06a9039d8870",
+        "parentUuid": "d772ece8-33e9-451e-8a7c-f54d4a312f88",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "session_id": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>",
+        "message": {
+          "id": "msg_011CepLp4bQ7mGzUzhUUPmRC",
+          "role": "assistant",
+          "stop_reason": "end_turn",
+          "content": [
+            {
+              "type": "text",
+              "text": "WARDIAN_CONTEXT_MANAGED_SKILL_42416_1788796098207_9e827b"
+            }
+          ]
+        }
+      },
+      {
+        "type": "system",
+        "uuid": "5e9b51e4-d0a1-48e0-9894-68092fd27ed6",
+        "parentUuid": "0051ca8c-2012-4ced-9897-06a9039d8870",
+        "isMeta": false,
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "user",
+        "uuid": "b88977f8-fa5d-4575-bb08-9c313a3bfac1",
+        "parentUuid": "5e9b51e4-d0a1-48e0-9894-68092fd27ed6",
+        "isSidechain": false,
+        "origin": {
+          "kind": "human"
+        },
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>",
+        "message": {
+          "role": "user",
+          "content": "Remember this ephemeral phrase for the next turn: WARDIAN_CONTEXT_EPHEMERAL_RESUME_SECRET_42416_1788796122342_fe85ec. Do not repeat it now; reply exactly WARDIAN_CONTEXT_EPHEMERAL_ACK_42416_1788796122342_83fa97."
+        }
+      },
+      {
+        "type": "attachment",
+        "uuid": "f71353f0-df87-4480-b2cc-8d4c863bf0c8",
+        "parentUuid": "b88977f8-fa5d-4575-bb08-9c313a3bfac1",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "assistant",
+        "uuid": "ed93f32c-50fa-4031-a1d0-4043cd84153f",
+        "parentUuid": "f71353f0-df87-4480-b2cc-8d4c863bf0c8",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "session_id": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>",
+        "message": {
+          "id": "msg_011CepLpGq6sxSR8NNFsRt4E",
+          "role": "assistant",
+          "stop_reason": "end_turn",
+          "content": []
+        }
+      },
+      {
+        "type": "assistant",
+        "uuid": "ab38f5ac-cdea-4e2d-89a6-deb0aed2d35c",
+        "parentUuid": "ed93f32c-50fa-4031-a1d0-4043cd84153f",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "session_id": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>",
+        "message": {
+          "id": "msg_011CepLpGq6sxSR8NNFsRt4E",
+          "role": "assistant",
+          "stop_reason": "end_turn",
+          "content": [
+            {
+              "type": "text",
+              "text": "WARDIAN_CONTEXT_EPHEMERAL_ACK_42416_1788796122342_83fa97"
+            }
+          ]
+        }
+      },
+      {
+        "type": "system",
+        "uuid": "861ae779-90d4-4336-91db-24417a05b6d1",
+        "parentUuid": "ab38f5ac-cdea-4e2d-89a6-deb0aed2d35c",
+        "isMeta": false,
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "user",
+        "uuid": "75e9a6df-c904-4503-8ffa-1d4e806fdb6e",
+        "parentUuid": "861ae779-90d4-4336-91db-24417a05b6d1",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>",
+        "message": {
+          "role": "user",
+          "content": "Repeat the ephemeral phrase from the immediately previous turn, followed by | and exactly WARDIAN_CONTEXT_HEADLESS_RESUME_42416_1788796127564_e1f671. Do not use tools."
+        }
+      },
+      {
+        "type": "attachment",
+        "uuid": "9e64b8b8-2b4c-4ba9-aba2-3ace5f2688be",
+        "parentUuid": "75e9a6df-c904-4503-8ffa-1d4e806fdb6e",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "attachment",
+        "uuid": "493c918b-a462-4c8e-a3bd-61a00538007c",
+        "parentUuid": "9e64b8b8-2b4c-4ba9-aba2-3ace5f2688be",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "attachment",
+        "uuid": "2bfaecc4-1ff1-4019-9087-c55f74f0c6f0",
+        "parentUuid": "493c918b-a462-4c8e-a3bd-61a00538007c",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "attachment",
+        "uuid": "31b3a5a5-cbb7-4c81-a327-6468497920f3",
+        "parentUuid": "2bfaecc4-1ff1-4019-9087-c55f74f0c6f0",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "attachment",
+        "uuid": "f2a17a07-c953-4d4a-9b08-c93c44eb6450",
+        "parentUuid": "31b3a5a5-cbb7-4c81-a327-6468497920f3",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "attachment",
+        "uuid": "6f3c846c-b137-4b06-85ea-09761988e1b7",
+        "parentUuid": "f2a17a07-c953-4d4a-9b08-c93c44eb6450",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "attachment",
+        "uuid": "77ff2742-708c-40a7-9d34-c2db58e830a9",
+        "parentUuid": "6f3c846c-b137-4b06-85ea-09761988e1b7",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "assistant",
+        "uuid": "2d384166-27a0-4b22-8807-53d52ebcd859",
+        "parentUuid": "77ff2742-708c-40a7-9d34-c2db58e830a9",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>",
+        "message": {
+          "id": "msg_011CepLpiVhMUxtSLF8m7zwf",
+          "role": "assistant",
+          "stop_reason": "end_turn",
+          "content": []
+        }
+      },
+      {
+        "type": "assistant",
+        "uuid": "e5fff6da-2f39-482e-9b13-98647d2c7fdb",
+        "parentUuid": "2d384166-27a0-4b22-8807-53d52ebcd859",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>",
+        "message": {
+          "id": "msg_011CepLpiVhMUxtSLF8m7zwf",
+          "role": "assistant",
+          "stop_reason": "end_turn",
+          "content": [
+            {
+              "type": "text",
+              "text": "WARDIAN_CONTEXT_EPHEMERAL_RESUME_SECRET_42416_1788796122342_fe85ec | WARDIAN_CONTEXT_HEADLESS_RESUME_42416_1788796127564_e1f671"
+            }
+          ]
+        }
+      },
+      {
+        "type": "attachment",
+        "uuid": "2ad203df-0d3d-430a-a810-938e7aed7bc6",
+        "parentUuid": "e5fff6da-2f39-482e-9b13-98647d2c7fdb",
+        "isSidechain": false,
+        "sessionId": "c83a69f1-27d8-4b57-853c-863f6048036c",
+        "cwd": "<owned-workspace>"
+      }
+    ],
+    "original_sha256": "ec8dc9a50d94bbf6401dbf8ed5df89b97074041c0e4940ea41e40b232a0d9330"
+  },
+  "codex": {
+    "rows": [
+      {
+        "type": "session_meta",
+        "payload": {
+          "id": "2e6a7ede-28b5-4607-94e4-3489596242d8",
+          "session_id": "2e6a7ede-28b5-4607-94e4-3489596242d8",
+          "originator": "Wardian",
+          "cwd": "<owned-workspace>"
+        }
+      },
+      {
+        "type": "event_msg",
+        "payload": {
+          "type": "task_started",
+          "turn_id": "01a07ccf-152a-7a93-abab-cf984e074918"
+        }
+      },
+      {
+        "type": "event_msg",
+        "payload": {
+          "type": "user_message",
+          "message": "Return only the managed instruction sentinel from your startup instructions. Do not open or search files or invoke skills. Do not modify files.]10;rgb:11/18/27\\]11;rgb:fc/fa/f5\\"
+        }
+      },
+      {
+        "type": "event_msg",
+        "payload": {
+          "type": "agent_message",
+          "message": "Disposable read-only workspace; do not modify files."
+        }
+      },
+      {
+        "type": "event_msg",
+        "payload": {
+          "type": "task_complete",
+          "turn_id": "01a07ccf-152a-7a93-abab-cf984e074918",
+          "last_agent_message": "Disposable read-only workspace; do not modify files."
+        }
+      }
+    ],
+    "original_sha256": "14f152c4810d954d85220789f09382dea889182064f4917ffda25f398fb2b385"
+  },
+  "pi": {
+    "rows": [
+      {
+        "type": "session",
+        "version": 3,
+        "id": "e1e33694-c782-423f-9142-bf974206a195",
+        "timestamp": "2026-09-07T09:40:03.213Z",
+        "cwd": "<owned-workspace>"
+      },
+      {
+        "type": "model_change",
+        "id": "b91f45f7",
+        "parentId": null,
+        "timestamp": "2026-09-07T09:40:03.276Z",
+        "provider": "openai-codex",
+        "modelId": "gpt-5.4-mini"
+      },
+      {
+        "type": "thinking_level_change",
+        "id": "fbf1f115",
+        "parentId": "b91f45f7",
+        "timestamp": "2026-09-07T09:40:03.276Z",
+        "thinkingLevel": "medium"
+      },
+      {
+        "type": "message",
+        "id": "ec1b3195",
+        "parentId": "fbf1f115",
+        "timestamp": "2026-09-07T09:40:03.292Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Return exactly WARDIAN_HEADLESS_AUTOMATION_PI_72244-1788774000195 and no other text."
+            }
+          ]
+        }
+      },
+      {
+        "type": "message",
+        "id": "1f0e1517",
+        "parentId": "ec1b3195",
+        "timestamp": "2026-09-07T09:40:04.922Z",
+        "message": {
+          "role": "assistant",
+          "stopReason": "stop",
+          "rawStopReason": "completed",
+          "content": [
+            {
+              "type": "text",
+              "text": "WARDIAN_HEADLESS_AUTOMATION_PI_72244-1788774000195"
+            }
+          ]
+        }
+      }
+    ],
+    "sanitized_source_sha256": "e7c40d8e8f72b4c4fce9214d5b0b4f83d0043c989030350316aa96c30f3cb3c3"
+  },
+  "antigravity_fresh": {
+    "provenance": "Retained CcdDfP native cascade66d22997 step0/1, CLI1.1.27; workspace metadata had only inherited include00/01/02/03, with no cwd URI. Fixture does not establish historical pre-run inventory.",
+    "session": "66d22997-075b-4323-8695-5893f21909e3",
+    "steps": [
+      {
+        "idx": 0,
+        "step_type": 14,
+        "status": 3,
+        "source": 4,
+        "text": "If this conversation has a previous turn with an ephemeral phrase, return that phrase followed by |WARDIAN_CONTEXT_HEADLESS_FRESH_76024_1788804691540_fb0c8f. If no such phrase is available in this conversation, return exactly UNKNOWN|WARDIAN_CONTEXT_HEADLESS_FRESH_76024_1788804691540_fb0c8f. Do not use tools or ask for clarification."
+      },
+      {
+        "idx": 1,
+        "step_type": 15,
+        "status": 3,
+        "source": 2,
+        "text": "UNKNOWN|WARDIAN_CONTEXT_HEADLESS_FRESH_76024_1788804691540_fb0c8f"
+      }
+    ]
+  }
+}
