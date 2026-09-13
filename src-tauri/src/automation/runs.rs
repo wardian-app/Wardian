@@ -873,7 +873,9 @@ pub async fn drive_started_run_with_catalog_assignments_and_memory_principal(
                 return Err(message);
             }
         };
-    let owner_id = format!("{}/{}", blueprint.id, state.run_id);
+    let blueprint_id = blueprint.id.clone();
+    let run_id = state.run_id.clone();
+    let owner_id = format!("{blueprint_id}/{run_id}");
     let exec = if let Some(app) = app {
         live_executor_with_catalog_assignments_and_app(
             app,
@@ -892,7 +894,8 @@ pub async fn drive_started_run_with_catalog_assignments_and_memory_principal(
             agent_catalog,
         )
     }
-    .with_owner_id(owner_id);
+    .with_owner_id(owner_id)
+    .with_automation_origin(blueprint_id, run_id);
     let exec = match memory_principal {
         Some(agent_id) => exec.with_memory_principal(agent_id),
         None => exec,
@@ -951,11 +954,13 @@ pub async fn drive_resume_with_catalog(
         &bindings,
         InvocationKind::Manual,
     );
-    let owner_id = run_root
+    let run_id = run_root
         .file_name()
         .and_then(|value| value.to_str())
-        .map(|run_id| format!("{}/{}", blueprint.id, run_id))
-        .unwrap_or_else(|| format!("{}/resume", blueprint.id));
+        .map(str::to_string)
+        .unwrap_or_else(|| "resume".to_string());
+    let blueprint_id = blueprint.id.clone();
+    let owner_id = format!("{blueprint_id}/{run_id}");
     let exec = if let Some(app) = app {
         live_executor_with_catalog_assignments_and_app(
             app,
@@ -974,7 +979,8 @@ pub async fn drive_resume_with_catalog(
             agent_catalog,
         )
     }
-    .with_owner_id(owner_id);
+    .with_owner_id(owner_id)
+    .with_automation_origin(blueprint_id, run_id);
     let exec = match memory_principal {
         Some(agent_id) => exec.with_memory_principal(agent_id),
         None => exec,
@@ -1043,6 +1049,8 @@ edges:
             std::env::set_var("WARDIAN_MOCK_SCENARIO", "basic");
             std::env::set_var("WARDIAN_MOCK_DELAY_MS", "0");
             std::env::set_var("WARDIAN_MOCK_SCRIPT", mock_script);
+            wardian_core::db::init_db_at_path(&home.join("state.db"))
+                .expect("initialize automation run database");
 
             guard
         }

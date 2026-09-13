@@ -3308,6 +3308,7 @@ mod tests {
             unsafe {
                 std::env::remove_var("WARDIAN_NATIVE_TEST_SCRIPT");
                 std::env::remove_var("WARDIAN_NATIVE_TEST_LOG");
+                std::env::remove_var("WARDIAN_NATIVE_TEST_SETTLE_GATE");
             }
         }
     }
@@ -3909,7 +3910,6 @@ input.on('line', (line) => {
         let temp = tempfile::tempdir().expect("native broker tempdir");
         wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
             .expect("initialize native broker db");
-
         let broker = Arc::new(NativeDeliveryBroker::new());
         let config = AgentConfig {
             provider: "pi".to_string(),
@@ -3962,6 +3962,109 @@ input.on('line', (line) => {
                 .phase,
             NativeDeliveryPhase::Queued
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn invalidate_premise_is_acknowledged_inside_the_active_pi_turn() {
+        let _lock = crate::utils::wardian_test_env_lock_async().await;
+        let temp = tempfile::tempdir().expect("native broker tempdir");
+        wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
+            .expect("initialize native broker db");
+        let script = temp.path().join("pi-provider.cjs");
+        let settle_gate = temp.path().join("pi-settle-gate");
+        std::fs::write(
+            &script,
+            r#"const readline = require('node:readline');
+const fs = require('node:fs');
+const input = readline.createInterface({ input: process.stdin });
+input.on('line', (line) => {
+  const request = JSON.parse(line);
+  if (request.type === 'get_state') {
+    console.log(JSON.stringify({ id: request.id, type: 'response', command: 'get_state', success: true, data: { sessionId: 'pi-fixture-session' } }));
+  } else if (request.type === 'prompt') {
+    console.log(JSON.stringify({ id: request.id, type: 'response', command: 'prompt', success: true }));
+    console.log(JSON.stringify({ type: 'agent_start' }));
+    const settle = setInterval(() => {
+      if (fs.existsSync(process.env.WARDIAN_NATIVE_TEST_SETTLE_GATE)) {
+        clearInterval(settle);
+        console.log(JSON.stringify({ type: 'agent_settled' }));
+      }
+    }, 10);
+  } else if (request.type === 'steer') {
+    console.log(JSON.stringify({ id: request.id, type: 'response', command: 'steer', success: true }));
+  }
+});
+"#,
+        )
+        .expect("write Pi provider fixture");
+        unsafe {
+            std::env::set_var("WARDIAN_NATIVE_TEST_SCRIPT", &script);
+            std::env::set_var("WARDIAN_NATIVE_TEST_SETTLE_GATE", &settle_gate);
+        }
+        let _script_guard = NativeTestScriptGuard;
+
+        let broker = Arc::new(NativeDeliveryBroker::new());
+        let config = AgentConfig {
+            provider: "pi".to_string(),
+            session_id: "agent-native-test".to_string(),
+            folder: temp.path().display().to_string(),
+            ..AgentConfig::default()
+        };
+        let spec = NativeSessionSpec {
+            target_agent_id: "agent-native-test".to_string(),
+            provider: "pi".to_string(),
+            generation: 1,
+            workspace: temp.path().to_path_buf(),
+            config,
+        };
+        let mut first = test_admission("interaction-active", "active-key", "start work");
+        first.provider = "pi".to_string();
+        let first = broker.admit(first).await.expect("admit active turn");
+        broker
+            .dispatch(spec.clone(), first)
+            .await
+            .expect("active turn started");
+
+        let mut correction = test_admission(
+            "interaction-correction",
+            "correction-key",
+            "premise changed",
+        );
+        correction.provider = "pi".to_string();
+        correction.operation = NativeMessageOperation::InvalidatePremise;
+        let correction = broker.admit(correction).await.expect("admit correction");
+        let receipt = broker
+            .dispatch(spec, correction)
+            .await
+            .expect("provider accepted correction");
+        assert_eq!(receipt.record.phase, NativeDeliveryPhase::ProviderAccepted);
+        assert_eq!(
+            broker
+                .get("interaction-correction")
+                .expect("accepted correction")
+                .phase,
+            NativeDeliveryPhase::ProviderAccepted,
+            "correction acceptance must precede the terminal fixture event"
+        );
+        std::fs::write(&settle_gate, "release").expect("release Pi settle gate");
+
+        for _ in 0..100 {
+            if broker
+                .get("interaction-correction")
+                .is_ok_and(|record| record.phase == NativeDeliveryPhase::Completed)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            broker
+                .get("interaction-correction")
+                .expect("completed correction")
+                .phase,
+            NativeDeliveryPhase::Completed
+        );
+        broker.dispose_agent("agent-native-test").await.unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -597,6 +597,7 @@ async fn dispatch_background_task(
             interaction_id: Some(claim.record.id.clone()),
             timeout: bounded_headless_delivery_timeout(None),
             lease_owner: Some(lease_guard.owner().clone()),
+            cancellation_marker: None,
         },
     )
     .await;

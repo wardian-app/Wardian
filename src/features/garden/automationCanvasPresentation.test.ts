@@ -9,7 +9,7 @@ const districts = new Map([["d", { roots: ["/workspace"], origin: { x: 500, y: 1
 const input: CanvasAutomationInput = { id: "schedule:s", label: "Build", nodeCount: 2, runStatus: "none", agentIds: ["a", "b"] };
 function evidence(id: string, status: GardenRunEvidence["summary"]["status"], events: RunEvent[] = []): GardenRunEvidence {
   return { summary: { run_id: id, blueprint_id: "bp", status, node_count: 2, path: "run" }, invocation: null,
-    detail: { blueprint: null, state: null, events } };
+    detail: { blueprint: null, state: null, events, workers: [], worker_telemetry: {} } };
 }
 
 describe("automation canvas evidence", () => {

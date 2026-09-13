@@ -31,6 +31,7 @@ pub struct LiveStepExecutor {
     assignments: AutomationAssignments,
     agent_catalog: HashMap<String, AgentBinding>,
     owner_id: String,
+    automation_origin: Option<(String, String)>,
     memory_principal: Option<String>,
     notification_app: Option<tauri::AppHandle>,
 }
@@ -101,6 +102,7 @@ impl LiveStepExecutor {
             assignments,
             agent_catalog,
             owner_id: "automation/manual".to_string(),
+            automation_origin: None,
             memory_principal: None,
             notification_app: None,
         }
@@ -109,6 +111,26 @@ impl LiveStepExecutor {
     pub fn with_owner_id(mut self, owner_id: String) -> Self {
         self.owner_id = owner_id;
         self
+    }
+
+    pub fn with_automation_origin(mut self, blueprint_id: String, run_id: String) -> Self {
+        self.automation_origin = Some((blueprint_id, run_id));
+        self
+    }
+
+    fn temporary_origin(
+        &self,
+        node_id: &str,
+    ) -> Option<wardian_core::temporary_workers::AutomationWorkerOrigin> {
+        self.automation_origin
+            .as_ref()
+            .map(
+                |(blueprint_id, run_id)| wardian_core::temporary_workers::AutomationWorkerOrigin {
+                    blueprint_id: blueprint_id.clone(),
+                    run_id: run_id.clone(),
+                    node_id: node_id.to_string(),
+                },
+            )
     }
 
     /// Authorize memory commits for one invocation-owned agent. The value is
@@ -187,6 +209,7 @@ impl LiveStepExecutor {
                 resume_session: resolved.resume_session,
                 config_override: resolved.config,
                 lease_owner: None,
+                temporary_origin: self.temporary_origin(node),
             })
             .await
             .map_err(StepError::new)
@@ -263,6 +286,7 @@ impl LiveStepExecutor {
                         resume_session: None,
                         config_override: Some(config_override),
                         lease_owner: None,
+                        temporary_origin: self.temporary_origin(node),
                     })
                     .await
                     .map_err(StepError::new)
@@ -400,6 +424,7 @@ impl LiveStepExecutor {
                 resume_session: Some(resume_session),
                 config_override: agent.config.clone(),
                 lease_owner: Some(lease_guard.owner().clone()),
+                temporary_origin: None,
             })
             .await;
 
@@ -450,6 +475,7 @@ impl LiveStepExecutor {
                 resume_session: None,
                 config_override: agent.config.clone(),
                 lease_owner: Some(lease_guard.owner().clone()),
+                temporary_origin: None,
             })
             .await;
 

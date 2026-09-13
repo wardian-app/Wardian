@@ -8,6 +8,9 @@ use tauri::{Emitter, Manager};
 use wardian_core::control::ReplyStatus;
 use wardian_core::conversation_lease::ConversationLeaseOwner;
 use wardian_core::models::AgentConfig;
+use wardian_core::temporary_workers::{
+    AutomationWorkerOrigin, RegisterAutomationWorker, TemporaryWorkerRecord, TemporaryWorkerState,
+};
 
 type AgentRunFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
 type LiveAgentRunFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
@@ -31,6 +34,9 @@ pub struct AgentRunSpec {
     /// Owned by registered background automation paths. It lets the shared
     /// headless process keep the persisted conversation lease alive.
     pub lease_owner: Option<ConversationLeaseOwner>,
+    /// Structured automation ownership for an ephemeral worker. Registered
+    /// agent conversations leave this unset.
+    pub temporary_origin: Option<AutomationWorkerOrigin>,
 }
 
 /// What the executor needs to route one prompt into an already-running agent.
@@ -66,7 +72,9 @@ pub struct HeadlessAgentRunner;
 impl AgentRunner for HeadlessAgentRunner {
     fn run(&self, spec: AgentRunSpec) -> AgentRunFuture<'_> {
         Box::pin(async move {
-            let value =
+            let mut worker = begin_temporary_worker(&spec)?;
+            let cancellation_marker = cancellation_marker(&spec);
+            let run =
                 crate::manager::run_headless_with_options(crate::manager::HeadlessRunOptions {
                     cwd: &spec.cwd,
                     prompt: &spec.prompt,
@@ -78,17 +86,17 @@ impl AgentRunner for HeadlessAgentRunner {
                     config_override: spec.config_override.as_ref(),
                     timeout: crate::manager::DEFAULT_HEADLESS_RUN_TIMEOUT,
                     lease_owner: spec.lease_owner.clone(),
+                    cancellation_marker: cancellation_marker.as_deref(),
                 })
-                .await?;
-
-            let response = value
-                .get("response")
-                .and_then(|value| value.as_str())
-                .or_else(|| value.get("text").and_then(|value| value.as_str()))
-                .map(ToString::to_string)
-                .unwrap_or_else(|| value.to_string());
-
-            Ok(response)
+                .await
+                .map(|value| {
+                    let provider_session_id = provider_session_id(&value);
+                    let response = response_from_headless_value(&value);
+                    (response, provider_session_id)
+                });
+            finish_temporary_worker(worker.as_mut(), &run)?;
+            run.map(|(response, _)| response)
+                .map_err(|error| error.to_string())
         })
     }
 }
@@ -183,6 +191,8 @@ impl AgentRunner for TauriHeadlessAgentRunner {
             } else {
                 (spec.config_override.clone(), false)
             };
+            let mut worker = begin_temporary_worker(&spec)?;
+            let cancellation_marker = cancellation_marker(&spec);
             let lease_owner = spec.lease_owner.clone();
             let result = crate::delivery::run_headless_process_prompt(
                 &state,
@@ -198,10 +208,13 @@ impl AgentRunner for TauriHeadlessAgentRunner {
                     interaction_id: None,
                     timeout: crate::manager::DEFAULT_HEADLESS_RUN_TIMEOUT,
                     lease_owner: spec.lease_owner,
+                    cancellation_marker,
                 },
             )
             .await
-            .map(|result| result.response);
+            .map(|result| (result.response, result.provider_session_id));
+
+            let registry_result = finish_temporary_worker(worker.as_mut(), &result);
 
             // `run_background_resume` also owns an idempotent persisted-lease
             // guard. Release here, while this runner still owns the local
@@ -243,9 +256,148 @@ impl AgentRunner for TauriHeadlessAgentRunner {
                 }
             }
 
+            registry_result?;
             result
+                .map(|(response, _)| response)
+                .map_err(|error| error.to_string())
         })
     }
+}
+
+struct TemporaryWorkerLifecycle {
+    record: TemporaryWorkerRecord,
+    completed: bool,
+}
+
+impl Drop for TemporaryWorkerLifecycle {
+    fn drop(&mut self) {
+        if !self.completed {
+            let _ = wardian_core::temporary_workers::mark_unknown(
+                &self.record,
+                "execution_future_dropped",
+                None,
+            );
+        }
+    }
+}
+
+fn begin_temporary_worker(spec: &AgentRunSpec) -> Result<Option<TemporaryWorkerLifecycle>, String> {
+    let Some(origin) = spec.temporary_origin.as_ref() else {
+        return Ok(None);
+    };
+    let worker =
+        wardian_core::temporary_workers::register_automation_worker(RegisterAutomationWorker {
+            provider: &spec.provider,
+            workspace: &spec.cwd.to_string_lossy(),
+            runtime_session_id: &spec.session_id,
+            origin,
+        })
+        .map_err(|error| format!("failed to register temporary worker: {error}"))?;
+    let lifecycle = TemporaryWorkerLifecycle {
+        record: worker,
+        completed: false,
+    };
+    let started = wardian_core::temporary_workers::mark_running(&lifecycle.record)
+        .map_err(|error| format!("failed to start temporary worker registry entry: {error}"))?;
+    if !started {
+        return Err("temporary worker ownership changed before execution started".to_string());
+    }
+    Ok(Some(lifecycle))
+}
+
+fn finish_temporary_worker(
+    worker: Option<&mut TemporaryWorkerLifecycle>,
+    result: &Result<(String, Option<String>), crate::manager::HeadlessRunError>,
+) -> Result<(), String> {
+    let Some(worker) = worker else {
+        return Ok(());
+    };
+    if let Err(error) = result {
+        if temporary_worker_error_state(error).is_none() {
+            wardian_core::temporary_workers::mark_unknown(
+                &worker.record,
+                "provider_outcome_uncertain",
+                Some(error.message()),
+            )
+            .map_err(|error| format!("failed to preserve uncertain temporary worker: {error}"))?;
+            worker.completed = true;
+            return Ok(());
+        }
+    }
+    let (state, outcome, provider_session_id, coverage, error) = match result {
+        Ok((_, provider_session_id)) => (
+            TemporaryWorkerState::Succeeded,
+            Some("completed"),
+            provider_session_id.as_deref(),
+            if worker.record.provider == "codex" && provider_session_id.is_some() {
+                "provider_session_identified"
+            } else if provider_session_id.is_some() {
+                "provider_observation_adapter_unavailable"
+            } else {
+                "provider_session_unavailable"
+            },
+            None,
+        ),
+        Err(error) if error.kind() == crate::manager::HeadlessRunErrorKind::Cancelled => (
+            TemporaryWorkerState::Cancelled,
+            Some("cancelled_by_run"),
+            None,
+            "run_cancellation_acknowledged",
+            None,
+        ),
+        Err(error) => (
+            TemporaryWorkerState::Failed,
+            Some("provider_failed"),
+            None,
+            "provider_session_unavailable",
+            Some(error.message()),
+        ),
+    };
+    wardian_core::temporary_workers::mark_terminal(
+        &worker.record,
+        state,
+        outcome,
+        provider_session_id,
+        None,
+        coverage,
+        error,
+    )
+    .map_err(|error| format!("failed to complete temporary worker registry entry: {error}"))?;
+    worker.completed = true;
+    Ok(())
+}
+
+fn temporary_worker_error_state(
+    error: &crate::manager::HeadlessRunError,
+) -> Option<TemporaryWorkerState> {
+    match error.kind() {
+        crate::manager::HeadlessRunErrorKind::DefiniteFailure => Some(TemporaryWorkerState::Failed),
+        crate::manager::HeadlessRunErrorKind::Uncertain => None,
+        crate::manager::HeadlessRunErrorKind::Cancelled => Some(TemporaryWorkerState::Cancelled),
+    }
+}
+
+fn cancellation_marker(spec: &AgentRunSpec) -> Option<PathBuf> {
+    let origin = spec.temporary_origin.as_ref()?;
+    wardian_core::paths::automation_run_dir(&origin.blueprint_id, &origin.run_id)
+        .map(|run_root| run_root.join("cancel.marker"))
+}
+
+fn provider_session_id(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("thread_id")
+        .or_else(|| value.get("session_id"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn response_from_headless_value(value: &serde_json::Value) -> String {
+    value
+        .get("response")
+        .and_then(|value| value.as_str())
+        .or_else(|| value.get("text").and_then(|value| value.as_str()))
+        .map(ToString::to_string)
+        .unwrap_or_else(|| value.to_string())
 }
 
 fn is_offline_agent_status(status: &str) -> bool {
@@ -513,6 +665,23 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    #[test]
+    fn worker_error_classification_distinguishes_failure_uncertainty_and_cancellation() {
+        let failed = crate::manager::HeadlessRunError::definite("provider rejected launch");
+        let uncertain = crate::manager::HeadlessRunError::uncertain("connection lost after submit");
+        let cancelled = crate::manager::HeadlessRunError::cancelled("owned run cancelled");
+
+        assert_eq!(
+            temporary_worker_error_state(&failed),
+            Some(TemporaryWorkerState::Failed)
+        );
+        assert_eq!(temporary_worker_error_state(&uncertain), None);
+        assert_eq!(
+            temporary_worker_error_state(&cancelled),
+            Some(TemporaryWorkerState::Cancelled)
+        );
+    }
+
     #[tokio::test]
     async fn fake_runner_returns_scripted_response_and_records_calls() {
         let runner = FakeAgentRunner::new().with_response("plan", "```json\n{\"ok\":true}\n```");
@@ -526,6 +695,7 @@ mod tests {
             resume_session: None,
             config_override: None,
             lease_owner: None,
+            temporary_origin: None,
         };
         let out = runner.run(spec).await.unwrap();
         assert!(out.contains("ok"));

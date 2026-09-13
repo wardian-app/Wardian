@@ -309,6 +309,7 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
     }
 
     crate::telemetry::run_telemetry_migrations(conn)?;
+    crate::temporary_workers::migrate(conn)?;
     agent_messaging::migrate(conn)?;
     Ok(())
 }
