@@ -74,6 +74,15 @@ expands fluidly on narrow surfaces.
 
 Use the **Terminal** / **Chat** button in the card header for a temporary per-agent override. The default comes from **Settings > Agents > Agent card display**. Unsent Chat text stays with that agent when you switch modes.
 
+A compact **child** indicator appears in the card header when Wardian has verified
+provider-spawned workers through that agent's provider ancestry. Select it to inspect
+each retained child's outcome, evidence coverage, available capabilities, own usage,
+and descendant combined usage. **Observe only** identifies providers for which no
+canonical follow-up, resume, or interruption control has been verified. The indicator
+reports attention without creating another agent card or watchlist row. Inspect
+automation workers from their Monitor run and Observe node; a headless worker does
+not receive a fictional terminal.
+
 In Terminal mode, click inside the terminal before typing. When the same agent terminal is visible elsewhere, the clicked presentation explicitly requests ownership; merely tabbing through the UI does not steal it. A **Mirror** remains read-only until ownership transfers. Reclaimed renderers restore and fit automatically when visible.
 
 ## Arrange and Focus Agents
