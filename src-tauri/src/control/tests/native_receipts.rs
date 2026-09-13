@@ -73,9 +73,21 @@ async fn native_codex_delivery_waits_for_provider_applied_payload() {
         agent.config.lock().unwrap().provider = "codex".to_string();
         *agent.current_status.lock().unwrap() = "Idle".to_string();
     }
-    record_provider_ready_evidence(&state, "agent-1", ProviderReadyEvidence::PromptDetected).await;
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     install_test_terminal_runtime_with_write_receipts(&state, "agent-1", tx).await;
+    let generation = state.agents.lock().await["agent-1"]
+        .runtime_generation
+        .expect("registered test runtime generation");
+    assert!(
+        record_provider_ready_evidence(
+            &state,
+            "agent-1",
+            generation,
+            ProviderReadyEvidence::PromptDetected,
+        )
+        .await,
+        "readiness evidence must be recorded for the registered runtime generation"
+    );
 
     let delivery = deliver_message_to_target(
         None,
