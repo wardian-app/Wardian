@@ -87,6 +87,19 @@ Antigravity runs directly in the real target workspace. Wardian does not use a p
 - Wardian verifies Antigravity's exact workspace-cache mapping against `conversation_metadata.json`, then resumes that conversation with `--conversation`. A conversation explicitly detached by **Clear** is excluded from recovery.
 - Antigravity 1.1.7 and later persist interactive turns in `conversations/<conversation-id>.db`; Wardian binds a known conversation's database for live status as soon as its `steps` schema exists, while Chat waits for a real user-message step before preferring it over the older `brain/<conversation-id>/.system_generated/logs/transcript.jsonl` fallback. Fresh identity discovery still requires exact post-launch workspace metadata and an unambiguous database candidate. Restored agents position the watch cursor after existing rows instead of replaying history as live output.
 - The Chat view also replays Wardian's durable conversation archive before the bounded live provider data, so already captured rows remain visible when a provider artifact is temporarily unavailable.
+- SQLite Chat replay preserves the provider step source. Explicit user-message
+  steps carry `human_input/request` provenance and a stable request root; legacy
+  user-message payloads without a source retain that fallback. A user-shaped
+  step with an explicitly different source uses the System role and `provider_internal/internal`
+  and does not start a request. `context_observation: "unreported"` records that
+  this decoder does not identify context-injection subtypes. Assistant messages
+  retain their assistant role without input provenance.
+- SQLite Chat also projects planner tool calls and generic tool-result text from
+  the layouts verified against paired Antigravity 1.1.27 SQLite/JSONL records.
+  It retains the database log binding and existing message IDs, orders tools by
+  provider step and call position, and identifies tool results with the Tool
+  role. Completion alone does not establish success. Unknown step layouts are
+  omitted; this does not establish coverage of every Antigravity tool type.
 - The real-provider rendering audit uses a short exact marker prompt for Antigravity, submits it through Wardian's provider-aware prompt delivery path, and treats the post-clear respawn as marker-optional. This avoids mistaking echoed prompt text for the model response while still proving initial live rendering, resize, pause, and resume behavior.
 
 ### Prompt delivery

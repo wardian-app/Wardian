@@ -6,6 +6,8 @@ use wardian_core::models::chat::AgentChatRole;
 use wardian_core::models::provider::{AgentEvent, AgentProvider};
 use wardian_core::models::AgentConfig;
 
+pub(crate) mod chat_tools;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AntigravityTranscriptSummary {
     pub conversation_id: Option<String>,
@@ -101,6 +103,8 @@ fn update_latest_timestamp(latest: &mut Option<String>, candidate: Option<String
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AntigravityConversationMessage {
     pub step_index: u64,
+    /// Raw metadata.source (step payload field 5.3), absent in legacy payloads.
+    pub source: Option<u64>,
     pub role: AgentChatRole,
     pub text: String,
 }
@@ -321,8 +325,9 @@ impl AntigravityProvider {
                     AgentChatRole::User,
                     protobuf_string_at_path(&payload, &[19, 2]),
                 ),
-                // PLANNER_RESPONSE: prefer the final response; progress prose
-                // is the only visible response for intermediate planner steps.
+                // PLANNER_RESPONSE: preserve the existing final/text fallback.
+                // Paired 1.1.27 JSONL labels field 3 as thinking; this fallback
+                // does not establish that it is a second final answer.
                 15 => (
                     AgentChatRole::Assistant,
                     protobuf_string_at_path(&payload, &[20, 1])
@@ -338,6 +343,8 @@ impl AntigravityProvider {
             };
             messages.push(AntigravityConversationMessage {
                 step_index: step_index.max(0) as u64,
+                source: protobuf_message_at_path(&payload, &[5])
+                    .and_then(|metadata| protobuf_varint_field(metadata, 3)),
                 role,
                 text,
             });

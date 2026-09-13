@@ -3460,6 +3460,7 @@ mod tests {
     ) -> AntigravityConversationMessage {
         AntigravityConversationMessage {
             step_index,
+            source: None,
             role,
             text: text.to_string(),
         }
