@@ -1,0 +1,55 @@
+{
+  "generated": {
+    "id": "generated:conversation:opencode:1",
+    "session_id": "agent-opencode-fixture",
+    "provider": "opencode",
+    "kind": "message",
+    "role": "user",
+    "text": "SANITIZED_OPEN_CODE_PROMPT",
+    "title": null,
+    "status": null,
+    "turn_id": "opencode:session:opencode-native-session-1",
+    "source": null,
+    "command": null,
+    "exit_code": null,
+    "path": null,
+    "language": null,
+    "created_at": "2026-09-13T17:20:34.508Z",
+    "sequence": 1,
+    "metadata": {
+      "generated": true,
+      "input_origin": "human_input",
+      "input_purpose": "request",
+      "request_root_id": "wardian:input:1"
+    }
+  },
+  "native": {
+    "id": "agent-opencode-fixture:0000000000000001:opencode_db:part-1",
+    "session_id": "agent-opencode-fixture",
+    "provider": "opencode",
+    "kind": "message",
+    "role": "user",
+    "text": "SANITIZED_OPEN_CODE_PROMPT",
+    "title": null,
+    "status": null,
+    "turn_id": "opencode-message-1",
+    "source": "opencode_db",
+    "command": null,
+    "exit_code": null,
+    "path": null,
+    "language": null,
+    "created_at": "2026-09-13T17:20:34.213Z",
+    "sequence": 1,
+    "metadata": {
+      "provider_log": true,
+      "opencode_session_id": "opencode-native-session-1",
+      "part_id": "part-1",
+      "source_path": "<provider-data>/opencode.db",
+      "input_origin": "human_input",
+      "input_purpose": "request",
+      "request_root_id": "opencode-message-1",
+      "part_time_created": 1789318834213,
+      "message_time_created": 1789318834179
+    }
+  }
+}
