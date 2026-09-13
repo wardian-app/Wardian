@@ -1162,12 +1162,7 @@ fn promote_fresh_provider_session_after_resume(
 
     let promoted = {
         let mut new_config = new_active.config.lock().unwrap();
-        if let Some(fresh_provider_session_id) = new_config.fresh_provider_session_id.take() {
-            new_config.resume_session = Some(fresh_provider_session_id);
-            true
-        } else {
-            false
-        }
+        agent_lifecycle::promote_fresh_provider_session_fields(provider, &mut new_config)
     };
 
     if promoted {
@@ -2386,9 +2381,6 @@ async fn register_new_agent(
     let active_agent =
         pending.attach(manager::spawn_agent(app.clone(), config.clone(), false, None).await?);
     // Propagate any fields that spawn_agent may have auto-assigned (e.g. opencode_port).
-    let persisted_resume = persisted_resume_session_for_provider(actual_resume);
-    config.resume_session = persisted_resume.clone();
-    config.fresh_provider_session_id = None;
 
     {
         let mut cfg = active_agent.config.lock().unwrap();
@@ -2401,8 +2393,7 @@ async fn register_new_agent(
                 target.port = opencode.port;
             }
         }
-        cfg.resume_session = persisted_resume;
-        cfg.fresh_provider_session_id = None;
+        agent_lifecycle::sync_registered_provider_session(&mut config, &mut cfg, actual_resume);
     }
 
     let mut agents = state.agents.lock().await;

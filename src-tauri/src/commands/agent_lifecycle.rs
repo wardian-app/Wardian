@@ -5,6 +5,49 @@ use crate::state::AppState;
 #[path = "agent/lifecycle_tests.rs"]
 mod tests;
 
+pub(super) fn fresh_pi_session_for_initial_capture(
+    config: &wardian_core::models::AgentConfig,
+    actual_resume: Option<&str>,
+) -> Option<String> {
+    if config.provider != "pi" || config.resume_session.is_some() {
+        return None;
+    }
+    let fresh_provider_session_id = config.fresh_provider_session_id.as_deref()?.trim();
+    let actual_resume = actual_resume?.trim();
+    (!fresh_provider_session_id.is_empty() && fresh_provider_session_id == actual_resume)
+        .then(|| actual_resume.to_string())
+}
+
+pub(super) fn sync_registered_provider_session(
+    config: &mut wardian_core::models::AgentConfig,
+    active_config: &mut wardian_core::models::AgentConfig,
+    actual_resume: Option<String>,
+) {
+    let persisted_resume = super::persisted_resume_session_for_provider(actual_resume);
+    let fresh_pi_session =
+        fresh_pi_session_for_initial_capture(config, persisted_resume.as_deref());
+    config.resume_session = persisted_resume.clone();
+    config.fresh_provider_session_id = fresh_pi_session.clone();
+    active_config.resume_session = persisted_resume;
+    active_config.fresh_provider_session_id = fresh_pi_session;
+}
+
+pub(super) fn promote_fresh_provider_session_fields(
+    provider: &str,
+    config: &mut wardian_core::models::AgentConfig,
+) -> bool {
+    if let Some(fresh_provider_session_id) = config.fresh_provider_session_id.take() {
+        config.resume_session = Some(fresh_provider_session_id.clone());
+        if provider == "pi" {
+            // Pair the runtime-only fresh identity with its promoted resume ID.
+            config.fresh_provider_session_id = Some(fresh_provider_session_id);
+        }
+        true
+    } else {
+        false
+    }
+}
+
 pub(super) async fn lock_agent_lifecycle(
     state: &AppState,
     session_id: &str,

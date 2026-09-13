@@ -61,6 +61,21 @@ pub(crate) struct ArchiveCaptureResult {
     pub(crate) continue_immediately: bool,
 }
 
+fn provider_log_source_is_fresh(
+    provider: &str,
+    resume_session: Option<&str>,
+    fresh_provider_session_id: Option<&str>,
+) -> bool {
+    if provider == "pi" {
+        return match (resume_session, fresh_provider_session_id) {
+            (None, Some(_)) => true,
+            (Some(resume), Some(fresh)) => resume == fresh,
+            _ => false,
+        };
+    }
+    resume_session.is_none() && fresh_provider_session_id.is_some()
+}
+
 #[tauri::command]
 pub async fn load_agent_chat_transcript(
     session_id: String,
@@ -444,8 +459,11 @@ pub(crate) async fn archive_agent_chat_events_for_state(
         append_only_provider_log_path(&snapshot),
         context.provider_source_key.as_deref(),
     ) {
-        let trust_source_from_start =
-            snapshot.resume_session.is_none() && snapshot.fresh_provider_session_id.is_some();
+        let trust_source_from_start = provider_log_source_is_fresh(
+            &snapshot.provider,
+            snapshot.resume_session.as_deref(),
+            snapshot.fresh_provider_session_id.as_deref(),
+        );
         let previous = state
             .conversation_archive
             .provider_log_capture_state(&snapshot.session_id, provider_source_key)
@@ -602,8 +620,11 @@ pub(crate) fn record_provider_log_policy_for_snapshot(
         }
         return Ok(());
     };
-    let trust_source_from_start =
-        snapshot.resume_session.is_none() && snapshot.fresh_provider_session_id.is_some();
+    let trust_source_from_start = provider_log_source_is_fresh(
+        &snapshot.provider,
+        snapshot.resume_session.as_deref(),
+        snapshot.fresh_provider_session_id.as_deref(),
+    );
     let previous = state
         .conversation_archive
         .provider_log_capture_state(&snapshot.session_id, provider_source_key)
@@ -1939,6 +1960,35 @@ fn event_id(session_id: &str, sequence: u64, source: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_promoted_fresh_identity_trusts_prefix_but_resume_does_not() {
+        assert!(provider_log_source_is_fresh(
+            "pi",
+            None,
+            Some("pi-fresh-session")
+        ));
+        assert!(provider_log_source_is_fresh(
+            "pi",
+            Some("pi-fresh-session"),
+            Some("pi-fresh-session")
+        ));
+        assert!(!provider_log_source_is_fresh(
+            "pi",
+            Some("pi-resumed-session"),
+            None
+        ));
+        assert!(!provider_log_source_is_fresh(
+            "pi",
+            Some("pi-resumed-session"),
+            Some("pi-other-session")
+        ));
+        assert!(!provider_log_source_is_fresh(
+            "codex",
+            Some("codex-session"),
+            Some("codex-session")
+        ));
+    }
 
     fn output(text: &str) -> WatchOutput {
         WatchOutput {
