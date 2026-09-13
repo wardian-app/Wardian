@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { HOME_LOCK_DIRECTORY, readHomeLock, releaseHomeLock } from "./sessionHome.mjs";
+import { HOME_LOCK_DIRECTORY, lockHolderAlive, readHomeLock, releaseHomeLock } from "./sessionHome.mjs";
 
 /** WebDriver deletion must succeed and the owned driver must have actually exited. */
 export async function closeConformanceSession(session) {
@@ -33,6 +33,38 @@ export async function pauseConformanceWork(invoke, { spawnAttempted, sessionId, 
 }
 
 /**
+ * Release the suite claim when this child owns it, or acknowledge the live
+ * runner claim that will be released by the upstream supervisor after the
+ * child exits. The snapshot is the lock object stored by prepareIsolatedHome,
+ * not the wrapper returned by acquireHomeLock.
+ */
+function releaseOrDeferHomeLock(harness) {
+  const lockDirectory = path.join(harness.isolatedHome, HOME_LOCK_DIRECTORY);
+  const lock = readHomeLock(harness.isolatedHome);
+  if (!fs.existsSync(lockDirectory)) {
+    return { released: true, deferred: false };
+  }
+  if (!lock || lock.runId !== harness.runId) {
+    throw new Error("Suite home lock ownership changed or is unreadable; refusing release");
+  }
+
+  const runnerOwnsClaim = harness.homeLock
+    && harness.homeLock.runId === harness.runId
+    && lock.pid === harness.homeLock.pid
+    && lock.pid !== process.pid
+    && lockHolderAlive(lock.pid);
+  if (runnerOwnsClaim) {
+    return { released: false, deferred: true };
+  }
+  if (lock.pid !== process.pid) {
+    throw new Error("Suite home lock ownership changed or is unreadable; refusing release");
+  }
+  releaseHomeLock({ home: harness.isolatedHome, runId: harness.runId });
+  if (fs.existsSync(lockDirectory)) throw new Error("Suite home lock release was not observed");
+  return { released: true, deferred: false };
+}
+
+/**
  * Final cleanup for isolated provider conformance suites. Run real suites through the native runner:
  * its process-tree supervisor remains the boundary for failed/uncertain startup.
  * A report error cannot prevent pause/close; uncertain cleanup never releases a lock.
@@ -55,21 +87,19 @@ export async function cleanupConformanceSession({
   }
 
   let homeLockReleased = false;
+  let homeLockReleaseDeferred = false;
   if (shutdownConfirmed) {
     try {
-      const lockDirectory = path.join(harness.isolatedHome, HOME_LOCK_DIRECTORY);
-      const lock = readHomeLock(harness.isolatedHome);
-      if (fs.existsSync(lockDirectory)) {
-        if (!lock || lock.runId !== harness.runId || lock.pid !== process.pid) {
-          throw new Error("Suite home lock ownership changed or is unreadable; refusing release");
-        }
-        releaseHomeLock({ home: harness.isolatedHome, runId: harness.runId });
-        if (fs.existsSync(lockDirectory)) throw new Error("Suite home lock release was not observed");
-      }
-      homeLockReleased = true;
+      const release = releaseOrDeferHomeLock(harness);
+      homeLockReleased = release.released;
+      homeLockReleaseDeferred = release.deferred;
     } catch (error) { errors.push(error); }
   }
-  const cleanup = { shutdown_confirmed: shutdownConfirmed, home_lock_released: homeLockReleased };
+  const cleanup = {
+    shutdown_confirmed: shutdownConfirmed,
+    home_lock_released: homeLockReleased,
+    home_lock_release_deferred: homeLockReleaseDeferred,
+  };
   // Save last, so even a rejected write cannot bypass any shutdown operation.
   try { await save(cleanup); }
   catch (error) { errors.push(error); }
