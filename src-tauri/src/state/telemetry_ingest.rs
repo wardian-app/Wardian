@@ -236,9 +236,13 @@ impl Default for MachineCatalog {
 impl MachineCatalog {
     pub fn new() -> Self {
         let home = dirs::home_dir();
-        let shared_codex_root = home
-            .as_ref()
-            .map(|home| home.join(".codex").join("sessions"));
+        let codex_home = std::env::var_os("CODEX_HOME").map(PathBuf::from);
+        Self::from_homes(home, codex_home)
+    }
+
+    fn from_homes(home: Option<PathBuf>, codex_home: Option<PathBuf>) -> Self {
+        let shared_codex_root = resolve_shared_codex_home(codex_home, home.as_deref())
+            .map(|home| home.join("sessions"));
         let shared_codex = shared_codex_root
             .as_deref()
             .map(index_transcripts)
@@ -325,6 +329,17 @@ impl MachineCatalog {
 
         paths
     }
+}
+
+/// Resolve the Codex home the current process explicitly selected, falling
+/// back to Codex's native default when no absolute override is present.
+fn resolve_shared_codex_home(
+    codex_home: Option<PathBuf>,
+    native_home: Option<&Path>,
+) -> Option<PathBuf> {
+    codex_home
+        .filter(|home| home.is_absolute())
+        .or_else(|| native_home.map(|home| home.join(".codex")))
 }
 
 impl SessionCatalog for MachineCatalog {
@@ -1307,6 +1322,43 @@ pub fn start_telemetry_ingest(app_handle: tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_codex_home_selects_the_shared_catalog_without_scanning_native_home() {
+        let directory = tempfile::tempdir().unwrap();
+        let native_home = directory.path().join("native-home");
+        let explicit_codex_home = directory.path().join("owned-codex-home");
+        let native_sessions = native_home.join(".codex").join("sessions");
+        let explicit_sessions = explicit_codex_home.join("sessions");
+        std::fs::create_dir_all(&native_sessions).unwrap();
+        std::fs::create_dir_all(&explicit_sessions).unwrap();
+
+        let native_id = "00000000-0000-0000-0000-000000000001";
+        let explicit_id = "00000000-0000-0000-0000-000000000002";
+        std::fs::write(
+            native_sessions.join(format!("rollout-{native_id}.jsonl")),
+            "{}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            explicit_sessions.join(format!("rollout-{explicit_id}.jsonl")),
+            "{}\n",
+        )
+        .unwrap();
+
+        let catalog =
+            MachineCatalog::from_homes(Some(native_home), Some(explicit_codex_home.clone()));
+
+        assert_eq!(
+            catalog.shared_codex_root.as_deref(),
+            Some(explicit_sessions.as_path())
+        );
+        assert_eq!(
+            catalog.shared_codex.keys().collect::<Vec<_>>(),
+            vec![explicit_id]
+        );
+        assert!(!catalog.shared_codex.contains_key(native_id));
+    }
 
     fn agent(session: &str, provider: &str, resume: Option<&str>) -> AgentDescriptor {
         AgentDescriptor {
