@@ -1734,7 +1734,7 @@ mod test_support;
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::HeldMutex;
+    use super::test_support::{HeldMutex, TestWardianHome};
     use super::*;
     use crate::state::{ActiveAgent, AgentWatchState, AppState};
     use std::sync::{Arc, Mutex};
@@ -2723,6 +2723,7 @@ mod tests {
 
     #[tokio::test]
     async fn remote_agent_chat_transcript_returns_normalized_messages() {
+        let _home = TestWardianHome::new_async().await;
         let state = AppState::new();
         let agent = test_agent("agent-1", "CoderOne", "Coder", "Idle");
         {

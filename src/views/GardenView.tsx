@@ -755,7 +755,7 @@ export const GardenView: React.FC<GardenViewProps> = ({
             viewport={viewSize()}
             focused={currentFrame?.ref.kind === "agent" && currentFrame.ref.id === unit.ref.id}
             label={unit.label} status={gardenAgentStatusColor(unit.status)} onSelect={() => selectObject(unit.ref)} onEnter={() => enterObject(unit.ref)}>
-            <GardenAgentInterior agent={agent} status={unit.status} crown={unit.crown} agents={filteredAgents} teams={teams}
+            <GardenAgentInterior agent={agent} status={unit.status} crown={unit.crown}
               projectedWidth={screen.width} contentsCache={contentsCache}
               automations={automationInputs} selectedKey={activeSelectionKey} onSelect={selectObject} onEnter={enterObject} onOpenAgent={openCanonicalAgent} />
           </GardenSpatialCell>;
