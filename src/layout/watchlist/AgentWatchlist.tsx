@@ -228,6 +228,7 @@ export default function AgentWatchlist({
   const [searchTerm, setSearchTerm] = useState("");
   const effectiveSearchTerm = filter ?? searchTerm;
   const [draggedAgentId, setDraggedAgentId] = useState<string | null>(null);
+  const [draggedTeamId, setDraggedTeamId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({
     visible: false,
     x: 0,
@@ -423,6 +424,7 @@ export default function AgentWatchlist({
     dragOriginRef.current = { x: e.clientX, y: e.clientY };
     dragActiveRef.current = false;
     setDraggedAgentId(source.type === "agent" ? source.agentId : null);
+    setDraggedTeamId(source.type === "team" ? source.teamId : null);
   };
 
   const activateDrag = () => {
@@ -444,33 +446,34 @@ export default function AgentWatchlist({
 
   // Rows fire mousemove continuously; re-rendering the roster for a drop target
   // that has not changed is what made dragging feel sticky.
-  const setDropTarget = useCallback((target: DropTarget | null) => {
+  const setDropTarget = (target: DropTarget | null) => {
     if (isSameDropTarget(dropTargetRef.current, target)) return;
     dropTargetRef.current = target;
     setDropTargetState(target);
-  }, []);
+  };
 
-  const setTabDropTarget = useCallback((target: TabDropTarget | null) => {
+  const setTabDropTarget = (target: TabDropTarget | null) => {
     if (isSameTabDropTarget(tabDropTargetRef.current, target)) return;
     tabDropTargetRef.current = target;
     setTabDropTargetState(target);
-  }, []);
+  };
 
-  const resetDragState = useCallback(() => {
+  const resetDragState = () => {
     dragSourceRef.current = null;
     dragOriginRef.current = null;
     dragActiveRef.current = false;
     setIsDragging(false);
     setDropTarget(null);
     setDraggedAgentId(null);
-  }, [setDropTarget]);
+    setDraggedTeamId(null);
+  };
 
-  const resetTabDragState = useCallback(() => {
+  const resetTabDragState = () => {
     draggedListIdRef.current = null;
     setDraggedListId(null);
     setIsTabDragging(false);
     setTabDropTarget(null);
-  }, [setTabDropTarget]);
+  };
 
   const rowDropPosition = (e: React.MouseEvent): DropPosition => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -754,7 +757,7 @@ export default function AgentWatchlist({
     };
     window.addEventListener("mouseup", cancelDrag);
     return () => window.removeEventListener("mouseup", cancelDrag);
-  }, [resetDragState, resetTabDragState]);
+  }, [draggedAgentId, draggedTeamId, draggedListId]);
 
   const handleContextMenu = (e: React.MouseEvent, agentId: string) => {
     e.preventDefault();
