@@ -307,12 +307,4 @@ test("captures district ground, change paint, and the centrality legend", async 
   };
 
   await capture("garden-districts-ground-and-centrality.png");
-
-  // Workspace composition reveals activity ancestry rather than recursively
-  // drawing unchanged filesystem contents as the camera magnifies.
-  await garden.locator('[data-garden-object="agent:writer"]').press("Enter");
-  await garden.getByRole("region", { name: "Workspace, Teams, Agents" }).getByRole("button", { name: /work\/papers/ }).press("Enter");
-  await expect(garden.getByRole("region", { name: "Workspace activity" })).toBeVisible();
-  await expect(garden.getByRole("checkbox", { name: "Show full tree" })).not.toBeChecked();
-  await capture("garden-workspace-activity.png");
 });

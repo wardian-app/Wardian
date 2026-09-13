@@ -1,8 +1,7 @@
 use super::codex::codex_bootstrap_workspace_key;
 use crate::utils::fs::*;
-use crate::utils::shell::build_program_launch;
 use chrono::TimeZone;
-use wardian_core::models::{AgentConfig, AgentProvider};
+use wardian_core::models::AgentConfig;
 pub(crate) fn opencode_status_from_title(title: &str) -> Option<&'static str> {
     let trimmed = title.trim();
     if trimmed.is_empty() {
@@ -34,24 +33,45 @@ fn opencode_loop_line_session_id(line: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn opencode_data_dirs() -> Vec<std::path::PathBuf> {
+fn opencode_data_dirs_from_roots(
+    xdg_data_home: Option<&std::path::Path>,
+    data_local_dir: Option<std::path::PathBuf>,
+    data_dir: Option<std::path::PathBuf>,
+    home_dir: Option<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(d) = dirs::data_local_dir() {
-        dirs.push(d.join("opencode"));
-    }
-    if let Some(d) = dirs::data_dir() {
-        let p = d.join("opencode");
-        if !dirs.contains(&p) {
-            dirs.push(p);
+    let mut push_unique = |path: std::path::PathBuf| {
+        if !path.as_os_str().is_empty() && !dirs.contains(&path) {
+            dirs.push(path);
         }
+    };
+
+    // OpenCode follows XDG_DATA_HOME even on Windows. It must win over the
+    // platform default so isolated provider runs do not get attributed to a
+    // different installation's database or rolling log.
+    if let Some(xdg_data_home) = xdg_data_home {
+        push_unique(xdg_data_home.join("opencode"));
     }
-    if let Some(h) = dirs::home_dir() {
-        let p = h.join(".local").join("share").join("opencode");
-        if !dirs.contains(&p) {
-            dirs.push(p);
-        }
+    if let Some(data_local_dir) = data_local_dir {
+        push_unique(data_local_dir.join("opencode"));
+    }
+    if let Some(data_dir) = data_dir {
+        push_unique(data_dir.join("opencode"));
+    }
+    if let Some(home_dir) = home_dir {
+        push_unique(home_dir.join(".local").join("share").join("opencode"));
     }
     dirs
+}
+
+fn opencode_data_dirs() -> Vec<std::path::PathBuf> {
+    let xdg_data_home = std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from);
+    opencode_data_dirs_from_roots(
+        xdg_data_home.as_deref(),
+        dirs::data_local_dir(),
+        dirs::data_dir(),
+        dirs::home_dir(),
+    )
 }
 
 pub(crate) fn opencode_database_path() -> Option<std::path::PathBuf> {
@@ -61,42 +81,218 @@ pub(crate) fn opencode_database_path() -> Option<std::path::PathBuf> {
         .find(|path| path.exists())
 }
 
-/// Reads OpenCode's own session registry to capture a session that its
-/// interactive TUI created for this workspace. Unlike `opencode run`, this
-/// does not submit a model prompt or consume provider quota.
+pub(crate) fn opencode_telemetry_session_id(config: &AgentConfig) -> Option<String> {
+    if config.provider != "opencode" {
+        return config.resume_session.clone();
+    }
+    config
+        .resume_session
+        .as_deref()
+        .filter(|value| value.starts_with("ses_"))
+        .map(ToString::to_string)
+        .or_else(|| {
+            config
+                .fresh_provider_session_id
+                .as_deref()
+                .filter(|value| value.starts_with("ses_"))
+                .map(ToString::to_string)
+        })
+}
+
+/// Captures the OpenCode session created by this Wardian launch. OpenCode's
+/// session list is global to the provider data root, so a directory/time match
+/// alone is not ownership evidence when multiple agents share a workspace.
+/// The provider log records the run that loaded the agent's generated config;
+/// only a unique session created by that same run is accepted.
 pub(crate) fn opencode_recent_session_for_workspace(
     workspace: &std::path::Path,
     created_after_ms: i64,
+    wardian_session_id: &str,
 ) -> Option<String> {
-    let provider = crate::providers::opencode::OpenCodeProvider::new();
-    let (bin, initial_args) = provider.get_executable();
-    let mut args = initial_args;
-    args.extend(["session", "list", "--format", "json", "--max-count", "20"].map(str::to_string));
-    let launch = build_program_launch(&bin, &args).ok()?;
-    let output = std::process::Command::new(launch.executable)
-        .args(launch.args)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    let mut candidates = std::collections::HashSet::new();
+    for directory in opencode_log_dirs() {
+        for path in opencode_log_files_in(&directory) {
+            let Ok(content) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            if let Some(session_id) = select_opencode_session_from_launch_log(
+                &content,
+                workspace,
+                created_after_ms,
+                wardian_session_id,
+            ) {
+                candidates.insert(session_id);
+            }
+        }
     }
-    let sessions: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    let expected = workspace.to_string_lossy().replace('/', "\\");
-    sessions.as_array()?.iter().find_map(|session| {
-        let directory = session
-            .get("directory")
-            .and_then(|value| value.as_str())?
-            .replace('/', "\\");
-        let created = session.get("created").and_then(|value| value.as_i64())?;
-        (directory.eq_ignore_ascii_case(&expected) && created >= created_after_ms)
-            .then(|| {
-                session
-                    .get("id")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string)
+
+    (candidates.len() == 1).then(|| candidates.into_iter().next().expect("one candidate"))
+}
+
+type OpenCodeLogRevision = Vec<(std::path::PathBuf, u64, Option<std::time::SystemTime>)>;
+
+/// Discovers an owned session independently of title-derived activity. Unchanged
+/// logs require metadata checks only, including while an idle agent awaits input.
+#[derive(Default)]
+pub(crate) struct OpenCodeSessionDiscovery {
+    previous: Option<OpenCodeLogRevision>,
+}
+
+impl OpenCodeSessionDiscovery {
+    pub(crate) fn poll(
+        &mut self,
+        status: &str,
+        workspace: &std::path::Path,
+        created_after_ms: i64,
+        wardian_session_id: &str,
+    ) -> Option<String> {
+        let mut revision = opencode_log_dirs()
+            .iter()
+            .flat_map(|directory| opencode_log_files_in(directory))
+            .filter_map(|path| {
+                let metadata = std::fs::metadata(&path).ok()?;
+                Some((path, metadata.len(), metadata.modified().ok()))
             })
-            .flatten()
-    })
+            .collect::<Vec<_>>();
+        revision.sort_by(|left, right| left.0.cmp(&right.0));
+        self.poll_with(status, revision, || {
+            opencode_recent_session_for_workspace(workspace, created_after_ms, wardian_session_id)
+        })
+    }
+
+    fn poll_with(
+        &mut self,
+        status: &str,
+        revision: OpenCodeLogRevision,
+        lookup: impl FnOnce() -> Option<String>,
+    ) -> Option<String> {
+        if wardian_core::identity::normalize_status(status) == "off"
+            || self.previous.as_ref() == Some(&revision)
+        {
+            return None;
+        }
+        self.previous = Some(revision);
+        lookup()
+    }
+}
+
+fn normalize_opencode_workspace(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        path.replace('/', "\\")
+            .trim_end_matches(['\\', '/'])
+            .to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        let normalized = path.trim_end_matches('/');
+        if normalized.is_empty() {
+            "/".to_string()
+        } else {
+            normalized.to_string()
+        }
+    }
+}
+
+fn opencode_log_field(line: &str, key: &str) -> Option<String> {
+    let marker = format!("{key}=");
+    let start = line.find(&marker)? + marker.len();
+    let value = &line[start..];
+    if let Some(value) = value.strip_prefix('"') {
+        let mut decoded = String::new();
+        let mut characters = value.chars().peekable();
+        while let Some(character) = characters.next() {
+            match character {
+                '"' => return Some(decoded),
+                '\\' if matches!(characters.peek(), Some('\\' | '"')) => {
+                    decoded.push(characters.next().expect("peeked escaped character"));
+                }
+                '\\' => decoded.push('\\'),
+                character => decoded.push(character),
+            }
+        }
+        None
+    } else {
+        value.split_whitespace().next().map(ToString::to_string)
+    }
+}
+
+fn opencode_agent_config_path_matches(path: &str, wardian_session_id: &str) -> bool {
+    let marker = if cfg!(windows) {
+        format!(
+            "agents\\{}\\habitat\\.opencode\\opencode.json",
+            wardian_session_id.trim()
+        )
+    } else {
+        format!(
+            "agents/{}/habitat/.opencode/opencode.json",
+            wardian_session_id.trim()
+        )
+    };
+    normalize_opencode_workspace(path).contains(&normalize_opencode_workspace(&marker))
+}
+
+fn opencode_log_files_in(base: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    let rolling = base.join("opencode.log");
+    if rolling.is_file() {
+        paths.push(rolling);
+        return paths;
+    }
+    let mut dated = std::fs::read_dir(base)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name().and_then(|name| name.to_str()) != Some("opencode.log")
+                && path.extension().and_then(|extension| extension.to_str()) == Some("log")
+        })
+        .collect::<Vec<_>>();
+    dated.sort();
+    dated.reverse();
+    paths.extend(dated);
+    paths
+}
+
+fn select_opencode_session_from_launch_log(
+    content: &str,
+    workspace: &std::path::Path,
+    created_after_ms: i64,
+    wardian_session_id: &str,
+) -> Option<String> {
+    let expected = normalize_opencode_workspace(&workspace.to_string_lossy());
+    let owned_runs = content
+        .lines()
+        .filter(|line| line.contains("message=loading"))
+        .filter_map(|line| {
+            let path = opencode_log_field(line, "path")?;
+            opencode_agent_config_path_matches(&path, wardian_session_id)
+                .then(|| opencode_log_field(line, "run"))
+                .flatten()
+        })
+        .collect::<std::collections::HashSet<_>>();
+
+    let candidates = content
+        .lines()
+        .filter(|line| line.contains("message=created"))
+        .filter_map(|line| {
+            let run = opencode_log_field(line, "run")?;
+            let id = opencode_log_field(line, "id")?;
+            let directory = opencode_log_field(line, "directory")?;
+            let created = opencode_log_field(line, "time.created")?
+                .parse::<i64>()
+                .ok()?;
+            (owned_runs.contains(&run)
+                && id.starts_with("ses_")
+                && normalize_opencode_workspace(&directory) == expected
+                && created >= created_after_ms)
+                .then_some(id)
+        })
+        .collect::<std::collections::HashSet<_>>();
+
+    (candidates.len() == 1).then(|| candidates.into_iter().next().expect("one candidate"))
 }
 
 pub(crate) fn opencode_last_assistant_text(session_id: &str) -> Result<Option<String>, String> {
@@ -334,26 +530,13 @@ pub(crate) fn opencode_log_path_in(
 }
 
 /// Return the ordered list of directories where opencode writes its log files.
-/// Tries platform-native data dirs first (Windows: %LOCALAPPDATA%, %APPDATA%),
-/// then the XDG fallback (~/.local/share).
+/// Honors XDG_DATA_HOME first, then tries platform-native data dirs (Windows:
+/// %LOCALAPPDATA%, %APPDATA%), followed by the home-directory XDG fallback.
 pub(crate) fn opencode_log_dirs() -> Vec<std::path::PathBuf> {
-    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(d) = dirs::data_local_dir() {
-        dirs.push(d.join("opencode").join("log"));
-    }
-    if let Some(d) = dirs::data_dir() {
-        let p = d.join("opencode").join("log");
-        if !dirs.contains(&p) {
-            dirs.push(p);
-        }
-    }
-    if let Some(h) = dirs::home_dir() {
-        let p = h.join(".local").join("share").join("opencode").join("log");
-        if !dirs.contains(&p) {
-            dirs.push(p);
-        }
-    }
-    dirs
+    opencode_data_dirs()
+        .into_iter()
+        .map(|path| path.join("log"))
+        .collect()
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -540,6 +723,149 @@ mod tests {
     };
     use std::path::Path;
     use wardian_core::models::AgentConfig;
+
+    #[test]
+    fn opencode_data_root_prefers_xdg_provider_storage() {
+        let xdg_data_home = std::path::PathBuf::from("D:/isolated/data");
+        let platform_local = std::path::PathBuf::from("C:/Users/test/AppData/Local");
+        let platform_data = std::path::PathBuf::from("C:/Users/test/AppData/Roaming");
+        let home = std::path::PathBuf::from("C:/Users/test");
+
+        let roots = opencode_data_dirs_from_roots(
+            Some(&xdg_data_home),
+            Some(platform_local),
+            Some(platform_data),
+            Some(home),
+        );
+
+        assert_eq!(roots[0], xdg_data_home.join("opencode"));
+        assert!(roots
+            .iter()
+            .any(|path| path == &std::path::PathBuf::from("C:/Users/test/AppData/Local/opencode")));
+    }
+
+    #[test]
+    fn opencode_telemetry_prefers_a_valid_resume_or_fresh_session() {
+        let mut config = AgentConfig {
+            provider: "opencode".to_string(),
+            resume_session: Some("wardian-agent-id".to_string()),
+            fresh_provider_session_id: Some("ses_fresh".to_string()),
+            ..AgentConfig::default()
+        };
+        assert_eq!(
+            opencode_telemetry_session_id(&config).as_deref(),
+            Some("ses_fresh")
+        );
+
+        config.resume_session = Some("ses_resume".to_string());
+        assert_eq!(
+            opencode_telemetry_session_id(&config).as_deref(),
+            Some("ses_resume")
+        );
+    }
+
+    #[test]
+    fn opencode_session_recovery_requires_the_agent_owned_launch_run() {
+        let workspace = if cfg!(windows) {
+            std::path::PathBuf::from(r"D:\work\project")
+        } else {
+            std::path::PathBuf::from("/work/project")
+        };
+        let config_path = if cfg!(windows) {
+            r#"D:\wardian\agents\agent-1\habitat\.opencode\opencode.json"#
+        } else {
+            "/wardian/agents/agent-1/habitat/.opencode/opencode.json"
+        };
+        let directory = workspace.to_string_lossy();
+        let log = format!(
+            "run=owned message=loading path=\"{config_path}\"\n\
+             run=other message=created id=ses_other directory=\"{directory}\" time.created=200\n\
+             run=owned message=created id=ses_owner directory=\"{directory}\" time.created=300"
+        );
+
+        assert_eq!(
+            select_opencode_session_from_launch_log(&log, &workspace, 250, "agent-1").as_deref(),
+            Some("ses_owner")
+        );
+        let mut discovery = OpenCodeSessionDiscovery::default();
+        let revision = vec![(
+            std::path::PathBuf::from("opencode.log"),
+            log.len() as u64,
+            None,
+        )];
+        assert_eq!(
+            discovery
+                .poll_with("Idle", revision.clone(), || {
+                    select_opencode_session_from_launch_log(&log, &workspace, 250, "agent-1")
+                })
+                .as_deref(),
+            Some("ses_owner"),
+            "A completed owned session must be discovered without a Processing title"
+        );
+        assert_eq!(
+            discovery.poll_with("Idle", revision.clone(), || panic!("unchanged log reread")),
+            None
+        );
+        let changed = vec![(
+            std::path::PathBuf::from("opencode.log"),
+            log.len() as u64 + 1,
+            None,
+        )];
+        assert_eq!(
+            discovery.poll_with("Off", changed.clone(), || panic!("stopped owner scanned")),
+            None
+        );
+        assert_eq!(
+            discovery
+                .poll_with("Idle", changed, || Some("ses_next".into()))
+                .as_deref(),
+            Some("ses_next")
+        );
+    }
+
+    #[test]
+    fn opencode_session_recovery_fails_closed_for_ambiguous_owned_runs() {
+        let workspace = if cfg!(windows) {
+            std::path::PathBuf::from(r"D:\work\project")
+        } else {
+            std::path::PathBuf::from("/work/project")
+        };
+        let config_path = if cfg!(windows) {
+            r#"D:\wardian\agents\agent-1\habitat\.opencode\opencode.json"#
+        } else {
+            "/wardian/agents/agent-1/habitat/.opencode/opencode.json"
+        };
+        let directory = workspace.to_string_lossy();
+        let log = format!(
+            "run=first message=loading path=\"{config_path}\"\n\
+             run=first message=created id=ses_first directory=\"{directory}\" time.created=300\n\
+             run=second message=loading path=\"{config_path}\"\n\
+             run=second message=created id=ses_second directory=\"{directory}\" time.created=301"
+        );
+
+        assert_eq!(
+            select_opencode_session_from_launch_log(&log, &workspace, 250, "agent-1"),
+            None
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn opencode_workspace_matching_keeps_posix_case_and_backslashes_literal() {
+        let workspace = Path::new("/work/project");
+        let log = [
+            r#"run=case message=loading path="/wardian/agents/agent-1/habitat/.opencode/opencode.json""#,
+            r#"run=case message=created id=ses_case directory="/work/Project" time.created=300"#,
+            r#"run=slash message=loading path="/wardian/agents/agent-1/habitat/.opencode/opencode.json""#,
+            r#"run=slash message=created id=ses_slash directory="/work/project\nested" time.created=301"#,
+        ]
+        .join("\n");
+
+        assert_eq!(
+            select_opencode_session_from_launch_log(&log, workspace, 250, "agent-1"),
+            None
+        );
+    }
     #[test]
     fn opencode_title_maps_to_status() {
         assert_eq!(opencode_status_from_title("OpenCode"), Some("Idle"));

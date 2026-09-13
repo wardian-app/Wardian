@@ -115,6 +115,18 @@ Codex executes against the real target workspace while Wardian keeps mutable pro
 
 Codex reads `AGENTS.md`. Wardian passes the real project root with `--cd <absolute-workspace-path>` and projects assigned skills into the agent-specific `CODEX_HOME/skills` tree. This keeps skill scope per agent while preserving Codex trust and command execution against the actual repository path.
 
+For shared interactive/background owners and inherited headless launches,
+Wardian supplies its managed common, class, and agent instructions through
+Codex's developer instructions setting, in that order. The shared owner places
+the same instructions in its temporary startup configuration for the ordinary
+TUI; no TUI command-line config override is needed. These are the same managed sources used
+to generate habitat `AGENTS.md`; workspace instructions retain Codex's normal
+discovery and priority. Inherited workers use the configured agent's instruction
+identity. This bridge works when Wardian memory is disabled. When enabled, the
+runtime memory contract and startup brief are included once in the bridge.
+Wardian does not modify workspace instruction files or import arbitrary include
+paths into developer instructions, and keeps the configured model and effort.
+
 Each agent keeps its own mutable Codex home. Wardian links that home's
 `sessions/` directory to the native Codex `sessions/` directory, using a
 Windows junction where supported and the platform equivalent elsewhere. Local

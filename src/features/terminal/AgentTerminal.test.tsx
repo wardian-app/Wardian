@@ -4743,7 +4743,7 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
-  it("does not reply to Codex OSC 10/11 probes (the modern ConPTY answers them)", async () => {
+  it("does not send Codex OSC 10/11 replies from the renderer", async () => {
     const probe = "\u001b]10;?\u001b\\\u001b]11;?\u001b\\";
     mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
       switch (cmd) {

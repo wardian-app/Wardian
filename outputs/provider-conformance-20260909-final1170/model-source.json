@@ -1,0 +1,54 @@
+{
+  "collected_at": "2026-09-09T05:03:38.679704+00:00",
+  "scope": "Model candidates retain source metadata; catalog presence does not establish successful access or quota.",
+  "selections": [
+    {
+      "provider": "claude",
+      "version": "2.1.265 (Claude Code)",
+      "catalog_source": "Refreshed CLI metadata",
+      "model": "haiku",
+      "basis": "provisional until first isolated provider response resolves alias. Current first-party published Haiku 4.5 pricing is below current Sonnet/Opus/Fable tiers; Wardian alias and historical resolved-model evidence only, not live entitlement proof. Most recent recorded pass: haiku, 2026-09-07T18:31:11.635Z. lowest documented current tier among inspected Wardian aliases, conditional on successful alias resolution",
+      "source_url": "https://platform.claude.com/docs/en/about-claude/pricing"
+    },
+    {
+      "provider": "codex",
+      "version": "codex-cli 0.154.0-alpha.6",
+      "catalog_source": "Refreshed CLI metadata",
+      "model": "gpt-5.6-luna",
+      "basis": "listed in refreshed installed alpha.6 catalog; no model prompt this preparation. Official docs identify cost-sensitive nano-equivalent tier; fresh CLI catalog exposes low as minimum. Most recent recorded pass: gpt-5.6-luna, 2026-09-08T21:14:59.369Z. practical low-cost selection, not an exhaustive account-specific price ranking",
+      "source_url": "https://developers.openai.com/api/docs/models/gpt-5.6-luna"
+    },
+    {
+      "provider": "opencode",
+      "version": "1.18.29",
+      "catalog_source": "Refreshed CLI metadata",
+      "model": "opencode/mimo-v2.5-free",
+      "basis": "listed. CLI route explicitly named free; not a live service-acceptance or quota test. Most recent recorded pass: opencode/mimo-v2.5-free, 2026-09-07T19:39:44.177Z. ",
+      "source_url": "https://github.com/wardian-app/Wardian/issues/1159"
+    },
+    {
+      "provider": "antigravity",
+      "version": "1.1.27",
+      "catalog_source": "Refreshed CLI metadata",
+      "model": "gemini-3.8-flash-low",
+      "basis": "direct catalog only; Wardian parsing requires integrated recheck. price/account quota opaque; no cheapest claim. Most recent recorded pass: gemini-3.6-flash-low, 2026-09-07T19:40:26.553Z. ",
+      "source_url": "https://github.com/wardian-app/Wardian/issues/1159"
+    },
+    {
+      "provider": "pi",
+      "version": "0.84.2",
+      "catalog_source": "Refreshed CLI metadata",
+      "model": "lmstudio/gemma-4-31b-unslop-good-lora-v1-i1",
+      "basis": "configured catalog entry. Local route; no per-token API invoice assumed, endpoint availability and machine cost not checked. Most recent recorded pass: openai-codex/gpt-5.4-mini, 2026-09-07T19:40:13.746Z. ",
+      "source_url": "https://github.com/wardian-app/Wardian/issues/1159"
+    },
+    {
+      "provider": "gemini",
+      "version": "",
+      "catalog_source": "",
+      "model": "",
+      "basis": "Unmaintained; excluded by existing support policy.",
+      "source_url": "https://github.com/wardian-app/Wardian/issues/1159"
+    }
+  ]
+}

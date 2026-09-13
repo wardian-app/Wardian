@@ -1,0 +1,52 @@
+[
+  {
+    "part_id": "prt_07b8d9d2f001nCzpbYiQVrhkrP",
+    "message_id": "msg_07b8d721d0016oi5n6fYbTDf24",
+    "session_id": "ses_f84729174ffe6BqVNF93FnHLDJ",
+    "message": {
+      "role": "assistant",
+      "parentID": "msg_07b8d6ebc001N8cmilUUtu1kNT"
+    },
+    "part": {
+      "type": "tool",
+      "tool": "glob",
+      "callID": "call_f882b5089f0a46f6bb059bcd",
+      "state": {
+        "status": "completed",
+        "input": {
+          "pattern": "**/scratch-7af9f77cc2.txt"
+        },
+        "output": "<scratch-workspace>\\scratch-7af9f77cc2.txt",
+        "time": {
+          "start": 1788779273537,
+          "end": 1788779273612
+        }
+      }
+    }
+  },
+  {
+    "part_id": "prt_07b8da8f0001gZ8yPFG5I3ThbU",
+    "message_id": "msg_07b8d9dc2001cXlwMV6BjNuvJq",
+    "session_id": "ses_f84729174ffe6BqVNF93FnHLDJ",
+    "message": {
+      "role": "assistant",
+      "parentID": "msg_07b8d6ebc001N8cmilUUtu1kNT"
+    },
+    "part": {
+      "type": "tool",
+      "tool": "read",
+      "callID": "call_ffc6c93da5e54b098ab0ee5d",
+      "state": {
+        "status": "completed",
+        "input": {
+          "filePath": "<scratch-workspace>\\scratch-7af9f77cc2.txt"
+        },
+        "output": "<path><scratch-workspace>\\scratch-7af9f77cc2.txt</path>\n<type>file</type>\n<content>\n1: probe-15928793f96c825b\n\n(End of file - total 1 lines)\n</content>",
+        "time": {
+          "start": 1788779276867,
+          "end": 1788779277011
+        }
+      }
+    }
+  }
+]
