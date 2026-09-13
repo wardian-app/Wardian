@@ -41,7 +41,20 @@ export async function installGardenCompositionMock(page: Page, options: {
   memoryCount?: number;
   conversationCount?: number;
   historicalOneOffRunCount?: number;
+  assignedAutomationCount?: number;
+  scheduledRunStatus?: "running" | "failed";
+  singleAgentAutomations?: boolean;
 } = {}) {
+  const scheduledRunStatus = options.scheduledRunStatus ?? "running";
+  const scheduleAssignments = options.singleAgentAutomations ? {
+    ...assignments,
+    reviewer: { target_type: "agent" as const, agent_id: GARDEN_AGENT, conversation: "fresh_background" as const },
+  } : assignments;
+  const schedules = Array.from({ length: options.assignedAutomationCount ?? 1 }, (_, index) => ({
+    ...schedule,
+    assignments: scheduleAssignments,
+    ...(index ? { id: `daily-design-${index + 1}`, name: `Design review ${index + 1}` } : {}),
+  }));
   const recentTerminalRuns = Array.from({ length: options.historicalOneOffRunCount ?? 0 }, (_, index) => ({
     run_id: `historical-review-${index}`,
     blueprint_id: blueprint.id,
@@ -63,7 +76,7 @@ export async function installGardenCompositionMock(page: Page, options: {
     ],
     explorer_root: GARDEN_ROOT,
     files: [
-      { path: `${GARDEN_ROOT}/src/cutaway.tsx`, content: "export const regions = ['Identity', 'Capabilities', 'Memory', 'Active work', 'Ports'];" },
+      { path: `${GARDEN_ROOT}/src/cutaway.tsx`, content: "export const regions = ['Identity', 'Skills', 'Memory', 'Automations', 'Conversations'];" },
       { path: `${GARDEN_ROOT}/docs/evidence.md`, content: "# Review evidence\nThe agent layout is stable." },
       { path: `${GARDEN_ROOT}/README.md`, content: "Unchanged workspace introduction." },
     ],
@@ -84,13 +97,13 @@ export async function installGardenCompositionMock(page: Page, options: {
       ] } },
       load_agent_reach: { schema: 1, agents: [], skipped_turn_records: 0 },
       automation_list_blueprints: { blueprints: [{ id: blueprint.id, path: "/synthetic/library/design-review.md" }], truncated: false, next_offset: null },
-      automation_parse: { blueprint }, schedule_list: [schedule],
+      automation_parse: { blueprint }, schedule_list: schedules,
       automation_list_runs: { runs: [
-        { run_id: GARDEN_RUN, blueprint_id: blueprint.id, schedule_id: schedule.id, status: "running", node_count: 2, path: `/synthetic/runs/${GARDEN_RUN}`, started_at: timestamp },
+        { run_id: GARDEN_RUN, blueprint_id: blueprint.id, schedule_id: schedule.id, status: scheduledRunStatus, node_count: 2, path: `/synthetic/runs/${GARDEN_RUN}`, started_at: timestamp },
         ...recentTerminalRuns,
       ], truncated: false, next_offset: null },
-      read_file_preview: JSON.stringify({ workspace: GARDEN_ROOT, schedule_id: schedule.id, assignments }),
-      automation_read_run: { blueprint, blueprint_path: "/synthetic/library/design-review.md", state: { run_id: GARDEN_RUN, blueprint_id: blueprint.id, status: "running", nodes: { draft: "completed", review: "running" } }, events: [{ seq: 1, ts: timestamp, kind: "node_completed", node: "draft", output: { artifact: "cutaway-preview", region_count: 5 } }, { seq: 2, ts: timestamp, kind: "node_started", node: "review" }] },
+      read_file_preview: JSON.stringify({ workspace: GARDEN_ROOT, schedule_id: schedule.id, assignments: scheduleAssignments }),
+      automation_read_run: { blueprint, blueprint_path: "/synthetic/library/design-review.md", state: { run_id: GARDEN_RUN, blueprint_id: blueprint.id, status: scheduledRunStatus, nodes: { draft: "completed", review: scheduledRunStatus } }, events: [{ seq: 1, ts: timestamp, kind: "node_completed", node: "draft", output: { artifact: "cutaway-preview", region_count: 5 } }, scheduledRunStatus === "failed" ? { seq: 2, ts: timestamp, kind: "node_failed", node: "review", error: "Synthetic review failure" } : { seq: 2, ts: timestamp, kind: "node_started", node: "review" }] },
     },
   });
 }
