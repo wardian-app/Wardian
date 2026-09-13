@@ -874,6 +874,8 @@ pub fn run() {
             commands::automation::automation_list_blueprints,
             commands::automation::automation_list_runs,
             commands::automation::automation_read_run,
+            commands::automation::temporary_worker_root_summaries,
+            commands::automation::temporary_worker_root_details,
             commands::automation::automation_run,
             commands::automation::automation_resume,
             commands::automation::automation_approve,

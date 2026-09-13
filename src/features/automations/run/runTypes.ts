@@ -49,6 +49,60 @@ export interface RunSummary {
   started_at?: string | null;
   updated_at?: string | null;
   completed_at?: string | null;
+  worker_attention_count?: number;
+}
+
+export type TemporaryWorkerState = 'requested' | 'running' | 'waiting' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
+
+export interface TemporaryWorker {
+  worker_id: string;
+  kind: 'automation' | 'provider_child';
+  provider: string;
+  workspace: string;
+  root_agent_id?: string | null;
+  parent_worker_id?: string | null;
+  parent_provider_session_id?: string | null;
+  blueprint_id?: string | null;
+  run_id?: string | null;
+  node_id?: string | null;
+  attempt?: number | null;
+  provider_session_id?: string | null;
+  runtime_session_id: string;
+  runtime_generation?: number | null;
+  state: TemporaryWorkerState;
+  outcome?: string | null;
+  capabilities: {
+    inspection: boolean;
+    follow_up: boolean;
+    interruption: boolean;
+    resume: boolean;
+    source: string;
+  };
+  coverage: string;
+  source_key?: string | null;
+  source_path?: string | null;
+  requested_at: string;
+  started_at?: string | null;
+  terminal_at?: string | null;
+  last_observed_at?: string;
+  last_follow_up_accepted_at?: string | null;
+  resumable_until?: string | null;
+  detail_retained_until?: string | null;
+  error?: string | null;
+}
+
+export interface TemporaryWorkerTelemetry {
+  worker_id: string;
+  turns: number;
+  tokens: {
+    input_tokens?: number | null;
+    cached_input_tokens?: number | null;
+    cache_write_tokens?: number | null;
+    output_tokens?: number | null;
+    reasoning_tokens?: number | null;
+  };
+  models: string[];
+  efforts: string[];
 }
 
 export interface RunSummaryListResult {
@@ -62,4 +116,6 @@ export interface RunReadResult {
   events: RunEvent[];
   blueprint: Blueprint | null;
   blueprint_path?: string | null;
+  workers: TemporaryWorker[];
+  worker_telemetry: Record<string, TemporaryWorkerTelemetry>;
 }

@@ -85,7 +85,7 @@ export function buildMonitorModel(runs: RunSummary[], schedules: AutomationSched
     } else {
       setLatestRun(latestUnscheduledRunByBlueprint, run.blueprint_id, run);
     }
-    if (run.status === 'running' || run.status === 'awaiting_approval') {
+    if (run.status === 'running' || run.status === 'awaiting_approval' || (run.worker_attention_count ?? 0) > 0) {
       if (run.status === 'running') runningCount += 1;
       if (run.status === 'awaiting_approval') awaitingCount += 1;
       activeRuns.push(run);
@@ -274,6 +274,17 @@ function activityState(
     ?? (schedules.some((schedule) => schedule.last_run_status === 'failed') ? 'Last scheduled run failed' : null);
   if (activeRun?.status === 'awaiting_approval') {
     return { statusLabel: 'Awaiting approval', tone: 'warning', section: 'attention', issue: null };
+  }
+  const workerAttentionCount = activeRun?.worker_attention_count
+    ?? latestRun?.worker_attention_count
+    ?? 0;
+  if (needsAttention && workerAttentionCount > 0) {
+    return {
+      statusLabel: 'Worker attention',
+      tone: 'warning',
+      section: 'attention',
+      issue: `${workerAttentionCount} temporary worker${workerAttentionCount === 1 ? ' needs' : 's need'} attention`,
+    };
   }
   if (needsAttention) {
     return {

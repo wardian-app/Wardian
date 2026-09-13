@@ -57,6 +57,81 @@ const HEADLESS_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const HEADLESS_LEASE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 const HEADLESS_LEASE_DURATION: chrono::Duration = chrono::Duration::minutes(20);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadlessRunErrorKind {
+    DefiniteFailure,
+    Uncertain,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadlessRunError {
+    kind: HeadlessRunErrorKind,
+    message: String,
+}
+
+impl HeadlessRunError {
+    pub fn definite(message: impl Into<String>) -> Self {
+        Self {
+            kind: HeadlessRunErrorKind::DefiniteFailure,
+            message: message.into(),
+        }
+    }
+
+    pub fn uncertain(message: impl Into<String>) -> Self {
+        Self {
+            kind: HeadlessRunErrorKind::Uncertain,
+            message: message.into(),
+        }
+    }
+
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            kind: HeadlessRunErrorKind::Cancelled,
+            message: message.into(),
+        }
+    }
+
+    pub fn kind(&self) -> HeadlessRunErrorKind {
+        self.kind
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn contains(&self, pattern: &str) -> bool {
+        self.message.contains(pattern)
+    }
+
+    pub fn with_context(&self, context: impl std::fmt::Display) -> Self {
+        Self {
+            kind: self.kind,
+            message: format!("{}; {context}", self.message),
+        }
+    }
+}
+
+impl std::fmt::Display for HeadlessRunError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for HeadlessRunError {}
+
+impl From<String> for HeadlessRunError {
+    fn from(message: String) -> Self {
+        Self::definite(message)
+    }
+}
+
+impl From<&str> for HeadlessRunError {
+    fn from(message: &str) -> Self {
+        Self::definite(message)
+    }
+}
+
 pub struct HeadlessRunOptions<'a> {
     pub cwd: &'a std::path::Path,
     pub prompt: &'a str,
@@ -76,6 +151,9 @@ pub struct HeadlessRunOptions<'a> {
     /// Present only when this run owns a persisted provider-conversation lease.
     /// The manager renews it while the provider process is still alive.
     pub lease_owner: Option<ConversationLeaseOwner>,
+    /// Run-owned marker checked while the provider process is active. This is
+    /// never shared with permanent-agent or unrelated provider lifecycles.
+    pub cancellation_marker: Option<&'a std::path::Path>,
 }
 
 #[derive(Debug)]
@@ -378,7 +456,7 @@ pub(crate) fn headless_provider_args(
 
 pub async fn run_headless_with_options(
     options: HeadlessRunOptions<'_>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, HeadlessRunError> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     super::validate_session_values_for_launch(options.wardian_session_id, options.resume_session)?;
     let cwd = options.cwd;
@@ -683,6 +761,7 @@ pub async fn run_headless_with_options(
             prompt,
             options.timeout,
             options.lease_owner.as_ref(),
+            options.cancellation_marker,
             &mut process_tree_guard,
         )
         .await
@@ -692,6 +771,7 @@ pub async fn run_headless_with_options(
             provider_name,
             options.timeout,
             options.lease_owner.as_ref(),
+            options.cancellation_marker,
         )
         .await
     };
@@ -718,10 +798,10 @@ pub async fn run_headless_with_options(
         } else {
             "provider exited without output"
         };
-        return Err(format!(
+        return Err(HeadlessRunError::definite(format!(
             "Headless provider {provider_name} exited with status {}: {detail}",
             status.code().unwrap_or(-1)
-        ));
+        )));
     }
 
     if let Some((memory_store, memory_brief)) = memory_setup {
@@ -741,6 +821,11 @@ pub async fn run_headless_with_options(
     }
 
     if provider_name == "codex" {
+        let thread_id = bootstrap_output_session_id("codex", &output).or_else(|| {
+            resume_session
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string)
+        });
         let mut last_message = None;
         for line in output.lines() {
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
@@ -778,7 +863,7 @@ pub async fn run_headless_with_options(
 
         if output_format == "json" {
             Ok(serde_json::json!({
-                "thread_id": wardian_session_id,
+                "thread_id": thread_id,
                 "response": last_message.unwrap_or_else(|| output.clone()),
                 "raw": output,
             }))
@@ -787,6 +872,7 @@ pub async fn run_headless_with_options(
         }
     } else if provider_name == "claude" {
         normalize_claude_headless_output(&output, output_format)
+            .map_err(HeadlessRunError::uncertain)
     } else if provider_name == "opencode" {
         let summary = OpenCodeProvider::summarize_run_output(&output);
         let response = summary.last_text.unwrap_or_else(|| output.clone());
@@ -833,10 +919,10 @@ pub async fn run_headless_with_options(
             Ok(serde_json::json!({ "text": response }))
         }
     } else if provider_name == "pi" {
-        normalize_pi_headless_output(&output, output_format)
+        normalize_pi_headless_output(&output, output_format).map_err(HeadlessRunError::uncertain)
     } else if output_format == "json" {
         serde_json::from_str(&output)
-            .map_err(|e| format!("Failed to parse JSON output: {}. Raw: {}", e, output))
+            .map_err(|e| HeadlessRunError::uncertain(format!("Failed to parse JSON output: {}. Raw: {}", e, output)))
     } else {
         Ok(serde_json::json!({ "text": output }))
     }
@@ -907,12 +993,14 @@ async fn wait_for_headless_child(
     provider_name: &str,
     timeout: Duration,
     lease_owner: Option<&ConversationLeaseOwner>,
-) -> Result<std::process::ExitStatus, String> {
+    cancellation_marker: Option<&std::path::Path>,
+) -> Result<std::process::ExitStatus, HeadlessRunError> {
     wait_for_headless_child_with_intervals(
         child,
         provider_name,
         timeout,
         lease_owner,
+        cancellation_marker,
         HEADLESS_PROCESS_POLL_INTERVAL,
         HEADLESS_LEASE_HEARTBEAT_INTERVAL,
     )
@@ -924,9 +1012,10 @@ async fn wait_for_headless_child_with_intervals(
     provider_name: &str,
     timeout: Duration,
     lease_owner: Option<&ConversationLeaseOwner>,
+    cancellation_marker: Option<&std::path::Path>,
     process_poll_interval: Duration,
     lease_heartbeat_interval: Duration,
-) -> Result<std::process::ExitStatus, String> {
+) -> Result<std::process::ExitStatus, HeadlessRunError> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut process_poll = tokio::time::interval_at(
         tokio::time::Instant::now() + process_poll_interval,
@@ -941,29 +1030,43 @@ async fn wait_for_headless_child_with_intervals(
         tokio::select! {
             _ = tokio::time::sleep_until(deadline) => {
                 terminate_headless_child(child).await;
-                return Err(format!(
+                return Err(HeadlessRunError::uncertain(format!(
                     "Headless provider {provider_name} exceeded its {} second execution limit",
                     timeout.as_secs()
-                ));
+                )));
             }
             _ = process_poll.tick() => {
-                if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+                if cancellation_marker.is_some_and(std::path::Path::exists) {
+                    terminate_headless_child(child).await;
+                    return Err(HeadlessRunError::cancelled(format!(
+                        "Headless provider {provider_name} cancelled by its owning automation run"
+                    )));
+                }
+                if let Some(status) = child.try_wait().map_err(|error| HeadlessRunError::uncertain(error.to_string()))? {
                     return Ok(status);
                 }
             }
             _ = heartbeat.tick(), if lease_owner.is_some() => {
                 let owner = lease_owner.expect("lease owner checked by select guard");
                 let now = chrono::Utc::now();
-                let renewed = wardian_core::conversation_lease::renew_lease_owner_persisted(
+                let renewed = match wardian_core::conversation_lease::renew_lease_owner_persisted(
                     owner,
                     &now.to_rfc3339(),
                     &(now + HEADLESS_LEASE_DURATION).to_rfc3339(),
-                )?;
+                ) {
+                    Ok(renewed) => renewed,
+                    Err(error) => {
+                        terminate_headless_child(child).await;
+                        return Err(HeadlessRunError::uncertain(format!(
+                            "Headless provider {provider_name} lease observation failed before completion: {error}"
+                        )));
+                    }
+                };
                 if !renewed {
                     terminate_headless_child(child).await;
-                    return Err(format!(
+                    return Err(HeadlessRunError::uncertain(format!(
                         "Headless provider {provider_name} lost its conversation lease before completion"
-                    ));
+                    )));
                 }
             }
         }
@@ -1622,6 +1725,7 @@ mod tests {
             config_override: Some(&config),
             timeout: Duration::from_secs(10),
             lease_owner: None,
+            cancellation_marker: None,
         })
         .await;
         match previous_scenario {
@@ -1697,6 +1801,7 @@ mod tests {
             config_override: Some(&config),
             timeout: Duration::from_secs(10),
             lease_owner: None,
+            cancellation_marker: None,
         })
         .await;
         match previous_scenario {
@@ -1787,6 +1892,7 @@ mod tests {
             config_override: Some(&config),
             timeout: Duration::from_secs(10),
             lease_owner: None,
+            cancellation_marker: None,
         })
         .await;
         match previous_scenario {
@@ -1845,6 +1951,7 @@ mod tests {
             config_override: Some(&config),
             timeout: Duration::from_secs(10),
             lease_owner: None,
+            cancellation_marker: None,
         })
         .await;
         match previous_scenario {
@@ -1952,6 +2059,7 @@ mod tests {
                 config_override: Some(&config),
                 timeout: Duration::from_secs(110),
                 lease_owner: None,
+                cancellation_marker: None,
             }),
         )
         .await
@@ -2053,6 +2161,7 @@ mod tests {
             "mock",
             Duration::from_secs(1),
             Some(&owner),
+            None,
             Duration::from_millis(5),
             Duration::from_millis(10),
         )
@@ -2104,6 +2213,7 @@ mod tests {
             "mock",
             Duration::from_millis(25),
             None,
+            None,
             Duration::from_millis(5),
             Duration::from_secs(1),
         )
@@ -2121,6 +2231,39 @@ mod tests {
             !crate::utils::process::process_exists(descendant_pid),
             "headless timeout must terminate a shell/provider descendant"
         );
+    }
+
+    #[tokio::test]
+    async fn run_owned_cancellation_marker_terminates_and_acknowledges_child() {
+        if !node_available() {
+            return;
+        }
+        let temp = tempfile::tempdir().expect("temporary cancellation directory");
+        let marker = temp.path().join("cancel.marker");
+        std::fs::write(&marker, "cancelled").expect("write cancellation marker");
+        let mut command = crate::utils::process::new_headless_command(if cfg!(windows) {
+            "node.exe"
+        } else {
+            "node"
+        });
+        command.arg("-e").arg("setInterval(() => {}, 1000)");
+        command.kill_on_drop(true);
+        let mut child = command.spawn().expect("spawn cancellable child");
+
+        let error = wait_for_headless_child_with_intervals(
+            &mut child,
+            "mock",
+            Duration::from_secs(5),
+            None,
+            Some(&marker),
+            Duration::from_millis(5),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect_err("owned marker must cancel the child");
+
+        assert_eq!(error.kind(), HeadlessRunErrorKind::Cancelled);
+        assert!(child.try_wait().expect("reaped child").is_some());
     }
 
     #[cfg(windows)]
