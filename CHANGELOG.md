@@ -4,6 +4,64 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.6.1](https://github.com/wardian-app/Wardian/compare/v0.6.0...v0.6.1) (2026-09-13)
+
+
+### Features
+
+* **automations:** add selected-agent scope toggle ([#1276](https://github.com/wardian-app/Wardian/issues/1276)) ([492a726](https://github.com/wardian-app/Wardian/commit/492a7264614ef7a0eef3e9f13c9203950a2ebc6d)), closes [#1275](https://github.com/wardian-app/Wardian/issues/1275)
+* **automations:** scope workflows to selected agents ([#1242](https://github.com/wardian-app/Wardian/issues/1242)) ([972aebd](https://github.com/wardian-app/Wardian/commit/972aebdc3d00cdb3b7d864dbd05f5ff6ef7af6ae))
+* **ci:** mint the site refresh token from the release-dispatch App ([#1156](https://github.com/wardian-app/Wardian/issues/1156)) ([39d996c](https://github.com/wardian-app/Wardian/commit/39d996c896de2e5a4883ff325984889c851348e2))
+* **docs:** capture the feature-site clips from the real app ([#1146](https://github.com/wardian-app/Wardian/issues/1146)) ([1845bec](https://github.com/wardian-app/Wardian/commit/1845bece8e8f8384ee3c34fcbc122de505a86783)), closes [#332](https://github.com/wardian-app/Wardian/issues/332)
+* **docs:** make the garden clip required ([#1158](https://github.com/wardian-app/Wardian/issues/1158)) ([b7d5d30](https://github.com/wardian-app/Wardian/commit/b7d5d30657e95613488f54175f8c3cd2b18a036e))
+* **garden:** unfold hierarchical cells with crisp Wardian details ([#1172](https://github.com/wardian-app/Wardian/issues/1172)) ([17b0265](https://github.com/wardian-app/Wardian/commit/17b026576adc97c9a80fc14a4ccfcffd59bbedbd))
+* **library:** preview Markdown and clarify class contents ([#1221](https://github.com/wardian-app/Wardian/issues/1221)) ([f0143e0](https://github.com/wardian-app/Wardian/commit/f0143e03303b113c5568c35c9fc28ea30b7b5d89))
+
+
+### Bug Fixes
+
+* **antigravity:** paste multiline and long prompts into the editor ([#1198](https://github.com/wardian-app/Wardian/issues/1198)) ([8a41303](https://github.com/wardian-app/Wardian/commit/8a41303d58329ff4d09e75e6b6c2de4a8e8f47a0))
+* **antigravity:** project native chat tools and provenance ([#1188](https://github.com/wardian-app/Wardian/issues/1188)) ([48dead4](https://github.com/wardian-app/Wardian/commit/48dead45b0bdb5a5d2681393f77d77375a999fb4))
+* **antigravity:** restore tab-separated model discovery ([#1171](https://github.com/wardian-app/Wardian/issues/1171)) ([9b39f5d](https://github.com/wardian-app/Wardian/commit/9b39f5dcbaf9d917db67d19b276e82bbacf314bd))
+* **automation:** replace Windows checkpoints with open readers ([#1186](https://github.com/wardian-app/Wardian/issues/1186)) ([5fcfa14](https://github.com/wardian-app/Wardian/commit/5fcfa143f5ec7e49a1e3093f3f62244c3c62cf08))
+* **browser:** complete owned profile cleanup after close ([#1265](https://github.com/wardian-app/Wardian/issues/1265)) ([fd3c1a8](https://github.com/wardian-app/Wardian/commit/fd3c1a8e174b0469ff35d1302b2b50b9bd598b15))
+* **canvas:** speed up shared wheel zoom ([#1280](https://github.com/wardian-app/Wardian/issues/1280)) ([ef61845](https://github.com/wardian-app/Wardian/commit/ef61845ce8a03f431fe021b68437cbc8849b208e))
+* **chat:** acquire provider logs forward ([#1253](https://github.com/wardian-app/Wardian/issues/1253)) ([7a3d04d](https://github.com/wardian-app/Wardian/commit/7a3d04d1be1a146f6bd173dbb2242fe88054d952))
+* **chat:** classify explicit Codex user input ([#1248](https://github.com/wardian-app/Wardian/issues/1248)) ([6097948](https://github.com/wardian-app/Wardian/commit/60979484a39fea0451312880f85506f3d8ba3617))
+* **chat:** keep Claude history synchronized ([#1144](https://github.com/wardian-app/Wardian/issues/1144)) ([d153c82](https://github.com/wardian-app/Wardian/commit/d153c82f18d263afb6e3268c1e6a6cf3e3ce8ec5))
+* **chat:** preserve Claude provider provenance ([#1166](https://github.com/wardian-app/Wardian/issues/1166)) ([cd6ff34](https://github.com/wardian-app/Wardian/commit/cd6ff3406e81d982b47b6eb137fade5afb11ff58))
+* **chat:** repair source-bound archive provenance and completed tools ([#1189](https://github.com/wardian-app/Wardian/issues/1189)) ([d0b7bac](https://github.com/wardian-app/Wardian/commit/d0b7bac86e03b59df7cf15e54199ad176b010b6e))
+* **ci:** stop the site refresh deleting the phone screenshots ([#1154](https://github.com/wardian-app/Wardian/issues/1154)) ([add3f5d](https://github.com/wardian-app/Wardian/commit/add3f5dd8337147fa696172d42225bc1c3e87406))
+* **claude:** load managed instructions without wrapper import consent ([#1181](https://github.com/wardian-app/Wardian/issues/1181)) ([d42af9f](https://github.com/wardian-app/Wardian/commit/d42af9fb6fc048a1adbd029d6b8ff0ccad0a0384))
+* **claude:** normalize verbose headless result arrays ([#1243](https://github.com/wardian-app/Wardian/issues/1243)) ([cd936d1](https://github.com/wardian-app/Wardian/commit/cd936d171dbb4ba9eef7744b6cd47e848a25da26))
+* **claude:** publish managed instructions on Windows long paths ([#1260](https://github.com/wardian-app/Wardian/issues/1260)) ([d36ed75](https://github.com/wardian-app/Wardian/commit/d36ed75e82516e732597ef8e208adca5db26d2ec))
+* **codex:** attach without history hydration or cwd prompts ([#1271](https://github.com/wardian-app/Wardian/issues/1271)) ([5b31222](https://github.com/wardian-app/Wardian/commit/5b312224f40a6808b7c196cf6a2ae2ded9ffffdb))
+* **codex:** avoid late Windows default-color replies ([#1217](https://github.com/wardian-app/Wardian/issues/1217)) ([4869bbc](https://github.com/wardian-app/Wardian/commit/4869bbc811f1f6bd0260337e8d88553be1231866))
+* **codex:** deliver managed instructions independently of memory ([#1204](https://github.com/wardian-app/Wardian/issues/1204)) ([a790c10](https://github.com/wardian-app/Wardian/commit/a790c10ba4419525bb3966015e63806ca52daa60))
+* **codex:** exclude startup context from prompt activity ([#1256](https://github.com/wardian-app/Wardian/issues/1256)) ([dba0836](https://github.com/wardian-app/Wardian/commit/dba0836ea0471d51dc67552ca9f556b5d644fd44))
+* **codex:** publish managed MCP files on long Windows paths ([#1255](https://github.com/wardian-app/Wardian/issues/1255)) ([0b98850](https://github.com/wardian-app/Wardian/commit/0b98850021b4f72e4588b42e79b8c625378dddce))
+* **codex:** recover abandoned startup sockets ([#1269](https://github.com/wardian-app/Wardian/issues/1269)) ([905ac9b](https://github.com/wardian-app/Wardian/commit/905ac9bd6a21fe2eb274f79f123a3732cb61ede8))
+* deliver Codex messages through a shared stock runtime ([#1239](https://github.com/wardian-app/Wardian/issues/1239)) ([5094ed6](https://github.com/wardian-app/Wardian/commit/5094ed65b774b0f703de7021c3006be7a81b42af))
+* **docs:** complete screenshot capture on a cold dev server ([#1142](https://github.com/wardian-app/Wardian/issues/1142)) ([428a207](https://github.com/wardian-app/Wardian/commit/428a2072c511c0589ee0b2b93b39a79eb650f87c))
+* **garden:** hide terminal one-off run history ([#1278](https://github.com/wardian-app/Wardian/issues/1278)) ([36e274c](https://github.com/wardian-app/Wardian/commit/36e274c9383abf9a0d4e3c8426d8dc29a47fdfa3))
+* **garden:** keep agent shells out of placement hit-testing ([#1252](https://github.com/wardian-app/Wardian/issues/1252)) ([0fb610c](https://github.com/wardian-app/Wardian/commit/0fb610c21c23e827b90fb2b0a0218e895e4122e5))
+* **garden:** spatialize agent automations ([#1299](https://github.com/wardian-app/Wardian/issues/1299)) ([2415c5f](https://github.com/wardian-app/Wardian/commit/2415c5fff4b853d231331e673f597d170a4507c9))
+* **graph:** hide activity cap notice ([#1274](https://github.com/wardian-app/Wardian/issues/1274)) ([e7d3d67](https://github.com/wardian-app/Wardian/commit/e7d3d672b6007abd1f6794196caf49ec3997f9f4)), closes [#1273](https://github.com/wardian-app/Wardian/issues/1273)
+* **lifecycle:** preserve config updates during startup restoration ([#1203](https://github.com/wardian-app/Wardian/issues/1203)) ([e8b99e3](https://github.com/wardian-app/Wardian/commit/e8b99e33dbc2d7772c7f6f168e90d4319b5d61e4))
+* **native:** isolate owned WebView profiles in driver capabilities ([#1291](https://github.com/wardian-app/Wardian/issues/1291)) ([3ff3508](https://github.com/wardian-app/Wardian/commit/3ff35084ca47ab372bbbb452b1709df3d0a0554f))
+* **native:** preserve Windows build argv ([#1228](https://github.com/wardian-app/Wardian/issues/1228)) ([13c5aec](https://github.com/wardian-app/Wardian/commit/13c5aec1b808417ea0424745bc688b7736459809))
+* **opencode:** avoid redundant Windows shell wrapper ([#1283](https://github.com/wardian-app/Wardian/issues/1283)) ([766a19a](https://github.com/wardian-app/Wardian/commit/766a19ab5ed275c6a4379cc2d6ba6d3f210bdadc))
+* **opencode:** preserve headless prompts via stdin ([#1210](https://github.com/wardian-app/Wardian/issues/1210)) ([b049f08](https://github.com/wardian-app/Wardian/commit/b049f0858eb090cb0485340e9a251720e2957781))
+* **opencode:** refresh chat from the effective provider data root ([#1173](https://github.com/wardian-app/Wardian/issues/1173)) ([1d31406](https://github.com/wardian-app/Wardian/commit/1d31406e55763ee5765061f709c1bfa46603337b))
+* **opencode:** require native turn acceptance receipt ([#1195](https://github.com/wardian-app/Wardian/issues/1195)) ([7531e37](https://github.com/wardian-app/Wardian/commit/7531e37822ef1004c6f2df6ce2bb1075e9ff84a0))
+* **opencode:** show native SQLite tool calls and results ([#1190](https://github.com/wardian-app/Wardian/issues/1190)) ([c614373](https://github.com/wardian-app/Wardian/commit/c614373f7126ab5d7189d5fa59dea6e468e92744))
+* **pi:** preserve native request entry provenance ([#1191](https://github.com/wardian-app/Wardian/issues/1191)) ([8d6969c](https://github.com/wardian-app/Wardian/commit/8d6969c5180cbb25971922642280d7e8230612c3))
+* **providers:** honor native transport arguments and answer semantics ([#1207](https://github.com/wardian-app/Wardian/issues/1207)) ([40750fe](https://github.com/wardian-app/Wardian/commit/40750fe177e2d52af90093013b9f2c6b0ca9b3d4))
+* **qa:** compare package.json contract fields, not the whole manifest ([#1150](https://github.com/wardian-app/Wardian/issues/1150)) ([5f2b7a4](https://github.com/wardian-app/Wardian/commit/5f2b7a45a80dc82f1abb9e4598086fb92d8a04f6)), closes [#1149](https://github.com/wardian-app/Wardian/issues/1149)
+* **terminal:** display provider restoration failures ([#1267](https://github.com/wardian-app/Wardian/issues/1267)) ([b7a76e5](https://github.com/wardian-app/Wardian/commit/b7a76e5c49252ea55fa78a751cd2d8c5b05b2d3e))
+* **terminal:** preserve history during snapshot replay ([#1213](https://github.com/wardian-app/Wardian/issues/1213)) ([7e96017](https://github.com/wardian-app/Wardian/commit/7e9601760c864ee62c60d2593fd5d3373f9aff44))
+* **terminal:** protect remounted presentation ownership ([#1304](https://github.com/wardian-app/Wardian/issues/1304)) ([cdb557b](https://github.com/wardian-app/Wardian/commit/cdb557b7bf16ff9245758298422af7f35c357c91))
+
 ## [0.6.0](https://github.com/wardian-app/Wardian/compare/v0.5.3...v0.6.0) (2026-09-05)
 
 
