@@ -103,6 +103,28 @@ struct OpenCodeHttpRegistration {
     event_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenCodeHttpEligibility {
+    Unsupported,
+    Pending,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenCodeHttpLaunchPhase {
+    Pending,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+struct OpenCodeHttpLaunchState {
+    generation: u64,
+    config_fingerprint: String,
+    phase: OpenCodeHttpLaunchPhase,
+}
+
 #[derive(Debug)]
 enum SessionCommand {
     Submit {
@@ -246,6 +268,7 @@ pub struct NativeDeliveryBroker {
     owner_changes: tokio::sync::Notify,
     pi_bridges: Mutex<HashMap<String, PiBridgeRegistration>>,
     opencode_http: Mutex<HashMap<String, Arc<OpenCodeHttpRegistration>>>,
+    opencode_http_states: Mutex<HashMap<String, OpenCodeHttpLaunchState>>,
     codex_creations: CodexCreationRegistry,
     #[cfg(test)]
     codex_creation_test: CodexCreationTestHooks,
@@ -677,6 +700,90 @@ impl NativeDeliveryBroker {
     /// launched and its exact resumed session has been observed. The unique
     /// child-only credential plus the reserved loopback endpoint ties the
     /// authenticated listener probe to this child; missing proof fails closed.
+    pub async fn prepare_opencode_http(
+        &self,
+        target_agent_id: &str,
+        generation: u64,
+        config_fingerprint: String,
+    ) -> Result<(), NativeBrokerError> {
+        if target_agent_id.trim().is_empty() || generation == 0 {
+            return Err(error(
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+                "OpenCode HTTP eligibility has no valid target or generation",
+                false,
+            ));
+        }
+        if config_fingerprint.trim().is_empty() {
+            return Err(error(
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+                "OpenCode HTTP eligibility has no configuration fingerprint",
+                false,
+            ));
+        }
+        let _gate = self.owner_gate(target_agent_id).await.lock_owned().await;
+        self.opencode_http_states.lock().await.insert(
+            target_agent_id.to_string(),
+            OpenCodeHttpLaunchState {
+                generation,
+                config_fingerprint,
+                phase: OpenCodeHttpLaunchPhase::Pending,
+            },
+        );
+        Ok(())
+    }
+
+    /// Keep an eligible launch on the native route after handoff failure. The
+    /// state is generation-bound so a later replacement can establish a new
+    /// eligibility record without reopening this launch through the composer.
+    pub async fn fail_opencode_http(&self, target_agent_id: &str, generation: u64) {
+        let _gate = self.owner_gate(target_agent_id).await.lock_owned().await;
+        if let Some(state) = self
+            .opencode_http_states
+            .lock()
+            .await
+            .get_mut(target_agent_id)
+        {
+            if state.generation == generation {
+                state.phase = OpenCodeHttpLaunchPhase::Failed;
+            }
+        }
+    }
+
+    pub async fn opencode_http_eligibility(
+        &self,
+        target_agent_id: &str,
+        generation: u64,
+    ) -> OpenCodeHttpEligibility {
+        let phase = self
+            .opencode_http_states
+            .lock()
+            .await
+            .get(target_agent_id)
+            .filter(|state| state.generation == generation)
+            .map(|state| state.phase);
+        match phase {
+            Some(OpenCodeHttpLaunchPhase::Pending) => OpenCodeHttpEligibility::Pending,
+            Some(OpenCodeHttpLaunchPhase::Failed) => OpenCodeHttpEligibility::Failed,
+            Some(OpenCodeHttpLaunchPhase::Ready) => {
+                let registered = self
+                    .opencode_http
+                    .lock()
+                    .await
+                    .get(target_agent_id)
+                    .is_some_and(|entry| entry.generation == generation);
+                if registered {
+                    OpenCodeHttpEligibility::Ready
+                } else {
+                    OpenCodeHttpEligibility::Failed
+                }
+            }
+            None => OpenCodeHttpEligibility::Unsupported,
+        }
+    }
+
+    /// Compatibility predicate for callers that only need to know whether a
+    /// session is on the native boundary. Pending and failed eligible launches
+    /// remain native-owned so they cannot fall through to PTY composition.
     #[allow(clippy::too_many_arguments)]
     pub async fn register_opencode_http(
         &self,
@@ -706,6 +813,36 @@ impl NativeDeliveryBroker {
             ));
         }
         let _gate = self.owner_gate(&target_agent_id).await.lock_owned().await;
+        let generation = plan.generation();
+        {
+            let mut states = self.opencode_http_states.lock().await;
+            match states.get(&target_agent_id) {
+                Some(state)
+                    if state.generation == generation
+                        && state.config_fingerprint == config_fingerprint
+                        && state.phase == OpenCodeHttpLaunchPhase::Pending => {}
+                Some(_) => {
+                    return Err(error(
+                        NativeDeliveryErrorCode::StaleGeneration,
+                        "OpenCode HTTP launch no longer matches its eligible generation",
+                        false,
+                    ));
+                }
+                None => {
+                    // Direct broker callers may already possess a verified
+                    // launch proof; normal TUI startup records Pending before
+                    // spawning and therefore takes the checked branch above.
+                    states.insert(
+                        target_agent_id.clone(),
+                        OpenCodeHttpLaunchState {
+                            generation,
+                            config_fingerprint: config_fingerprint.clone(),
+                            phase: OpenCodeHttpLaunchPhase::Pending,
+                        },
+                    );
+                }
+            }
+        }
         let binding = plan
             .bind(OpenCodeHttpLaunchProof {
                 agent_id: target_agent_id.clone(),
@@ -777,6 +914,8 @@ impl NativeDeliveryBroker {
             let _ = event_task.await;
             return Err(db_error(error));
         }
+        let state_agent_id = target_agent_id.clone();
+        let state_config_fingerprint = config_fingerprint.clone();
         let registration = Arc::new(OpenCodeHttpRegistration {
             generation: owner.binding().generation(),
             runtime_generation: owner.binding().runtime_generation(),
@@ -790,6 +929,16 @@ impl NativeDeliveryBroker {
             .lock()
             .await
             .insert(target_agent_id, registration);
+        self.opencode_http_states
+            .lock()
+            .await
+            .entry(state_agent_id)
+            .and_modify(|state| state.phase = OpenCodeHttpLaunchPhase::Ready)
+            .or_insert(OpenCodeHttpLaunchState {
+                generation,
+                config_fingerprint: state_config_fingerprint,
+                phase: OpenCodeHttpLaunchPhase::Ready,
+            });
         if let Some(previous) = previous {
             close_opencode_http_registration(previous).await;
         }
@@ -800,11 +949,11 @@ impl NativeDeliveryBroker {
     /// OpenCode task away from the existing composer exception. A closed owner
     /// stays registered until disposal so a lost transport leaves work pending.
     pub async fn opencode_http_prepared(&self, target_agent_id: &str, generation: u64) -> bool {
-        self.opencode_http
-            .lock()
-            .await
-            .get(target_agent_id)
-            .is_some_and(|entry| entry.generation == generation)
+        !matches!(
+            self.opencode_http_eligibility(target_agent_id, generation)
+                .await,
+            OpenCodeHttpEligibility::Unsupported
+        )
     }
 
     /// Revalidate the owner and provider busy state before the canonical claim.
@@ -816,6 +965,33 @@ impl NativeDeliveryBroker {
         config: &AgentConfig,
         workspace: &std::path::Path,
     ) -> Result<(), NativeBrokerError> {
+        match self
+            .opencode_http_eligibility(target_agent_id, generation)
+            .await
+        {
+            OpenCodeHttpEligibility::Ready => {}
+            OpenCodeHttpEligibility::Pending => {
+                return Err(error(
+                    NativeDeliveryErrorCode::CapabilityUnavailable,
+                    "OpenCode HTTP owner is still handshaking; task remains pending",
+                    false,
+                ));
+            }
+            OpenCodeHttpEligibility::Failed => {
+                return Err(error(
+                    NativeDeliveryErrorCode::CapabilityUnavailable,
+                    "OpenCode HTTP owner failed before submission; task remains pending",
+                    false,
+                ));
+            }
+            OpenCodeHttpEligibility::Unsupported => {
+                return Err(error(
+                    NativeDeliveryErrorCode::CapabilityUnavailable,
+                    "OpenCode TUI has no eligible HTTP owner",
+                    false,
+                ));
+            }
+        }
         let registration = self
             .opencode_http
             .lock()
@@ -1048,6 +1224,15 @@ impl NativeDeliveryBroker {
                 None
             }
         };
+        {
+            let mut states = self.opencode_http_states.lock().await;
+            if states
+                .get(target_agent_id)
+                .is_some_and(|state| generation.is_none_or(|wanted| wanted == state.generation))
+            {
+                states.remove(target_agent_id);
+            }
+        }
         if let Some(registration) = registration {
             close_opencode_http_registration(registration).await;
         }

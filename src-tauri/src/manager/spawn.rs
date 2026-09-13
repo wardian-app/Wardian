@@ -1108,6 +1108,20 @@ pub async fn spawn_agent(
         binding_config.folder = expected_folder.clone();
         crate::delivery::native_broker::opencode_http_config_fingerprint(&binding_config, &cwd)
     });
+    if let (Some(_plan), Some(config_fingerprint)) = (
+        opencode_http_plan.as_ref(),
+        opencode_http_config_fingerprint.as_ref(),
+    ) {
+        app_state
+            .native_delivery
+            .prepare_opencode_http(
+                &config.session_id,
+                provider_generation,
+                config_fingerprint.clone(),
+            )
+            .await
+            .map_err(|error| format!("Failed to reserve OpenCode native ownership: {error}"))?;
+    }
 
     let mut codex_attach_guard = None;
     let codex_attachment = if config.provider == "codex" {
@@ -1318,6 +1332,12 @@ pub async fn spawn_agent(
     let child = match pair.slave.spawn_command(cmd) {
         Ok(child) => child,
         Err(error) => {
+            if opencode_http_plan.is_some() {
+                app_state
+                    .native_delivery
+                    .fail_opencode_http(&config.session_id, provider_generation)
+                    .await;
+            }
             if let Some(attachment) = pi_attachment.as_ref() {
                 attachment.owner().close();
             }
@@ -1433,6 +1453,7 @@ pub async fn spawn_agent(
         let registration_workspace = cwd.clone();
         let registration_endpoint = plan.endpoint().clone();
         let registration_runtime_generation = runtime_generation;
+        let registration_provider_generation = provider_generation;
         tauri::async_runtime::spawn(async move {
             if !wait_for_opencode_http_listener(
                 &registration_app,
@@ -1442,6 +1463,9 @@ pub async fn spawn_agent(
             )
             .await
             {
+                registration_broker
+                    .fail_opencode_http(&registration_agent_id, registration_provider_generation)
+                    .await;
                 return;
             }
             let process_identity =
@@ -1452,7 +1476,7 @@ pub async fn spawn_agent(
             );
             if let Err(error) = registration_broker
                 .register_opencode_http(
-                    registration_agent_id,
+                    registration_agent_id.clone(),
                     plan,
                     provider_session_id,
                     process_identity,
@@ -1462,6 +1486,9 @@ pub async fn spawn_agent(
                 )
                 .await
             {
+                registration_broker
+                    .fail_opencode_http(&registration_agent_id, registration_provider_generation)
+                    .await;
                 log_debug(&format!(
                     "[Wardian] OpenCode HTTP owner unavailable after launch: {error}"
                 ));

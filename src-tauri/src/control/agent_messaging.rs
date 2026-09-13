@@ -355,11 +355,32 @@ pub(super) async fn dispatch_pending_queue(
     }
 }
 
-/// A prepared native owner is selected before the surface fallback checks the
-/// terminal broker. This is the support boundary for existing OpenCode and Pi
-/// sessions; an unprepared owner keeps the existing unsupported-case fallback.
+/// A prepared Pi owner is selected before the surface fallback checks the
+/// terminal broker. OpenCode uses its richer eligibility state below so a
+/// pending or failed eligible launch cannot be mistaken for unsupported.
 fn native_attached_owner_is_selected(provider: &str, owner_prepared: bool) -> bool {
-    owner_prepared && matches!(provider, "opencode" | "pi")
+    owner_prepared && provider == "pi"
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenCodeTaskRoute {
+    Native,
+    Composer,
+}
+
+fn opencode_task_route(
+    eligibility: crate::delivery::native_broker::OpenCodeHttpEligibility,
+) -> OpenCodeTaskRoute {
+    match eligibility {
+        crate::delivery::native_broker::OpenCodeHttpEligibility::Pending
+        | crate::delivery::native_broker::OpenCodeHttpEligibility::Ready
+        | crate::delivery::native_broker::OpenCodeHttpEligibility::Failed => {
+            OpenCodeTaskRoute::Native
+        }
+        crate::delivery::native_broker::OpenCodeHttpEligibility::Unsupported => {
+            OpenCodeTaskRoute::Composer
+        }
+    }
 }
 
 async fn dispatch_one(
@@ -403,18 +424,18 @@ async fn dispatch_one(
             .current_provider_input_generation(&info.uuid)
             .await
             .unwrap_or(0);
-        let owner_prepared = state
+        let eligibility = state
             .native_delivery
-            .opencode_http_prepared(&info.uuid, generation)
+            .opencode_http_eligibility(&info.uuid, generation)
             .await;
-        if native_attached_owner_is_selected(&info.provider, owner_prepared) {
-            // A registered HTTP owner is the exact same-session path. If its
-            // busy/config/generation proof is not current, leave the task
-            // pending instead of sending it through the composer.
+        if matches!(opencode_task_route(eligibility), OpenCodeTaskRoute::Native) {
+            // An eligible HTTP launch owns this task boundary even while its
+            // owner is handshaking or has failed. Native admission leaves the
+            // claim pending before any PTY write in those states.
             return native::dispatch_attached_task(state, &info).await;
         }
-        // Fresh or otherwise unprepared OpenCode sessions retain the existing
-        // composer exception until an exact provider session is available.
+        // Fresh or explicitly unsupported OpenCode sessions retain the
+        // existing composer exception until an exact provider session exists.
     }
     if status_uses_headless_delivery(&info.status) {
         return dispatch_background_task(app, state, &info).await;

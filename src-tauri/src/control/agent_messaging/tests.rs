@@ -74,11 +74,60 @@ fn stored_status(id: &str) -> String {
 }
 
 #[test]
-fn prepared_opencode_attached_task_selects_native_before_surface_fallback() {
-    assert!(native_attached_owner_is_selected("opencode", true));
-    assert!(!native_attached_owner_is_selected("opencode", false));
+fn prepared_pi_attached_task_selects_native_before_surface_fallback() {
+    assert!(native_attached_owner_is_selected("pi", true));
     assert!(!native_attached_owner_is_selected("pi", false));
+    assert!(!native_attached_owner_is_selected("opencode", true));
     assert!(!native_attached_owner_is_selected("claude", true));
+}
+
+#[test]
+fn opencode_pending_or_failed_owner_has_zero_pty_writes_and_ready_uses_native() {
+    use crate::delivery::native_broker::OpenCodeHttpEligibility;
+
+    let eligible_states = [
+        OpenCodeHttpEligibility::Pending,
+        OpenCodeHttpEligibility::Failed,
+        OpenCodeHttpEligibility::Ready,
+    ];
+    let mut composer_pty_writes = 0;
+    for eligibility in eligible_states {
+        assert_eq!(opencode_task_route(eligibility), OpenCodeTaskRoute::Native);
+        if matches!(
+            opencode_task_route(eligibility),
+            OpenCodeTaskRoute::Composer
+        ) {
+            composer_pty_writes += 1;
+        }
+    }
+    assert_eq!(composer_pty_writes, 0);
+    assert_eq!(
+        opencode_task_route(OpenCodeHttpEligibility::Unsupported),
+        OpenCodeTaskRoute::Composer
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn opencode_owner_handoff_states_route_without_composer_pty_writes() {
+    use crate::delivery::native_broker::{NativeDeliveryBroker, OpenCodeHttpEligibility};
+
+    let broker = NativeDeliveryBroker::new();
+    broker
+        .prepare_opencode_http("opencode-agent", 7, "config-7".into())
+        .await
+        .expect("eligible owner state");
+    let pending = broker.opencode_http_eligibility("opencode-agent", 7).await;
+    assert_eq!(pending, OpenCodeHttpEligibility::Pending);
+    assert_eq!(opencode_task_route(pending), OpenCodeTaskRoute::Native);
+
+    broker.fail_opencode_http("opencode-agent", 7).await;
+    let failed = broker.opencode_http_eligibility("opencode-agent", 7).await;
+    assert_eq!(failed, OpenCodeHttpEligibility::Failed);
+    assert_eq!(opencode_task_route(failed), OpenCodeTaskRoute::Native);
+    assert_eq!(
+        opencode_task_route(OpenCodeHttpEligibility::Ready),
+        OpenCodeTaskRoute::Native
+    );
 }
 
 fn count(table: &str) -> i64 {

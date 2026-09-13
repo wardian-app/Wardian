@@ -436,7 +436,7 @@ wardian conversation list --scope all
 wardian conversation show <conversation-id>
 wardian message list
 wardian message followup reviewer-a1 --stdin
-wardian message reply ask_0123456789abcdef --status done --stdin
+wardian message reply req_0123456789abcdef --status done --stdin
 wardian message send coder-a1 "The review evidence is available"
 wardian message receive --limit 20 --timeout-ms 60000
 wardian notify update "The migration is ready for review" --title "Inbox refactor"
@@ -469,22 +469,25 @@ leaving the project workspace files untouched. It always requires the exact
 current agent name as `--confirm <current-agent-name>`. Without `--force`, it
 refuses to delete while the provider process is running; with `--force`, it
 explicitly terminates that provider first. Rename is live and does not restart
-the provider. The new name resolves immediately
-for `send` and `ask`. Agent-owned Wardian history is cascaded with deletion;
-project workspace files are never removed.
+the provider. Agent-owned Wardian history is cascaded with deletion; project
+workspace files are never removed.
 
-`send` is one-way: it reports delivery evidence or queueing, but does not
-return the target's answer. Use `ask` when an automation step needs a durable
-structured reply. When a normal live message is queued because the target is
-busy, Wardian persists it until the target reaches a later idle or ready
-observation; there is no timer-based retry or age expiry. Pending mailbox work
-survives an app restart and gets a status-gated delivery opportunity after the
-agent is restored. A native live message becomes `provider_accepted` only after
-the provider starts the submitted turn. If terminal state becomes ambiguous
-after input is written, Wardian marks the delivery failed instead of replaying
-the message. For a live message, `send --wait-until idle` waits for the
-provider-confirmed completion of the specific delivered turn rather than
-treating any brief Idle status observation as completion.
+`wardian message send <target> <message>` admits information without waking or
+interrupting the recipient. `wardian message followup <target> <message>`
+admits a task and returns its canonical request ID without waiting for a reply;
+use `--idempotency-key` to preserve one logical admission across a caller
+retry. `wardian message receive` reads bounded inbox pages, `message reply`
+settles a request by its exact request ID, and `message interrupt` requests
+interruption only where the provider bridge supports it.
+
+When a task is queued because the target is busy or an eligible native owner is
+still handshaking, Wardian retains the canonical task for a later authoritative
+opportunity. An owner that fails before submission leaves the task pending and
+does not reopen the PTY composer. Native provider acceptance is recorded only
+after the provider acknowledges the submitted turn; a terminal or transport
+state that becomes ambiguous after bytes may have crossed is marked uncertain
+and is never replayed through another route. Admission, provider acceptance,
+turn start, and completion remain separate outcomes.
 
 ## Common Automations
 
@@ -654,7 +657,7 @@ wardian library read classes/Reviewer
 
 Use `conversation list` and `conversation show <conversation-id>` to inspect durable agent-owned conversation archives. Inside a Wardian-managed agent terminal, `conversation list` defaults to that agent through `WARDIAN_SESSION_ID`. Outside a managed agent terminal, pass `--agent <agent-id-or-name>` or `--scope all`. `show` returns the manifest and agent-readable `conversation.jsonl` narrative, not provider-private raw logs. Wardian refreshes `turns.jsonl` whenever it refreshes the normalized archive, including open conversations, so readers can use `manifest.json` plus `turns.jsonl` as the cheap per-request index and fall back to `conversation.jsonl` only for full detail. A `turns.jsonl` row means one user-originated request plus following assistant, tool, and lifecycle records until the next user-originated request or boundary; provider tool-call IDs do not create separate turn rows. Context rows such as AGENTS.md injections, goal continuations, and lifecycle-only records are typed in `request.kind` so agents can skip them when building summaries. Agents and external tools should use this CLI surface or bounded reads of `agents/<agent-id>/conversations/index.jsonl`; do not recursively crawl under `agents/*`, because agent directories can contain worktrees, provider caches, screenshots, and dependencies. Direct readers must treat `index.jsonl` as append-only upsert history and keep the latest row per `conversation_id`.
 
-Mutating commands use Wardian's local control endpoint and require the desktop app to be running for the same `WARDIAN_HOME`. This includes agent lifecycle commands, agent worktree commands, live `automation exec`, and `send`.
+Mutating commands use Wardian's local control endpoint and require the desktop app to be running for the same `WARDIAN_HOME`. This includes agent lifecycle commands, agent worktree commands, live `automation exec`, and `message send`.
 
 `automation list`, `automation validate`, `automation parse`, `automation normalize`, `automation node-types`, `automation runs`, `automation run-show`, `automation replay`, `library`, `conversation list`, `conversation show`, `inbox list`, `team`, and `watchlist` can run from disk without the desktop app.
 
@@ -682,7 +685,7 @@ Managed worktree agents must use
 
 `agent worktree list` returns the worktrees currently managed by Wardian with source folder, worktree folder, display name, and member agent IDs. `agent worktree enable`, `join`, and `disable` are live-control commands. They reuse the same backend logic as the Source Control panel and force a fresh agent session after changing the runtime workspace. `disable` removes the assignment only; it does not delete the physical worktree folder.
 
-`team` and `watchlist` read and write `<wardian-home>/watchlists/index.json`. Read commands accept the current v2 shape with global teams and legacy flat watchlist arrays, then return `schema: 1` JSON for automation. Mutation commands write canonical v2 JSON with camelCase storage keys, resolve agent names or UUIDs through the same roster state as `agent list`, and update `topology.json` when team creation, add, or split operations seed new team clique edges. If the desktop app is running for the same `WARDIAN_HOME`, the CLI sends a best-effort reload notification so the roster picks up the change. `send --to team:<name>` is still not implemented.
+`team` and `watchlist` read and write `<wardian-home>/watchlists/index.json`. Read commands accept the current v2 shape with global teams and legacy flat watchlist arrays, then return `schema: 1` JSON for automation. Mutation commands write canonical v2 JSON with camelCase storage keys, resolve agent names or UUIDs through the same roster state as `agent list`, and update `topology.json` when team creation, add, or split operations seed new team clique edges. If the desktop app is running for the same `WARDIAN_HOME`, the CLI sends a best-effort reload notification so the roster picks up the change. `message send team:<name> <message>` is still not implemented.
 
 Team mutation validation rejects duplicate team names, unknown agents, ambiguous names, and operations that would leave a team empty. Deleting a team removes dangling team entries from watchlists. Removing or splitting team members does not remove existing topology edges; the communication graph remains user-owned after a team has seeded edges.
 
@@ -768,9 +771,9 @@ live runtime contracts.
 
 ## Important Limits
 
-- The desktop app must be running for live-control commands such as `send`, `agent spawn`, `agent pause`, `agent resume`, `agent delete`, and default `automation exec`.
+- The desktop app must be running for live-control commands such as `message send`, `agent spawn`, `agent pause`, `agent resume`, `agent delete`, and default `automation exec`.
 - `WARDIAN_HOME` must match between the app and CLI when you expect shared live state.
-- Team and watchlist mutation commands write disk state directly and best-effort notify the running app. `send --to team:<name>` is not implemented yet.
+- Team and watchlist mutation commands write disk state directly and best-effort notify the running app. `message send team:<name> <message>` is not implemented yet.
 - Raw terminal output can include escape sequences; prefer transcript or sanitized output unless debugging PTY behavior.
 
 ## Exit Codes

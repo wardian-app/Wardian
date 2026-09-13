@@ -125,6 +125,11 @@ impl NativeDeliveryBroker {
                 agents.push(agent_id.clone());
             }
         }
+        for agent_id in self.opencode_http_states.lock().await.keys() {
+            if !agents.iter().any(|known| known == agent_id) {
+                agents.push(agent_id.clone());
+            }
+        }
         let mut first_error = None;
         for agent in agents {
             if let Err(error) = self.dispose_agent(&agent).await {
