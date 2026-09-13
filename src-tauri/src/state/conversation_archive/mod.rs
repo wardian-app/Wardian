@@ -102,6 +102,10 @@ struct ConversationCaptureEventScope {
     provider_source_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     skip_events_at_or_before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    disabled_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    disabled_until: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     event_ids: Vec<String>,
 }
@@ -114,15 +118,45 @@ impl ConversationCaptureState {
                 .iter()
                 .any(|event_id| self.skip_event_ids.iter().any(|id| id == event_id));
         let scoped_match = self.skip_event_scopes.iter().any(|scope| {
-            scope.provider_source_key.as_deref() == provider_source_key
-                && (event_ids
-                    .iter()
-                    .any(|event_id| scope.event_ids.iter().any(|id| id == event_id))
-                    || scope
-                        .skip_events_at_or_before
-                        .as_deref()
-                        .zip(event.created_at.as_deref())
-                        .is_some_and(|(cutoff, created_at)| created_at <= cutoff))
+            if scope.provider_source_key.as_deref() != provider_source_key {
+                return false;
+            }
+            if event_ids
+                .iter()
+                .any(|event_id| scope.event_ids.iter().any(|id| id == event_id))
+            {
+                return true;
+            }
+            let is_canonical_opencode_db_event = event.source.as_deref() == Some("opencode_db")
+                && event
+                    .metadata
+                    .get("part_id")
+                    .and_then(|value| value.as_str())
+                    .is_some();
+            // A closed policy interval classifies canonical DB rows by their
+            // own creation time. The byte-log cutoff remains the fallback for
+            // legacy state and non-canonical provider observations.
+            let cutoff_match = scope
+                .skip_events_at_or_before
+                .as_deref()
+                .zip(event.created_at.as_deref())
+                .is_some_and(|(cutoff, created_at)| {
+                    created_at <= cutoff
+                        && (!is_canonical_opencode_db_event
+                            || scope.disabled_from.is_none()
+                            || scope.disabled_until.is_none())
+                });
+            let disabled_window_match = match (
+                scope.disabled_from.as_deref(),
+                scope.disabled_until.as_deref(),
+                event.created_at.as_deref(),
+            ) {
+                (Some(disabled_from), Some(disabled_until), Some(created_at)) => {
+                    timestamp_is_in_disabled_window(created_at, disabled_from, disabled_until)
+                }
+                _ => false,
+            };
+            cutoff_match || disabled_window_match
         });
         if legacy_unscoped_match || scoped_match {
             return true;
@@ -138,6 +172,23 @@ impl ConversationCaptureState {
             .as_deref()
             .is_some_and(|created_at| created_at <= cutoff)
     }
+}
+
+fn timestamp_is_in_disabled_window(
+    created_at: &str,
+    disabled_from: &str,
+    disabled_until: &str,
+) -> bool {
+    let Ok(created_at) = chrono::DateTime::parse_from_rfc3339(created_at) else {
+        return false;
+    };
+    let Ok(disabled_from) = chrono::DateTime::parse_from_rfc3339(disabled_from) else {
+        return false;
+    };
+    let Ok(disabled_until) = chrono::DateTime::parse_from_rfc3339(disabled_until) else {
+        return false;
+    };
+    created_at > disabled_from && created_at <= disabled_until
 }
 
 pub fn effective_conversation_logging(
@@ -977,12 +1028,18 @@ impl ConversationArchiveState {
                         .push(ConversationCaptureEventScope {
                             provider_source_key: provider_source_key.clone(),
                             skip_events_at_or_before: None,
+                            disabled_from: None,
+                            disabled_until: None,
                             event_ids: Vec::new(),
                         });
                     capture_state.skip_event_scopes.len() - 1
                 });
             let scope = &mut capture_state.skip_event_scopes[scope_index];
             scope.skip_events_at_or_before = Some(cutoff);
+            if scope.disabled_from.is_none() || scope.disabled_until.is_some() {
+                scope.disabled_from = scope.skip_events_at_or_before.clone();
+                scope.disabled_until = None;
+            }
             let mut seen = scope.event_ids.iter().cloned().collect::<HashSet<_>>();
             for event in events {
                 for event_id in event_identity_ids(event) {
@@ -1015,6 +1072,28 @@ impl ConversationArchiveState {
             active.remove(agent_id);
         }
         Ok(removed)
+    }
+
+    pub(crate) fn close_agent_capture_disabled_window(
+        &self,
+        context: ConversationArchiveContext,
+    ) -> io::Result<()> {
+        let Some(provider_source_key) = context.provider_source_key else {
+            return Ok(());
+        };
+        let agent_lock = agent_lock_for(&self.agent_locks, &context.agent_id)?;
+        let _agent_guard = lock_agent_archive(&agent_lock)?;
+        let mut capture_state = read_capture_state(&context.agent_id)?;
+        let Some(scope) = capture_state.skip_event_scopes.iter_mut().find(|scope| {
+            scope.provider_source_key.as_deref() == Some(provider_source_key.as_str())
+        }) else {
+            return Ok(());
+        };
+        if scope.disabled_from.is_some() && scope.disabled_until.is_none() {
+            scope.disabled_until = Some(current_rfc3339_millis());
+            write_capture_state(&context.agent_id, &capture_state)?;
+        }
+        Ok(())
     }
 
     #[cfg(test)]
