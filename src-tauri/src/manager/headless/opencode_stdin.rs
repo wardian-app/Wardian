@@ -20,13 +20,15 @@ pub(super) async fn wait(
     prompt: &str,
     timeout: Duration,
     lease_owner: Option<&ConversationLeaseOwner>,
+    cancellation_marker: Option<&std::path::Path>,
     process_tree: &mut super::HeadlessProcessTreeGuard,
-) -> Result<std::process::ExitStatus, String> {
+) -> Result<std::process::ExitStatus, super::HeadlessRunError> {
     wait_with_intervals(
         child,
         prompt,
         timeout,
         lease_owner,
+        cancellation_marker,
         process_tree,
         (
             super::HEADLESS_PROCESS_POLL_INTERVAL,
@@ -41,9 +43,10 @@ async fn wait_with_intervals(
     prompt: &str,
     timeout: Duration,
     lease_owner: Option<&ConversationLeaseOwner>,
+    cancellation_marker: Option<&std::path::Path>,
     process_tree: &mut super::HeadlessProcessTreeGuard,
     intervals: (Duration, Duration),
-) -> Result<std::process::ExitStatus, String> {
+) -> Result<std::process::ExitStatus, super::HeadlessRunError> {
     let deadline = tokio::time::Instant::now() + timeout;
     let stdin = child.stdin.take();
     let outcome = {
@@ -67,6 +70,7 @@ async fn wait_with_intervals(
             "opencode",
             timeout,
             lease_owner,
+            cancellation_marker,
             intervals.0,
             intervals.1,
         );
@@ -76,7 +80,7 @@ async fn wait_with_intervals(
             biased;
             status = &mut completion => match status {
                 Err(error) => Err(error),
-                Ok(_) => Err("OpenCode exited before prompt input completed; delivery may be partial and was not retried".to_owned()),
+                Ok(_) => Err(super::HeadlessRunError::uncertain("OpenCode exited before prompt input completed; delivery may be partial and was not retried")),
             },
             delivered = &mut delivery => match delivered {
                 Ok(()) => completion.await,
@@ -86,10 +90,10 @@ async fn wait_with_intervals(
                     if tokio::time::Instant::now() >= deadline {
                         match completion.await {
                             Err(monitor_error) => Err(monitor_error),
-                            Ok(_) => Err(error),
+                            Ok(_) => Err(super::HeadlessRunError::uncertain(error)),
                         }
                     } else {
-                        Err(error)
+                        Err(super::HeadlessRunError::uncertain(error))
                     }
                 },
             },
@@ -101,10 +105,10 @@ async fn wait_with_intervals(
         } else {
             // A provider can echo private input in stderr; retain its exit code
             // rather than forwarding that text through the error channel.
-            Err(format!(
+            Err(super::HeadlessRunError::definite(format!(
                 "Headless provider opencode exited with status {}",
                 status.code().unwrap_or(-1)
-            ))
+            )))
         }
     });
     if outcome.is_err() {

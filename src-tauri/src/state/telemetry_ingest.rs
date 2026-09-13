@@ -14,6 +14,7 @@ use crate::manager::opencode::opencode_database_path;
 use crate::state::AppState;
 use crate::utils::fs::get_wardian_home;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tauri::Manager;
@@ -78,6 +79,10 @@ pub struct AgentDescriptor {
     /// providers get.
     pub workspace: Option<String>,
     pub is_off: bool,
+    /// Exact provider sources established by a canonical ownership adapter.
+    /// When present, discovery must not widen this record through workspace or
+    /// projected-home inference.
+    pub verified_source_paths: Vec<PathBuf>,
 }
 
 /// A resolved, ingestable source.
@@ -104,7 +109,7 @@ impl DiscoveredSource {
     }
 }
 
-type DiscoveryIdentity = Vec<(String, String, Option<String>, Option<String>)>;
+type DiscoveryIdentity = Vec<(String, String, Option<String>, Option<String>, String)>;
 
 /// Source paths change much less often than source contents. Retain the path
 /// topology between background passes so the one-minute delta reader does not
@@ -150,6 +155,12 @@ fn discovery_identity(agents: &[AgentDescriptor]) -> DiscoveryIdentity {
                 agent.provider.clone(),
                 agent.provider_session_id.clone(),
                 agent.workspace.clone(),
+                agent
+                    .verified_source_paths
+                    .iter()
+                    .map(|path| canonical_path(path).to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
             )
         })
         .collect();
@@ -225,9 +236,13 @@ impl Default for MachineCatalog {
 impl MachineCatalog {
     pub fn new() -> Self {
         let home = dirs::home_dir();
-        let shared_codex_root = home
-            .as_ref()
-            .map(|home| home.join(".codex").join("sessions"));
+        let codex_home = std::env::var_os("CODEX_HOME").map(PathBuf::from);
+        Self::from_homes(home, codex_home)
+    }
+
+    fn from_homes(home: Option<PathBuf>, codex_home: Option<PathBuf>) -> Self {
+        let shared_codex_root = resolve_shared_codex_home(codex_home, home.as_deref())
+            .map(|home| home.join("sessions"));
         let shared_codex = shared_codex_root
             .as_deref()
             .map(index_transcripts)
@@ -316,8 +331,22 @@ impl MachineCatalog {
     }
 }
 
+/// Resolve the Codex home the current process explicitly selected, falling
+/// back to Codex's native default when no absolute override is present.
+fn resolve_shared_codex_home(
+    codex_home: Option<PathBuf>,
+    native_home: Option<&Path>,
+) -> Option<PathBuf> {
+    codex_home
+        .filter(|home| home.is_absolute())
+        .or_else(|| native_home.map(|home| home.join(".codex")))
+}
+
 impl SessionCatalog for MachineCatalog {
     fn codex_rollouts(&self, agent: &AgentDescriptor) -> Vec<PathBuf> {
+        if !agent.verified_source_paths.is_empty() {
+            return agent.verified_source_paths.clone();
+        }
         self.resolve(
             agent,
             &[".codex", "sessions"],
@@ -328,6 +357,9 @@ impl SessionCatalog for MachineCatalog {
     }
 
     fn claude_transcripts(&self, agent: &AgentDescriptor) -> Vec<PathBuf> {
+        if !agent.verified_source_paths.is_empty() {
+            return agent.verified_source_paths.clone();
+        }
         self.resolve(
             agent,
             &[".claude", "projects"],
@@ -338,6 +370,9 @@ impl SessionCatalog for MachineCatalog {
     }
 
     fn pi_sessions(&self, agent: &AgentDescriptor) -> Vec<PathBuf> {
+        if !agent.verified_source_paths.is_empty() {
+            return agent.verified_source_paths.clone();
+        }
         let Some(home) = get_wardian_home() else {
             return Vec::new();
         };
@@ -363,6 +398,9 @@ impl SessionCatalog for MachineCatalog {
     }
 
     fn archive_turn_files(&self, agent: &AgentDescriptor) -> Vec<PathBuf> {
+        if !agent.verified_source_paths.is_empty() {
+            return agent.verified_source_paths.clone();
+        }
         let Some(home) = get_wardian_home() else {
             return Vec::new();
         };
@@ -524,6 +562,18 @@ pub fn discover_sources_with(
     // its key remains agent-scoped.
     let mut seen: HashMap<String, DiscoveredSource> = HashMap::new();
     let mut ambiguous = HashSet::new();
+    let verified_source_keys: HashSet<String> = agents
+        .iter()
+        .flat_map(|agent| {
+            agent.verified_source_paths.iter().map(|path| {
+                source_key(
+                    &agent.provider,
+                    &agent.session_id,
+                    &canonical_path(path).to_string_lossy(),
+                )
+            })
+        })
+        .collect();
 
     // Opencode sessions are assigned to exactly one agent. A session's rows are
     // stored under whichever agent's source read them, so letting two agents in
@@ -586,6 +636,9 @@ pub fn discover_sources_with(
                 provider_session_ids
             };
             let key = source_key(&agent.provider, &agent.session_id, &path.to_string_lossy());
+            if agent.verified_source_paths.is_empty() && verified_source_keys.contains(&key) {
+                continue;
+            }
             if ambiguous.contains(&key) {
                 continue;
             }
@@ -825,19 +878,313 @@ pub async fn agent_descriptors(state: &AppState) -> Vec<AgentDescriptor> {
                 provider_session_id: config.resume_session.clone(),
                 workspace: Some(config.folder.clone()).filter(|folder| !folder.trim().is_empty()),
                 is_off: config.is_off,
+                verified_source_paths: Vec::new(),
             }
         })
         .collect()
+}
+
+const CODEX_META_BYTES: u64 = 256 * 1024;
+const CODEX_TAIL_BYTES: u64 = 256 * 1024;
+
+#[derive(Debug, Clone)]
+struct CodexRolloutMeta {
+    thread_id: String,
+    parent_thread_id: Option<String>,
+    path: PathBuf,
+    state: wardian_core::temporary_workers::TemporaryWorkerState,
+    outcome: Option<String>,
+    requested_at: Option<String>,
+    terminal_at: Option<String>,
+}
+
+fn read_codex_rollout_meta(path: &Path) -> Option<CodexRolloutMeta> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut first_line = String::new();
+    reader
+        .by_ref()
+        .take(CODEX_META_BYTES + 1)
+        .read_line(&mut first_line)
+        .ok()?;
+    if first_line.len() as u64 > CODEX_META_BYTES || !first_line.ends_with('\n') {
+        return None;
+    }
+    let meta: serde_json::Value = serde_json::from_str(first_line.trim()).ok()?;
+    if meta.get("type").and_then(|value| value.as_str()) != Some("session_meta") {
+        return None;
+    }
+    let payload = meta.get("payload")?;
+    let requested_at = meta
+        .get("timestamp")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let thread_id = payload.get("id")?.as_str()?.trim().to_string();
+    if thread_id.is_empty() {
+        return None;
+    }
+    let parent_thread_id = payload
+        .get("source")
+        .and_then(|source| source.get("subagent"))
+        .and_then(|subagent| subagent.get("thread_spawn"))
+        .and_then(|spawn| spawn.get("parent_thread_id"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let mut state = wardian_core::temporary_workers::TemporaryWorkerState::Unknown;
+    let mut outcome = None;
+    let mut terminal_at = None;
+    let mut file = reader.into_inner();
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(CODEX_TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut tail = String::new();
+    file.take(CODEX_TAIL_BYTES).read_to_string(&mut tail).ok()?;
+    for (index, line) in tail.lines().enumerate() {
+        if start > 0 && index == 0 {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let event_type = event.get("type").and_then(|value| value.as_str());
+        let payload_type = event
+            .get("payload")
+            .and_then(|payload| payload.get("type"))
+            .and_then(|value| value.as_str());
+        match (event_type, payload_type) {
+            (Some("event_msg"), Some("user_message" | "user_message_event")) => {
+                state = wardian_core::temporary_workers::TemporaryWorkerState::Running;
+                outcome = None;
+                terminal_at = None;
+            }
+            (Some("event_msg"), Some("task_complete")) | (Some("turn.completed"), _) => {
+                state = wardian_core::temporary_workers::TemporaryWorkerState::Succeeded;
+                outcome = Some("completed".to_string());
+                terminal_at = event
+                    .get("timestamp")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
+            }
+            (Some("event_msg"), Some("turn_aborted")) => {
+                state = wardian_core::temporary_workers::TemporaryWorkerState::Cancelled;
+                outcome = Some("aborted".to_string());
+                terminal_at = event
+                    .get("timestamp")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
+            }
+            _ => {}
+        }
+    }
+
+    Some(CodexRolloutMeta {
+        thread_id,
+        parent_thread_id,
+        path: canonical_path(path),
+        state,
+        outcome,
+        requested_at,
+        terminal_at,
+    })
+}
+
+fn temporary_worker_descriptors() -> Vec<AgentDescriptor> {
+    wardian_core::temporary_workers::telemetry_records()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|worker| {
+            let source_path = worker.source_path?;
+            Some(AgentDescriptor {
+                session_id: worker.worker_id,
+                provider: worker.provider,
+                provider_session_id: worker.provider_session_id,
+                workspace: Some(worker.workspace).filter(|value| !value.trim().is_empty()),
+                is_off: worker.state.is_terminal(),
+                verified_source_paths: vec![PathBuf::from(source_path)],
+            })
+        })
+        .collect()
+}
+
+fn reconcile_codex_children(permanent: &[AgentDescriptor], catalog: &MachineCatalog) {
+    let automation_roots =
+        wardian_core::temporary_workers::codex_automation_roots().unwrap_or_default();
+    let mut candidate_paths: HashSet<PathBuf> = catalog
+        .shared_codex
+        .values()
+        .map(|path| canonical_path(path))
+        .collect();
+    for agent in permanent.iter().filter(|agent| agent.provider == "codex") {
+        candidate_paths.extend(
+            catalog
+                .codex_rollouts(agent)
+                .into_iter()
+                .map(|path| canonical_path(&path)),
+        );
+    }
+    for root in &automation_roots {
+        let descriptor = AgentDescriptor {
+            session_id: root.runtime_session_id.clone(),
+            provider: root.provider.clone(),
+            provider_session_id: root.provider_session_id.clone(),
+            workspace: Some(root.workspace.clone()),
+            is_off: root.state.is_terminal(),
+            verified_source_paths: Vec::new(),
+        };
+        candidate_paths.extend(
+            catalog
+                .codex_rollouts(&descriptor)
+                .into_iter()
+                .map(|path| canonical_path(&path)),
+        );
+    }
+
+    let metas: Vec<CodexRolloutMeta> = candidate_paths
+        .iter()
+        .filter_map(|path| read_codex_rollout_meta(path))
+        .collect();
+
+    for agent in permanent.iter().filter(|agent| agent.provider == "codex") {
+        let roots = known_session_ids(agent);
+        reconcile_codex_tree(
+            &metas,
+            roots,
+            Some(agent.session_id.as_str()),
+            None,
+            &agent.session_id,
+            agent.workspace.as_deref().unwrap_or_default(),
+            None,
+        );
+    }
+    for root in automation_roots {
+        let Some(provider_session_id) = root.provider_session_id.as_deref() else {
+            continue;
+        };
+        if let Some(meta) = metas
+            .iter()
+            .find(|meta| meta.thread_id == provider_session_id)
+        {
+            let _ = wardian_core::temporary_workers::attach_verified_source(
+                &root.worker_id,
+                &meta.path.to_string_lossy(),
+                "codex_rollout_verified",
+            );
+        }
+        let Some(origin) = root
+            .blueprint_id
+            .as_ref()
+            .zip(root.run_id.as_ref())
+            .zip(root.node_id.as_ref())
+            .map(|((blueprint_id, run_id), node_id)| {
+                wardian_core::temporary_workers::AutomationWorkerOrigin {
+                    blueprint_id: blueprint_id.clone(),
+                    run_id: run_id.clone(),
+                    node_id: node_id.clone(),
+                }
+            })
+        else {
+            continue;
+        };
+        reconcile_codex_tree(
+            &metas,
+            [provider_session_id.to_string()].into_iter().collect(),
+            None,
+            Some(root.worker_id.as_str()),
+            &root.runtime_session_id,
+            &root.workspace,
+            Some(&origin),
+        );
+    }
+}
+
+fn reconcile_codex_tree(
+    metas: &[CodexRolloutMeta],
+    roots: BTreeSet<String>,
+    root_agent_id: Option<&str>,
+    root_worker_id: Option<&str>,
+    runtime_session_id: &str,
+    workspace: &str,
+    automation_origin: Option<&wardian_core::temporary_workers::AutomationWorkerOrigin>,
+) {
+    let descendants = verified_codex_descendants(metas, &roots);
+    let mut worker_by_provider_session: HashMap<String, Option<String>> = roots
+        .into_iter()
+        .map(|root| (root, root_worker_id.map(str::to_string)))
+        .collect();
+    for (parent_provider_session_id, child) in descendants {
+        let parent_worker_id = worker_by_provider_session
+            .get(&parent_provider_session_id)
+            .and_then(|worker| worker.as_deref());
+        let registered = wardian_core::temporary_workers::register_provider_child(
+            wardian_core::temporary_workers::RegisterProviderChild {
+                provider: "codex",
+                workspace,
+                root_agent_id,
+                parent_worker_id,
+                parent_provider_session_id: &parent_provider_session_id,
+                runtime_session_id,
+                provider_session_id: &child.thread_id,
+                automation_origin,
+                state: child.state,
+                outcome: child.outcome.as_deref(),
+                source_path: &child.path.to_string_lossy(),
+                coverage: "codex_parent_thread_id_verified",
+                requested_at: child.requested_at.as_deref(),
+                terminal_at: child.terminal_at.as_deref(),
+            },
+        );
+        if let Ok(worker) = registered {
+            worker_by_provider_session.insert(child.thread_id.clone(), Some(worker.worker_id));
+        }
+    }
+}
+
+fn verified_codex_descendants<'a>(
+    metas: &'a [CodexRolloutMeta],
+    roots: &BTreeSet<String>,
+) -> Vec<(String, &'a CodexRolloutMeta)> {
+    let mut children: HashMap<&str, Vec<&CodexRolloutMeta>> = HashMap::new();
+    for meta in metas {
+        if let Some(parent) = meta.parent_thread_id.as_deref() {
+            children.entry(parent).or_default().push(meta);
+        }
+    }
+    let mut queue: Vec<String> = roots.iter().cloned().collect();
+    let mut visited = HashSet::new();
+    let mut descendants = Vec::new();
+    while let Some(parent_provider_session_id) = queue.pop() {
+        if !visited.insert(parent_provider_session_id.clone()) {
+            continue;
+        }
+        for child in children
+            .get(parent_provider_session_id.as_str())
+            .into_iter()
+            .flatten()
+        {
+            descendants.push((parent_provider_session_id.clone(), *child));
+            queue.push(child.thread_id.clone());
+        }
+    }
+    descendants
 }
 
 /// Run one full cycle: snapshot agents, resolve sources, advance them.
 pub async fn run_ingest_cycle(state: &AppState) -> IngestPassReport {
     let agents = agent_descriptors(state).await;
     tokio::task::spawn_blocking(move || {
+        let catalog = MachineCatalog::new();
+        let _ = wardian_core::temporary_workers::reconcile_stale_automation_owners();
+        reconcile_codex_children(&agents, &catalog);
+        let _ = wardian_core::temporary_workers::apply_detail_retention();
+        let mut agents = agents;
+        agents.extend(temporary_worker_descriptors());
         let discovery_profile = crate::utils::runtime_profile::RuntimeProfileSpan::start(
             crate::utils::runtime_profile::RuntimeMetric::TelemetryIngestDiscover,
         );
-        let sources = discover_sources(&agents);
+        let sources = discover_sources_with(&agents, &catalog);
         discovery_profile.finish(sources.len() as u64);
         let pass_profile = crate::utils::runtime_profile::RuntimeProfileSpan::start(
             crate::utils::runtime_profile::RuntimeMetric::TelemetryIngestPass,
@@ -892,16 +1239,27 @@ fn telemetry_maintenance_is_due(now: Instant, next_attempt: Instant) -> bool {
 pub fn start_telemetry_ingest(app_handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut discovery_cache = BackgroundDiscoveryCache::default();
+        let mut last_worker_reconcile = None;
         let mut next_maintenance_attempt =
             Instant::now() + crate::state::telemetry_maintenance::initial_delay();
         loop {
             let state = app_handle.state::<AppState>();
-            let descriptors = agent_descriptors(&state).await;
-            let any_agent_known = !descriptors.is_empty();
-            let any_agent_live = descriptors.iter().any(|agent| !agent.is_off);
+            let permanent_descriptors = agent_descriptors(&state).await;
+            let any_agent_known = !permanent_descriptors.is_empty();
+            let any_agent_live = permanent_descriptors.iter().any(|agent| !agent.is_off);
             let mut pass_cache = std::mem::take(&mut discovery_cache);
+            let reconcile_due = last_worker_reconcile
+                .is_none_or(|last: Instant| last.elapsed() >= DISCOVERY_REFRESH_INTERVAL);
 
             let pass = tokio::task::spawn_blocking(move || {
+                if reconcile_due {
+                    let catalog = MachineCatalog::new();
+                    let _ = wardian_core::temporary_workers::reconcile_stale_automation_owners();
+                    reconcile_codex_children(&permanent_descriptors, &catalog);
+                }
+                let _ = wardian_core::temporary_workers::apply_detail_retention();
+                let mut descriptors = permanent_descriptors;
+                descriptors.extend(temporary_worker_descriptors());
                 pass_cache.refresh(&descriptors, Instant::now());
                 let pass_profile = crate::utils::runtime_profile::RuntimeProfileSpan::start(
                     crate::utils::runtime_profile::RuntimeMetric::TelemetryIngestPass,
@@ -920,6 +1278,9 @@ pub fn start_telemetry_ingest(app_handle: tauri::AppHandle) {
             match pass.await {
                 Ok((report, returned_cache)) => {
                     discovery_cache = returned_cache;
+                    if reconcile_due {
+                        last_worker_reconcile = Some(Instant::now());
+                    }
                     for failure in &report.failures {
                         crate::utils::logging::log_debug(&format!(
                             "[Wardian] Telemetry ingest source failed: {failure}"
@@ -962,6 +1323,43 @@ pub fn start_telemetry_ingest(app_handle: tauri::AppHandle) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn explicit_codex_home_selects_the_shared_catalog_without_scanning_native_home() {
+        let directory = tempfile::tempdir().unwrap();
+        let native_home = directory.path().join("native-home");
+        let explicit_codex_home = directory.path().join("owned-codex-home");
+        let native_sessions = native_home.join(".codex").join("sessions");
+        let explicit_sessions = explicit_codex_home.join("sessions");
+        std::fs::create_dir_all(&native_sessions).unwrap();
+        std::fs::create_dir_all(&explicit_sessions).unwrap();
+
+        let native_id = "00000000-0000-0000-0000-000000000001";
+        let explicit_id = "00000000-0000-0000-0000-000000000002";
+        std::fs::write(
+            native_sessions.join(format!("rollout-{native_id}.jsonl")),
+            "{}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            explicit_sessions.join(format!("rollout-{explicit_id}.jsonl")),
+            "{}\n",
+        )
+        .unwrap();
+
+        let catalog =
+            MachineCatalog::from_homes(Some(native_home), Some(explicit_codex_home.clone()));
+
+        assert_eq!(
+            catalog.shared_codex_root.as_deref(),
+            Some(explicit_sessions.as_path())
+        );
+        assert_eq!(
+            catalog.shared_codex.keys().collect::<Vec<_>>(),
+            vec![explicit_id]
+        );
+        assert!(!catalog.shared_codex.contains_key(native_id));
+    }
+
     fn agent(session: &str, provider: &str, resume: Option<&str>) -> AgentDescriptor {
         AgentDescriptor {
             session_id: session.to_string(),
@@ -969,6 +1367,7 @@ mod tests {
             provider_session_id: resume.map(str::to_string),
             workspace: None,
             is_off: false,
+            verified_source_paths: Vec::new(),
         }
     }
 
@@ -1299,6 +1698,20 @@ mod tests {
     }
 
     #[test]
+    fn verified_worker_source_wins_over_projected_home_claim() {
+        let inferred = agent("agent-a", "codex", None);
+        let mut verified = agent("worker-child", "codex", None);
+        verified.verified_source_paths = vec![PathBuf::from(
+            "rollout-2026-09-04T00-00-00-019fef5a-e0ef-7011-bc3d-06581a3dfaac.jsonl",
+        )];
+
+        let sources = discover_sources_with(&[inferred, verified], &SharedCodexCatalog);
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].session_id, "worker-child");
+    }
+
+    #[test]
     fn off_agents_are_still_discovered() {
         // An agent's log holds work done while Wardian was closed. Filtering on
         // `is_off` would make recorded history depend on whether the app
@@ -1333,6 +1746,57 @@ mod tests {
         );
         assert_eq!(transcript_session_id(Path::new("notes.txt")), None);
         assert_eq!(transcript_session_id(Path::new("short.jsonl")), None);
+    }
+
+    #[test]
+    fn codex_child_discovery_follows_only_verified_parent_thread_ancestry() {
+        let meta = |thread_id: &str, parent_thread_id: Option<&str>| CodexRolloutMeta {
+            thread_id: thread_id.to_string(),
+            parent_thread_id: parent_thread_id.map(str::to_string),
+            path: PathBuf::from(format!("{thread_id}.jsonl")),
+            state: wardian_core::temporary_workers::TemporaryWorkerState::Unknown,
+            outcome: None,
+            requested_at: None,
+            terminal_at: None,
+        };
+        let metas = vec![
+            meta("root", None),
+            meta("child", Some("root")),
+            meta("grandchild", Some("child")),
+            meta("unrelated", Some("different-root")),
+        ];
+        let roots = ["root".to_string()].into_iter().collect();
+
+        let descendants = verified_codex_descendants(&metas, &roots)
+            .into_iter()
+            .map(|(_, child)| child.thread_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(descendants, vec!["child", "grandchild"]);
+    }
+
+    #[test]
+    fn codex_rollout_meta_reads_raw_thread_spawn_shape_and_terminal_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rollout.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"child\",\"source\":{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"root\",\"depth\":1}}}}}\n",
+                "{\"timestamp\":\"2026-09-13T00:01:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n"
+            ),
+        )
+        .unwrap();
+
+        let meta = read_codex_rollout_meta(&path).unwrap();
+
+        assert_eq!(meta.thread_id, "child");
+        assert_eq!(meta.parent_thread_id.as_deref(), Some("root"));
+        assert_eq!(
+            meta.state,
+            wardian_core::temporary_workers::TemporaryWorkerState::Succeeded
+        );
+        assert_eq!(meta.terminal_at.as_deref(), Some("2026-09-13T00:01:00Z"));
     }
 
     #[test]

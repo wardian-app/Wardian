@@ -1,8 +1,11 @@
 // @tier manual — Needs a real provider or a logged-in CLI. Run it deliberately.
 import test from "node:test";
+import { cleanupConformanceSession, pauseConformanceAgents } from "../lib/conformance-cleanup.mjs";
+
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { By, until } from "selenium-webdriver";
 
 import {
@@ -20,10 +23,13 @@ import {
   writeJsonArtifact,
 } from "../lib/rendering-audit.mjs";
 import {
+  assertTerminalDebugAvailable,
   readTerminalDebugSnapshot as readPresentationDebugSnapshot,
   resolveAgentTerminalPresentationId,
 } from "../lib/terminal-debug.mjs";
 import { openWorkbenchSurface } from "../lib/workbench.mjs";
+import { createHeadlessEvidenceReader, EvidenceBlocked } from "../lib/provider-headless-evidence.mjs";
+import { assessRenderingNativeAnswer, assertOpenCodeClearResume, renderingTwoColumnLayout } from "../lib/rendering-provider-evidence.mjs";
 
 const runRealRendering = process.env.WARDIAN_E2E_REAL_RENDERING === "1";
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
@@ -53,7 +59,7 @@ const auditTerminalFontSize = Number.isFinite(parsedTerminalFontSize) && parsedT
   : 10;
 const auditTerminalFontFamily = process.env.WARDIAN_E2E_TERMINAL_FONT_FAMILY ?? "";
 const auditGridStacked = process.env.WARDIAN_E2E_RENDERING_GRID_STACKED === "1";
-const auditTwoColumnLayout = process.env.WARDIAN_E2E_RENDERING_TWO_COLUMN_LAYOUT !== "0";
+const auditTwoColumnLayout = renderingTwoColumnLayout(process.env);
 const parsedRenderingRowHeight = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_ROW_HEIGHT ?? "420", 10);
 const auditRenderingRowHeight =
   Number.isFinite(parsedRenderingRowHeight) && parsedRenderingRowHeight > 0 ? parsedRenderingRowHeight : null;
@@ -101,6 +107,7 @@ const auditGeminiModel =
 const auditOpenCodeModel =
   process.env.WARDIAN_E2E_RENDERING_OPENCODE_MODEL?.trim() || DEFAULT_OPENCODE_RENDERING_MODEL;
 const auditPiModel = process.env.WARDIAN_E2E_RENDERING_PI_MODEL?.trim() || "";
+const auditAntigravityModel = process.env.WARDIAN_E2E_RENDERING_ANTIGRAVITY_MODEL?.trim() || "";
 const auditRapidResizeSequence = parseWindowSizeSequence(
   process.env.WARDIAN_E2E_RENDERING_RAPID_SEQUENCE,
   [
@@ -236,6 +243,9 @@ function modelForProvider(provider) {
   if (provider === "pi") {
     return auditPiModel || null;
   }
+  if (provider === "antigravity") {
+    return auditAntigravityModel || null;
+  }
   return null;
 }
 
@@ -360,7 +370,7 @@ async function spawnProviderAgent(driver, provider) {
   return await invokeTauri(driver, "spawn_agent", {
     req: {
       sessionName: `Rendering-${provider}-${RUN_ID}`,
-      agentClass: "RenderingAudit",
+      agentClass: "QA",
       folder: workspacePath,
       resumeSession: null,
       isOff: false,
@@ -727,7 +737,7 @@ async function spawnLayoutFillerAgent(driver) {
   return await invokeTauri(driver, "spawn_agent", {
     req: {
       sessionName: `Rendering-layout-filler-${RUN_ID}`,
-      agentClass: "RenderingAudit",
+      agentClass: "QA",
       folder: workspacePath,
       resumeSession: null,
       isOff: false,
@@ -947,13 +957,16 @@ async function waitForSubmittedProviderTurn(driver, sessionId, options = {}) {
       auditProviderTurnTimeoutMs,
       minNumberedResponseOccurrences,
       options.provider ?? null,
+      options.nativeEvidence,
     );
     return {
       waited_for_turn: true,
       expected_response_text: auditExpectedResponseText,
       expected_numbered_response_rows: numberedResponseMax,
       min_numbered_response_occurrences: minNumberedResponseOccurrences,
-      required_scrollback: true,
+      required_scrollback: !NO_XTERM_SCROLLBACK_PROVIDERS.has(options.provider ?? ""),
+      viewport_oracle: NO_XTERM_SCROLLBACK_PROVIDERS.has(options.provider ?? "") ? "contiguous_visible_tail" : "full_numbered_scrollback",
+      native_answer: options.nativeEvidence.record.native_answer,
       started_at: startedAt,
       completed_at: nowIso(),
       duration_ms: elapsedMs(startedAtMs),
@@ -1176,63 +1189,36 @@ async function maybeAnswerApprovalPrompt(driver, sessionId, capture, state) {
   return true;
 }
 
-const PROVIDER_BUSY_PATTERN = /esc to cancel|esc to interrupt|Thinking|Generating|Working/i;
-const MAX_NUMBERED_RESPONSE_RESUBMITS = 2;
-const NUMBERED_RESPONSE_STALL_MS = 15000;
-
-/**
- * Providers occasionally end their turn with an incomplete numbered response
- * (model noncompliance, e.g. stopping at 46/50). When the response has stalled,
- * the provider is idle at its ready prompt, and the response is still incomplete,
- * resubmit the audit prompt so the run measures rendering rather than one model
- * sample's arithmetic discipline.
- */
-async function maybeResubmitNumberedPrompt(driver, sessionId, capture, max, minOccurrences, state) {
-  if (!state.readyText || state.resubmits >= MAX_NUMBERED_RESPONSE_RESUBMITS) {
-    return false;
-  }
-  const seenCount = numberedResponseValues(capture, max).size;
-  const now = Date.now();
-  if (seenCount > state.lastSeenCount) {
-    state.lastSeenCount = seenCount;
-    state.lastProgressAt = now;
-    return false;
-  }
-  if (now - state.lastProgressAt < NUMBERED_RESPONSE_STALL_MS) {
-    return false;
-  }
-  const viewportText = (capture?.debug?.renderer?.lines ?? capture?.debug?.lines ?? []).join("\n");
-  if (!viewportText.includes(state.readyText) || PROVIDER_BUSY_PATTERN.test(viewportText)) {
-    return false;
-  }
-  if (hasCompleteNumberedResponse(capture, max, minOccurrences)) {
-    return false;
-  }
-  state.resubmits += 1;
-  state.lastProgressAt = now;
-  await sendTerminalPresentationInput(driver, sessionId, auditInputText);
-  await new Promise((resolve) => setTimeout(resolve, 1000));
-  await sendTerminalPresentationInput(driver, sessionId, auditInputSubmitSequence);
-  return true;
-}
-
-async function waitForScrollableNumberedResponse(driver, sessionId, max, timeoutMs, minOccurrences = 1, provider = null) {
+async function waitForScrollableNumberedResponse(driver, sessionId, max, timeoutMs, minOccurrences = 1, provider = null, nativeEvidence = null) {
   let last = null;
   let lastWheelError = null;
   const approvalState = { answers: 0, lastAnswerAt: 0 };
-  const resubmitState = {
-    readyText: provider ? providerReadyText(provider) : null,
-    resubmits: 0,
-    lastSeenCount: 0,
-    lastProgressAt: Date.now(),
-  };
   const requireScrollback = !NO_XTERM_SCROLLBACK_PROVIDERS.has(provider ?? "");
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     last = await readTerminalCapture(driver, sessionId);
     assertNoProviderAuthFailure(last, sessionId, provider);
     await maybeAnswerApprovalPrompt(driver, sessionId, last, approvalState);
-    await maybeResubmitNumberedPrompt(driver, sessionId, last, max, minOccurrences, resubmitState);
+    // Observing a stalled/incomplete screen never authorizes another submission.
+    const config = await readAgentConfig(driver, sessionId);
+    let proof;
+    try {
+      const nativeSession = config?.resume_session;
+      if (!nativeSession) throw new EvidenceBlocked("native_identity_missing", "Provider session binding unavailable");
+      const snapshot = await nativeEvidence.reader.snapshot({ agentId: sessionId, originalSession: nativeSession });
+      proof = assessRenderingNativeAnswer({ snapshot, provider, nativeSession, prompt: auditInputText,
+        occurrence: minOccurrences, max });
+    } catch (error) {
+      if (!(error instanceof EvidenceBlocked)) throw error;
+      proof = { status: "blocked", classification: error.code };
+    }
+    nativeEvidence.record.native_answer = proof;
+    nativeEvidence.record.save();
+    assert.notEqual(proof.status, "fail", `Native numbered answer failed: ${JSON.stringify(proof)}`);
+    if (proof.status !== "pass") {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      continue;
+    }
     if (!requireScrollback) {
       if (hasContiguousVisibleNumberedTail(last, max)) {
         return last;
@@ -1250,6 +1236,10 @@ async function waitForScrollableNumberedResponse(driver, sessionId, max, timeout
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   const rawLogPath = await dumpRawOutputLog(driver, sessionId, "numbered-response-timeout");
+  if (nativeEvidence?.record.native_answer?.status === "blocked") {
+    throw new EvidenceBlocked(nativeEvidence.record.native_answer.classification,
+      `Native numbered-answer coverage blocked; viewport evidence cannot replace it (diagnostic log: ${rawLogPath ?? "unavailable"})`);
+  }
   throw new Error(
     `Timed out waiting for complete scrollable numbered response 1..${max} for ${sessionId} (raw PTY log: ${rawLogPath ?? "unavailable"}): ${JSON.stringify({
       title: last?.title ?? "",
@@ -1850,6 +1840,7 @@ async function addCapturedState(record, driver, providerDir, sessionId, stateNam
     ...(await captureState(driver, providerDir, sessionId, stateName, options)),
   };
   record.states.push(state);
+  record.save?.();
   return state;
 }
 
@@ -1924,6 +1915,10 @@ test("real provider terminal rendering audit captures user-visible Wardian state
   }
 
   const providers = parseRenderingProviders(process.env.WARDIAN_E2E_RENDERING_PROVIDERS);
+  if (providers.includes("opencode") && auditSubmitInput && auditInputText.trim().length > 0) {
+    assert.notEqual(expectedPlainNumberedResponseMax(), null,
+      "OpenCode clear/resume requires a native numbered-answer oracle before any submission");
+  }
   const previousWardianHome = process.env.WARDIAN_HOME;
   const changedWardianHome = ensureRealRenderingHome();
   let harness;
@@ -1937,6 +1932,11 @@ test("real provider terminal rendering audit captures user-visible Wardian state
     return;
   }
   const evidenceDir = createRenderingEvidenceDir(harness.repoRoot, RUN_ID);
+  let manifest = { run_id: RUN_ID, status: "running", phase: "build-preflight",
+    wardian_two_column_layout: auditTwoColumnLayout,
+    providers: providers.map((provider) => ({ provider, status: "not_run", input_events: [], states: [] })) };
+  const saveManifest = () => writeJsonArtifact(path.join(evidenceDir, "manifest.json"), manifest);
+  saveManifest();
   const previousTerminalDebug = process.env.VITE_WARDIAN_TERMINAL_DEBUG;
   const previousXdgStateHome = process.env.XDG_STATE_HOME;
   let changedXdgStateHome = false;
@@ -1951,12 +1951,48 @@ test("real provider terminal rendering audit captures user-visible Wardian state
     if (changedWardianHome) {
       restoreEnv("WARDIAN_HOME", previousWardianHome);
     }
+    manifest.status = "blocked";
+    manifest.error = { phase: "native-preflight", message: String(error) };
+    saveManifest();
     t.skip(String(error));
     return;
   } finally {
     restoreEnv("VITE_WARDIAN_TERMINAL_DEBUG", previousTerminalDebug);
   }
 
+  let session;
+  let startupAttempted = false;
+  let auditPhase = "fixture";
+  t.after(async () => {
+    let finalSurface;
+    let finalSurfaceError;
+    if (session) {
+      try {
+        finalSurface = { phase: auditPhase,
+          page: await readPageDiagnostics(session.driver),
+          agents: await invokeTauri(session.driver, "list_agents") };
+      } catch (error) { finalSurfaceError = { phase: auditPhase, error: String(error) }; }
+    }
+    try {
+      await cleanupConformanceSession({
+        harness, session, startupAttempted,
+        pause: () => pauseConformanceAgents((command, args) => invokeTauri(session.driver, command, args)),
+        save: (cleanup) => {
+          manifest.cleanup = cleanup;
+          if (manifest.status === "running") {
+            manifest.status = "fail";
+            manifest.error = { phase: auditPhase, message: "Run ended before audit completion" };
+          }
+          saveManifest();
+          if (finalSurface) writeJsonArtifact(path.join(evidenceDir, "final-surface.json"), finalSurface);
+          if (finalSurfaceError) writeJsonArtifact(path.join(evidenceDir, "final-surface-error.json"), finalSurfaceError);
+        },
+      });
+    } finally {
+      if (changedXdgStateHome) restoreEnv("XDG_STATE_HOME", previousXdgStateHome);
+      if (changedWardianHome) restoreEnv("WARDIAN_HOME", previousWardianHome);
+    }
+  });
   prepareIsolatedHome(harness);
   skipGuidedTour(harness);
   let opencodeStateHome = null;
@@ -1966,8 +2002,8 @@ test("real provider terminal rendering audit captures user-visible Wardian state
     changedXdgStateHome = true;
   }
 
-  let session;
   try {
+    startupAttempted = true;
     session = await startNativeSession(harness);
   } catch (error) {
     if (changedXdgStateHome) {
@@ -1976,30 +2012,53 @@ test("real provider terminal rendering audit captures user-visible Wardian state
     if (changedWardianHome) {
       restoreEnv("WARDIAN_HOME", previousWardianHome);
     }
+    manifest.status = "blocked";
+    manifest.error = { phase: "native-preflight", message: String(error) };
+    saveManifest();
     t.skip(String(error));
     return;
   }
 
-  t.after(async () => {
-    try {
-      await session.close();
-    } finally {
-      if (changedXdgStateHome) {
-        restoreEnv("XDG_STATE_HOME", previousXdgStateHome);
-      }
-      if (changedWardianHome) {
-        restoreEnv("WARDIAN_HOME", previousWardianHome);
-      }
-    }
-  });
+  auditPhase = "app-shell";
+  const progress = (phase) => {
+    auditPhase = phase;
+    if (manifest) manifest.phase = phase;
+    saveManifest();
+    writeJsonArtifact(path.join(evidenceDir, "progress.json"), { phase, at: new Date().toISOString() });
+  };
+
 
   const { driver } = session;
   await waitForAppShell(driver, 20000);
   await forceDarkTheme(driver);
   await driver.manage().window().setRect({ width: auditWindowWidth, height: auditWindowHeight });
   await openWorkbenchSurface(driver, "agents-overview", { timeoutMs: 60_000 });
+  // The overview imports AgentTerminal, which installs the build-gated debug
+  // API. Wait for its content before checking, but do not spawn an agent just
+  // to discover that a reused packaged frontend lacks instrumentation.
+  await driver.wait(
+    until.elementLocated(By.css('[data-testid="agents-overview-surface"]')),
+    60_000,
+  );
+  try {
+    await assertTerminalDebugAvailable(driver);
+    writeJsonArtifact(path.join(evidenceDir, "debug-preflight.json"), { available: true });
+  } catch (error) {
+    writeJsonArtifact(path.join(evidenceDir, "debug-preflight.json"), {
+      available: false,
+      error: String(error),
+      page: await readPageDiagnostics(driver),
+    });
+    throw error;
+  }
 
-  const manifest = {
+  manifest = {
+    status: "running",
+    oracle_sha256: Object.fromEntries([
+      ["suite", new URL(import.meta.url)],
+      ["native_reader", new URL("../lib/provider-headless-evidence.mjs", import.meta.url)],
+      ["rendering_reader", new URL("../lib/rendering-provider-evidence.mjs", import.meta.url)],
+    ].map(([key, file]) => [key, createHash("sha256").update(fs.readFileSync(file)).digest("hex")])),
     run_id: RUN_ID,
     workspace: workspacePath,
     evidence_dir: evidenceDir,
@@ -2021,6 +2080,7 @@ test("real provider terminal rendering audit captures user-visible Wardian state
       gemini: auditGeminiModel || null,
       opencode: auditOpenCodeModel || null,
       pi: auditPiModel || null,
+      antigravity: auditAntigravityModel || null,
     },
     stable_rows_quiet_ms: positiveInt(auditStableRowsQuietMs, 750),
     settle_timeout_ms: positiveInt(auditSettleTimeoutMs, 10000),
@@ -2032,26 +2092,43 @@ test("real provider terminal rendering audit captures user-visible Wardian state
     input_submitted: auditSubmitInput && auditInputText.trim().length > 0 && auditInputSubmitSequence.length > 0,
     input_submit_sequence: inputSequenceLabel(auditInputSubmitSequence),
     expected_response_text: auditExpectedResponseText || null,
-    providers: [],
+    providers: providers.map((provider) => ({ provider, status: "not_run", config_override: providerConfig(provider), input_events: [], states: [] })),
     limitation:
       "This captures exact Wardian-rendered native WebView screenshots and xterm parser rows. External non-Wardian terminal screenshots must be captured separately for final inside/outside parity sign-off.",
   };
 
+  saveManifest();
+  try {
+  const readers = new Map();
+  // Storage/source capability is checked before any real provider spawn or prompt.
+  if (expectedPlainNumberedResponseMax() !== null) {
+    for (const provider of providers) {
+      progress(`${provider}/native-evidence-preflight`);
+      readers.set(provider, await createHeadlessEvidenceReader({ provider, isolatedHome: harness.isolatedHome, workspace: workspacePath }));
+    }
+  }
   if (auditTwoColumnLayout && !auditGridStacked) {
+    progress("layout-filler-spawn");
     const filler = await spawnLayoutFillerAgent(driver);
     manifest.layout_filler_agent = {
       session_id: filler.session_id,
       session_name: filler.session_name,
       provider: filler.provider,
     };
+    progress("layout-filler-terminal");
     await waitForAgentTerminal(driver, filler.session_id);
+    progress("layout-filler-readable");
     await waitForReadableTerminal(driver, filler.session_id);
   }
 
   for (const provider of providers) {
+    progress(`${provider}/spawn`);
     const providerDir = path.join(evidenceDir, provider);
-    const record = { provider, config_override: providerConfig(provider), input_events: [], states: [] };
-    manifest.providers.push(record);
+    const record = manifest.providers.find((entry) => entry.provider === provider);
+    record.status = "running";
+    record.save = saveManifest;
+    const nativeEvidence = { reader: readers.get(provider), record };
+    saveManifest();
 
     await setWindowRect(driver, { width: auditWindowWidth, height: auditWindowHeight });
     const agent = await spawnProviderAgent(driver, provider);
@@ -2059,8 +2136,11 @@ test("real provider terminal rendering audit captures user-visible Wardian state
     assert.equal(typeof sessionId, "string", `Expected session id for ${provider}`);
     record.session_id = sessionId;
 
+    progress(`${provider}/terminal`);
     await waitForAgentTerminal(driver, sessionId);
+    progress(`${provider}/readable`);
     await waitForReadableTerminal(driver, sessionId);
+    progress(`${provider}/input-ready`);
     await waitForProviderInputReady(driver, sessionId, provider);
     if (auditExpectedResponseText.length >= 3) {
       await waitForProviderResponseTextAbsence(driver, sessionId, auditExpectedResponseText);
@@ -2069,11 +2149,13 @@ test("real provider terminal rendering audit captures user-visible Wardian state
       await waitForProviderInputReady(driver, sessionId, provider);
       const inputEvent = await submitAuditInput(driver, sessionId, provider, auditInputText);
       inputEvent.phase = inputIndex === 0 ? "initial" : `initial-repeat-${inputIndex + 1}`;
+      record.input_events.push(inputEvent);
+      saveManifest();
       inputEvent.provider_turn = await waitForSubmittedProviderTurn(driver, sessionId, {
         minNumberedResponseOccurrences: inputIndex + 1,
-        provider,
+        provider, nativeEvidence,
       });
-      record.input_events.push(inputEvent);
+      saveManifest();
     }
     if (auditPostInputWaitMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, auditPostInputWaitMs));
@@ -2202,6 +2284,9 @@ test("real provider terminal rendering audit captures user-visible Wardian state
     await scrollTerminalDebug(driver, sessionId, "bottom");
     await waitForViewportBottom(driver, sessionId);
 
+    const beforeClearSession = provider === "opencode"
+      ? (await readAgentConfig(driver, sessionId))?.resume_session : null;
+    let clearedNativeAnswer = null;
     const { resize: clearResize } = await performWindowAction(
       driver,
       sessionId,
@@ -2215,9 +2300,14 @@ test("real provider terminal rendering audit captures user-visible Wardian state
     if (submitAfterClear && auditInputText.trim().length > 0) {
       const inputEvent = await submitAuditInput(driver, sessionId, provider, auditInputText);
       inputEvent.phase = "after-clear";
-      inputEvent.provider_turn = await waitForSubmittedProviderTurn(driver, sessionId, { provider });
       record.input_events.push(inputEvent);
+      saveManifest();
+      inputEvent.provider_turn = await waitForSubmittedProviderTurn(driver, sessionId, { provider, nativeEvidence });
+      clearedNativeAnswer = inputEvent.provider_turn.native_answer;
+      saveManifest();
     }
+    const afterClearSession = provider === "opencode"
+      ? (await readAgentConfig(driver, sessionId))?.resume_session : null;
     const clearedState = await addCapturedStateWithScrollback(record, driver, providerDir, sessionId, "cleared-immediate", {
       resize: clearResize,
       expectAuditText: submitAfterClear && auditInputText.trim().length > 0,
@@ -2262,9 +2352,22 @@ test("real provider terminal rendering audit captures user-visible Wardian state
         `Expected OpenCode resume_session to contain provider session id for ${sessionId}, got ${JSON.stringify(providerSessionId)}`,
       );
       record.provider_session_id = providerSessionId;
+      if (auditSubmitInput && auditInputText.trim().length > 0) {
+        assert.ok(nativeEvidence.reader && expectedPlainNumberedResponseMax() !== null,
+          "OpenCode clear/resume requires the native numbered-answer oracle");
+        const snapshot = await nativeEvidence.reader.snapshot({ agentId: sessionId, originalSession: providerSessionId });
+        record.after_new_session_resume = assertOpenCodeClearResume({
+          beforeClear: beforeClearSession, afterClear: afterClearSession, afterResume: providerSessionId,
+          clearedAnswer: clearedNativeAnswer, snapshot, prompt: auditInputText, max: expectedPlainNumberedResponseMax(),
+        });
+      } else {
+        record.after_new_session_resume = { status: "untested", reason: "No native answer was submitted" };
+      }
     } else {
-      record.provider_session_id = config?.resume_session || sessionId;
+      record.provider_session_id = config?.resume_session || null;
     }
+    record.status = "captured";
+    saveManifest();
   }
 
   writeJsonArtifact(path.join(evidenceDir, "manifest.json"), manifest);
@@ -2292,5 +2395,21 @@ test("real provider terminal rendering audit captures user-visible Wardian state
     requireWardianLabMetrics: true,
     requireOutsideEvidence: false,
   });
+  manifest.audit = wardianAudit;
+  // Per-provider verdicts include their own rendering failures; not_run is never pass.
+  for (const record of manifest.providers) {
+    const summary = wardianAudit.providers.find((entry) => entry.provider === record.provider);
+    record.status = summary?.checks.length ? (summary.checks.every((check) => check.ok) ? "pass" : "fail") : "blocked";
+  }
   assert.equal(wardianAudit.ok, true, wardianAudit.failures.join("\n"));
+  manifest.status = "pass";
+  } catch (error) {
+    manifest.status = error instanceof EvidenceBlocked ? "blocked" : "fail";
+    manifest.error = { phase: auditPhase, message: String(error), classification: error.code ?? null };
+    const active = manifest.providers.find((record) => record.status === "running");
+    if (active) { active.status = manifest.status; active.error = manifest.error; }
+    throw error;
+  } finally {
+    saveManifest();
+  }
 });

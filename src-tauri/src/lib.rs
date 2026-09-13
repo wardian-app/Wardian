@@ -46,9 +46,11 @@ fn schedule_restored_agent_archive_sync(app_handle: AppHandle, session_id: Strin
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(750)).await;
         let state = app_handle.state::<AppState>();
-        if let Err(error) =
-            crate::commands::chat::archive_agent_chat_events_for_state(state.inner(), &session_id)
-                .await
+        if let Err(error) = crate::commands::chat::archive_agent_chat_events_until_stable_for_state(
+            state.inner(),
+            &session_id,
+        )
+        .await
         {
             crate::manager::log_debug(&format!(
                 "[WARDIAN] conversation archive restored-agent sync failed for {session_id}: {error}"
@@ -874,6 +876,8 @@ pub fn run() {
             commands::automation::automation_list_blueprints,
             commands::automation::automation_list_runs,
             commands::automation::automation_read_run,
+            commands::automation::temporary_worker_root_summaries,
+            commands::automation::temporary_worker_root_details,
             commands::automation::automation_run,
             commands::automation::automation_resume,
             commands::automation::automation_approve,

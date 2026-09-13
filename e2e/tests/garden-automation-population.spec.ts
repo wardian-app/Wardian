@@ -27,7 +27,7 @@ test("Garden omits dense terminal one-off automation history", async ({ page }) 
   });
 
   await garden.locator(`[data-garden-object="agent:${GARDEN_AGENT}"]`).press("Enter");
-  const activity = garden.getByRole("region", { name: "Automations, Conversations, Inbox", exact: true });
+  const activity = garden.getByRole("region", { name: "Automations", exact: true });
   await expect(activity.getByRole("button", { name: /Daily design review/ })).toBeVisible();
   await expect(activity.getByRole("button", { name: /historical review/i })).toHaveCount(0);
 });

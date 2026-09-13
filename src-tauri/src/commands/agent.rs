@@ -22,6 +22,11 @@ use wardian_core::models::{
 mod agent_lifecycle;
 #[path = "agent_naming.rs"]
 mod agent_naming;
+#[path = "agent/config_persistence.rs"]
+mod config_persistence;
+#[cfg(test)]
+#[path = "agent/provider_log_tests.rs"]
+mod provider_log_tests;
 mod removal;
 use agent_lifecycle::{
     acquire_agent_lifecycle_guard, lock_agent_lifecycle, stop_native_owner, PendingRuntime,
@@ -30,6 +35,7 @@ use agent_naming::{
     generated_agent_name, persisted_agent_session_names, resolve_requested_spawn_session_name,
     validate_agent_name,
 };
+use config_persistence::persist_agent_config_while_lifecycle_locked;
 use removal::{cleanup_removed_agent_directory, join_agent_processes_for_removal};
 
 /// Outcome of applying a persisted agent model selection to its live provider.
@@ -3141,6 +3147,14 @@ pub async fn resume_agent(
     let starts_fresh = resolved_session_persistence(&config) == AgentSessionPersistence::Fresh;
     let fresh_pending_boundary =
         if starts_fresh {
+            crate::commands::chat::archive_agent_chat_events_until_stable_for_state(
+                &state,
+                &session_id,
+            )
+            .await
+            .map_err(|error| {
+                format!("Failed to acquire the closing provider log before fresh resume: {error}")
+            })?;
             let snapshot =
                 match crate::commands::chat::agent_archive_capture_snapshot(&state, &session_id)
                     .await
@@ -3362,7 +3376,7 @@ fn prepare_conversation_boundary(
         global_conversation_logging,
         snapshot.agent_conversation_logging,
     );
-    let capture = crate::commands::chat::collect_agent_chat_events_for_archive(&snapshot)?;
+    let capture = crate::commands::chat::collect_agent_chat_events_for_boundary(&snapshot)?;
     Ok(PendingConversationBoundary {
         effective_logging,
         capture,
@@ -3987,6 +4001,9 @@ async fn clear_agent_session_inner(
     };
     lifecycle_heartbeat.ensure_active("clear")?;
     let boundary_reason = conversation_boundary_for_clear_reason(reason.as_deref());
+    crate::commands::chat::archive_agent_chat_events_until_stable_for_state(&state, &session_id)
+        .await
+        .map_err(|error| format!("Failed to acquire the closing provider log: {error}"))?;
     // Persist the closing evidence while the old runtime is intact, but leave
     // the archive open until the replacement runtime and metadata commit.
     let archive_snapshot = match archive_snapshot {
@@ -4328,84 +4345,6 @@ pub async fn update_agent_config<R: tauri::Runtime>(
     ));
     let _lifecycle_guard = lock_agent_lifecycle(&state, &new_config.session_id).await;
     persist_agent_config_while_lifecycle_locked(new_config, state.inner()).await
-}
-
-async fn persist_agent_config_while_lifecycle_locked(
-    mut new_config: AgentConfig,
-    state: &AppState,
-) -> Result<(), String> {
-    new_config.validate_provider_config_matches_provider()?;
-    new_config.description = normalize_agent_description(&new_config.description)?;
-    new_config.mark_provider_config_nested_for_save();
-    let _roster_barrier = wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "Agent roster barrier is unavailable".to_string())?;
-    let agents = state.agents.lock().await;
-    let order = state.agent_order.lock().await;
-
-    if let Some(agent) = agents.get(&new_config.session_id) {
-        let previous_config = agent.config.lock().unwrap().clone();
-        // If class has changed, auto-update the system_include_directories
-        let current_class = previous_config.agent_class.clone();
-
-        if current_class != new_config.agent_class {
-            manager::log_debug(&format!(
-                "[WARDIAN] Agent class changed from {} to {}. Updating system include directories.",
-                current_class, new_config.agent_class
-            ));
-            new_config.system_include_directories =
-                Some(crate::utils::fs::resolve_system_include_directories(
-                    &new_config.agent_class,
-                    &new_config.session_id,
-                ));
-        }
-
-        let previous_state_snapshot = manager::state_configs_snapshot(&agents, &order);
-        let mut state_snapshot = previous_state_snapshot.clone();
-        let persisted_config = state_snapshot
-            .iter_mut()
-            .find(|config| config.session_id == new_config.session_id)
-            .ok_or_else(|| {
-                format!(
-                    "Agent {} is missing from persisted order",
-                    new_config.session_id
-                )
-            })?;
-        *persisted_config = new_config.clone();
-
-        manager::try_save_state_snapshot_unlocked(&state_snapshot)
-            .map_err(|error| format!("Failed to persist agent configuration: {error}"))?;
-
-        let workspace = crate::utils::fs::resolve_cwd(&new_config.folder, &new_config.session_id)
-            .to_string_lossy()
-            .to_string();
-        let created_at = agent.init_timestamp.lock().unwrap().clone();
-        let project = wardian_core::db::project_name_from_workspace(&workspace);
-        wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
-            session_id: &new_config.session_id,
-            session_name: &new_config.session_name,
-            description: &new_config.description,
-            agent_class: &new_config.agent_class,
-            provider: &new_config.provider,
-            workspace: Some(&workspace),
-            project: project.as_deref(),
-            is_off: new_config.is_off,
-            created_at: created_at.as_deref(),
-        })
-        .map_err(|error| {
-            let rollback_error =
-                manager::try_save_state_snapshot_unlocked(&previous_state_snapshot)
-                    .err()
-                    .map(|rollback| format!("; state rollback also failed: {rollback}"))
-                    .unwrap_or_default();
-            format!("Failed to persist agent metadata: {error}{rollback_error}")
-        })?;
-
-        *agent.config.lock().unwrap() = new_config;
-        Ok(())
-    } else {
-        Err(format!("Agent {} not found", new_config.session_id))
-    }
 }
 
 struct AgentModelSelectionMutationGuards {

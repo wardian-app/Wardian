@@ -66,6 +66,40 @@ export interface SituatedRoute {
   presentation: ReturnType<typeof automationCanvasPresentation>;
 }
 
+/**
+ * Pack attachments into expanding rings instead of turning an agent into the
+ * origin of an unbounded vertical list. The sequence is deterministic so
+ * refreshes do not make routine anchors orbit between frames.
+ */
+export function radialAttachmentPosition(base: GardenPosition, slot: number): GardenPosition {
+  let ring = 0;
+  let index = slot;
+  let capacity = 8;
+  while (index >= capacity) {
+    index -= capacity;
+    ring += 1;
+    capacity = 8 + ring * 4;
+  }
+  const radius = 46 + ring * 30;
+  const stagger = ring % 2 ? Math.PI / capacity : 0;
+  const angle = stagger + index * Math.PI * 2 / capacity;
+  return { x: base.x + Math.cos(angle) * radius, y: base.y + Math.sin(angle) * radius };
+}
+
+/** Shared participant routes fan across their midpoint in both directions. */
+function sharedRouteAnchor(points: readonly GardenPosition[], slot: number): GardenPosition {
+  const first = points[0];
+  const second = points[1];
+  const midpoint = { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 };
+  if (slot === 0) return midpoint;
+  const length = Math.hypot(second.x - first.x, second.y - first.y) || 1;
+  const distance = Math.ceil(slot / 2) * 28 * (slot % 2 ? 1 : -1);
+  return {
+    x: midpoint.x - (second.y - first.y) / length * distance,
+    y: midpoint.y + (second.x - first.x) / length * distance,
+  };
+}
+
 /** Associations are location. Missing participants never manufacture a route. */
 export function situatedRoutes(inputs: readonly GardenAutomationInput[], agents: readonly GardenAgentUnit[], districts: ReadonlyMap<string, TerrainDistrict>): SituatedRoute[] {
   const byId = new Map(agents.map((unit) => [unit.ref.id, unit.position]));
@@ -82,12 +116,10 @@ export function situatedRoutes(inputs: readonly GardenAutomationInput[], agents:
       points.push(workspace);
     }
     const base = points[0];
-    const slotKey = `${base.x},${base.y}`;
+    const slotKey = points.map((point) => `${point.x},${point.y}`).join("→");
     const slot = slots.get(slotKey) ?? 0;
     slots.set(slotKey, slot + 1);
-    const anchor = points.length === 1
-      ? { x: base.x + 30, y: base.y + slot * 24 }
-      : { x: (base.x + points[1].x) / 2, y: (base.y + points[1].y) / 2 + slot * 24 };
+    const anchor = points.length === 1 ? radialAttachmentPosition(base, slot) : sharedRouteAnchor(points, slot);
     return [{ input, points, anchor, presentation: automationCanvasPresentation(input, agents, districts) }];
   });
 }
