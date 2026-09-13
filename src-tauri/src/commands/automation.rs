@@ -1027,15 +1027,15 @@ async fn await_owned_worker_cancellation(
         .map_err(|error| error.to_string())?;
     let requested_worker_ids = workers
         .iter()
-        .filter_map(|worker| {
-            (worker.kind == wardian_core::temporary_workers::TemporaryWorkerKind::Automation
+        .filter(|worker| {
+            worker.kind == wardian_core::temporary_workers::TemporaryWorkerKind::Automation
                 && matches!(
                     worker.state,
                     wardian_core::temporary_workers::TemporaryWorkerState::Requested
                         | wardian_core::temporary_workers::TemporaryWorkerState::Running
-                ))
-            .then(|| worker.worker_id.clone())
+                )
         })
+        .map(|worker| worker.worker_id.clone())
         .collect::<Vec<_>>();
     if requested_worker_ids.is_empty() {
         let status = read_checkpoint(run_root)
