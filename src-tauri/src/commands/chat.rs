@@ -363,17 +363,7 @@ pub(crate) fn collect_agent_chat_events_for_archive(
         snapshot.log_path.as_deref(),
         &snapshot.cleared_provider_sessions,
     );
-    if snapshot.provider == "opencode" {
-        provider_events.extend(load_opencode_db_chat_events(
-            &snapshot.session_id,
-            opencode_session_id(
-                &snapshot.session_id,
-                snapshot.resume_session.as_deref(),
-                snapshot.fresh_provider_session_id.as_deref(),
-            )
-            .as_deref(),
-        ));
-    }
+    provider_events.extend(load_opencode_db_chat_events_for_snapshot(snapshot));
     collect_agent_chat_events_with_provider_events(snapshot, provider_events, false)
 }
 
@@ -395,17 +385,7 @@ pub(crate) fn collect_agent_chat_events_for_boundary(
     } else {
         Vec::new()
     };
-    if snapshot.provider == "opencode" {
-        provider_events.extend(load_opencode_db_chat_events(
-            &snapshot.session_id,
-            opencode_session_id(
-                &snapshot.session_id,
-                snapshot.resume_session.as_deref(),
-                snapshot.fresh_provider_session_id.as_deref(),
-            )
-            .as_deref(),
-        ));
-    }
+    provider_events.extend(load_opencode_db_chat_events_for_snapshot(snapshot));
     collect_agent_chat_events_with_provider_events(snapshot, provider_events, false)
 }
 
@@ -502,6 +482,14 @@ pub(crate) async fn archive_agent_chat_events_for_state(
             .map_err(|error| format!("provider-log acquisition failed: {error}"))?;
             let _consumed_provider_log_bytes = batch.consumed_bytes;
             decorate_forward_provider_log_events(&mut batch.events, &snapshot.provider, path);
+            // OpenCode's watcher can label a fallback message `opencode_db`,
+            // but it does not carry the database session/path binding. Keep
+            // the canonical DB projection in this incremental provider batch
+            // so the existing archive writer persists the bound observation.
+            let canonical_db_events = load_opencode_db_chat_events_for_snapshot(&snapshot);
+            if logging_enabled {
+                batch.events.extend(canonical_db_events.iter().cloned());
+            }
             state
                 .conversation_archive
                 .append_provider_log_batch_with_context(
@@ -512,6 +500,11 @@ pub(crate) async fn archive_agent_chat_events_for_state(
                 )
                 .map_err(|error| format!("provider-log archive append failed: {error}"))?;
 
+            if !logging_enabled {
+                // Preserve the existing live projection while the logging
+                // policy suppresses new durable rows.
+                batch.events.extend(canonical_db_events);
+            }
             let result = collect_agent_chat_events_with_provider_events(
                 &snapshot,
                 batch.events,
@@ -595,10 +588,16 @@ pub(crate) fn record_provider_log_policy_for_snapshot(
     logging_enabled: bool,
 ) -> Result<(), String> {
     let context = conversation_archive_context_from_snapshot(snapshot);
-    let (Some(path), Some(provider_source_key)) = (
-        append_only_provider_log_path(snapshot),
-        context.provider_source_key.as_deref(),
-    ) else {
+    let Some(provider_source_key) = context.provider_source_key.as_deref() else {
+        return Ok(());
+    };
+    let Some(path) = append_only_provider_log_path(snapshot) else {
+        if logging_enabled {
+            state
+                .conversation_archive
+                .close_agent_capture_disabled_window(context)
+                .map_err(|error| format!("conversation archive disabled window close failed: {error}"))?;
+        }
         return Ok(());
     };
     let trust_source_from_start =
@@ -616,13 +615,30 @@ pub(crate) fn record_provider_log_policy_for_snapshot(
     )
     .map_err(|error| format!("provider-log policy observation failed: {error}"))?;
     let Some(policy) = policy else {
+        if logging_enabled {
+            state
+                .conversation_archive
+                .close_agent_capture_disabled_window(context)
+                .map_err(|error| format!("conversation archive disabled window close failed: {error}"))?;
+        }
         return Ok(());
     };
     if previous.as_ref() != Some(&policy.next) {
         state
             .conversation_archive
-            .append_provider_log_batch_with_context(context, &[], previous.as_ref(), &policy.next)
+            .append_provider_log_batch_with_context(
+                context.clone(),
+                &[],
+                previous.as_ref(),
+                &policy.next,
+            )
             .map_err(|error| format!("provider-log policy commit failed: {error}"))?;
+    }
+    if logging_enabled {
+        state
+            .conversation_archive
+            .close_agent_capture_disabled_window(context)
+            .map_err(|error| format!("conversation archive disabled window close failed: {error}"))?;
     }
     Ok(())
 }
@@ -1175,6 +1191,23 @@ fn load_opencode_db_chat_events(
 
     load_opencode_db_chat_events_from_db(&db_path, wardian_session_id, opencode_session_id)
         .unwrap_or_default()
+}
+
+fn load_opencode_db_chat_events_for_snapshot(
+    snapshot: &AgentArchiveCaptureSnapshot,
+) -> Vec<AgentChatEvent> {
+    if snapshot.provider != "opencode" {
+        return Vec::new();
+    }
+    load_opencode_db_chat_events(
+        &snapshot.session_id,
+        opencode_session_id(
+            &snapshot.session_id,
+            snapshot.resume_session.as_deref(),
+            snapshot.fresh_provider_session_id.as_deref(),
+        )
+        .as_deref(),
+    )
 }
 
 fn load_opencode_db_chat_events_from_db(
@@ -2193,6 +2226,316 @@ Do you want to proceed?
             std::fs::metadata(&log_path).unwrap().len()
         );
         std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[tokio::test]
+    async fn incremental_opencode_capture_persists_bound_db_events_once_and_respects_disabled_logging()
+    {
+        let _guard = crate::utils::wardian_test_env_lock_async().await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let provider_data = temp.path().join("provider-data");
+        let opencode_dir = provider_data.join("opencode");
+        std::fs::create_dir_all(&opencode_dir).expect("create OpenCode data dir");
+        let db_path = opencode_dir.join("opencode.db");
+        let log_path = temp.path().join("opencode.log");
+        std::fs::write(&log_path, "").expect("write empty rolling log");
+
+        let previous_wardian_home = std::env::var_os("WARDIAN_HOME");
+        let previous_xdg_data_home = std::env::var_os("XDG_DATA_HOME");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        std::env::set_var("XDG_DATA_HOME", &provider_data);
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: ConversationLoggingSetting::Enabled,
+            ..Default::default()
+        })
+        .expect("save enabled logging setting");
+
+        let initial_created_at = chrono::Utc::now().timestamp_millis();
+        let conn = rusqlite::Connection::open(&db_path).expect("open db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE message (
+                id text PRIMARY KEY,
+                session_id text NOT NULL,
+                time_created integer,
+                time_updated integer,
+                data text NOT NULL
+            );
+            CREATE TABLE part (
+                id text PRIMARY KEY,
+                message_id text NOT NULL,
+                session_id text NOT NULL,
+                time_created integer,
+                time_updated integer,
+                data text NOT NULL
+            );
+            "#,
+        )
+        .expect("seed db");
+        conn.execute(
+            "INSERT INTO message VALUES ('msg-initial', 'ses_incremental', ?1, ?1, '{\"role\":\"assistant\"}')",
+            rusqlite::params![initial_created_at],
+        )
+        .expect("insert initial message");
+        conn.execute(
+            "INSERT INTO part VALUES ('part-initial', 'msg-initial', 'ses_incremental', ?1, ?1, '{\"type\":\"text\",\"text\":\"Canonical initial answer\"}')",
+            rusqlite::params![initial_created_at + 1],
+        )
+        .expect("insert initial part");
+        drop(conn);
+
+        let watch_state = Arc::new(Mutex::new(AgentWatchState::new(
+            "agent-1".to_string(),
+            32,
+            4096,
+        )));
+        watch_state
+            .lock()
+            .expect("lock watch state")
+            .push_transcript(WatchTranscriptMessage {
+                role: "assistant".to_string(),
+                text: "Canonical initial answer".to_string(),
+                provider: "opencode".to_string(),
+                turn_id: Some("ses_incremental".to_string()),
+                source: Some("opencode_db".to_string()),
+            });
+
+        let state = AppState::new();
+        state.agents.lock().await.insert(
+            "agent-1".to_string(),
+            crate::state::ActiveAgent {
+                config: Arc::new(Mutex::new(wardian_core::models::AgentConfig {
+                    session_id: "agent-1".to_string(),
+                    session_name: "Agent One".to_string(),
+                    agent_class: "Coder".to_string(),
+                    provider: "opencode".to_string(),
+                    folder: temp.path().to_string_lossy().to_string(),
+                    fresh_provider_session_id: Some("ses_incremental".to_string()),
+                    conversation_logging: AgentConversationLoggingSetting::Default,
+                    ..Default::default()
+                })),
+                child_process: None,
+                background_processes: Vec::new(),
+                memory_capability: None,
+                runtime_generation: None,
+                process_id: None,
+                query_count: Arc::new(Mutex::new(0)),
+                init_timestamp: Arc::new(Mutex::new(None)),
+                last_query_timestamp: Arc::new(Mutex::new(None)),
+                current_status: Arc::new(Mutex::new("Idle".to_string())),
+                last_status_at: Arc::new(Mutex::new(None)),
+                watch_state,
+                terminal_title: Arc::new(Mutex::new(String::new())),
+                last_output_at: Arc::new(Mutex::new(None)),
+                log_path: Arc::new(Mutex::new(Some(log_path))),
+                log_last_modified: Arc::new(Mutex::new(None)),
+                #[cfg(windows)]
+                job_object: None,
+            },
+        );
+
+        archive_agent_chat_events_for_state(&state, "agent-1")
+            .await
+            .expect("capture initial OpenCode events");
+        let snapshot = agent_archive_capture_snapshot(&state, "agent-1")
+            .await
+            .expect("capture snapshot");
+        let context = conversation_archive_context_from_snapshot(&snapshot);
+        let events = state
+            .conversation_archive
+            .chat_events_for_capture(&context)
+            .expect("read initial archive");
+        let initial = events
+            .iter()
+            .filter(|event| event.metadata["part_id"] == "part-initial")
+            .collect::<Vec<_>>();
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].source.as_deref(), Some("opencode_db"));
+        assert_eq!(initial[0].metadata["provider_log"], true);
+        assert_eq!(
+            initial[0].metadata["opencode_session_id"],
+            "ses_incremental"
+        );
+        assert_eq!(
+            initial[0].metadata["source_path"],
+            db_path.to_string_lossy().as_ref()
+        );
+
+        archive_agent_chat_events_for_state(&state, "agent-1")
+            .await
+            .expect("poll OpenCode events again");
+        let repeated = state
+            .conversation_archive
+            .chat_events_for_capture(&context)
+            .expect("read repeated archive");
+        assert_eq!(
+            repeated
+                .iter()
+                .filter(|event| event.metadata["part_id"] == "part-initial")
+                .count(),
+            1
+        );
+
+        // This answer is written while logging is enabled but is deliberately
+        // left as backlog until after the policy transition.
+        let backlog_created_at = chrono::Utc::now().timestamp_millis();
+        let conn = rusqlite::Connection::open(&db_path).expect("reopen db");
+        conn.execute(
+            "INSERT INTO message VALUES ('msg-backlog', 'ses_incremental', ?1, ?1, '{\"role\":\"assistant\"}')",
+            rusqlite::params![backlog_created_at],
+        )
+        .expect("append enabled backlog message");
+        conn.execute(
+            "INSERT INTO part VALUES ('part-backlog', 'msg-backlog', 'ses_incremental', ?1, ?1, '{\"type\":\"text\",\"text\":\"Enabled backlog answer\"}')",
+            rusqlite::params![backlog_created_at + 1],
+        )
+        .expect("append enabled backlog part");
+        drop(conn);
+
+        // Exercise the real #1253 policy transition. No archive/transcript
+        // poll occurs while logging is disabled.
+        crate::commands::settings::save_shell_settings_for_state(
+            &state,
+            crate::utils::ShellSettingsDocument {
+                schema_version: 2,
+                settings: crate::utils::ShellSettings {
+                    conversation_logging: ConversationLoggingSetting::Disabled,
+                    ..Default::default()
+                },
+                overrides: crate::utils::ShellSettingsOverrides {
+                    conversation_logging: Some(ConversationLoggingSetting::Disabled),
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .expect("disable logging through policy transition");
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let disabled_created_at = chrono::Utc::now().timestamp_millis();
+        let conn = rusqlite::Connection::open(&db_path).expect("reopen db while disabled");
+        conn.execute(
+            "INSERT INTO message VALUES ('msg-disabled', 'ses_incremental', ?1, ?1, '{\"role\":\"assistant\"}')",
+            rusqlite::params![disabled_created_at],
+        )
+        .expect("append disabled answer message");
+        conn.execute(
+            "INSERT INTO part VALUES ('part-disabled', 'msg-disabled', 'ses_incremental', ?1, ?1, '{\"type\":\"text\",\"text\":\"Must remain live-only\"}')",
+            rusqlite::params![disabled_created_at],
+        )
+        .expect("append disabled answer part");
+        drop(conn);
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        crate::commands::settings::save_shell_settings_for_state(
+            &state,
+            crate::utils::ShellSettingsDocument {
+                schema_version: 2,
+                settings: crate::utils::ShellSettings {
+                    conversation_logging: ConversationLoggingSetting::Enabled,
+                    ..Default::default()
+                },
+                overrides: crate::utils::ShellSettingsOverrides::default(),
+            },
+        )
+        .await
+        .expect("re-enable logging through policy transition");
+
+        archive_agent_chat_events_for_state(&state, "agent-1")
+            .await
+            .expect("capture after no-poll disabled window");
+        let after_reenable = state
+            .conversation_archive
+            .chat_events_for_capture(&context)
+            .expect("read archive after re-enable");
+        assert!(after_reenable
+            .iter()
+            .all(|event| event.metadata["part_id"] != "part-disabled"));
+        assert_eq!(
+            after_reenable
+                .iter()
+                .filter(|event| event.metadata["part_id"] == "part-initial")
+                .count(),
+            1
+        );
+        assert_eq!(
+            after_reenable
+                .iter()
+                .filter(|event| event.metadata["part_id"] == "part-backlog")
+                .count(),
+            1
+        );
+
+        // A disabled poll must not move the original interval start past a
+        // canonical row created earlier in that same disabled window.
+        crate::commands::settings::save_shell_settings_for_state(
+            &state,
+            crate::utils::ShellSettingsDocument {
+                schema_version: 2,
+                settings: crate::utils::ShellSettings {
+                    conversation_logging: ConversationLoggingSetting::Disabled,
+                    ..Default::default()
+                },
+                overrides: crate::utils::ShellSettingsOverrides {
+                    conversation_logging: Some(ConversationLoggingSetting::Disabled),
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .expect("disable logging for polled window");
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let polled_disabled_created_at = chrono::Utc::now().timestamp_millis();
+        let conn = rusqlite::Connection::open(&db_path).expect("reopen db for disabled poll");
+        conn.execute(
+            "INSERT INTO message VALUES ('msg-disabled-polled', 'ses_incremental', ?1, ?1, '{\"role\":\"assistant\"}')",
+            rusqlite::params![polled_disabled_created_at],
+        )
+        .expect("append polled disabled answer message");
+        conn.execute(
+            "INSERT INTO part VALUES ('part-disabled-polled', 'msg-disabled-polled', 'ses_incremental', ?1, ?1, '{\"type\":\"text\",\"text\":\"Must remain live-only after poll\"}')",
+            rusqlite::params![polled_disabled_created_at],
+        )
+        .expect("append polled disabled answer part");
+        drop(conn);
+
+        archive_agent_chat_events_for_state(&state, "agent-1")
+            .await
+            .expect("capture disabled poll");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        crate::commands::settings::save_shell_settings_for_state(
+            &state,
+            crate::utils::ShellSettingsDocument {
+                schema_version: 2,
+                settings: crate::utils::ShellSettings {
+                    conversation_logging: ConversationLoggingSetting::Enabled,
+                    ..Default::default()
+                },
+                overrides: crate::utils::ShellSettingsOverrides::default(),
+            },
+        )
+        .await
+        .expect("re-enable logging after disabled poll");
+        archive_agent_chat_events_for_state(&state, "agent-1")
+            .await
+            .expect("capture after polled disabled window");
+        let after_polled_reenable = state
+            .conversation_archive
+            .chat_events_for_capture(&context)
+            .expect("read archive after polled re-enable");
+        assert!(after_polled_reenable
+            .iter()
+            .all(|event| event.metadata["part_id"] != "part-disabled-polled"));
+
+        match previous_wardian_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+        match previous_xdg_data_home {
+            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
     }
 
     #[tokio::test]
