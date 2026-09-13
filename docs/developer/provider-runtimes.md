@@ -211,6 +211,9 @@ Current model:
   rollouts are copied first without changing their filenames. If link creation
   fails, the local sessions tree is restored and the provider continues in
   local-only mode.
+- Telemetry resolves the shared Codex session catalog from an explicit absolute
+  `CODEX_HOME` when the Wardian process has one. Without that override, it uses
+  the native user profile's `.codex` home.
 - The provider writes agent-local `history.jsonl` and `session_index.jsonl`.
   Wardian is the sole writer to the central copies: it publishes complete,
   validated records under a cross-process lock, atomically republishes the

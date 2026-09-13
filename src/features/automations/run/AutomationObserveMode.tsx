@@ -18,6 +18,8 @@ export function AutomationObserveMode({ theme }: AutomationObserveModeProps) {
   const events = useRunStore((store) => store.events);
   const blueprint = useRunStore((store) => store.blueprint);
   const blueprintPath = useRunStore((store) => store.blueprintPath);
+  const workers = useRunStore((store) => store.workers);
+  const workerTelemetry = useRunStore((store) => store.workerTelemetry);
   const scrubIndex = useRunStore((store) => store.scrubIndex);
   const setScrubIndex = useRunStore((store) => store.setScrubIndex);
   const currentNodeStatuses = useRunStore((store) => store.currentNodeStatuses);
@@ -96,6 +98,8 @@ export function AutomationObserveMode({ theme }: AutomationObserveModeProps) {
               currentStatuses={statuses}
               events={events}
               scrubIndex={scrubIndex}
+              workers={workers}
+              workerTelemetry={workerTelemetry}
             />
           </aside>
         ) : null}

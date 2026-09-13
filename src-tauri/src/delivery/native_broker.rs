@@ -2393,6 +2393,7 @@ mod tests {
             unsafe {
                 std::env::remove_var("WARDIAN_NATIVE_TEST_SCRIPT");
                 std::env::remove_var("WARDIAN_NATIVE_TEST_LOG");
+                std::env::remove_var("WARDIAN_NATIVE_TEST_SETTLE_GATE");
             }
         }
     }
@@ -3043,9 +3044,11 @@ input.on('line', (line) => {
         wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
             .expect("initialize native broker db");
         let script = temp.path().join("pi-provider.cjs");
+        let settle_gate = temp.path().join("pi-settle-gate");
         std::fs::write(
             &script,
             r#"const readline = require('node:readline');
+const fs = require('node:fs');
 const input = readline.createInterface({ input: process.stdin });
 input.on('line', (line) => {
   const request = JSON.parse(line);
@@ -3054,7 +3057,12 @@ input.on('line', (line) => {
   } else if (request.type === 'prompt') {
     console.log(JSON.stringify({ id: request.id, type: 'response', command: 'prompt', success: true }));
     console.log(JSON.stringify({ type: 'agent_start' }));
-    setTimeout(() => console.log(JSON.stringify({ type: 'agent_settled' })), 500);
+    const settle = setInterval(() => {
+      if (fs.existsSync(process.env.WARDIAN_NATIVE_TEST_SETTLE_GATE)) {
+        clearInterval(settle);
+        console.log(JSON.stringify({ type: 'agent_settled' }));
+      }
+    }, 10);
   } else if (request.type === 'steer') {
     console.log(JSON.stringify({ id: request.id, type: 'response', command: 'steer', success: true }));
   }
@@ -3062,7 +3070,10 @@ input.on('line', (line) => {
 "#,
         )
         .expect("write Pi provider fixture");
-        unsafe { std::env::set_var("WARDIAN_NATIVE_TEST_SCRIPT", &script) };
+        unsafe {
+            std::env::set_var("WARDIAN_NATIVE_TEST_SCRIPT", &script);
+            std::env::set_var("WARDIAN_NATIVE_TEST_SETTLE_GATE", &settle_gate);
+        }
         let _script_guard = NativeTestScriptGuard;
 
         let broker = Arc::new(NativeDeliveryBroker::new());
@@ -3100,6 +3111,15 @@ input.on('line', (line) => {
             .await
             .expect("provider accepted correction");
         assert_eq!(receipt.record.phase, NativeDeliveryPhase::ProviderAccepted);
+        assert_eq!(
+            broker
+                .get("interaction-correction")
+                .expect("accepted correction")
+                .phase,
+            NativeDeliveryPhase::ProviderAccepted,
+            "correction acceptance must precede the terminal fixture event"
+        );
+        std::fs::write(&settle_gate, "release").expect("release Pi settle gate");
 
         for _ in 0..100 {
             if broker

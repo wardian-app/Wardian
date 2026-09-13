@@ -42,44 +42,86 @@ async fn assert_shared_submission_failure(after_write: bool, fail_persistence: b
             .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let (server_error_tx, mut server_error_rx) =
+            tokio::sync::mpsc::unbounded_channel::<String>();
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-            if after_write {
-                let request: Value =
-                    serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap())
-                        .unwrap();
-                assert_eq!(request["method"], "turn/start");
-                assert_eq!(
-                    request["params"],
-                    json!({
+            let result: Result<(), String> = async {
+                let (stream, _) = listener
+                    .accept()
+                    .await
+                    .map_err(|error| format!("initial server accept failed: {error}"))?;
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .map_err(|error| format!("WebSocket handshake failed: {error}"))?;
+                if after_write {
+                    let message = socket
+                        .next()
+                        .await
+                        .ok_or_else(|| "client ended before turn/start request".to_string())?
+                        .map_err(|error| format!("reading turn/start failed: {error}"))?;
+                    let request: Value = serde_json::from_str(
+                        message
+                            .to_text()
+                            .map_err(|error| format!("turn/start was not text: {error}"))?,
+                    )
+                    .map_err(|error| format!("turn/start JSON was invalid: {error}"))?;
+                    if request["method"] != "turn/start" {
+                        return Err(format!("unexpected method: {}", request["method"]));
+                    }
+                    let expected_params = json!({
                         "threadId":"owned",
                         "clientUserMessageId":"native-message-id",
                         "input":[{"type":"text","text":"literal ordinary input"}]
-                    })
-                );
-                if fail_persistence {
-                    rusqlite::Connection::open(&db_path).unwrap().execute_batch(
-                        "CREATE TRIGGER reject_failure_transition BEFORE INSERT ON native_deliveries
-                         WHEN NEW.phase = 'submitted_unconfirmed'
-                         BEGIN SELECT RAISE(FAIL, 'injected persistence failure'); END;",
-                    ).unwrap();
+                    });
+                    if request["params"] != expected_params {
+                        return Err(format!(
+                            "unexpected turn/start params: {}",
+                            request["params"]
+                        ));
+                    }
+                    if fail_persistence {
+                        let connection = rusqlite::Connection::open(&db_path)
+                            .map_err(|error| format!("SQLite trigger connection open failed: {error}"))?;
+                        connection
+                            .execute_batch(
+                                "CREATE TRIGGER reject_failure_transition BEFORE INSERT ON native_deliveries
+                                 WHEN NEW.phase = 'submitted_unconfirmed'
+                                 BEGIN SELECT RAISE(FAIL, 'injected persistence failure'); END;",
+                            )
+                            .map_err(|error| {
+                                format!("SQLite trigger installation failed: {error}")
+                            })?;
+                    }
+                    socket
+                        .close(None)
+                        .await
+                        .map_err(|error| format!("server close after turn/start failed: {error}"))?;
+                } else {
+                    // The client is deliberately closed before broker admission;
+                    // no turn/start may precede the close frame.
+                    match socket.next().await {
+                        Some(Ok(Message::Close(_))) | None => {}
+                        Some(Ok(message)) => {
+                            return Err(format!(
+                                "unexpected pre-submit message: {message:?}"
+                            ));
+                        }
+                        Some(Err(error)) => {
+                            return Err(format!("reading pre-submit close failed: {error}"));
+                        }
+                    }
                 }
-                socket.close(None).await.unwrap();
-            } else {
-                // The client is deliberately closed before broker admission;
-                // no turn/start may precede the close frame.
-                assert!(matches!(
-                    socket.next().await,
-                    Some(Ok(Message::Close(_))) | None
-                ));
+                match tokio::time::timeout(Duration::from_millis(50), listener.accept()).await {
+                    Ok(Ok(_)) => Err("submission failure triggered a reconnect/replay".to_string()),
+                    Ok(Err(error)) => Err(format!("reconnect probe failed: {error}")),
+                    Err(_) => Ok(()),
+                }
             }
-            assert!(
-                tokio::time::timeout(Duration::from_millis(50), listener.accept())
-                    .await
-                    .is_err(),
-                "submission failure must not reconnect and replay"
-            );
+            .await;
+            if let Err(error) = &result {
+                let _ = server_error_tx.send(error.clone());
+            }
+            result
         });
         let client = crate::delivery::codex_shared::CodexSharedClient::connect(
             "agent".into(),
@@ -97,10 +139,37 @@ async fn assert_shared_submission_failure(after_write: bool, fail_persistence: b
         if !after_write {
             client.close().await;
         }
-        let failure = broker
-            .submit_shared_codex_input(&client, &record)
-            .await
-            .unwrap_err();
+        let submission = broker.submit_shared_codex_input(&client, &record);
+        tokio::pin!(submission);
+        let failure = match tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                failure = &mut submission => {
+                    failure.expect_err("shared submission unexpectedly succeeded")
+                }
+                server_error = server_error_rx.recv() => {
+                    if let Some(error) = server_error {
+                        panic!("shared submission fixture server failed: {error}");
+                    }
+                    submission
+                        .await
+                        .expect_err("shared submission unexpectedly succeeded")
+                }
+            }
+        }).await {
+            Ok(failure) => failure,
+            Err(_) => {
+                let server_state = if server.is_finished() {
+                    match server.await {
+                        Ok(Ok(())) => "server completed without reporting an error".to_string(),
+                        Ok(Err(error)) => format!("server error: {error}"),
+                        Err(error) => format!("server task join error: {error}"),
+                    }
+                } else {
+                    "server task is still running".to_string()
+                };
+                panic!("shared submission fixture timed out after 5s; {server_state}");
+            }
+        };
         assert_eq!(failure.provider_boundary_crossed, after_write);
         let phase = if after_write {
             NativeDeliveryPhase::SubmittedUnconfirmed
@@ -151,7 +220,11 @@ async fn assert_shared_submission_failure(after_write: bool, fail_persistence: b
             NativeDeliveryPhase::ProviderAccepted | NativeDeliveryPhase::Completed
         )));
         client.close().await;
-        server.await.unwrap();
+        match server.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => panic!("shared submission fixture server failed: {error}"),
+            Err(error) => panic!("shared submission fixture server task failed: {error}"),
+        }
     })
     .await
     .unwrap();
