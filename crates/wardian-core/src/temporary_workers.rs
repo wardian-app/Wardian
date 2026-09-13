@@ -395,29 +395,43 @@ pub fn mark_terminal(
         Ok(mark_terminal_with_conn(
             conn,
             worker,
-            state,
-            outcome,
-            provider_session_id,
-            source_path,
-            coverage,
-            error,
-            observed,
+            TerminalUpdate {
+                state,
+                outcome,
+                provider_session_id,
+                source_path,
+                coverage,
+                error,
+                observed,
+            },
         )?)
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+struct TerminalUpdate<'a> {
+    state: TemporaryWorkerState,
+    outcome: Option<&'a str>,
+    provider_session_id: Option<&'a str>,
+    source_path: Option<&'a str>,
+    coverage: &'a str,
+    error: Option<&'a str>,
+    observed: DateTime<Utc>,
+}
+
 fn mark_terminal_with_conn(
     conn: &Connection,
     worker: &TemporaryWorkerRecord,
-    state: TemporaryWorkerState,
-    outcome: Option<&str>,
-    provider_session_id: Option<&str>,
-    source_path: Option<&str>,
-    coverage: &str,
-    error: Option<&str>,
-    observed: DateTime<Utc>,
+    update: TerminalUpdate<'_>,
 ) -> rusqlite::Result<bool> {
+    let TerminalUpdate {
+        state,
+        outcome,
+        provider_session_id,
+        source_path,
+        coverage,
+        error,
+        observed,
+    } = update;
     let observed_at = observed.to_rfc3339();
     let resumable_until = (observed + Duration::days(RESUME_ELIGIBILITY_DAYS)).to_rfc3339();
     let detail_retained_until = (observed + Duration::days(DETAIL_RETENTION_DAYS)).to_rfc3339();
@@ -1246,29 +1260,33 @@ mod tests {
         assert!(mark_terminal_with_conn(
             &conn,
             &current,
-            TemporaryWorkerState::Cancelled,
-            Some("cancelled_by_run"),
-            None,
-            None,
-            "run_cancellation_acknowledged",
-            None,
-            DateTime::parse_from_rfc3339("2026-09-13T01:01:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
+            TerminalUpdate {
+                state: TemporaryWorkerState::Cancelled,
+                outcome: Some("cancelled_by_run"),
+                provider_session_id: None,
+                source_path: None,
+                coverage: "run_cancellation_acknowledged",
+                error: None,
+                observed: DateTime::parse_from_rfc3339("2026-09-13T01:01:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            },
         )
         .unwrap());
         assert!(!mark_terminal_with_conn(
             &conn,
             &current,
-            TemporaryWorkerState::Succeeded,
-            Some("completed"),
-            None,
-            None,
-            "provider_session_unavailable",
-            None,
-            DateTime::parse_from_rfc3339("2026-09-13T01:02:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
+            TerminalUpdate {
+                state: TemporaryWorkerState::Succeeded,
+                outcome: Some("completed"),
+                provider_session_id: None,
+                source_path: None,
+                coverage: "provider_session_unavailable",
+                error: None,
+                observed: DateTime::parse_from_rfc3339("2026-09-13T01:02:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            },
         )
         .unwrap());
         assert_eq!(
@@ -1295,13 +1313,15 @@ mod tests {
         assert!(!mark_terminal_with_conn(
             &conn,
             &stale,
-            TemporaryWorkerState::Succeeded,
-            Some("completed"),
-            None,
-            None,
-            "provider_session_unavailable",
-            None,
-            Utc::now(),
+            TerminalUpdate {
+                state: TemporaryWorkerState::Succeeded,
+                outcome: Some("completed"),
+                provider_session_id: None,
+                source_path: None,
+                coverage: "provider_session_unavailable",
+                error: None,
+                observed: Utc::now(),
+            },
         )
         .unwrap());
         let reconciled = load_with_conn(&conn, "stale-future").unwrap().unwrap();
