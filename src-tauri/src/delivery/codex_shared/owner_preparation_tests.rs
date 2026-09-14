@@ -251,8 +251,13 @@ fn owner_managed_instructions_reach_tui_overlay_independently_of_memory() {
                 serde_json::json!({"schema_version":2,"overrides":{"memory_enabled":memory_enabled}}).to_string(),
             ).unwrap();
             assert_eq!(crate::utils::memory_feature_enabled(), memory_enabled);
-            let (habitat, home) =
-                prepare_owner_habitat(&fixture.workspace, "Builder", "agent").unwrap();
+            let (habitat, home) = prepare_owner_habitat(
+                &fixture.workspace,
+                "Builder",
+                "agent",
+                &mut OwnerStartTimings::default(),
+            )
+            .unwrap();
             std::fs::write(habitat.join("AGENTS.md"), "UNTRUSTED_GENERATED_FILE").unwrap();
             let config_before = std::fs::read(home.join("config.toml")).unwrap();
             let spec = crate::delivery::native_broker::NativeSessionSpec {
@@ -345,7 +350,13 @@ fn owner_memory_failures_block_context_publication_before_launch() {
         )
         .unwrap();
         assert!(crate::utils::memory_feature_enabled());
-        let (habitat, home) = prepare_owner_habitat(&fixture.workspace, "", "agent").unwrap();
+        let (habitat, home) = prepare_owner_habitat(
+            &fixture.workspace,
+            "",
+            "agent",
+            &mut OwnerStartTimings::default(),
+        )
+        .unwrap();
         std::fs::write(habitat.join("AGENTS.md"), "UNCHANGED_CONTEXT").unwrap();
         let config_before = std::fs::read(home.join("config.toml")).unwrap();
         let memory_path = wardian_core::paths::memory_db_path().unwrap();
