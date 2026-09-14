@@ -140,15 +140,17 @@ function buildCli(harness) {
   return freezeBuiltCliForRun(harness);
 }
 
-function runCli(cliPath, harness, args) {
-  return spawnSync(cliPath, args, {
+function runCli(cliPath, harness, args, timeoutMs = undefined) {
+  const options = {
     cwd: harness.repoRoot,
     env: {
       ...process.env,
       WARDIAN_HOME: harness.isolatedHome,
     },
     encoding: "utf8",
-  });
+  };
+  if (timeoutMs !== undefined) options.timeout = timeoutMs;
+  return spawnSync(cliPath, args, options);
 }
 
 function runCliOk(cliPath, harness, args) {
@@ -606,7 +608,7 @@ async function capturePiFailureEvidence(driver, harness, agent, providerError) {
   }
 
   const manifest = {
-    status: sessionReadError ? "session-read-failed" : "captured-before-kill",
+    status: sessionReadError ? "session-read-failed" : "captured-before-pause",
     provider: "pi",
     wardian_session_id: sessionId,
     owned_run_home: ownedRunHome,
@@ -630,6 +632,264 @@ async function capturePiFailureEvidence(driver, harness, agent, providerError) {
   };
   await writePiEvidenceJson(safeEvidenceRoot, "manifest.json", manifest);
   return { status: manifest.status, path: safeEvidenceRoot, files: files.length };
+}
+
+const FAILURE_CAPTURE_MAX_EVENTS = 64;
+const FAILURE_CAPTURE_MAX_TEXT_BYTES = 4096;
+const FAILURE_CAPTURE_MAX_ROWS = 8;
+const FAILURE_CAPTURE_CAPABILITY_TIMEOUT_MS = 5000;
+const FAILURE_CAPTURE_NATIVE_METADATA_KEYS = [
+  "provider_log",
+  "provider_turn_id",
+  "provider_session_id",
+  "opencode_session_id",
+  "message_id",
+  "turn_id",
+  "part_id",
+  "provider_phase",
+  "log_path",
+  "source_path",
+  "raw_type",
+  "request_root_id",
+  "provider_observation_ids",
+  "input_origin",
+  "input_purpose",
+];
+
+function boundedFailureString(value, maxBytes = FAILURE_CAPTURE_MAX_TEXT_BYTES) {
+  const text = String(value ?? "");
+  const bytes = Buffer.from(text, "utf8");
+  return bytes.length <= maxBytes ? text : bytes.subarray(0, maxBytes).toString("utf8");
+}
+
+function boundedFailureValue(value) {
+  if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value === "string") return boundedFailureString(value);
+  if (Array.isArray(value)) return value.slice(0, 16).map(boundedFailureValue);
+  if (value && typeof value === "object") return boundedFailureString(JSON.stringify(value));
+  return undefined;
+}
+
+function boundedFailureTranscriptEvent(event) {
+  const text = typeof event?.text === "string" ? event.text : "";
+  const textBytes = Buffer.from(text, "utf8");
+  const metadata = event?.metadata && typeof event.metadata === "object" ? event.metadata : {};
+  const nativeMetadata = Object.fromEntries(FAILURE_CAPTURE_NATIVE_METADATA_KEYS
+    .filter((key) => Object.prototype.hasOwnProperty.call(metadata, key))
+    .map((key) => [key, boundedFailureValue(metadata[key])]));
+  return {
+    id: typeof event?.id === "string" ? event.id : null,
+    provider: diagnosticProvider(event?.provider),
+    kind: typeof event?.kind === "string" ? event.kind : "absent",
+    role: typeof event?.role === "string" ? event.role : "absent",
+    source: typeof event?.source === "string" ? event.source : null,
+    turn_id: typeof event?.turn_id === "string" ? event.turn_id : null,
+    native_metadata: nativeMetadata,
+    text: textBytes.length <= FAILURE_CAPTURE_MAX_TEXT_BYTES
+      ? text
+      : textBytes.subarray(0, FAILURE_CAPTURE_MAX_TEXT_BYTES).toString("utf8"),
+    text_truncated: textBytes.length > FAILURE_CAPTURE_MAX_TEXT_BYTES,
+    text_sha256: createHash("sha256").update(text).digest("hex"),
+    text_byte_count: textBytes.length,
+  };
+}
+
+function boundedFailureTranscript(events) {
+  const source = Array.isArray(events) ? events : [];
+  return {
+    total_events: source.length,
+    captured_events: Math.min(source.length, FAILURE_CAPTURE_MAX_EVENTS),
+    truncated: source.length > FAILURE_CAPTURE_MAX_EVENTS,
+    order: "source_order_tail",
+    events: source.slice(-FAILURE_CAPTURE_MAX_EVENTS).map(boundedFailureTranscriptEvent),
+  };
+}
+
+function failureAgentIdentity(agent) {
+  const keys = [
+    "session_id",
+    "provider",
+    "resume_session",
+    "fresh_provider_session_id",
+    "runtime_generation",
+    "session_name",
+    "agent_class",
+    "is_off",
+    "last_pid",
+  ];
+  return Object.fromEntries(keys
+    .filter((key) => Object.prototype.hasOwnProperty.call(agent ?? {}, key))
+    .map((key) => [key, boundedFailureValue(agent[key])]));
+}
+
+function latestProviderCase(report, provider) {
+  return [
+    ...(Array.isArray(report?.native_cases) ? report.native_cases : []),
+    ...(Array.isArray(report?.composer_task_cases) ? report.composer_task_cases : []),
+  ].filter((entry) => entry?.provider === provider).at(-1) ?? null;
+}
+
+function failureRequestId(entry) {
+  return [
+    entry?.receipt?.request_id,
+    entry?.claim?.request_id,
+    entry?.request_id,
+  ].find((value) => typeof value === "string" && value.trim()) ?? null;
+}
+
+function failureCaseAttempt(entry) {
+  if (!entry) return null;
+  return {
+    provider: entry.provider ?? null,
+    case: entry.case ?? null,
+    status: entry.status ?? null,
+    request_id: failureRequestId(entry),
+    attempts: entry.attempts ?? null,
+    admission_state: entry.admission_state ?? null,
+    receipt: boundedFailureValue(entry.receipt),
+    claim: boundedFailureValue(entry.claim),
+  };
+}
+
+function boundedFailureRow(row) {
+  return Object.fromEntries(Object.entries(row ?? {}).map(([key, value]) => [
+    key,
+    boundedFailureValue(value),
+  ]));
+}
+
+async function readFailureDeliveryAttempt(harness, entry) {
+  const requestId = failureRequestId(entry);
+  const result = { status: requestId ? "unread" : "unavailable", request_id: requestId, tables: {}, errors: [] };
+  if (!requestId) {
+    result.reason = "no_request_id";
+    return result;
+  }
+
+  let db;
+  try {
+    const { DatabaseSync } = await import("node:sqlite");
+    db = new DatabaseSync(path.join(harness.isolatedHome, "state.db"), { readOnly: true });
+    for (const table of [
+      "native_deliveries",
+      "native_delivery_evidence",
+      "agent_message_delivery",
+      "interaction_delivery_attempts",
+    ]) {
+      try {
+        result.tables[table] = db
+          .prepare(`SELECT * FROM ${table} WHERE interaction_id=? LIMIT ${FAILURE_CAPTURE_MAX_ROWS}`)
+          .all(requestId)
+          .map(boundedFailureRow);
+      } catch (error) {
+        result.errors.push(`${table}: ${boundedFailureString(error)}`);
+      }
+    }
+    result.status = "read";
+  } catch (error) {
+    result.errors.push(boundedFailureString(error));
+  } finally {
+    db?.close();
+  }
+  return result;
+}
+
+function failureCapabilityProbeError(result) {
+  if (result?.error?.code === "ETIMEDOUT") {
+    const error = new Error(
+      `ETIMEDOUT: failure capability probe exceeded ${FAILURE_CAPTURE_CAPABILITY_TIMEOUT_MS}ms`,
+    );
+    error.code = "ETIMEDOUT";
+    return error;
+  }
+  if (result?.status !== 0) {
+    return new Error(`exit=${result?.status}: ${boundedFailureString(result?.stderr || result?.stdout)}`);
+  }
+  return null;
+}
+
+async function captureProviderFailureEvidence({ driver, cliPath, harness, agent, provider, report }) {
+  const sessionId = agent?.session_id ?? null;
+  const capture = {
+    status: "captured-before-pause",
+    provider,
+    session_id: sessionId,
+    captured_at: new Date().toISOString(),
+    transcript: { status: "unread", events: [], errors: [] },
+    capability: { status: "unread", value: null, errors: [] },
+    current_agent_identity: failureAgentIdentity(agent),
+    delivery_attempt: null,
+    capture_errors: [],
+  };
+
+  try {
+    const events = await invokeTauri(driver, "load_agent_chat_transcript", { sessionId });
+    if (!Array.isArray(events)) throw new Error("load_agent_chat_transcript returned a non-array");
+    capture.transcript = { status: "read", ...boundedFailureTranscript(events), errors: [] };
+  } catch (error) {
+    capture.transcript = { status: "capture-failed", events: [], errors: [boundedFailureString(error)] };
+    capture.capture_errors.push(`transcript: ${boundedFailureString(error)}`);
+  }
+
+  try {
+    const agents = await invokeTauri(driver, "list_agents");
+    const current = Array.isArray(agents) ? agents.find((entry) => entry.session_id === sessionId) : null;
+    if (!current) throw new Error("current agent identity was not present in list_agents");
+    capture.current_agent_identity = failureAgentIdentity(current);
+  } catch (error) {
+    capture.current_agent_identity_error = boundedFailureString(error);
+    capture.capture_errors.push(`agent_identity: ${boundedFailureString(error)}`);
+  }
+
+  if (!cliPath) {
+    capture.capability = { status: "unavailable", value: null, errors: ["CLI path unavailable"] };
+  } else {
+    try {
+      const result = runCli(
+        cliPath,
+        harness,
+        ["delivery", "capabilities", sessionId],
+        FAILURE_CAPTURE_CAPABILITY_TIMEOUT_MS,
+      );
+      const probeError = failureCapabilityProbeError(result);
+      if (probeError) throw probeError;
+      capture.capability = { status: "read", value: JSON.parse(result.stdout), errors: [] };
+    } catch (error) {
+      capture.capability = { status: "capture-failed", value: null, errors: [boundedFailureString(error)] };
+      capture.capture_errors.push(`capability: ${boundedFailureString(error)}`);
+    }
+  }
+
+  const entry = latestProviderCase(report, provider);
+  capture.delivery_attempt = {
+    report_case: failureCaseAttempt(entry),
+    state: await readFailureDeliveryAttempt(harness, entry),
+  };
+  if (capture.delivery_attempt.state.errors.length) {
+    capture.capture_errors.push(...capture.delivery_attempt.state.errors.map((error) => `delivery: ${error}`));
+  }
+  return capture;
+}
+
+async function pauseRealProviderAgent(driver, sessionId) {
+  await invokeTauri(driver, "pause_agent", { sessionId });
+  const agents = await invokeTauri(driver, "list_agents");
+  const retained = Array.isArray(agents) && agents.find((entry) => entry.session_id === sessionId);
+  assert.ok(retained, `real provider pause was acknowledged but agent ${sessionId} was not retained`);
+  return retained;
+}
+
+function markActiveProviderCasesFailed(report, provider, error) {
+  const message = String(error?.message ?? error);
+  for (const entry of [
+    ...(Array.isArray(report?.native_cases) ? report.native_cases : []),
+    ...(Array.isArray(report?.composer_task_cases) ? report.composer_task_cases : []),
+  ]) {
+    if (entry.provider === provider && entry.status === "running") {
+      entry.status = "fail";
+      entry.error = message;
+    }
+  }
 }
 
 async function spawnRealProviderAgent(driver, provider, sessionName, folder) {
@@ -666,25 +926,6 @@ async function spawnRealProviderAgent(driver, provider, sessionName, folder) {
   );
   assert.equal(result.agent.provider, provider);
   return result.agent;
-}
-
-async function killRealProviderAgent(driver, sessionId) {
-  if (!sessionId) {
-    return;
-  }
-
-  const result = await driver.executeAsyncScript((sid, done) => {
-    window.__TAURI_INTERNALS__.invoke("kill_agent", { sessionId: sid }).then(
-      () => done({ ok: true }),
-      (error) => done({ ok: false, error: String(error) }),
-    );
-  }, sessionId);
-
-  assert.equal(
-    result.ok,
-    true,
-    `real provider cleanup failed for ${sessionId}: ${result.error}`,
-  );
 }
 
 async function antigravityStartupNeedsAction(cliPath, harness, agentName, timeoutMs = 15000) {
@@ -1455,6 +1696,83 @@ test("Pi failure evidence rejects escape, reparse, and bounded-file violations",
   }
 });
 
+test("failure transcript capture preserves native fields and source order within its bound", () => {
+  const source = Array.from({ length: FAILURE_CAPTURE_MAX_EVENTS + 2 }, (_, index) => ({
+    id: `event-${index}`,
+    provider: "codex",
+    kind: "message",
+    role: index % 2 ? "assistant" : "user",
+    source: index % 2 ? "response_item" : "event_msg",
+    turn_id: index % 2 ? `turn-${index}` : null,
+    text: `event text ${index}`,
+    metadata: {
+      provider_log: true,
+      provider_turn_id: `turn-${index}`,
+      message_id: `message-${index}`,
+      provider_observation_ids: [`observation-${index}`],
+    },
+  }));
+
+  const captured = boundedFailureTranscript(source);
+  assert.equal(captured.total_events, FAILURE_CAPTURE_MAX_EVENTS + 2);
+  assert.equal(captured.captured_events, FAILURE_CAPTURE_MAX_EVENTS);
+  assert.equal(captured.truncated, true);
+  assert.deepEqual(
+    captured.events.map((event) => event.id),
+    source.slice(-FAILURE_CAPTURE_MAX_EVENTS).map((event) => event.id),
+  );
+  assert.equal(captured.events[0].text, "event text 2");
+  assert.equal(captured.events.at(-1).native_metadata.message_id, "message-65");
+  assert.deepEqual(captured.events.at(-1).native_metadata.provider_observation_ids, ["observation-65"]);
+});
+
+test("provider pause requires acknowledgement and retains the owned agent", async () => {
+  const retained = { session_id: "owned-agent", provider: "codex", is_off: true };
+  const commands = [];
+  const driver = {
+    async executeAsyncScript(_script, command) {
+      commands.push(command);
+      if (command === "pause_agent") return { ok: true, value: null };
+      if (command === "list_agents") return { ok: true, value: [retained] };
+      throw new Error(`unexpected command: ${command}`);
+    },
+  };
+
+  assert.deepEqual(await pauseRealProviderAgent(driver, retained.session_id), retained);
+  assert.deepEqual(commands, ["pause_agent", "list_agents"]);
+});
+
+test("failure capture records component errors and fails the active case", async () => {
+  const driver = {
+    async executeAsyncScript() {
+      throw new Error("diagnostic read unavailable");
+    },
+  };
+  const report = {
+    native_cases: [{ provider: "codex", case: "prompt-short", status: "running" }],
+    composer_task_cases: [{ provider: "codex", case: "prompt-multiline", status: "pass" }],
+  };
+  const capture = await captureProviderFailureEvidence({
+    driver,
+    cliPath: null,
+    harness: { isolatedHome: path.join(tmpdir(), "missing-failure-capture-home") },
+    agent: { session_id: "owned-agent", provider: "codex", resume_session: "provider-session" },
+    provider: "codex",
+    report,
+  });
+
+  assert.equal(capture.status, "captured-before-pause");
+  assert.equal(capture.transcript.status, "capture-failed");
+  assert.equal(capture.capability.status, "unavailable");
+  assert.equal(capture.delivery_attempt.state.reason, "no_request_id");
+  assert.ok(capture.capture_errors.some((error) => error.startsWith("transcript:")));
+  assert.ok(capture.capture_errors.some((error) => error.startsWith("agent_identity:")));
+
+  markActiveProviderCasesFailed(report, "codex", new Error("replay failed"));
+  assert.equal(report.native_cases[0].status, "fail");
+  assert.equal(report.composer_task_cases[0].status, "pass");
+});
+
 async function waitForFreshTranscript(driver, sessionId, provider, freshMarker) {
   return await driver.wait(async () => {
     const events = await invokeTauri(driver, "load_agent_chat_transcript", { sessionId });
@@ -1741,6 +2059,21 @@ test("Codex spawn restores the bounded observation timeout", async () => {
   ]);
 });
 
+test("failure capability probes classify a bounded child timeout", () => {
+  const result = runCli(
+    process.execPath,
+    { repoRoot: process.cwd(), isolatedHome: path.join(tmpdir(), "wardian-cli-timeout-test") },
+    ["-e", "setTimeout(() => {}, 1000)"],
+    50,
+  );
+  assert.equal(result.error?.code, "ETIMEDOUT");
+  assert.equal(failureCapabilityProbeError(result)?.code, "ETIMEDOUT");
+  assert.match(
+    failureCapabilityProbeError(result)?.message ?? "",
+    /failure capability probe exceeded 5000ms/,
+  );
+});
+
 test("composer exception task candidates stay on their maintained providers", () => {
   assert.doesNotThrow(() => assertDeliveryRouteCandidates(
     ["claude", "antigravity"],
@@ -1851,7 +2184,7 @@ test("human composer delivery uses actual providers; not peer messaging", { time
     let agent = null;
     let providerError = null;
     let providerTerminalTail = null;
-    let piFailureEvidence = null;
+    let failureEvidence = null;
     try {
       agent = await spawnRealProviderAgent(session.driver, provider, agentName, workspacePath);
       if (provider === "antigravity" && await antigravityStartupNeedsAction(cliPath, harness, agentName)) {
@@ -1964,27 +2297,61 @@ test("human composer delivery uses actual providers; not peer messaging", { time
     } catch (error) {
       providerError = error;
       if (agent?.session_id) {
-        providerTerminalTail = await readProviderTerminalTail(session.driver, agent.session_id);
+        try {
+          providerTerminalTail = await readProviderTerminalTail(session.driver, agent.session_id);
+        } catch (tailError) {
+          providerTerminalTail = `Unable to read provider terminal output: ${tailError}`;
+        }
       }
     } finally {
       if (agent?.session_id) {
-        if (provider === "pi" && providerError) {
+        if (providerError) {
+          report.status = "fail";
+          report.error = providerError.message;
           try {
-            piFailureEvidence = await capturePiFailureEvidence(
-              session.driver,
+            failureEvidence = await captureProviderFailureEvidence({
+              driver: session.driver,
+              cliPath,
               harness,
               agent,
-              providerError,
-            );
+              provider,
+              report,
+            });
           } catch (captureError) {
-            piFailureEvidence = {
+            failureEvidence = {
               status: "capture-failed",
+              provider,
+              session_id: agent.session_id,
               error: String(captureError),
             };
           }
+          if (provider === "pi") {
+            try {
+              failureEvidence.pi_session_snapshot = await capturePiFailureEvidence(
+                session.driver,
+                harness,
+                agent,
+                providerError,
+              );
+            } catch (captureError) {
+              failureEvidence.pi_session_snapshot = {
+                status: "capture-failed",
+                error: String(captureError),
+              };
+            }
+          }
+          report.failure_evidence ??= {};
+          report.failure_evidence[provider] = failureEvidence;
+          markActiveProviderCasesFailed(report, provider, providerError);
+          try {
+            await save();
+          } catch (saveError) {
+            cleanupFailure ??= saveError;
+            providerError ??= saveError;
+          }
         }
         try {
-          await killRealProviderAgent(session.driver, agent.session_id);
+          await pauseRealProviderAgent(session.driver, agent.session_id);
         } catch (cleanupError) {
           cleanupFailure ??= cleanupError;
           providerError ??= cleanupError;
@@ -2001,7 +2368,7 @@ test("human composer delivery uses actual providers; not peer messaging", { time
         `Real provider delivery failed for ${provider}: ${providerError.message}\n\n` +
           `Model: ${providerModel(provider) ?? "<provider default>"}\n` +
         `Custom args: ${providerCustomArgs(provider) ?? "<none>"}\n` +
-          `--- Pi failure evidence ---\n${piFailureEvidence ? JSON.stringify(piFailureEvidence) : "<not-applicable>"}\n` +
+          `--- Failure evidence ---\n${failureEvidence ? JSON.stringify(failureEvidence) : "<not-captured>"}\n` +
           `--- Provider terminal tail ---\n${providerTerminalTail ?? "<unavailable>"}\n` +
           `--- Wardian debug tail ---\n${debugTail}`,
       );
