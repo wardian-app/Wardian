@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { invoke } from '@tauri-apps/api/core';
 import AgentWatchlist from './AgentWatchlist';
 import {
   resetAgentTelemetryStore,
@@ -25,6 +27,7 @@ Object.defineProperty(window, 'matchMedia', {
 });
 
 describe('AgentWatchlist', () => {
+  const invokeMock = vi.mocked(invoke);
   const mockOnSelectionChange = vi.fn();
   const mockOnSelectAgent = vi.fn();
   const mockOnOpenAgent = vi.fn();
@@ -127,6 +130,7 @@ describe('AgentWatchlist', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    invokeMock.mockReset();
   });
 
   const setRect = (element: Element, top: number, height: number) => {
@@ -267,6 +271,46 @@ describe('AgentWatchlist', () => {
     expect(mockOnOpenAgent).not.toHaveBeenCalled();
     expect(mockOnSelectAgent).not.toHaveBeenCalled();
     expect(mockOnSelectionChange).not.toHaveBeenCalled();
+  });
+
+  it('opens and closes the inspector with Enter without revealing the row', async () => {
+    const user = userEvent.setup();
+    invokeMock
+      .mockResolvedValueOnce({
+        summaries: [{
+          root_agent_id: 'agent-1',
+          active: 1,
+          past: 0,
+          unknown: 0,
+          attention_count: 0,
+          attention_waiting: 0,
+          attention_failed: 0,
+          attention_unknown: 0,
+        }],
+      })
+      .mockResolvedValueOnce({
+        root_agent_id: 'agent-1',
+        workers: [],
+        worker_telemetry: {},
+      });
+
+    render(<AgentWatchlist {...defaultProps} />);
+    const badge = await screen.findByTestId('watchlist-child-worker-indicator-agent-1');
+
+    badge.focus();
+    await user.keyboard('{Enter}');
+
+    expect(await screen.findByTestId('agent-child-worker-details-agent-1')).toBeInTheDocument();
+    expect(mockOnRevealAgent).not.toHaveBeenCalled();
+
+    const closeButton = screen.getByRole('button', { name: 'Close subagent details' });
+    closeButton.focus();
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('agent-child-worker-details-agent-1')).not.toBeInTheDocument();
+    });
+    expect(mockOnRevealAgent).not.toHaveBeenCalled();
   });
 
   it('offers navigation and management actions in one context menu', async () => {
