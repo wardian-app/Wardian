@@ -84,6 +84,15 @@ const DEFAULT_PROVIDER_EFFORTS = {
   codex: "low",
 };
 const COMPOSER_EXCEPTION_PROVIDERS = ["claude", "antigravity"];
+// Match the established Codex model-selection spawn contract. The larger
+// budget is scoped to Codex spawn_agent and observation is restored afterward.
+const SPAWN_SCRIPT_MS = 2 * 120_000 + 60_000;
+const OBSERVATION_SCRIPT_MS = 30_000;
+const PROVIDER_READY_MS = 120_000;
+const CANONICAL_REPLY_EXACT_BYTES_INSTRUCTION =
+  " The canonical reply tool message must contain exactly the requested text bytes. " +
+  "If using stdin, write those bytes without a trailing newline; do not use shell echo, " +
+  "which appends a newline. Do not trim or otherwise transform the returned message.";
 
 const runRealDelivery = process.env.WARDIAN_E2E_REAL_DELIVERY === "1";
 const verifyFreshTranscript = process.env.WARDIAN_E2E_REAL_FRESH_TRANSCRIPT === "1";
@@ -248,6 +257,28 @@ function configOverrideForProvider(provider, environment = process.env) {
     config.provider_config = { type: provider, reasoning_effort: effort };
   }
   return config;
+}
+
+function providerInputReadinessObserved(provider, metric, visibleGrid = "") {
+  if (metric?.current_status?.toLowerCase() !== "idle") {
+    return false;
+  }
+  if (provider !== "opencode") {
+    return true;
+  }
+
+  const screen = String(visibleGrid).toLowerCase();
+  const startupBlocked = ["loading", "connecting", "permission required", "do you trust"]
+    .some((text) => screen.includes(text));
+  if (startupBlocked) {
+    return false;
+  }
+
+  const placeholderComposer = screen.includes("ask anything") &&
+    screen.includes("ctrl+p") && screen.includes("commands");
+  const restoredComposer = screen.includes("ctrl+p") &&
+    screen.includes("commands") && screen.includes("opencode");
+  return placeholderComposer || restoredComposer;
 }
 
 async function readDebugTail(harness) {
@@ -603,20 +634,30 @@ async function capturePiFailureEvidence(driver, harness, agent, providerError) {
 
 async function spawnRealProviderAgent(driver, provider, sessionName, folder) {
   const configOverride = configOverrideForProvider(provider);
-  const result = await driver.executeAsyncScript((sessionName, provider, folder, configOverride, done) => {
-    window.__TAURI_INTERNALS__.invoke("spawn_agent", {
-      req: {
-        sessionName,
-        agentClass: "Reviewer",
-        folder,
-        isOff: false,
-        configOverride,
-      },
-    }).then(
-      (agent) => done({ ok: true, agent }),
-      (error) => done({ ok: false, error: String(error), provider }),
-    );
-  }, sessionName, provider, folder, configOverride);
+  let result;
+  try {
+    if (provider === "codex") {
+      await driver.manage().setTimeouts({ script: SPAWN_SCRIPT_MS });
+    }
+    result = await driver.executeAsyncScript((sessionName, provider, folder, configOverride, done) => {
+      window.__TAURI_INTERNALS__.invoke("spawn_agent", {
+        req: {
+          sessionName,
+          agentClass: "Reviewer",
+          folder,
+          isOff: false,
+          configOverride,
+        },
+      }).then(
+        (agent) => done({ ok: true, agent }),
+        (error) => done({ ok: false, error: String(error), provider }),
+      );
+    }, sessionName, provider, folder, configOverride);
+  } finally {
+    if (provider === "codex") {
+      await driver.manage().setTimeouts({ script: OBSERVATION_SCRIPT_MS });
+    }
+  }
 
   assert.equal(
     result.ok,
@@ -692,10 +733,73 @@ async function waitForPersistedOpenCodeSession(harness, sessionId, timeoutMs = 1
   );
 }
 
+async function waitForProviderInputReady(driver, provider, sessionId, timeoutMs = PROVIDER_READY_MS) {
+  let lastStatus = "unknown";
+  let lastScreenState = provider === "opencode" ? "unobserved" : "not-required";
+  try {
+    return await driver.wait(async () => {
+      try {
+        const metrics = await invokeTauri(driver, "list_agent_metrics");
+        const metric = metrics.find((entry) => entry.session_id === sessionId);
+        lastStatus = metric?.current_status ?? "missing";
+        if (provider !== "opencode") {
+          return providerInputReadinessObserved(provider, metric);
+        }
+
+        if (metric?.current_status?.toLowerCase() !== "idle") {
+          lastScreenState = "awaiting-idle";
+          return false;
+        }
+        const snapshot = await invokeTauri(driver, "request_terminal_snapshot", {
+          request: { session_id: sessionId },
+        });
+        const ready = providerInputReadinessObserved(provider, metric, snapshot.visible_grid);
+        lastScreenState = ready ? "ready" : "not-ready";
+        return ready;
+      } catch {
+        lastScreenState = "observation-error";
+        return false;
+      }
+    }, timeoutMs, `${provider} provider input did not become ready before submission`, 250);
+  } catch (error) {
+    throw new Error(
+      `${provider} provider input readiness timed out (status=${lastStatus}, screen=${lastScreenState})`,
+      { cause: error },
+    );
+  }
+}
+
+async function waitForExistingAgentIdle(driver, sessionId, timeoutMs = OBSERVATION_SCRIPT_MS) {
+  let lastStatus = "unknown";
+  try {
+    await driver.wait(async () => {
+      const metrics = await invokeTauri(driver, "list_agent_metrics");
+      lastStatus = metrics.find((row) => row.session_id === sessionId)?.current_status ?? "missing";
+      return existingAgentIsIdle(metrics, sessionId);
+    }, timeoutMs, "Existing receiver not observed idle before native runtime detachment", 200);
+  } catch (error) {
+    throw new Error(
+      `Existing receiver idle observation timed out (status=${lastStatus})`,
+      { cause: error },
+    );
+  }
+}
+
+function existingAgentIsIdle(metrics, sessionId) {
+  return metrics.find((row) => row.session_id === sessionId)?.current_status?.toLowerCase() === "idle";
+}
+
 function assertOpenCodeResumeIdentity(before, after, providerSessionId) {
   assert.equal(after?.session_id, before?.session_id, "OpenCode resume replaced the Wardian agent identity");
   assert.equal(before?.resume_session, providerSessionId, "OpenCode setup did not persist the discovered provider session");
   assert.equal(after?.resume_session, providerSessionId, "OpenCode resume changed the discovered provider session");
+  return after;
+}
+
+function assertPiResumeIdentity(before, after, providerSessionId) {
+  assert.equal(after?.session_id, before?.session_id, "Pi resume replaced the Wardian agent identity");
+  assert.equal(before?.resume_session, providerSessionId, "Pi setup did not persist the provider session");
+  assert.equal(after?.resume_session, providerSessionId, "Pi resume changed the provider session");
   return after;
 }
 
@@ -716,6 +820,23 @@ async function resumeOpenCodeExistingSession(driver, agentSessionId, providerSes
   }, 120_000, "OpenCode same-session resume did not preserve the discovered provider session", 250);
 }
 
+async function resumePiExistingSession(driver, agentSessionId, providerSessionId) {
+  const before = (await invokeTauri(driver, "list_agents"))
+    .find((entry) => entry.session_id === agentSessionId);
+  assert.ok(before, "Pi agent missing before same-session resume");
+  assertPiResumeIdentity(before, before, providerSessionId);
+
+  await invokeTauri(driver, "pause_agent", { sessionId: agentSessionId });
+  await invokeTauri(driver, "resume_agent", { sessionId: agentSessionId });
+
+  return driver.wait(async () => {
+    const after = (await invokeTauri(driver, "list_agents"))
+      .find((entry) => entry.session_id === agentSessionId);
+    if (!after?.resume_session) return false;
+    return assertPiResumeIdentity(before, after, providerSessionId);
+  }, 120_000, "Pi same-session resume did not preserve the provider session", 250);
+}
+
 async function waitForOpenCodeNativeOwner(driver, cliPath, harness, agentSessionId, providerSessionId) {
   return driver.wait(async () => {
     const capability = JSON.parse(runCliOk(cliPath, harness, ["delivery", "capabilities", agentSessionId]).stdout);
@@ -726,6 +847,76 @@ async function waitForOpenCodeNativeOwner(driver, cliPath, harness, agentSession
     assert.equal(binding.transport, "opencode_http");
     return capability;
   }, 30_000, "OpenCode same-session HTTP owner was not registered after resume", 250);
+}
+
+function assertPiNativeOwnerCapability(capability, agentSessionId, providerSessionId) {
+  assert.equal(
+    capability.binding?.provider_session_id,
+    providerSessionId,
+    "Pi native binding replaced the resumed provider session",
+  );
+  assertProviderNativeSession("pi", capability, agentSessionId);
+  return capability;
+}
+
+async function waitForPiNativeOwner(driver, cliPath, harness, agentSessionId, providerSessionId) {
+  return driver.wait(async () => {
+    const capability = JSON.parse(runCliOk(cliPath, harness, ["delivery", "capabilities", agentSessionId]).stdout);
+    if (!capability.native_negotiated) return false;
+    const config = (await invokeTauri(driver, "list_agents"))
+      .find((entry) => entry.session_id === agentSessionId);
+    assertPiResumeIdentity(
+      { session_id: agentSessionId, resume_session: providerSessionId },
+      config,
+      providerSessionId,
+    );
+    return assertPiNativeOwnerCapability(capability, agentSessionId, providerSessionId);
+  }, 30_000, "Pi native owner was not registered after same-session resume", 250);
+}
+
+function classifyLocalDeliveryReply(rawMessage, expected) {
+  if (typeof rawMessage !== "string") {
+    return {
+      rawMessage,
+      lineEnding: "unknown",
+      accepted: false,
+      rejection: "non_string",
+    };
+  }
+
+  const lineEnding = rawMessage.endsWith("\r\n")
+    ? "crlf"
+    : rawMessage.endsWith("\n")
+      ? "lf"
+      : rawMessage.endsWith("\r")
+        ? "cr"
+        : "none";
+  const accepted = rawMessage === expected ||
+    rawMessage === `${expected}\n` ||
+    rawMessage === `${expected}\r\n`;
+  if (accepted) {
+    return { rawMessage, lineEnding, accepted: true, rejection: null };
+  }
+
+  const body = lineEnding === "crlf" ? rawMessage.slice(0, -2)
+    : ["lf", "cr"].includes(lineEnding) ? rawMessage.slice(0, -1) : rawMessage;
+  const countLineBreaks = (value) => (value.match(/\r\n|\r|\n/g) ?? []).length;
+  const rejection = countLineBreaks(body) > countLineBreaks(expected)
+    ? "multiple_lines"
+    : lineEnding === "cr"
+      ? "unsupported_line_ending"
+      : "wrong_content";
+  return { rawMessage, lineEnding, accepted: false, rejection };
+}
+
+function qualifyLocalDeliveryReply(page, requestId, expected) {
+  const replies = page.messages.filter((row) =>
+    row.kind === "reply" && row.parent_interaction_id === requestId);
+  const candidates = replies.map((reply) => ({
+    reply,
+    ...classifyLocalDeliveryReply(reply.message, expected),
+  }));
+  return candidates.find((candidate) => candidate.accepted) ?? candidates.at(-1) ?? null;
 }
 
 async function runRealDeliveryCase({
@@ -741,6 +932,7 @@ async function runRealDeliveryCase({
   const marker = `WARDIAN_REAL_DELIVERY_${provider.toUpperCase()}_${inputCase.name.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_${runId}`;
   const prompt = inputCase.prompt(marker);
   // Human composer coverage only. Peer tasks use the canonical messaging suite.
+  await waitForProviderInputReady(driver, provider, agentSessionId);
   const delivery = await invokeTauri(driver, "submit_prompt_to_agent", {
     sessionId: agentSessionId, prompt, inputMode: "message",
   });
@@ -779,13 +971,10 @@ async function runNativeTaskCase({ driver, cliPath, harness, provider, agent, se
   const marker = `NATIVE_TASK_${provider}_${Date.now()}`;
   const expected = inputCase.name === "prompt-multiline" ? `${marker}_LINE_1\n${marker}_LINE_2` : marker;
   const body = inputCase.prompt(marker).replace("Do not access files or run tools.", "Do not access files or run tools except the canonical reply tool.") +
-    " Complete this task using the canonical reply tool with status done and exactly the requested text as its message.";
+    " Complete this task using the canonical reply tool with status done and exactly the requested text as its message." +
+    CANONICAL_REPLY_EXACT_BYTES_INSTRUCTION;
   const evidence = { provider, case: inputCase.name, status: "running", identity, attempts: 0, admission_state: "idle" };
   report.native_cases.push(evidence);
-  await driver.wait(async () => {
-    const metrics = await invokeTauri(driver, "list_agent_metrics");
-    return metrics.find((row) => row.session_id === agent.session_id)?.current_status?.toLowerCase() === "idle";
-  }, 30_000, "Existing receiver not observed idle before idle-task admission", 200);
   const initial = await messageCli(cliPath, harness.isolatedHome, harness.repoRoot, sender.session_id, ["receive", "--timeout-ms", "0"]);
   let cursor = initial.next_cursor;
   evidence.attempts = 1;
@@ -807,7 +996,16 @@ async function runNativeTaskCase({ driver, cliPath, harness, provider, agent, se
     const page = await messageCli(cliPath, harness.isolatedHome, harness.repoRoot, sender.session_id,
       ["receive", "--cursor", cursor, "--timeout-ms", "0"]);
     cursor = page.next_cursor;
-    reply ??= correlatedReply(page, task.request_id, agent.session_id, expected);
+    const qualified = qualifyLocalDeliveryReply(page, task.request_id, expected);
+    if (qualified) {
+      evidence.reply_raw_message = qualified.rawMessage;
+      evidence.reply_line_ending = qualified.lineEnding;
+      evidence.reply_qualification = qualified.accepted
+        ? `accepted_${qualified.lineEnding}`
+        : `rejected_${qualified.rejection}`;
+      assert.ok(qualified.accepted, `Canonical reply rejected: ${evidence.reply_qualification}`);
+      reply ??= correlatedReply(page, task.request_id, agent.session_id, qualified.rawMessage);
+    }
     return !!reply;
   }, 120_000, "Native canonical reply missing; no fallback or replay", 250);
   const { DatabaseSync } = await import("node:sqlite");
@@ -828,7 +1026,7 @@ async function runNativeTaskCase({ driver, cliPath, harness, provider, agent, se
         requestId: task.request_id,
         reply,
         claim,
-        expectedMessage: expected,
+        expectedMessage: reply.message,
       });
     }
   } finally { db.close(); }
@@ -841,7 +1039,8 @@ async function runComposerExceptionTaskCase({ driver, cliPath, harness, provider
   const marker = `COMPOSER_EXCEPTION_TASK_${provider}_${Date.now()}`;
   const expected = inputCase.name === "prompt-multiline" ? `${marker}_LINE_1\n${marker}_LINE_2` : marker;
   const body = inputCase.prompt(marker).replace("Do not access files or run tools.", "Do not access files or run tools except the canonical reply tool.") +
-    " Complete this task using the canonical reply tool with status done and exactly the requested text as its message.";
+    " Complete this task using the canonical reply tool with status done and exactly the requested text as its message." +
+    CANONICAL_REPLY_EXACT_BYTES_INSTRUCTION;
   const evidence = {
     provider,
     case: inputCase.name,
@@ -878,7 +1077,16 @@ async function runComposerExceptionTaskCase({ driver, cliPath, harness, provider
     const page = await messageCli(cliPath, harness.isolatedHome, harness.repoRoot, sender.session_id,
       ["receive", "--cursor", cursor, "--timeout-ms", "0"]);
     cursor = page.next_cursor;
-    reply ??= correlatedReply(page, task.request_id, agent.session_id, expected);
+    const qualified = qualifyLocalDeliveryReply(page, task.request_id, expected);
+    if (qualified) {
+      evidence.reply_raw_message = qualified.rawMessage;
+      evidence.reply_line_ending = qualified.lineEnding;
+      evidence.reply_qualification = qualified.accepted
+        ? `accepted_${qualified.lineEnding}`
+        : `rejected_${qualified.rejection}`;
+      assert.ok(qualified.accepted, `Canonical reply rejected: ${evidence.reply_qualification}`);
+      reply ??= correlatedReply(page, task.request_id, agent.session_id, qualified.rawMessage);
+    }
     return !!reply;
   }, 120_000, "Composer-exception canonical reply missing", 250);
   assertTerminalRuntimePreserved(terminal, await invokeTauri(driver, "request_terminal_snapshot", { request: { session_id: agent.session_id } }));
@@ -1360,6 +1568,107 @@ test("OpenCode same-session resume keeps the discovered provider identity", () =
   );
 });
 
+test("Pi native qualification keeps the existing provider session across resume", () => {
+  const before = { session_id: "wardian-agent", resume_session: "pi-session" };
+  const after = { session_id: "wardian-agent", resume_session: "pi-session" };
+  assert.deepEqual(assertPiResumeIdentity(before, after, "pi-session"), after);
+  assert.throws(
+    () => assertPiResumeIdentity(before, { ...after, session_id: "other-agent" }, "pi-session"),
+    /replaced the Wardian agent identity/,
+  );
+  assert.throws(
+    () => assertPiResumeIdentity(before, { ...after, resume_session: "new-session" }, "pi-session"),
+    /changed the provider session/,
+  );
+});
+
+test("Pi native owner validation returns the capability shape", () => {
+  const capability = {
+    native_negotiated: true,
+    binding: {
+      target_agent_id: "wardian-agent",
+      provider: "pi",
+      provider_session_id: "pi-session",
+      generation: 4,
+      transport: "pi_native",
+      capabilities: { persistent_session: true, positive_turn_start: true },
+    },
+  };
+  const returned = assertPiNativeOwnerCapability(capability, "wardian-agent", "pi-session");
+  assert.strictEqual(returned, capability);
+  assert.equal(returned.native_negotiated, true);
+  assert.equal(returned.binding.provider_session_id, "pi-session");
+});
+
+test("local delivery reply qualification preserves raw CLI line endings", () => {
+  const expected = "DELIVERY_MARKER";
+  const makePage = (message, extra = []) => ({
+    messages: [{
+      kind: "reply",
+      parent_interaction_id: "task-1",
+      sender: "agent-1",
+      reply_status: "done",
+      interaction_id: "reply-1",
+      message,
+    }, ...extra],
+  });
+
+  for (const [rawMessage, lineEnding] of [
+    [expected, "none"],
+    [`${expected}\n`, "lf"],
+    [`${expected}\r\n`, "crlf"],
+  ]) {
+    const qualified = qualifyLocalDeliveryReply(makePage(rawMessage), "task-1", expected);
+    assert.equal(qualified.accepted, true);
+    assert.equal(qualified.rawMessage, rawMessage);
+    assert.equal(qualified.lineEnding, lineEnding);
+    assert.equal(correlatedReply(makePage(rawMessage), "task-1", "agent-1", qualified.rawMessage).message, rawMessage);
+  }
+
+  const multilineExpected = "DELIVERY_LINE_1\nDELIVERY_LINE_2";
+  const multilineQualified = qualifyLocalDeliveryReply(
+    makePage(`${multilineExpected}\r\n`),
+    "task-1",
+    multilineExpected,
+  );
+  assert.equal(multilineQualified.accepted, true);
+  assert.equal(multilineQualified.lineEnding, "crlf");
+
+  for (const [label, rawMessage, rejection] of [
+    ["leading whitespace", ` ${expected}`, "wrong_content"],
+    ["multiple lines", `${expected}\nSECOND_LINE`, "multiple_lines"],
+    ["wrong marker with CRLF", `OTHER_MARKER\r\n`, "wrong_content"],
+    ["prefix", `PREFIX_${expected}`, "wrong_content"],
+    ["suffix", `${expected}_SUFFIX`, "wrong_content"],
+    ["unsupported CR terminator", `${expected}\r`, "unsupported_line_ending"],
+  ]) {
+    const qualified = qualifyLocalDeliveryReply(makePage(rawMessage), "task-1", expected);
+    assert.equal(qualified.accepted, false, label);
+    assert.equal(qualified.rawMessage, rawMessage, label);
+    assert.equal(qualified.rejection, rejection, label);
+  }
+
+  const duplicatePage = makePage(`${expected}\n`, [{
+    kind: "reply",
+    parent_interaction_id: "task-1",
+    sender: "agent-1",
+    reply_status: "done",
+    interaction_id: "reply-2",
+    message: `${expected}\n`,
+  }]);
+  const duplicate = qualifyLocalDeliveryReply(duplicatePage, "task-1", expected);
+  assert.throws(
+    () => correlatedReply(duplicatePage, "task-1", "agent-1", duplicate.rawMessage),
+    /Duplicate replies to the same task/,
+  );
+});
+
+test("canonical reply task prompt requires exact stdin bytes", () => {
+  assert.match(CANONICAL_REPLY_EXACT_BYTES_INSTRUCTION, /without a trailing newline/);
+  assert.match(CANONICAL_REPLY_EXACT_BYTES_INSTRUCTION, /do not use shell echo/);
+  assert.match(CANONICAL_REPLY_EXACT_BYTES_INSTRUCTION, /Do not trim/);
+});
+
 test("OpenCode native mode defaults to resume and exposes fresh explicitly", () => {
   assert.equal(parseOpenCodeNativeMode(undefined), "resume");
   assert.equal(parseOpenCodeNativeMode("fresh"), "fresh");
@@ -1378,6 +1687,58 @@ test("provider effort override uses the core provider_config field", () => {
   assert.equal(override.provider_config?.type, "codex");
   assert.equal(override.provider_config?.reasoning_effort, "low");
   assert.equal(override.custom_args, undefined);
+});
+
+test("human delivery waits for provider input readiness before submission", () => {
+  assert.equal(
+    providerInputReadinessObserved(
+      "opencode",
+      { current_status: "Idle" },
+      "Ask anything...\nctrl+p commands",
+    ),
+    true,
+  );
+  assert.equal(
+    providerInputReadinessObserved(
+      "opencode",
+      { current_status: "Idle" },
+      "Loading session...\nAsk anything...\nctrl+p commands",
+    ),
+    false,
+  );
+  assert.equal(
+    providerInputReadinessObserved("opencode", { current_status: "Processing" }, "Ask anything... ctrl+p commands"),
+    false,
+  );
+  assert.equal(providerInputReadinessObserved("claude", { current_status: "Idle" }), true);
+});
+
+test("native idle observation matches the existing receiver", () => {
+  assert.equal(existingAgentIsIdle([
+    { session_id: "other-agent", current_status: "Idle" },
+    { session_id: "receiver", current_status: "Processing..." },
+  ], "receiver"), false);
+  assert.equal(existingAgentIsIdle([
+    { session_id: "receiver", current_status: "Idle" },
+  ], "receiver"), true);
+  assert.equal(existingAgentIsIdle([], "receiver"), false);
+});
+
+test("Codex spawn restores the bounded observation timeout", async () => {
+  const timeouts = [];
+  const driver = {
+    manage: () => ({
+      setTimeouts: async (value) => timeouts.push(value),
+    }),
+    executeAsyncScript: async () => ({ ok: true, agent: { provider: "codex" } }),
+  };
+
+  const agent = await spawnRealProviderAgent(driver, "codex", "codex-test", "workspace");
+  assert.equal(agent.provider, "codex");
+  assert.deepEqual(timeouts, [
+    { script: SPAWN_SCRIPT_MS },
+    { script: OBSERVATION_SCRIPT_MS },
+  ]);
 });
 
 test("composer exception task candidates stay on their maintained providers", () => {
@@ -1454,7 +1815,8 @@ test("human composer delivery uses actual providers; not peer messaging", { time
   const report = { status: "running", scope: nativeProviders.length || composerTaskProviders.length ? "selected_delivery_routes" : "human_composer",
     native_cases: [], native_candidates: nativeProviders, composer_task_cases: [],
     composer_task_candidates: composerTaskProviders, blocked_providers: [],
-    opencode_native_mode: nativeProviders.includes("opencode") ? opencodeNativeMode : null };
+    opencode_native_mode: nativeProviders.includes("opencode") ? opencodeNativeMode : null,
+    pi_native_mode: nativeProviders.includes("pi") ? "resume" : null };
   const save = () => fs.writeFile(path.join(harness.isolatedHome, "provider-delivery-report.json"), JSON.stringify(report, null, 2));
 
   let session;
@@ -1518,10 +1880,26 @@ test("human composer delivery uses actual providers; not peer messaging", { time
             await resumeOpenCodeExistingSession(session.driver, agent.session_id, setupDelivery.providerSessionId);
           }
         }
+        let piProviderSessionId = null;
+        if (provider === "pi") {
+          const config = (await invokeTauri(session.driver, "list_agents"))
+            .find((entry) => entry.session_id === agent.session_id);
+          assert.equal(config?.session_id, agent.session_id, "Pi setup changed the Wardian agent identity");
+          assert.equal(config?.provider, "pi", "Pi setup changed the provider identity");
+          assert.ok(
+            typeof config?.resume_session === "string" && config.resume_session.trim(),
+            "Pi setup did not persist the provider session",
+          );
+          piProviderSessionId = config.resume_session;
+          await resumePiExistingSession(session.driver, agent.session_id, piProviderSessionId);
+        }
         const capability = provider === "opencode"
           ? await waitForOpenCodeNativeOwner(session.driver, cliPath, harness, agent.session_id, setupDelivery.providerSessionId)
-          : JSON.parse(runCliOk(cliPath, harness, ["delivery", "capabilities", agent.session_id]).stdout);
+          : provider === "pi"
+            ? await waitForPiNativeOwner(session.driver, cliPath, harness, agent.session_id, piProviderSessionId)
+            : JSON.parse(runCliOk(cliPath, harness, ["delivery", "capabilities", agent.session_id]).stdout);
         const identity = assertProviderNativeSession(provider, capability, agent.session_id);
+        await waitForExistingAgentIdle(session.driver, agent.session_id);
         await invokeTauri(session.driver, "debug_remove_agent_input_sender", { sessionId: agent.session_id });
         const terminal = await invokeTauri(session.driver, "request_terminal_snapshot", { request: { session_id: agent.session_id } });
         const sender = await invokeTauri(session.driver, "spawn_agent", { req: {

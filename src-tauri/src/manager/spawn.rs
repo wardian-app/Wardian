@@ -13,7 +13,6 @@ use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AgentWatchState, AppState};
 use crate::utils::fs::*;
 use crate::utils::logging::{log_debug, log_terminal_trace_bytes, log_terminal_trace_note};
-use crate::utils::strip_ansi_controls;
 use crate::utils::PtyUtf8Decoder;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::collections::HashMap;
@@ -586,37 +585,16 @@ fn antigravity_database_watermark(path: &std::path::Path) -> Option<AntigravityD
     Some(AntigravityDatabaseWatermark { database, wal })
 }
 
-#[derive(Default)]
-struct ClaudeStartupReadiness {
-    compose_prompt_seen: bool,
-    remote_connection_pending: bool,
-}
-
-impl ClaudeStartupReadiness {
-    fn observe(&mut self, output: &str) -> bool {
-        let compact = strip_ansi_controls(output)
-            .chars()
-            .filter(|character| character.is_ascii_alphanumeric())
-            .flat_map(char::to_lowercase)
-            .collect::<String>();
-        if crate::control::provider_output_has_startup_ready_prompt("claude", output) {
-            self.compose_prompt_seen = true;
-            self.remote_connection_pending = compact.contains("rcconnecting");
-            if !self.remote_connection_pending {
-                return true;
-            }
-        }
-
-        if self.remote_connection_pending
-            && compact.contains("httpsclaudeaicodesession")
-            && self.compose_prompt_seen
-        {
-            self.remote_connection_pending = false;
-            return true;
-        }
-
-        false
-    }
+fn startup_prompt_is_ready(
+    provider: &str,
+    startup_prompt_pending: bool,
+    startup_screen: Option<&str>,
+) -> bool {
+    provider != "codex"
+        && startup_prompt_pending
+        && startup_screen.is_some_and(|output| {
+            crate::control::provider_output_has_startup_ready_prompt(provider, output)
+        })
 }
 
 impl AntigravityTranscriptTracker {
@@ -1643,7 +1621,6 @@ pub async fn spawn_agent(
         let mut opencode_chunks_logged = 0usize;
         let mut codex_terminal_theme_responder = CodexTerminalThemeProbeResponder::default();
         let mut antigravity_turn_completion_gate = AntigravityTurnCompletionGate::default();
-        let mut claude_startup_readiness = ClaudeStartupReadiness::default();
         let mut startup_prompt_pending = true;
         let mut codex_choice_pending = false;
         let mut antigravity_workspace_trust_confirmed = false;
@@ -1767,19 +1744,11 @@ pub async fn spawn_agent(
                     } else {
                         startup_output.clone()
                     };
-                    let startup_ready = if provider_name_for_pty == "codex" {
-                        false // Only the owner attachment gate publishes Codex readiness.
-                    } else if provider_name_for_pty == "claude" {
-                        claude_startup_readiness.observe(&text)
-                    } else {
-                        startup_prompt_pending
-                            && startup_screen.as_deref().is_some_and(|output| {
-                                crate::control::provider_output_has_startup_ready_prompt(
-                                    &provider_name_for_pty,
-                                    output,
-                                )
-                            })
-                    };
+                    let startup_ready = startup_prompt_is_ready(
+                        &provider_name_for_pty,
+                        startup_prompt_pending,
+                        startup_screen.as_deref(),
+                    );
                     if startup_ready {
                         startup_prompt_pending = false;
                         record_pending_memory_injection(
@@ -3608,7 +3577,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_startup_readiness_waits_for_pending_remote_connection() {
+    fn claude_startup_prompt_rejects_pending_remote_connection() {
         use crate::control::provider_output_has_startup_ready_prompt as ready;
         assert!(!ready(
             "claude",
@@ -3621,6 +3590,28 @@ mod tests {
         assert!(ready(
             "claude",
             "Claude Code v2.1.263\n❯ Try ask Claude\nshift+tab to cycle · /rc",
+        ));
+    }
+
+    #[test]
+    fn claude_startup_readiness_uses_canonical_screen_after_partial_repaint() {
+        let partial_repaint = "\x1b[4;1H\x1b[2KHaiku 4.5 | workspace | /rc";
+        let canonical_screen = "Claude Code v2.1.270\n❯ Try fix typecheck errors\n────────\nHaiku 4.5 | workspace | /rc\n⏵⏵ bypass permissions on (shift+tab to cycle)";
+
+        assert!(!startup_prompt_is_ready(
+            "claude",
+            true,
+            Some(partial_repaint),
+        ));
+        assert!(startup_prompt_is_ready(
+            "claude",
+            true,
+            Some(canonical_screen),
+        ));
+        assert!(!startup_prompt_is_ready(
+            "claude",
+            false,
+            Some(canonical_screen),
         ));
     }
 

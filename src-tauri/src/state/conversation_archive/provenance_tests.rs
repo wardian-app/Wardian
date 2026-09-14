@@ -28,6 +28,94 @@ fn same_id_native_capture_repairs_persisted_provenance() {
     assert_eq!(events[0].metadata["request_root_id"], "native-event");
 }
 
+#[test]
+fn codex_assistant_mirror_projection_requires_one_final_native_turn() {
+    let observation = |id: &str,
+                       source: &str,
+                       turn_id: Option<&str>,
+                       provider_turn: &str,
+                       phase: Option<&str>| {
+        let mut metadata = serde_json::json!({
+            "provider_log": true,
+            "log_path": "<codex-log>",
+            "provider_turn_id": provider_turn,
+            "raw_type": if source == "event_msg" { "agent_message" } else { "message" },
+        });
+        if let Some(phase) = phase {
+            metadata["provider_phase"] = serde_json::json!(phase);
+        }
+        AgentChatEvent {
+            id: id.into(),
+            session_id: "wardian-agent".into(),
+            provider: "codex".into(),
+            kind: AgentChatEventKind::Message,
+            role: Some(AgentChatRole::Assistant),
+            text: Some("same final answer".into()),
+            title: None,
+            status: None,
+            turn_id: turn_id.map(str::to_string),
+            source: Some(source.into()),
+            command: None,
+            exit_code: None,
+            path: None,
+            language: None,
+            created_at: None,
+            sequence: None,
+            metadata,
+        }
+    };
+
+    let projected = provenance::merge_current_capture(
+        Vec::new(),
+        vec![
+            observation("mirror-a", "event_msg", None, "turn-a", None),
+            observation(
+                "msg-a",
+                "response_item",
+                Some("msg-a"),
+                "turn-a",
+                Some("final_answer"),
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].id, "msg-a");
+    assert_eq!(
+        projected[0].metadata["provider_observation_ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let distinct_turns = provenance::merge_current_capture(
+        Vec::new(),
+        vec![
+            observation("mirror-a", "event_msg", None, "turn-a", None),
+            observation(
+                "msg-a",
+                "response_item",
+                Some("msg-a"),
+                "turn-a",
+                Some("final_answer"),
+            ),
+            observation("mirror-b", "event_msg", None, "turn-b", None),
+            observation(
+                "msg-b",
+                "response_item",
+                Some("msg-b"),
+                "turn-b",
+                Some("final_answer"),
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(distinct_turns.len(), 2);
+    assert!(distinct_turns.iter().any(|event| event.id == "msg-a"));
+    assert!(distinct_turns.iter().any(|event| event.id == "msg-b"));
+}
+
 use crate::commands::chat::archive_identity as native_identity;
 
 const PI_FIXTURE: &str = include_str!("fixtures/real-pi-session.jsonl");
