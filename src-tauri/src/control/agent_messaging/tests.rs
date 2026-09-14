@@ -393,11 +393,30 @@ async fn attached_opencode_terminal_native_phase_does_not_replay_or_release_task
 }
 
 #[test]
-fn prepared_pi_attached_task_selects_native_before_surface_fallback() {
-    assert!(native_attached_owner_is_selected("pi", true));
-    assert!(!native_attached_owner_is_selected("pi", false));
-    assert!(!native_attached_owner_is_selected("opencode", true));
-    assert!(!native_attached_owner_is_selected("claude", true));
+fn selected_native_owner_precedes_off_display_for_supported_providers() {
+    for provider in ["codex", "pi", "opencode"] {
+        assert_eq!(
+            task_dispatch_route(provider, false, "off", true),
+            TaskDispatchRoute::Native,
+            "{provider} owner must win over display status"
+        );
+    }
+}
+
+#[test]
+fn explicit_off_and_absent_owner_keep_existing_fallbacks() {
+    for provider in ["codex", "pi", "opencode"] {
+        assert_eq!(
+            task_dispatch_route(provider, true, "off", true),
+            TaskDispatchRoute::Background,
+            "{provider} explicit off must retain background policy"
+        );
+        assert_eq!(
+            task_dispatch_route(provider, false, "off", false),
+            TaskDispatchRoute::Background,
+            "{provider} without a selected owner must retain fallback"
+        );
+    }
 }
 
 #[test]
@@ -411,19 +430,15 @@ fn opencode_pending_or_failed_owner_has_zero_pty_writes_and_ready_uses_native() 
     ];
     let mut composer_pty_writes = 0;
     for eligibility in eligible_states {
-        assert_eq!(opencode_task_route(eligibility), OpenCodeTaskRoute::Native);
-        if matches!(
-            opencode_task_route(eligibility),
-            OpenCodeTaskRoute::Composer
-        ) {
+        assert!(native::opencode_native_owner_eligibility(eligibility));
+        if !native::opencode_native_owner_eligibility(eligibility) {
             composer_pty_writes += 1;
         }
     }
     assert_eq!(composer_pty_writes, 0);
-    assert_eq!(
-        opencode_task_route(OpenCodeHttpEligibility::Unsupported),
-        OpenCodeTaskRoute::Composer
-    );
+    assert!(!native::opencode_native_owner_eligibility(
+        OpenCodeHttpEligibility::Unsupported
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -437,16 +452,15 @@ async fn opencode_owner_handoff_states_route_without_composer_pty_writes() {
         .expect("eligible owner state");
     let pending = broker.opencode_http_eligibility("opencode-agent", 7).await;
     assert_eq!(pending, OpenCodeHttpEligibility::Pending);
-    assert_eq!(opencode_task_route(pending), OpenCodeTaskRoute::Native);
+    assert!(native::opencode_native_owner_eligibility(pending));
 
     broker.fail_opencode_http("opencode-agent", 7).await;
     let failed = broker.opencode_http_eligibility("opencode-agent", 7).await;
     assert_eq!(failed, OpenCodeHttpEligibility::Failed);
-    assert_eq!(opencode_task_route(failed), OpenCodeTaskRoute::Native);
-    assert_eq!(
-        opencode_task_route(OpenCodeHttpEligibility::Ready),
-        OpenCodeTaskRoute::Native
-    );
+    assert!(native::opencode_native_owner_eligibility(failed));
+    assert!(native::opencode_native_owner_eligibility(
+        OpenCodeHttpEligibility::Ready
+    ));
 }
 
 fn count(table: &str) -> i64 {

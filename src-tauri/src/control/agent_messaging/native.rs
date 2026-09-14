@@ -199,6 +199,7 @@ pub(super) async fn dispatch_attached_task(
     let current = delivery_target_info(state, &info.uuid).await?;
     if !same_delivery_target_incarnation(info, &current)
         || active_conversation_lease_for_delivery(&current)
+        || current.config.is_off
     {
         return Ok(());
     }
@@ -322,6 +323,50 @@ pub(super) async fn dispatch_attached_task(
     result
         .map(|_| ())
         .map_err(|error| native_error(error, "native_followup_unavailable"))
+}
+
+pub(super) async fn selected_native_owner_for_dispatch(
+    state: &AppState,
+    info: &DeliveryTargetInfo,
+) -> bool {
+    if info.config.is_off {
+        return false;
+    }
+    let generation = state
+        .interactions
+        .current_provider_input_generation(&info.uuid)
+        .await
+        .unwrap_or(0);
+    match info.provider.as_str() {
+        "codex" => {
+            state
+                .native_delivery
+                .codex_owner_selected(&info.uuid, generation)
+                .await
+        }
+        "pi" => {
+            state
+                .native_delivery
+                .pi_bridge_prepared(&info.uuid, generation)
+                .await
+        }
+        "opencode" => opencode_native_owner_eligibility(
+            state
+                .native_delivery
+                .opencode_http_eligibility(&info.uuid, generation)
+                .await,
+        ),
+        _ => false,
+    }
+}
+
+pub(super) fn opencode_native_owner_eligibility(
+    eligibility: crate::delivery::native_broker::OpenCodeHttpEligibility,
+) -> bool {
+    !matches!(
+        eligibility,
+        crate::delivery::native_broker::OpenCodeHttpEligibility::Unsupported
+    )
 }
 
 fn native_error(error: NativeBrokerError, prewrite_code: &'static str) -> ControlError {

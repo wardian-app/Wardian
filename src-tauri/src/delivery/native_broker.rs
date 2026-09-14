@@ -211,6 +211,15 @@ impl CodexCreationRegistry {
         })
     }
 
+    fn has_active(&self, agent_id: &str, generation: u64) -> bool {
+        let Ok(revisions) = self.revisions.lock() else {
+            return false;
+        };
+        revisions
+            .get(&(agent_id.to_owned(), generation))
+            .is_some_and(|revision| revision.strong_count() > 0)
+    }
+
     /// Cancel requests already registered at this boundary, before awaiting the
     /// owner gate. An exact-generation stop must not invalidate a newer generation.
     fn cancel(&self, agent_id: &str, generation: Option<u64>) -> Result<(), &'static str> {

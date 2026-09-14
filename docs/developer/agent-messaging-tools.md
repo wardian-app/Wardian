@@ -60,6 +60,9 @@ Native delivery must reach the same running provider conversation. Provider
 adapters may retain composer delivery for specific configurations where native
 attachment is unavailable; those exceptions require a documented capability
 limit. An uncertain native submission must not be retried through the composer.
+For automatic task routing, a selected native owner for the current generation
+takes precedence over an observed `Off` status; an explicit user `off` setting
+and an active conversation lease remain authoritative.
 
 ## Automatic task delivery
 

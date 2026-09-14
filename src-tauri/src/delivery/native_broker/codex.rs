@@ -439,6 +439,20 @@ impl NativeDeliveryBroker {
             .map_err(shared_error)
     }
 
+    /// Read-only selection predicate for routing. A current-generation session
+    /// slot or active creation request owns the native boundary even before a
+    /// ready receipt exists; dispatch then fails closed through the state
+    /// machine instead of falling through to another transport.
+    pub(crate) async fn codex_owner_selected(&self, agent_id: &str, generation: u64) -> bool {
+        let session_selected = self
+            .sessions
+            .lock()
+            .await
+            .get(agent_id)
+            .is_some_and(|handle| handle.provider == "codex" && handle.generation == generation);
+        session_selected || self.codex_creations.has_active(agent_id, generation)
+    }
+
     /// Subscribe without creating an owner or changing its thread/generation.
     pub(crate) async fn codex_observations(
         &self,
