@@ -1,9 +1,18 @@
+mod pi_startup;
+use pi_startup::pi_output_has_startup_ready_prompt;
+
+pub(crate) mod codex_menu_status;
+pub(crate) mod startup_readiness;
+use startup_readiness::record_provider_ready_evidence;
+pub(crate) use startup_readiness::{
+    provider_output_has_startup_ready_prompt, provider_output_requires_startup_action,
+};
+
 use crate::manager;
 mod agent_messaging;
 pub(crate) use agent_messaging::message_with_structured_reply_instruction;
 mod codex_background;
 mod headless_delivery;
-use crate::providers::claude::claude_output_has_bypass_permissions_consent_prompt;
 use crate::remote::operations::inbox_list_control as list_inbox_control;
 use crate::state::conversation_archive::{
     effective_conversation_logging, ConversationArchiveContext,
@@ -2677,14 +2686,25 @@ async fn wait_for_terminal_ready_for_control_send(
             info.uuid, info.uuid
         ));
     }
+    if info.provider == "codex"
+        && startup_readiness::codex_current_screen_requires_choice(state, &info.uuid).await?
+    {
+        return Err(format!(
+            "Agent {} requires an explicit Codex model choice; no prompt bytes sent",
+            info.uuid
+        ));
+    }
+    // Cached Ready can come from a previous turn in OpenCode's rolling log.
+    // The current composer must authorize input even when that cache is Ready.
+    if info.provider == "opencode" {
+        return wait_for_opencode_terminal_ready(state, &info.uuid, 15_000).await;
+    }
     if provider_input_current_state(state, &info.uuid).await == Some(ProviderInputReadiness::Ready)
     {
         return Ok(());
     }
 
-    if info.provider == "opencode" {
-        wait_for_opencode_terminal_ready(state, &info.uuid, 15_000).await
-    } else if info.provider == "codex" {
+    if info.provider == "codex" {
         wait_for_terminal_output(state, &info.uuid, 15_000, |output| {
             provider_output_has_ready_prompt("codex", output)
         })
@@ -2752,43 +2772,6 @@ async fn provider_input_blocks_task_dispatch(state: &AppState, session_id: &str)
         .is_some_and(|input_state| input_state != ProviderInputReadiness::Ready)
 }
 
-async fn record_provider_ready_evidence(
-    state: &AppState,
-    session_id: &str,
-    evidence: ProviderReadyEvidence,
-) {
-    let generation = state
-        .interactions
-        .provider_input_state(session_id)
-        .await
-        .filter(|input| input.state != ProviderInputReadiness::ActionRequired)
-        .map(|input| input.generation)
-        .unwrap_or(0);
-    state
-        .interactions
-        .record_provider_input_state(
-            session_id,
-            generation,
-            ProviderInputReadiness::Ready,
-            Some(evidence),
-        )
-        .await;
-}
-
-/// Records startup readiness only after the provider has rendered its own
-/// interactive prompt. This is deliberately separate from an `Idle` status:
-/// a newly spawned process is not safe to receive mailbox input merely because
-/// Wardian has not yet observed it doing work.
-pub(crate) async fn record_provider_ready_prompt(state: &AppState, session_id: &str) {
-    record_provider_ready_evidence(state, session_id, ProviderReadyEvidence::PromptDetected).await;
-}
-
-/// OpenCode exposes initial compose readiness through its provider-owned
-/// terminal title rather than a stable prompt marker in the raw PTY stream.
-pub(crate) async fn record_provider_ready_title(state: &AppState, session_id: &str) {
-    record_provider_ready_evidence(state, session_id, ProviderReadyEvidence::TitleDetected).await;
-}
-
 async fn current_agent_status_is_idle(state: &AppState, session_id: &str) -> Result<bool, String> {
     let status = {
         let agents = state.agents.lock().await;
@@ -2808,31 +2791,34 @@ async fn wait_for_opencode_terminal_ready(
     session_id: &str,
     timeout_ms: u64,
 ) -> Result<(), String> {
+    let generation = state
+        .interactions
+        .current_provider_input_generation(session_id)
+        .await
+        .unwrap_or(0);
     let started = std::time::Instant::now();
     while started.elapsed() < std::time::Duration::from_millis(timeout_ms) {
-        let (title, status) = {
+        let current_status = {
             let agents = state.agents.lock().await;
             let agent = agents
                 .get(session_id)
                 .ok_or_else(|| format!("Agent {} not found or is off", session_id))?;
-            let title = agent
-                .terminal_title
-                .lock()
-                .map(|value| value.clone())
-                .unwrap_or_default();
-            let status = agent
-                .current_status
-                .lock()
-                .map(|value| value.clone())
-                .unwrap_or_default();
-            (title, status)
+            agent.current_status.clone()
         };
-        let title = title.trim();
+        let status = current_status
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_default();
         if wardian_core::identity::normalize_status(&status) == "idle"
-            && (title == "OpenCode" || title.starts_with("OC | "))
+            && startup_readiness::opencode_current_screen_is_ready(state, session_id).await?
+            && record_provider_ready_evidence(
+                state,
+                session_id,
+                generation,
+                ProviderReadyEvidence::PromptDetected,
+            )
+            .await
         {
-            record_provider_ready_evidence(state, session_id, ProviderReadyEvidence::TitleDetected)
-                .await;
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -2849,6 +2835,11 @@ async fn wait_for_terminal_output(
     timeout_ms: u64,
     is_ready: impl Fn(&str) -> bool,
 ) -> Result<(), String> {
+    let generation = state
+        .interactions
+        .current_provider_input_generation(session_id)
+        .await
+        .unwrap_or(0);
     let started = std::time::Instant::now();
     while started.elapsed() < std::time::Duration::from_millis(timeout_ms) {
         if !current_agent_status_is_idle(state, session_id).await? {
@@ -2869,13 +2860,15 @@ async fn wait_for_terminal_output(
             .snapshot_since(None, None)
             .map(|snapshot| snapshot.output.text)
             .unwrap_or_default();
-        if is_ready(&output) {
-            record_provider_ready_evidence(
+        if is_ready(&output)
+            && record_provider_ready_evidence(
                 state,
                 session_id,
+                generation,
                 ProviderReadyEvidence::PromptDetected,
             )
-            .await;
+            .await
+        {
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -2996,22 +2989,6 @@ fn gemini_output_has_api_key_prompt(output: &str) -> bool {
     output.contains("Enter Gemini API Key") || output.contains("Paste your API key here")
 }
 
-fn pi_output_has_startup_ready_prompt(output: &str) -> bool {
-    let cleaned = strip_ansi_controls(output).replace('\r', "\n");
-    if cleaned.contains("No models available") || cleaned.contains("Error: Model") {
-        return false;
-    }
-
-    let lines = cleaned
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    lines.windows(2).any(|pair| {
-        pair[0].contains(" • ") && pair[1].contains("%/") && pair[1].split_whitespace().count() >= 2
-    })
-}
-
 pub(crate) fn antigravity_output_has_ready_prompt(output: &str) -> bool {
     let cleaned = strip_ansi_controls(output).replace('\r', "\n");
     let lines = cleaned
@@ -3043,39 +3020,6 @@ pub(crate) fn provider_output_has_ready_prompt(provider: &str, output: &str) -> 
         "antigravity" => antigravity_output_has_ready_prompt(output),
         _ => false,
     }
-}
-
-/// Startup has no previously submitted turn, so a provider's compose marker
-/// cannot be stale. Full-screen CLIs render that marker with cursor controls
-/// which do not preserve a useful last line in the raw ConPTY stream; use this
-/// only while the initial compose prompt is still unresolved.
-pub(crate) fn provider_output_has_startup_ready_prompt(provider: &str, output: &str) -> bool {
-    let cleaned = strip_ansi_controls(output).replace('\r', "\n");
-    match provider {
-        "codex" => {
-            !crate::delivery::codex_composer::output_has_workspace_trust_prompt(&cleaned)
-                && cleaned.contains('›')
-        }
-        "claude" => {
-            !claude_output_has_bypass_permissions_consent_prompt(&cleaned) && cleaned.contains('❯')
-        }
-        "gemini" => {
-            !gemini_output_has_api_key_prompt(&cleaned)
-                && cleaned.contains("Type your message or @path/to/file")
-        }
-        "antigravity" => antigravity_output_has_ready_prompt(&cleaned),
-        "pi" => pi_output_has_startup_ready_prompt(&cleaned),
-        _ => false,
-    }
-}
-
-/// Provider startup can require an explicit account or workspace decision
-/// before a compose prompt exists. Keep that state visible and prevent queued
-/// delivery from being mistaken for a prompt the provider can receive.
-pub(crate) fn provider_output_requires_startup_action(provider: &str, output: &str) -> bool {
-    let cleaned = strip_ansi_controls(output).to_ascii_lowercase();
-    matches!(provider, "antigravity")
-        && cleaned.contains("do you trust the contents of this project?")
 }
 
 fn antigravity_ready_prompt_footer_line(line: &str) -> bool {
@@ -4389,6 +4333,8 @@ pub(crate) mod test_support;
 
 #[cfg(test)]
 pub(crate) mod tests {
+    include!("control/opencode_startup_tests.rs");
+
     use super::*;
     use crate::state::ActiveAgent;
     use std::collections::HashMap;
@@ -4579,7 +4525,7 @@ pub(crate) mod tests {
         }
     }
 
-    async fn insert_test_agent(
+    pub(super) async fn insert_test_agent(
         state: &AppState,
         session_id: &str,
         session_name: &str,
@@ -4609,7 +4555,7 @@ pub(crate) mod tests {
             .expect("per-agent snapshot reads must not retain the global agent lock");
     }
 
-    async fn install_test_terminal_runtime(
+    pub(super) async fn install_test_terminal_runtime(
         state: &AppState,
         session_id: &str,
         input_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
@@ -4694,42 +4640,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn startup_ready_prompt_accepts_a_full_screen_codex_compose_marker() {
-        assert!(provider_output_has_startup_ready_prompt(
-            "codex",
-            "\u{1b}[1;1H\u{1b}[J\u{1b}[13;1H\u{1b}[1m›\u{1b}[22m Write tests for @filename\u{1b}[?25h",
-        ));
-    }
-
-    #[test]
-    fn startup_ready_prompt_accepts_pi_regular_tui_footer() {
-        assert!(provider_output_has_startup_ready_prompt(
-            "pi",
-            "pi v0.84.2\r\n────────────────\r\nC:\\workspace • Wardian-Pi\r\n0.0%/33k (auto) echo",
-        ));
-        assert!(!provider_output_has_startup_ready_prompt(
-            "pi",
-            "No models available. Use /login to log into a provider.",
-        ));
-    }
-
-    #[test]
-    fn antigravity_startup_trust_prompt_requires_action() {
-        assert!(provider_output_requires_startup_action(
-            "antigravity",
-            "Do you trust the contents of this project?",
-        ));
-        assert!(!provider_output_requires_startup_action(
-            "antigravity",
-            "Welcome to the Antigravity CLI. You are currently not signed in.",
-        ));
-        assert!(!provider_output_requires_startup_action(
-            "codex",
-            "Do you trust the contents of this project?",
-        ));
-    }
-
-    #[test]
     fn gemini_ready_prompt_rejects_api_key_modal_over_composer() {
         assert!(!gemini_output_has_ready_prompt(
             "\r\n╭────────────────────────────────────────────────────────╮\r\n\
@@ -4740,48 +4650,6 @@ pub(crate) mod tests {
              >   Type your message or @path/to/file\r\n\
              workspace (/directory)        Auto (Gemini 3)       2% used\r\n",
         ));
-    }
-
-    #[tokio::test]
-    async fn opencode_control_send_waits_for_open_code_title() {
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "OpenCodeOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "opencode".to_string();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-            *agent.terminal_title.lock().unwrap() = "OpenCode".to_string();
-        }
-        let info = delivery_target_infos(&state, &["agent-1".to_string()])
-            .await
-            .unwrap()
-            .remove(0);
-
-        wait_for_terminal_ready_for_control_send(&state, &info)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn opencode_control_send_accepts_idle_oc_title() {
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "OpenCodeOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "opencode".to_string();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-            *agent.terminal_title.lock().unwrap() = "OC | Self-introduction".to_string();
-        }
-        let info = delivery_target_infos(&state, &["agent-1".to_string()])
-            .await
-            .unwrap()
-            .remove(0);
-
-        wait_for_terminal_ready_for_control_send(&state, &info)
-            .await
-            .unwrap();
     }
 
     #[tokio::test]
@@ -4799,7 +4667,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .push_output(b"\r\n\xe2\x80\xba [Pasted Content 6479 chars]\r\n");
         }
-        record_provider_ready_evidence(&state, "agent-1", ProviderReadyEvidence::ProviderEvent)
+        record_provider_ready_evidence(&state, "agent-1", 0, ProviderReadyEvidence::ProviderEvent)
             .await;
         let info = delivery_target_infos(&state, &["agent-1".to_string()])
             .await
@@ -5942,13 +5810,6 @@ pub(crate) mod tests {
 
         assert_eq!(error.phase, "approval_send_failed");
         assert!(!error.retry_safe);
-    }
-
-    #[test]
-    fn claude_ready_prompt_detector_accepts_visible_prompt_tail() {
-        assert!(claude_output_has_ready_prompt(
-            "ClaudeCode v2.1.150\r\n❯ Try \"write a test\"\r\n────────────────⏵⏵ dontask on · Haiku 4.5"
-        ));
     }
 
     #[test]

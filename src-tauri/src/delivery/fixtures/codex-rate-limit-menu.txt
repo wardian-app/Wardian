@@ -1,0 +1,30 @@
+╭────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.153.4)                     │
+│                                                │
+│ model:     gpt-5.4-mini low   /model to change │
+│ directory: <isolated-workspace> │
+╰────────────────────────────────────────────────╯
+
+  Tip: Use /feedback to send logs to the maintainers when something looks off.
+
+• You have 2 usage limit resets available. Run /usage to use one.
+
+⚠ Heads up, you have less than 10% of your weekly limit left. Run /status for a breakdown.
+
+
+› No tools. What is 19147 plus seven? Reply only with the decimal number.
+
+
+• Session renamed to No tools. What is 19147 plus seven?. To resume this session run codex resume, then select No tools. What is 19147 plus seven? (<native-session>)
+
+• 19154
+ 
+ 
+  Approaching rate limits
+  Switch to gpt-5.6-luna for lower credit usage?
+ 
+› 1. Switch to gpt-5.6-luna                 Fast and affordable agentic coding model.
+  2. Keep current model
+  3. Keep current model (never show again)  Hide future rate limit reminders about switching models.
+ 
+  Press enter to confirm or esc to go back                                                                                                                                                    

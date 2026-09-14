@@ -3965,7 +3965,7 @@ input.on('line', (line) => {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn invalidate_premise_is_acknowledged_inside_the_active_pi_turn() {
+    async fn invalidate_premise_is_acknowledged_inside_the_active_pi_protocol_actor() {
         let _lock = crate::utils::wardian_test_env_lock_async().await;
         let temp = tempfile::tempdir().expect("native broker tempdir");
         wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
@@ -4017,12 +4017,33 @@ input.on('line', (line) => {
             workspace: temp.path().to_path_buf(),
             config,
         };
+        // The public Pi broker route is intentionally TUI-bridge-only above.
+        // Drive the retained Pi protocol actor directly here so its active-turn
+        // invalidation lifecycle remains covered without restoring RPC fallback.
+        let capabilities = NativeProviderProtocol::PiRpc.capabilities("fixture");
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let actor = tokio::spawn(run_session_actor(
+            Arc::clone(&broker),
+            spec,
+            NativeProviderProtocol::PiRpc,
+            capabilities,
+            command_rx,
+        ));
+
         let mut first = test_admission("interaction-active", "active-key", "start work");
         first.provider = "pi".to_string();
         let first = broker.admit(first).await.expect("admit active turn");
-        broker
-            .dispatch(spec.clone(), first)
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::Submit {
+                record: Box::new(first),
+                reply: reply_tx,
+            })
             .await
+            .expect("send active turn to retained actor");
+        reply_rx
+            .await
+            .expect("active turn actor reply")
             .expect("active turn started");
 
         let mut correction = test_admission(
@@ -4033,9 +4054,17 @@ input.on('line', (line) => {
         correction.provider = "pi".to_string();
         correction.operation = NativeMessageOperation::InvalidatePremise;
         let correction = broker.admit(correction).await.expect("admit correction");
-        let receipt = broker
-            .dispatch(spec, correction)
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::Submit {
+                record: Box::new(correction),
+                reply: reply_tx,
+            })
             .await
+            .expect("send correction to retained actor");
+        let receipt = reply_rx
+            .await
+            .expect("correction actor reply")
             .expect("provider accepted correction");
         assert_eq!(receipt.record.phase, NativeDeliveryPhase::ProviderAccepted);
         assert_eq!(
@@ -4064,7 +4093,11 @@ input.on('line', (line) => {
                 .phase,
             NativeDeliveryPhase::Completed
         );
-        broker.dispose_agent("agent-native-test").await.unwrap();
+        command_tx
+            .send(SessionCommand::Shutdown)
+            .await
+            .expect("stop retained actor");
+        actor.await.expect("retained actor exit");
     }
 
     #[tokio::test(flavor = "current_thread")]

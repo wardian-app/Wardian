@@ -283,8 +283,36 @@ pub fn merge_current_capture(
     current: Vec<AgentChatEvent>,
     mut archived: Vec<AgentChatEvent>,
 ) -> io::Result<Vec<AgentChatEvent>> {
-    refresh_events(&mut archived, &current)?;
-    for mut event in current {
+    let mut unmatched_current = Vec::with_capacity(current.len());
+    let mut matched_generated = std::collections::HashSet::new();
+    let mut archived_native_duplicates = BTreeSet::new();
+    for event in current {
+        let generated = matching_opencode_generated_input(&archived, &event)
+            .filter(|index| matched_generated.insert(*index));
+        if let Some(generated) = generated {
+            let mut canonical = archived[generated].clone();
+            enrich(&mut canonical, &event)?;
+            archived[generated] = canonical;
+            // The normal delivery path archives the generated local echo
+            // first, then appends the native DB projection during its first
+            // capture. Replaying that archive therefore contains both rows;
+            // remove only the already-archived native observation that is
+            // bound to this exact current event. The generated row remains
+            // the canonical identity after enrichment.
+            for (index, archived_event) in archived.iter().enumerate() {
+                if index != generated && same_observation(archived_event, &event) {
+                    archived_native_duplicates.insert(index);
+                }
+            }
+        } else {
+            unmatched_current.push(event);
+        }
+    }
+    for index in archived_native_duplicates.into_iter().rev() {
+        archived.remove(index);
+    }
+    refresh_events(&mut archived, &unmatched_current)?;
+    for mut event in unmatched_current {
         if !archived.iter().any(|old| {
             same_observation(old, &event)
                 || (old.metadata["provider_log"] != true
@@ -305,6 +333,61 @@ pub fn merge_current_capture(
         event.sequence = Some(index as u64 + 1);
     }
     Ok(archived)
+}
+
+/// Reconcile the live OpenCode database projection with its already archived
+/// generated input when archive logging is disabled. Text alone is not an
+/// identity key: the generated marker, request ownership, provider session,
+/// source path, and a unique candidate are all required. Ambiguous repeated
+/// prompts therefore remain separate observations.
+fn matching_opencode_generated_input(
+    archived: &[AgentChatEvent],
+    native: &AgentChatEvent,
+) -> Option<usize> {
+    if native.provider != "opencode"
+        || native.source.as_deref() != Some("opencode_db")
+        || native.metadata["provider_log"] != true
+        || native.kind != AgentChatEventKind::Message
+        || native.role != Some(AgentChatRole::User)
+        || matches!(
+            string(native, "input_origin"),
+            Some("provider_internal" | "context_injection")
+        )
+        || string(native, "opencode_session_id").is_none()
+        || string(native, "source_path").is_none()
+    {
+        return None;
+    }
+    let native_text = native.text.as_deref()?;
+    if native_text.is_empty() {
+        return None;
+    }
+    let native_session = string(native, "opencode_session_id")?;
+    let provider_source_key = format!("opencode:session:{native_session}");
+    let matches: Vec<usize> = archived
+        .iter()
+        .enumerate()
+        .filter_map(|(index, generated)| {
+            (generated.metadata["generated"] == true
+                && generated.session_id == native.session_id
+                && generated.provider == "opencode"
+                && generated.kind == AgentChatEventKind::Message
+                && generated.role == Some(AgentChatRole::User)
+                && generated.turn_id.as_deref() == Some(provider_source_key.as_str())
+                && matches!(
+                    string(generated, "input_origin"),
+                    Some("human_input" | "agent_input")
+                )
+                && string(generated, "input_purpose") == Some("request")
+                && string(generated, "request_root_id")
+                    .is_some_and(|root| root.starts_with("wardian:input:"))
+                && generated.text.as_deref().is_some_and(|generated_text| {
+                    generated_text.as_bytes() == native_text.as_bytes()
+                }))
+            .then_some(index)
+        })
+        .collect();
+    (matches.len() == 1).then(|| matches[0])
 }
 
 pub(super) fn refresh_records(

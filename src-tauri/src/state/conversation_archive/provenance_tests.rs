@@ -1,5 +1,5 @@
 use super::*;
-use wardian_core::models::chat::{AgentChatEventKind, AgentChatRole};
+use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatRole};
 
 fn event(id: &str, provider: &str, root: Option<&str>) -> AgentChatEvent {
     AgentChatEvent {
@@ -78,6 +78,116 @@ fn isolate() -> (tokio::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
     let temp = tempfile::tempdir().unwrap();
     std::env::set_var("WARDIAN_HOME", temp.path());
     (guard, temp)
+}
+
+fn opencode_local_echo_fixture() -> (AgentChatEvent, AgentChatEvent) {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/opencode-local-echo.json")).unwrap();
+    (
+        serde_json::from_value(fixture["generated"].clone()).unwrap(),
+        serde_json::from_value(fixture["native"].clone()).unwrap(),
+    )
+}
+
+#[test]
+fn opencode_native_projection_reconciles_unique_generated_local_echo() {
+    let (_guard, _temp) = isolate();
+    let (generated, native) = opencode_local_echo_fixture();
+
+    let merged = provenance::merge_current_capture(vec![native], vec![generated.clone()]).unwrap();
+
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].id, generated.id);
+    assert_eq!(merged[0].source.as_deref(), Some("opencode_db"));
+    assert_eq!(merged[0].metadata["provider_log"], true);
+    assert_eq!(
+        merged[0].metadata["opencode_session_id"],
+        "opencode-native-session-1"
+    );
+    assert_eq!(merged[0].turn_id.as_deref(), Some("opencode-message-1"));
+    assert_eq!(merged[0].metadata["legacy_event_ids"][0], native_event_id());
+}
+
+#[test]
+fn opencode_reconciles_when_native_projection_is_already_archived() {
+    let (_guard, _temp) = isolate();
+    let (generated, native) = opencode_local_echo_fixture();
+
+    let merged = provenance::merge_current_capture(
+        vec![native.clone()],
+        vec![generated.clone(), native.clone()],
+    )
+    .unwrap();
+
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].id, generated.id);
+    assert_eq!(merged[0].source.as_deref(), Some("opencode_db"));
+    assert_eq!(merged[0].metadata["provider_log"], true);
+    assert_eq!(merged[0].metadata["legacy_event_ids"][0], native_event_id());
+}
+
+fn native_event_id() -> &'static str {
+    "agent-opencode-fixture:0000000000000001:opencode_db:part-1"
+}
+
+#[test]
+fn opencode_distinct_actual_turns_with_identical_text_remain_separate() {
+    let (_guard, _temp) = isolate();
+    let (generated, native) = opencode_local_echo_fixture();
+    let mut second_native = native.clone();
+    second_native.id = "agent-opencode-fixture:0000000000000002:opencode_db:part-2".into();
+    second_native.turn_id = Some("opencode-message-2".into());
+    second_native.created_at = Some("2026-09-13T17:20:35.213Z".into());
+    second_native.metadata["part_id"] = serde_json::json!("part-2");
+    second_native.metadata["request_root_id"] = serde_json::json!("opencode-message-2");
+    let merged =
+        provenance::merge_current_capture(vec![native, second_native], vec![generated]).unwrap();
+
+    assert_eq!(merged.len(), 2);
+    assert!(merged.iter().any(|event| {
+        event.metadata["legacy_event_ids"]
+            .as_array()
+            .is_some_and(|ids| ids.iter().any(|id| id == native_event_id()))
+    }));
+    assert!(merged
+        .iter()
+        .any(|event| event.id.ends_with("opencode_db:part-2")));
+}
+
+#[test]
+fn opencode_archived_duplicate_cleanup_preserves_distinct_actual_turn() {
+    let (_guard, _temp) = isolate();
+    let (generated, native) = opencode_local_echo_fixture();
+    let mut second_native = native.clone();
+    second_native.id = "agent-opencode-fixture:0000000000000002:opencode_db:part-2".into();
+    second_native.turn_id = Some("opencode-message-2".into());
+    second_native.created_at = Some("2026-09-13T17:20:35.213Z".into());
+    second_native.metadata["part_id"] = serde_json::json!("part-2");
+    second_native.metadata["request_root_id"] = serde_json::json!("opencode-message-2");
+
+    let merged = provenance::merge_current_capture(
+        vec![native.clone(), second_native.clone()],
+        vec![generated.clone(), native],
+    )
+    .unwrap();
+
+    assert_eq!(merged.len(), 2);
+    assert!(merged.iter().any(|event| event.id == generated.id));
+    assert!(merged.iter().any(|event| event.id == second_native.id));
+}
+
+#[test]
+fn opencode_whitespace_distinct_inputs_remain_separate() {
+    let (_guard, _temp) = isolate();
+    let (mut generated, native) = opencode_local_echo_fixture();
+    generated.text = Some(" SANITIZED_OPEN_CODE_PROMPT".into());
+
+    let merged =
+        provenance::merge_current_capture(vec![native.clone()], vec![generated.clone()]).unwrap();
+
+    assert_eq!(merged.len(), 2);
+    assert!(merged.iter().any(|event| event.id == generated.id));
+    assert!(merged.iter().any(|event| event.id == native.id));
 }
 
 #[test]
