@@ -289,6 +289,27 @@ directory through `--session-dir`; fresh launches use `--session-id` and resumed
 launches use `--session`. Wardian watches only the JSONL whose header confirms
 that exact ID.
 
+Interactive delivery receipts use a launch-owned extension supplied through Pi's
+supported `--extension` argument. It observes actual native user messages before
+Pi flushes its transcript, so a slow first assistant response does not delay
+input acceptance. A receipt matches the submitted plain text and the current
+launch, provider session, and terminal generation. It confirms input acceptance,
+not model completion. User extensions remain enabled.
+
+Wardian serializes managed submissions. Identical text entered manually at the
+same time remains ambiguous; avoid concurrent manual input while waiting for a
+managed receipt. Commands, extension-handled input, and transformed text cannot
+stand in for the submitted user message. Missing extension readiness rejects
+managed input before writing it. An unconfirmed submission remains uncertain
+after ten seconds and is never automatically replayed.
+
+The bounded receipt stream lives in a new `pi/receipt-<random>/` directory for
+each launch. It contains session identity, sequence numbers, and content hashes,
+not prompt bodies. Extension reload, session changes, or exhausted stream
+capacity require restarting that runtime for further managed receipts. Wardian
+removes the launch files only after the owned process exits and its watcher
+joins; uncertain cleanup retains them. Native JSONL remains the transcript source.
+
 Visible agents use Pi's `regular` TUI mode so xterm retains terminal scrollback.
 Automation execution uses `--mode json` and treats `agent_end` as definitive turn
 completion. Model discovery uses `pi --list-models`; models that advertise

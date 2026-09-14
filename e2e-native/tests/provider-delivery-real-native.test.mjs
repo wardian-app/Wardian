@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
 import {
   messageCli,
   correlatedReply,
@@ -83,6 +84,9 @@ const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
 const nativeProviders = parseCommaList(process.env.WARDIAN_E2E_DELIVERY_NATIVE_PROVIDERS, []);
 
 function buildCli(harness) {
+  if (skipNativeBuild) {
+    return freezeBuiltCliForRun(harness);
+  }
   const result = spawnSync(
     "cargo",
     ["build", "-p", "wardian-cli", "--bin", "wardian-cli"],
@@ -193,6 +197,347 @@ async function readDebugTail(harness) {
   } catch {
     return "No wardian_debug.log found.";
   }
+}
+
+const PI_FAILURE_MAX_FILES = 8;
+const PI_FAILURE_MAX_FILE_BYTES = 2 * 1024 * 1024;
+const PI_FAILURE_MAX_TOTAL_BYTES = 8 * 1024 * 1024;
+const PI_FAILURE_MAX_HEADER_BYTES = 16 * 1024;
+const PI_SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function assertPiSessionId(value) {
+  if (typeof value !== "string" || !PI_SESSION_ID_PATTERN.test(value.trim())) {
+    throw new Error("Pi failure evidence requires a UUID Wardian session ID");
+  }
+  return value.trim();
+}
+
+function comparablePath(value) {
+  const resolved = path.resolve(value);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function pathIsContained(root, candidate) {
+  const relative = path.relative(comparablePath(root), comparablePath(candidate));
+  return relative === "" ||
+    (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
+}
+
+async function assertNoPiReparseComponents(candidate, label) {
+  const absolute = path.resolve(candidate);
+  let current = path.parse(absolute).root;
+  const rootStat = await fs.lstat(current);
+  if (rootStat.isSymbolicLink()) {
+    throw new Error(`${label} contains a symlink/reparse root: ${current}`);
+  }
+  for (const component of absolute.slice(current.length).split(/[\\/]+/).filter(Boolean)) {
+    current = path.join(current, component);
+    const stat = await fs.lstat(current);
+    if (stat.isSymbolicLink()) {
+      throw new Error(`${label} contains a symlink/reparse component: ${current}`);
+    }
+    const real = await fs.realpath(current);
+    if (comparablePath(real) !== comparablePath(current)) {
+      throw new Error(`${label} contains a junction/reparse component: ${current}`);
+    }
+  }
+  return fs.realpath(absolute);
+}
+
+async function assertSafePiContainedPath(root, candidate, label, allowMissing = false) {
+  const rootReal = await assertNoPiReparseComponents(root, `${label} root`);
+  const candidateAbsolute = path.resolve(candidate);
+  if (!pathIsContained(rootReal, candidateAbsolute)) {
+    throw new Error(`${label} escapes its owned root`);
+  }
+
+  let candidateReal;
+  try {
+    candidateReal = await assertNoPiReparseComponents(candidateAbsolute, label);
+  } catch (error) {
+    if (!allowMissing || error?.code !== "ENOENT") {
+      throw error;
+    }
+    candidateReal = await assertNoPiReparseComponents(path.dirname(candidateAbsolute), `${label} parent`);
+  }
+  if (!pathIsContained(rootReal, candidateReal)) {
+    throw new Error(`${label} resolves outside its owned root`);
+  }
+  return candidateReal;
+}
+
+async function ensureSafePiDirectory(root, candidate, label) {
+  const rootReal = await assertNoPiReparseComponents(root, `${label} root`);
+  const candidateAbsolute = path.resolve(candidate);
+  if (!pathIsContained(rootReal, candidateAbsolute)) {
+    throw new Error(`${label} escapes its owned root`);
+  }
+
+  let current = rootReal;
+  const relative = path.relative(rootReal, candidateAbsolute);
+  for (const component of relative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, component);
+    try {
+      await assertNoPiReparseComponents(current, label);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      await fs.mkdir(current);
+      await assertNoPiReparseComponents(current, label);
+    }
+    if (!(await fs.lstat(current)).isDirectory()) {
+      throw new Error(`${label} is not a directory: ${current}`);
+    }
+  }
+  return fs.realpath(candidateAbsolute);
+}
+
+async function readPiBoundedBytes(filePath, maxBytes, label) {
+  const safePath = await assertNoPiReparseComponents(filePath, label);
+  const handle = await fs.open(safePath, "r");
+  try {
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const result = await handle.read(buffer, offset, buffer.length - offset, null);
+      if (result.bytesRead === 0) break;
+      offset += result.bytesRead;
+    }
+    if (offset > maxBytes) {
+      throw new Error(`${label} exceeds its ${maxBytes}-byte bound`);
+    }
+    return buffer.subarray(0, offset);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readPiBoundedHeader(filePath) {
+  const safePath = await assertNoPiReparseComponents(filePath, "Pi session file");
+  const handle = await fs.open(safePath, "r");
+  const chunks = [];
+  let total = 0;
+  try {
+    while (total <= PI_FAILURE_MAX_HEADER_BYTES) {
+      const buffer = Buffer.alloc(Math.min(4096, PI_FAILURE_MAX_HEADER_BYTES - total + 1));
+      const result = await handle.read(buffer, 0, buffer.length, null);
+      if (result.bytesRead === 0) return Buffer.concat(chunks);
+      const chunk = buffer.subarray(0, result.bytesRead);
+      const newline = chunk.indexOf(0x0a);
+      if (newline >= 0) {
+        const header = chunk.subarray(0, newline + 1);
+        if (total + header.length > PI_FAILURE_MAX_HEADER_BYTES) {
+          throw new Error(`Pi session header exceeds its ${PI_FAILURE_MAX_HEADER_BYTES}-byte bound`);
+        }
+        chunks.push(header);
+        return Buffer.concat(chunks);
+      }
+      chunks.push(chunk);
+      total += chunk.length;
+      if (total > PI_FAILURE_MAX_HEADER_BYTES) {
+        throw new Error(`Pi session header exceeds its ${PI_FAILURE_MAX_HEADER_BYTES}-byte bound`);
+      }
+    }
+  } finally {
+    await handle.close();
+  }
+  throw new Error(`Pi session header exceeds its ${PI_FAILURE_MAX_HEADER_BYTES}-byte bound`);
+}
+
+async function copyPiSessionFiles(sourceRoot, evidenceSessionsRoot, evidenceHeadersRoot, expectedSessionIds) {
+  const entries = (await fs.readdir(sourceRoot, { withFileTypes: true }))
+    .filter((entry) => entry.name.toLowerCase().endsWith(".jsonl"))
+    .sort((left, right) => left.name.localeCompare(right.name));
+  if (entries.length > PI_FAILURE_MAX_FILES) {
+    throw new Error(`Pi session file count exceeds the maximum of ${PI_FAILURE_MAX_FILES}`);
+  }
+
+  const files = [];
+  let totalBytes = 0;
+  for (const entry of entries) {
+    const sourcePath = await assertSafePiContainedPath(
+      sourceRoot,
+      path.join(sourceRoot, entry.name),
+      "Pi session file",
+    );
+    const header = await readPiBoundedHeader(sourcePath);
+    const remaining = PI_FAILURE_MAX_TOTAL_BYTES - totalBytes;
+    const content = await readPiBoundedBytes(
+      sourcePath,
+      Math.min(PI_FAILURE_MAX_FILE_BYTES, remaining),
+      remaining < PI_FAILURE_MAX_FILE_BYTES ? "Pi session aggregate" : "Pi session file",
+    );
+    if (content.length > PI_FAILURE_MAX_FILE_BYTES) {
+      throw new Error(`Pi session file exceeds its ${PI_FAILURE_MAX_FILE_BYTES}-byte bound`);
+    }
+    if (content.length > remaining) {
+      throw new Error(`Pi session aggregate exceeds its ${PI_FAILURE_MAX_TOTAL_BYTES}-byte bound`);
+    }
+    totalBytes += content.length;
+    const copiedPath = path.join(evidenceSessionsRoot, entry.name);
+    const headerPath = path.join(evidenceHeadersRoot, `${entry.name}.header`);
+    await assertSafePiContainedPath(evidenceSessionsRoot, copiedPath, "Pi evidence session copy", true);
+    await assertSafePiContainedPath(evidenceHeadersRoot, headerPath, "Pi evidence header copy", true);
+    await fs.writeFile(copiedPath, content, { flag: "wx" });
+    await fs.writeFile(headerPath, header, { flag: "wx" });
+    let parsedHeader = null;
+    try {
+      parsedHeader = JSON.parse(header.toString("utf8").trim());
+    } catch {
+      // Preserve exact header bytes for diagnosis even when parsing fails.
+    }
+    files.push({
+      name: entry.name,
+      bytes: content.byteLength,
+      sha256: createHash("sha256").update(content).digest("hex"),
+      header_sha256: createHash("sha256").update(header).digest("hex"),
+      header_type: typeof parsedHeader?.type === "string" ? parsedHeader.type : null,
+      header_id: typeof parsedHeader?.id === "string" ? parsedHeader.id : null,
+      expected_id_match: expectedSessionIds.includes(parsedHeader?.id),
+    });
+  }
+  return { files, totalBytes };
+}
+
+function piConfigBindingProjection(config) {
+  const allowed = [
+    "session_id",
+    "provider",
+    "model",
+    "session_name",
+    "agent_class",
+    "folder",
+    "git_worktree_folder",
+    "resume_session",
+    "fresh_provider_session_id",
+    "is_off",
+    "session_persistence",
+  ];
+  return Object.fromEntries(allowed
+    .filter((key) => Object.prototype.hasOwnProperty.call(config ?? {}, key))
+    .map((key) => [key, config[key]]));
+}
+
+async function writePiEvidenceJson(root, name, value) {
+  const target = path.join(root, name);
+  await assertSafePiContainedPath(root, target, `Pi evidence ${name}`, true);
+  await fs.writeFile(target, JSON.stringify(value, null, 2), { flag: "wx" });
+}
+
+async function capturePiFailureEvidence(driver, harness, agent, providerError) {
+  const sessionId = assertPiSessionId(agent?.session_id);
+  const ownedRunHome = await assertNoPiReparseComponents(harness.isolatedHome, "Pi owned run home");
+  const repoRoot = await assertNoPiReparseComponents(harness.repoRoot, "Pi evidence repository root");
+  const evidenceRoot = path.join(
+    harness.repoRoot,
+    ".task",
+    "combined-pi-native-acceptance",
+    "1244-failure-evidence",
+    `pi-${Date.now()}-${sessionId}`,
+  );
+  const safeEvidenceRoot = await ensureSafePiDirectory(repoRoot, evidenceRoot, "Pi evidence root");
+  const evidenceSessionsRoot = await ensureSafePiDirectory(
+    safeEvidenceRoot,
+    path.join(safeEvidenceRoot, "sessions"),
+    "Pi evidence sessions root",
+  );
+  const evidenceHeadersRoot = await ensureSafePiDirectory(
+    safeEvidenceRoot,
+    path.join(safeEvidenceRoot, "headers"),
+    "Pi evidence headers root",
+  );
+
+  const safeAgentConfig = piConfigBindingProjection(agent);
+  await writePiEvidenceJson(safeEvidenceRoot, "agent-config.json", safeAgentConfig);
+
+  let persistedConfig = null;
+  try {
+    const state = JSON.parse(await fs.readFile(
+      path.join(ownedRunHome, "settings", "state.json"),
+      "utf8",
+    ));
+    persistedConfig = state.find((candidate) => candidate.session_id === sessionId) ?? null;
+  } catch {
+    // The runtime may atomically replace this snapshot during startup.
+  }
+  await writePiEvidenceJson(
+    safeEvidenceRoot,
+    "persisted-agent-config.json",
+    piConfigBindingProjection(persistedConfig),
+  );
+
+  let cachedMetrics = null;
+  let cachedMetricsError = null;
+  try {
+    const metrics = await invokeTauri(driver, "list_agent_metrics");
+    const metric = Array.isArray(metrics)
+      ? metrics.find((candidate) => candidate.session_id === sessionId)
+      : null;
+    if (metric) {
+      cachedMetrics = {
+        session_id: metric.session_id ?? null,
+        provider: metric.provider ?? null,
+        status: metric.status ?? null,
+        log_path: metric.log_path ?? null,
+      };
+    }
+  } catch (error) {
+    cachedMetricsError = String(error);
+  }
+  await writePiEvidenceJson(
+    safeEvidenceRoot,
+    "cached-metrics.json",
+    { metrics: cachedMetrics, error: cachedMetricsError },
+  );
+
+  const expectedSessionIds = [agent.resume_session, agent.fresh_provider_session_id]
+    .filter((value) => typeof value === "string" && value.trim())
+    .map((value) => value.trim());
+  const sourceSessionRoot = path.join(ownedRunHome, "agents", sessionId, "pi", "sessions");
+  let files = [];
+  let totalBytes = 0;
+  let sessionReadError = null;
+  let sourceSessionRootReal = null;
+  try {
+    sourceSessionRootReal = await assertSafePiContainedPath(
+      ownedRunHome,
+      sourceSessionRoot,
+      "Pi source session root",
+    );
+    ({ files, totalBytes } = await copyPiSessionFiles(
+      sourceSessionRootReal,
+      evidenceSessionsRoot,
+      evidenceHeadersRoot,
+      expectedSessionIds,
+    ));
+  } catch (error) {
+    sessionReadError = String(error);
+  }
+
+  const manifest = {
+    status: sessionReadError ? "session-read-failed" : "captured-before-kill",
+    provider: "pi",
+    wardian_session_id: sessionId,
+    owned_run_home: ownedRunHome,
+    source_session_dir: sourceSessionRoot,
+    source_session_dir_realpath: sourceSessionRootReal,
+    evidence_root: safeEvidenceRoot,
+    expected_session_ids: expectedSessionIds,
+    limits: {
+      max_files: PI_FAILURE_MAX_FILES,
+      max_file_bytes: PI_FAILURE_MAX_FILE_BYTES,
+      max_total_bytes: PI_FAILURE_MAX_TOTAL_BYTES,
+      max_header_bytes: PI_FAILURE_MAX_HEADER_BYTES,
+    },
+    files,
+    total_bytes: totalBytes,
+    session_read_error: sessionReadError,
+    failure: {
+      name: providerError?.name ?? "Error",
+      message: String(providerError?.message ?? providerError),
+    },
+  };
+  await writePiEvidenceJson(safeEvidenceRoot, "manifest.json", manifest);
+  return { status: manifest.status, path: safeEvidenceRoot, files: files.length };
 }
 
 async function spawnRealProviderAgent(driver, provider, sessionName, folder) {
@@ -647,6 +992,100 @@ test("transcript timeout diagnostics retain incomplete provider metadata without
   assert.equal(Object.hasOwn(classified, "message"), false);
 });
 
+function piSessionBytes(sessionId, totalBytes = 256) {
+  const header = Buffer.from(JSON.stringify({ type: "session", id: sessionId }) + "\n");
+  return Buffer.concat([header, Buffer.alloc(Math.max(0, totalBytes - header.length), 0x78)]);
+}
+
+test("Pi failure evidence rejects escape, reparse, and bounded-file violations", async () => {
+  const root = await fs.mkdtemp(path.join(tmpdir(), "wardian-pi-capture-"));
+  try {
+    const ownedRoot = path.join(root, "owned");
+    const sourceRoot = path.join(ownedRoot, "agents", "00000000-0000-4000-8000-000000000001", "pi", "sessions");
+    const outsideRoot = path.join(root, "outside");
+    await fs.mkdir(sourceRoot, { recursive: true });
+    await fs.mkdir(outsideRoot, { recursive: true });
+    assert.throws(() => assertPiSessionId("escape"), /UUID Wardian session ID/);
+    await assert.rejects(
+      assertSafePiContainedPath(ownedRoot, outsideRoot, "Pi escape"),
+      /escapes its owned root/,
+    );
+
+    const junctionTarget = path.join(outsideRoot, "sessions-target");
+    await fs.mkdir(junctionTarget, { recursive: true });
+    const junctionPath = path.join(ownedRoot, "linked-sessions");
+    await fs.symlink(junctionTarget, junctionPath, "junction");
+    await assert.rejects(
+      assertSafePiContainedPath(ownedRoot, path.join(junctionPath, "file.jsonl"), "Pi junction escape"),
+      /symlink\/reparse|junction\/reparse|reparse component/,
+    );
+
+    const makeCase = async (name, files) => {
+      const caseRoot = path.join(root, name);
+      const source = path.join(caseRoot, "source");
+      const evidenceSessions = path.join(caseRoot, "evidence", "sessions");
+      const evidenceHeaders = path.join(caseRoot, "evidence", "headers");
+      await fs.mkdir(source, { recursive: true });
+      await fs.mkdir(evidenceSessions, { recursive: true });
+      await fs.mkdir(evidenceHeaders, { recursive: true });
+      for (const [fileName, content] of files) {
+        await fs.writeFile(path.join(source, fileName), content);
+      }
+      return { source, evidenceSessions, evidenceHeaders };
+    };
+    const expected = ["00000000-0000-4000-8000-000000000001"];
+
+    const reparseCase = await makeCase("reparse-file", []);
+    const reparseTarget = path.join(outsideRoot, "file-target");
+    await fs.mkdir(reparseTarget, { recursive: true });
+    await fs.writeFile(path.join(reparseTarget, "session.jsonl"), piSessionBytes(expected[0]));
+    await fs.symlink(reparseTarget, path.join(reparseCase.source, "linked.jsonl"), "junction");
+    await assert.rejects(
+      copyPiSessionFiles(reparseCase.source, reparseCase.evidenceSessions, reparseCase.evidenceHeaders, expected),
+      /symlink\/reparse|junction\/reparse|reparse component/,
+    );
+
+    const headerCase = await makeCase("oversized-header", [[
+      "oversized.jsonl",
+      Buffer.concat([Buffer.alloc(PI_FAILURE_MAX_HEADER_BYTES, 0x61), Buffer.from("\n")]),
+    ]]);
+    await assert.rejects(
+      copyPiSessionFiles(headerCase.source, headerCase.evidenceSessions, headerCase.evidenceHeaders, expected),
+      /header exceeds/,
+    );
+
+    const fileCase = await makeCase("oversized-file", [[
+      "oversized.jsonl",
+      piSessionBytes(expected[0], PI_FAILURE_MAX_FILE_BYTES + 1),
+    ]]);
+    await assert.rejects(
+      copyPiSessionFiles(fileCase.source, fileCase.evidenceSessions, fileCase.evidenceHeaders, expected),
+      /file exceeds/,
+    );
+
+    const countCase = await makeCase("too-many-files", Array.from({ length: PI_FAILURE_MAX_FILES + 1 }, (_, index) => [
+      `session-${index}.jsonl`,
+      piSessionBytes(expected[0]),
+    ]));
+    await assert.rejects(
+      copyPiSessionFiles(countCase.source, countCase.evidenceSessions, countCase.evidenceHeaders, expected),
+      /file count exceeds the maximum of 8/,
+    );
+
+    const aggregateFileBytes = Math.floor(PI_FAILURE_MAX_TOTAL_BYTES / 5) + 1;
+    const aggregateCase = await makeCase("too-many-bytes", Array.from({ length: 5 }, (_, index) => [
+      `session-${index}.jsonl`,
+      piSessionBytes(expected[0], aggregateFileBytes),
+    ]));
+    await assert.rejects(
+      copyPiSessionFiles(aggregateCase.source, aggregateCase.evidenceSessions, aggregateCase.evidenceHeaders, expected),
+      /aggregate exceeds/,
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 async function waitForFreshTranscript(driver, sessionId, provider, freshMarker) {
   return await driver.wait(async () => {
     const events = await invokeTauri(driver, "load_agent_chat_transcript", { sessionId });
@@ -838,6 +1277,7 @@ test("human composer delivery uses actual providers; not peer messaging", { time
     let agent = null;
     let providerError = null;
     let providerTerminalTail = null;
+    let piFailureEvidence = null;
     try {
       agent = await spawnRealProviderAgent(session.driver, provider, agentName, workspacePath);
       if (provider === "antigravity" && await antigravityStartupNeedsAction(cliPath, harness, agentName)) {
@@ -912,6 +1352,21 @@ test("human composer delivery uses actual providers; not peer messaging", { time
       }
     } finally {
       if (agent?.session_id) {
+        if (provider === "pi" && providerError) {
+          try {
+            piFailureEvidence = await capturePiFailureEvidence(
+              session.driver,
+              harness,
+              agent,
+              providerError,
+            );
+          } catch (captureError) {
+            piFailureEvidence = {
+              status: "capture-failed",
+              error: String(captureError),
+            };
+          }
+        }
         try {
           await killRealProviderAgent(session.driver, agent.session_id);
         } catch (cleanupError) {
@@ -929,7 +1384,8 @@ test("human composer delivery uses actual providers; not peer messaging", { time
       assert.fail(
         `Real provider delivery failed for ${provider}: ${providerError.message}\n\n` +
           `Model: ${providerModel(provider) ?? "<provider default>"}\n` +
-          `Custom args: ${providerCustomArgs(provider) ?? "<none>"}\n` +
+        `Custom args: ${providerCustomArgs(provider) ?? "<none>"}\n` +
+          `--- Pi failure evidence ---\n${piFailureEvidence ? JSON.stringify(piFailureEvidence) : "<not-applicable>"}\n` +
           `--- Provider terminal tail ---\n${providerTerminalTail ?? "<unavailable>"}\n` +
           `--- Wardian debug tail ---\n${debugTail}`,
       );
