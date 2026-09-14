@@ -350,8 +350,11 @@ pub fn merge_current_capture(
 /// Reconcile the live OpenCode database projection with its already archived
 /// generated input when archive logging is disabled. Text alone is not an
 /// identity key: the generated marker, request ownership, provider session,
-/// source path, and a unique candidate are all required. Ambiguous repeated
-/// prompts therefore remain separate observations.
+/// source path, and a unique candidate are all required. A generated input
+/// may be unbound when the authoritative provider source was unavailable at
+/// delivery time; it is eligible for late binding only when that candidate is
+/// otherwise uniquely owned by the native session. Ambiguous repeated prompts
+/// therefore remain separate observations.
 fn matching_opencode_generated_input(
     archived: &[AgentChatEvent],
     native: &AgentChatEvent,
@@ -380,12 +383,17 @@ fn matching_opencode_generated_input(
         .iter()
         .enumerate()
         .filter_map(|(index, generated)| {
+            let has_expected_binding =
+                generated.turn_id.as_deref() == Some(provider_source_key.as_str());
+            let is_unbound_broker_echo = generated.turn_id.is_none()
+                && generated.source.is_none()
+                && generated.metadata["provider_log"] != true;
             (generated.metadata["generated"] == true
                 && generated.session_id == native.session_id
                 && generated.provider == "opencode"
                 && generated.kind == AgentChatEventKind::Message
                 && generated.role == Some(AgentChatRole::User)
-                && generated.turn_id.as_deref() == Some(provider_source_key.as_str())
+                && (has_expected_binding || is_unbound_broker_echo)
                 && matches!(
                     string(generated, "input_origin"),
                     Some("human_input" | "agent_input")

@@ -109,6 +109,25 @@ fn opencode_native_projection_reconciles_unique_generated_local_echo() {
 }
 
 #[test]
+fn opencode_unbound_generated_local_echo_reconciles_with_authoritative_native_session() {
+    let (_guard, _temp) = isolate();
+    let (mut generated, native) = opencode_local_echo_fixture();
+    generated.turn_id = None;
+
+    let merged = provenance::merge_current_capture(vec![native], vec![generated.clone()]).unwrap();
+
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].id, generated.id);
+    assert_eq!(merged[0].source.as_deref(), Some("opencode_db"));
+    assert_eq!(merged[0].metadata["provider_log"], true);
+    assert_eq!(
+        merged[0].metadata["opencode_session_id"],
+        "opencode-native-session-1"
+    );
+    assert_eq!(merged[0].turn_id.as_deref(), Some("opencode-message-1"));
+}
+
+#[test]
 fn opencode_reconciles_when_native_projection_is_already_archived() {
     let (_guard, _temp) = isolate();
     let (generated, native) = opencode_local_echo_fixture();
@@ -187,6 +206,30 @@ fn opencode_whitespace_distinct_inputs_remain_separate() {
 
     assert_eq!(merged.len(), 2);
     assert!(merged.iter().any(|event| event.id == generated.id));
+    assert!(merged.iter().any(|event| event.id == native.id));
+}
+
+#[test]
+fn opencode_ambiguous_unbound_generated_echoes_remain_separate() {
+    let (_guard, _temp) = isolate();
+    let (mut generated, native) = opencode_local_echo_fixture();
+    generated.turn_id = None;
+    let mut repeated = generated.clone();
+    repeated.id = "generated:conversation:opencode:2".into();
+    repeated.sequence = Some(2);
+    repeated.created_at = Some("2026-09-13T17:20:36.508Z".into());
+    repeated.metadata["request_root_id"] = serde_json::json!("wardian:input:2");
+
+    let merged =
+        provenance::merge_current_capture(vec![native.clone()], vec![generated, repeated]).unwrap();
+
+    assert_eq!(merged.len(), 3);
+    assert!(merged
+        .iter()
+        .any(|event| event.id == "generated:conversation:opencode:1"));
+    assert!(merged
+        .iter()
+        .any(|event| event.id == "generated:conversation:opencode:2"));
     assert!(merged.iter().any(|event| event.id == native.id));
 }
 
