@@ -22,6 +22,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, Notify};
 
+use crate::utils::logging::log_debug;
 use wardian_core::native_transport::{
     NativeMessageEnvelope, NativeMessageOperation, NativeSessionBinding,
     NativeTransportCapabilities,
@@ -73,6 +74,8 @@ pub struct PiBridgeError {
     pub code: &'static str,
     pub message: String,
     pub provider_boundary_crossed: bool,
+    authentication_stage: Option<&'static str>,
+    authentication_code: Option<&'static str>,
 }
 
 impl fmt::Display for PiBridgeError {
@@ -84,36 +87,41 @@ impl fmt::Display for PiBridgeError {
 impl std::error::Error for PiBridgeError {}
 
 impl PiBridgeError {
-    fn closed(message: impl Into<String>) -> Self {
+    fn with_reason(
+        code: &'static str,
+        message: impl Into<String>,
+        provider_boundary_crossed: bool,
+    ) -> Self {
         Self {
-            code: "bridge_closed",
+            code,
             message: message.into(),
-            provider_boundary_crossed: false,
+            provider_boundary_crossed,
+            authentication_stage: None,
+            authentication_code: None,
         }
+    }
+
+    fn closed(message: impl Into<String>) -> Self {
+        Self::with_reason("bridge_closed", message, false)
     }
 
     fn unavailable(message: impl Into<String>) -> Self {
-        Self {
-            code: "bridge_unavailable",
-            message: message.into(),
-            provider_boundary_crossed: false,
-        }
+        Self::with_reason("bridge_unavailable", message, false)
     }
 
     fn uncertain(message: impl Into<String>) -> Self {
-        Self {
-            code: "submitted_unconfirmed",
-            message: message.into(),
-            provider_boundary_crossed: true,
-        }
+        Self::with_reason("submitted_unconfirmed", message, true)
     }
 
     fn rejected(message: impl Into<String>) -> Self {
-        Self {
-            code: "provider_rejected",
-            message: message.into(),
-            provider_boundary_crossed: false,
-        }
+        Self::with_reason("provider_rejected", message, false)
+    }
+
+    fn authentication(stage: &'static str, code: &'static str, message: &'static str) -> Self {
+        let mut error = Self::unavailable(message);
+        error.authentication_stage = Some(stage);
+        error.authentication_code = Some(code);
+        error
     }
 }
 
@@ -432,9 +440,17 @@ async fn run_listener(
         _ = owner.close_notify.notified() => return,
         authenticated = authenticate(&owner, &mut stream) => authenticated,
     };
-    let Ok(mut session) = authenticated else {
-        owner.close();
-        return;
+    let mut session = match authenticated {
+        Ok(session) => session,
+        Err(error) => {
+            let stage = error.authentication_stage.unwrap_or("authenticate");
+            let code = error.authentication_code.unwrap_or("bridge_unavailable");
+            log_debug(&format!(
+                "[Wardian] Pi bridge authentication failed stage={stage} code={code}"
+            ));
+            owner.close();
+            return;
+        }
     };
     owner.ready.store(true, Ordering::Release);
 
@@ -485,9 +501,11 @@ async fn authenticate(
 ) -> Result<BridgeSession, PiBridgeError> {
     let hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_frame(stream))
         .await
-        .map_err(|_| PiBridgeError::unavailable("Pi TUI bridge hello timed out"))?
-        .map_err(|error| {
-            PiBridgeError::unavailable(format!("Pi TUI bridge hello failed: {error}"))
+        .map_err(|_| {
+            PiBridgeError::authentication("hello", "timeout", "Pi TUI bridge hello timed out")
+        })?
+        .map_err(|_| {
+            PiBridgeError::authentication("hello", "read_failed", "Pi TUI bridge hello failed")
         })?;
     exact_keys(
         &hello,
@@ -504,7 +522,13 @@ async fn authenticate(
             "session_file",
         ],
     )
-    .map_err(PiBridgeError::unavailable)?;
+    .map_err(|_| {
+        PiBridgeError::authentication(
+            "hello",
+            "invalid_shape",
+            "Pi TUI bridge hello shape was rejected",
+        )
+    })?;
     if hello["version"] != 1
         || hello["target_id"] != owner.binding.target_agent_id
         || hello["generation"].as_u64() != Some(owner.binding.generation)
@@ -513,7 +537,9 @@ async fn authenticate(
         || hello["type"] != "hello"
         || hello["session_file"] != owner.binding.session_file
     {
-        return Err(PiBridgeError::unavailable(
+        return Err(PiBridgeError::authentication(
+            "hello",
+            "binding_mismatch",
             "Pi TUI bridge hello binding was rejected",
         ));
     }
@@ -524,7 +550,9 @@ async fn authenticate(
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         || token.as_bytes().ct_eq(owner.token.as_bytes()).unwrap_u8() != 1
     {
-        return Err(PiBridgeError::unavailable(
+        return Err(PiBridgeError::authentication(
+            "hello",
+            "credential_mismatch",
             "Pi TUI bridge credential was rejected",
         ));
     }
@@ -533,27 +561,33 @@ async fn authenticate(
         .and_then(|pid| u32::try_from(pid).ok());
     let expected_pid = wait_for_process_id(owner).await;
     if claimed_pid.is_none() || expected_pid == 0 || claimed_pid != Some(expected_pid) {
-        return Err(PiBridgeError::unavailable(
+        return Err(PiBridgeError::authentication(
+            "hello",
+            "process_mismatch",
             "Pi TUI bridge child identity was rejected",
         ));
     }
     let runtime_nonce = hello["runtime_nonce"].as_str().unwrap_or_default();
     if runtime_nonce.is_empty() || runtime_nonce.len() > 128 || !runtime_nonce.is_ascii() {
-        return Err(PiBridgeError::unavailable(
+        return Err(PiBridgeError::authentication(
+            "hello",
+            "runtime_nonce_invalid",
             "Pi TUI bridge runtime nonce was rejected",
         ));
     }
     let mut welcome = common_frame(owner, runtime_nonce, 1, "welcome");
     welcome.insert("token".to_string(), Value::String(owner.token.clone()));
-    write_frame(stream, &welcome).await.map_err(|error| {
-        PiBridgeError::unavailable(format!("Pi TUI bridge welcome failed: {error}"))
+    write_frame(stream, &welcome).await.map_err(|_| {
+        PiBridgeError::authentication("welcome", "write_failed", "Pi TUI bridge welcome failed")
     })?;
 
     let ready = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_frame(stream))
         .await
-        .map_err(|_| PiBridgeError::unavailable("Pi TUI bridge ready timed out"))?
-        .map_err(|error| {
-            PiBridgeError::unavailable(format!("Pi TUI bridge ready failed: {error}"))
+        .map_err(|_| {
+            PiBridgeError::authentication("ready", "timeout", "Pi TUI bridge ready timed out")
+        })?
+        .map_err(|_| {
+            PiBridgeError::authentication("ready", "read_failed", "Pi TUI bridge ready failed")
         })?;
     exact_keys(
         &ready,
@@ -568,12 +602,20 @@ async fn authenticate(
             "capabilities",
         ],
     )
-    .map_err(PiBridgeError::unavailable)?;
+    .map_err(|_| {
+        PiBridgeError::authentication(
+            "ready",
+            "invalid_shape",
+            "Pi TUI bridge ready shape was rejected",
+        )
+    })?;
     if !common_matches(owner, &ready, runtime_nonce, 2, "ready")
         || ready["capabilities"]
             != serde_json::json!({"task": true, "information": false, "cancel": false, "completion": false})
     {
-        return Err(PiBridgeError::unavailable(
+        return Err(PiBridgeError::authentication(
+            "ready",
+            "capability_mismatch",
             "Pi TUI bridge capability handshake was rejected",
         ));
     }

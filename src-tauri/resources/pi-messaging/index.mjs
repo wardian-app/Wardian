@@ -3,6 +3,11 @@ import { randomUUID } from 'node:crypto';
 import { parseConfig } from './protocol.mjs';
 import { createBridge } from './bridge.mjs';
 
+function reportSessionStartRejection(code) {
+  // Keep extension diagnostics credential-free and independent of session data.
+  console.error(`[Wardian] Pi bridge rejection stage=session_start code=${code}`);
+}
+
 /** Explicitly load with Pi -e; never installs itself or controls another session. */
 export default function wardianPiMessaging(pi) {
   let bridge;
@@ -13,11 +18,29 @@ export default function wardianPiMessaging(pi) {
     const raw = process.env.WARDIAN_PI_BRIDGE_CONFIG;
     // Avoid forwarding the bearer credential to later tool children.
     delete process.env.WARDIAN_PI_BRIDGE_CONFIG;
-    if (!raw) return;
+    if (!raw) {
+      reportSessionStartRejection('config_missing');
+      return;
+    }
     let config;
-    try { config = parseConfig(raw); } catch { return; }
-    if (ctx.mode !== 'tui' || ctx.sessionManager.getSessionId() !== config.session_id
-        || ctx.sessionManager.getSessionFile() !== config.session_file) return;
+    try {
+      config = parseConfig(raw);
+    } catch {
+      reportSessionStartRejection('config_parse_failed');
+      return;
+    }
+    if (ctx.mode !== 'tui') {
+      reportSessionStartRejection('mode_not_tui');
+      return;
+    }
+    if (ctx.sessionManager.getSessionId() !== config.session_id) {
+      reportSessionStartRejection('session_id_mismatch');
+      return;
+    }
+    if (ctx.sessionManager.getSessionFile() !== config.session_file) {
+      reportSessionStartRejection('session_file_mismatch');
+      return;
+    }
     const socket = createConnection({ host: config.host, port: config.port });
     bridge = createBridge({ config, runtimeNonce: randomUUID(), pid: process.pid, pi, ctx, socket });
   });

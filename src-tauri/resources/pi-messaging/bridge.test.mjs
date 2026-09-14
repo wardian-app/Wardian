@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 import { FrameDecoder, encodeFrame, parseConfig, MAX_FRAME_BYTES } from './protocol.mjs';
 import { createBridge } from './bridge.mjs';
+import wardianPiMessaging from './index.mjs';
 
 const config = { version: 1, host: '127.0.0.1', port: 12345, token: 'a'.repeat(64),
   target_id: 'target', generation: 7, session_id: 'session', session_file: '/owned/session.jsonl' };
@@ -35,6 +36,45 @@ function fixture(t, { idle = true, throwSend = false } = {}) {
     switchSession: () => { currentSession = 'other'; },
     consume: () => bridge.messageStart({ message: { role: 'custom', ...calls[0][0] } }) };
 }
+
+test('session-start rejection diagnostics expose only fixed credential-free codes', () => {
+  const originalConfig = process.env.WARDIAN_PI_BRIDGE_CONFIG;
+  const originalError = console.error;
+  const logs = [];
+  const diagnosticConfig = { ...config, session_id: 'pi-session-7', session_file: '/owned/pi-session-7.jsonl' };
+  console.error = message => logs.push(message);
+  try {
+    const cases = [
+      ['config_missing', undefined, { mode: 'tui', sessionId: diagnosticConfig.session_id, sessionFile: diagnosticConfig.session_file }],
+      ['config_parse_failed', '{bad', { mode: 'tui', sessionId: diagnosticConfig.session_id, sessionFile: diagnosticConfig.session_file }],
+      ['mode_not_tui', JSON.stringify(diagnosticConfig), { mode: 'non-tui', sessionId: diagnosticConfig.session_id, sessionFile: diagnosticConfig.session_file }],
+      ['session_id_mismatch', JSON.stringify(diagnosticConfig), { mode: 'tui', sessionId: 'other', sessionFile: diagnosticConfig.session_file }],
+      ['session_file_mismatch', JSON.stringify(diagnosticConfig), { mode: 'tui', sessionId: diagnosticConfig.session_id, sessionFile: '/other/session.jsonl' }],
+    ];
+    for (const [code, raw, values] of cases) {
+      if (raw === undefined) delete process.env.WARDIAN_PI_BRIDGE_CONFIG;
+      else process.env.WARDIAN_PI_BRIDGE_CONFIG = raw;
+      const pi = new EventEmitter();
+      wardianPiMessaging(pi);
+      pi.emit('session_start', {}, {
+        mode: values.mode,
+        hasUI: true,
+        sessionManager: {
+          getSessionId: () => values.sessionId,
+          getSessionFile: () => values.sessionFile,
+        },
+      });
+      assert.equal(logs.at(-1), `[Wardian] Pi bridge rejection stage=session_start code=${code}`);
+      assert.equal(logs.at(-1).includes(config.token), false);
+      assert.equal(logs.at(-1).includes(diagnosticConfig.session_id), false);
+      assert.equal(logs.at(-1).includes(diagnosticConfig.session_file), false);
+    }
+  } finally {
+    console.error = originalError;
+    if (originalConfig === undefined) delete process.env.WARDIAN_PI_BRIDGE_CONFIG;
+    else process.env.WARDIAN_PI_BRIDGE_CONFIG = originalConfig;
+  }
+});
 
 test('frames survive every split boundary and coalescing', () => {
   const frame = encodeFrame({ body: 'héllo🙂' });
