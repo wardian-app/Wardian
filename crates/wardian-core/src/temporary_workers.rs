@@ -748,8 +748,13 @@ pub fn attention_counts_by_run(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RootAgentWorkerSummary {
     pub root_agent_id: String,
-    pub total: u32,
-    pub attention: u32,
+    pub active: u32,
+    pub past: u32,
+    pub unknown: u32,
+    pub attention_count: u32,
+    pub attention_waiting: u32,
+    pub attention_failed: u32,
+    pub attention_unknown: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -856,26 +861,42 @@ fn split_sql_list(value: Option<String>) -> Vec<String> {
 }
 
 pub fn root_agent_summaries() -> Result<Vec<RootAgentWorkerSummary>, Box<dyn std::error::Error>> {
-    crate::db::get_db_conn(|conn| {
-        let mut statement = conn.prepare(
-            "SELECT root_agent_id, COUNT(*),
-             SUM(CASE WHEN state IN ('waiting', 'failed', 'unknown') THEN 1 ELSE 0 END)
-             FROM temporary_workers WHERE root_agent_id IS NOT NULL AND (
-               state IN ('requested', 'running', 'waiting', 'unknown') OR detail_retained_until > ?1
-             )
-             GROUP BY root_agent_id ORDER BY root_agent_id",
-        )?;
-        let summaries = statement
-            .query_map(params![now()], |row| {
-                Ok(RootAgentWorkerSummary {
-                    root_agent_id: row.get(0)?,
-                    total: row.get(1)?,
-                    attention: row.get(2)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(summaries)
-    })
+    crate::db::get_db_conn(|conn| Ok(root_agent_summaries_with_conn(conn, &now())?))
+}
+
+fn root_agent_summaries_with_conn(
+    conn: &Connection,
+    observed_at: &str,
+) -> rusqlite::Result<Vec<RootAgentWorkerSummary>> {
+    let mut statement = conn.prepare(
+        "SELECT root_agent_id,
+         SUM(CASE WHEN state IN ('requested', 'running', 'waiting') THEN 1 ELSE 0 END),
+         SUM(CASE WHEN state IN ('succeeded', 'failed', 'cancelled') THEN 1 ELSE 0 END),
+         SUM(CASE WHEN state = 'unknown' THEN 1 ELSE 0 END),
+         SUM(CASE WHEN state IN ('waiting', 'failed', 'unknown') THEN 1 ELSE 0 END),
+         SUM(CASE WHEN state = 'waiting' THEN 1 ELSE 0 END),
+         SUM(CASE WHEN state = 'failed' THEN 1 ELSE 0 END),
+         SUM(CASE WHEN state = 'unknown' THEN 1 ELSE 0 END)
+         FROM temporary_workers WHERE root_agent_id IS NOT NULL AND (
+           state IN ('requested', 'running', 'waiting', 'unknown') OR detail_retained_until > ?1
+         )
+         GROUP BY root_agent_id ORDER BY root_agent_id",
+    )?;
+    let summaries = statement
+        .query_map(params![observed_at], |row| {
+            Ok(RootAgentWorkerSummary {
+                root_agent_id: row.get(0)?,
+                active: row.get(1)?,
+                past: row.get(2)?,
+                unknown: row.get(3)?,
+                attention_count: row.get(4)?,
+                attention_waiting: row.get(5)?,
+                attention_failed: row.get(6)?,
+                attention_unknown: row.get(7)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(summaries)
 }
 
 pub fn telemetry_records() -> Result<Vec<TemporaryWorkerRecord>, Box<dyn std::error::Error>> {
@@ -1327,6 +1348,73 @@ mod tests {
         let reconciled = load_with_conn(&conn, "stale-future").unwrap().unwrap();
         assert_eq!(reconciled.state, TemporaryWorkerState::Unknown);
         assert_eq!(reconciled.coverage, "runtime_owner_lost");
+    }
+
+    #[test]
+    fn root_agent_summaries_serialize_status_categories_and_attention_reasons() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        for (worker_id, state, detail_retained_until) in [
+            ("requested", TemporaryWorkerState::Requested, None),
+            ("running", TemporaryWorkerState::Running, None),
+            ("waiting", TemporaryWorkerState::Waiting, None),
+            (
+                "succeeded",
+                TemporaryWorkerState::Succeeded,
+                Some("2026-10-01T00:00:00Z"),
+            ),
+            (
+                "failed",
+                TemporaryWorkerState::Failed,
+                Some("2026-10-01T00:00:00Z"),
+            ),
+            (
+                "cancelled",
+                TemporaryWorkerState::Cancelled,
+                Some("2026-10-01T00:00:00Z"),
+            ),
+            ("unknown", TemporaryWorkerState::Unknown, None),
+            (
+                "expired",
+                TemporaryWorkerState::Succeeded,
+                Some("2026-09-01T00:00:00Z"),
+            ),
+        ] {
+            let mut record = sample_record(worker_id, 1);
+            record.kind = TemporaryWorkerKind::ProviderChild;
+            record.root_agent_id = Some("root-a".into());
+            record.state = state;
+            record.detail_retained_until = detail_retained_until.map(str::to_string);
+            insert_record(&conn, &record).unwrap();
+        }
+
+        let summaries = root_agent_summaries_with_conn(&conn, "2026-09-13T00:00:00Z").unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(
+            summaries[0],
+            RootAgentWorkerSummary {
+                root_agent_id: "root-a".into(),
+                active: 3,
+                past: 3,
+                unknown: 1,
+                attention_count: 3,
+                attention_waiting: 1,
+                attention_failed: 1,
+                attention_unknown: 1,
+            }
+        );
+
+        let serialized = serde_json::to_value(&summaries[0]).unwrap();
+        assert_eq!(serialized["active"], 3);
+        assert_eq!(serialized["past"], 3);
+        assert_eq!(serialized["unknown"], 1);
+        assert_eq!(serialized["attention_count"], 3);
+        assert_eq!(serialized["attention_waiting"], 1);
+        assert_eq!(serialized["attention_failed"], 1);
+        assert_eq!(serialized["attention_unknown"], 1);
+        assert!(serialized.get("total").is_none());
+        assert!(serialized.get("attention").is_none());
     }
 
     #[test]

@@ -34,6 +34,13 @@ import { isUserFacingProviderName, providerDisplayName } from "../../features/ag
 import { useLayoutStore } from "../../store/useLayoutStore";
 import { SidebarResizeHandle } from "../../components/SidebarResizeHandle";
 import { useDragAutoScroll } from "./dragAutoScroll";
+import {
+  RootTemporaryWorkerInspector,
+  normalizeRootWorkerSummary,
+  type RawRootWorkerSummary,
+  type RootWorkerSummary,
+  hasRootWorkers,
+} from "../../features/agents/RootTemporaryWorkerInspector";
 
 type DragSource =
   | { type: "agent"; agentId: string }
@@ -46,12 +53,6 @@ type DropTarget =
   | { type: "team"; teamId: string; position: "before" | "inside" | "after" };
 
 type TabDropTarget = { listId: string; position: DropPosition };
-
-interface RootWorkerSummary {
-  root_agent_id: string;
-  total: number;
-  attention: number;
-}
 
 /** Pointer travel, in pixels, that promotes a press into a drag. */
 const DRAG_ACTIVATION_DISTANCE = 4;
@@ -205,9 +206,12 @@ export default function AgentWatchlist({
     let disposed = false;
     const refresh = async () => {
       try {
-        const result = await invoke<{ summaries: RootWorkerSummary[] }>('temporary_worker_root_summaries');
+        const result = await invoke<{ summaries?: RawRootWorkerSummary[] }>('temporary_worker_root_summaries');
         if (!disposed) {
-          setWorkerSummaries(Object.fromEntries(result.summaries.map((summary) => [summary.root_agent_id, summary])));
+          const summaries = (result.summaries ?? [])
+            .map(normalizeRootWorkerSummary)
+            .filter((summary): summary is RootWorkerSummary => summary !== null);
+          setWorkerSummaries(Object.fromEntries(summaries.map((summary) => [summary.root_agent_id, summary])));
         }
       } catch {
         // Child summaries become available after the backend migration is ready.
@@ -914,6 +918,7 @@ export default function AgentWatchlist({
           if (!(e.ctrlKey || e.metaKey || e.shiftKey)) revealAgent?.(agentId);
         }}
         onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
           if (e.key !== "Enter" || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
           e.preventDefault();
           e.stopPropagation();
@@ -950,27 +955,28 @@ export default function AgentWatchlist({
               onMouseDown={e => e.stopPropagation()}
             />
           ) : (
-            <div className="flex min-w-0 items-center gap-1.5">
+            <div className="flex min-w-0 flex-col">
               <p className="min-w-0 truncate text-xs font-bold text-bright-neutral">
                 {agent.session_name}
               </p>
-              {workerSummary?.total ? (
-                <span
-                  data-testid={`watchlist-child-worker-indicator-${agentId}`}
-                  className={`shrink-0 rounded border px-1 py-0.5 text-[9px] font-semibold ${workerSummary.attention > 0 ? 'border-[var(--color-wardian-warning)]/40 text-[var(--color-wardian-warning)]' : 'border-wardian-border text-primary/50'}`}
-                  title={`${workerSummary.total} verified child worker${workerSummary.total === 1 ? '' : 's'}${workerSummary.attention > 0 ? `; ${workerSummary.attention} ${workerSummary.attention === 1 ? 'needs' : 'need'} attention` : ''}`}
+              <div className="flex min-w-0 items-center gap-1.5">
+                <p
+                  className="min-w-0 truncate text-[10px] text-primary/50 font-medium tracking-wide"
+                  title={agent.agent_class}
                 >
-                  {workerSummary.total}{workerSummary.attention > 0 ? '!' : ''}
-                </span>
-              ) : null}
+                  {agent.agent_class}
+                </p>
+                {workerSummary && hasRootWorkers(workerSummary) ? (
+                  <RootTemporaryWorkerInspector
+                    agentName={agent.session_name}
+                    compact
+                    indicatorTestId={`watchlist-child-worker-indicator-${agentId}`}
+                    summary={workerSummary}
+                  />
+                ) : null}
+              </div>
             </div>
           )}
-          <p
-            className="text-[10px] text-primary/50 font-medium truncate tracking-wide"
-            title={agent.agent_class}
-          >
-            {agent.agent_class}
-          </p>
         </div>
         {prefs.columns.filter(c => c.visible).map(col => {
           if (col.id === 'status_label') {
