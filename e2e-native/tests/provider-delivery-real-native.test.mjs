@@ -10,7 +10,6 @@ import { tmpdir } from "node:os";
 import {
   messageCli,
   correlatedReply,
-  assertDetachedTerminal,
   assertNativeSession,
   assertOpenCodeHttpSession,
   assertOpenCodeCompletedAnswer,
@@ -68,20 +67,47 @@ export const INPUT_CASES = [
   },
 ];
 
+function assertTerminalRuntimePreserved(before, after) {
+  assert.equal(after.session_id, before.session_id);
+  assert.equal(after.runtime_generation, before.runtime_generation, "Messaging recreated a PTY runtime");
+  // OpenCode HTTP output may advance the stream while the provider owns the
+  // session. Runtime identity, rather than sequence_barrier, proves that the
+  // debug input-disable hook preserved the session.
+}
+
 const DEFAULT_CASES = ["prompt-short"];
 const DEFAULT_PROVIDER_MODELS = {
   claude: "haiku",
   opencode: "opencode/deepseek-v4-flash-free",
 };
+const DEFAULT_PROVIDER_EFFORTS = {
+  codex: "low",
+};
+const COMPOSER_EXCEPTION_PROVIDERS = ["claude", "antigravity"];
 
 const runRealDelivery = process.env.WARDIAN_E2E_REAL_DELIVERY === "1";
 const verifyFreshTranscript = process.env.WARDIAN_E2E_REAL_FRESH_TRANSCRIPT === "1";
 const allowPartialDelivery = process.env.WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL === "1";
 const workspacePath = process.env.WARDIAN_E2E_REAL_WORKSPACE || process.cwd();
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
+function parseOpenCodeNativeMode(value) {
+  const mode = value?.trim().toLowerCase() || "resume";
+  if (!new Set(["resume", "fresh"]).has(mode)) {
+    throw new Error(`WARDIAN_E2E_OPENCODE_NATIVE_MODE must be resume or fresh, got: ${mode}`);
+  }
+  return mode;
+}
+
+const opencodeNativeMode = parseOpenCodeNativeMode(process.env.WARDIAN_E2E_OPENCODE_NATIVE_MODE);
 // Explicit candidates, not a provider-wide unsupported/manual-only classification.
 // Unselected providers retain the separate human composer matrix.
 const nativeProviders = parseCommaList(process.env.WARDIAN_E2E_DELIVERY_NATIVE_PROVIDERS, []);
+// These providers retain the input sender and exercise the canonical task
+// route through the existing composer fallback. They never claim native delivery.
+const composerTaskProviders = parseCommaList(
+  process.env.WARDIAN_E2E_DELIVERY_COMPOSER_TASK_PROVIDERS,
+  [],
+);
 
 function buildCli(harness) {
   if (skipNativeBuild) {
@@ -163,28 +189,63 @@ function missingProviders(providers) {
   return PROVIDERS.filter((provider) => !selected.has(provider));
 }
 
-function providerModel(provider) {
+function assertDeliveryRouteCandidates(selectedProviders, nativeCandidates, composerCandidates) {
+  assert.deepEqual(
+    unknownValues(nativeCandidates, selectedProviders),
+    [],
+    "Native candidates must be in the selected provider matrix",
+  );
+  assert.deepEqual(
+    unknownValues(composerCandidates, selectedProviders),
+    [],
+    "Composer exception candidates must be in the selected provider matrix",
+  );
+  assert.deepEqual(
+    unknownValues(composerCandidates, COMPOSER_EXCEPTION_PROVIDERS),
+    [],
+    "Composer exception tasks are maintained only for Claude and Antigravity",
+  );
+  assert.deepEqual(
+    nativeCandidates.filter((provider) => composerCandidates.includes(provider)),
+    [],
+    "A provider cannot be assigned both native and composer-exception task routes",
+  );
+}
+
+function providerModel(provider, environment = process.env) {
   const envName = `WARDIAN_E2E_DELIVERY_${provider.toUpperCase()}_MODEL`;
-  if (Object.prototype.hasOwnProperty.call(process.env, envName)) {
-    return process.env[envName]?.trim() || null;
+  if (Object.prototype.hasOwnProperty.call(environment, envName)) {
+    return environment[envName]?.trim() || null;
   }
   return DEFAULT_PROVIDER_MODELS[provider] ?? null;
 }
 
-function providerCustomArgs(provider) {
+function providerCustomArgs(provider, environment = process.env) {
   const envName = `WARDIAN_E2E_DELIVERY_${provider.toUpperCase()}_ARGS`;
-  return process.env[envName]?.trim() || null;
+  return environment[envName]?.trim() || null;
 }
 
-function configOverrideForProvider(provider) {
+function providerEffort(provider, environment = process.env) {
+  const envName = `WARDIAN_E2E_DELIVERY_${provider.toUpperCase()}_EFFORT`;
+  if (Object.prototype.hasOwnProperty.call(environment, envName)) {
+    return environment[envName]?.trim() || null;
+  }
+  return DEFAULT_PROVIDER_EFFORTS[provider] ?? null;
+}
+
+function configOverrideForProvider(provider, environment = process.env) {
   const config = { provider };
-  const model = providerModel(provider);
-  const customArgs = providerCustomArgs(provider);
+  const model = providerModel(provider, environment);
+  const customArgs = providerCustomArgs(provider, environment);
+  const effort = providerEffort(provider, environment);
   if (model) {
     config.model = model;
   }
   if (customArgs) {
     config.custom_args = customArgs;
+  }
+  if (effort) {
+    config.provider_config = { type: provider, reasoning_effort: effort };
   }
   return config;
 }
@@ -631,6 +692,42 @@ async function waitForPersistedOpenCodeSession(harness, sessionId, timeoutMs = 1
   );
 }
 
+function assertOpenCodeResumeIdentity(before, after, providerSessionId) {
+  assert.equal(after?.session_id, before?.session_id, "OpenCode resume replaced the Wardian agent identity");
+  assert.equal(before?.resume_session, providerSessionId, "OpenCode setup did not persist the discovered provider session");
+  assert.equal(after?.resume_session, providerSessionId, "OpenCode resume changed the discovered provider session");
+  return after;
+}
+
+async function resumeOpenCodeExistingSession(driver, agentSessionId, providerSessionId) {
+  const before = (await invokeTauri(driver, "list_agents"))
+    .find((entry) => entry.session_id === agentSessionId);
+  assert.ok(before, "OpenCode agent missing before same-session resume");
+  assertOpenCodeResumeIdentity(before, before, providerSessionId);
+
+  await invokeTauri(driver, "pause_agent", { sessionId: agentSessionId });
+  await invokeTauri(driver, "resume_agent", { sessionId: agentSessionId });
+
+  return driver.wait(async () => {
+    const after = (await invokeTauri(driver, "list_agents"))
+      .find((entry) => entry.session_id === agentSessionId);
+    if (!after?.resume_session) return false;
+    return assertOpenCodeResumeIdentity(before, after, providerSessionId);
+  }, 120_000, "OpenCode same-session resume did not preserve the discovered provider session", 250);
+}
+
+async function waitForOpenCodeNativeOwner(driver, cliPath, harness, agentSessionId, providerSessionId) {
+  return driver.wait(async () => {
+    const capability = JSON.parse(runCliOk(cliPath, harness, ["delivery", "capabilities", agentSessionId]).stdout);
+    const binding = capability.binding;
+    if (!capability.native_negotiated || binding?.provider_session_id !== providerSessionId) return false;
+    assert.equal(binding.target_agent_id, agentSessionId);
+    assert.equal(binding.provider, "opencode");
+    assert.equal(binding.transport, "opencode_http");
+    return capability;
+  }, 30_000, "OpenCode same-session HTTP owner was not registered after resume", 250);
+}
+
 async function runRealDeliveryCase({
   driver,
   harness,
@@ -652,8 +749,9 @@ async function runRealDeliveryCase({
   // Admission alone is not a PASS: provider-authored transcript and archive
   // evidence are observed below.
 
+  let providerSessionId = null;
   if (provider === "opencode") {
-    await waitForPersistedOpenCodeSession(harness, agentSessionId);
+    providerSessionId = await waitForPersistedOpenCodeSession(harness, agentSessionId);
   }
 
   const conformance = await assertRealChatConformance(driver, agentSessionId, provider, marker, { report, save });
@@ -673,6 +771,7 @@ async function runRealDeliveryCase({
     marker,
     expected: inputCase.expectedOutput?.(marker) ??
       (inputCase.name === "prompt-multiline" ? `${marker}_LINE_1\n${marker}_LINE_2` : marker),
+    providerSessionId,
   };
 }
 
@@ -704,7 +803,7 @@ async function runNativeTaskCase({ driver, cliPath, harness, provider, agent, se
     assertProviderNativeSession(provider, capability, agent.session_id, identity);
     const config = (await invokeTauri(driver, "list_agents")).find((row) => row.session_id === agent.session_id);
     assert.equal(config?.resume_session, identity.provider_session_id);
-    assertDetachedTerminal(terminal, await invokeTauri(driver, "request_terminal_snapshot", { request: { session_id: agent.session_id } }));
+    assertTerminalRuntimePreserved(terminal, await invokeTauri(driver, "request_terminal_snapshot", { request: { session_id: agent.session_id } }));
     const page = await messageCli(cliPath, harness.isolatedHome, harness.repoRoot, sender.session_id,
       ["receive", "--cursor", cursor, "--timeout-ms", "0"]);
     cursor = page.next_cursor;
@@ -732,6 +831,68 @@ async function runNativeTaskCase({ driver, cliPath, harness, provider, agent, se
         expectedMessage: expected,
       });
     }
+  } finally { db.close(); }
+  evidence.reply = reply;
+  evidence.status = "pass";
+  await save();
+}
+
+async function runComposerExceptionTaskCase({ driver, cliPath, harness, provider, agent, sender, inputCase, report, save }) {
+  const marker = `COMPOSER_EXCEPTION_TASK_${provider}_${Date.now()}`;
+  const expected = inputCase.name === "prompt-multiline" ? `${marker}_LINE_1\n${marker}_LINE_2` : marker;
+  const body = inputCase.prompt(marker).replace("Do not access files or run tools.", "Do not access files or run tools except the canonical reply tool.") +
+    " Complete this task using the canonical reply tool with status done and exactly the requested text as its message.";
+  const evidence = {
+    provider,
+    case: inputCase.name,
+    route: "composer_exception",
+    status: "running",
+    input_attached: true,
+    native_negotiated: false,
+    native_record: null,
+    attempts: 0,
+  };
+  report.composer_task_cases.push(evidence);
+  await driver.wait(async () => {
+    const metrics = await invokeTauri(driver, "list_agent_metrics");
+    return metrics.find((row) => row.session_id === agent.session_id)?.current_status?.toLowerCase() === "idle";
+  }, 30_000, "Existing receiver not observed idle before composer-exception task admission", 200);
+  const capability = JSON.parse(runCliOk(cliPath, harness, ["delivery", "capabilities", agent.session_id]).stdout);
+  assert.equal(capability.native_negotiated, false, `${provider} composer exception unexpectedly negotiated native delivery`);
+  evidence.capability = {
+    native_negotiated: capability.native_negotiated,
+    transport: capability.binding?.transport ?? null,
+  };
+  const terminal = await invokeTauri(driver, "request_terminal_snapshot", { request: { session_id: agent.session_id } });
+  const initial = await messageCli(cliPath, harness.isolatedHome, harness.repoRoot, sender.session_id, ["receive", "--timeout-ms", "0"]);
+  let cursor = initial.next_cursor;
+  evidence.attempts = 1;
+  await save();
+  const task = await messageCli(cliPath, harness.isolatedHome, harness.repoRoot, sender.session_id, ["followup", agent.session_id, body]);
+  assert.equal(task.operation, "followup_task");
+  assert.ok(task.request_id);
+  evidence.receipt = task;
+  await save();
+  let reply;
+  await driver.wait(async () => {
+    const page = await messageCli(cliPath, harness.isolatedHome, harness.repoRoot, sender.session_id,
+      ["receive", "--cursor", cursor, "--timeout-ms", "0"]);
+    cursor = page.next_cursor;
+    reply ??= correlatedReply(page, task.request_id, agent.session_id, expected);
+    return !!reply;
+  }, 120_000, "Composer-exception canonical reply missing", 250);
+  assertTerminalRuntimePreserved(terminal, await invokeTauri(driver, "request_terminal_snapshot", { request: { session_id: agent.session_id } }));
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(path.join(harness.isolatedHome, "state.db"), { readOnly: true });
+  try {
+    const claim = db.prepare("SELECT d.interaction_id AS request_id,d.recipient,d.sender,d.generation,d.owner,i.status FROM agent_message_delivery d JOIN interactions i ON i.id=d.interaction_id WHERE d.interaction_id=?").get(task.request_id);
+    assert.equal(claim?.recipient, agent.session_id);
+    assert.equal(claim.sender, sender.session_id);
+    assert.equal(claim?.owner, "provider_visible");
+    assert.equal(claim?.status, "completed");
+    const nativeRecord = db.prepare("SELECT interaction_id,phase FROM native_deliveries WHERE interaction_id=?").get(task.request_id);
+    assert.equal(nativeRecord, undefined, "Composer exception task unexpectedly created a native delivery record");
+    evidence.claim = claim;
   } finally { db.close(); }
   evidence.reply = reply;
   evidence.status = "pass";
@@ -1186,6 +1347,55 @@ async function readProviderTerminalTail(driver, sessionId) {
   return result.output || "<provider terminal emitted no readable output>";
 }
 
+test("OpenCode same-session resume keeps the discovered provider identity", () => {
+  const before = { session_id: "wardian-agent", resume_session: "ses_discovered" };
+  const after = { session_id: "wardian-agent", resume_session: "ses_discovered" };
+  assert.deepEqual(
+    assertOpenCodeResumeIdentity(before, after, "ses_discovered"),
+    after,
+  );
+  assert.throws(
+    () => assertOpenCodeResumeIdentity(before, { ...after, resume_session: "ses_replaced" }, "ses_discovered"),
+    /changed the discovered provider session/,
+  );
+});
+
+test("OpenCode native mode defaults to resume and exposes fresh explicitly", () => {
+  assert.equal(parseOpenCodeNativeMode(undefined), "resume");
+  assert.equal(parseOpenCodeNativeMode("fresh"), "fresh");
+  assert.throws(
+    () => parseOpenCodeNativeMode("implicit"),
+    /must be resume or fresh/,
+  );
+});
+
+test("provider effort override uses the core provider_config field", () => {
+  const override = configOverrideForProvider("codex", {
+    WARDIAN_E2E_DELIVERY_CODEX_MODEL: "gpt-5.6-luna",
+    WARDIAN_E2E_DELIVERY_CODEX_EFFORT: "low",
+  });
+  assert.equal(override.model, "gpt-5.6-luna");
+  assert.equal(override.provider_config?.type, "codex");
+  assert.equal(override.provider_config?.reasoning_effort, "low");
+  assert.equal(override.custom_args, undefined);
+});
+
+test("composer exception task candidates stay on their maintained providers", () => {
+  assert.doesNotThrow(() => assertDeliveryRouteCandidates(
+    ["claude", "antigravity"],
+    [],
+    ["claude", "antigravity"],
+  ));
+  assert.throws(
+    () => assertDeliveryRouteCandidates(["codex"], [], ["codex"]),
+    /maintained only for Claude and Antigravity/,
+  );
+  assert.throws(
+    () => assertDeliveryRouteCandidates(["claude"], ["claude"], ["claude"]),
+    /both native and composer-exception/,
+  );
+});
+
 test("real provider delivery case parser expands all only as the sole entry", () => {
   assert.deepEqual(
     parseDeliveryCases("all"),
@@ -1199,7 +1409,7 @@ test("human composer delivery uses actual providers; not peer messaging", { time
   const caseNames = parseDeliveryCases(process.env.WARDIAN_E2E_DELIVERY_CASES);
   const unknownProviders = unknownValues(providers, PROVIDERS);
   const unknownCases = unknownValues(caseNames, INPUT_CASES.map((inputCase) => inputCase.name));
-  assert.deepEqual(unknownValues(nativeProviders, providers), [], "Native candidates must be in the selected provider matrix");
+  assertDeliveryRouteCandidates(providers, nativeProviders, composerTaskProviders);
   assert.ok(!nativeProviders.length || !verifyFreshTranscript, "Existing-session qualification and intentional fresh-session replacement are separate runs");
 
   assert.deepEqual(
@@ -1241,8 +1451,10 @@ test("human composer delivery uses actual providers; not peer messaging", { time
   await enableIsolatedCodexWorkspaceTrust(harness);
   const cliPath = buildCli(harness);
   const runId = `${process.pid}_${Date.now()}`;
-  const report = { status: "running", scope: nativeProviders.length ? "selected_native_candidates" : "human_composer",
-    native_cases: [], native_candidates: nativeProviders, blocked_providers: [] };
+  const report = { status: "running", scope: nativeProviders.length || composerTaskProviders.length ? "selected_delivery_routes" : "human_composer",
+    native_cases: [], native_candidates: nativeProviders, composer_task_cases: [],
+    composer_task_candidates: composerTaskProviders, blocked_providers: [],
+    opencode_native_mode: nativeProviders.includes("opencode") ? opencodeNativeMode : null };
   const save = () => fs.writeFile(path.join(harness.isolatedHome, "provider-delivery-report.json"), JSON.stringify(report, null, 2));
 
   let session;
@@ -1289,17 +1501,26 @@ test("human composer delivery uses actual providers; not peer messaging", { time
         );
         report.blocked_providers.push({ provider, reason: "account_or_workspace_prompt" });
         await save();
-        assert.ok(!nativeProviders.includes(provider), "Native candidate blocked before qualification; this is not unsupported-route evidence");
+        assert.ok(!nativeProviders.includes(provider) && !composerTaskProviders.includes(provider), "Delivery candidate blocked before qualification; this is not unsupported-route evidence");
         continue;
       }
       const deliveredCases = [];
       let nativeCase;
+      let composerTaskOrigin;
       if (nativeProviders.includes(provider)) {
         // Establish a real session through the existing human path before disabling it.
         // Setup is not native task acceptance and never substitutes for the case below.
-        await runRealDeliveryCase({ driver: session.driver, harness, provider,
+        const setupDelivery = await runRealDeliveryCase({ driver: session.driver, harness, provider,
           agentSessionId: agent.session_id, inputCase: INPUT_CASES[0], runId: `setup-${runId}`, report, save });
-        const capability = JSON.parse(runCliOk(cliPath, harness, ["delivery", "capabilities", agent.session_id]).stdout);
+        if (provider === "opencode") {
+          assert.ok(setupDelivery.providerSessionId, "OpenCode setup did not return its discovered provider session");
+          if (opencodeNativeMode === "resume") {
+            await resumeOpenCodeExistingSession(session.driver, agent.session_id, setupDelivery.providerSessionId);
+          }
+        }
+        const capability = provider === "opencode"
+          ? await waitForOpenCodeNativeOwner(session.driver, cliPath, harness, agent.session_id, setupDelivery.providerSessionId)
+          : JSON.parse(runCliOk(cliPath, harness, ["delivery", "capabilities", agent.session_id]).stdout);
         const identity = assertProviderNativeSession(provider, capability, agent.session_id);
         await invokeTauri(session.driver, "debug_remove_agent_input_sender", { sessionId: agent.session_id });
         const terminal = await invokeTauri(session.driver, "request_terminal_snapshot", { request: { session_id: agent.session_id } });
@@ -1311,11 +1532,28 @@ test("human composer delivery uses actual providers; not peer messaging", { time
         // Off mock origin owns no provider process; retain its identity in this isolated report.
         report.native_origin = sender.session_id;
         await save();
+      } else if (composerTaskProviders.includes(provider)) {
+        // Establish a real provider session through the human path, then keep
+        // its input sender attached for the canonical task fallback case.
+        deliveredCases.push(await runRealDeliveryCase({ driver: session.driver, harness, provider,
+          agentSessionId: agent.session_id, inputCase: INPUT_CASES[0], runId: `setup-${runId}`, report, save }));
+        composerTaskOrigin = await invokeTauri(session.driver, "spawn_agent", { req: {
+          sessionName: `Composer-Task-Origin-${provider}-${runId}`, agentClass: "TestClass", folder: workspacePath,
+          isOff: true, resumeSession: null, configOverride: { provider: "mock" },
+        } });
+        report.composer_task_origin ??= {};
+        report.composer_task_origin[provider] = composerTaskOrigin.session_id;
+        await save();
       }
       for (const inputCase of selectedCases) {
         if (nativeCase) {
           await runNativeTaskCase({ driver: session.driver, cliPath, harness, provider, agent,
             inputCase, ...nativeCase, report, save });
+          continue;
+        }
+        if (composerTaskOrigin) {
+          await runComposerExceptionTaskCase({ driver: session.driver, cliPath, harness, provider, agent,
+            sender: composerTaskOrigin, inputCase, report, save });
           continue;
         }
         deliveredCases.push(await runRealDeliveryCase({

@@ -1,6 +1,8 @@
 //! Canonical messaging over the single generation-bound Codex owner.
 use super::*;
-use crate::delivery::native_broker::{NativeBrokerError, NativeSessionSpec};
+use crate::delivery::native_broker::{
+    NativeBrokerError, NativeDeliveryAdmission, NativeSessionSpec,
+};
 use wardian_core::conversation_lease::{ConversationLeaseOwner, PersistedConversationLeaseGuard};
 
 pub(super) fn spawn_information(app: &AppHandle, recipient: &str) {
@@ -40,6 +42,62 @@ async fn settle(
         }
     }
     .map_err(control_error)
+}
+
+fn native_phase_settlement(
+    phase: wardian_core::native_transport::NativeDeliveryPhase,
+) -> Result<&'static str, bool> {
+    use wardian_core::native_transport::NativeDeliveryPhase;
+
+    match phase {
+        NativeDeliveryPhase::FailedBeforeSubmit => Ok("failed_before_submit"),
+        NativeDeliveryPhase::ProviderAccepted => Ok("provider_accepted"),
+        NativeDeliveryPhase::TurnStarted => Ok("provider_visible"),
+        NativeDeliveryPhase::Completed => Ok("provider_completed"),
+        NativeDeliveryPhase::Queued => Err(false),
+        NativeDeliveryPhase::Dispatching => Err(true),
+        NativeDeliveryPhase::SubmittedUnconfirmed
+        | NativeDeliveryPhase::Failed
+        | NativeDeliveryPhase::CancelRequested
+        | NativeDeliveryPhase::Cancelled
+        | NativeDeliveryPhase::Expired
+        | NativeDeliveryPhase::StaleGeneration
+        | NativeDeliveryPhase::Withdrawn
+        | NativeDeliveryPhase::Superseded => Err(true),
+    }
+}
+
+fn native_phase_allows_followup(
+    phase: wardian_core::native_transport::NativeDeliveryPhase,
+) -> bool {
+    matches!(
+        phase,
+        wardian_core::native_transport::NativeDeliveryPhase::Queued
+    )
+}
+
+async fn settle_persisted_native_phase(
+    state: &AppState,
+    claim: &store::TaskClaim,
+    phase: wardian_core::native_transport::NativeDeliveryPhase,
+) -> Result<(), ControlError> {
+    settle(state, claim, native_phase_settlement(phase)).await
+}
+
+async fn settle_attached_task(
+    state: &AppState,
+    claim: &store::TaskClaim,
+    result: Result<&str, bool>,
+    native_phase_guard: bool,
+) -> Result<(), ControlError> {
+    if native_phase_guard {
+        if let Ok(record) = state.native_delivery.get(&claim.record.id) {
+            if !native_phase_allows_followup(record.phase) {
+                return settle_persisted_native_phase(state, claim, record.phase).await;
+            }
+        }
+    }
+    settle(state, claim, result).await
 }
 
 /// No owner creation: unsupported legacy/embedded sessions retain receive.
@@ -206,27 +264,59 @@ pub(super) async fn dispatch_attached_task(
             .await
             .map(|receipt| receipt.delivery_state),
         "opencode" => {
-            state
+            let body = match &claim.record.body_ref {
+                wardian_core::control::InteractionBodyRef::Inline { body } => body.clone(),
+                wardian_core::control::InteractionBodyRef::File { .. } => {
+                    unreachable!("claim context preparation rejects file-backed task bodies")
+                }
+            };
+            let admitted = state
                 .native_delivery
-                .opencode_http_followup(
-                    &info.uuid,
+                .admit(NativeDeliveryAdmission {
+                    interaction_id: claim.record.id.clone(),
+                    message_id: claim.record.id.clone(),
+                    target_agent_id: info.uuid.clone(),
+                    sender_agent_id: claim.record.sender_session_id.clone(),
+                    provider: info.provider.clone(),
                     generation,
-                    &claim.record.id,
-                    &context,
-                    &info.config,
-                    &info.cwd,
-                )
-                .await
+                    operation: wardian_core::native_transport::NativeMessageOperation::StartTurn,
+                    caller_idempotency_key: Some(claim.record.id.clone()),
+                    parent_interaction_id: claim.record.parent_interaction_id.clone(),
+                    deadline_at: None,
+                    body,
+                })
+                .await;
+            match admitted {
+                Ok(record) if !native_phase_allows_followup(record.phase) => {
+                    settle_persisted_native_phase(state, &claim, record.phase).await?;
+                    return Ok(());
+                }
+                Ok(_) => {
+                    state
+                        .native_delivery
+                        .opencode_http_followup(
+                            &info.uuid,
+                            generation,
+                            &claim.record.id,
+                            &context,
+                            &info.config,
+                            &info.cwd,
+                        )
+                        .await
+                }
+                Err(error) => Err(error),
+            }
         }
         _ => return Ok(()),
     };
-    settle(
+    settle_attached_task(
         state,
         &claim,
         result
             .as_ref()
             .map(String::as_str)
             .map_err(|error| error.provider_boundary_crossed),
+        info.provider == "opencode",
     )
     .await?;
     result

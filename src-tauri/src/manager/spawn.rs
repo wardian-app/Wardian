@@ -144,22 +144,26 @@ fn opencode_http_conflicting_custom_arg(argument: &str) -> bool {
         || argument.starts_with("--config=")
 }
 
-/// Reserve the per-generation listener before the ordinary TUI spawn. Only a
-/// restored/existing provider session gets this overlay; a fresh OpenCode TUI
-/// has no exact session identity until its first provider turn creates one.
+fn opencode_http_launch_identity_is_valid(session: Option<&str>) -> bool {
+    session.is_none_or(|session| {
+        session.starts_with("ses_")
+            && session.len() <= 256
+            && session
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    })
+}
+
+/// Reserve the per-generation listener before every ordinary OpenCode TUI
+/// spawn. A fresh TUI has no provider identity yet, so its pending owner is
+/// rebound only after the launch-scoped discovery returns one exact session.
 async fn prepare_opencode_http_launch(
     app_state: &AppState,
     config: &AgentConfig,
     provider_generation: u64,
 ) -> Option<OpenCodeHttpLaunchPlan> {
     if config.provider != "opencode"
-        || config.resume_session.as_deref().is_none_or(|session| {
-            !session.starts_with("ses_")
-                || session.len() > 256
-                || !session
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        })
+        || !opencode_http_launch_identity_is_valid(config.resume_session.as_deref())
     {
         return None;
     }
@@ -216,6 +220,79 @@ async fn wait_for_opencode_http_listener(
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
     false
+}
+
+struct OpenCodeHttpLaunchContext {
+    app: AppHandle,
+    broker: std::sync::Arc<crate::delivery::native_broker::NativeDeliveryBroker>,
+    agent_id: String,
+    plan: OpenCodeHttpLaunchPlan,
+    provider_session_id: String,
+    process_id: u32,
+    workspace: std::path::PathBuf,
+    config_fingerprint: String,
+    runtime_generation: u64,
+    provider_generation: u64,
+}
+
+async fn register_opencode_http_after_launch(context: OpenCodeHttpLaunchContext) {
+    let OpenCodeHttpLaunchContext {
+        app,
+        broker,
+        agent_id,
+        plan,
+        provider_session_id,
+        process_id,
+        workspace,
+        config_fingerprint,
+        runtime_generation,
+        provider_generation,
+    } = context;
+    let endpoint = plan.endpoint().clone();
+    if !wait_for_opencode_http_listener(&app, &agent_id, runtime_generation, &endpoint).await {
+        broker
+            .fail_opencode_http(&agent_id, provider_generation)
+            .await;
+        return;
+    }
+
+    let process_identity = format!("pid:{process_id}:runtime:{runtime_generation}");
+    let listener_identity = format!(
+        "loopback:127.0.0.1:{}:pid:{process_id}:runtime:{runtime_generation}",
+        endpoint.port().unwrap_or_default()
+    );
+    if let Err(error) = broker
+        .register_opencode_http(
+            agent_id.clone(),
+            plan,
+            provider_session_id,
+            process_identity,
+            listener_identity,
+            workspace,
+            config_fingerprint,
+        )
+        .await
+    {
+        broker
+            .fail_opencode_http(&agent_id, provider_generation)
+            .await;
+        log_debug(&format!(
+            "[Wardian] OpenCode HTTP owner unavailable after launch: {error}"
+        ));
+        return;
+    }
+
+    // Owner registration can complete after the provider's one startup/idle
+    // observation. Reuse the canonical status trigger so a task that remained
+    // pending during the handshake gets one dispatch opportunity without
+    // bypassing the normal busy, generation, or claim checks.
+    let state = app.state::<crate::state::AppState>();
+    crate::control::dispatch_agent_messaging_from_status_observation(
+        Some(&app),
+        state.inner(),
+        &agent_id,
+    )
+    .await;
 }
 
 /// Selects the verified Antigravity conversation created by this launch for
@@ -1071,7 +1148,7 @@ pub async fn spawn_agent(
     }
     provider_args = interactive_provider_args(&config.provider, &provider_cwd, &cwd, provider_args);
 
-    let mut opencode_http_plan = if config.provider == "opencode" && is_resume {
+    let mut opencode_http_plan = if config.provider == "opencode" {
         prepare_opencode_http_launch(&app_state, &config, provider_generation).await
     } else {
         None
@@ -1422,59 +1499,28 @@ pub async fn spawn_agent(
         .map_err(|error| format!("Failed to start terminal session broker: {error}"))?;
     child.runtime(app_state.terminal_sessions.clone(), runtime_generation);
 
-    if let (Some(plan), Some(process_id), Some(provider_session_id), Some(config_fingerprint)) = (
-        opencode_http_plan.take(),
-        process_id,
-        config.resume_session.clone(),
-        opencode_http_config_fingerprint,
-    ) {
-        let registration_app = app.clone();
-        let registration_broker = app_state.native_delivery.clone();
-        let registration_agent_id = config.session_id.clone();
-        let registration_workspace = cwd.clone();
-        let registration_endpoint = plan.endpoint().clone();
-        let registration_runtime_generation = runtime_generation;
-        let registration_provider_generation = provider_generation;
-        tauri::async_runtime::spawn(async move {
-            if !wait_for_opencode_http_listener(
-                &registration_app,
-                &registration_agent_id,
-                registration_runtime_generation,
-                &registration_endpoint,
-            )
-            .await
-            {
-                registration_broker
-                    .fail_opencode_http(&registration_agent_id, registration_provider_generation)
-                    .await;
-                return;
-            }
-            let process_identity =
-                format!("pid:{process_id}:runtime:{registration_runtime_generation}");
-            let listener_identity = format!(
-                "loopback:127.0.0.1:{}:pid:{process_id}:runtime:{registration_runtime_generation}",
-                registration_endpoint.port().unwrap_or_default()
-            );
-            if let Err(error) = registration_broker
-                .register_opencode_http(
-                    registration_agent_id.clone(),
+    if config.resume_session.is_some() {
+        if let (Some(plan), Some(process_id), Some(provider_session_id), Some(config_fingerprint)) = (
+            opencode_http_plan.take(),
+            process_id,
+            config.resume_session.clone(),
+            opencode_http_config_fingerprint,
+        ) {
+            tauri::async_runtime::spawn(register_opencode_http_after_launch(
+                OpenCodeHttpLaunchContext {
+                    app: app.clone(),
+                    broker: app_state.native_delivery.clone(),
+                    agent_id: config.session_id.clone(),
                     plan,
                     provider_session_id,
-                    process_identity,
-                    listener_identity,
-                    registration_workspace,
+                    process_id,
+                    workspace: cwd.clone(),
                     config_fingerprint,
-                )
-                .await
-            {
-                registration_broker
-                    .fail_opencode_http(&registration_agent_id, registration_provider_generation)
-                    .await;
-                log_debug(&format!(
-                    "[Wardian] OpenCode HTTP owner unavailable after launch: {error}"
-                ));
-            }
-        });
+                    runtime_generation,
+                    provider_generation,
+                },
+            ));
+        }
     }
     if let Some(receipt) = &pi_receipt {
         receipt.bind(runtime_generation);
@@ -2987,8 +3033,17 @@ pub async fn spawn_agent(
 
     // OpenCode creates a provider-owned session only once its interactive TUI
     // begins a turn. Capture that local identity instead of bootstrapping it
-    // with an extra `opencode run` model request.
+    // with an extra `opencode run` model request, then bind the listener that
+    // was reserved before this same child was spawned.
     if config.provider == "opencode" && config.resume_session.is_none() {
+        let mut fresh_opencode_http_plan = opencode_http_plan.take();
+        let fresh_process_id = process_id;
+        let fresh_runtime_generation = runtime_generation;
+        let fresh_provider_generation = provider_generation;
+        let fresh_broker = app_state.native_delivery.clone();
+        let fresh_app = app.clone();
+        let fresh_expected_folder = expected_folder.clone();
+        let fresh_workspace = cwd.clone();
         let watcher_app = app.clone();
         let watcher_config = config_lock.clone();
         let watcher_current_status = current_status.clone();
@@ -3010,11 +3065,74 @@ pub async fn spawn_agent(
                 started_after_ms,
                 &watcher_session,
             ) {
-                if let Ok(mut cfg) = watcher_config.lock() {
+                let binding_config = if let Ok(mut cfg) = watcher_config.lock() {
                     cfg.resume_session = Some(provider_session_id);
                     cfg.fresh_provider_session_id = None;
-                }
+                    cfg.folder = fresh_expected_folder.clone();
+                    Some(cfg.clone())
+                } else {
+                    None
+                };
                 persist_runtime_agent_configs(&watcher_app);
+                let Some(mut binding_config) = binding_config else {
+                    tauri::async_runtime::block_on(
+                        fresh_broker
+                            .fail_opencode_http(&watcher_session, fresh_provider_generation),
+                    );
+                    break;
+                };
+                let Some(plan) = fresh_opencode_http_plan.take() else {
+                    break;
+                };
+                let Some(process_id) = fresh_process_id else {
+                    tauri::async_runtime::block_on(
+                        fresh_broker
+                            .fail_opencode_http(&watcher_session, fresh_provider_generation),
+                    );
+                    break;
+                };
+                let provider_session_id = binding_config
+                    .resume_session
+                    .clone()
+                    .expect("fresh OpenCode discovery set resume_session");
+                let config_fingerprint = {
+                    binding_config.folder = fresh_expected_folder.clone();
+                    crate::delivery::native_broker::opencode_http_config_fingerprint(
+                        &binding_config,
+                        &fresh_workspace,
+                    )
+                };
+                tauri::async_runtime::block_on(async move {
+                    if let Err(error) = fresh_broker
+                        .prepare_opencode_http(
+                            &watcher_session,
+                            fresh_provider_generation,
+                            config_fingerprint.clone(),
+                        )
+                        .await
+                    {
+                        log_debug(&format!(
+                            "[Wardian] OpenCode HTTP fresh owner preparation failed: {error}"
+                        ));
+                        fresh_broker
+                            .fail_opencode_http(&watcher_session, fresh_provider_generation)
+                            .await;
+                        return;
+                    }
+                    register_opencode_http_after_launch(OpenCodeHttpLaunchContext {
+                        app: fresh_app,
+                        broker: fresh_broker,
+                        agent_id: watcher_session,
+                        plan,
+                        provider_session_id,
+                        process_id,
+                        workspace: fresh_workspace,
+                        config_fingerprint,
+                        runtime_generation: fresh_runtime_generation,
+                        provider_generation: fresh_provider_generation,
+                    })
+                    .await;
+                });
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -3151,6 +3269,16 @@ mod tests {
     fn restored_spawns_skip_stale_process_scan() {
         assert!(!should_cleanup_stale_session_processes_before_spawn(true));
         assert!(should_cleanup_stale_session_processes_before_spawn(false));
+    }
+
+    #[test]
+    fn opencode_http_launch_accepts_fresh_identity_then_rejects_invalid_identity() {
+        assert!(opencode_http_launch_identity_is_valid(None));
+        assert!(opencode_http_launch_identity_is_valid(Some("ses_exact")));
+        assert!(!opencode_http_launch_identity_is_valid(Some("ses/other")));
+        assert!(!opencode_http_launch_identity_is_valid(Some(
+            "wardian-agent"
+        )));
     }
 
     #[test]

@@ -111,6 +111,39 @@ Remove-Item Env:\WARDIAN_E2E_DELIVERY_PROVIDERS
 Remove-Item Env:\WARDIAN_E2E_DELIVERY_NATIVE_PROVIDERS
 ```
 
+Claude and Antigravity can also be checked through the maintained automatic
+task composer exception. Set
+`WARDIAN_E2E_DELIVERY_COMPOSER_TASK_PROVIDERS` to `claude`, `antigravity`, or
+both. The test first establishes the real provider session through the human
+composer, keeps its input sender attached, then submits a canonical
+`wardian message followup`. It records the composer route only after a
+correlated structured reply, a `provider_visible` task claim, and no
+`native_deliveries` row. This route does not qualify native delivery.
+
+POSIX shell:
+
+```bash
+WARDIAN_E2E_REAL_DELIVERY=1 \
+WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL=1 \
+WARDIAN_E2E_DELIVERY_PROVIDERS=claude,antigravity \
+WARDIAN_E2E_DELIVERY_COMPOSER_TASK_PROVIDERS=claude,antigravity \
+npm run test:e2e:native:fast -- e2e-native/tests/provider-delivery-real-native.test.mjs
+```
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_E2E_REAL_DELIVERY = "1"
+$env:WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL = "1"
+$env:WARDIAN_E2E_DELIVERY_PROVIDERS = "claude,antigravity"
+$env:WARDIAN_E2E_DELIVERY_COMPOSER_TASK_PROVIDERS = "claude,antigravity"
+npm run test:e2e:native:fast -- e2e-native/tests/provider-delivery-real-native.test.mjs
+Remove-Item Env:\WARDIAN_E2E_REAL_DELIVERY
+Remove-Item Env:\WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL
+Remove-Item Env:\WARDIAN_E2E_DELIVERY_PROVIDERS
+Remove-Item Env:\WARDIAN_E2E_DELIVERY_COMPOSER_TASK_PROVIDERS
+```
+
 The delivery test enables Codex workspace trust only inside its isolated
 `WARDIAN_HOME`; it does not alter the user's Codex configuration or approval
 policy. Authentication and any other provider-specific first-run requirements
@@ -153,6 +186,29 @@ $env:WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL = "1"
 $env:WARDIAN_E2E_DELIVERY_PROVIDERS = "claude"
 npm run test:e2e:native:fast -- e2e-native/tests/provider-delivery-real-native.test.mjs
 Remove-Item Env:\WARDIAN_E2E_DELIVERY_CLAUDE_MODEL
+Remove-Item Env:\WARDIAN_E2E_REAL_DELIVERY
+Remove-Item Env:\WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL
+Remove-Item Env:\WARDIAN_E2E_DELIVERY_PROVIDERS
+```
+
+Set a provider-specific reasoning effort with
+`WARDIAN_E2E_DELIVERY_<PROVIDER>_EFFORT`. The harness maps this value to the
+provider's `provider_config.reasoning_effort` field. For example, the selected
+Codex low-effort run is:
+
+```bash
+WARDIAN_E2E_DELIVERY_CODEX_EFFORT=low WARDIAN_E2E_REAL_DELIVERY=1 WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL=1 WARDIAN_E2E_DELIVERY_PROVIDERS=codex npm run test:e2e:native:fast -- e2e-native/tests/provider-delivery-real-native.test.mjs
+```
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_E2E_DELIVERY_CODEX_EFFORT = "low"
+$env:WARDIAN_E2E_REAL_DELIVERY = "1"
+$env:WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL = "1"
+$env:WARDIAN_E2E_DELIVERY_PROVIDERS = "codex"
+npm run test:e2e:native:fast -- e2e-native/tests/provider-delivery-real-native.test.mjs
+Remove-Item Env:\WARDIAN_E2E_DELIVERY_CODEX_EFFORT
 Remove-Item Env:\WARDIAN_E2E_REAL_DELIVERY
 Remove-Item Env:\WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL
 Remove-Item Env:\WARDIAN_E2E_DELIVERY_PROVIDERS

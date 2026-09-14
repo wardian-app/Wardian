@@ -36,8 +36,9 @@ pub async fn debug_remove_agent_input_sender(
         .map_err(|error| error.to_string())?;
     state
         .terminal_sessions
-        .terminate_and_remove_runtime(&session_id, broker_state.runtime_generation)
+        .pause_runtime(&session_id, broker_state.runtime_generation)
         .await
+        .map(|_| ())
         .map_err(|error| error.to_string())
 }
 
