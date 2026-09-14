@@ -64,6 +64,18 @@ fn home(root: &Path, name: &str) -> PathBuf {
     path
 }
 
+/// A home whose `sessions` really resolves to the central tree.
+fn projecting_home(root: &Path, name: &str, central: &Path) -> PathBuf {
+    let path = home(root, name);
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(central.join("sessions"), path.join("sessions"))
+        .expect("project central sessions");
+    #[cfg(not(windows))]
+    std::os::unix::fs::symlink(central.join("sessions"), path.join("sessions"))
+        .expect("project central sessions");
+    path
+}
+
 fn real_codex(root: &Path) -> PathBuf {
     let path = root.join(REAL_SESSIONS_PARENT);
     std::fs::create_dir_all(path.join("sessions")).expect("create central sessions");
@@ -75,7 +87,7 @@ fn a_warm_home_publishes_a_snapshot_that_seeds_a_new_one() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
     let central = real_codex(temp.path());
-    let warm = home(temp.path(), "warm");
+    let warm = projecting_home(temp.path(), "warm", &central);
     thread_database(&warm.join("state_5.sqlite"), 12, 0);
 
     assert!(refresh(&wardian_home, &warm, &central).expect("publish snapshot"));
@@ -95,7 +107,7 @@ fn a_published_snapshot_names_no_agent_home() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
     let central = real_codex(temp.path());
-    let warm = home(temp.path(), "warm");
+    let warm = projecting_home(temp.path(), "warm", &central);
     thread_database(&warm.join("state_5.sqlite"), 3, 0);
 
     refresh(&wardian_home, &warm, &central).expect("publish snapshot");
@@ -125,7 +137,7 @@ fn an_unshared_table_with_rows_refuses_publication() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
     let central = real_codex(temp.path());
-    let warm = home(temp.path(), "warm");
+    let warm = projecting_home(temp.path(), "warm", &central);
     thread_database(&warm.join("state_5.sqlite"), 4, 3);
 
     // `projects` is not on the allow-list and holds rows, so publishing it
@@ -145,7 +157,7 @@ fn an_unshared_but_empty_table_is_cleared_rather_than_refused() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
     let central = real_codex(temp.path());
-    let warm = home(temp.path(), "warm");
+    let warm = projecting_home(temp.path(), "warm", &central);
     thread_database(&warm.join("state_5.sqlite"), 2, 0);
 
     assert!(refresh(&wardian_home, &warm, &central).expect("publish"));
@@ -161,13 +173,13 @@ fn a_generation_change_republishes_and_seeds_the_new_name() {
     let wardian_home = home(temp.path(), "wardian");
     let central = real_codex(temp.path());
 
-    let old = home(temp.path(), "old");
+    let old = projecting_home(temp.path(), "old", &central);
     thread_database(&old.join("state_5.sqlite"), 2, 0);
     assert!(refresh(&wardian_home, &old, &central).expect("publish generation 5"));
 
     // A provider upgrade moves to a new generation well inside the refresh
     // interval; the cache must follow rather than serve an unusable file.
-    let upgraded = home(temp.path(), "upgraded");
+    let upgraded = projecting_home(temp.path(), "upgraded", &central);
     thread_database(&upgraded.join("state_6.sqlite"), 9, 0);
     assert!(refresh(&wardian_home, &upgraded, &central).expect("republish generation 6"));
 
@@ -199,7 +211,7 @@ fn a_home_that_already_has_a_thread_database_is_left_alone() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
     let central = real_codex(temp.path());
-    let warm = home(temp.path(), "warm");
+    let warm = projecting_home(temp.path(), "warm", &central);
     thread_database(&warm.join("state_5.sqlite"), 9, 0);
     refresh(&wardian_home, &warm, &central).expect("publish snapshot");
 
@@ -221,7 +233,7 @@ fn a_database_created_after_the_guard_is_never_clobbered() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
     let central = real_codex(temp.path());
-    let warm = home(temp.path(), "warm");
+    let warm = projecting_home(temp.path(), "warm", &central);
     thread_database(&warm.join("state_5.sqlite"), 6, 0);
     refresh(&wardian_home, &warm, &central).expect("publish");
 
@@ -261,7 +273,7 @@ fn a_recent_snapshot_of_the_same_generation_is_not_republished() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
     let central = real_codex(temp.path());
-    let warm = home(temp.path(), "warm");
+    let warm = projecting_home(temp.path(), "warm", &central);
     thread_database(&warm.join("state_5.sqlite"), 2, 0);
     assert!(refresh(&wardian_home, &warm, &central).expect("first publication"));
 
@@ -285,7 +297,7 @@ fn a_stale_snapshot_is_replaced() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
     let central = real_codex(temp.path());
-    let warm = home(temp.path(), "warm");
+    let warm = projecting_home(temp.path(), "warm", &central);
     thread_database(&warm.join("state_5.sqlite"), 2, 0);
     refresh(&wardian_home, &warm, &central).expect("first publication");
 
@@ -311,7 +323,7 @@ fn a_snapshot_captured_from_a_live_writer_is_complete() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
     let central = real_codex(temp.path());
-    let warm = home(temp.path(), "warm");
+    let warm = projecting_home(temp.path(), "warm", &central);
     let database = warm.join("state_5.sqlite");
     thread_database(&database, 5, 0);
 
@@ -336,7 +348,7 @@ fn an_abandoned_staging_file_is_reclaimed() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
     let central = real_codex(temp.path());
-    let warm = home(temp.path(), "warm");
+    let warm = projecting_home(temp.path(), "warm", &central);
     thread_database(&warm.join("state_5.sqlite"), 3, 0);
 
     // A publication interrupted mid-capture leaves a full-size file behind.
@@ -355,7 +367,7 @@ fn a_cached_name_that_escapes_its_home_is_refused() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
     let central = real_codex(temp.path());
-    let warm = home(temp.path(), "warm");
+    let warm = projecting_home(temp.path(), "warm", &central);
     thread_database(&warm.join("state_5.sqlite"), 1, 0);
     refresh(&wardian_home, &warm, &central).expect("publish");
 
@@ -439,7 +451,7 @@ fn a_rewritten_path_uses_this_platform_s_separator() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
     let central = real_codex(temp.path());
-    let warm = home(temp.path(), "warm");
+    let warm = projecting_home(temp.path(), "warm", &central);
     thread_database(&warm.join("state_5.sqlite"), 2, 0);
     refresh(&wardian_home, &warm, &central).expect("publish");
     let fresh = home(temp.path(), "fresh");
@@ -473,7 +485,7 @@ fn engine_bookkeeping_tables_do_not_stop_publication() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
     let central = real_codex(temp.path());
-    let warm = home(temp.path(), "warm");
+    let warm = projecting_home(temp.path(), "warm", &central);
     let database = warm.join("state_5.sqlite");
     thread_database(&database, 3, 0);
     // ANALYZE materialises sqlite_stat1, which holds rows and is not the
@@ -491,10 +503,10 @@ fn a_superseded_snapshot_is_reclaimed() {
     let wardian_home = home(temp.path(), "wardian");
     let central = real_codex(temp.path());
 
-    let old = home(temp.path(), "old");
+    let old = projecting_home(temp.path(), "old", &central);
     thread_database(&old.join("state_5.sqlite"), 2, 0);
     refresh(&wardian_home, &old, &central).expect("publish generation 5");
-    let upgraded = home(temp.path(), "upgraded");
+    let upgraded = projecting_home(temp.path(), "upgraded", &central);
     thread_database(&upgraded.join("state_6.sqlite"), 4, 0);
     refresh(&wardian_home, &upgraded, &central).expect("publish generation 6");
 
@@ -533,7 +545,7 @@ fn a_discarded_seed_leaves_the_home_without_a_database() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
     let central = real_codex(temp.path());
-    let warm = home(temp.path(), "warm");
+    let warm = projecting_home(temp.path(), "warm", &central);
     thread_database(&warm.join("state_5.sqlite"), 3, 0);
     refresh(&wardian_home, &warm, &central).expect("publish");
 
@@ -543,7 +555,7 @@ fn a_discarded_seed_leaves_the_home_without_a_database() {
 
     // Another agent publishing a new generation in between must not redirect
     // the undo: it takes the name this seed wrote, not the current metadata.
-    let upgraded = home(temp.path(), "upgraded");
+    let upgraded = projecting_home(temp.path(), "upgraded", &central);
     thread_database(&upgraded.join("state_6.sqlite"), 1, 0);
     let cache = cache_directory(&wardian_home);
     let mut meta = read_meta(&cache).expect("meta");
@@ -564,24 +576,12 @@ fn a_discarded_seed_leaves_the_home_without_a_database() {
     );
 }
 
-/// A home whose `sessions` really resolves to the central tree.
-fn projecting_home(root: &Path, name: &str, central: &Path) -> PathBuf {
-    let path = home(root, name);
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(central.join("sessions"), path.join("sessions"))
-        .expect("project central sessions");
-    #[cfg(not(windows))]
-    std::os::unix::fs::symlink(central.join("sessions"), path.join("sessions"))
-        .expect("project central sessions");
-    path
-}
-
 #[test]
 fn a_row_that_cannot_be_rewritten_refuses_publication() {
     let temp = tempfile::tempdir().expect("temp");
     let wardian_home = home(temp.path(), "wardian");
     let central = real_codex(temp.path());
-    let warm = home(temp.path(), "warm");
+    let warm = projecting_home(temp.path(), "warm", &central);
     let database = warm.join("state_5.sqlite");
     thread_database(&database, 2, 0);
     let connection = rusqlite::Connection::open(&database).expect("open");
@@ -656,7 +656,7 @@ fn a_skipped_seed_says_why() {
         SeedOutcome::NoSnapshot
     );
 
-    let warm = home(temp.path(), "warm");
+    let warm = projecting_home(temp.path(), "warm", &central);
     thread_database(&warm.join("state_5.sqlite"), 2, 0);
     refresh(&wardian_home, &warm, &central).expect("publish");
 
@@ -678,5 +678,93 @@ fn a_skipped_seed_says_why() {
     assert_eq!(
         seed(&wardian_home, &fresh).expect("already owned"),
         SeedOutcome::HomeHasDatabase
+    );
+}
+
+#[test]
+fn publication_fails_closed_when_the_central_tree_cannot_be_resolved() {
+    let temp = tempfile::tempdir().expect("temp");
+    let wardian_home = home(temp.path(), "wardian");
+    // No central sessions directory at all: ensure_codex_sessions_projection
+    // can fail on its very first create_dir_all, and the home then runs on a
+    // private local fallback. By publication time "cannot tell" means the
+    // projection did not complete, so the gate must refuse rather than assume.
+    let absent_central = temp.path().join("absent-codex");
+    let warm = home(temp.path(), "warm");
+    std::fs::create_dir_all(warm.join("sessions")).expect("local fallback sessions");
+    thread_database(&warm.join("state_5.sqlite"), 3, 0);
+
+    assert!(!refresh(&wardian_home, &warm, &absent_central).expect("refuses to publish"));
+    let fresh = home(temp.path(), "fresh");
+    assert_eq!(
+        seed(&wardian_home, &fresh).expect("nothing published"),
+        SeedOutcome::NoSnapshot
+    );
+}
+
+#[test]
+fn publication_fails_closed_when_the_home_has_no_sessions_entry() {
+    let temp = tempfile::tempdir().expect("temp");
+    let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
+    // A dangling or missing projected entry is equally undetermined.
+    let warm = home(temp.path(), "warm");
+    thread_database(&warm.join("state_5.sqlite"), 3, 0);
+
+    assert!(!refresh(&wardian_home, &warm, &central).expect("refuses to publish"));
+}
+
+#[test]
+fn a_null_rollout_path_is_reported_as_stranded_rather_than_a_type_error() {
+    let temp = tempfile::tempdir().expect("temp");
+    let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
+    let warm = projecting_home(temp.path(), "warm", &central);
+    let database = warm.join("state_5.sqlite");
+    let connection = rusqlite::Connection::open(&database).expect("open fixture database");
+    connection
+        .execute_batch(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT);
+             CREATE TABLE backfill_state (id INTEGER PRIMARY KEY);",
+        )
+        .expect("schema permitting a null path");
+    connection
+        .execute(
+            "INSERT INTO threads (id, rollout_path, cwd) VALUES ('null-row', NULL, 'w')",
+            [],
+        )
+        .expect("insert null row");
+    drop(connection);
+
+    let error = refresh(&wardian_home, &warm, &central).expect_err("must refuse");
+    assert!(
+        error.contains("central session tree"),
+        "expected the deliberate all-or-nothing refusal, got: {error}"
+    );
+}
+
+#[test]
+fn an_interrupted_seed_leaves_no_file_at_the_live_name() {
+    let temp = tempfile::tempdir().expect("temp");
+    let wardian_home = home(temp.path(), "wardian");
+    let central = real_codex(temp.path());
+    let warm = projecting_home(temp.path(), "warm", &central);
+    thread_database(&warm.join("state_5.sqlite"), 4, 0);
+    refresh(&wardian_home, &warm, &central).expect("publish");
+
+    // A copy that cannot finish must not leave a truncated database at the name
+    // the next launch checks; the provider would refuse to open it and nothing
+    // in Wardian would notice.
+    let fresh = home(temp.path(), "fresh");
+    let cache = cache_directory(&wardian_home);
+    let missing = cache.join("snapshot-state_9.sqlite");
+    assert!(write_seed(&missing, &fresh.join("state_9.sqlite")).is_err());
+    assert!(
+        !fresh.join("state_9.sqlite").exists(),
+        "a failed placement left a file at the live name"
+    );
+    assert!(
+        !fresh.join("state_9.wardian-seed").exists(),
+        "staging was not reclaimed"
     );
 }

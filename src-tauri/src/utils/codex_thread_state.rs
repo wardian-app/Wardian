@@ -221,29 +221,33 @@ pub(crate) fn seed(wardian_home: &Path, codex_home: &Path) -> Result<SeedOutcome
     })
 }
 
-/// Copy the snapshot in without ever replacing an existing database.
+/// Place the snapshot without ever replacing an existing database.
+///
+/// Copies to a sibling and links it into place rather than writing the live
+/// name directly. A copy interrupted by a kill or power loss would otherwise
+/// leave a truncated file that the next launch mistakes for the provider's own
+/// database, and the provider would then refuse to open a malformed image with
+/// nothing in Wardian to notice or repair it.
 fn write_seed(snapshot: &Path, target: &Path) -> Result<bool, String> {
-    let mut source = std::fs::File::open(snapshot).map_err(|error| error.to_string())?;
-    let mut destination = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(target)
-    {
-        Ok(file) => file,
-        // The provider created its own database first; it owns this home now.
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
-        Err(error) => return Err(error.to_string()),
-    };
-    // The provider recreates its write-ahead log and shared-memory files, so a
-    // single complete database file is a sufficient seed.
-    match std::io::copy(&mut source, &mut destination) {
-        Ok(_) => Ok(true),
-        Err(error) => {
-            drop(destination);
-            let _ = std::fs::remove_file(target);
-            Err(error.to_string())
+    let staging = target.with_extension("wardian-seed");
+    let _ = std::fs::remove_file(&staging);
+    let placed = (|| -> std::io::Result<bool> {
+        let mut source = std::fs::File::open(snapshot)?;
+        let mut destination = std::fs::File::create(&staging)?;
+        // The provider recreates its write-ahead log and shared-memory files,
+        // so a single complete database file is a sufficient seed.
+        std::io::copy(&mut source, &mut destination)?;
+        destination.sync_all()?;
+        drop(destination);
+        match std::fs::hard_link(&staging, target) {
+            Ok(()) => Ok(true),
+            // The provider created its own database first; it owns this home.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error),
         }
-    }
+    })();
+    let _ = std::fs::remove_file(&staging);
+    placed.map_err(|error| error.to_string())
 }
 
 /// Publish a snapshot of this home's thread index for future agents.
@@ -264,7 +268,17 @@ pub(crate) fn refresh(
     // that would seed every later agent with an empty history and suppress the
     // rebuild that would repair it, and the next publisher would be one of
     // those agents. Refuse at the source, not only when consuming.
-    if !projects_central_sessions(codex_home, real_codex_home) {
+    //
+    // This fails closed, unlike the consumer-side check: by the time a home
+    // publishes, its projection has already run, so "cannot tell" means the
+    // projection did not complete rather than that it has not happened yet.
+    let (Ok(projected), Ok(central)) = (
+        std::fs::canonicalize(codex_home.join("sessions")),
+        std::fs::canonicalize(real_codex_home.join("sessions")),
+    ) else {
+        return Ok(false);
+    };
+    if projected != central {
         return Ok(false);
     }
     let cache = cache_directory(wardian_home);
@@ -458,8 +472,10 @@ fn canonicalize_rollout_paths(
         .prepare("SELECT id, rollout_path FROM threads")
         .map_err(|error| error.to_string())?;
     let rows = statement
+        // Read the path as optional so a NULL reaches the audit below and is
+        // reported as a stranded row, rather than failing here as a type error.
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
         })
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
@@ -467,6 +483,9 @@ fn canonicalize_rollout_paths(
 
     let mut rewritten = 0;
     for (id, rollout_path) in rows {
+        let Some(rollout_path) = rollout_path else {
+            continue;
+        };
         let Some(tail) = sessions_tail(&rollout_path) else {
             continue;
         };

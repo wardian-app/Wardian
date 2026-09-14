@@ -179,12 +179,21 @@ fn prepare_owner_habitat(
         ) {
             // Undo by the exact name written, never by re-reading published
             // metadata: another agent may have published a new generation.
-            let discarded = crate::utils::codex_thread_state::discard_seed(&codex_home, database);
-            crate::utils::logging::log_debug(&format!(
-                "[Wardian] Discarded Codex thread index seed for agent {agent_id}: this home \
-does not project the central session tree ({})",
-                discarded.err().unwrap_or_else(|| "removed".into())
-            ));
+            match crate::utils::codex_thread_state::discard_seed(&codex_home, database) {
+                Ok(()) => crate::utils::logging::log_debug(&format!(
+                    "[Wardian] Discarded Codex thread index seed for agent {agent_id}: \
+this home does not project the central session tree"
+                )),
+                // Starting on an index this code has just judged unusable is
+                // worse than not starting: its migration state would claim the
+                // central tree is indexed while the home reads a local one, so
+                // the agent's own rollouts would never be indexed at all.
+                Err(error) => {
+                    return Err(CodexSharedError::unsupported(format!(
+                        "could not discard an unusable Codex thread index seed: {error}"
+                    )))
+                }
+            }
         }
     }
     if let crate::utils::codex_messaging::Registration::Unavailable(reason) =
