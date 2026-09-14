@@ -22,6 +22,8 @@ pub(crate) struct TranscriptNormalizationState {
     next_sequence: u64,
     request_root_id: Option<String>,
     codex_provider_turn_id: Option<String>,
+    #[serde(default)]
+    codex_user_mirror_pending: bool,
     pending_events: Vec<AgentChatEvent>,
     pending_context_indices: Vec<usize>,
     tool_request_roots: HashMap<String, ToolRequestRootState>,
@@ -34,6 +36,7 @@ impl Default for TranscriptNormalizationState {
             next_sequence: 1,
             request_root_id: None,
             codex_provider_turn_id: None,
+            codex_user_mirror_pending: false,
             pending_events: Vec::new(),
             pending_context_indices: Vec::new(),
             tool_request_roots: HashMap::new(),
@@ -79,6 +82,20 @@ pub(crate) fn normalize_chat_lines_with_state(
         let sequence = state.next_sequence;
         state.next_sequence = state.next_sequence.saturating_add(1);
         let raw_line = line.as_ref();
+        if normalized_provider == "codex"
+            && serde_json::from_str::<Value>(raw_line)
+                .ok()
+                .is_some_and(|value| {
+                    value.get("type").and_then(Value::as_str) == Some("turn_context")
+                })
+        {
+            // A new Codex turn must not inherit the previous turn's native
+            // identity. The following response_item or context observation
+            // establishes the identity for its own event_msg mirror.
+            state.request_root_id = None;
+            state.codex_provider_turn_id = None;
+            state.codex_user_mirror_pending = false;
+        }
         let Some(mut event) =
             normalize_chat_line(session_id, normalized_provider.as_str(), raw_line, sequence)
         else {
@@ -107,6 +124,26 @@ pub(crate) fn normalize_chat_lines_with_state(
         }
 
         let input_origin = metadata_string(&event.metadata, "input_origin");
+        let mut provider_turn_id = metadata_string(&event.metadata, "provider_turn_id");
+        let mut inherited_provider_turn_id = false;
+        if normalized_provider == "codex"
+            && input_origin.as_deref() == Some("human_input")
+            && event.kind == AgentChatEventKind::Message
+            && event.role == Some(AgentChatRole::User)
+            && event.source.as_deref() == Some("event_msg")
+            && provider_turn_id.is_none()
+            && state.codex_user_mirror_pending
+        {
+            // Codex writes the same human input as a response_item and an
+            // event_msg. The latter omits the provider turn ID, so carry the
+            // explicit native identity from the current turn state. This is
+            // source provenance, not text or timing based deduplication.
+            if let Some(current_turn_id) = state.codex_provider_turn_id.as_deref() {
+                set_metadata_string(&mut event.metadata, "provider_turn_id", current_turn_id);
+                provider_turn_id = Some(current_turn_id.to_string());
+                inherited_provider_turn_id = true;
+            }
+        }
         if matches!(input_origin.as_deref(), Some("human_input" | "agent_input")) {
             let root_id = metadata_string(&event.metadata, "request_root_id")
                 .or_else(|| event.turn_id.clone())
@@ -137,9 +174,20 @@ pub(crate) fn normalize_chat_lines_with_state(
                         }
                     }
                 }
-                state.codex_provider_turn_id = pending_turn_id;
+                let active_provider_turn_id = provider_turn_id.or(pending_turn_id);
+                state.codex_provider_turn_id = active_provider_turn_id.clone();
+                state.codex_user_mirror_pending = active_provider_turn_id.is_some()
+                    && !inherited_provider_turn_id
+                    && event.source.as_deref() != Some("event_msg");
                 events.append(&mut state.pending_events);
             }
+        }
+
+        if normalized_provider == "codex"
+            && event.kind == AgentChatEventKind::Message
+            && event.role == Some(AgentChatRole::Assistant)
+        {
+            state.codex_user_mirror_pending = false;
         }
 
         if event.kind == AgentChatEventKind::ToolCall {
@@ -2388,6 +2436,32 @@ mod tests {
         assert_eq!(message.metadata["input_origin"], "human_input");
         assert_eq!(message.metadata["input_purpose"], "request");
         assert_eq!(message.metadata["provider_turn_id"], "native-turn");
+    }
+
+    #[test]
+    fn codex_user_mirror_inherits_the_current_native_turn_identity() {
+        let events = normalize_chat_lines(
+            "agent-1",
+            "codex",
+            include_str!("fixtures/codex-user-input-mirror.jsonl").lines(),
+        );
+
+        let users = events
+            .iter()
+            .filter(|event| event.role == Some(AgentChatRole::User))
+            .collect::<Vec<_>>();
+        assert_eq!(users.len(), 2);
+        assert!(users.iter().all(|event| {
+            event.metadata["input_origin"] == "human_input"
+                && event.metadata["input_purpose"] == "request"
+                && event.metadata["provider_turn_id"] == "provider-turn-a"
+        }));
+        assert_eq!(users[0].source.as_deref(), Some("response_item"));
+        assert_eq!(users[1].source.as_deref(), Some("event_msg"));
+        assert_ne!(
+            users[0].metadata["request_root_id"],
+            users[1].metadata["request_root_id"]
+        );
     }
 
     #[test]
