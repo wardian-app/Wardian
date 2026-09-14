@@ -285,6 +285,7 @@ pub fn merge_current_capture(
 ) -> io::Result<Vec<AgentChatEvent>> {
     let mut unmatched_current = Vec::with_capacity(current.len());
     let mut matched_generated = std::collections::HashSet::new();
+    let mut archived_native_duplicates = BTreeSet::new();
     for event in current {
         let generated = matching_opencode_generated_input(&archived, &event)
             .filter(|index| matched_generated.insert(*index));
@@ -292,9 +293,23 @@ pub fn merge_current_capture(
             let mut canonical = archived[generated].clone();
             enrich(&mut canonical, &event)?;
             archived[generated] = canonical;
+            // The normal delivery path archives the generated local echo
+            // first, then appends the native DB projection during its first
+            // capture. Replaying that archive therefore contains both rows;
+            // remove only the already-archived native observation that is
+            // bound to this exact current event. The generated row remains
+            // the canonical identity after enrichment.
+            for (index, archived_event) in archived.iter().enumerate() {
+                if index != generated && same_observation(archived_event, &event) {
+                    archived_native_duplicates.insert(index);
+                }
+            }
         } else {
             unmatched_current.push(event);
         }
+    }
+    for index in archived_native_duplicates.into_iter().rev() {
+        archived.remove(index);
     }
     refresh_events(&mut archived, &unmatched_current)?;
     for mut event in unmatched_current {
