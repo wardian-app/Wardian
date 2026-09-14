@@ -1547,10 +1547,8 @@ fn canonicalize_provider_input_projection(events: &mut Vec<AgentChatEvent>) {
         };
 
         let candidate = event;
-        let replace = should_prefer_message_duplicate_candidate(
-            &projected[canonical_index],
-            &candidate,
-        );
+        let replace =
+            should_prefer_message_duplicate_candidate(&projected[canonical_index], &candidate);
         if replace {
             let mut replacement = candidate;
             retain_provider_observation_ids(&mut replacement, &projected[canonical_index]);
@@ -3285,11 +3283,7 @@ Do you want to proceed?
             r#"{"type":"response_item","payload":{"type":"message","id":"message-b","role":"user","content":[{"type":"input_text","text":"Inspect the archive."}],"internal_chat_message_metadata_passthrough":{"turn_id":"provider-turn-b","content_item_kinds":["user.text"]}}}"#,
             r#"{"type":"event_msg","payload":{"type":"user_message","client_id":"client-b","message":"Inspect the archive."}}"#,
         ]);
-        let mut provider_events = normalize_chat_lines(
-            "agent-1",
-            "codex",
-            lines,
-        );
+        let mut provider_events = normalize_chat_lines("agent-1", "codex", lines);
         for event in &mut provider_events {
             event.metadata["provider_log"] = serde_json::json!(true);
             event.metadata["provider_session_id"] = serde_json::json!("provider-session");
@@ -3327,8 +3321,7 @@ Do you want to proceed?
             vec!["provider-turn-a", "provider-turn-b"]
         );
         assert!(users.iter().all(|event| {
-            event
-                .metadata["provider_observation_ids"]
+            event.metadata["provider_observation_ids"]
                 .as_array()
                 .unwrap()
                 .iter()

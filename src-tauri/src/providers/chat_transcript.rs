@@ -85,8 +85,9 @@ pub(crate) fn normalize_chat_lines_with_state(
         if normalized_provider == "codex"
             && serde_json::from_str::<Value>(raw_line)
                 .ok()
-                .and_then(|value| value.get("type").and_then(Value::as_str))
-                == Some("turn_context")
+                .is_some_and(|value| {
+                    value.get("type").and_then(Value::as_str) == Some("turn_context")
+                })
         {
             // A new Codex turn must not inherit the previous turn's native
             // identity. The following response_item or context observation
