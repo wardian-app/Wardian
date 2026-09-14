@@ -1900,7 +1900,7 @@ test("human composer delivery uses actual providers; not peer messaging", { time
             : JSON.parse(runCliOk(cliPath, harness, ["delivery", "capabilities", agent.session_id]).stdout);
         const identity = assertProviderNativeSession(provider, capability, agent.session_id);
         await waitForExistingAgentIdle(session.driver, agent.session_id);
-        await invokeTauri(session.driver, "debug_remove_agent_input_sender", { sessionId: agent.session_id });
+        await invokeTauri(session.driver, "debug_pause_agent_input_sender", { sessionId: agent.session_id });
         const terminal = await invokeTauri(session.driver, "request_terminal_snapshot", { request: { session_id: agent.session_id } });
         const sender = await invokeTauri(session.driver, "spawn_agent", { req: {
           sessionName: `Native-Task-Origin-${provider}-${runId}`, agentClass: "TestClass", folder: workspacePath,
