@@ -112,6 +112,7 @@ pub async fn load_agent_chat_transcript_for_state(
         archived_events,
     )
     .map_err(|error| format!("conversation archive provenance refresh failed: {error}"))?;
+    canonicalize_provider_input_projection(&mut events);
     for event in &mut events {
         normalize_chat_event_visible_text(event);
     }
@@ -1516,11 +1517,96 @@ fn merge_chat_events(
         }
     }
 
+    canonicalize_provider_input_projection(&mut merged);
     for (index, event) in merged.iter_mut().enumerate() {
         event.sequence = Some(index as u64 + 1);
     }
 
     merged
+}
+
+/// Projects Codex's two native user-input records into one chat row while
+/// retaining both observation IDs in the returned metadata. The raw provider
+/// log and archive source records remain unchanged, so this is a presentation
+/// projection rather than evidence deletion.
+fn canonicalize_provider_input_projection(events: &mut Vec<AgentChatEvent>) {
+    let mut canonical_indexes = HashMap::new();
+    let mut projected = Vec::with_capacity(events.len());
+
+    for event in events.drain(..) {
+        let Some(identity) = provider_input_projection_identity(&event) else {
+            projected.push(event);
+            continue;
+        };
+
+        let Some(&canonical_index) = canonical_indexes.get(&identity) else {
+            let index = projected.len();
+            canonical_indexes.insert(identity, index);
+            projected.push(event);
+            continue;
+        };
+
+        let candidate = event;
+        let replace =
+            should_prefer_message_duplicate_candidate(&projected[canonical_index], &candidate);
+        if replace {
+            let mut replacement = candidate;
+            retain_provider_observation_ids(&mut replacement, &projected[canonical_index]);
+            projected[canonical_index] = replacement;
+        } else {
+            retain_provider_observation_ids(&mut projected[canonical_index], &candidate);
+        }
+    }
+
+    *events = projected;
+}
+
+fn provider_input_projection_identity(event: &AgentChatEvent) -> Option<String> {
+    if event.kind != AgentChatEventKind::Message
+        || event.role != Some(AgentChatRole::User)
+        || !event.provider.eq_ignore_ascii_case("codex")
+        || event.metadata["provider_log"] != true
+        || event.metadata["input_origin"] != "human_input"
+        || event.metadata["input_purpose"] != "request"
+    {
+        return None;
+    }
+    let provider_turn_id = event
+        .metadata
+        .get("provider_turn_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(format!(
+        "{}|{}|{provider_turn_id}",
+        event.session_id, event.provider
+    ))
+}
+
+fn retain_provider_observation_ids(canonical: &mut AgentChatEvent, duplicate: &AgentChatEvent) {
+    let mut ids = provider_observation_ids(canonical);
+    for id in provider_observation_ids(duplicate) {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    canonical.metadata["provider_observation_ids"] = serde_json::json!(ids);
+}
+
+fn provider_observation_ids(event: &AgentChatEvent) -> Vec<String> {
+    let mut ids = event
+        .metadata
+        .get("provider_observation_ids")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if !ids.iter().any(|id| id == &event.id) {
+        ids.push(event.id.clone());
+    }
+    ids
 }
 
 fn is_cross_source_archive_duplicate(
@@ -3185,6 +3271,65 @@ Do you want to proceed?
             turns[0].status,
             wardian_core::conversations::ConversationTurnStatus::Responded
         );
+    }
+
+    #[test]
+    fn canonicalizes_codex_user_mirrors_by_native_turn_and_preserves_repeated_turns() {
+        let mut lines = include_str!("../providers/fixtures/codex-user-input-mirror.jsonl")
+            .lines()
+            .collect::<Vec<_>>();
+        lines.extend([
+            r#"{"type":"turn_context","payload":{"turn_id":"provider-turn-b"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","id":"message-b","role":"user","content":[{"type":"input_text","text":"Inspect the archive."}],"internal_chat_message_metadata_passthrough":{"turn_id":"provider-turn-b","content_item_kinds":["user.text"]}}}"#,
+            r#"{"type":"event_msg","payload":{"type":"user_message","client_id":"client-b","message":"Inspect the archive."}}"#,
+        ]);
+        let mut provider_events = normalize_chat_lines("agent-1", "codex", lines);
+        for event in &mut provider_events {
+            event.metadata["provider_log"] = serde_json::json!(true);
+            event.metadata["provider_session_id"] = serde_json::json!("provider-session");
+            event.metadata["log_path"] = serde_json::json!("<provider-log>");
+        }
+        let raw_user_ids = provider_events
+            .iter()
+            .filter(|event| event.role == Some(AgentChatRole::User))
+            .map(|event| event.id.clone())
+            .collect::<Vec<_>>();
+
+        let projected = merge_chat_events(Vec::new(), provider_events);
+        let users = projected
+            .iter()
+            .filter(|event| event.role == Some(AgentChatRole::User))
+            .collect::<Vec<_>>();
+
+        assert_eq!(raw_user_ids.len(), 4);
+        assert_eq!(users.len(), 2);
+        assert_eq!(
+            users
+                .iter()
+                .map(|event| event.metadata["provider_observation_ids"]
+                    .as_array()
+                    .expect("observation IDs")
+                    .len())
+                .collect::<Vec<_>>(),
+            vec![2, 2]
+        );
+        assert_eq!(
+            users
+                .iter()
+                .map(|event| event.metadata["provider_turn_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["provider-turn-a", "provider-turn-b"]
+        );
+        assert!(users.iter().all(|event| {
+            event.metadata["provider_observation_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|id| {
+                    id.as_str()
+                        .is_some_and(|id| raw_user_ids.iter().any(|raw_id| raw_id == id))
+                })
+        }));
     }
 
     #[test]
