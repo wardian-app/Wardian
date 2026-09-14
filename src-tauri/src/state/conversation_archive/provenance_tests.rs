@@ -114,6 +114,71 @@ fn codex_assistant_mirror_projection_requires_one_final_native_turn() {
     assert_eq!(distinct_turns.len(), 2);
     assert!(distinct_turns.iter().any(|event| event.id == "msg-a"));
     assert!(distinct_turns.iter().any(|event| event.id == "msg-b"));
+
+    let ambiguous = provenance::merge_current_capture(
+        Vec::new(),
+        vec![
+            observation("mirror-a", "event_msg", None, "turn-a", None),
+            observation("mirror-b", "event_msg", None, "turn-a", None),
+            observation(
+                "msg-a",
+                "response_item",
+                Some("msg-a"),
+                "turn-a",
+                Some("final_answer"),
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(ambiguous.len(), 3);
+}
+
+#[test]
+fn retained_codex_delivery_fixture_collapses_only_the_bound_provider_pair() {
+    let (_guard, _temp) = isolate();
+    let mut current = crate::providers::chat_transcript::normalize_chat_lines(
+        "wardian-agent",
+        "codex",
+        include_str!("../../providers/fixtures/codex-real-delivery-mirror.jsonl").lines(),
+    );
+    for event in &mut current {
+        if event.kind == AgentChatEventKind::Message {
+            event.metadata["provider_log"] = serde_json::json!(true);
+            event.metadata["log_path"] = serde_json::json!("<codex-log>");
+        }
+    }
+    let mirror = current
+        .iter()
+        .find(|event| {
+            event.role == Some(AgentChatRole::Assistant)
+                && event.source.as_deref() == Some("event_msg")
+        })
+        .cloned()
+        .expect("fixture identityless mirror");
+    let mut unbound_watch_observation = mirror.clone();
+    unbound_watch_observation.id = "watch-event-msg".into();
+    unbound_watch_observation.metadata = serde_json::json!({});
+    current.push(unbound_watch_observation);
+
+    let projected = provenance::merge_current_capture(Vec::new(), current).unwrap();
+    let assistants = projected
+        .iter()
+        .filter(|event| event.role == Some(AgentChatRole::Assistant))
+        .collect::<Vec<_>>();
+    assert_eq!(assistants.len(), 2);
+    let canonical = assistants
+        .iter()
+        .find(|event| event.source.as_deref() == Some("response_item"))
+        .expect("identified final response");
+    assert_eq!(canonical.metadata["provider_phase"], "final_answer");
+    assert_eq!(
+        canonical.metadata["provider_observation_ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(assistants.iter().any(|event| event.id == "watch-event-msg"));
 }
 
 use crate::commands::chat::archive_identity as native_identity;
