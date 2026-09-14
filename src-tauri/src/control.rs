@@ -5778,7 +5778,7 @@ mod test_support;
 
 #[cfg(test)]
 mod tests {
-    include!("control/opencode_startup_tests.rs");
+    include!("control/tests/registrations.rs");
 
     use super::*;
     use crate::state::ActiveAgent;

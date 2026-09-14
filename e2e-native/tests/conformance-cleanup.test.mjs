@@ -11,7 +11,7 @@ import { cleanupConformanceSession, closeConformanceSession, pauseConformanceAge
 function fixture(t) {
   const isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), "wardian-conformance-cleanup-"));
   const harness = { isolatedHome, runId: `cleanup-${path.basename(isolatedHome)}` };
-  acquireHomeLock({ home: isolatedHome, runId: harness.runId });
+  harness.homeLock = acquireHomeLock({ home: isolatedHome, runId: harness.runId }).lock;
   t.after(() => fs.rmSync(isolatedHome, { recursive: true, force: true }));
   const calls = [];
   const session = {
@@ -21,7 +21,11 @@ function fixture(t) {
   const options = {
     harness, session, startupAttempted: true,
     pause: async () => { calls.push("pause"); },
-    save: async (result) => { calls.push("save"); assert.equal(result.home_lock_released, readHomeLock(isolatedHome) === null); },
+    save: async (result) => {
+      calls.push("save");
+      assert.equal(result.home_lock_released, readHomeLock(isolatedHome) === null);
+      assert.equal(result.home_lock_release_deferred, false);
+    },
   };
   return { harness, session, calls, options };
 }
@@ -95,10 +99,55 @@ test("foreign home lock is never released after successful session cleanup", asy
   assert.equal(readHomeLock(harness.isolatedHome).runId, "foreign");
 });
 
+test("same-run lock with a changed owner is retained", async (t) => {
+  const { options, harness } = fixture(t);
+  fs.writeFileSync(
+    path.join(harness.isolatedHome, HOME_LOCK_FILE),
+    JSON.stringify({ runId: harness.runId, pid: process.ppid, startedAt: new Date().toISOString() }),
+  );
+  await assert.rejects(cleanupConformanceSession(options), (error) =>
+    error.cleanupConfirmed === false && error.errors.some((item) => /ownership changed/.test(item.message)));
+  assert.equal(readHomeLock(harness.isolatedHome).pid, process.ppid);
+});
+
+test("a live same-run supervisor claim is deferred for upstream release", async (t) => {
+  const isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), "wardian-conformance-supervisor-"));
+  const runId = `supervisor-${path.basename(isolatedHome)}`;
+  const harness = {
+    isolatedHome,
+    runId,
+    homeLock: acquireHomeLock({ home: isolatedHome, runId, pid: process.ppid }).lock,
+  };
+  t.after(() => fs.rmSync(isolatedHome, { recursive: true, force: true }));
+  const session = {
+    tauriDriver: { exitCode: null, signalCode: null },
+    close: async () => { session.tauriDriver.exitCode = 0; },
+  };
+  const cleanup = await cleanupConformanceSession({
+    harness,
+    session,
+    startupAttempted: true,
+    pause: async () => {},
+    save: async () => {},
+  });
+  assert.deepEqual(cleanup, {
+    shutdown_confirmed: true,
+    home_lock_released: false,
+    home_lock_release_deferred: true,
+  });
+  assert.equal(readHomeLock(isolatedHome).pid, process.ppid);
+  releaseHomeLock({ home: isolatedHome, runId });
+  assert.equal(readHomeLock(isolatedHome), null);
+});
+
 test("observed signal exit releases only the suite claim after successful quit", async (t) => {
   const { options, session, harness } = fixture(t);
   session.close = async () => { session.tauriDriver.signalCode = "SIGTERM"; };
-  assert.deepEqual(await cleanupConformanceSession(options), { shutdown_confirmed: true, home_lock_released: true });
+  assert.deepEqual(await cleanupConformanceSession(options), {
+    shutdown_confirmed: true,
+    home_lock_released: true,
+    home_lock_release_deferred: false,
+  });
   assert.equal(readHomeLock(harness.isolatedHome), null);
 });
 
@@ -160,7 +209,11 @@ test("unavailable or malformed owned roster cannot authorize lock release", asyn
 test("empty owned roster permits cleanup only with observed driver exit", async (t) => {
   const { options, harness } = fixture(t);
   options.pause = () => pauseConformanceAgents(async () => []);
-  assert.deepEqual(await cleanupConformanceSession(options), { shutdown_confirmed: true, home_lock_released: true });
+  assert.deepEqual(await cleanupConformanceSession(options), {
+    shutdown_confirmed: true,
+    home_lock_released: true,
+    home_lock_release_deferred: false,
+  });
   assert.equal(readHomeLock(harness.isolatedHome), null);
 });
 

@@ -778,6 +778,11 @@ pub async fn spawn_agent(
     } else {
         None
     };
+    let pi_receipt = if config.provider == "pi" {
+        Some(super::pi_receipt::Receipt::prepare(&config)?)
+    } else {
+        None
+    };
     let memory_process_key = if is_restored {
         config
             .resume_session
@@ -917,6 +922,9 @@ pub async fn spawn_agent(
         );
         CodexProvider::new()
             .insert_developer_instructions_arg(&mut provider_args, &runtime_instructions);
+    }
+    if let Some(receipt) = &pi_receipt {
+        receipt.append_args(&mut provider_args);
     }
     provider_args = interactive_provider_args(&config.provider, &provider_cwd, &cwd, provider_args);
 
@@ -1060,6 +1068,11 @@ pub async fn spawn_agent(
         .spawn_command(cmd)
         .map_err(|e| format!("Failed to spawn command: {}", e))?;
 
+    let child = if let Some(receipt) = &pi_receipt {
+        receipt.own_child(child)
+    } else {
+        child
+    };
     let mut child = super::codex_shared::StartingCodexTui::new(
         child,
         codex_attachment.as_ref().map(|attachment| {
@@ -1134,6 +1147,9 @@ pub async fn spawn_agent(
         .await
         .map_err(|error| format!("Failed to start terminal session broker: {error}"))?;
     child.runtime(app_state.terminal_sessions.clone(), runtime_generation);
+    if let Some(receipt) = &pi_receipt {
+        receipt.bind(runtime_generation);
+    }
     let sid_for_input = config.session_id.clone();
     let provider_name_for_input = config.provider.clone();
 
@@ -1928,18 +1944,31 @@ pub async fn spawn_agent(
             .map(|baseline| baseline.cursor.clone())
             .unwrap_or_default();
 
-        std::thread::spawn(move || {
+        let receipt = pi_receipt.clone().expect("Pi receipt prepared");
+        let watcher_receipt = receipt.clone();
+        let receipt_broker = app_state.terminal_sessions.clone();
+        let receipt_executor = tokio::runtime::Handle::current();
+        let watcher = std::thread::spawn(move || {
             let mut cursor = watcher_initial_cursor;
             loop {
                 let current = watcher_current_status
                     .lock()
                     .map(|status| status.clone())
                     .unwrap_or_else(|error| error.into_inner().clone());
-                if current == "Off" {
+                if current == "Off" || watcher_receipt.stopped() {
                     break;
                 }
                 let watcher_profile = crate::utils::runtime_profile::RuntimeProfileSpan::start(
                     crate::utils::runtime_profile::RuntimeMetric::PiWatcherPoll,
+                );
+
+                watcher_receipt.poll(
+                    &receipt_broker,
+                    &receipt_executor,
+                    &watcher_watch_state,
+                    &watcher_query_count,
+                    &watcher_app,
+                    &watcher_current_status,
                 );
 
                 let provider_session_id = watcher_config
@@ -2025,14 +2054,18 @@ pub async fn spawn_agent(
                                         }
                                     }
                                 }
-                                apply_agent_event(
-                                    &watcher_app,
-                                    &watcher_session,
-                                    event,
-                                    &watcher_query_count,
-                                    &watcher_init_timestamp,
-                                    &watcher_current_status,
-                                );
+                                // Hook owns starts/counts. Keep both transcript projection and
+                                // raw JSON emission when the buffered user record arrives later.
+                                if let Some(event) = super::pi_receipt::log_activity(event) {
+                                    apply_agent_event(
+                                        &watcher_app,
+                                        &watcher_session,
+                                        event,
+                                        &watcher_query_count,
+                                        &watcher_init_timestamp,
+                                        &watcher_current_status,
+                                    );
+                                }
                             }
                             let _ = watcher_app.emit(
                                 "agent-json-event",
@@ -2049,7 +2082,9 @@ pub async fn spawn_agent(
                 watcher_profile.finish(0);
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
+            watcher_receipt.stop();
         });
+        receipt.retain_watcher(watcher);
     } else if config.provider == "claude" {
         let watcher_app = app.clone();
         let watcher_provider = provider.clone();
