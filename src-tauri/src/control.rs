@@ -1713,12 +1713,22 @@ async fn deliver_message_to_target_with_delivery_options(
     let mut failures = Vec::new();
     let mut delivery = Vec::with_capacity(session_ids.len());
     for initial_info in target_infos {
-        let (lifecycle_was_busy, target_lifecycle_guard) =
-            match state.try_lock_agent_lifecycle(&initial_info.uuid).await {
-                Some(guard) => (false, guard),
-                None => (true, state.lock_agent_lifecycle(&initial_info.uuid).await),
-            };
+        let target_lifecycle_guard = match state.try_lock_agent_lifecycle(&initial_info.uuid).await
+        {
+            Some(guard) => guard,
+            None => state.lock_agent_lifecycle(&initial_info.uuid).await,
+        };
         let info = delivery_target_info(state, &initial_info.uuid).await?;
+        if !same_delivery_target_incarnation(&initial_info, &info) {
+            failures.push(format!("{}: target_replaced", initial_info.uuid));
+            delivery.push(rejected_delivery_detail(
+                initial_info,
+                "target_replaced",
+                input_mode,
+                queue_policy,
+            ));
+            continue;
+        }
         let outbound_message = message_with_origin(
             state,
             message,
@@ -1734,14 +1744,7 @@ async fn deliver_message_to_target_with_delivery_options(
             .broker_state(&info.uuid)
             .await
             .is_ok();
-        let route = if input_mode != MessageInputMode::ApprovalAction
-            && matches!(queue_policy, QueuePolicy::QueueIfBusy)
-            && lifecycle_was_busy
-        {
-            DeliveryRoute::Reject {
-                failure: "conversation_leased",
-            }
-        } else if input_mode == MessageInputMode::ApprovalAction
+        let route = if input_mode == MessageInputMode::ApprovalAction
             || matches!(queue_policy, QueuePolicy::MailboxOnly)
         {
             decide_delivery_route(&info.status, input_mode, queue_policy, approval_action)
@@ -4364,6 +4367,7 @@ pub(crate) mod test_support;
 #[cfg(test)]
 pub(crate) mod tests {
     include!("control/tests/registrations.rs");
+    include!("control/tests/lifecycle_delivery.rs");
 
     use super::*;
     use crate::state::ActiveAgent;

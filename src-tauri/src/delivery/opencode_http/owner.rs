@@ -86,13 +86,10 @@ pub enum OpenCodeSessionActivity {
 }
 
 impl OpenCodeSessionActivity {
-    fn from_value(value: Option<&Value>) -> Self {
+    fn from_value(value: &Value) -> Self {
         let value = value
-            .and_then(|value| {
-                value
-                    .as_str()
-                    .or_else(|| value.get("type").and_then(Value::as_str))
-            })
+            .as_str()
+            .or_else(|| value.get("type").and_then(Value::as_str))
             .unwrap_or_default();
         match value {
             "idle" => Self::Idle,
@@ -319,12 +316,25 @@ impl OpenCodeHttpOwner {
         ))
     }
 
+    /// Read the authenticated OpenCode status map for this exact bound session.
+    /// OpenCode removes idle entries, so an absent key is idle only after the
+    /// response has been validated as a JSON object. Unknown explicit values
+    /// remain fail-closed for the native admission caller.
     pub async fn session_activity(&self) -> Result<OpenCodeSessionActivity, OpenCodeHttpError> {
         self.ensure_open()?;
         let value = self.get_json(self.root_url("session/status")?).await?;
-        Ok(OpenCodeSessionActivity::from_value(
-            value.get(self.binding.provider_session_id()),
-        ))
+        let statuses = value.as_object().ok_or_else(|| {
+            OpenCodeHttpError::new(
+                OpenCodeHttpErrorCode::MalformedResponse,
+                false,
+                None,
+                "OpenCode session status response was not a JSON object",
+            )
+        })?;
+        Ok(statuses
+            .get(self.binding.provider_session_id())
+            .map(OpenCodeSessionActivity::from_value)
+            .unwrap_or(OpenCodeSessionActivity::Idle))
     }
 
     pub async fn open_events(&self) -> Result<OpenCodeEventStream, OpenCodeHttpError> {
@@ -631,8 +641,9 @@ fn same_directory(remote: &str, expected: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::thread::JoinHandle;
 
     use super::*;
     use crate::delivery::opencode_http::{
@@ -659,6 +670,34 @@ mod tests {
 
     fn prompt_for_test() -> OpenCodePrompt {
         OpenCodePrompt::new("msg_test", "native task", Default::default()).expect("prompt")
+    }
+
+    fn status_owner_for_test(body: impl Into<String>) -> (OpenCodeHttpOwner, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("status listener");
+        let port = listener
+            .local_addr()
+            .expect("status listener address")
+            .port();
+        let body = body.into();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("status request accepted");
+            let mut request = [0_u8; 8192];
+            let size = stream.read(&mut request).expect("status request read");
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.starts_with("GET /session/status HTTP/1.1"));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("authorization: basic "));
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("status response write");
+        });
+        (owner_for_test(port, 7, 11), server)
     }
 
     #[test]
@@ -730,6 +769,94 @@ mod tests {
             listener.accept().is_err(),
             "stale request touched the network"
         );
+    }
+
+    #[tokio::test]
+    async fn session_activity_treats_an_empty_valid_status_map_as_idle() {
+        let (owner, server) = status_owner_for_test("{}");
+
+        assert_eq!(
+            owner.session_activity().await.expect("status activity"),
+            OpenCodeSessionActivity::Idle
+        );
+
+        server.join().expect("status server");
+    }
+
+    #[tokio::test]
+    async fn session_activity_ignores_foreign_session_entries() {
+        let (owner, server) = status_owner_for_test(r#"{"ses_foreign":{"type":"busy"}}"#);
+
+        assert_eq!(
+            owner.session_activity().await.expect("status activity"),
+            OpenCodeSessionActivity::Idle
+        );
+
+        server.join().expect("status server");
+    }
+
+    #[tokio::test]
+    async fn session_activity_reads_only_the_exact_bound_session_entry() {
+        let (owner, server) =
+            status_owner_for_test(r#"{"ses_foreign":{"type":"busy"},"ses_test":{"type":"retry"}}"#);
+
+        assert_eq!(
+            owner.session_activity().await.expect("status activity"),
+            OpenCodeSessionActivity::Retry
+        );
+
+        server.join().expect("status server");
+    }
+
+    #[tokio::test]
+    async fn session_activity_preserves_explicit_busy_and_retry_states() {
+        for (body, expected) in [
+            (
+                r#"{"ses_test":{"type":"busy"}}"#,
+                OpenCodeSessionActivity::Busy,
+            ),
+            (
+                r#"{"ses_test":{"type":"retry"}}"#,
+                OpenCodeSessionActivity::Retry,
+            ),
+        ] {
+            let (owner, server) = status_owner_for_test(body);
+
+            assert_eq!(
+                owner.session_activity().await.expect("status activity"),
+                expected
+            );
+
+            server.join().expect("status server");
+        }
+    }
+
+    #[tokio::test]
+    async fn session_activity_rejects_malformed_status_roots() {
+        for body in ["null", "[]", "\"idle\""] {
+            let (owner, server) = status_owner_for_test(body);
+
+            let error = owner
+                .session_activity()
+                .await
+                .expect_err("malformed status root");
+            assert_eq!(error.code, OpenCodeHttpErrorCode::MalformedResponse);
+            assert!(!error.provider_boundary_crossed);
+
+            server.join().expect("status server");
+        }
+    }
+
+    #[tokio::test]
+    async fn session_activity_keeps_unrecognized_bound_state_fail_closed() {
+        let (owner, server) = status_owner_for_test(r#"{"ses_test":{"type":"stalled"}}"#);
+
+        assert_eq!(
+            owner.session_activity().await.expect("status activity"),
+            OpenCodeSessionActivity::Unknown
+        );
+
+        server.join().expect("status server");
     }
 
     #[tokio::test]

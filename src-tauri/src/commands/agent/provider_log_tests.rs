@@ -1,4 +1,4 @@
-use super::agent_lifecycle::fresh_pi_session_for_initial_capture;
+use super::agent_lifecycle::fresh_provider_session_for_initial_capture;
 use super::tests::{make_test_agent, WardianHomeGuard};
 use super::{
     lifecycle_config_for_session, persist_agent_config_while_lifecycle_locked,
@@ -35,11 +35,11 @@ fn pi_initial_capture_provenance_requires_the_launch_owned_identity() {
         ..AgentConfig::default()
     };
     assert_eq!(
-        fresh_pi_session_for_initial_capture(&fresh_config, Some("pi-fresh-session")),
+        fresh_provider_session_for_initial_capture(&fresh_config, Some("pi-fresh-session")),
         Some("pi-fresh-session".to_string())
     );
     assert_eq!(
-        fresh_pi_session_for_initial_capture(&fresh_config, Some("different-session")),
+        fresh_provider_session_for_initial_capture(&fresh_config, Some("different-session")),
         None
     );
 
@@ -50,9 +50,56 @@ fn pi_initial_capture_provenance_requires_the_launch_owned_identity() {
         ..AgentConfig::default()
     };
     assert_eq!(
-        fresh_pi_session_for_initial_capture(&resumed_config, Some("pi-resumed-session")),
+        fresh_provider_session_for_initial_capture(&resumed_config, Some("pi-resumed-session")),
         None
     );
+}
+
+#[test]
+fn generated_claude_and_captured_codex_identities_survive_registration_shape() {
+    for provider in ["claude", "codex"] {
+        let mut fresh_config = AgentConfig {
+            provider: provider.to_string(),
+            fresh_provider_session_id: Some("fresh-provider-session".to_string()),
+            ..AgentConfig::default()
+        };
+        assert_eq!(
+            fresh_provider_session_for_initial_capture(
+                &fresh_config,
+                Some("fresh-provider-session")
+            ),
+            Some("fresh-provider-session".to_string())
+        );
+        fresh_config.resume_session = Some("fresh-provider-session".to_string());
+        assert_eq!(
+            fresh_provider_session_for_initial_capture(
+                &fresh_config,
+                Some("fresh-provider-session")
+            ),
+            Some("fresh-provider-session".to_string())
+        );
+    }
+}
+
+#[test]
+fn empty_or_mismatched_runtime_identity_fails_closed() {
+    let cases = [
+        (Some("fresh-provider-session"), Some("different-session")),
+        (Some(""), Some("fresh-provider-session")),
+        (Some("fresh-provider-session"), Some("")),
+    ];
+    for (fresh, resume) in cases {
+        let config = AgentConfig {
+            provider: "claude".to_string(),
+            fresh_provider_session_id: fresh.map(str::to_string),
+            resume_session: resume.map(str::to_string),
+            ..AgentConfig::default()
+        };
+        assert_eq!(
+            fresh_provider_session_for_initial_capture(&config, Some("fresh-provider-session")),
+            None
+        );
+    }
 }
 
 #[tokio::test]

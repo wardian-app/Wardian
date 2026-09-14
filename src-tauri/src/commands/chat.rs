@@ -66,14 +66,22 @@ fn provider_log_source_is_fresh(
     resume_session: Option<&str>,
     fresh_provider_session_id: Option<&str>,
 ) -> bool {
-    if provider == "pi" {
-        return match (resume_session, fresh_provider_session_id) {
-            (None, Some(_)) => true,
-            (Some(resume), Some(fresh)) => resume == fresh,
-            _ => false,
-        };
+    if !matches!(provider, "claude" | "codex" | "pi") {
+        return false;
     }
-    resume_session.is_none() && fresh_provider_session_id.is_some()
+    let Some(fresh) = fresh_provider_session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    match resume_session {
+        None => true,
+        Some(resume) => {
+            let resume = resume.trim();
+            !resume.is_empty() && resume == fresh
+        }
+    }
 }
 
 #[tauri::command]
@@ -2048,7 +2056,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pi_promoted_fresh_identity_trusts_prefix_but_resume_does_not() {
+    fn launch_owned_fresh_identity_trusts_prefix_but_resume_does_not() {
         assert!(provider_log_source_is_fresh(
             "pi",
             None,
@@ -2069,10 +2077,35 @@ mod tests {
             Some("pi-resumed-session"),
             Some("pi-other-session")
         ));
-        assert!(!provider_log_source_is_fresh(
+        assert!(provider_log_source_is_fresh(
             "codex",
             Some("codex-session"),
             Some("codex-session")
+        ));
+        assert!(!provider_log_source_is_fresh(
+            "codex",
+            Some("codex-session"),
+            None
+        ));
+        assert!(!provider_log_source_is_fresh(
+            "codex",
+            Some("codex-session"),
+            Some("other-session")
+        ));
+        assert!(!provider_log_source_is_fresh(
+            "codex",
+            Some(""),
+            Some("codex-session")
+        ));
+        assert!(!provider_log_source_is_fresh(
+            "codex",
+            Some("codex-session"),
+            Some("")
+        ));
+        assert!(!provider_log_source_is_fresh(
+            "opencode",
+            Some("opencode-session"),
+            Some("opencode-session")
         ));
     }
 

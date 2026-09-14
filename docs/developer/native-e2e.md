@@ -298,7 +298,7 @@ WARDIAN_E2E_REAL_CHAT_CONFORMANCE=1 \
 WARDIAN_E2E_CHAT_PROVIDERS=claude \
 WARDIAN_E2E_CHAT_CLAUDE_MODEL='<verified-low-cost-model>' \
 WARDIAN_NATIVE_APP='<absolute-packaged-app-path>' \
-node --test e2e-native/tests/provider-chat-conformance-real-native.test.mjs
+node scripts/run-native-e2e.mjs e2e-native/tests/provider-chat-conformance-real-native.test.mjs
 ```
 
 PowerShell:
@@ -308,7 +308,7 @@ $env:WARDIAN_E2E_REAL_CHAT_CONFORMANCE = '1'
 $env:WARDIAN_E2E_CHAT_PROVIDERS = 'claude'
 $env:WARDIAN_E2E_CHAT_CLAUDE_MODEL = '<verified-low-cost-model>'
 $env:WARDIAN_NATIVE_APP = '<absolute-packaged-app-path>'
-node --test e2e-native/tests/provider-chat-conformance-real-native.test.mjs
+node scripts/run-native-e2e.mjs e2e-native/tests/provider-chat-conformance-real-native.test.mjs
 ```
 
 Provider selection accepts `claude`, `codex`, `opencode`, `antigravity`, and `pi`.
@@ -332,33 +332,17 @@ inherited headless session boundaries. Independent provider-native records bind
 each headless answer to its request and session. Normalized automation output
 or saved agent configuration alone cannot establish that identity.
 
-The native broker suite creates an off agent and checks ordinary `wardian send`
-through the persistent provider transport. It requires provider-backed start and
-completion, second-turn recall of an omitted secret on the same session binding,
-and advertised cancellation followed by another successful turn. A headless
-fallback or a turn that completed before cancellation cannot count as a pass.
+For canonical task delivery, use the maintained
+[native messaging acceptance procedure](./agent-messaging-tools.md#native-acceptance).
+It verifies assigned work, the provider's correlated reply, and consumption by
+the sender in the bound provider sessions. Native acceptance and the documented
+Claude/Antigravity composer exceptions remain separate results.
 
-```bash
-WARDIAN_E2E_REAL_NATIVE_BROKER=1 \
-WARDIAN_E2E_NATIVE_BROKER_PROVIDER=claude \
-WARDIAN_E2E_NATIVE_BROKER_MODEL='<verified-low-cost-model>' \
-WARDIAN_NATIVE_SKIP_BUILD=1 \
-WARDIAN_NATIVE_APP='<absolute-frozen-app-path>' \
-WARDIAN_E2E_NATIVE_BROKER_CLI='<absolute-adjacent-cli-path>' \
-node --test e2e-native/tests/provider-native-broker-real-native.test.mjs
-```
-
-PowerShell:
-
-```powershell
-$env:WARDIAN_E2E_REAL_NATIVE_BROKER = '1'
-$env:WARDIAN_E2E_NATIVE_BROKER_PROVIDER = 'claude'
-$env:WARDIAN_E2E_NATIVE_BROKER_MODEL = '<verified-low-cost-model>'
-$env:WARDIAN_NATIVE_SKIP_BUILD = '1'
-$env:WARDIAN_NATIVE_APP = '<absolute-frozen-app-path>'
-$env:WARDIAN_E2E_NATIVE_BROKER_CLI = '<absolute-adjacent-cli-path>'
-node --test e2e-native/tests/provider-native-broker-real-native.test.mjs
-```
+The older `provider-native-broker-real-native.test.mjs` integration path uses
+the retired `wardian send` command. Its retained reports describe historical
+builds; that path cannot qualify the current canonical messaging implementation.
+Run real-provider suites through `scripts/run-native-e2e.mjs` so the supervisor
+owns the isolated home lock and child processes.
 
 These suites retain disposable Wardian homes under `.tmp/e2e-native/`, with
 artifact/harness hashes and per-case observations. Raw logs and screenshots stay

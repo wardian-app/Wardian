@@ -1358,6 +1358,28 @@ function isProviderAuthoredAssistantEvent(event, provider, marker) {
     (event.text ?? "").includes(marker);
 }
 
+// AgentChatView renders every semantic assistant message, including watch and
+// terminal-fallback rows that do not carry provider-log provenance. Keep this
+// count separate from the provider-authored evidence predicate above.
+function visibleSemanticAssistantMessageRows(events, marker) {
+  return events.filter((event) => {
+    if (event?.kind !== "message") return false;
+    const role = event.role ?? "assistant";
+    const visibleText = event.text?.trimEnd() || event.title || "";
+    return role === "assistant" && visibleText.includes(marker);
+  });
+}
+
+function assertVisibleSemanticAssistantMessageOnce(events, marker) {
+  const rows = visibleSemanticAssistantMessageRows(events, marker);
+  assert.equal(
+    rows.length,
+    1,
+    `Chat contains ${rows.length} visible semantic assistant-message rows for ${marker}`,
+  );
+  return rows;
+}
+
 const SAFE_IPC_ERROR_NAMES = new Set([
   "DOMException",
   "Error",
@@ -1449,6 +1471,7 @@ function summarizeTranscript(candidate, provider, marker) {
       provider_log_true: providerLogEvents.length,
       source_present: sourceEvents.length,
       marker: markerEvents.length,
+      visible_assistant_marker: visibleSemanticAssistantMessageRows(events, marker).length,
     },
     provider: [...new Set(events.map((event) => diagnosticProvider(event?.provider)))],
     source: [...new Set(sourceEvents.map((event) => diagnosticSource(event.source)))],
@@ -1473,7 +1496,8 @@ async function assertRealChatConformance(driver, sessionId, provider, marker, { 
     hasUser: false,
     hasAssistant: false,
     counts: { events: 0, user_marker: 0, assistant_role: 0, provider_match: 0,
-      message_kind: 0, provider_log_true: 0, source_present: 0, marker: 0 },
+      message_kind: 0, provider_log_true: 0, source_present: 0, marker: 0,
+      visible_assistant_marker: 0 },
     provider: [],
     source: [],
     provider_log: [],
@@ -1529,6 +1553,7 @@ async function assertRealChatConformance(driver, sessionId, provider, marker, { 
     1,
     `${provider} chat replay duplicated or omitted the assistant response for ${marker}`,
   );
+  assertVisibleSemanticAssistantMessageOnce(events, marker);
   assert.equal(new Set(events.map((event) => event.id)).size, events.length, `${provider} chat replay contains duplicate event IDs`);
 
   const metrics = await invokeTauri(driver, "list_agent_metrics");
@@ -1573,6 +1598,44 @@ test("delivery deterministic: fresh readiness cannot filter away separate stale 
   assertNoStaleTranscript([fresh], "OLD");
 });
 
+test("delivery deterministic: an unbound watch answer fails visible assistant cardinality", () => {
+  const marker = "WARDIAN_REAL_DELIVERY_DUPLICATE_MARKER";
+  const qualifiedNative = {
+    id: "native-response-item",
+    provider: "codex",
+    kind: "message",
+    role: "assistant",
+    text: marker,
+    source: "response_item",
+    turn_id: "msg-native",
+    metadata: {
+      provider_log: true,
+      provider_turn_id: "turn-native",
+      provider_phase: "final_answer",
+    },
+  };
+  const unboundWatch = {
+    ...qualifiedNative,
+    id: "watch-event-msg",
+    source: "event_msg",
+    turn_id: null,
+    metadata: {
+      transcript_cursor: "agent:0000000000000003:event_msg",
+      raw_role: "assistant",
+      provider_source: "event",
+    },
+  };
+
+  assert.equal(isProviderAuthoredAssistantEvent(qualifiedNative, "codex", marker), true);
+  assert.equal(isProviderAuthoredAssistantEvent(unboundWatch, "codex", marker), false);
+  assert.equal(visibleSemanticAssistantMessageRows([qualifiedNative], marker).length, 1);
+  assert.equal(visibleSemanticAssistantMessageRows([qualifiedNative, unboundWatch], marker).length, 2);
+  assert.throws(
+    () => assertVisibleSemanticAssistantMessageOnce([qualifiedNative, unboundWatch], marker),
+    /visible semantic assistant-message rows/,
+  );
+});
+
 test("transcript timeout diagnostics retain incomplete provider metadata without raw errors", () => {
   const summary = summarizeTranscript([
     { provider: "opencode", kind: "message", role: "user", text: "MARKER",
@@ -1591,6 +1654,7 @@ test("transcript timeout diagnostics retain incomplete provider metadata without
     provider_log_true: 1,
     source_present: 2,
     marker: 2,
+    visible_assistant_marker: 1,
   });
   assert.deepEqual(summary.provider, ["opencode"]);
   assert.deepEqual(summary.source, ["other"]);
