@@ -198,6 +198,18 @@ fn enrich(old: &mut AgentChatEvent, current: &AgentChatEvent) -> io::Result<()> 
             old.turn_id = current.turn_id.clone();
         }
     }
+    if broker_input {
+        // The broker-owned request root remains authoritative, but the
+        // provider's explicit turn identity is native evidence needed by the
+        // chat projection to join its mirrored user observation.
+        if let Some(provider_turn_id) = current
+            .metadata
+            .get("provider_turn_id")
+            .filter(|value| !value.is_null())
+        {
+            old.metadata["provider_turn_id"] = provider_turn_id.clone();
+        }
+    }
     // Source fields are observations, not inferred from text or role. They
     // also make a reconciled broker row visible to provider-native consumers.
     for key in [
