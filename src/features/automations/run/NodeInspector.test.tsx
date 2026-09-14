@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { NodeInspector } from './NodeInspector';
-import type { RunEvent, RunState } from './runTypes';
+import type { RunEvent, RunState, TemporaryWorker } from './runTypes';
 
 const state: RunState = {
   run_id: 'run-1',
@@ -95,5 +95,70 @@ describe('NodeInspector', () => {
 
     expect(screen.getByText('No output recorded.')).toBeInTheDocument();
     expect(screen.queryByText(/"ok": true/)).toBeNull();
+  });
+
+  it('shows only selected-node workers with honest capability and ancestry coverage', () => {
+    const workers: TemporaryWorker[] = [{
+      worker_id: 'child-1',
+      kind: 'provider_child',
+      provider: 'codex',
+      workspace: '/workspace',
+      node_id: 'a',
+      runtime_session_id: 'runtime-a',
+      state: 'unknown',
+      capabilities: {
+        inspection: true,
+        follow_up: false,
+        interruption: false,
+        resume: false,
+        source: 'codex child adapter is observe-only',
+      },
+      coverage: 'codex_parent_thread_id_verified',
+      requested_at: '2026-09-13T00:00:00Z',
+    }, {
+      worker_id: 'other-node',
+      kind: 'automation',
+      provider: 'codex',
+      workspace: '/workspace',
+      node_id: 'b',
+      runtime_session_id: 'runtime-b',
+      attempt: 1,
+      state: 'succeeded',
+      capabilities: {
+        inspection: true,
+        follow_up: false,
+        interruption: false,
+        resume: false,
+        source: 'observe only',
+      },
+      coverage: 'provider_session_identified',
+      requested_at: '2026-09-13T00:00:00Z',
+    }];
+
+    render(
+      <NodeInspector
+        selectedNodeId="a"
+        state={state}
+        currentStatuses={{ a: 'failed' }}
+        events={events}
+        scrubIndex={events.length - 1}
+        workers={workers}
+        workerTelemetry={{
+          'child-1': {
+            worker_id: 'child-1',
+            turns: 1,
+            tokens: { input_tokens: 120, cached_input_tokens: 80, output_tokens: 12 },
+            models: ['gpt-test'],
+            efforts: ['high'],
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText('Codex child')).toBeInTheDocument();
+    expect(screen.getByText('Observe only')).toBeInTheDocument();
+    expect(screen.getByText('Verified ancestry')).toBeInTheDocument();
+    expect(screen.getByText(/1 own turn.*input 120.*cache read 80.*output 12/)).toBeInTheDocument();
+    expect(screen.queryByText('Attempt 1')).toBeNull();
   });
 });

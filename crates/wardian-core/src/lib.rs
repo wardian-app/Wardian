@@ -27,6 +27,7 @@ pub mod registry_reconciliation;
 pub mod schedule;
 pub mod session_close;
 pub mod telemetry;
+pub mod temporary_workers;
 pub mod topology;
 pub mod workbench;
 

@@ -109,6 +109,44 @@ async fn start(timer: Arc<ManualTimer>) -> (Arc<TerminalSessionBroker>, u64) {
     (broker, generation)
 }
 
+#[tokio::test]
+async fn generation_bound_turn_receipt_cannot_publish_after_runtime_replacement() {
+    let timer = Arc::new(ManualTimer::default());
+    let (broker, generation) = start(timer).await;
+    let watch_state = Arc::new(Mutex::new(crate::state::AgentWatchState::new(
+        "session-1".to_string(),
+        32,
+        32 * 1024,
+    )));
+
+    broker
+        .record_turn_started_for_generation("session-1", generation, watch_state.clone())
+        .await
+        .expect("current runtime receipt");
+
+    let (replacement, _, _) = runtime();
+    let replacement_generation = broker
+        .start_or_replace_runtime("session-1", replacement, geometry(80, 24))
+        .await
+        .expect("replace runtime");
+    assert_ne!(replacement_generation, generation);
+
+    let error = broker
+        .record_turn_started_for_generation("session-1", generation, watch_state.clone())
+        .await
+        .expect_err("stale runtime receipt");
+    assert!(matches!(
+        error,
+        TerminalBrokerError::StaleRuntimeGeneration { .. }
+    ));
+    let snapshot = watch_state
+        .lock()
+        .expect("watch state")
+        .snapshot_since(None, None)
+        .expect("watch snapshot");
+    assert_eq!(snapshot.events.len(), 1);
+}
+
 fn registration(
     presentation_id: &str,
     client_kind: TerminalClientKind,

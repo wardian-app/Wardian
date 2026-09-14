@@ -3,11 +3,14 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::manager::{self, opencode::opencode_database_path};
+use crate::manager::{
+    self,
+    opencode::{opencode_database_path, opencode_log_dirs, opencode_log_path_in},
+};
 use crate::providers::antigravity::AntigravityProvider;
 use crate::providers::chat_transcript::{
     legacy_visible_chat_text_for_provider, normalize_chat_lines, visible_chat_text,
-    visible_chat_text_for_provider,
+    visible_chat_text_for_provider, PROVIDER_RAW_LINE_METADATA_KEY,
 };
 use crate::providers::pi::PiProvider;
 use crate::state::conversation_archive::{
@@ -23,7 +26,17 @@ use wardian_core::models::chat::{
     AgentChatEvent, AgentChatEventKind, AgentChatRole, AgentChatStatus,
 };
 
+#[path = "chat_archive_identity.rs"]
+pub(crate) mod archive_identity;
+use archive_identity::stable_provider_log_event_id;
+
 const PROVIDER_LOG_TAIL_BYTES: u64 = 2 * 1024 * 1024;
+
+#[cfg(test)]
+#[path = "chat_antigravity_tests.rs"]
+mod antigravity_tests;
+#[path = "chat_opencode_tools.rs"]
+mod opencode_tools;
 
 #[derive(Clone)]
 pub(crate) struct AgentArchiveCaptureSnapshot {
@@ -45,6 +58,22 @@ pub(crate) struct AgentArchiveCaptureSnapshot {
 pub(crate) struct ArchiveCaptureResult {
     pub(crate) events: Vec<AgentChatEvent>,
     pub(crate) context: ConversationArchiveContext,
+    pub(crate) continue_immediately: bool,
+}
+
+fn provider_log_source_is_fresh(
+    provider: &str,
+    resume_session: Option<&str>,
+    fresh_provider_session_id: Option<&str>,
+) -> bool {
+    if provider == "pi" {
+        return match (resume_session, fresh_provider_session_id) {
+            (None, Some(_)) => true,
+            (Some(resume), Some(fresh)) => resume == fresh,
+            _ => false,
+        };
+    }
+    resume_session.is_none() && fresh_provider_session_id.is_some()
 }
 
 #[tauri::command]
@@ -67,7 +96,7 @@ pub async fn load_agent_chat_transcript_for_state(
     let result = archive_agent_chat_events_for_state(state, &session_id).await?;
     let archived_events = state
         .conversation_archive
-        .chat_events_for_active_conversation(&session_id)
+        .chat_events_for_capture(&result.context)
         .unwrap_or_else(|error| {
             manager::log_debug(&format!(
                 "[WARDIAN] conversation archive chat replay failed for {session_id}: {error}"
@@ -78,7 +107,15 @@ pub async fn load_agent_chat_transcript_for_state(
     // Provider logs and the watch snapshot are live, bounded sources. Replay
     // only the active durable archive so a restart or log rotation does not
     // erase current chat rows, while a new provider session starts empty.
-    let mut events = merge_chat_events(result.events, archived_events);
+    let mut events = crate::state::conversation_archive::provenance::merge_current_capture(
+        result.events,
+        archived_events,
+    )
+    .map_err(|error| format!("conversation archive provenance refresh failed: {error}"))?;
+    canonicalize_provider_input_projection(&mut events);
+    for event in &mut events {
+        normalize_chat_event_visible_text(event);
+    }
     let conversation_started_at = active_conversation_started_at(state, &session_id);
     events.extend(memory_chat_events(
         &session_id,
@@ -298,6 +335,23 @@ pub(crate) async fn agent_archive_capture_snapshot(
             }
         }
     }
+    if provider == "opencode" && log_path.is_none() {
+        let provider_session_id = opencode_session_id(
+            &config.session_id,
+            config.resume_session.as_deref(),
+            config.fresh_provider_session_id.as_deref(),
+        );
+        if let Some(path) = provider_session_id.and_then(|provider_session_id| {
+            opencode_log_dirs()
+                .into_iter()
+                .find_map(|directory| opencode_log_path_in(&directory, &provider_session_id))
+        }) {
+            log_path = Some(path.clone());
+            if let Ok(mut agent_log_path) = agent.log_path.lock() {
+                *agent_log_path = Some(path);
+            }
+        }
+    }
 
     Ok(AgentArchiveCaptureSnapshot {
         session_id,
@@ -319,25 +373,49 @@ pub(crate) async fn agent_archive_capture_snapshot(
 pub(crate) fn collect_agent_chat_events_for_archive(
     snapshot: &AgentArchiveCaptureSnapshot,
 ) -> Result<ArchiveCaptureResult, String> {
-    let watch_snapshot = snapshot
-        .watch_state
-        .lock()
-        .map_err(|_| "watch state lock poisoned".to_string())?
-        .snapshot_since(None, None)
-        .map_err(|error| format!("watch state error: {} {}", error.code(), error.details()))?;
     let mut provider_events = load_provider_log_chat_events(
         &snapshot.session_id,
         &snapshot.provider,
         snapshot.log_path.as_deref(),
         &snapshot.cleared_provider_sessions,
     );
-    if snapshot.provider == "opencode" {
-        provider_events.extend(load_opencode_db_chat_events(
+    provider_events.extend(load_opencode_db_chat_events_for_snapshot(snapshot));
+    collect_agent_chat_events_with_provider_events(snapshot, provider_events, false)
+}
+
+pub(crate) fn collect_agent_chat_events_for_boundary(
+    snapshot: &AgentArchiveCaptureSnapshot,
+) -> Result<ArchiveCaptureResult, String> {
+    let mut provider_events = if snapshot.provider == "antigravity"
+        && snapshot
+            .log_path
+            .as_deref()
+            .is_some_and(|path| path.extension().is_some_and(|extension| extension == "db"))
+    {
+        load_provider_log_chat_events(
             &snapshot.session_id,
-            opencode_session_id(&snapshot.session_id, snapshot.resume_session.as_deref())
-                .as_deref(),
-        ));
-    }
+            &snapshot.provider,
+            snapshot.log_path.as_deref(),
+            &snapshot.cleared_provider_sessions,
+        )
+    } else {
+        Vec::new()
+    };
+    provider_events.extend(load_opencode_db_chat_events_for_snapshot(snapshot));
+    collect_agent_chat_events_with_provider_events(snapshot, provider_events, false)
+}
+
+fn collect_agent_chat_events_with_provider_events(
+    snapshot: &AgentArchiveCaptureSnapshot,
+    provider_events: Vec<AgentChatEvent>,
+    continue_immediately: bool,
+) -> Result<ArchiveCaptureResult, String> {
+    let watch_snapshot = snapshot
+        .watch_state
+        .lock()
+        .map_err(|_| "watch state lock poisoned".to_string())?
+        .snapshot_since(None, None)
+        .map_err(|error| format!("watch state error: {} {}", error.code(), error.details()))?;
     let provider_has_transcript = has_transcript_events(&provider_events);
     let watch_events = map_watch_snapshot_to_chat_events(WatchSnapshotChatInput {
         session_id: &snapshot.session_id,
@@ -354,7 +432,11 @@ pub(crate) fn collect_agent_chat_events_for_archive(
     let events = merge_chat_events(watch_events, provider_events);
     let context = conversation_archive_context_from_snapshot(snapshot);
 
-    Ok(ArchiveCaptureResult { events, context })
+    Ok(ArchiveCaptureResult {
+        events,
+        context,
+        continue_immediately,
+    })
 }
 
 pub(crate) async fn archive_agent_chat_events_for_state(
@@ -362,35 +444,269 @@ pub(crate) async fn archive_agent_chat_events_for_state(
     session_id: &str,
 ) -> Result<ArchiveCaptureResult, String> {
     let snapshot = agent_archive_capture_snapshot(state, session_id).await?;
-    let result = collect_agent_chat_events_for_archive(&snapshot)?;
+    // Lock order is global roster snapshot (above), policy gate, then the
+    // archive's per-agent gate. No caller may hold `state.agents` here.
+    let _policy_guard = state.conversation_capture_policy_lock.lock().await;
     let global_conversation_logging = crate::utils::shell::load_shell_settings()
         .unwrap_or_default()
         .conversation_logging;
-    if effective_conversation_logging(
+    let logging_enabled = effective_conversation_logging(
         global_conversation_logging,
         snapshot.agent_conversation_logging,
-    ) == ConversationLoggingSetting::Enabled
-    {
-        if let Err(error) = state
+    ) == ConversationLoggingSetting::Enabled;
+    let context = conversation_archive_context_from_snapshot(&snapshot);
+
+    if let (Some(path), Some(provider_source_key)) = (
+        append_only_provider_log_path(&snapshot),
+        context.provider_source_key.as_deref(),
+    ) {
+        let trust_source_from_start = provider_log_source_is_fresh(
+            &snapshot.provider,
+            snapshot.resume_session.as_deref(),
+            snapshot.fresh_provider_session_id.as_deref(),
+        );
+        let previous = state
+            .conversation_archive
+            .provider_log_capture_state(&snapshot.session_id, provider_source_key)
+            .map_err(|error| format!("provider-log capture state read failed: {error}"))?;
+        let policy =
+            super::provider_log_acquisition::observe_provider_log_policy_with_initial_absence(
+                path,
+                provider_source_key,
+                previous.clone(),
+                logging_enabled,
+                trust_source_from_start,
+            )
+            .map_err(|error| format!("provider-log policy observation failed: {error}"))?;
+        if let Some(policy) = policy {
+            if previous.as_ref() != Some(&policy.next) {
+                state
+                    .conversation_archive
+                    .append_provider_log_batch_with_context(
+                        context.clone(),
+                        &[],
+                        previous.as_ref(),
+                        &policy.next,
+                    )
+                    .map_err(|error| format!("provider-log policy commit failed: {error}"))?;
+            }
+            let mut batch = super::provider_log_acquisition::acquire_provider_log_batch(
+                &snapshot.session_id,
+                &snapshot.provider,
+                path,
+                provider_source_key,
+                Some(policy.next),
+                trust_source_from_start,
+            )
+            .map_err(|error| format!("provider-log acquisition failed: {error}"))?;
+            let _consumed_provider_log_bytes = batch.consumed_bytes;
+            decorate_forward_provider_log_events(&mut batch.events, &snapshot.provider, path);
+            // OpenCode's watcher can label a fallback message `opencode_db`,
+            // but it does not carry the database session/path binding. Keep
+            // the canonical DB projection in this incremental provider batch
+            // so the existing archive writer persists the bound observation.
+            let canonical_db_events = load_opencode_db_chat_events_for_snapshot(&snapshot);
+            if logging_enabled {
+                batch.events.extend(canonical_db_events.iter().cloned());
+            }
+            state
+                .conversation_archive
+                .append_provider_log_batch_with_context(
+                    context.clone(),
+                    &batch.events,
+                    batch.previous.as_ref(),
+                    &batch.next,
+                )
+                .map_err(|error| format!("provider-log archive append failed: {error}"))?;
+
+            if !logging_enabled {
+                // Preserve the existing live projection while the logging
+                // policy suppresses new durable rows.
+                batch.events.extend(canonical_db_events);
+            }
+            let result = collect_agent_chat_events_with_provider_events(
+                &snapshot,
+                batch.events,
+                batch.continue_immediately,
+            )?;
+            let watch_only = result
+                .events
+                .iter()
+                .filter(|event| event.metadata["provider_log"] != true)
+                .cloned()
+                .collect::<Vec<_>>();
+            if logging_enabled {
+                state
+                    .conversation_archive
+                    .append_chat_events_with_context(context, &watch_only)
+                    .map_err(|error| {
+                        format!("conversation archive watch append failed: {error}")
+                    })?;
+            } else {
+                state
+                    .conversation_archive
+                    .discard_agent_with_context(context, &watch_only)
+                    .map_err(|error| {
+                        format!("conversation archive disabled cutoff failed: {error}")
+                    })?;
+            }
+            return Ok(result);
+        }
+    }
+
+    let result = collect_agent_chat_events_for_archive(&snapshot)?;
+    if logging_enabled {
+        state
             .conversation_archive
             .append_chat_events_with_context(result.context.clone(), &result.events)
-        {
-            manager::log_debug(&format!(
-                "[WARDIAN] conversation archive append failed for {}: {error}",
-                snapshot.session_id
-            ));
-        }
-    } else if let Err(error) = state
-        .conversation_archive
-        .discard_agent_with_context(result.context.clone(), &result.events)
-    {
-        manager::log_debug(&format!(
-            "[WARDIAN] conversation archive disabled cutoff failed for {}: {error}",
-            snapshot.session_id
-        ));
+            .map_err(|error| format!("conversation archive append failed: {error}"))?;
+    } else {
+        state
+            .conversation_archive
+            .discard_agent_with_context(result.context.clone(), &result.events)
+            .map_err(|error| format!("conversation archive disabled cutoff failed: {error}"))?;
     }
 
     Ok(result)
+}
+
+/// Drains consecutive bounded provider-log batches for owners that already
+/// run outside the UI request path. Each pass yields before reacquiring policy
+/// and per-agent gates so settings transitions and other agents can proceed.
+pub(crate) async fn archive_agent_chat_events_until_stable_for_state(
+    state: &AppState,
+    session_id: &str,
+) -> Result<ArchiveCaptureResult, String> {
+    loop {
+        let result = archive_agent_chat_events_for_state(state, session_id).await?;
+        if !result.continue_immediately {
+            return Ok(result);
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+fn append_only_provider_log_path(snapshot: &AgentArchiveCaptureSnapshot) -> Option<&Path> {
+    let path = snapshot.log_path.as_deref()?;
+    if provider_log_path_is_cleared(
+        &snapshot.provider,
+        path,
+        &snapshot.cleared_provider_sessions,
+    ) || (snapshot.provider == "antigravity"
+        && path.extension().is_some_and(|extension| extension == "db"))
+    {
+        None
+    } else {
+        Some(path)
+    }
+}
+
+pub(crate) fn record_provider_log_policy_for_snapshot(
+    state: &AppState,
+    snapshot: &AgentArchiveCaptureSnapshot,
+    logging_enabled: bool,
+) -> Result<(), String> {
+    let context = conversation_archive_context_from_snapshot(snapshot);
+    let Some(provider_source_key) = context.provider_source_key.as_deref() else {
+        return Ok(());
+    };
+    let Some(path) = append_only_provider_log_path(snapshot) else {
+        if logging_enabled {
+            state
+                .conversation_archive
+                .close_agent_capture_disabled_window(context)
+                .map_err(|error| {
+                    format!("conversation archive disabled window close failed: {error}")
+                })?;
+        }
+        return Ok(());
+    };
+    let trust_source_from_start = provider_log_source_is_fresh(
+        &snapshot.provider,
+        snapshot.resume_session.as_deref(),
+        snapshot.fresh_provider_session_id.as_deref(),
+    );
+    let previous = state
+        .conversation_archive
+        .provider_log_capture_state(&snapshot.session_id, provider_source_key)
+        .map_err(|error| format!("provider-log capture state read failed: {error}"))?;
+    let policy = super::provider_log_acquisition::observe_provider_log_policy_with_initial_absence(
+        path,
+        provider_source_key,
+        previous.clone(),
+        logging_enabled,
+        trust_source_from_start,
+    )
+    .map_err(|error| format!("provider-log policy observation failed: {error}"))?;
+    let Some(policy) = policy else {
+        if logging_enabled {
+            state
+                .conversation_archive
+                .close_agent_capture_disabled_window(context)
+                .map_err(|error| {
+                    format!("conversation archive disabled window close failed: {error}")
+                })?;
+        }
+        return Ok(());
+    };
+    if previous.as_ref() != Some(&policy.next) {
+        state
+            .conversation_archive
+            .append_provider_log_batch_with_context(
+                context.clone(),
+                &[],
+                previous.as_ref(),
+                &policy.next,
+            )
+            .map_err(|error| format!("provider-log policy commit failed: {error}"))?;
+    }
+    if logging_enabled {
+        state
+            .conversation_archive
+            .close_agent_capture_disabled_window(context)
+            .map_err(|error| {
+                format!("conversation archive disabled window close failed: {error}")
+            })?;
+    }
+    Ok(())
+}
+
+fn decorate_forward_provider_log_events(
+    events: &mut [AgentChatEvent],
+    provider: &str,
+    path: &Path,
+) {
+    for event in events {
+        let raw_line = event
+            .metadata
+            .as_object_mut()
+            .and_then(|metadata| metadata.remove(PROVIDER_RAW_LINE_METADATA_KEY))
+            .and_then(|value| value.as_str().map(str::to_string));
+        set_metadata(&mut event.metadata, "provider_log", true);
+        set_metadata(&mut event.metadata, "log_source", "active_agent_log_path");
+        set_metadata(
+            &mut event.metadata,
+            "log_path",
+            path.to_string_lossy().to_string(),
+        );
+        if provider.eq_ignore_ascii_case("claude") {
+            if let Some(raw_line) = raw_line.as_deref() {
+                let legacy_id = claude_legacy_provider_log_event_id(event, path, raw_line);
+                event.id = stable_provider_log_event_id_from_raw_line(event, path, raw_line);
+                if event.id != legacy_id {
+                    set_metadata(
+                        &mut event.metadata,
+                        "legacy_event_ids",
+                        serde_json::json!([legacy_id]),
+                    );
+                }
+            } else {
+                event.id = stable_provider_log_event_id(event, path);
+            }
+        } else {
+            event.id = stable_provider_log_event_id(event, path);
+        }
+    }
 }
 
 struct WatchSnapshotChatInput<'a> {
@@ -570,7 +886,7 @@ fn load_provider_log_chat_events(
     };
 
     let lines = content.lines().collect::<Vec<_>>();
-    normalize_chat_lines(session_id, provider, lines.iter())
+    let mut events = normalize_chat_lines(session_id, provider, lines.iter())
         .into_iter()
         .map(|mut event| {
             set_metadata(&mut event.metadata, "provider_log", true);
@@ -602,7 +918,14 @@ fn load_provider_log_chat_events(
             }
             event
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // The bridge is available only for a complete, session-headed snapshot.
+    // A bounded tail may use persisted aliases but cannot invent new ones.
+    let complete = std::fs::metadata(path).is_ok_and(|meta| {
+        meta.len() == content.len() as u64 && meta.len() <= PROVIDER_LOG_TAIL_BYTES
+    });
+    archive_identity::attach_native_legacy_aliases(&mut events, path, &content, complete);
+    events
 }
 
 fn claude_legacy_provider_log_event_id(
@@ -693,7 +1016,7 @@ fn load_antigravity_database_chat_events(
         return Vec::new();
     };
 
-    messages
+    let mut events: Vec<_> = messages
         .into_iter()
         .enumerate()
         .map(|(index, message)| {
@@ -702,7 +1025,7 @@ fn load_antigravity_database_chat_events(
                 session_id: session_id.to_string(),
                 provider: provider.to_string(),
                 kind: AgentChatEventKind::Message,
-                role: Some(message.role),
+                role: Some(message.role.clone()),
                 text: Some(message.text),
                 title: None,
                 status: None,
@@ -721,43 +1044,50 @@ fn load_antigravity_database_chat_events(
                     "step_index": message.step_index,
                 }),
             };
+            // Preserve the previous database message identity even when an
+            // explicit provider source corrects its display role below.
             event.id = stable_provider_log_event_id(&event, path);
+            if message.role == AgentChatRole::User
+                && message.source.is_some_and(|source| source != 4)
+            {
+                event.role = Some(AgentChatRole::System);
+            }
+            if let Some(source) = message.source {
+                event.metadata["provider_step_source"] = serde_json::json!(source);
+            }
+            if message.role == AgentChatRole::User {
+                // Only USER_MESSAGE steps reach this role. Source 4 is
+                // USER_EXPLICIT in paired provider SQLite/JSONL records.
+                // Retain the legacy fallback when source is unreported, but
+                // never promote an explicitly different source to a request.
+                let is_request = message.source.is_none_or(|source| source == 4);
+                event.metadata["input_origin"] = serde_json::json!(if is_request {
+                    "human_input"
+                } else {
+                    "provider_internal"
+                });
+                event.metadata["input_purpose"] =
+                    serde_json::json!(if is_request { "request" } else { "internal" });
+                event.metadata["context_observation"] = serde_json::json!("unreported");
+                if is_request {
+                    event.metadata["request_root_id"] = serde_json::json!(&event.id);
+                }
+            }
             event
         })
-        .collect()
-}
-
-fn stable_provider_log_event_id(event: &AgentChatEvent, path: &Path) -> String {
-    let mut hash = Sha256::new();
-    hash.update(event.session_id.as_bytes());
-    hash.update(b"\0");
-    hash.update(event.provider.as_bytes());
-    hash.update(b"\0");
-    hash.update(path.to_string_lossy().as_bytes());
-    hash.update(b"\0");
-    hash.update(format!("{:?}", event.kind).as_bytes());
-    hash.update(b"\0");
-    hash.update(format!("{:?}", event.role).as_bytes());
-    hash.update(b"\0");
-    for value in [
-        event.turn_id.as_deref(),
-        event.created_at.as_deref(),
-        event.source.as_deref(),
-        event.title.as_deref(),
-        event.command.as_deref(),
-        event.text.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
+        .collect();
+    if let Ok(tools) =
+        crate::providers::antigravity::chat_tools::load_tools(session_id, provider, path)
     {
-        hash.update(value.as_bytes());
-        hash.update(b"\0");
+        events.extend(tools);
     }
-    format!(
-        "{}:provider_log:{}",
-        event.session_id,
-        hex_prefix(hash.finalize().as_slice(), 16)
-    )
+    // Stable sort keeps a planner's existing message before its wire-ordered
+    // calls. Message IDs were assigned before this projection and stay intact.
+    events.sort_by_key(|event| event.metadata["step_index"].as_u64().unwrap_or_default());
+    for (index, event) in events.iter_mut().enumerate() {
+        event.sequence = Some(index as u64 + 1);
+    }
+    events
 }
 
 fn hex_prefix(bytes: &[u8], len: usize) -> String {
@@ -891,6 +1221,23 @@ fn load_opencode_db_chat_events(
         .unwrap_or_default()
 }
 
+fn load_opencode_db_chat_events_for_snapshot(
+    snapshot: &AgentArchiveCaptureSnapshot,
+) -> Vec<AgentChatEvent> {
+    if snapshot.provider != "opencode" {
+        return Vec::new();
+    }
+    load_opencode_db_chat_events(
+        &snapshot.session_id,
+        opencode_session_id(
+            &snapshot.session_id,
+            snapshot.resume_session.as_deref(),
+            snapshot.fresh_provider_session_id.as_deref(),
+        )
+        .as_deref(),
+    )
+}
+
 fn load_opencode_db_chat_events_from_db(
     db_path: &Path,
     wardian_session_id: &str,
@@ -924,18 +1271,39 @@ fn load_opencode_db_chat_events_from_db(
 
     let mut events = Vec::new();
     let mut request_root_id = None;
+    let mut text_sequence = 0;
     for row in rows {
         let row = row.map_err(|err| err.to_string())?;
+        events.extend(opencode_tools::project(
+            wardian_session_id,
+            opencode_session_id,
+            &row,
+            request_root_id.as_deref(),
+            db_path,
+            events.len() as u64 + 1,
+        ));
         let Some(event) = opencode_db_part_to_chat_event(
             wardian_session_id,
             opencode_session_id,
-            events.len() as u64 + 1,
+            text_sequence + 1,
             row,
             request_root_id.as_deref(),
         )?
         else {
             continue;
         };
+        let mut event = event;
+        // Keep legacy text IDs stable when previously omitted tool parts appear.
+        text_sequence += 1;
+        event.sequence = Some(events.len() as u64 + 1);
+        event.created_at = event.metadata["part_time_created"]
+            .as_i64()
+            .or_else(|| event.metadata["message_time_created"].as_i64())
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|time| time.to_rfc3339());
+        // `source_path` is part of the archive source-record contract and is
+        // retained when events are replayed after a restart.
+        event.metadata["source_path"] = serde_json::json!(db_path.to_string_lossy());
         if event.role == Some(AgentChatRole::User)
             && event.metadata["input_origin"] != "context_injection"
         {
@@ -1058,15 +1426,22 @@ fn opencode_db_part_to_chat_event(
     }))
 }
 
-fn opencode_session_id(wardian_session_id: &str, resume_session: Option<&str>) -> Option<String> {
+fn opencode_session_id(
+    wardian_session_id: &str,
+    resume_session: Option<&str>,
+    fresh_provider_session_id: Option<&str>,
+) -> Option<String> {
     resume_session
         .map(str::trim)
         .filter(|session| session.starts_with("ses_"))
         .or_else(|| {
-            wardian_session_id
-                .trim()
-                .starts_with("ses_")
-                .then_some(wardian_session_id)
+            fresh_provider_session_id
+                .map(str::trim)
+                .filter(|session| session.starts_with("ses_"))
+        })
+        .or_else(|| {
+            let session = wardian_session_id.trim();
+            session.starts_with("ses_").then_some(session)
         })
         .map(ToString::to_string)
 }
@@ -1142,11 +1517,96 @@ fn merge_chat_events(
         }
     }
 
+    canonicalize_provider_input_projection(&mut merged);
     for (index, event) in merged.iter_mut().enumerate() {
         event.sequence = Some(index as u64 + 1);
     }
 
     merged
+}
+
+/// Projects Codex's two native user-input records into one chat row while
+/// retaining both observation IDs in the returned metadata. The raw provider
+/// log and archive source records remain unchanged, so this is a presentation
+/// projection rather than evidence deletion.
+fn canonicalize_provider_input_projection(events: &mut Vec<AgentChatEvent>) {
+    let mut canonical_indexes = HashMap::new();
+    let mut projected = Vec::with_capacity(events.len());
+
+    for event in events.drain(..) {
+        let Some(identity) = provider_input_projection_identity(&event) else {
+            projected.push(event);
+            continue;
+        };
+
+        let Some(&canonical_index) = canonical_indexes.get(&identity) else {
+            let index = projected.len();
+            canonical_indexes.insert(identity, index);
+            projected.push(event);
+            continue;
+        };
+
+        let candidate = event;
+        let replace =
+            should_prefer_message_duplicate_candidate(&projected[canonical_index], &candidate);
+        if replace {
+            let mut replacement = candidate;
+            retain_provider_observation_ids(&mut replacement, &projected[canonical_index]);
+            projected[canonical_index] = replacement;
+        } else {
+            retain_provider_observation_ids(&mut projected[canonical_index], &candidate);
+        }
+    }
+
+    *events = projected;
+}
+
+fn provider_input_projection_identity(event: &AgentChatEvent) -> Option<String> {
+    if event.kind != AgentChatEventKind::Message
+        || event.role != Some(AgentChatRole::User)
+        || !event.provider.eq_ignore_ascii_case("codex")
+        || event.metadata["provider_log"] != true
+        || event.metadata["input_origin"] != "human_input"
+        || event.metadata["input_purpose"] != "request"
+    {
+        return None;
+    }
+    let provider_turn_id = event
+        .metadata
+        .get("provider_turn_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(format!(
+        "{}|{}|{provider_turn_id}",
+        event.session_id, event.provider
+    ))
+}
+
+fn retain_provider_observation_ids(canonical: &mut AgentChatEvent, duplicate: &AgentChatEvent) {
+    let mut ids = provider_observation_ids(canonical);
+    for id in provider_observation_ids(duplicate) {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    canonical.metadata["provider_observation_ids"] = serde_json::json!(ids);
+}
+
+fn provider_observation_ids(event: &AgentChatEvent) -> Vec<String> {
+    let mut ids = event
+        .metadata
+        .get("provider_observation_ids")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if !ids.iter().any(|id| id == &event.id) {
+        ids.push(event.id.clone());
+    }
+    ids
 }
 
 fn is_cross_source_archive_duplicate(
@@ -1218,29 +1678,19 @@ fn normalize_chat_event_visible_text(event: &mut AgentChatEvent) {
 /// metadata is authoritative, so replay can migrate the presentation role
 /// without rewriting the durable archive or treating the row as a new prompt.
 fn normalize_chat_event_provenance(event: &mut AgentChatEvent) {
-    let input_origin = event
-        .metadata
-        .get("input_origin")
-        .and_then(serde_json::Value::as_str);
-    if event.kind == AgentChatEventKind::Message
-        && event.role == Some(AgentChatRole::User)
-        && matches!(
-            input_origin,
-            Some("context_injection" | "provider_internal")
-        )
-    {
-        event.role = Some(AgentChatRole::System);
-    } else if event.kind == AgentChatEventKind::ToolResult
-        && event.role == Some(AgentChatRole::User)
-    {
-        event.role = Some(AgentChatRole::Tool);
-    }
+    crate::state::conversation_archive::provenance::canonicalize_role(event);
 }
 
 fn should_collapse_provider_message_duplicate(
     existing: &AgentChatEvent,
     candidate: &AgentChatEvent,
 ) -> bool {
+    if existing.metadata["provider_log"] == true
+        && candidate.metadata["provider_log"] == true
+        && !archive_identity::is_codex_stream_completion_pair(existing, candidate)
+    {
+        return false; // Native records with distinct IDs are distinct observations.
+    }
     if existing.kind != AgentChatEventKind::Message || candidate.kind != AgentChatEventKind::Message
     {
         return false;
@@ -1286,6 +1736,12 @@ fn chat_event_dedupe_key(event: &AgentChatEvent) -> String {
         return format!("archive|{conversation_id}|{}", event.id);
     }
 
+    if event.metadata["provider_log"] == true {
+        return format!(
+            "native|{}|{}|{}",
+            event.session_id, event.provider, event.id
+        );
+    }
     if event.kind == AgentChatEventKind::Message {
         return format!(
             "{:?}|{:?}|{}|{}",
@@ -1591,6 +2047,35 @@ fn event_id(session_id: &str, sequence: u64, source: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn pi_promoted_fresh_identity_trusts_prefix_but_resume_does_not() {
+        assert!(provider_log_source_is_fresh(
+            "pi",
+            None,
+            Some("pi-fresh-session")
+        ));
+        assert!(provider_log_source_is_fresh(
+            "pi",
+            Some("pi-fresh-session"),
+            Some("pi-fresh-session")
+        ));
+        assert!(!provider_log_source_is_fresh(
+            "pi",
+            Some("pi-resumed-session"),
+            None
+        ));
+        assert!(!provider_log_source_is_fresh(
+            "pi",
+            Some("pi-resumed-session"),
+            Some("pi-other-session")
+        ));
+        assert!(!provider_log_source_is_fresh(
+            "codex",
+            Some("codex-session"),
+            Some("codex-session")
+        ));
+    }
+
     fn output(text: &str) -> WatchOutput {
         WatchOutput {
             cursor: "agent-1:0000000000000003".to_string(),
@@ -1781,6 +2266,540 @@ Do you want to proceed?
             chat_events[0].metadata["log_path"].as_str(),
             Some(log_path.to_string_lossy().as_ref())
         );
+    }
+
+    #[tokio::test]
+    async fn provider_log_capture_keeps_relationships_before_an_unseen_two_mib_burst() {
+        let _guard = crate::utils::wardian_test_env_lock_async().await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: ConversationLoggingSetting::Enabled,
+            ..Default::default()
+        })
+        .expect("save enabled logging setting");
+        let log_path = temp.path().join("codex.jsonl");
+        let tool_call = r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"shell_command","call_id":"call-leading","input":{"command":"npm test"}}}"#;
+        let filler = format!(r#"{{"type":"ignored","padding":"{}"}}"#, "x".repeat(1024));
+        let tool_result = r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-leading","output":"tests passed"}}"#;
+        let answer = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Finished after the burst"}]}}"#;
+        let mut content = String::from(tool_call);
+        content.push('\n');
+        while content.len() <= PROVIDER_LOG_TAIL_BYTES as usize + filler.len() {
+            content.push_str(&filler);
+            content.push('\n');
+        }
+        content.push_str(tool_result);
+        content.push('\n');
+        content.push_str(answer);
+        content.push('\n');
+        std::fs::write(&log_path, content).expect("write oversized provider log");
+
+        let state = AppState::new();
+        state.agents.lock().await.insert(
+            "agent-1".to_string(),
+            crate::state::ActiveAgent {
+                config: Arc::new(Mutex::new(wardian_core::models::AgentConfig {
+                    session_id: "agent-1".to_string(),
+                    session_name: "Agent One".to_string(),
+                    agent_class: "Coder".to_string(),
+                    provider: "codex".to_string(),
+                    folder: temp.path().to_string_lossy().to_string(),
+                    fresh_provider_session_id: Some("codex-session-one".to_string()),
+                    conversation_logging: AgentConversationLoggingSetting::Default,
+                    ..Default::default()
+                })),
+                child_process: None,
+                background_processes: Vec::new(),
+                memory_capability: None,
+                runtime_generation: None,
+                process_id: None,
+                query_count: Arc::new(Mutex::new(0)),
+                init_timestamp: Arc::new(Mutex::new(None)),
+                last_query_timestamp: Arc::new(Mutex::new(None)),
+                current_status: Arc::new(Mutex::new("Idle".to_string())),
+                last_status_at: Arc::new(Mutex::new(None)),
+                watch_state: Arc::new(Mutex::new(AgentWatchState::new(
+                    "agent-1".to_string(),
+                    32,
+                    4096,
+                ))),
+                terminal_title: Arc::new(Mutex::new(String::new())),
+                last_output_at: Arc::new(Mutex::new(None)),
+                log_path: Arc::new(Mutex::new(Some(log_path.clone()))),
+                log_last_modified: Arc::new(Mutex::new(None)),
+                #[cfg(windows)]
+                job_object: None,
+            },
+        );
+
+        archive_agent_chat_events_until_stable_for_state(&state, "agent-1")
+            .await
+            .expect("drain bounded provider batches");
+        let snapshot = agent_archive_capture_snapshot(&state, "agent-1")
+            .await
+            .expect("capture snapshot");
+        let context = conversation_archive_context_from_snapshot(&snapshot);
+        let events = state
+            .conversation_archive
+            .chat_events_for_capture(&context)
+            .expect("read archived provider events");
+
+        assert!(events.iter().any(|event| {
+            event.kind == AgentChatEventKind::ToolCall
+                && event.turn_id.as_deref() == Some("call-leading")
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == AgentChatEventKind::ToolResult
+                && event.turn_id.as_deref() == Some("call-leading")
+        }));
+        assert!(events.iter().any(|event| {
+            event.role == Some(AgentChatRole::Assistant)
+                && event.text.as_deref() == Some("Finished after the burst")
+        }));
+        let capture = state
+            .conversation_archive
+            .provider_log_capture_state("agent-1", "codex:session:codex-session-one")
+            .expect("read provider cursor")
+            .expect("provider cursor");
+        assert_eq!(capture.status, "complete");
+        assert_eq!(
+            capture.committed_offset,
+            std::fs::metadata(&log_path).unwrap().len()
+        );
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[tokio::test]
+    async fn incremental_opencode_capture_persists_bound_db_events_once_and_respects_disabled_logging(
+    ) {
+        let _guard = crate::utils::wardian_test_env_lock_async().await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let provider_data = temp.path().join("provider-data");
+        let opencode_dir = provider_data.join("opencode");
+        std::fs::create_dir_all(&opencode_dir).expect("create OpenCode data dir");
+        let db_path = opencode_dir.join("opencode.db");
+        let log_path = temp.path().join("opencode.log");
+        std::fs::write(&log_path, "").expect("write empty rolling log");
+
+        let previous_wardian_home = std::env::var_os("WARDIAN_HOME");
+        let previous_xdg_data_home = std::env::var_os("XDG_DATA_HOME");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        std::env::set_var("XDG_DATA_HOME", &provider_data);
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: ConversationLoggingSetting::Enabled,
+            ..Default::default()
+        })
+        .expect("save enabled logging setting");
+
+        let initial_created_at = chrono::Utc::now().timestamp_millis();
+        let conn = rusqlite::Connection::open(&db_path).expect("open db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE message (
+                id text PRIMARY KEY,
+                session_id text NOT NULL,
+                time_created integer,
+                time_updated integer,
+                data text NOT NULL
+            );
+            CREATE TABLE part (
+                id text PRIMARY KEY,
+                message_id text NOT NULL,
+                session_id text NOT NULL,
+                time_created integer,
+                time_updated integer,
+                data text NOT NULL
+            );
+            "#,
+        )
+        .expect("seed db");
+        conn.execute(
+            "INSERT INTO message VALUES ('msg-initial', 'ses_incremental', ?1, ?1, '{\"role\":\"assistant\"}')",
+            rusqlite::params![initial_created_at],
+        )
+        .expect("insert initial message");
+        conn.execute(
+            "INSERT INTO part VALUES ('part-initial', 'msg-initial', 'ses_incremental', ?1, ?1, '{\"type\":\"text\",\"text\":\"Canonical initial answer\"}')",
+            rusqlite::params![initial_created_at + 1],
+        )
+        .expect("insert initial part");
+        drop(conn);
+
+        let watch_state = Arc::new(Mutex::new(AgentWatchState::new(
+            "agent-1".to_string(),
+            32,
+            4096,
+        )));
+        watch_state
+            .lock()
+            .expect("lock watch state")
+            .push_transcript(WatchTranscriptMessage {
+                role: "assistant".to_string(),
+                text: "Canonical initial answer".to_string(),
+                provider: "opencode".to_string(),
+                turn_id: Some("ses_incremental".to_string()),
+                source: Some("opencode_db".to_string()),
+            });
+
+        let state = AppState::new();
+        state.agents.lock().await.insert(
+            "agent-1".to_string(),
+            crate::state::ActiveAgent {
+                config: Arc::new(Mutex::new(wardian_core::models::AgentConfig {
+                    session_id: "agent-1".to_string(),
+                    session_name: "Agent One".to_string(),
+                    agent_class: "Coder".to_string(),
+                    provider: "opencode".to_string(),
+                    folder: temp.path().to_string_lossy().to_string(),
+                    fresh_provider_session_id: Some("ses_incremental".to_string()),
+                    conversation_logging: AgentConversationLoggingSetting::Default,
+                    ..Default::default()
+                })),
+                child_process: None,
+                background_processes: Vec::new(),
+                memory_capability: None,
+                runtime_generation: None,
+                process_id: None,
+                query_count: Arc::new(Mutex::new(0)),
+                init_timestamp: Arc::new(Mutex::new(None)),
+                last_query_timestamp: Arc::new(Mutex::new(None)),
+                current_status: Arc::new(Mutex::new("Idle".to_string())),
+                last_status_at: Arc::new(Mutex::new(None)),
+                watch_state,
+                terminal_title: Arc::new(Mutex::new(String::new())),
+                last_output_at: Arc::new(Mutex::new(None)),
+                log_path: Arc::new(Mutex::new(Some(log_path))),
+                log_last_modified: Arc::new(Mutex::new(None)),
+                #[cfg(windows)]
+                job_object: None,
+            },
+        );
+
+        archive_agent_chat_events_for_state(&state, "agent-1")
+            .await
+            .expect("capture initial OpenCode events");
+        let snapshot = agent_archive_capture_snapshot(&state, "agent-1")
+            .await
+            .expect("capture snapshot");
+        let context = conversation_archive_context_from_snapshot(&snapshot);
+        let events = state
+            .conversation_archive
+            .chat_events_for_capture(&context)
+            .expect("read initial archive");
+        let initial = events
+            .iter()
+            .filter(|event| event.metadata["part_id"] == "part-initial")
+            .collect::<Vec<_>>();
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].source.as_deref(), Some("opencode_db"));
+        assert_eq!(initial[0].metadata["provider_log"], true);
+        assert_eq!(
+            initial[0].metadata["opencode_session_id"],
+            "ses_incremental"
+        );
+        assert_eq!(
+            initial[0].metadata["source_path"],
+            db_path.to_string_lossy().as_ref()
+        );
+
+        archive_agent_chat_events_for_state(&state, "agent-1")
+            .await
+            .expect("poll OpenCode events again");
+        let repeated = state
+            .conversation_archive
+            .chat_events_for_capture(&context)
+            .expect("read repeated archive");
+        assert_eq!(
+            repeated
+                .iter()
+                .filter(|event| event.metadata["part_id"] == "part-initial")
+                .count(),
+            1
+        );
+
+        // This answer is written while logging is enabled but is deliberately
+        // left as backlog until after the policy transition.
+        let backlog_created_at = chrono::Utc::now().timestamp_millis();
+        let conn = rusqlite::Connection::open(&db_path).expect("reopen db");
+        conn.execute(
+            "INSERT INTO message VALUES ('msg-backlog', 'ses_incremental', ?1, ?1, '{\"role\":\"assistant\"}')",
+            rusqlite::params![backlog_created_at],
+        )
+        .expect("append enabled backlog message");
+        conn.execute(
+            "INSERT INTO part VALUES ('part-backlog', 'msg-backlog', 'ses_incremental', ?1, ?1, '{\"type\":\"text\",\"text\":\"Enabled backlog answer\"}')",
+            rusqlite::params![backlog_created_at + 1],
+        )
+        .expect("append enabled backlog part");
+        drop(conn);
+
+        // Exercise the real #1253 policy transition. No archive/transcript
+        // poll occurs while logging is disabled.
+        crate::commands::settings::save_shell_settings_for_state(
+            &state,
+            crate::utils::ShellSettingsDocument {
+                schema_version: 2,
+                settings: crate::utils::ShellSettings {
+                    conversation_logging: ConversationLoggingSetting::Disabled,
+                    ..Default::default()
+                },
+                overrides: crate::utils::ShellSettingsOverrides {
+                    conversation_logging: Some(ConversationLoggingSetting::Disabled),
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .expect("disable logging through policy transition");
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let disabled_created_at = chrono::Utc::now().timestamp_millis();
+        let conn = rusqlite::Connection::open(&db_path).expect("reopen db while disabled");
+        conn.execute(
+            "INSERT INTO message VALUES ('msg-disabled', 'ses_incremental', ?1, ?1, '{\"role\":\"assistant\"}')",
+            rusqlite::params![disabled_created_at],
+        )
+        .expect("append disabled answer message");
+        conn.execute(
+            "INSERT INTO part VALUES ('part-disabled', 'msg-disabled', 'ses_incremental', ?1, ?1, '{\"type\":\"text\",\"text\":\"Must remain live-only\"}')",
+            rusqlite::params![disabled_created_at],
+        )
+        .expect("append disabled answer part");
+        drop(conn);
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        crate::commands::settings::save_shell_settings_for_state(
+            &state,
+            crate::utils::ShellSettingsDocument {
+                schema_version: 2,
+                settings: crate::utils::ShellSettings {
+                    conversation_logging: ConversationLoggingSetting::Enabled,
+                    ..Default::default()
+                },
+                overrides: crate::utils::ShellSettingsOverrides::default(),
+            },
+        )
+        .await
+        .expect("re-enable logging through policy transition");
+
+        archive_agent_chat_events_for_state(&state, "agent-1")
+            .await
+            .expect("capture after no-poll disabled window");
+        let after_reenable = state
+            .conversation_archive
+            .chat_events_for_capture(&context)
+            .expect("read archive after re-enable");
+        assert!(after_reenable
+            .iter()
+            .all(|event| event.metadata["part_id"] != "part-disabled"));
+        assert_eq!(
+            after_reenable
+                .iter()
+                .filter(|event| event.metadata["part_id"] == "part-initial")
+                .count(),
+            1
+        );
+        assert_eq!(
+            after_reenable
+                .iter()
+                .filter(|event| event.metadata["part_id"] == "part-backlog")
+                .count(),
+            1
+        );
+
+        // A disabled poll must not move the original interval start past a
+        // canonical row created earlier in that same disabled window.
+        crate::commands::settings::save_shell_settings_for_state(
+            &state,
+            crate::utils::ShellSettingsDocument {
+                schema_version: 2,
+                settings: crate::utils::ShellSettings {
+                    conversation_logging: ConversationLoggingSetting::Disabled,
+                    ..Default::default()
+                },
+                overrides: crate::utils::ShellSettingsOverrides {
+                    conversation_logging: Some(ConversationLoggingSetting::Disabled),
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .expect("disable logging for polled window");
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let polled_disabled_created_at = chrono::Utc::now().timestamp_millis();
+        let conn = rusqlite::Connection::open(&db_path).expect("reopen db for disabled poll");
+        conn.execute(
+            "INSERT INTO message VALUES ('msg-disabled-polled', 'ses_incremental', ?1, ?1, '{\"role\":\"assistant\"}')",
+            rusqlite::params![polled_disabled_created_at],
+        )
+        .expect("append polled disabled answer message");
+        conn.execute(
+            "INSERT INTO part VALUES ('part-disabled-polled', 'msg-disabled-polled', 'ses_incremental', ?1, ?1, '{\"type\":\"text\",\"text\":\"Must remain live-only after poll\"}')",
+            rusqlite::params![polled_disabled_created_at],
+        )
+        .expect("append polled disabled answer part");
+        drop(conn);
+
+        archive_agent_chat_events_for_state(&state, "agent-1")
+            .await
+            .expect("capture disabled poll");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        crate::commands::settings::save_shell_settings_for_state(
+            &state,
+            crate::utils::ShellSettingsDocument {
+                schema_version: 2,
+                settings: crate::utils::ShellSettings {
+                    conversation_logging: ConversationLoggingSetting::Enabled,
+                    ..Default::default()
+                },
+                overrides: crate::utils::ShellSettingsOverrides::default(),
+            },
+        )
+        .await
+        .expect("re-enable logging after disabled poll");
+        archive_agent_chat_events_for_state(&state, "agent-1")
+            .await
+            .expect("capture after polled disabled window");
+        let after_polled_reenable = state
+            .conversation_archive
+            .chat_events_for_capture(&context)
+            .expect("read archive after polled re-enable");
+        assert!(after_polled_reenable
+            .iter()
+            .all(|event| event.metadata["part_id"] != "part-disabled-polled"));
+
+        match previous_wardian_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+        match previous_xdg_data_home {
+            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+    }
+
+    #[tokio::test]
+    async fn initially_disabled_fresh_provider_prefix_is_not_archived() {
+        let _guard = crate::utils::wardian_test_env_lock_async().await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: ConversationLoggingSetting::Disabled,
+            ..Default::default()
+        })
+        .expect("save disabled logging setting");
+        let log_path = temp.path().join("codex.jsonl");
+        std::fs::write(
+            &log_path,
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"SECRET_BEFORE_FIRST_CAPTURE\"}}\n",
+        )
+        .expect("write pre-existing provider event");
+        let existing_len = std::fs::metadata(&log_path)
+            .expect("provider metadata")
+            .len();
+
+        let state = AppState::new();
+        state.agents.lock().await.insert(
+            "agent-1".to_string(),
+            crate::state::ActiveAgent {
+                config: Arc::new(Mutex::new(wardian_core::models::AgentConfig {
+                    session_id: "agent-1".to_string(),
+                    session_name: "Agent One".to_string(),
+                    agent_class: "Coder".to_string(),
+                    provider: "codex".to_string(),
+                    folder: temp.path().to_string_lossy().to_string(),
+                    fresh_provider_session_id: Some("codex-session-one".to_string()),
+                    conversation_logging: AgentConversationLoggingSetting::Default,
+                    ..Default::default()
+                })),
+                child_process: None,
+                background_processes: Vec::new(),
+                memory_capability: None,
+                runtime_generation: None,
+                process_id: None,
+                query_count: Arc::new(Mutex::new(0)),
+                init_timestamp: Arc::new(Mutex::new(None)),
+                last_query_timestamp: Arc::new(Mutex::new(None)),
+                current_status: Arc::new(Mutex::new("Idle".to_string())),
+                last_status_at: Arc::new(Mutex::new(None)),
+                watch_state: Arc::new(Mutex::new(AgentWatchState::new(
+                    "agent-1".to_string(),
+                    32,
+                    4096,
+                ))),
+                terminal_title: Arc::new(Mutex::new(String::new())),
+                last_output_at: Arc::new(Mutex::new(None)),
+                log_path: Arc::new(Mutex::new(Some(log_path))),
+                log_last_modified: Arc::new(Mutex::new(None)),
+                #[cfg(windows)]
+                job_object: None,
+            },
+        );
+
+        archive_agent_chat_events_until_stable_for_state(&state, "agent-1")
+            .await
+            .expect("observe initially disabled source");
+        let snapshot = agent_archive_capture_snapshot(&state, "agent-1")
+            .await
+            .expect("capture snapshot");
+        let context = conversation_archive_context_from_snapshot(&snapshot);
+        let events = state
+            .conversation_archive
+            .chat_events_for_capture(&context)
+            .expect("read archived provider events");
+        assert!(events
+            .iter()
+            .all(|event| event.text.as_deref() != Some("SECRET_BEFORE_FIRST_CAPTURE")));
+        let capture = state
+            .conversation_archive
+            .provider_log_capture_state("agent-1", "codex:session:codex-session-one")
+            .expect("read provider cursor")
+            .expect("provider cursor");
+        assert_eq!(capture.committed_offset, existing_len);
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn lifecycle_boundary_does_not_reimport_append_only_log_tail() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_path = temp.path().join("codex.jsonl");
+        std::fs::write(
+            &log_path,
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Must come through the cursor\"}}\n",
+        )
+        .expect("write provider log");
+        let snapshot = AgentArchiveCaptureSnapshot {
+            session_id: "agent-1".to_string(),
+            provider: "codex".to_string(),
+            resume_session: Some("provider-session-1".to_string()),
+            fresh_provider_session_id: None,
+            cleared_provider_sessions: Vec::new(),
+            current_status: "Idle".to_string(),
+            last_status_at: None,
+            log_path: Some(log_path),
+            agent_name: "Agent One".to_string(),
+            agent_class: "Coder".to_string(),
+            workspace: temp.path().to_string_lossy().to_string(),
+            agent_conversation_logging: AgentConversationLoggingSetting::Default,
+            watch_state: Arc::new(Mutex::new(AgentWatchState::new(
+                "agent-1".to_string(),
+                32,
+                4096,
+            ))),
+        };
+
+        let capture = collect_agent_chat_events_for_boundary(&snapshot)
+            .expect("collect lifecycle boundary events");
+        assert!(capture
+            .events
+            .iter()
+            .all(|event| event.text.as_deref() != Some("Must come through the cursor")));
+        assert!(capture
+            .events
+            .iter()
+            .all(|event| event.metadata["provider_log"] != true));
     }
 
     #[test]
@@ -2157,6 +3176,26 @@ Do you want to proceed?
             chat_events[0].text.as_deref(),
             Some("Created #daily-task-list under General.")
         );
+        // The mirror exception must not collapse two identified observations or
+        // equal answers belonging to different native requests.
+        let mut identified = chat_events[0].clone();
+        identified.id = "other-identified-answer".into();
+        identified.turn_id = Some("other-native-message".into());
+        assert_eq!(
+            merge_chat_events(Vec::new(), vec![chat_events[0].clone(), identified]).len(),
+            2
+        );
+        let mut rooted_stream = chat_events[0].clone();
+        rooted_stream.id = "stream-another-request".into();
+        rooted_stream.turn_id = None;
+        rooted_stream.source = Some("event_msg".into());
+        rooted_stream.metadata["request_root_id"] = serde_json::json!("request-a");
+        let mut rooted_completion = chat_events[0].clone();
+        rooted_completion.metadata["request_root_id"] = serde_json::json!("request-b");
+        assert_eq!(
+            merge_chat_events(Vec::new(), vec![rooted_stream, rooted_completion]).len(),
+            2
+        );
     }
 
     #[test]
@@ -2232,6 +3271,65 @@ Do you want to proceed?
             turns[0].status,
             wardian_core::conversations::ConversationTurnStatus::Responded
         );
+    }
+
+    #[test]
+    fn canonicalizes_codex_user_mirrors_by_native_turn_and_preserves_repeated_turns() {
+        let mut lines = include_str!("../providers/fixtures/codex-user-input-mirror.jsonl")
+            .lines()
+            .collect::<Vec<_>>();
+        lines.extend([
+            r#"{"type":"turn_context","payload":{"turn_id":"provider-turn-b"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","id":"message-b","role":"user","content":[{"type":"input_text","text":"Inspect the archive."}],"internal_chat_message_metadata_passthrough":{"turn_id":"provider-turn-b","content_item_kinds":["user.text"]}}}"#,
+            r#"{"type":"event_msg","payload":{"type":"user_message","client_id":"client-b","message":"Inspect the archive."}}"#,
+        ]);
+        let mut provider_events = normalize_chat_lines("agent-1", "codex", lines);
+        for event in &mut provider_events {
+            event.metadata["provider_log"] = serde_json::json!(true);
+            event.metadata["provider_session_id"] = serde_json::json!("provider-session");
+            event.metadata["log_path"] = serde_json::json!("<provider-log>");
+        }
+        let raw_user_ids = provider_events
+            .iter()
+            .filter(|event| event.role == Some(AgentChatRole::User))
+            .map(|event| event.id.clone())
+            .collect::<Vec<_>>();
+
+        let projected = merge_chat_events(Vec::new(), provider_events);
+        let users = projected
+            .iter()
+            .filter(|event| event.role == Some(AgentChatRole::User))
+            .collect::<Vec<_>>();
+
+        assert_eq!(raw_user_ids.len(), 4);
+        assert_eq!(users.len(), 2);
+        assert_eq!(
+            users
+                .iter()
+                .map(|event| event.metadata["provider_observation_ids"]
+                    .as_array()
+                    .expect("observation IDs")
+                    .len())
+                .collect::<Vec<_>>(),
+            vec![2, 2]
+        );
+        assert_eq!(
+            users
+                .iter()
+                .map(|event| event.metadata["provider_turn_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["provider-turn-a", "provider-turn-b"]
+        );
+        assert!(users.iter().all(|event| {
+            event.metadata["provider_observation_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|id| {
+                    id.as_str()
+                        .is_some_and(|id| raw_user_ids.iter().any(|raw_id| raw_id == id))
+                })
+        }));
     }
 
     #[test]
@@ -2545,9 +3643,12 @@ Do you want to proceed?
                 "CREATE TABLE steps (idx INTEGER, step_type INTEGER, step_payload BLOB);",
             )
             .expect("create steps");
-        // field 19.2 is the current Antigravity user message; field 20.1 is
-        // the completed planner response in its SQLite step payload.
-        let user = vec![0x9a, 0x01, 0x05, 0x12, 0x03, b'h', b'i', b'!'];
+        // Field 5.3 is metadata.source (4 = USER_EXPLICIT, 2 = MODEL),
+        // field 19.2 is the user message, and 20.1 is the planner response.
+        // These source values match the paired SQLite/JSONL QA recording.
+        let legacy_user = vec![0x9a, 0x01, 0x05, 0x12, 0x03, b'h', b'i', b'!'];
+        let mut user = vec![0x2a, 0x02, 0x18, 0x04];
+        user.extend(&legacy_user);
         let assistant = vec![0xa2, 0x01, 0x05, 0x0a, 0x03, b'o', b'k', b'!'];
         connection
             .execute(
@@ -2561,14 +3662,69 @@ Do you want to proceed?
                 rusqlite::params![assistant],
             )
             .expect("insert assistant");
+        for (step, source) in [(2, 2), (3, 99)] {
+            let mut payload = vec![0x2a, 0x02, 0x18, source];
+            payload.extend(&legacy_user);
+            connection
+                .execute(
+                    "INSERT INTO steps VALUES (?1, 14, ?2)",
+                    rusqlite::params![step, payload],
+                )
+                .expect("insert non-user source with user-shaped text");
+        }
+        for (step, kind, payload) in [
+            (4, 14, legacy_user.clone()),
+            (5, 999, user.clone()),
+            (6, 14, vec![0x2a, 0x02, 0x18, 0x04]),
+            (7, 14, user),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO steps VALUES (?1, ?2, ?3)",
+                    rusqlite::params![step, kind, payload],
+                )
+                .expect("insert compatibility and repeated-request fixtures");
+        }
 
         let events = load_antigravity_database_chat_events("agent-1", "antigravity", &database);
 
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 6);
         assert_eq!(events[0].role, Some(AgentChatRole::User));
         assert_eq!(events[0].text.as_deref(), Some("hi!"));
+        assert_eq!(events[0].metadata["input_origin"], "human_input");
+        assert_eq!(events[0].metadata["input_purpose"], "request");
+        assert_eq!(events[0].metadata["context_observation"], "unreported");
+        assert_eq!(events[0].metadata["request_root_id"], events[0].id);
+        assert_eq!(events[0].metadata["provider_step_source"], 4);
         assert_eq!(events[1].role, Some(AgentChatRole::Assistant));
         assert_eq!(events[1].text.as_deref(), Some("ok!"));
+        assert!(events[1].metadata.get("input_origin").is_none());
+        assert!(events[1].metadata.get("request_root_id").is_none());
+        for (event, source) in [(&events[2], 2), (&events[3], 99)] {
+            assert_eq!(event.role, Some(AgentChatRole::System));
+            let mut legacy = event.clone();
+            legacy.role = Some(AgentChatRole::User);
+            assert_eq!(event.id, stable_provider_log_event_id(&legacy, &database));
+            assert_eq!(event.text.as_deref(), Some("hi!"));
+            assert_eq!(event.metadata["provider_step_source"], source);
+            assert_eq!(event.metadata["input_origin"], "provider_internal");
+            assert_eq!(event.metadata["input_purpose"], "internal");
+            assert!(event.metadata.get("request_root_id").is_none());
+        }
+        for event in [&events[4], &events[5]] {
+            assert_eq!(event.metadata["input_origin"], "human_input");
+            assert_eq!(event.metadata["input_purpose"], "request");
+            assert_eq!(event.metadata["request_root_id"], event.id);
+            assert_ne!(
+                event.metadata["request_root_id"],
+                events[0].metadata["request_root_id"]
+            );
+        }
+        let replay = load_antigravity_database_chat_events("agent-1", "antigravity", &database);
+        for (original, replayed) in events.iter().zip(&replay) {
+            assert_eq!(original.id, replayed.id);
+            assert_eq!(original.metadata, replayed.metadata);
+        }
         assert_eq!(
             events[1].metadata["log_source"],
             "antigravity_conversation_database"
@@ -2634,21 +3790,49 @@ Do you want to proceed?
         assert_eq!(chat_events[2].metadata["opencode_session_id"], "ses_test");
         assert_eq!(chat_events[2].metadata["part_id"], "part-assistant");
         assert_eq!(chat_events[2].metadata["raw_type"], "text");
+        assert_eq!(
+            chat_events[2].metadata["source_path"],
+            db_path.to_string_lossy().as_ref()
+        );
+
+        conn.execute(
+            "INSERT INTO message VALUES ('msg-later', 'ses_test', 7, 7, '{\"role\":\"assistant\"}')",
+            [],
+        )
+        .expect("append message");
+        conn.execute(
+            "INSERT INTO part VALUES ('part-later', 'msg-later', 'ses_test', 8, 8, '{\"type\":\"text\",\"text\":\"A later reply\"}')",
+            [],
+        )
+        .expect("append part");
+
+        let refreshed = load_opencode_db_chat_events_from_db(&db_path, "agent-1", "ses_test")
+            .expect("refresh db");
+        assert_eq!(refreshed.len(), 4);
+        assert_eq!(refreshed[3].text.as_deref(), Some("A later reply"));
     }
 
     #[test]
     fn opencode_session_id_prefers_real_resume_session() {
         assert_eq!(
-            opencode_session_id("wardian-uuid", Some("ses_real")).as_deref(),
+            opencode_session_id("wardian-uuid", Some("ses_real"), None).as_deref(),
             Some("ses_real")
         );
         assert_eq!(
-            opencode_session_id("ses_from_agent", None).as_deref(),
+            opencode_session_id("ses_from_agent", None, None).as_deref(),
             Some("ses_from_agent")
         );
         assert_eq!(
-            opencode_session_id("wardian-uuid", Some("stale-uuid")),
+            opencode_session_id("wardian-uuid", Some("stale-uuid"), Some("ses_fresh")),
+            Some("ses_fresh".to_string())
+        );
+        assert_eq!(
+            opencode_session_id("wardian-uuid", Some("stale-uuid"), Some("fresh-uuid")),
             None
+        );
+        assert_eq!(
+            opencode_session_id("wardian-uuid", None, Some("ses_fresh")).as_deref(),
+            Some("ses_fresh")
         );
     }
 

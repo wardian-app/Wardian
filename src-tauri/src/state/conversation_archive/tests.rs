@@ -283,7 +283,8 @@ fn append_chat_events_writes_source_records_for_provider_metadata() {
         "raw_type": "text",
         "cursor": "opencode:part_42",
         "sequence": 42,
-        "offset": 128
+        "offset": 128,
+        "source_path": "<provider-data>/opencode.db"
     });
 
     let appended = archive
@@ -314,8 +315,21 @@ fn append_chat_events_writes_source_records_for_provider_metadata() {
     assert_eq!(sources[0].offset, Some(128));
     assert_eq!(sources[0].row_id.as_deref(), Some("part_42"));
     assert_eq!(sources[0].provider_event_type.as_deref(), Some("text"));
+    assert_eq!(
+        sources[0].source_path.as_deref(),
+        Some("<provider-data>/opencode.db")
+    );
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].source_refs, vec!["src_1".to_string()]);
+
+    let replayed = archive
+        .chat_events_for_active_conversation("agent-1")
+        .expect("replay archived events");
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(
+        replayed[0].metadata["source_path"],
+        "<provider-data>/opencode.db"
+    );
 }
 
 #[test]
@@ -3311,6 +3325,59 @@ fn archive_context(provider_session_id: &str) -> ConversationArchiveContext {
         provider_session_ids: vec![provider_session_id.to_string()],
         provider_source_key: Some(format!("codex:session:{provider_session_id}")),
     }
+}
+
+#[test]
+fn provider_log_cursor_commits_only_after_archive_append_and_rejects_stale_state() {
+    let (_guard, temp) = isolated_home();
+    let log_path = temp.path().join("provider.jsonl");
+    std::fs::write(
+        &log_path,
+        "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"Archived once\"}}\n",
+    )
+    .expect("write provider log");
+    let batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        "agent-1",
+        "codex",
+        &log_path,
+        "codex:session:one",
+        None,
+        true,
+    )
+    .expect("acquire provider batch");
+    let archive = ConversationArchiveState::default();
+    let context = archive_context("one");
+    let mut wrong_agent_events = batch.events.clone();
+    wrong_agent_events[0].session_id = "other-agent".to_string();
+
+    let append_error = archive
+        .append_provider_log_batch_with_context(
+            context.clone(),
+            &wrong_agent_events,
+            None,
+            &batch.next,
+        )
+        .expect_err("failed append must not commit cursor");
+    assert_eq!(append_error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(archive
+        .provider_log_capture_state("agent-1", "codex:session:one")
+        .expect("read capture state")
+        .is_none());
+
+    archive
+        .append_provider_log_batch_with_context(context.clone(), &batch.events, None, &batch.next)
+        .expect("append and commit provider batch");
+    assert_eq!(
+        archive
+            .provider_log_capture_state("agent-1", "codex:session:one")
+            .expect("read committed state"),
+        Some(batch.next.clone())
+    );
+
+    let stale_error = archive
+        .append_provider_log_batch_with_context(context, &[], None, &batch.next)
+        .expect_err("stale expected state must fail closed");
+    assert_eq!(stale_error.kind(), std::io::ErrorKind::WouldBlock);
 }
 
 fn isolated_home() -> (tokio::sync::MutexGuard<'static, ()>, tempfile::TempDir) {

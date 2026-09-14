@@ -1,0 +1,67 @@
+{
+  "observation": "OpenCode 1.18.29 retained real session, 2026-09-07; genuine cost/time/role field extracts. IDs replaced consistently. Fourth native assistant turn absent from retained telemetry snapshot. No provider execution by this test.",
+  "native_messages": [
+    {
+      "id": "msg_observed_1",
+      "time_created": 1788779262493,
+      "data": {
+        "role": "assistant",
+        "time": {
+          "created": 1788779262493,
+          "completed": 1788779273629
+        },
+        "cost": 0
+      }
+    },
+    {
+      "id": "msg_observed_2",
+      "time_created": 1788779273666,
+      "data": {
+        "role": "assistant",
+        "time": {
+          "created": 1788779273666,
+          "completed": 1788779277037
+        },
+        "cost": 0
+      }
+    },
+    {
+      "id": "msg_observed_3",
+      "time_created": 1788779277047,
+      "data": {
+        "role": "assistant",
+        "time": {
+          "created": 1788779277047,
+          "completed": 1788779279653
+        },
+        "cost": 0
+      }
+    },
+    {
+      "id": "msg_observed_4",
+      "time_created": 1788779323216,
+      "data": {
+        "role": "assistant",
+        "time": {
+          "created": 1788779323216,
+          "completed": 1788779328052
+        },
+        "cost": 0
+      }
+    }
+  ],
+  "ingested": [
+    {
+      "turn_id": "msg_observed_1",
+      "cost_usd": 0
+    },
+    {
+      "turn_id": "msg_observed_2",
+      "cost_usd": 0
+    },
+    {
+      "turn_id": "msg_observed_3",
+      "cost_usd": 0
+    }
+  ]
+}

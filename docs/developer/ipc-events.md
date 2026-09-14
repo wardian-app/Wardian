@@ -248,6 +248,21 @@ replay boundary also canonicalizes legacy archived roles from their persisted
 `input_origin` metadata; historical archive files do not need a destructive
 rewrite to display the corrected classification.
 
+Archive replay retains canonical IDs and can enrich provenance from a current,
+source-bound native observation. Capture-enabled repair persists verified
+aliases and metadata in the existing archive format; capture-disabled repair
+changes only the active view. A reconciled broker input retains its broker
+provenance while exposing the observed native source (`provider_log`, source,
+and log path). Equal prompt text alone does not establish identity. See the
+internal design record at
+`docs/specs/2026-09-07-provider-archive-provenance-repair.md` for the publication
+and compatibility contract.
+For the verified Antigravity SQLite GENERIC tool result, an identity-bound
+running-to-DONE observation also refreshes text and native step status in place.
+The original event ID and narrative sequence remain; DONE does not assert
+success and a stale running capture cannot replace completed output. Durable
+repair still requires enabled capture; disabled replay changes only the view.
+
 ### Provider Input State
 
 Live delivery readiness is tracked per provider runtime generation. The generation increments when a provider process is spawned, resumed, cleared, or reattached. Delivery may drain queued work only after readiness evidence for the current generation.

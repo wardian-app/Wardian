@@ -124,6 +124,12 @@ pub(super) fn matching_delivered_input_record_index(
     {
         return None;
     }
+    if matches!(
+        metadata_string(&event.metadata, "input_origin").as_deref(),
+        Some("provider_internal" | "context_injection")
+    ) {
+        return None;
+    }
     let event_text = event.text.as_deref()?.trim();
     if event_text.is_empty() {
         return None;

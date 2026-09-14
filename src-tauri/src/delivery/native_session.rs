@@ -225,6 +225,34 @@ impl NativeProviderProtocol {
         }
     }
 
+    pub fn set_session_mode_request(
+        self,
+        request_id: &str,
+        provider_session_id: Option<&str>,
+        mode_id: &str,
+    ) -> Result<Value, NativeProtocolError> {
+        if self != Self::OpenCodeAcp {
+            return Err(NativeProtocolError::UnsupportedOperation {
+                provider: self.provider().to_string(),
+                operation: "set_session_mode".to_string(),
+            });
+        }
+        let session_id = required_session_id(provider_session_id, self)?;
+        let mode_id = mode_id.trim();
+        if mode_id.is_empty() {
+            return Err(NativeProtocolError::UnsupportedOperation {
+                provider: self.provider().to_string(),
+                operation: "set_session_mode with an empty mode".to_string(),
+            });
+        }
+        Ok(json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "session/set_mode",
+            "params": {"sessionId": session_id, "modeId": mode_id}
+        }))
+    }
+
     pub fn cancel_request(
         self,
         interaction_id: &str,
@@ -287,6 +315,11 @@ pub struct NativeProtocolEvent {
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// When true, `text` is the complete assistant answer so far rather than an
+    /// increment, so a consumer must replace what it holds instead of appending.
+    /// Pi final messages and older full-message updates replace accumulated text.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cumulative_text: bool,
 }
 
 impl NativeProtocolEvent {
@@ -482,7 +515,7 @@ fn parse_claude_event(value: &Value) -> Vec<NativeProtocolEvent> {
             },
             request_id,
             string_at(value, &["session_id"]),
-            string_at(value, &["result"]),
+            text_at(value, &["result"]),
         )],
         _ => Vec::new(),
     }
@@ -519,9 +552,9 @@ fn parse_antigravity_event(value: &Value) -> Vec<NativeProtocolEvent> {
                 kind,
                 request_id,
                 string_at(value, &["step_update", "conversation_id"]),
-                string_at(value, &["step_update", "text_delta"])
-                    .or_else(|| string_at(value, &["content"]))
-                    .or_else(|| string_at(value, &["text"])),
+                text_at(value, &["step_update", "text_delta"])
+                    .or_else(|| text_at(value, &["content"]))
+                    .or_else(|| text_at(value, &["text"])),
             )]
         }
         "result" => vec![event(
@@ -539,7 +572,7 @@ fn parse_antigravity_event(value: &Value) -> Vec<NativeProtocolEvent> {
             request_id,
             string_at(value, &["result", "conversation_id"])
                 .or_else(|| string_at(value, &["conversation_id"])),
-            string_at(value, &["result", "response"]).or_else(|| string_at(value, &["content"])),
+            text_at(value, &["result", "response"]).or_else(|| text_at(value, &["content"])),
         )],
         _ => Vec::new(),
     }
@@ -583,16 +616,33 @@ fn parse_pi_event(value: &Value) -> Vec<NativeProtocolEvent> {
             None,
             None,
         )],
-        "message_start"
-        | "message_update"
-        | "tool_execution_start"
-        | "tool_execution_update"
-        | "tool_execution_end" => vec![event(
-            NativeProtocolEventKind::Progress,
+        // Current Pi RPC omits the full message from streaming updates. Typed
+        // text deltas accumulate until the final assistant message replaces
+        // them. Older full-message updates remain supported as snapshots.
+        "message_start" | "message_update" | "message_end" => vec![NativeProtocolEvent {
+            kind: NativeProtocolEventKind::Progress,
             request_id,
-            None,
-            assistant_text(value),
-        )],
+            provider_session_id: None,
+            provider_turn_id: None,
+            text: if value.get("message").is_some() {
+                pi_assistant_text(value)
+            } else {
+                let delta = value.get("assistantMessageEvent");
+                delta
+                    .filter(|delta| delta.get("type").and_then(Value::as_str) == Some("text_delta"))
+                    .and_then(|delta| text_at(delta, &["delta"]))
+            },
+            detail: None,
+            cumulative_text: value.get("message").is_some(),
+        }],
+        "tool_execution_start" | "tool_execution_update" | "tool_execution_end" => {
+            vec![event(
+                NativeProtocolEventKind::Progress,
+                request_id,
+                None,
+                None,
+            )]
+        }
         "extension_ui_request" => vec![event(
             NativeProtocolEventKind::ApprovalRequested,
             request_id,
@@ -626,6 +676,7 @@ fn parse_codex_event(value: &Value) -> Vec<NativeProtocolEvent> {
             provider_turn_id: None,
             text: None,
             detail: Some(error.to_string()),
+            cumulative_text: false,
         }];
     }
     if value.get("result").is_some() {
@@ -657,6 +708,7 @@ fn parse_codex_event(value: &Value) -> Vec<NativeProtocolEvent> {
             provider_turn_id,
             text: None,
             detail: None,
+            cumulative_text: false,
         }];
     }
 
@@ -681,6 +733,7 @@ fn parse_codex_event(value: &Value) -> Vec<NativeProtocolEvent> {
                 .or_else(|| string_at(params, &["turnId"])),
             text: None,
             detail: None,
+            cumulative_text: false,
         }],
         "turn/completed" => vec![NativeProtocolEvent {
             kind: match string_at(params, &["turn", "status"]).as_deref() {
@@ -695,12 +748,13 @@ fn parse_codex_event(value: &Value) -> Vec<NativeProtocolEvent> {
             provider_turn_id: string_at(params, &["turn", "id"]),
             text: None,
             detail: string_at(params, &["turn", "error", "message"]),
+            cumulative_text: false,
         }],
         "item/started" | "item/completed" | "item/agentMessage/delta" => vec![event(
             NativeProtocolEventKind::Progress,
             string_at(params, &["turnId"]),
             None,
-            string_at(params, &["delta"]),
+            text_at(params, &["delta"]),
         )],
         "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => vec![event(
             NativeProtocolEventKind::ApprovalRequested,
@@ -721,6 +775,7 @@ fn parse_opencode_event(value: &Value) -> Vec<NativeProtocolEvent> {
             provider_turn_id: None,
             text: None,
             detail: Some(error.to_string()),
+            cumulative_text: false,
         }];
     }
     if value.get("result").is_some() {
@@ -758,6 +813,7 @@ fn parse_opencode_event(value: &Value) -> Vec<NativeProtocolEvent> {
             } else {
                 stop_reason
             },
+            cumulative_text: false,
         }];
     }
     match value
@@ -769,9 +825,7 @@ fn parse_opencode_event(value: &Value) -> Vec<NativeProtocolEvent> {
             NativeProtocolEventKind::TurnStarted,
             None,
             string_at(value, &["params", "sessionId"]),
-            string_at(value, &["params", "update", "content", "text"])
-                .or_else(|| string_at(value, &["params", "update", "content"]))
-                .or_else(|| string_at(value, &["params", "update", "text"])),
+            acp_assistant_text(value),
         )],
         "session/request_permission" => vec![event(
             NativeProtocolEventKind::ApprovalRequested,
@@ -796,7 +850,33 @@ fn event(
         provider_turn_id: None,
         text,
         detail: None,
+        cumulative_text: false,
     }
+}
+
+/// Pi's assistant answer, taken only from the message's `text` content parts.
+///
+/// Used for role-bearing start/end messages and older full-message updates.
+/// These snapshots replace accumulated text. Current RPC updates omit the full
+/// message; their separately typed text deltas are handled by `parse_pi_event`.
+fn pi_assistant_text(value: &Value) -> Option<String> {
+    let message = value.get("message")?;
+    if message.get("role")?.as_str()? != "assistant" {
+        return None;
+    }
+    let parts = message.get("content")?.as_array()?;
+    let mut answer = String::new();
+    for part in parts {
+        let is_text_part = part.get("type").and_then(Value::as_str) == Some("text")
+            || (part.get("type").is_none() && part.get("text").is_some());
+        if !is_text_part {
+            continue;
+        }
+        if let Some(chunk) = part.get("text").and_then(Value::as_str) {
+            answer.push_str(chunk);
+        }
+    }
+    (!answer.is_empty()).then_some(answer)
 }
 
 fn json_rpc_id(value: &Value) -> Option<String> {
@@ -824,11 +904,36 @@ fn marker_value(text: &str, key: &str) -> Option<String> {
 }
 
 fn assistant_text(value: &Value) -> Option<String> {
-    string_at(value, &["message", "content"])
-        .or_else(|| string_at(value, &["message", "text"]))
-        .or_else(|| string_at(value, &["content"]))
-        .or_else(|| string_at(value, &["text"]))
-        .or_else(|| string_at(value, &["assistantMessageEvent", "delta"]))
+    text_at(value, &["message", "content"])
+        .or_else(|| text_at(value, &["message", "text"]))
+        .or_else(|| text_at(value, &["content"]))
+        .or_else(|| text_at(value, &["text"]))
+        .or_else(|| text_at(value, &["assistantMessageEvent", "delta"]))
+}
+
+/// ACP sends thoughts, tool updates and user echoes on the same notification
+/// method. Only a typed assistant text chunk contributes to the answer.
+fn acp_assistant_text(value: &Value) -> Option<String> {
+    let update = value.get("params")?.get("update")?;
+    if update.get("sessionUpdate")?.as_str()? != "agent_message_chunk"
+        || update.get("content")?.get("type")?.as_str()? != "text"
+    {
+        return None;
+    }
+    text_at(update, &["content", "text"])
+}
+
+/// Text chunks retain whitespace at their boundaries, including whitespace-only
+/// chunks. Trimming is valid for identifiers, but corrupts streamed answers.
+fn text_at(value: &Value, path: &[&str]) -> Option<String> {
+    let mut current = value;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    current
+        .as_str()
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
 }
 
 fn string_at(value: &Value, path: &[&str]) -> Option<String> {
@@ -916,6 +1021,45 @@ mod tests {
     }
 
     #[test]
+    fn opencode_agent_selection_uses_session_mode_before_prompt() {
+        let mode = NativeProviderProtocol::OpenCodeAcp
+            .set_session_mode_request("wardian:agent:agent-1", Some("ses-1"), "reviewer")
+            .expect("OpenCode session mode request");
+        assert_eq!(mode["method"], "session/set_mode");
+        assert_eq!(mode["params"]["sessionId"], "ses-1");
+        assert_eq!(mode["params"]["modeId"], "reviewer");
+
+        let prompt = NativeProviderProtocol::OpenCodeAcp
+            .submit_request(
+                &envelope(NativeMessageOperation::StartTurn),
+                Some("ses-1"),
+                None,
+            )
+            .expect("OpenCode prompt");
+        assert_ne!(mode["id"], prompt["id"]);
+    }
+
+    #[test]
+    fn session_mode_selection_requires_a_nonempty_mode_and_opencode() {
+        assert!(matches!(
+            NativeProviderProtocol::OpenCodeAcp.set_session_mode_request(
+                "mode",
+                Some("ses-1"),
+                "  "
+            ),
+            Err(NativeProtocolError::UnsupportedOperation { .. })
+        ));
+        assert!(matches!(
+            NativeProviderProtocol::CodexAppServer.set_session_mode_request(
+                "mode",
+                Some("thread-1"),
+                "reviewer"
+            ),
+            Err(NativeProtocolError::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
     fn broad_mid_turn_injection_is_not_available_on_opencode() {
         let result = NativeProviderProtocol::OpenCodeAcp.submit_request(
             &envelope(NativeMessageOperation::InvalidatePremise),
@@ -926,6 +1070,87 @@ mod tests {
             result,
             Err(NativeProtocolError::UnsupportedOperation { .. })
         ));
+    }
+
+    /// Pi accumulates the same streamed `delta` into `part.text` for a text
+    /// part and `part.thinking` for a thinking part, so the delta alone cannot
+    /// say which one it belongs to. Only the message's `text` parts may become
+    /// the assistant answer, or a reasoning summary is concatenated onto it.
+    #[test]
+    fn pi_thinking_and_tool_parts_never_become_assistant_answer_text() {
+        let update = r#"{"type":"message_update","message":{"role":"assistant","content":[
+            {"type":"thinking","thinking":"The user wants the secret repeated exactly."},
+            {"type":"toolCall","toolName":"read","input":{}},
+            {"type":"text","text":"PROBE-771F82BD"}
+        ]},"assistantMessageEvent":{"delta":"The user wants the secret"}}"#;
+
+        let events = NativeProviderProtocol::PiRpc
+            .parse_line(update)
+            .expect("pi message update");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, NativeProtocolEventKind::Progress);
+        assert_eq!(events[0].text.as_deref(), Some("PROBE-771F82BD"));
+        assert!(
+            events[0].cumulative_text,
+            "each update carries the whole message, so it replaces rather than appends"
+        );
+        // Pi 0.84.2 toJsonEvent removes `message` and `partial` from updates.
+        // The final role-bearing message is still present on message_end.
+        let mut answer = String::new();
+        for value in [
+            serde_json::json!({"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"private prompt"}]}}),
+            serde_json::json!({"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"private reasoning"}}),
+            serde_json::json!({"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"  hello"}}),
+            serde_json::json!({"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":" "}}),
+            serde_json::json!({"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"world\n"}}),
+            serde_json::json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"  hello world\n"}]}}),
+            serde_json::json!({"type":"message_end","message":{"role":"toolResult","content":[{"type":"text","text":"tool output"}]}}),
+        ] {
+            let parsed = parse_pi_event(&value);
+            if let Some(text) = &parsed[0].text {
+                if parsed[0].cumulative_text {
+                    answer.clear();
+                }
+                answer.push_str(text);
+            }
+        }
+        assert_eq!(answer, "  hello world\n");
+    }
+
+    #[test]
+    fn pi_thinking_only_update_carries_progress_without_answer_text() {
+        let events = NativeProviderProtocol::PiRpc
+            .parse_line(
+                r#"{"type":"message_update","message":{"role":"assistant","content":[
+                    {"type":"thinking","thinking":"Considering the request."}
+                ]},"assistantMessageEvent":{"delta":"Considering the request."}}"#,
+            )
+            .expect("pi thinking update");
+
+        assert_eq!(events[0].kind, NativeProtocolEventKind::Progress);
+        assert_eq!(
+            events[0].text, None,
+            "thinking is progress, never answer text"
+        );
+    }
+
+    #[test]
+    fn pi_tool_execution_events_stay_progress_without_text() {
+        for line in [
+            r#"{"type":"tool_execution_start","toolName":"read"}"#,
+            r#"{"type":"tool_execution_update","text":"reading file"}"#,
+            r#"{"type":"tool_execution_end","content":"file body"}"#,
+        ] {
+            let events = NativeProviderProtocol::PiRpc
+                .parse_line(line)
+                .expect("pi tool event");
+            assert_eq!(events[0].kind, NativeProtocolEventKind::Progress);
+            assert_eq!(
+                events[0].text, None,
+                "tool output is not the assistant answer: {line}"
+            );
+        }
     }
 
     #[test]
@@ -1035,6 +1260,42 @@ mod tests {
         assert_eq!(
             events[0].text.as_deref(),
             Some("WARDIAN_NATIVE_OPENCODE_OK")
+        );
+        let chunk = |kind: &str, text: &str| {
+            serde_json::json!({
+                "method": "session/update", "params": {"sessionId": "ses_1",
+                    "update": {"sessionUpdate": kind, "content": {"type": "text", "text": text}}}
+            })
+        };
+        for kind in [
+            "agent_thought_chunk",
+            "user_message_chunk",
+            "tool_call",
+            "tool_call_update",
+            "unknown",
+        ] {
+            let parsed = parse_opencode_event(&chunk(kind, "not the answer"));
+            assert_eq!(
+                parsed[0].text, None,
+                "{kind} is progress, not assistant text"
+            );
+        }
+        let answer = ["hello", " ", "world", "\n", "  indented\n"]
+            .iter()
+            .filter_map(|text| {
+                parse_opencode_event(&chunk("agent_message_chunk", text))[0]
+                    .text
+                    .clone()
+            })
+            .collect::<String>();
+        assert_eq!(answer, "hello world\n  indented\n");
+        assert_eq!(
+            string_at(&serde_json::json!({"id":"  request  "}), &["id"]).as_deref(),
+            Some("request")
+        );
+        assert_eq!(
+            assistant_text(&serde_json::json!({"text":"  answer\n"})).as_deref(),
+            Some("  answer\n")
         );
     }
 }

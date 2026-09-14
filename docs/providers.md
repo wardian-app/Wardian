@@ -103,6 +103,11 @@ Wardian assigns fresh Claude session IDs up front and uses explicit resume flags
 
 Visible Claude agents run through Claude Code's interactive mode. Do not pass `--input-format stream-json` or `--output-format stream-json` to interactive launches; Claude Code treats those as print-mode flags. Wardian keeps stream-json output only for headless/bootstrap flows that also pass `--print`.
 
+Startup readiness requires a composer and its footer on the current terminal
+screen. The external `CLAUDE.md` import consent menu is `Action Needed`, not an
+idle composer. Queued prompts remain pending until the consent is resolved and
+the composer appears. Wardian does not accept external imports automatically.
+
 ### Debug First
 
 If Claude appears blocked, inspect the permission hook output, `CLAUDE.md` discovery, and resume flags before treating the issue as a generic PTY failure. If mobile or remote drag scrolling fails only for Claude, verify that the managed launch environment still includes Claude Code's alternate-screen opt-out.
@@ -114,6 +119,18 @@ Codex executes against the real target workspace while Wardian keeps mutable pro
 ### Instruction and Skill Discovery
 
 Codex reads `AGENTS.md`. Wardian passes the real project root with `--cd <absolute-workspace-path>` and projects assigned skills into the agent-specific `CODEX_HOME/skills` tree. This keeps skill scope per agent while preserving Codex trust and command execution against the actual repository path.
+
+For shared interactive/background owners and inherited headless launches,
+Wardian supplies its managed common, class, and agent instructions through
+Codex's developer instructions setting, in that order. The shared owner places
+the same instructions in its temporary startup configuration for the ordinary
+TUI; no TUI command-line config override is needed. These are the same managed sources used
+to generate habitat `AGENTS.md`; workspace instructions retain Codex's normal
+discovery and priority. Inherited workers use the configured agent's instruction
+identity. This bridge works when Wardian memory is disabled. When enabled, the
+runtime memory contract and startup brief are included once in the bridge.
+Wardian does not modify workspace instruction files or import arbitrary include
+paths into developer instructions, and keeps the configured model and effort.
 
 Each agent keeps its own mutable Codex home. Wardian links that home's
 `sessions/` directory to the native Codex `sessions/` directory, using a
@@ -180,6 +197,33 @@ state. Startup reports an error if no secure location fits. This temporary
 workaround is tracked for removal in
 [#1235](https://github.com/wardian-app/Wardian/issues/1235).
 
+Startup delivery for Codex uses the current terminal screen and keeps messages
+queued while the model banner is loading or the session is resuming. Codex can
+also display a pasted draft while its session is still loading. Automated
+delivery withholds Return while the current terminal screen shows the loading
+model banner or `Resuming session…`, even when the complete draft is visible.
+The existing composer-confirmation timeout still applies; no automatic retry
+or second paste occurs.
+
+Codex model-migration choices are `Action Needed`, not a composer. Wardian
+does not select a replacement model or send queued text into that menu. A
+choice must be resolved before a ready composer can
+receive the queued prompt. Startup readiness belongs to the runtime that
+observed it; delayed observations cannot ready a replacement runtime.
+
+Model choices can also appear after a completed turn. While the current screen
+shows the rate-limit model-switch menu, Wardian keeps `Action Needed` and blocks
+new prompt bytes even if an earlier completion event reported Idle. Resolve the
+choice explicitly in the provider terminal; Wardian does not select a model or
+dismiss the reminder. Delivery can resume after the menu is replaced by the
+current composer. Wardian restores status from the same shared owner's current
+turn activity only after checking both runtime generations; a missing owner or
+incomplete activity evidence does not authorize restoration. A delayed completion
+cannot clear a menu that remains on screen. Quoted or erased menus in history do
+not keep input blocked.
+The provider's claim of lower credit usage is not an API-price comparison;
+Wardian preserves the selected model until the user chooses otherwise.
+
 ### Debug First
 
 If startup reports `list_turns is not supported yet`, the installed Codex
@@ -244,6 +288,27 @@ agent UUID. The provider session JSONL is isolated under the agent's Wardian
 directory through `--session-dir`; fresh launches use `--session-id` and resumed
 launches use `--session`. Wardian watches only the JSONL whose header confirms
 that exact ID.
+
+Interactive delivery receipts use a launch-owned extension supplied through Pi's
+supported `--extension` argument. It observes actual native user messages before
+Pi flushes its transcript, so a slow first assistant response does not delay
+input acceptance. A receipt matches the submitted plain text and the current
+launch, provider session, and terminal generation. It confirms input acceptance,
+not model completion. User extensions remain enabled.
+
+Wardian serializes managed submissions. Identical text entered manually at the
+same time remains ambiguous; avoid concurrent manual input while waiting for a
+managed receipt. Commands, extension-handled input, and transformed text cannot
+stand in for the submitted user message. Missing extension readiness rejects
+managed input before writing it. An unconfirmed submission remains uncertain
+after ten seconds and is never automatically replayed.
+
+The bounded receipt stream lives in a new `pi/receipt-<random>/` directory for
+each launch. It contains session identity, sequence numbers, and content hashes,
+not prompt bodies. Extension reload, session changes, or exhausted stream
+capacity require restarting that runtime for further managed receipts. Wardian
+removes the launch files only after the owned process exits and its watcher
+joins; uncertain cleanup retains them. Native JSONL remains the transcript source.
 
 Visible agents use Pi's `regular` TUI mode so xterm retains terminal scrollback.
 Automation execution uses `--mode json` and treats `agent_end` as definitive turn

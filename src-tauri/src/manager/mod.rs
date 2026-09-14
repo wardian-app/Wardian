@@ -3,8 +3,10 @@ pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod codex_shared;
 pub(crate) mod codex_stop;
+mod codex_terminal_theme;
 pub(crate) mod headless;
 pub(crate) mod opencode;
+pub(crate) mod pi_receipt;
 pub(crate) mod session_identity;
 pub(crate) mod spawn;
 #[cfg(test)]
@@ -19,7 +21,8 @@ pub use classes::{
     get_agent_class_default_instruction, get_all_agent_classes, init_agent_classes, save_classes,
 };
 pub use headless::{
-    obtain_session_id, run_headless_with_options, HeadlessRunOptions, DEFAULT_HEADLESS_RUN_TIMEOUT,
+    obtain_session_id, run_headless_with_options, HeadlessRunError, HeadlessRunErrorKind,
+    HeadlessRunOptions, DEFAULT_HEADLESS_RUN_TIMEOUT,
 };
 pub(crate) use opencode::opencode_last_assistant_text;
 pub(crate) use session_identity::{
@@ -303,6 +306,20 @@ fn schedule_agent_status_observation(
         .next_status_observation_sequence(session_id);
     tauri::async_runtime::spawn(async move {
         let state = status_app.state::<AppState>();
+        // Startup also schedules Idle here. Serialize with replacement before
+        // looking up the input generation so an old status Arc cannot publish
+        // Ready into a replacement between identity validation and the write.
+        let _lifecycle = state.lock_agent_lifecycle(&status_session_id).await;
+        let Some(status) = crate::control::codex_menu_status::constrain_publication(
+            state.inner(),
+            &status_session_id,
+            &current_status,
+            &status,
+        )
+        .await
+        else {
+            return;
+        };
         // Keep the map lock through the synchronous durable write. A runtime
         // replacement must wait until this observation is either rejected or
         // committed, which prevents an old Arc from winning the database race
@@ -402,11 +419,12 @@ fn schedule_agent_status_observation(
             let archive_session_id = status_session_id.clone();
             tauri::async_runtime::spawn(async move {
                 let state = archive_app.state::<AppState>();
-                if let Err(error) = crate::commands::chat::archive_agent_chat_events_for_state(
-                    state.inner(),
-                    &archive_session_id,
-                )
-                .await
+                if let Err(error) =
+                    crate::commands::chat::archive_agent_chat_events_until_stable_for_state(
+                        state.inner(),
+                        &archive_session_id,
+                    )
+                    .await
                 {
                     log_debug(&format!(
                         "[WARDIAN] conversation archive status sync failed for {archive_session_id}: {error}"
@@ -580,6 +598,29 @@ pub(crate) async fn record_agent_turn_started_for_watch(state: &AppState, sessio
             }),
         );
     };
+}
+
+/// Publishes a provider-confirmed turn start while holding the terminal
+/// broker's lifecycle read lock across generation validation and watch
+/// publication. This prevents a receipt from an old runtime entering the
+/// replacement runtime's watch stream.
+pub(crate) async fn record_agent_turn_started_for_watch_at_generation(
+    state: &AppState,
+    session_id: &str,
+    runtime_generation: u64,
+) -> Result<(), String> {
+    let watch_state = {
+        let agents = state.agents.lock().await;
+        agents
+            .get(session_id)
+            .map(|agent| agent.watch_state.clone())
+            .ok_or_else(|| format!("agent {session_id} disappeared before turn receipt"))?
+    };
+    state
+        .terminal_sessions
+        .record_turn_started_for_generation(session_id, runtime_generation, watch_state)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Adds the provider-confirmed end of a turn to the control-plane watch

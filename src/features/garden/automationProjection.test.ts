@@ -25,7 +25,7 @@ const schedule = (id = "daily", over: Partial<AutomationSchedule> = {}): Automat
 const run = (id: string, over: Partial<GardenRunEvidence> = {}): GardenRunEvidence => ({
   summary: { run_id: id, blueprint_id: "build", node_count: 4, status: "running", path: "/runs/" + id },
   invocation: { workspace: "/live", assignments: assignments("live-z", "live-a") },
-  detail: { blueprint: bp, events: [], state: { run_id: id, blueprint_id: "build", status: "running", nodes: { middle: "failed" } } },
+  detail: { blueprint: bp, events: [], state: { run_id: id, blueprint_id: "build", status: "running", nodes: { middle: "failed" } }, workers: [], worker_telemetry: {} },
   ...over,
 });
 const catalog = [{ blueprint: bp, path: "/library/build.md" }];

@@ -15,6 +15,7 @@ import {
 
 import { allocateSessionPorts, assertPortOwnedBy, portIsFree } from "./sessionPorts.mjs";
 import { FROZEN_BIN_DIR, freezeArtifact, freezeRunArtifacts } from "./frozenArtifacts.mjs";
+import { nativeSessionOptions } from "./webviewProfile.mjs";
 import {
   NATIVE_E2E_HOME_ENV,
   HOME_LOCK_DIRECTORY,
@@ -513,14 +514,15 @@ async function startNativeSessionAttempt(harness) {
     tauriDriverArgs.push("--native-driver", harness.nativeDriverPath);
   }
 
+  const sessionOptions = nativeSessionOptions({
+    home: harness.isolatedHome,
+    runId: harness.runId,
+    appPath: harness.appPath,
+  });
   const tauriDriver = spawn(harness.tauriDriverPath, tauriDriverArgs, {
     cwd: harness.repoRoot,
     stdio: ["ignore", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      WARDIAN_HOME: harness.isolatedHome,
-      WARDIAN_E2E_NATIVE_HOME: harness.isolatedHome,
-    },
+    env: sessionOptions.env,
   });
 
   let stderr = "";
@@ -576,9 +578,7 @@ async function startNativeSessionAttempt(harness) {
 
   const capabilities = new Capabilities();
   capabilities.setBrowserName("wry");
-  capabilities.set("tauri:options", {
-    application: harness.appPath,
-  });
+  capabilities.set("tauri:options", sessionOptions.tauriOptions);
 
   try {
     const driver = await new Builder()

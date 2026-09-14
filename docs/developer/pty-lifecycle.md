@@ -135,6 +135,29 @@ That layer is responsible for responding to standard terminal queries such as:
 
 Provider-specific terminal adapters should only exist when a provider genuinely requires non-standard behavior. Capability replies should otherwise be implemented once in the shared terminal layer.
 
+Codex is an exception: its backend responder lives in
+`src-tauri/src/manager/codex_terminal_theme.rs`, and the frontend suppresses
+automatic color replies. On Windows, the backend also leaves OSC 10/11
+foreground/background queries unanswered. Codex 0.153.4 waits only 100 ms for
+these replies, then uses `GetConsoleScreenBufferInfoEx`; a reply arriving later
+can enter its user-input queue. Wardian cannot establish that the provider's
+query window is still open from a PTY read. Modern bundled ConPTY forwards the
+queries without answering them itself, so this policy relies on Codex's Windows
+console-palette fallback, not a duplicate-response assumption about ConPTY.
+
+Startup remains bounded by that provider fallback. Wardian's existing renderer
+normalizes Codex chrome for light/dark themes, including theme changes, without
+sending unsolicited colors. The native console palette need not match every
+renderer color; this policy does not promise exact provider-side theme discovery.
+Unix OSC 10/11 replies, CSI 996 and OSC 4 behavior, and other providers' capability
+handling remain unchanged. The broker regression checks exact native-writer
+bytes around fragmented queries and paste/submit. Native transcript assertions
+must continue comparing exact submitted prompts; never repair a terminal-input
+mismatch by stripping archive text or merging unequal requests.
+
+Protocol references: [Codex Windows probe](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/tui/src/terminal_probe/windows.rs)
+and [ConPTY response ownership](https://github.com/microsoft/terminal/blob/v1.24.11321.0/src/host/outputStream.cpp).
+
 ### Broker Snapshot and Replay Model
 
 Wardian preserves terminal state across presentation remounts and independent

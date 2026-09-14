@@ -57,6 +57,81 @@ const HEADLESS_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const HEADLESS_LEASE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 const HEADLESS_LEASE_DURATION: chrono::Duration = chrono::Duration::minutes(20);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadlessRunErrorKind {
+    DefiniteFailure,
+    Uncertain,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadlessRunError {
+    kind: HeadlessRunErrorKind,
+    message: String,
+}
+
+impl HeadlessRunError {
+    pub fn definite(message: impl Into<String>) -> Self {
+        Self {
+            kind: HeadlessRunErrorKind::DefiniteFailure,
+            message: message.into(),
+        }
+    }
+
+    pub fn uncertain(message: impl Into<String>) -> Self {
+        Self {
+            kind: HeadlessRunErrorKind::Uncertain,
+            message: message.into(),
+        }
+    }
+
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            kind: HeadlessRunErrorKind::Cancelled,
+            message: message.into(),
+        }
+    }
+
+    pub fn kind(&self) -> HeadlessRunErrorKind {
+        self.kind
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn contains(&self, pattern: &str) -> bool {
+        self.message.contains(pattern)
+    }
+
+    pub fn with_context(&self, context: impl std::fmt::Display) -> Self {
+        Self {
+            kind: self.kind,
+            message: format!("{}; {context}", self.message),
+        }
+    }
+}
+
+impl std::fmt::Display for HeadlessRunError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for HeadlessRunError {}
+
+impl From<String> for HeadlessRunError {
+    fn from(message: String) -> Self {
+        Self::definite(message)
+    }
+}
+
+impl From<&str> for HeadlessRunError {
+    fn from(message: &str) -> Self {
+        Self::definite(message)
+    }
+}
+
 pub struct HeadlessRunOptions<'a> {
     pub cwd: &'a std::path::Path,
     pub prompt: &'a str,
@@ -76,6 +151,9 @@ pub struct HeadlessRunOptions<'a> {
     /// Present only when this run owns a persisted provider-conversation lease.
     /// The manager renews it while the provider process is still alive.
     pub lease_owner: Option<ConversationLeaseOwner>,
+    /// Run-owned marker checked while the provider process is active. This is
+    /// never shared with permanent-agent or unrelated provider lifecycles.
+    pub cancellation_marker: Option<&'a std::path::Path>,
 }
 
 #[derive(Debug)]
@@ -378,7 +456,7 @@ pub(crate) fn headless_provider_args(
 
 pub async fn run_headless_with_options(
     options: HeadlessRunOptions<'_>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, HeadlessRunError> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     super::validate_session_values_for_launch(options.wardian_session_id, options.resume_session)?;
     let cwd = options.cwd;
@@ -506,9 +584,15 @@ pub async fn run_headless_with_options(
         resume_session,
         effective_provider_config.as_ref(),
     );
-    if provider_name == "codex" && memory_enabled && memory_agent_id.is_some() {
-        CodexProvider::new()
-            .insert_developer_instructions_arg(&mut provider_args, &memory_runtime_instructions);
+    if provider_name == "codex" {
+        let config = effective_provider_config
+            .as_ref()
+            .ok_or("Codex headless launch requires an effective configuration")?;
+        CodexProvider::new().insert_managed_instructions_arg(
+            &mut provider_args,
+            config,
+            Some(&memory_runtime_instructions),
+        )?;
     }
     if let Some(hook) = claude_hook.as_ref() {
         if provider_name == "claude" {
@@ -677,6 +761,7 @@ pub async fn run_headless_with_options(
             prompt,
             options.timeout,
             options.lease_owner.as_ref(),
+            options.cancellation_marker,
             &mut process_tree_guard,
         )
         .await
@@ -686,6 +771,7 @@ pub async fn run_headless_with_options(
             provider_name,
             options.timeout,
             options.lease_owner.as_ref(),
+            options.cancellation_marker,
         )
         .await
     };
@@ -712,10 +798,10 @@ pub async fn run_headless_with_options(
         } else {
             "provider exited without output"
         };
-        return Err(format!(
+        return Err(HeadlessRunError::definite(format!(
             "Headless provider {provider_name} exited with status {}: {detail}",
             status.code().unwrap_or(-1)
-        ));
+        )));
     }
 
     if let Some((memory_store, memory_brief)) = memory_setup {
@@ -735,6 +821,11 @@ pub async fn run_headless_with_options(
     }
 
     if provider_name == "codex" {
+        let thread_id = bootstrap_output_session_id("codex", &output).or_else(|| {
+            resume_session
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string)
+        });
         let mut last_message = None;
         for line in output.lines() {
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
@@ -772,7 +863,7 @@ pub async fn run_headless_with_options(
 
         if output_format == "json" {
             Ok(serde_json::json!({
-                "thread_id": wardian_session_id,
+                "thread_id": thread_id,
                 "response": last_message.unwrap_or_else(|| output.clone()),
                 "raw": output,
             }))
@@ -781,6 +872,7 @@ pub async fn run_headless_with_options(
         }
     } else if provider_name == "claude" {
         normalize_claude_headless_output(&output, output_format)
+            .map_err(HeadlessRunError::uncertain)
     } else if provider_name == "opencode" {
         let summary = OpenCodeProvider::summarize_run_output(&output);
         let response = summary.last_text.unwrap_or_else(|| output.clone());
@@ -827,10 +919,14 @@ pub async fn run_headless_with_options(
             Ok(serde_json::json!({ "text": response }))
         }
     } else if provider_name == "pi" {
-        normalize_pi_headless_output(&output, output_format)
+        normalize_pi_headless_output(&output, output_format).map_err(HeadlessRunError::uncertain)
     } else if output_format == "json" {
-        serde_json::from_str(&output)
-            .map_err(|e| format!("Failed to parse JSON output: {}. Raw: {}", e, output))
+        serde_json::from_str(&output).map_err(|e| {
+            HeadlessRunError::uncertain(format!(
+                "Failed to parse JSON output: {}. Raw: {}",
+                e, output
+            ))
+        })
     } else {
         Ok(serde_json::json!({ "text": output }))
     }
@@ -901,12 +997,14 @@ async fn wait_for_headless_child(
     provider_name: &str,
     timeout: Duration,
     lease_owner: Option<&ConversationLeaseOwner>,
-) -> Result<std::process::ExitStatus, String> {
+    cancellation_marker: Option<&std::path::Path>,
+) -> Result<std::process::ExitStatus, HeadlessRunError> {
     wait_for_headless_child_with_intervals(
         child,
         provider_name,
         timeout,
         lease_owner,
+        cancellation_marker,
         HEADLESS_PROCESS_POLL_INTERVAL,
         HEADLESS_LEASE_HEARTBEAT_INTERVAL,
     )
@@ -918,9 +1016,10 @@ async fn wait_for_headless_child_with_intervals(
     provider_name: &str,
     timeout: Duration,
     lease_owner: Option<&ConversationLeaseOwner>,
+    cancellation_marker: Option<&std::path::Path>,
     process_poll_interval: Duration,
     lease_heartbeat_interval: Duration,
-) -> Result<std::process::ExitStatus, String> {
+) -> Result<std::process::ExitStatus, HeadlessRunError> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut process_poll = tokio::time::interval_at(
         tokio::time::Instant::now() + process_poll_interval,
@@ -935,29 +1034,43 @@ async fn wait_for_headless_child_with_intervals(
         tokio::select! {
             _ = tokio::time::sleep_until(deadline) => {
                 terminate_headless_child(child).await;
-                return Err(format!(
+                return Err(HeadlessRunError::uncertain(format!(
                     "Headless provider {provider_name} exceeded its {} second execution limit",
                     timeout.as_secs()
-                ));
+                )));
             }
             _ = process_poll.tick() => {
-                if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+                if cancellation_marker.is_some_and(std::path::Path::exists) {
+                    terminate_headless_child(child).await;
+                    return Err(HeadlessRunError::cancelled(format!(
+                        "Headless provider {provider_name} cancelled by its owning automation run"
+                    )));
+                }
+                if let Some(status) = child.try_wait().map_err(|error| HeadlessRunError::uncertain(error.to_string()))? {
                     return Ok(status);
                 }
             }
             _ = heartbeat.tick(), if lease_owner.is_some() => {
                 let owner = lease_owner.expect("lease owner checked by select guard");
                 let now = chrono::Utc::now();
-                let renewed = wardian_core::conversation_lease::renew_lease_owner_persisted(
+                let renewed = match wardian_core::conversation_lease::renew_lease_owner_persisted(
                     owner,
                     &now.to_rfc3339(),
                     &(now + HEADLESS_LEASE_DURATION).to_rfc3339(),
-                )?;
+                ) {
+                    Ok(renewed) => renewed,
+                    Err(error) => {
+                        terminate_headless_child(child).await;
+                        return Err(HeadlessRunError::uncertain(format!(
+                            "Headless provider {provider_name} lease observation failed before completion: {error}"
+                        )));
+                    }
+                };
                 if !renewed {
                     terminate_headless_child(child).await;
-                    return Err(format!(
+                    return Err(HeadlessRunError::uncertain(format!(
                         "Headless provider {provider_name} lost its conversation lease before completion"
-                    ));
+                    )));
                 }
             }
         }
@@ -1616,6 +1729,7 @@ mod tests {
             config_override: Some(&config),
             timeout: Duration::from_secs(10),
             lease_owner: None,
+            cancellation_marker: None,
         })
         .await;
         match previous_scenario {
@@ -1691,6 +1805,7 @@ mod tests {
             config_override: Some(&config),
             timeout: Duration::from_secs(10),
             lease_owner: None,
+            cancellation_marker: None,
         })
         .await;
         match previous_scenario {
@@ -1781,6 +1896,7 @@ mod tests {
             config_override: Some(&config),
             timeout: Duration::from_secs(10),
             lease_owner: None,
+            cancellation_marker: None,
         })
         .await;
         match previous_scenario {
@@ -1839,6 +1955,7 @@ mod tests {
             config_override: Some(&config),
             timeout: Duration::from_secs(10),
             lease_owner: None,
+            cancellation_marker: None,
         })
         .await;
         match previous_scenario {
@@ -1946,6 +2063,7 @@ mod tests {
                 config_override: Some(&config),
                 timeout: Duration::from_secs(110),
                 lease_owner: None,
+                cancellation_marker: None,
             }),
         )
         .await
@@ -2047,6 +2165,7 @@ mod tests {
             "mock",
             Duration::from_secs(1),
             Some(&owner),
+            None,
             Duration::from_millis(5),
             Duration::from_millis(10),
         )
@@ -2098,6 +2217,7 @@ mod tests {
             "mock",
             Duration::from_millis(25),
             None,
+            None,
             Duration::from_millis(5),
             Duration::from_secs(1),
         )
@@ -2115,6 +2235,39 @@ mod tests {
             !crate::utils::process::process_exists(descendant_pid),
             "headless timeout must terminate a shell/provider descendant"
         );
+    }
+
+    #[tokio::test]
+    async fn run_owned_cancellation_marker_terminates_and_acknowledges_child() {
+        if !node_available() {
+            return;
+        }
+        let temp = tempfile::tempdir().expect("temporary cancellation directory");
+        let marker = temp.path().join("cancel.marker");
+        std::fs::write(&marker, "cancelled").expect("write cancellation marker");
+        let mut command = crate::utils::process::new_headless_command(if cfg!(windows) {
+            "node.exe"
+        } else {
+            "node"
+        });
+        command.arg("-e").arg("setInterval(() => {}, 1000)");
+        command.kill_on_drop(true);
+        let mut child = command.spawn().expect("spawn cancellable child");
+
+        let error = wait_for_headless_child_with_intervals(
+            &mut child,
+            "mock",
+            Duration::from_secs(5),
+            None,
+            Some(&marker),
+            Duration::from_millis(5),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect_err("owned marker must cancel the child");
+
+        assert_eq!(error.kind(), HeadlessRunErrorKind::Cancelled);
+        assert!(child.try_wait().expect("reaped child").is_some());
     }
 
     #[cfg(windows)]
@@ -2427,6 +2580,127 @@ mod tests {
 
         assert!(args.contains(&"--print".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
+    }
+
+    #[test]
+    fn codex_managed_instructions_survive_disabled_memory_and_inherited_launches() {
+        let test_home = TestWardianHome::new();
+        let workspace = tempfile::tempdir().unwrap();
+        let sources = [
+            (
+                test_home._home.path().join("common/AGENTS.md"),
+                "COMMON_SENTINEL",
+            ),
+            (
+                test_home._home.path().join("classes/Builder/AGENTS.md"),
+                "CLASS_SENTINEL",
+            ),
+            (
+                test_home._home.path().join("agents/owner/AGENTS.md"),
+                "AGENT_SENTINEL",
+            ),
+            (
+                test_home._home.path().join("agents/worker/AGENTS.md"),
+                "WRONG_WORKER",
+            ),
+            (
+                test_home
+                    ._home
+                    .path()
+                    .join("agents/owner/habitat/AGENTS.md"),
+                "UNTRUSTED_GENERATED_FILE",
+            ),
+            (workspace.path().join("AGENTS.md"), "WORKSPACE_ONLY"),
+        ];
+        for (path, text) in &sources {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let owner = AgentConfig {
+            session_id: "owner".into(),
+            provider: "codex".into(),
+            agent_class: "Builder".into(),
+            model: Some("configured-model".into()),
+            system_include_directories: Some(vec![workspace.path().to_string_lossy().into()]),
+            provider_config: wardian_core::models::ProviderConfig::Codex(
+                wardian_core::models::CodexProviderConfig {
+                    reasoning_effort: Some("low".into()),
+                    approval_policy: Some("on-request".into()),
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        };
+        let provider = CodexProvider::new();
+        let memory = wardian_memory_instructions(Some("MEMORY_SENTINEL"));
+        for inherited in [false, true] {
+            let config = effective_headless_provider_config(
+                "codex",
+                workspace.path(),
+                "worker",
+                None,
+                inherited.then_some(&owner),
+                (!inherited).then_some(&owner),
+            )
+            .unwrap();
+            assert_eq!(config.session_id, "owner");
+            for mode in ["interactive", "exec", "app-server"] {
+                for memory_context in [None, Some(memory.as_str())] {
+                    let mut args = match mode {
+                        "exec" => headless_provider_args(
+                            "codex",
+                            &provider,
+                            workspace.path(),
+                            "task",
+                            "json",
+                            None,
+                            Some(&config),
+                        ),
+                        "app-server" => provider.shared_server_args(&config).unwrap(),
+                        _ => provider.get_spawn_args(&config, false),
+                    };
+                    let original = args.clone();
+                    provider
+                        .insert_managed_instructions_arg(&mut args, &config, memory_context)
+                        .unwrap();
+                    let index = args
+                        .iter()
+                        .position(|arg| arg.starts_with("developer_instructions="))
+                        .unwrap();
+                    assert_eq!(args[index - 1], "-c");
+                    let parsed = args[index].parse::<toml_edit::DocumentMut>().unwrap();
+                    let text = parsed["developer_instructions"].as_str().unwrap();
+                    let common = text.find("COMMON_SENTINEL").unwrap();
+                    let class = text.find("CLASS_SENTINEL").unwrap();
+                    let agent = text.find("AGENT_SENTINEL").unwrap();
+                    assert!(common < class && class < agent);
+                    for unexpected in ["WRONG_WORKER", "UNTRUSTED_GENERATED_FILE", "WORKSPACE_ONLY"]
+                    {
+                        assert!(!text.contains(unexpected));
+                    }
+                    assert_eq!(
+                        text.matches("## Wardian memory").count(),
+                        usize::from(memory_context.is_some())
+                    );
+                    assert_eq!(
+                        text.matches("MEMORY_SENTINEL").count(),
+                        usize::from(memory_context.is_some())
+                    );
+                    if mode == "exec" {
+                        assert!(index < args.iter().position(|arg| arg == mode).unwrap());
+                    } else if mode == "app-server" {
+                        assert_eq!(args.first().map(String::as_str), Some("app-server"));
+                        assert!(index > 1);
+                    }
+                    args.drain(index - 1..=index);
+                    // Every original argument survives, including cwd, model, effort and task.
+                    assert_eq!(args, original);
+                }
+            }
+        }
+        for (path, text) in &sources {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), *text);
+        }
     }
 
     #[test]

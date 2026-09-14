@@ -24,7 +24,7 @@ retry loop.
 | Target is busy | Existing idle/status observation | Keep the mailbox record pending. |
 | App restarts with pending work | Durable pending mailbox record | Restore it and give it one status-gated drain attempt. |
 | Prompt payload write | Native PTY writer completes `write_all` and `flush` | Do not press the submit key. Mark the state unknown/failed. |
-| Codex submit | Native payload-write receipt plus post-cursor complete literal payload or `[Pasted Content N chars]` composer evidence | Do not send Enter; record `payload_apply_unconfirmed` and require identity-preserving recovery if the payload remains in the composer. |
+| Codex submit | Native payload-write receipt plus post-cursor complete literal payload or `[Pasted Content N chars]` composer evidence, or the exact payload in the canonical active composer on the pre-write runtime generation when it was not already applied there | Do not send Enter; record `payload_apply_unconfirmed` and require identity-preserving recovery if the payload remains in the composer. |
 | Provider acceptance | A provider-originated `turn_started` event after the submit cursor | Persist `provider_accepted` and mark the interaction delivered. |
 
 Codex receives a fixed 750 ms provider-profile minimum settle window after the

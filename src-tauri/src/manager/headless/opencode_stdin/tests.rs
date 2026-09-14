@@ -65,6 +65,7 @@ async fn real_child_receives_exact_prompt_on_stdin_without_positional_message() 
         prompt,
         Duration::from_secs(10),
         None,
+        None,
         &mut guard,
     )
     .await
@@ -98,7 +99,11 @@ async fn real_child_receives_exact_prompt_on_stdin_without_positional_message() 
 async fn collect(
     mut command: tokio::process::Command,
     prompt: &str,
-) -> (Result<std::process::ExitStatus, String>, Vec<u8>, Vec<u8>) {
+) -> (
+    Result<std::process::ExitStatus, crate::manager::headless::HeadlessRunError>,
+    Vec<u8>,
+    Vec<u8>,
+) {
     configure(&mut command);
     let mut child = command.spawn().expect("spawn inert child");
     let mut guard = HeadlessProcessTreeGuard::new(child.id());
@@ -118,6 +123,7 @@ async fn collect(
         &mut child,
         prompt,
         Duration::from_secs(10),
+        None,
         None,
         &mut guard,
     )
@@ -259,6 +265,7 @@ async fn failed_write_terminates_wrapper_and_descendant_without_retry() {
         &prompt,
         Duration::from_secs(5),
         None,
+        None,
         &mut guard,
     )
     .await
@@ -278,6 +285,7 @@ async fn small_prompt_observes_the_final_buffered_write_failure() {
         &mut child,
         "PRIVATE_SMALL_WRITE",
         Duration::from_secs(5),
+        None,
         None,
         &mut guard,
     )
@@ -300,6 +308,7 @@ async fn blocked_write_obeys_execution_timeout_and_terminates_descendant() {
         &prompt,
         Duration::from_millis(100),
         None,
+        None,
         &mut guard,
     )
     .await
@@ -321,6 +330,7 @@ async fn cancelling_blocked_input_terminates_owned_process_tree() {
             &mut child,
             &prompt,
             Duration::from_secs(30),
+            None,
             None,
             &mut guard
         ));
@@ -501,6 +511,7 @@ async fn blocked_input_keeps_the_conversation_lease_alive() {
         &"blocked".repeat(1_000_000),
         Duration::from_millis(250),
         Some(&lease.owner()),
+        None,
         &mut guard,
         (Duration::from_millis(5), Duration::from_millis(10)),
     )
