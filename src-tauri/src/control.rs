@@ -1588,6 +1588,36 @@ async fn resolve_send_targets_scoped(
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+async fn deliver_message_to_target(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    target: &str,
+    message: &str,
+    thread: Option<&str>,
+    input_mode: MessageInputMode,
+    queue_policy: QueuePolicy,
+    approval_action: Option<&ApprovalAction>,
+    origin: Option<&MessageOrigin>,
+    scope_all: bool,
+) -> Result<Vec<DeliveryDetail>, ControlError> {
+    deliver_message_to_target_with_headless_timeout(
+        app,
+        state,
+        target,
+        message,
+        thread,
+        input_mode,
+        queue_policy,
+        approval_action,
+        origin,
+        scope_all,
+        crate::manager::DEFAULT_HEADLESS_RUN_TIMEOUT,
+    )
+    .await
+}
+
 pub(crate) async fn deliver_prompt_to_agent(
     app: Option<&AppHandle>,
     state: &AppState,
@@ -4565,6 +4595,30 @@ pub(crate) mod tests {
             .start_or_replace_runtime(
                 session_id,
                 crate::state::terminal_session::TerminalRuntimeHandles::new(input_tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry { cols: 80, rows: 24 },
+            )
+            .await
+            .expect("test terminal runtime");
+        if let Some(agent) = state.agents.lock().await.get_mut(session_id) {
+            agent.runtime_generation = Some(generation);
+        }
+    }
+
+    async fn install_test_terminal_runtime_with_write_receipts(
+        state: &AppState,
+        session_id: &str,
+        input_tx: tokio::sync::mpsc::Sender<
+            crate::state::terminal_session::NativeTerminalWriteRequest,
+        >,
+    ) {
+        let generation = state
+            .terminal_sessions
+            .start_or_replace_runtime(
+                session_id,
+                crate::state::terminal_session::TerminalRuntimeHandles::new_with_write_ack(
+                    input_tx,
+                    |_| Ok(()),
+                ),
                 wardian_core::models::TerminalGeometry { cols: 80, rows: 24 },
             )
             .await

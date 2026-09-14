@@ -411,6 +411,31 @@ fn ready_prompt_trailing_metadata_line(line: &str) -> bool {
 pub(crate) mod tests {
     use super::*;
 
+    pub(crate) async fn record_active_composer_repaint(
+        state: &AppState,
+        session_id: &str,
+        output: &[u8],
+    ) {
+        let (watch_state, generation) = {
+            let agents = state.agents.lock().await;
+            let agent = agents.get(session_id).expect("test agent");
+            (
+                agent.watch_state.clone(),
+                agent.runtime_generation.expect("test runtime generation"),
+            )
+        };
+        watch_state.lock().unwrap().push_output(output);
+        let terminal_sessions = state.terminal_sessions.clone();
+        let session_id = session_id.to_string();
+        let output = output.to_vec();
+        tokio::task::spawn_blocking(move || {
+            terminal_sessions.process_output_blocking(&session_id, generation, output)
+        })
+        .await
+        .expect("terminal output task")
+        .expect("canonical terminal repaint");
+    }
+
     #[test]
     fn ready_prompt_detects_visible_compose_prompt() {
         assert!(output_has_ready_prompt("\r\n› Write tests for @filename"));
