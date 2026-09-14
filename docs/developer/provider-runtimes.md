@@ -349,6 +349,14 @@ explicitly selects the configured workspace with `--cd`, avoiding Codex's resume
 directory picker when a saved conversation records another working directory.
 Attachment failures retain the transport reason and a bounded terminal tail.
 
+On Windows, replacing or removing a launch configuration file can briefly fail
+when another reader did not allow delete sharing. Wardian retries these atomic
+operations for at most 200 ms, rechecking the destination and any paired journal
+before each attempt. Persistent denial still fails startup and retains recovery
+evidence. Observed file changes stop publication; file permissions are unchanged.
+The error identifies the file operation and whether it involved `config.toml`
+or the launch journal, without exposing the private home path.
+
 For long canonical homes, owner startup recovers pending launch settings and
 then prepares a private compact physical home before config/MCP projection.
 The logical habitat path remains an owned directory link. Matching agent and

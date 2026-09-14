@@ -2,6 +2,8 @@ use super::*;
 use std::fs;
 
 mod recovery;
+#[cfg(windows)]
+mod sharing;
 
 fn args(assignments: &[&str]) -> Vec<String> {
     let mut args = vec!["app-server".into()];
