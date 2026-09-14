@@ -6,7 +6,10 @@ import {
   within,
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { RootTemporaryWorkerInspector } from "./RootTemporaryWorkerInspector";
+import {
+  normalizeRootWorkerSummary,
+  RootTemporaryWorkerInspector,
+} from "./RootTemporaryWorkerInspector";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
@@ -62,12 +65,21 @@ describe("RootTemporaryWorkerInspector", () => {
     render(
       <RootTemporaryWorkerInspector
         agentName="Root agent"
-        summary={{ root_agent_id: "root-1", total: 4, attention: 1 }}
+        summary={{
+          root_agent_id: "root-1",
+          active: 1,
+          past: 3,
+          unknown: 0,
+          attention_count: 1,
+          attention_waiting: 1,
+          attention_failed: 0,
+          attention_unknown: 0,
+        }}
       />,
     );
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Inspect 4 verified child workers for Root agent",
+        name: "Inspect subagents for Root agent: 1 active subagent. 3 past subagents. 0 unknown subagents. 1 subagent needs attention (1 waiting).",
       }),
     );
 
@@ -79,6 +91,12 @@ describe("RootTemporaryWorkerInspector", () => {
     const details = await screen.findByTestId(
       "agent-child-worker-details-root-1",
     );
+    expect(
+      within(details).getByTestId("agent-child-worker-summary-root-1"),
+    ).toHaveTextContent("1 active subagent");
+    expect(
+      within(details).getByTestId("agent-child-worker-attention-root-1"),
+    ).toHaveTextContent("1 subagent needs attention (1 waiting).");
     expect(
       within(details).getByTestId("temporary-worker-combined-usage"),
     ).toHaveTextContent("4 workers · 4 combined turns · input 406, output 46");
@@ -95,5 +113,38 @@ describe("RootTemporaryWorkerInspector", () => {
         name: /follow|resume|interrupt/i,
       }),
     ).toBeNull();
+  });
+
+  it("keeps legacy totals visible without inventing active, past, or unknown counts", () => {
+    const summary = normalizeRootWorkerSummary({
+      root_agent_id: "root-legacy",
+      total: 21,
+      attention: 2,
+    });
+    expect(summary).toEqual({
+      root_agent_id: "root-legacy",
+      active: null,
+      past: null,
+      unknown: null,
+      attention_count: 2,
+      attention_waiting: null,
+      attention_failed: null,
+      attention_unknown: null,
+      reported_records: 21,
+    });
+
+    render(
+      <RootTemporaryWorkerInspector
+        agentName="Legacy root"
+        compact
+        summary={summary!}
+      />,
+    );
+    const badge = screen.getByRole("button", { name: /Inspect subagents for Legacy root/ });
+    expect(badge).toHaveTextContent(/Subagents · 21 records · status counts unavailable\s*· 2 attention/);
+    expect(badge).toHaveAttribute(
+      "title",
+      "Subagents for Legacy root: 21 reported subagent records; active, past, and unknown counts are unavailable. 2 subagents need attention (attention reasons unavailable).",
+    );
   });
 });
