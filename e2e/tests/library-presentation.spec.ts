@@ -24,7 +24,18 @@ test('browses class contents, previews a skill, and saves a draft from Preview',
   await page.getByTestId('library-section-classes').click();
   await expect(page.getByTestId('library-row-classes/Architect')).toContainText('2 class skills');
   await page.getByTestId('library-row-classes/Architect').click();
+  const classDetail = page.getByTestId('class-detail');
   const contents = page.getByRole('region', { name: 'Class contents' });
+  const editor = classDetail.getByTestId('markdown-editor');
+  await expect(editor).toBeVisible();
+  await expect(contents).toBeVisible();
+  const editorIsAboveContents = await classDetail.evaluate((root) => {
+    const editor = root.querySelector('[data-testid="markdown-editor"]');
+    const contents = root.querySelector('[aria-label="Class contents"]');
+    if (!editor || !contents) throw new Error('Class editor or contents is missing');
+    return Boolean(editor.compareDocumentPosition(contents) & Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+  expect(editorIsAboveContents).toBe(true);
   await expect(contents.getByText('Plans work')).toBeVisible();
   await expect(contents.getByText("copied — edits won't sync")).toBeVisible();
   await expect(page.getByRole('table')).toBeVisible();

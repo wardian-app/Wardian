@@ -85,8 +85,9 @@ the Library instead of a separate sidebar panel.
 
 - **Organization**: classes are flat (no folder nesting) and appear under
   `<wardian-home>/classes/<Name>/`.
-- **Class workbench**: opening a class shows its `AGENTS.md` in the same
-  inline editor every other section uses, plus:
+- **Class workbench**: opening a class puts its `AGENTS.md` in the top of the
+  detail pane, using the same inline editor every other section uses. Below it
+  are:
   - the list of skills currently deployed to the class, with the same
     linked/copied indication skills show elsewhere, and a per-skill remove
     control;
