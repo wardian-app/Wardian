@@ -342,12 +342,6 @@ export function AutomationsView({
           )}
           {selectedAgentIds.size > 0 ? (
             <div className="flex shrink-0 items-center gap-1.5">
-              <span
-                className="rounded border border-[var(--color-wardian-accent)]/40 px-2 py-1 text-[10px] font-bold text-[var(--color-wardian-accent)]"
-                data-testid="automation-view-agent-scope"
-              >
-                {selectedAgentIds.size === 1 ? 'Selected agent' : `${selectedAgentIds.size} selected agents`}
-              </span>
               <button
                 type="button"
                 data-testid="automation-agent-scope-toggle"
