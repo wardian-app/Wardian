@@ -339,6 +339,7 @@ pub fn merge_current_capture(
         }
     }
     collapse_codex_stream_completion_pairs(&mut archived);
+    collapse_claude_stream_watch_mirrors(&mut archived);
     for (index, event) in archived.iter_mut().enumerate() {
         canonicalize_role(event);
         // Preserve archive-first replay order when a bounded live tail has
@@ -346,6 +347,80 @@ pub fn merge_current_capture(
         event.sequence = Some(index as u64 + 1);
     }
     Ok(archived)
+}
+
+/// Collapse Claude's uniquely identified provider/watch mirror while
+/// keeping both observation IDs. A missing or ambiguous native match remains
+/// visible.
+fn collapse_claude_stream_watch_mirrors(events: &mut Vec<AgentChatEvent>) {
+    let mut removed = BTreeSet::new();
+
+    for mirror_index in 0..events.len() {
+        if removed.contains(&mirror_index) || !is_claude_watch_mirror(&events[mirror_index]) {
+            continue;
+        }
+        let native_matches: Vec<usize> = (0..events.len())
+            .filter(|&native_index| {
+                native_index != mirror_index
+                    && !removed.contains(&native_index)
+                    && is_claude_stream_watch_pair(&events[mirror_index], &events[native_index])
+            })
+            .collect();
+        if native_matches.len() != 1 {
+            continue;
+        }
+        let native_index = native_matches[0];
+        let mirror_matches: Vec<usize> = (0..events.len())
+            .filter(|&candidate_index| {
+                candidate_index != native_index
+                    && !removed.contains(&candidate_index)
+                    && is_claude_stream_watch_pair(&events[candidate_index], &events[native_index])
+            })
+            .collect();
+        if mirror_matches.len() != 1 {
+            continue;
+        }
+
+        let mut canonical = events[native_index].clone();
+        retain_provider_observation_ids(&mut canonical, &events[mirror_index]);
+        events[native_index] = canonical;
+        removed.insert(mirror_index);
+    }
+
+    if !removed.is_empty() {
+        *events = events
+            .drain(..)
+            .enumerate()
+            .filter_map(|(index, event)| (!removed.contains(&index)).then_some(event))
+            .collect();
+    }
+}
+
+fn is_claude_watch_mirror(event: &AgentChatEvent) -> bool {
+    event.provider == "claude"
+        && event.kind == AgentChatEventKind::Message
+        && event.role == Some(AgentChatRole::Assistant)
+        && event.source.as_deref() == Some("stream_json")
+        && event.metadata["provider_log"] != true
+        && event.metadata["provider_source"] == "event"
+        && event
+            .turn_id
+            .as_deref()
+            .is_some_and(|turn_id| !turn_id.trim().is_empty())
+}
+
+fn is_claude_stream_watch_pair(mirror: &AgentChatEvent, native: &AgentChatEvent) -> bool {
+    is_claude_watch_mirror(mirror)
+        && native.provider == "claude"
+        && native.kind == AgentChatEventKind::Message
+        && native.role == Some(AgentChatRole::Assistant)
+        && native.source.as_deref() == Some("stream_json")
+        && native.metadata["provider_log"] == true
+        && string(native, "log_path").is_some()
+        && mirror.session_id == native.session_id
+        && mirror.turn_id == native.turn_id
+        && mirror.text.as_deref().is_some_and(|text| !text.is_empty())
+        && mirror.text.as_deref() == native.text.as_deref()
 }
 
 /// Collapse only Codex's identityless assistant stream mirror when the

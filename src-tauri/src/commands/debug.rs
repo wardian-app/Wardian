@@ -57,7 +57,7 @@ pub async fn debug_pause_agent_input_sender(
         .map_err(|error| error.to_string())?;
     state
         .terminal_sessions
-        .pause_runtime(&session_id, broker_state.runtime_generation)
+        .pause_input_sender(&session_id, broker_state.runtime_generation)
         .await
         .map(|_| ())
         .map_err(|error| error.to_string())
@@ -91,6 +91,7 @@ pub async fn debug_push_agent_watch_output(
             provider: provider.unwrap_or_else(|| "mock".to_string()),
             turn_id: Some("debug-seed".to_string()),
             source: Some("debug".to_string()),
+            provider_provenance: None,
         });
     }
     Ok(())

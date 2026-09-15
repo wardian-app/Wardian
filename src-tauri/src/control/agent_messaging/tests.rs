@@ -246,6 +246,126 @@ async fn attached_opencode_task_admits_native_record_before_followup() {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn request_context_dispatches_pending_opencode_worker() {
+    use crate::delivery::native_broker::opencode_http_config_fingerprint;
+    use crate::delivery::opencode_http::OpenCodeHttpLaunchPlan;
+    use axum::{routing::any, Router};
+    use tauri::Manager;
+    use wardian_core::control::ProviderInputReadiness;
+    use wardian_core::native_transport::NativeDeliveryPhase;
+
+    let home = TestWardianHome::new_async().await;
+    let app = tauri::test::mock_app();
+    app.manage(AppState::new());
+    let state = app.state::<AppState>();
+    agent(&state, "sender", "Sender").await;
+    agent(&state, "receiver", "Receiver").await;
+    {
+        let agents = state.agents.lock().await;
+        let receiver = agents.get("receiver").unwrap();
+        let mut config = receiver.config.lock().unwrap();
+        config.provider = "opencode".into();
+        config.folder = home.path().to_string_lossy().into_owned();
+        config.resume_session = Some("ses_r13_test".into());
+        *receiver.current_status.lock().unwrap() = "Idle".into();
+    }
+    let generation = state
+        .interactions
+        .start_provider_input_generation("receiver", ProviderInputReadiness::Ready, None)
+        .await
+        .generation;
+    let info = delivery_target_info(&state, "receiver").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let workspace = info.cwd.to_string_lossy().into_owned();
+    let post_count = Arc::new(AtomicUsize::new(0));
+    let app_router = Router::new().fallback(any({
+        let post_count = Arc::clone(&post_count);
+        move |request| {
+            let workspace = workspace.clone();
+            let post_count = Arc::clone(&post_count);
+            async move { opencode_test_server(request, workspace, Some(post_count)).await }
+        }
+    }));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app_router).await.unwrap();
+    });
+
+    let fingerprint = opencode_http_config_fingerprint(&info.config, &info.cwd);
+    state
+        .native_delivery
+        .prepare_opencode_http("receiver", generation, fingerprint.clone())
+        .await
+        .unwrap();
+    state
+        .native_delivery
+        .register_opencode_http(
+            "receiver".into(),
+            OpenCodeHttpLaunchPlan::new(generation, 1, port).unwrap(),
+            "ses_r13_test".into(),
+            "test-process".into(),
+            "test-listener".into(),
+            info.cwd.clone(),
+            fingerprint,
+        )
+        .await
+        .unwrap();
+
+    let admitted = task(&state).await;
+    // The mock app exposes AppHandle<MockRuntime>, while the production idle
+    // wrapper is Wry-typed. Drive the same detached queue worker directly with
+    // the admitted request context so this fixture proves worker execution
+    // without changing production runtime generics or claiming wrapper coverage.
+    dispatch_pending_queue_with_request(
+        None,
+        &state,
+        "receiver",
+        Some(&admitted.record.id),
+        Some(generation),
+        Some(WorkerProviderClassification::OpenCode),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(post_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        wardian_core::db::native_delivery(&admitted.record.id)
+            .unwrap()
+            .map(|record| record.phase),
+        Some(NativeDeliveryPhase::ProviderAccepted)
+    );
+    assert!(
+        store::with_db(|conn| store::next_pending_task_id(conn, "receiver"))
+            .unwrap()
+            .is_none()
+    );
+
+    assert_eq!(owner(&admitted.record.id), "provider_accepted");
+    let debug_log = std::fs::read_to_string(home.path().join("wardian_debug.log"))
+        .expect("OpenCode diagnostic log");
+    for expected in [
+        "stage=worker_entry reason=worker_started",
+        "stage=worker_entry reason=queue_head_matches",
+        "stage=worker_entry reason=queue_head_advanced",
+    ] {
+        assert!(
+            debug_log.lines().any(|line| {
+                line.contains(expected)
+                    && line.contains(&format!("request_id={}", admitted.record.id))
+                    && line.contains(&format!("generation={generation}"))
+            }),
+            "missing OpenCode worker diagnostic: {expected}"
+        );
+    }
+    state
+        .native_delivery
+        .dispose_opencode_http("receiver", Some(generation))
+        .await
+        .unwrap();
+    server.abort();
+}
+
 #[tokio::test]
 async fn attached_opencode_terminal_native_phase_does_not_replay_or_release_task() {
     use crate::delivery::native_broker::{
@@ -435,6 +555,29 @@ fn explicit_off_and_absent_owner_keep_existing_fallbacks() {
             "{provider} without a selected owner must retain fallback"
         );
     }
+}
+
+#[test]
+fn worker_entry_without_provider_context_emits_bounded_unknown() {
+    let home = TestWardianHome::new();
+    let entry = OpenCodeDispatchWorkerEntry {
+        request_id: "worker-context-unknown".into(),
+        generation: 7,
+        provider: WorkerProviderClassification::Unknown,
+    };
+
+    log_opencode_worker_entry(
+        &entry,
+        crate::delivery::native_broker::OpenCodeDispatchDiagnosticReason::WorkerStarted,
+    );
+
+    let debug_log = std::fs::read_to_string(home.path().join("wardian_debug.log"))
+        .expect("OpenCode diagnostic log");
+    assert!(debug_log.lines().any(|line| {
+        line.contains("stage=worker_entry reason=worker_provider_unknown")
+            && line.contains("request_id=worker-context-unknown")
+            && line.contains("generation=7")
+    }));
 }
 
 #[test]
@@ -1162,7 +1305,7 @@ async fn discovery_uses_normal_neighbors_including_self_and_excludes_unrelated_r
     assert_eq!(agents[1].visibility, None);
     // Discovery is narrower than the still-supported explicit exact targeting.
     assert_eq!(
-        resolve_exact(&state, "Unrelated").await.unwrap(),
+        resolve_exact(&state, "Unrelated").await.unwrap().id,
         "unrelated"
     );
     assert_eq!(count("interactions"), 0);

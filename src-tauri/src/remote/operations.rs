@@ -1939,6 +1939,7 @@ mod tests {
                 provider: "mock".to_string(),
                 turn_id: Some("turn-1".to_string()),
                 source: Some("model".to_string()),
+                provider_provenance: None,
             });
         }
         insert_agent(&state, agent).await;
@@ -2734,6 +2735,7 @@ mod tests {
                 provider: "mock".to_string(),
                 turn_id: Some("turn-1".to_string()),
                 source: Some("model".to_string()),
+                provider_provenance: None,
             });
         }
         insert_agent(&state, agent).await;

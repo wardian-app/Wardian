@@ -181,6 +181,86 @@ fn retained_codex_delivery_fixture_collapses_only_the_bound_provider_pair() {
     assert!(assistants.iter().any(|event| event.id == "watch-event-msg"));
 }
 
+#[test]
+fn claude_assistant_mirror_projection_requires_unique_native_message() {
+    let observation = |id: &str, native: bool, turn_id: &str| AgentChatEvent {
+        id: id.into(),
+        session_id: "wardian-agent".into(),
+        provider: "claude".into(),
+        kind: AgentChatEventKind::Message,
+        role: Some(AgentChatRole::Assistant),
+        text: Some("same Claude answer".into()),
+        title: None,
+        status: None,
+        turn_id: Some(turn_id.into()),
+        source: Some("stream_json".into()),
+        command: None,
+        exit_code: None,
+        path: None,
+        language: None,
+        created_at: None,
+        sequence: None,
+        metadata: if native {
+            serde_json::json!({
+                "provider_log": true,
+                "log_path": "<claude-log>",
+                "raw_type": "assistant",
+            })
+        } else {
+            serde_json::json!({"provider_source": "event"})
+        },
+    };
+
+    let projected = provenance::merge_current_capture(
+        Vec::new(),
+        vec![
+            observation("watch", false, "msg-1"),
+            observation("native", true, "msg-1"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].id, "native");
+    let observation_ids = projected[0].metadata["provider_observation_ids"]
+        .as_array()
+        .unwrap();
+    assert_eq!(observation_ids.len(), 2);
+    assert!(observation_ids.iter().any(|id| id == "watch"));
+    assert!(observation_ids.iter().any(|id| id == "native"));
+
+    let mut different_content = observation("watch", false, "msg-1");
+    different_content.text = Some("different Claude answer".into());
+    let content_mismatch = provenance::merge_current_capture(
+        Vec::new(),
+        vec![different_content, observation("native", true, "msg-1")],
+    )
+    .unwrap();
+    assert_eq!(content_mismatch.len(), 2);
+
+    let distinct_turns = provenance::merge_current_capture(
+        Vec::new(),
+        vec![
+            observation("watch-1", false, "msg-1"),
+            observation("native-1", true, "msg-1"),
+            observation("watch-2", false, "msg-2"),
+            observation("native-2", true, "msg-2"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(distinct_turns.len(), 2);
+
+    let ambiguous_native = provenance::merge_current_capture(
+        Vec::new(),
+        vec![
+            observation("watch", false, "msg-1"),
+            observation("native-1", true, "msg-1"),
+            observation("native-2", true, "msg-1"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(ambiguous_native.len(), 3);
+}
+
 use crate::commands::chat::archive_identity as native_identity;
 
 const PI_FIXTURE: &str = include_str!("fixtures/real-pi-session.jsonl");

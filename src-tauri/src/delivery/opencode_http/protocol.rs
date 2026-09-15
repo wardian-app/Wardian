@@ -7,6 +7,8 @@ use sha2::{Digest, Sha256};
 
 const LOOPBACK_HOST: &str = "127.0.0.1";
 const OPENCODE_USERNAME: &str = "wardian";
+const OPENCODE_MESSAGE_ID_PREFIX: &str = "msg_";
+const OPENCODE_MESSAGE_ID_SUFFIX_HEX_LEN: usize = 26;
 
 /// Credentials and endpoint arguments that the interactive OpenCode spawn
 /// path must apply to one runtime generation.
@@ -274,6 +276,24 @@ pub struct OpenCodePrompt {
 }
 
 impl OpenCodePrompt {
+    /// Construct a provider prompt from a Wardian-owned canonical message ID.
+    ///
+    /// Wardian keeps its `ask_...` identity in the native envelope and maps it
+    /// to one stable OpenCode-shaped ID only at this adapter boundary. The
+    /// provider ID remains suitable for OpenCode reconciliation and replay
+    /// refusal without exposing the canonical ID to the provider.
+    pub(crate) fn from_canonical_message_id(
+        canonical_message_id: impl AsRef<str>,
+        text: impl Into<String>,
+        options: OpenCodePromptOptions,
+    ) -> Result<Self, String> {
+        Self::new(
+            opencode_provider_message_id(canonical_message_id.as_ref())?,
+            text,
+            options,
+        )
+    }
+
     pub fn new(
         message_id: impl Into<String>,
         text: impl Into<String>,
@@ -348,6 +368,23 @@ impl OpenCodePrompt {
     }
 }
 
+/// Derive the stable provider identity for one Wardian canonical message.
+///
+/// OpenCode orders messages by persisted creation time and uses the ID only as
+/// a deterministic tie-breaker. A fixed-length hexadecimal digest preserves
+/// the generated `msg_` shape while keeping the mapping deterministic for
+/// replay protection and distinct for distinct canonical request IDs.
+pub(crate) fn opencode_provider_message_id(canonical_message_id: &str) -> Result<String, String> {
+    if canonical_message_id.trim().is_empty() {
+        return Err("OpenCode prompt requires a non-empty canonical message id".to_string());
+    }
+    let digest = format!("{:x}", Sha256::digest(canonical_message_id.as_bytes()));
+    Ok(format!(
+        "{OPENCODE_MESSAGE_ID_PREFIX}{}",
+        &digest[..OPENCODE_MESSAGE_ID_SUFFIX_HEX_LEN]
+    ))
+}
+
 /// One response from OpenCode's `GET /session/:id/message` endpoint.
 #[derive(Debug, Clone, Deserialize)]
 pub struct OpenCodeStoredMessage {
@@ -371,5 +408,47 @@ impl OpenCodeStoredMessage {
         self.info.get("sessionID").and_then(Value::as_str) == Some(session_id)
             && self.info.get("role").and_then(Value::as_str) == Some("assistant")
             && self.info.get("parentID").and_then(Value::as_str) == Some(user_message_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_message_ids_map_deterministically_to_open_code_shape() {
+        let first = opencode_provider_message_id("ask_one").expect("provider id");
+        assert_eq!(
+            first,
+            opencode_provider_message_id("ask_one").expect("provider id")
+        );
+        assert!(first.starts_with(OPENCODE_MESSAGE_ID_PREFIX));
+        assert_eq!(
+            first.len(),
+            OPENCODE_MESSAGE_ID_PREFIX.len() + OPENCODE_MESSAGE_ID_SUFFIX_HEX_LEN
+        );
+        assert_ne!(
+            first,
+            opencode_provider_message_id("ask_two").expect("provider id")
+        );
+    }
+
+    #[test]
+    fn canonical_prompts_with_same_text_keep_distinct_provider_ids() {
+        let first = OpenCodePrompt::from_canonical_message_id(
+            "ask_one",
+            "same canonical text",
+            Default::default(),
+        )
+        .expect("first prompt");
+        let second = OpenCodePrompt::from_canonical_message_id(
+            "ask_two",
+            "same canonical text",
+            Default::default(),
+        )
+        .expect("second prompt");
+
+        assert_eq!(first.text, second.text);
+        assert_ne!(first.message_id, second.message_id);
     }
 }

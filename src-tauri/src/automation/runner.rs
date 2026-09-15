@@ -809,6 +809,7 @@ mod tests {
                 provider: "gemini".to_string(),
                 turn_id: None,
                 source: Some("gemini_log".to_string()),
+                provider_provenance: None,
             });
             guard.push_event("status", serde_json::json!({ "status": "idle" }));
         }
@@ -866,6 +867,7 @@ mod tests {
                 provider: "mock".to_string(),
                 turn_id: None,
                 source: None,
+                provider_provenance: None,
             });
             guard.push_output(b"still working");
         }

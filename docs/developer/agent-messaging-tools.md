@@ -219,6 +219,10 @@ An existing empty Codex history database does not supersede the native rollout.
 When Codex omits reasoning effort from a turn, the report records it as
 unverified rather than inferring it from the requested configuration.
 
+The canonical Wardian `ask_...` request identity remains distinct from the
+provider-facing OpenCode `msg_...` message identity; both must remain bound in
+delivery evidence.
+
 Run against a frozen packaged application and its matching CLI:
 
 ```bash

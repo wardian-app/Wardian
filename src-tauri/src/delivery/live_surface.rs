@@ -373,32 +373,34 @@ pub async fn submit_live_surface_prompt(
             .await);
         }
     };
-    if state
+    let broker_state = match state
         .terminal_sessions
         .broker_state(&request.session_id)
         .await
-        .is_err()
     {
-        return Err(record_failed_live_surface_attempt(
-            state,
-            &request,
-            &interaction_id,
-            Some(LiveSurfaceTarget {
-                name: name.clone(),
-                provider: provider.clone(),
-            }),
-            FailedLiveSurfaceAttempt {
-                runtime_state: missing_sender_runtime_state(request.runtime_state),
-                error_code: "no_input_channel",
-                message: "no input channel".to_string(),
-                delivery_phase: Some("input_channel_missing".to_string()),
-                observed_state: None,
-                reason: None,
-                retry_safe: true,
-            },
-        )
-        .await);
-    }
+        Ok(broker_state) => broker_state,
+        Err(_) => {
+            return Err(record_failed_live_surface_attempt(
+                state,
+                &request,
+                &interaction_id,
+                Some(LiveSurfaceTarget {
+                    name: name.clone(),
+                    provider: provider.clone(),
+                }),
+                FailedLiveSurfaceAttempt {
+                    runtime_state: missing_sender_runtime_state(request.runtime_state),
+                    error_code: "no_input_channel",
+                    message: "no input channel".to_string(),
+                    delivery_phase: Some("input_channel_missing".to_string()),
+                    observed_state: None,
+                    reason: None,
+                    retry_safe: true,
+                },
+            )
+            .await);
+        }
+    };
     let native_write_receipts = match state
         .terminal_sessions
         .native_write_receipts_enabled(&request.session_id)
@@ -427,8 +429,19 @@ pub async fn submit_live_surface_prompt(
             .await);
         }
     };
-    let input =
-        BrokerTerminalInputSink::new(state.terminal_sessions.clone(), request.session_id.clone());
+    let input = if request.origin.is_none()
+        && matches!(
+            request.input_mode,
+            MessageInputMode::Message | MessageInputMode::Command
+        ) {
+        BrokerTerminalInputSink::new_for_composer(
+            state.terminal_sessions.clone(),
+            request.session_id.clone(),
+            broker_state.runtime_generation,
+        )
+    } else {
+        BrokerTerminalInputSink::new(state.terminal_sessions.clone(), request.session_id.clone())
+    };
     // This event is emitted after the payload has been acknowledged by the
     // native PTY writer but before the submit key. It gives send-and-watch an
     // ordering boundary that precedes every provider response for this exact

@@ -8,7 +8,7 @@ use crate::providers::claude::{
 };
 use crate::providers::codex::CodexProvider;
 use crate::providers::pi::PiProvider;
-use crate::providers::transcript::extract_transcript_message;
+use crate::providers::transcript::{extract_transcript_message, CodexWatchBindingState};
 use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AgentWatchState, AppState};
 use crate::utils::fs::*;
@@ -68,6 +68,12 @@ fn pi_bridge_child_handoff_code(process_id: Option<u32>) -> &'static str {
         Some(process_id) if process_id != 0 => "process_registered",
         Some(_) => "process_id_zero",
         None => "process_id_unavailable",
+    }
+}
+
+fn retain_pi_fresh_provider_session(config: &mut AgentConfig) {
+    if let Some(fresh) = config.fresh_provider_session_id.clone() {
+        config.resume_session = Some(fresh);
     }
 }
 
@@ -645,6 +651,7 @@ impl AntigravityTranscriptTracker {
                     provider: "antigravity".to_string(),
                     turn_id: None,
                     source: Some("antigravity_sqlite".to_string()),
+                    provider_provenance: None,
                 });
             }
         }
@@ -2204,6 +2211,8 @@ pub async fn spawn_agent(
         std::thread::spawn(move || {
             let mut offset: u64 = 0;
             let mut last_lookup_session = String::new();
+            let mut last_log_path: Option<std::path::PathBuf> = None;
+            let mut codex_watch_binding = CodexWatchBindingState::default();
             let mut positioned_initial_log = !watcher_skip_existing_log;
             loop {
                 let current = watcher_current_status
@@ -2227,6 +2236,8 @@ pub async fn spawn_agent(
                         if last_lookup_session != lookup_session {
                             *lock = None;
                             offset = 0;
+                            last_log_path = None;
+                            codex_watch_binding.reset();
                             positioned_initial_log = !watcher_skip_existing_log;
                             last_lookup_session = lookup_session.clone();
                         }
@@ -2241,11 +2252,19 @@ pub async fn spawn_agent(
                         *lock = None;
                         offset = 0;
                         last_lookup_session.clear();
+                        last_log_path = None;
+                        codex_watch_binding.reset();
                         None
                     }
                 };
 
                 if let Some(path) = path {
+                    if last_log_path.as_ref() != Some(&path) {
+                        codex_watch_binding.reset();
+                        last_log_path = Some(path.clone());
+                    }
+                    codex_watch_binding
+                        .set_source(&last_lookup_session, path.to_string_lossy().as_ref());
                     if let Ok(mut out) = watcher_log_path.lock() {
                         *out = Some(path.clone());
                     }
@@ -2253,6 +2272,11 @@ pub async fn spawn_agent(
                         if let Ok(metadata) = file.metadata() {
                             if metadata.len() < offset {
                                 offset = 0;
+                                codex_watch_binding.reset();
+                                codex_watch_binding.set_source(
+                                    &last_lookup_session,
+                                    path.to_string_lossy().as_ref(),
+                                );
                             }
                             if !positioned_initial_log {
                                 offset = metadata.len();
@@ -2277,14 +2301,16 @@ pub async fn spawn_agent(
                                     serde_json::from_str::<serde_json::Value>(line.trim())
                                 {
                                     let raw_line = parsed.to_string();
+                                    let event = watcher_provider.parse_output(&raw_line);
+                                    codex_watch_binding.observe_record(&raw_line, event.as_ref());
                                     if let Some(message) =
-                                        extract_transcript_message("codex", &raw_line)
+                                        codex_watch_binding.extract_message(&raw_line)
                                     {
                                         if let Ok(mut watch_state) = watcher_watch_state.lock() {
                                             watch_state.push_transcript(message);
                                         }
                                     }
-                                    if let Some(event) = watcher_provider.parse_output(&raw_line) {
+                                    if let Some(event) = event {
                                         apply_agent_event_with_policy(
                                             &watcher_app,
                                             &watcher_session,
@@ -2299,10 +2325,14 @@ pub async fn spawn_agent(
                                         "agent-json-event",
                                         serde_json::json!({ "session_id": watcher_session, "data": parsed }),
                                     );
+                                } else {
+                                    codex_watch_binding.reset();
                                 }
                             }
                         }
                     }
+                } else if last_log_path.take().is_some() {
+                    codex_watch_binding.reset();
                 }
 
                 watcher_profile.finish(0);
@@ -2412,11 +2442,7 @@ pub async fn spawn_agent(
                                     ) {
                                         Ok(_) => {
                                             if let Ok(mut config) = watcher_config.lock() {
-                                                if let Some(fresh) =
-                                                    config.fresh_provider_session_id.take()
-                                                {
-                                                    config.resume_session = Some(fresh);
-                                                }
+                                                retain_pi_fresh_provider_session(&mut config);
                                             }
                                             persist_runtime_agent_configs(&watcher_app);
                                         }
@@ -3261,6 +3287,24 @@ mod tests {
         assert_eq!(pi_bridge_child_handoff_code(Some(42)), "process_registered");
         assert_eq!(pi_bridge_child_handoff_code(Some(0)), "process_id_zero");
         assert_eq!(pi_bridge_child_handoff_code(None), "process_id_unavailable");
+    }
+
+    #[test]
+    fn pi_fresh_provider_session_promotion_retains_fresh_marker() {
+        let mut config = AgentConfig {
+            provider: "pi".to_string(),
+            session_id: "wardian-session".to_string(),
+            fresh_provider_session_id: Some("pi-fresh-session".to_string()),
+            ..Default::default()
+        };
+
+        retain_pi_fresh_provider_session(&mut config);
+
+        assert_eq!(config.resume_session.as_deref(), Some("pi-fresh-session"));
+        assert_eq!(
+            config.fresh_provider_session_id.as_deref(),
+            Some("pi-fresh-session")
+        );
     }
 
     #[test]

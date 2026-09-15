@@ -1260,8 +1260,8 @@ pub(crate) fn apply_interactive_provider_runtime_env(
     }
 
     #[cfg(windows)]
-    if provider_name == "claude" {
-        if let Some(script) = ensure_claude_bash_env_script()? {
+    if matches!(provider_name, "claude" | "pi") {
+        if let Some(script) = ensure_managed_cli_bash_env_script()? {
             cmd.env("BASH_ENV", script);
         }
     }
@@ -1282,8 +1282,8 @@ pub(crate) fn apply_process_provider_runtime_env(
     }
 
     #[cfg(windows)]
-    if provider_name == "claude" {
-        if let Some(script) = ensure_claude_bash_env_script()? {
+    if matches!(provider_name, "claude" | "pi") {
+        if let Some(script) = ensure_managed_cli_bash_env_script()? {
             cmd.env("BASH_ENV", script);
         }
     }
@@ -1301,30 +1301,30 @@ pub(crate) fn claude_terminal_runtime_env() -> [(&'static str, &'static str); 2]
 }
 
 #[cfg(windows)]
-fn ensure_claude_bash_env_script() -> Result<Option<String>, String> {
+fn ensure_managed_cli_bash_env_script() -> Result<Option<String>, String> {
     let Some(home) = crate::utils::fs::get_wardian_home() else {
         return Ok(None);
     };
     let script_path = home
         .join("runtime")
         .join("windows")
-        .join("claude-bash-env.sh");
+        .join("managed-cli-bash-env.sh");
     if let Some(parent) = script_path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| {
             format!(
-                "Failed to create Claude bash environment directory {}: {err}",
+                "Failed to create managed CLI bash environment directory {}: {err}",
                 parent.display()
             )
         })?;
     }
     let bin_path = windows_path_to_msys_shell_path(&home.join("bin"));
     let contents = format!(
-        "# wardian Claude tool shell PATH\nwardian_bin={}\ncase \":$PATH:\" in\n  \":$wardian_bin:\"*) ;;\n  *) export PATH=\"$wardian_bin:$PATH\" ;;\nesac\n",
+        "# wardian managed CLI tool shell PATH\nwardian_bin={}\ncase \":$PATH:\" in\n  \":$wardian_bin:\"*) ;;\n  *) export PATH=\"$wardian_bin:$PATH\" ;;\nesac\n",
         shell_single_quote(&bin_path)
     );
     std::fs::write(&script_path, contents).map_err(|err| {
         format!(
-            "Failed to write Claude bash environment script {}: {err}",
+            "Failed to write managed CLI bash environment script {}: {err}",
             script_path.display()
         )
     })?;
@@ -1605,6 +1605,9 @@ mod tests {
         assert!(!interactive_env
             .iter()
             .any(|key| key.eq_ignore_ascii_case("WARDIAN_REAL_COMSPEC")));
+        assert!(!interactive_env
+            .iter()
+            .any(|key| key.eq_ignore_ascii_case("BASH_ENV")));
 
         let mut process = tokio::process::Command::new("antigravity");
         apply_process_provider_runtime_env("antigravity", &mut process).unwrap();
@@ -1625,6 +1628,9 @@ mod tests {
         assert!(!process_env
             .iter()
             .any(|key| key.eq_ignore_ascii_case("WARDIAN_REAL_COMSPEC")));
+        assert!(!process_env
+            .iter()
+            .any(|key| key.eq_ignore_ascii_case("BASH_ENV")));
 
         match previous_comspec {
             Some(value) => std::env::set_var("ComSpec", value),
@@ -1660,12 +1666,12 @@ mod tests {
             .expect("BASH_ENV env")
             .to_string_lossy()
             .to_string();
-        assert!(bash_env.ends_with("/runtime/windows/claude-bash-env.sh"));
+        assert!(bash_env.ends_with("/runtime/windows/managed-cli-bash-env.sh"));
         let script_path = home
             .path()
             .join("runtime")
             .join("windows")
-            .join("claude-bash-env.sh");
+            .join("managed-cli-bash-env.sh");
         let script = std::fs::read_to_string(&script_path).expect("bash env script");
         assert!(script.contains("export PATH=\"$wardian_bin:$PATH\""));
         assert!(script.contains("\n  \":$wardian_bin:\"*) ;;\n"));
@@ -1675,6 +1681,118 @@ mod tests {
         match previous_home {
             Some(value) => std::env::set_var("WARDIAN_HOME", value),
             None => std::env::remove_var("WARDIAN_HOME"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pi_provider_runtime_env_sets_managed_bash_env_without_claude_flags() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let home = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", home.path());
+
+        let mut interactive = CommandBuilder::new("pi");
+        apply_interactive_provider_runtime_env("pi", &mut interactive).unwrap();
+        let interactive_bash_env = interactive
+            .get_env("BASH_ENV")
+            .expect("Pi BASH_ENV env")
+            .to_string_lossy()
+            .to_string();
+        assert!(interactive_bash_env.ends_with("/runtime/windows/managed-cli-bash-env.sh"));
+        assert!(interactive
+            .get_env("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN")
+            .is_none());
+
+        let mut process = tokio::process::Command::new("pi");
+        apply_process_provider_runtime_env("pi", &mut process).unwrap();
+        let process_bash_env = process.as_std().get_envs().find_map(|(key, value)| {
+            if key.to_string_lossy().eq_ignore_ascii_case("BASH_ENV") {
+                value.map(|value| value.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            process_bash_env.as_deref(),
+            Some(interactive_bash_env.as_str())
+        );
+        assert!(!process.as_std().get_envs().any(|(key, _)| key
+            .to_string_lossy()
+            .eq_ignore_ascii_case("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN")));
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_cli_bash_env_puts_wardian_bin_first_in_git_bash() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        let previous_path = std::env::var_os("PATH");
+        let home = tempfile::tempdir().expect("temp dir");
+        let old_bin = home.path().join("old-bin");
+        let managed_bin = home.path().join("bin");
+        std::fs::create_dir_all(&old_bin).expect("old CLI directory");
+        std::fs::create_dir_all(&managed_bin).expect("managed CLI directory");
+        std::fs::write(
+            old_bin.join("wardian"),
+            "#!/usr/bin/env sh\nprintf 'old-cli\\n'\n",
+        )
+        .expect("old CLI stub");
+        std::fs::write(
+            managed_bin.join("wardian"),
+            "#!/usr/bin/env sh\nprintf 'managed-cli\\n'\n",
+        )
+        .expect("managed CLI stub");
+        std::env::set_var("WARDIAN_HOME", home.path());
+
+        let mut interactive = CommandBuilder::new("pi");
+        apply_interactive_provider_runtime_env("pi", &mut interactive).unwrap();
+        let bash_env = interactive
+            .get_env("BASH_ENV")
+            .expect("Pi BASH_ENV env")
+            .to_string_lossy()
+            .to_string();
+        let original_path = previous_path
+            .as_deref()
+            .unwrap_or_else(|| std::ffi::OsStr::new(""))
+            .to_string_lossy();
+        let path = format!(
+            "{};{};{}",
+            old_bin.display(),
+            managed_bin.display(),
+            original_path
+        );
+        let program_files = std::env::var_os("ProgramFiles")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Program Files"));
+        let git_bash = program_files.join("Git").join("bin").join("bash.exe");
+        assert!(
+            git_bash.is_file(),
+            "Git Bash is required for this regression"
+        );
+        let output = std::process::Command::new(git_bash)
+            .args(["-c", "command -v wardian; wardian"])
+            .env("PATH", path)
+            .env("BASH_ENV", bash_env)
+            .output()
+            .expect("run Git Bash");
+        assert!(output.status.success(), "Git Bash failed: {output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.lines().last(), Some("managed-cli"));
+        assert!(!stdout.lines().any(|line| line == "old-cli"));
+
+        match previous_home {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+        match previous_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
         }
     }
 

@@ -876,6 +876,15 @@ pub struct WatchOutput {
     pub omitted_bytes: usize,
 }
 
+/// Provider session, source, and turn identity binding for a watched message.
+/// Absence of this value leaves the watch observation unbound to native logs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WatchTranscriptProvenance {
+    pub provider_session_id: String,
+    pub source_path: String,
+    pub provider_turn_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WatchTranscriptMessage {
     pub role: String,
@@ -885,6 +894,8 @@ pub struct WatchTranscriptMessage {
     pub turn_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_provenance: Option<WatchTranscriptProvenance>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1385,6 +1396,7 @@ mod tests {
                     provider: "codex".to_string(),
                     turn_id: Some("turn-1".to_string()),
                     source: Some("response_item".to_string()),
+                    provider_provenance: None,
                 }],
                 latest_text: "clean answer".to_string(),
                 truncated: false,

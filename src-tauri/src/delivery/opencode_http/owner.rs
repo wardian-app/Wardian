@@ -12,6 +12,8 @@ use super::protocol::{OpenCodeHttpBinding, OpenCodePrompt, OpenCodeStoredMessage
 use super::sse::{OpenCodeEvent, OpenCodeEventStream};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const EVENT_CONNECT_TIMEOUT: Duration = REQUEST_TIMEOUT;
+const EVENT_HEADER_TIMEOUT: Duration = REQUEST_TIMEOUT;
 const RESPONSE_BODY_LIMIT: usize = 1024 * 1024;
 
 /// Errors from the OpenCode HTTP owner.
@@ -127,6 +129,7 @@ pub struct OpenCodeUserMessageProof {
 pub struct OpenCodeHttpOwner {
     binding: Arc<OpenCodeHttpBinding>,
     client: reqwest::Client,
+    event_client: reqwest::Client,
     submit_lock: Mutex<()>,
     attempted_message_ids: Mutex<HashSet<String>>,
     closed: AtomicBool,
@@ -188,9 +191,23 @@ impl OpenCodeHttpOwner {
                     "OpenCode HTTP client could not be built",
                 )
             })?;
+        let event_client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(EVENT_CONNECT_TIMEOUT)
+            .build()
+            .map_err(|_| {
+                OpenCodeHttpError::new(
+                    OpenCodeHttpErrorCode::TransportUnavailable,
+                    false,
+                    None,
+                    "OpenCode event client could not be built",
+                )
+            })?;
         Ok(Self {
             binding: Arc::new(binding),
             client,
+            event_client,
             submit_lock: Mutex::new(()),
             attempted_message_ids: Mutex::new(HashSet::new()),
             closed: AtomicBool::new(false),
@@ -339,18 +356,30 @@ impl OpenCodeHttpOwner {
 
     pub async fn open_events(&self) -> Result<OpenCodeEventStream, OpenCodeHttpError> {
         self.ensure_open()?;
-        let response = self
-            .request(Method::GET, self.root_url("global/event")?)
-            .send()
-            .await
-            .map_err(|_| {
-                OpenCodeHttpError::new(
-                    OpenCodeHttpErrorCode::TransportUnavailable,
-                    false,
-                    None,
-                    "OpenCode event stream could not be opened",
-                )
-            })?;
+        let response = tokio::time::timeout(
+            EVENT_HEADER_TIMEOUT,
+            self.event_client
+                .request(Method::GET, self.root_url("global/event")?)
+                .basic_auth(&self.binding.username, Some(&self.binding.password))
+                .send(),
+        )
+        .await
+        .map_err(|_| {
+            OpenCodeHttpError::new(
+                OpenCodeHttpErrorCode::TransportUnavailable,
+                false,
+                None,
+                "OpenCode event stream headers timed out",
+            )
+        })?
+        .map_err(|_| {
+            OpenCodeHttpError::new(
+                OpenCodeHttpErrorCode::TransportUnavailable,
+                false,
+                None,
+                "OpenCode event stream could not be opened",
+            )
+        })?;
         self.require_status(response.status(), false)?;
         let content_type = response
             .headers()
@@ -644,6 +673,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread::JoinHandle;
+    use std::time::Instant;
 
     use super::*;
     use crate::delivery::opencode_http::{
@@ -669,7 +699,37 @@ mod tests {
     }
 
     fn prompt_for_test() -> OpenCodePrompt {
-        OpenCodePrompt::new("msg_test", "native task", Default::default()).expect("prompt")
+        OpenCodePrompt::from_canonical_message_id("ask_test", "native task", Default::default())
+            .expect("prompt")
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let size = stream.read(&mut chunk).expect("request read");
+            if size == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..size]);
+            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("Content-Length:")
+                        .or_else(|| line.strip_prefix("content-length:"))
+                })
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if request.len() >= header_end + 4 + content_length {
+                break;
+            }
+        }
+        request
     }
 
     fn status_owner_for_test(body: impl Into<String>) -> (OpenCodeHttpOwner, JoinHandle<()>) {
@@ -696,6 +756,41 @@ mod tests {
             stream
                 .write_all(response.as_bytes())
                 .expect("status response write");
+        });
+        (owner_for_test(port, 7, 11), server)
+    }
+
+    fn event_owner_for_test(
+        response_body: Option<&'static [u8]>,
+        delay: Duration,
+    ) -> (OpenCodeHttpOwner, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("event listener");
+        let port = listener
+            .local_addr()
+            .expect("event listener address")
+            .port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("event request accepted");
+            let mut request = [0_u8; 8192];
+            let size = stream.read(&mut request).expect("event request read");
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.starts_with("GET /global/event HTTP/1.1"));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("authorization: basic "));
+
+            if let Some(response_body) = response_body {
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
+                    )
+                    .expect("event headers write");
+                stream.flush().expect("event headers flush");
+                std::thread::sleep(delay);
+                let _ = stream.write_all(response_body);
+            } else {
+                std::thread::sleep(delay);
+            }
         });
         (owner_for_test(port, 7, 11), server)
     }
@@ -739,10 +834,14 @@ mod tests {
 
     #[test]
     fn exact_user_message_requires_session_id_and_text_part() {
-        let prompt =
-            OpenCodePrompt::new("msg_1", "canonical task", Default::default()).expect("prompt");
+        let prompt = OpenCodePrompt::from_canonical_message_id(
+            "ask_1",
+            "canonical task",
+            Default::default(),
+        )
+        .expect("prompt");
         let message = OpenCodeStoredMessage {
-            info: serde_json::json!({"id":"msg_1","sessionID":"ses_1","role":"user"}),
+            info: serde_json::json!({"id":prompt.message_id,"sessionID":"ses_1","role":"user"}),
             parts: vec![serde_json::json!({"type":"text","text":"canonical task"})],
         };
         assert!(message.is_exact_user_prompt("ses_1", &prompt));
@@ -857,6 +956,128 @@ mod tests {
         );
 
         server.join().expect("status server");
+    }
+
+    #[tokio::test]
+    async fn event_stream_body_outlives_request_deadline_but_headers_remain_bounded() {
+        let (stream_owner, stream_server) = event_owner_for_test(
+            Some(
+                br#"event: message.updated
+data: {"sessionID":"ses_test"}
+
+"#,
+            ),
+            REQUEST_TIMEOUT + Duration::from_millis(100),
+        );
+        let (stalled_owner, stalled_server) = event_owner_for_test(None, EVENT_HEADER_TIMEOUT);
+        let started = Instant::now();
+
+        let stream_result = async {
+            let mut events = stream_owner.open_events().await?;
+            events.next_event().await
+        };
+        let (stream_result, stalled_result) =
+            tokio::join!(stream_result, stalled_owner.open_events());
+
+        let event = stream_result
+            .expect("long-lived event stream should remain open")
+            .expect("delayed event should arrive");
+        assert_eq!(event.session_id(), Some("ses_test"));
+        let stalled_error = match stalled_result {
+            Ok(_) => panic!("event headers must have a deadline"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            stalled_error.code,
+            OpenCodeHttpErrorCode::TransportUnavailable
+        );
+        assert!(
+            started.elapsed() >= REQUEST_TIMEOUT,
+            "fixture must cross the ordinary request deadline"
+        );
+
+        stream_server.join().expect("event stream server");
+        stalled_server.join().expect("stalled event server");
+    }
+
+    #[tokio::test]
+    async fn canonical_ask_submission_uses_provider_id_for_receipt_reconciliation_and_replay_guard()
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let prompt = OpenCodePrompt::from_canonical_message_id(
+            "ask_canonical",
+            "same canonical task",
+            Default::default(),
+        )
+        .expect("prompt");
+        let provider_message_id = prompt.message_id.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("submit request accepted");
+            let request = read_http_request(&mut stream);
+            let header_end = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .expect("submit headers");
+            let request_text = String::from_utf8_lossy(&request[..header_end]);
+            assert!(request_text.starts_with("POST /session/ses_test/prompt_async HTTP/1.1"));
+            let body: Value =
+                serde_json::from_slice(&request[header_end + 4..]).expect("submit body");
+            assert_eq!(body["messageID"], provider_message_id);
+            assert_eq!(body["parts"][0]["type"], "text");
+            assert_eq!(body["parts"][0]["text"], "same canonical task");
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .expect("submit response");
+
+            let (mut stream, _) = listener.accept().expect("reconciliation request accepted");
+            let request = read_http_request(&mut stream);
+            let header_end = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .expect("reconciliation headers");
+            let request_text = String::from_utf8_lossy(&request[..header_end]);
+            assert!(request_text.starts_with("GET /session/ses_test/message?limit=200 HTTP/1.1"));
+            let body = serde_json::json!([
+                {
+                    "info": {"id": provider_message_id.clone(), "sessionID": "ses_test", "role": "user"},
+                    "parts": [{"type": "text", "text": "same canonical task"}]
+                }
+            ])
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("reconciliation response");
+        });
+        let owner = owner_for_test(port, 7, 11);
+
+        let receipt = owner
+            .submit_once(7, 11, &prompt)
+            .await
+            .expect("provider acknowledgement");
+        assert_eq!(receipt.provider_message_id, prompt.message_id);
+        assert_eq!(receipt.response_status, 204);
+
+        let proof = owner
+            .reconcile_user_message(&prompt)
+            .await
+            .expect("reconciliation request")
+            .expect("exact provider user message");
+        assert_eq!(proof.provider_message_id, prompt.message_id);
+
+        let replay = owner
+            .submit_once(7, 11, &prompt)
+            .await
+            .expect_err("same canonical request must not replay");
+        assert_eq!(replay.code, OpenCodeHttpErrorCode::ReplayRefused);
+        server.join().expect("HTTP test server");
     }
 
     #[tokio::test]

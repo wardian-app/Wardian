@@ -215,7 +215,33 @@ async fn authenticate(state: &AppState, sender: &str) -> Result<(), ControlError
     Ok(())
 }
 
-async fn resolve_exact(state: &AppState, target: &str) -> Result<String, ControlError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerProviderClassification {
+    OpenCode,
+    Other,
+    Unknown,
+}
+
+impl WorkerProviderClassification {
+    fn from_config(provider: &str) -> Self {
+        let provider = provider.trim();
+        if provider.is_empty() {
+            Self::Unknown
+        } else if provider.eq_ignore_ascii_case("opencode") {
+            Self::OpenCode
+        } else {
+            Self::Other
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedRecipient {
+    id: String,
+    provider: WorkerProviderClassification,
+}
+
+async fn resolve_exact(state: &AppState, target: &str) -> Result<ResolvedRecipient, ControlError> {
     let selector = target.to_ascii_lowercase();
     if target.trim().is_empty()
         || target != target.trim()
@@ -238,11 +264,17 @@ async fn resolve_exact(state: &AppState, target: &str) -> Result<String, Control
             .lock()
             .map_err(|_| ControlError::request_failed("Agent configuration lock poisoned."))?;
         if id == target || config.session_name == target {
-            matches.push(id.clone());
+            matches.push((
+                id.clone(),
+                WorkerProviderClassification::from_config(&config.provider),
+            ));
         }
     }
     match matches.as_slice() {
-        [id] => Ok(id.clone()),
+        [(id, provider)] => Ok(ResolvedRecipient {
+            id: id.clone(),
+            provider: *provider,
+        }),
         [] => Err(ControlError::not_found("No exact recipient exists.")),
         _ => Err(ControlError::coded(
             "ambiguous_target",
@@ -272,7 +304,8 @@ async fn admit(
         task,
     } = input;
     store::validate_message(message).map_err(control_error)?;
-    let recipient = resolve_exact(state, target).await?;
+    let resolved = resolve_exact(state, target).await?;
+    let recipient = resolved.id;
     let generation = state
         .interactions
         .current_provider_input_generation(&recipient)
@@ -293,7 +326,13 @@ async fn admit(
     if let Some(app) = app {
         let _ = app.emit("pair-activity-changed", ());
         if task && !admitted.duplicate {
-            spawn_pending_tasks(app, &recipient);
+            spawn_pending_tasks_with_request(
+                app,
+                &recipient,
+                Some(admitted.record.id.clone()),
+                Some(generation),
+                Some(resolved.provider),
+            );
         } else if !task && !admitted.duplicate {
             native::spawn_information(app, &recipient);
         }
@@ -317,14 +356,31 @@ async fn admit(
 /// Idle status observations and new admissions give unclaimed work a chance to
 /// run. Received or uncertain work is excluded by the durable claim transaction.
 pub(crate) fn spawn_pending_tasks(app: &AppHandle, recipient: &str) {
+    spawn_pending_tasks_with_request(app, recipient, None, None, None);
+}
+
+fn spawn_pending_tasks_with_request(
+    app: &AppHandle,
+    recipient: &str,
+    request_id: Option<String>,
+    generation: Option<u64>,
+    provider: Option<WorkerProviderClassification>,
+) {
     // Ready/idle observations also give stored information a push opportunity;
     // this path itself can only inspect an already-existing native owner.
     native::spawn_information(app, recipient);
     let app = app.clone();
     let recipient = recipient.to_string();
     tauri::async_runtime::spawn(async move {
-        if let Err(error) =
-            dispatch_pending_queue(Some(&app), &app.state::<AppState>(), &recipient).await
+        if let Err(error) = dispatch_pending_queue_with_request(
+            Some(&app),
+            &app.state::<AppState>(),
+            &recipient,
+            request_id.as_deref(),
+            generation,
+            provider,
+        )
+        .await
         {
             manager::log_debug(&format!("[WARDIAN] v2 task dispatch: {error}"));
         }
@@ -339,15 +395,66 @@ pub(super) async fn dispatch_pending_queue(
     state: &AppState,
     recipient: &str,
 ) -> Result<(), ControlError> {
+    dispatch_pending_queue_with_request(app, state, recipient, None, None, None).await
+}
+
+#[derive(Debug)]
+struct OpenCodeDispatchWorkerEntry {
+    request_id: String,
+    generation: u64,
+    provider: WorkerProviderClassification,
+}
+
+async fn dispatch_pending_queue_with_request(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    recipient: &str,
+    request_id: Option<&str>,
+    generation: Option<u64>,
+    provider: Option<WorkerProviderClassification>,
+) -> Result<(), ControlError> {
+    let worker_entry =
+        request_id
+            .zip(generation)
+            .map(|(request_id, generation)| OpenCodeDispatchWorkerEntry {
+                request_id: request_id.to_string(),
+                generation,
+                provider: provider.unwrap_or(WorkerProviderClassification::Unknown),
+            });
+    let mut worker_entry = Some(worker_entry);
     loop {
+        let entry = worker_entry.take().flatten();
+        if let Some(entry) = entry.as_ref() {
+            log_opencode_worker_entry(entry, OpenCodeDispatchDiagnosticReason::WorkerStarted);
+        }
         let before = store::with_db(|conn| store::next_pending_task_id(conn, recipient))
             .map_err(control_error)?;
+        if let Some(entry) = entry.as_ref() {
+            let reason = match before.as_deref() {
+                Some(id) if id == entry.request_id => {
+                    OpenCodeDispatchDiagnosticReason::QueueHeadMatches
+                }
+                Some(_) => OpenCodeDispatchDiagnosticReason::QueueHeadOther,
+                None => OpenCodeDispatchDiagnosticReason::QueueHeadEmpty,
+            };
+            log_opencode_worker_entry(entry, reason);
+        }
         if before.is_none() {
             return Ok(());
         }
         let outcome = dispatch_one_with_request(app, state, recipient, before.as_deref()).await;
         let after = store::with_db(|conn| store::next_pending_task_id(conn, recipient))
             .map_err(control_error)?;
+        if let Some(entry) = entry.as_ref() {
+            log_opencode_worker_entry(
+                entry,
+                if after == before {
+                    OpenCodeDispatchDiagnosticReason::QueueHeadUnchanged
+                } else {
+                    OpenCodeDispatchDiagnosticReason::QueueHeadAdvanced
+                },
+            );
+        }
         if after == before {
             return outcome;
         }
@@ -357,6 +464,28 @@ pub(super) async fn dispatch_pending_queue(
             ));
         }
     }
+}
+
+fn log_opencode_worker_entry(
+    entry: &OpenCodeDispatchWorkerEntry,
+    reason: OpenCodeDispatchDiagnosticReason,
+) {
+    let reason = match entry.provider {
+        WorkerProviderClassification::OpenCode => reason,
+        WorkerProviderClassification::Other => return,
+        WorkerProviderClassification::Unknown => {
+            if reason != OpenCodeDispatchDiagnosticReason::WorkerStarted {
+                return;
+            }
+            OpenCodeDispatchDiagnosticReason::WorkerProviderUnknown
+        }
+    };
+    log_opencode_dispatch_diagnostic(
+        &entry.request_id,
+        entry.generation,
+        OpenCodeDispatchDiagnosticStage::WorkerEntry,
+        reason,
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

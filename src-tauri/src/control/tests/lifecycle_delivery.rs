@@ -67,6 +67,60 @@ async fn live_delivery_waits_for_transient_lifecycle_contention() {
     assert_eq!(rx.recv().await.expect("submitted return"), b"\r".to_vec());
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn task_composer_rejects_after_input_pause_without_writing_live_runtime() {
+    let _home = TestWardianHome::new_async().await;
+    let state = std::sync::Arc::new(AppState::new());
+    insert_test_agent(&state, "receiver", "Receiver", "Test").await;
+    {
+        let agents = state.agents.lock().await;
+        *agents
+            .get("receiver")
+            .expect("receiver")
+            .current_status
+            .lock()
+            .expect("status") = "Idle".to_string();
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    install_test_terminal_runtime(&state, "receiver", tx).await;
+    let generation = state
+        .terminal_sessions
+        .broker_state("receiver")
+        .await
+        .expect("runtime state")
+        .runtime_generation;
+    state
+        .terminal_sessions
+        .pause_input_sender("receiver", generation)
+        .await
+        .expect("pause input sender");
+
+    let error = deliver_prompt_to_agent(
+        None,
+        &state,
+        "Receiver",
+        "composer must not write while input is paused",
+        MessageInputMode::Message,
+    )
+    .await
+    .expect_err("paused task composer must fail before writing");
+    assert!(error.to_string().contains("RuntimeUnavailable"));
+    assert!(
+        rx.try_recv().is_err(),
+        "task-composer delivery must emit no payload or submit bytes"
+    );
+
+    state
+        .terminal_sessions
+        .send_privileged_input("receiver", b"explicit-control".to_vec())
+        .await
+        .expect("explicit privileged control remains available");
+    assert_eq!(
+        rx.recv().await.expect("explicit control write"),
+        b"explicit-control".to_vec()
+    );
+}
+
 #[tokio::test]
 async fn live_delivery_rejects_an_actual_active_conversation_lease() {
     let _home = TestWardianHome::new_async().await;

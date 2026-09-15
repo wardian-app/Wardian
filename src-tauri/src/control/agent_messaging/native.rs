@@ -5,6 +5,7 @@ use crate::delivery::native_broker::{
     NativeSessionSpec, OpenCodeDispatchDiagnosticReason, OpenCodeDispatchDiagnosticStage,
 };
 use wardian_core::conversation_lease::{ConversationLeaseOwner, PersistedConversationLeaseGuard};
+use wardian_core::native_transport::NativeDeliveryErrorCode;
 
 pub(super) fn spawn_information(app: &AppHandle, recipient: &str) {
     let app = app.clone();
@@ -162,7 +163,7 @@ pub(super) async fn push_pending_information(
 }
 
 pub(super) async fn interrupt(state: &AppState, target: &str) -> Result<Response, ControlError> {
-    let recipient = resolve_exact(state, target).await?;
+    let recipient = resolve_exact(state, target).await?.id;
     let info = delivery_target_info(state, &recipient).await?;
     if info.provider != "codex" {
         return Err(ControlError::coded(
@@ -263,17 +264,16 @@ pub(super) async fn dispatch_attached_task_with_request(
             }
         }
         "opencode" => {
-            if state
+            if let Err(error) = state
                 .native_delivery
                 .opencode_http_admission(&info.uuid, generation, &info.config, &info.cwd)
                 .await
-                .is_err()
             {
                 log_opencode_dispatch_diagnostic_for_request(
                     request_id,
                     generation,
                     OpenCodeDispatchDiagnosticStage::Preclaim,
-                    OpenCodeDispatchDiagnosticReason::NativeAdmissionRejected,
+                    opencode_admission_diagnostic_reason(&error.code),
                 );
                 return Ok(());
             }
@@ -444,6 +444,20 @@ fn log_opencode_dispatch_diagnostic_for_request(
 ) {
     if let Some(request_id) = request_id {
         log_opencode_dispatch_diagnostic(request_id, generation, stage, reason);
+    }
+}
+
+fn opencode_admission_diagnostic_reason(
+    code: &NativeDeliveryErrorCode,
+) -> OpenCodeDispatchDiagnosticReason {
+    match code {
+        NativeDeliveryErrorCode::StaleGeneration => {
+            OpenCodeDispatchDiagnosticReason::NativeAdmissionStaleGeneration
+        }
+        NativeDeliveryErrorCode::CapabilityUnavailable => {
+            OpenCodeDispatchDiagnosticReason::NativeAdmissionCapabilityUnavailable
+        }
+        _ => OpenCodeDispatchDiagnosticReason::NativeAdmissionRejected,
     }
 }
 
@@ -671,4 +685,26 @@ pub(super) async fn dispatch_background(
             error.message,
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{opencode_admission_diagnostic_reason, OpenCodeDispatchDiagnosticReason};
+    use wardian_core::native_transport::NativeDeliveryErrorCode;
+
+    #[test]
+    fn opencode_admission_codes_map_to_bounded_diagnostic_reasons() {
+        assert_eq!(
+            opencode_admission_diagnostic_reason(&NativeDeliveryErrorCode::StaleGeneration),
+            OpenCodeDispatchDiagnosticReason::NativeAdmissionStaleGeneration
+        );
+        assert_eq!(
+            opencode_admission_diagnostic_reason(&NativeDeliveryErrorCode::CapabilityUnavailable),
+            OpenCodeDispatchDiagnosticReason::NativeAdmissionCapabilityUnavailable
+        );
+        assert_eq!(
+            opencode_admission_diagnostic_reason(&NativeDeliveryErrorCode::TransportUnavailable),
+            OpenCodeDispatchDiagnosticReason::NativeAdmissionRejected
+        );
+    }
 }

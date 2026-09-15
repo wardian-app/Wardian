@@ -37,6 +37,7 @@ const OPENCODE_DISPATCH_DIAGNOSTIC_CAPACITY: usize = 256;
 /// admitting provider payloads, credentials, or raw error text into the log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OpenCodeDispatchDiagnosticStage {
+    WorkerEntry,
     Preclaim,
     PostclaimPreNativeAdmission,
     NativeAdmission,
@@ -46,6 +47,7 @@ pub(crate) enum OpenCodeDispatchDiagnosticStage {
 impl OpenCodeDispatchDiagnosticStage {
     fn code(self) -> &'static str {
         match self {
+            Self::WorkerEntry => "worker_entry",
             Self::Preclaim => "preclaim",
             Self::PostclaimPreNativeAdmission => "postclaim_pre_native_admission",
             Self::NativeAdmission => "native_admission",
@@ -58,6 +60,13 @@ impl OpenCodeDispatchDiagnosticStage {
 /// provider state from becoming an accidental observability channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OpenCodeDispatchDiagnosticReason {
+    WorkerStarted,
+    WorkerProviderUnknown,
+    QueueHeadMatches,
+    QueueHeadOther,
+    QueueHeadEmpty,
+    QueueHeadUnchanged,
+    QueueHeadAdvanced,
     RouteNative,
     RouteBackground,
     RouteSurface,
@@ -70,6 +79,8 @@ pub(crate) enum OpenCodeDispatchDiagnosticReason {
     BrokerUnavailable,
     NativeAdmissionReady,
     NativeAdmissionRejected,
+    NativeAdmissionStaleGeneration,
+    NativeAdmissionCapabilityUnavailable,
     NoClaim,
     ClaimAcquired,
     NativeAdmit,
@@ -85,6 +96,13 @@ pub(crate) enum OpenCodeDispatchDiagnosticReason {
 impl OpenCodeDispatchDiagnosticReason {
     fn code(self) -> &'static str {
         match self {
+            Self::WorkerStarted => "worker_started",
+            Self::WorkerProviderUnknown => "worker_provider_unknown",
+            Self::QueueHeadMatches => "queue_head_matches",
+            Self::QueueHeadOther => "queue_head_other",
+            Self::QueueHeadEmpty => "queue_head_empty",
+            Self::QueueHeadUnchanged => "queue_head_unchanged",
+            Self::QueueHeadAdvanced => "queue_head_advanced",
             Self::RouteNative => "route_native",
             Self::RouteBackground => "route_background",
             Self::RouteSurface => "route_surface",
@@ -97,6 +115,8 @@ impl OpenCodeDispatchDiagnosticReason {
             Self::BrokerUnavailable => "broker_unavailable",
             Self::NativeAdmissionReady => "native_admission_ready",
             Self::NativeAdmissionRejected => "native_admission_rejected",
+            Self::NativeAdmissionStaleGeneration => "native_admission_stale_generation",
+            Self::NativeAdmissionCapabilityUnavailable => "native_admission_capability_unavailable",
             Self::NoClaim => "no_claim",
             Self::ClaimAcquired => "claim_acquired",
             Self::NativeAdmit => "native_admit",
@@ -657,8 +677,8 @@ impl NativeDeliveryBroker {
                     false,
                 )
             })?;
-        let prompt = OpenCodePrompt::new(
-            record.envelope.message_id.clone(),
+        let prompt = OpenCodePrompt::from_canonical_message_id(
+            &record.envelope.message_id,
             record.envelope.body.clone(),
             OpenCodePromptOptions::default(),
         )
@@ -1366,8 +1386,8 @@ impl NativeDeliveryBroker {
                     false,
                 )
             })?;
-        let prompt = OpenCodePrompt::new(
-            message_id.to_string(),
+        let prompt = OpenCodePrompt::from_canonical_message_id(
+            message_id,
             prompt_text,
             OpenCodePromptOptions::default(),
         )
@@ -3386,7 +3406,11 @@ fn opencode_http_error(failure: OpenCodeHttpError) -> NativeBrokerError {
         | OpenCodeHttpErrorCode::MalformedResponse
         | OpenCodeHttpErrorCode::MalformedEvent => NativeDeliveryErrorCode::CapabilityUnavailable,
     };
-    error(code, failure.to_string(), failure.provider_boundary_crossed)
+    let message = match failure.status {
+        Some(status) => format!("{} (status {status})", failure),
+        None => failure.to_string(),
+    };
+    error(code, message, failure.provider_boundary_crossed)
 }
 
 async fn close_opencode_http_registration(registration: Arc<OpenCodeHttpRegistration>) {
@@ -3623,6 +3647,24 @@ mod tests {
         retry.interaction_id = "two".into();
         retry.message_id = "message-two".into();
         assert_eq!(canonical_hash(&request), canonical_hash(&retry));
+    }
+
+    #[test]
+    fn opencode_http_error_preserves_numeric_status_without_response_body() {
+        let converted = opencode_http_error(OpenCodeHttpError::new(
+            OpenCodeHttpErrorCode::ProviderRejectedAfterSubmit,
+            true,
+            Some(400),
+            "OpenCode prompt request was not accepted; replay is forbidden",
+        ));
+
+        assert_eq!(
+            converted.code,
+            NativeDeliveryErrorCode::SubmittedUnconfirmed
+        );
+        assert!(converted.message.contains("status 400"));
+        assert!(!converted.message.contains("body"));
+        assert!(converted.provider_boundary_crossed);
     }
 
     #[test]
