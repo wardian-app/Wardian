@@ -1,7 +1,8 @@
 //! Canonical messaging over the single generation-bound Codex owner.
 use super::*;
 use crate::delivery::native_broker::{
-    NativeBrokerError, NativeDeliveryAdmission, NativeSessionSpec,
+    log_opencode_dispatch_diagnostic, NativeBrokerError, NativeDeliveryAdmission,
+    NativeSessionSpec, OpenCodeDispatchDiagnosticReason, OpenCodeDispatchDiagnosticStage,
 };
 use wardian_core::conversation_lease::{ConversationLeaseOwner, PersistedConversationLeaseGuard};
 
@@ -189,18 +190,50 @@ pub(super) async fn interrupt(state: &AppState, target: &str) -> Result<Response
     })
 }
 
-pub(super) async fn dispatch_attached_task(
+pub(super) async fn dispatch_attached_task_with_request(
     state: &AppState,
     info: &DeliveryTargetInfo,
+    request_id: Option<&str>,
 ) -> Result<(), ControlError> {
     let Some(lifecycle) = state.try_lock_agent_lifecycle(&info.uuid).await else {
+        log_opencode_preclaim_stage(
+            state,
+            info,
+            request_id,
+            OpenCodeDispatchDiagnosticReason::LifecycleBusy,
+        )
+        .await;
         return Ok(());
     };
     let current = delivery_target_info(state, &info.uuid).await?;
-    if !same_delivery_target_incarnation(info, &current)
-        || active_conversation_lease_for_delivery(&current)
-        || current.config.is_off
-    {
+    if !same_delivery_target_incarnation(info, &current) {
+        log_opencode_preclaim_stage(
+            state,
+            &current,
+            request_id,
+            OpenCodeDispatchDiagnosticReason::StaleIncarnation,
+        )
+        .await;
+        return Ok(());
+    }
+    if active_conversation_lease_for_delivery(&current) {
+        log_opencode_preclaim_stage(
+            state,
+            &current,
+            request_id,
+            OpenCodeDispatchDiagnosticReason::ConversationLease,
+        )
+        .await;
+        return Ok(());
+    }
+    if current.config.is_off {
+        log_opencode_preclaim_stage(
+            state,
+            &current,
+            request_id,
+            OpenCodeDispatchDiagnosticReason::AgentOff,
+        )
+        .await;
         return Ok(());
     }
     let generation = state
@@ -236,8 +269,20 @@ pub(super) async fn dispatch_attached_task(
                 .await
                 .is_err()
             {
+                log_opencode_dispatch_diagnostic_for_request(
+                    request_id,
+                    generation,
+                    OpenCodeDispatchDiagnosticStage::Preclaim,
+                    OpenCodeDispatchDiagnosticReason::NativeAdmissionRejected,
+                );
                 return Ok(());
             }
+            log_opencode_dispatch_diagnostic_for_request(
+                request_id,
+                generation,
+                OpenCodeDispatchDiagnosticStage::Preclaim,
+                OpenCodeDispatchDiagnosticReason::NativeAdmissionReady,
+            );
         }
         _ => return Ok(()),
     }
@@ -247,8 +292,24 @@ pub(super) async fn dispatch_attached_task(
         .await
         .map_err(control_error)?
     else {
+        if info.provider == "opencode" {
+            log_opencode_dispatch_diagnostic_for_request(
+                request_id,
+                generation,
+                OpenCodeDispatchDiagnosticStage::Preclaim,
+                OpenCodeDispatchDiagnosticReason::NoClaim,
+            );
+        }
         return Ok(());
     };
+    if info.provider == "opencode" {
+        log_opencode_dispatch_diagnostic(
+            &claim.record.id,
+            generation,
+            OpenCodeDispatchDiagnosticStage::PostclaimPreNativeAdmission,
+            OpenCodeDispatchDiagnosticReason::ClaimAcquired,
+        );
+    }
     let context = prepare_claim_context(state, &claim).await?;
     drop(lifecycle);
     // The actor revalidates this generation before writing. No lifecycle lock
@@ -271,6 +332,14 @@ pub(super) async fn dispatch_attached_task(
                     unreachable!("claim context preparation rejects file-backed task bodies")
                 }
             };
+            if info.provider == "opencode" {
+                log_opencode_dispatch_diagnostic(
+                    &claim.record.id,
+                    generation,
+                    OpenCodeDispatchDiagnosticStage::PostclaimPreNativeAdmission,
+                    OpenCodeDispatchDiagnosticReason::NativeAdmit,
+                );
+            }
             let admitted = state
                 .native_delivery
                 .admit(NativeDeliveryAdmission {
@@ -289,10 +358,22 @@ pub(super) async fn dispatch_attached_task(
                 .await;
             match admitted {
                 Ok(record) if !native_phase_allows_followup(record.phase) => {
+                    log_opencode_dispatch_diagnostic(
+                        &claim.record.id,
+                        generation,
+                        OpenCodeDispatchDiagnosticStage::NativeAdmission,
+                        OpenCodeDispatchDiagnosticReason::NativeRecordTerminal,
+                    );
                     settle_persisted_native_phase(state, &claim, record.phase).await?;
                     return Ok(());
                 }
                 Ok(_) => {
+                    log_opencode_dispatch_diagnostic(
+                        &claim.record.id,
+                        generation,
+                        OpenCodeDispatchDiagnosticStage::NativeAdmission,
+                        OpenCodeDispatchDiagnosticReason::NativeRecordQueued,
+                    );
                     state
                         .native_delivery
                         .opencode_http_followup(
@@ -305,7 +386,15 @@ pub(super) async fn dispatch_attached_task(
                         )
                         .await
                 }
-                Err(error) => Err(error),
+                Err(error) => {
+                    log_opencode_dispatch_diagnostic(
+                        &claim.record.id,
+                        generation,
+                        OpenCodeDispatchDiagnosticStage::NativeAdmission,
+                        OpenCodeDispatchDiagnosticReason::NativeRecordRejected,
+                    );
+                    Err(error)
+                }
             }
         }
         _ => return Ok(()),
@@ -323,6 +412,39 @@ pub(super) async fn dispatch_attached_task(
     result
         .map(|_| ())
         .map_err(|error| native_error(error, "native_followup_unavailable"))
+}
+
+async fn log_opencode_preclaim_stage(
+    state: &AppState,
+    info: &DeliveryTargetInfo,
+    request_id: Option<&str>,
+    reason: OpenCodeDispatchDiagnosticReason,
+) {
+    let Some(request_id) = request_id.filter(|_| info.provider == "opencode") else {
+        return;
+    };
+    let generation = state
+        .interactions
+        .current_provider_input_generation(&info.uuid)
+        .await
+        .unwrap_or(0);
+    log_opencode_dispatch_diagnostic(
+        request_id,
+        generation,
+        OpenCodeDispatchDiagnosticStage::Preclaim,
+        reason,
+    );
+}
+
+fn log_opencode_dispatch_diagnostic_for_request(
+    request_id: Option<&str>,
+    generation: u64,
+    stage: OpenCodeDispatchDiagnosticStage,
+    reason: OpenCodeDispatchDiagnosticReason,
+) {
+    if let Some(request_id) = request_id {
+        log_opencode_dispatch_diagnostic(request_id, generation, stage, reason);
+    }
 }
 
 pub(super) async fn selected_native_owner_for_dispatch(

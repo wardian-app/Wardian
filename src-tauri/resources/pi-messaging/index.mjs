@@ -8,6 +8,14 @@ function reportSessionStartRejection(code) {
   console.error(`[Wardian] Pi bridge rejection stage=session_start code=${code}`);
 }
 
+function reportSessionStartValidated() {
+  console.error('[Wardian] Pi bridge stage=session_start code=validated');
+}
+
+function reportListenerHandoff(code) {
+  console.error(`[Wardian] Pi bridge stage=listener_child_handoff code=${code}`);
+}
+
 /** Explicitly load with Pi -e; never installs itself or controls another session. */
 export default function wardianPiMessaging(pi) {
   let bridge;
@@ -41,6 +49,8 @@ export default function wardianPiMessaging(pi) {
       reportSessionStartRejection('session_file_mismatch');
       return;
     }
+    reportSessionStartValidated();
+    reportListenerHandoff('socket_connecting');
     const socket = createConnection({ host: config.host, port: config.port });
     bridge = createBridge({ config, runtimeNonce: randomUUID(), pid: process.pid, pi, ctx, socket });
   });

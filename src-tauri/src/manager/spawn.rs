@@ -63,6 +63,14 @@ struct PiBridgeSpawnGuard {
     armed: bool,
 }
 
+fn pi_bridge_child_handoff_code(process_id: Option<u32>) -> &'static str {
+    match process_id {
+        Some(process_id) if process_id != 0 => "process_registered",
+        Some(_) => "process_id_zero",
+        None => "process_id_unavailable",
+    }
+}
+
 impl PiBridgeSpawnGuard {
     fn new(
         broker: std::sync::Arc<crate::delivery::native_broker::NativeDeliveryBroker>,
@@ -1396,6 +1404,12 @@ pub async fn spawn_agent(
         guard.attached();
     }
     let process_id = child.process_id();
+    if pi_attachment.is_some() {
+        log_debug(&format!(
+            "[Wardian] Pi bridge stage=listener_child_handoff code={}",
+            pi_bridge_child_handoff_code(process_id)
+        ));
+    }
     if let Some(attachment) = pi_attachment.as_mut() {
         if let Some(process_id) = process_id {
             attachment.register_process(process_id);
@@ -2622,7 +2636,9 @@ pub async fn spawn_agent(
                                                     pty_status_event_policy_for_provider("claude"),
                                                 );
                                             }
-                                            AgentEvent::Init { .. } | AgentEvent::Unknown => {}
+                                            AgentEvent::Init { .. }
+                                            | AgentEvent::TurnStarted { .. }
+                                            | AgentEvent::Unknown => {}
                                         }
                                     } else {
                                         apply_agent_event_with_policy(
@@ -3238,6 +3254,13 @@ mod tests {
     fn restored_spawns_skip_stale_process_scan() {
         assert!(!should_cleanup_stale_session_processes_before_spawn(true));
         assert!(should_cleanup_stale_session_processes_before_spawn(false));
+    }
+
+    #[test]
+    fn pi_bridge_child_handoff_diagnostic_distinguishes_pid_states() {
+        assert_eq!(pi_bridge_child_handoff_code(Some(42)), "process_registered");
+        assert_eq!(pi_bridge_child_handoff_code(Some(0)), "process_id_zero");
+        assert_eq!(pi_bridge_child_handoff_code(None), "process_id_unavailable");
     }
 
     #[test]

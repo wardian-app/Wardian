@@ -76,6 +76,35 @@ test('session-start rejection diagnostics expose only fixed credential-free code
   }
 });
 
+test('successful session-start validation begins the listener handoff with fixed codes', () => {
+  const originalConfig = process.env.WARDIAN_PI_BRIDGE_CONFIG;
+  const originalError = console.error;
+  const logs = [];
+  console.error = message => logs.push(message);
+  try {
+    process.env.WARDIAN_PI_BRIDGE_CONFIG = JSON.stringify(config);
+    const pi = new EventEmitter();
+    wardianPiMessaging(pi);
+    pi.emit('session_start', {}, {
+      mode: 'tui',
+      sessionManager: {
+        getSessionId: () => config.session_id,
+        getSessionFile: () => config.session_file,
+      },
+    });
+    assert.deepEqual(logs.slice(0, 2), [
+      '[Wardian] Pi bridge stage=session_start code=validated',
+      '[Wardian] Pi bridge stage=listener_child_handoff code=socket_connecting',
+    ]);
+    assert.equal(logs.join('\n').includes(config.token), false);
+    pi.emit('session_shutdown');
+  } finally {
+    console.error = originalError;
+    if (originalConfig === undefined) delete process.env.WARDIAN_PI_BRIDGE_CONFIG;
+    else process.env.WARDIAN_PI_BRIDGE_CONFIG = originalConfig;
+  }
+});
+
 test('frames survive every split boundary and coalescing', () => {
   const frame = encodeFrame({ body: 'héllo🙂' });
   for (let cut = 0; cut <= frame.length; cut++) {
@@ -113,6 +142,39 @@ test('authentication, generation, session, runtime and sequence fail closed', t 
 });
 test('delivery before welcome is never submitted', t => {
   const f = fixture(t); f.deliver(); assert.equal(f.socket.destroyed, true); assert.equal(f.calls.length, 0);
+});
+
+test('listener handoff reports an early socket error without exposing its payload', t => {
+  const originalError = console.error;
+  const logs = [];
+  console.error = message => logs.push(message);
+  try {
+    const f = fixture(t);
+    f.socket.emit('error', new Error('secret-token-and-session-file'));
+    assert.equal(logs.at(-1), '[Wardian] Pi bridge stage=listener_child_handoff code=socket_error_before_ready');
+    assert.equal(logs.join('\n').includes('secret-token-and-session-file'), false);
+    assert.equal(f.socket.destroyed, true);
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test('listener handoff reports a bounded timeout when the child never connects', async t => {
+  const originalError = console.error;
+  const logs = [];
+  console.error = message => logs.push(message);
+  const socket = new EventEmitter();
+  socket.destroyed = false;
+  socket.destroy = () => { socket.destroyed = true; };
+  socket.write = () => true;
+  const bridge = createBridge({ config, runtimeNonce: 'runtime', pid: 123, socket,
+    ctx: { mode: 'tui', isIdle: () => true,
+      sessionManager: { getSessionId: () => config.session_id, getSessionFile: () => config.session_file } },
+    pi: { sendMessage: () => {} }, handshakeMs: 1 });
+  t.after(() => { console.error = originalError; bridge.stop(); });
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(logs.at(-1), '[Wardian] Pi bridge stage=listener_child_handoff code=handshake_timeout');
+  assert.equal(socket.destroyed, true);
 });
 for (const idle of [true, false]) test(`task uses custom attribution and followUp while idle=${idle}`, t => {
   const f = fixture(t, { idle }); f.welcome(); f.deliver();

@@ -152,3 +152,36 @@ async fn delivery_fails_closed_when_the_target_incarnation_is_replaced_while_wai
         "stale delivery must not write to successor"
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn codex_task_started_fixture_reaches_the_provider_receipt_waiter() {
+    use crate::providers::codex::CodexProvider;
+    use wardian_core::models::{AgentEvent, AgentProvider};
+
+    let state = AppState::new();
+    insert_test_agent(&state, "receiver", "Receiver", "Test").await;
+    let provider = CodexProvider::new();
+    let line = include_str!("../../providers/fixtures/codex-real-delivery-mirror.jsonl")
+        .lines()
+        .next()
+        .expect("retained Codex delivery fixture");
+    let event = provider.parse_output(line).expect("task_started event");
+    assert!(matches!(
+        &event,
+        AgentEvent::TurnStarted { turn_id }
+            if turn_id.as_str() == "01a0a1e5-2f6d-7530-bebc-f44c8c299bb7"
+    ));
+    assert!(
+        crate::manager::ProviderStatusEventPolicy::PreserveActionRequired
+            .confirms_turn_started(&event)
+    );
+
+    let cursor = provider_turn_start_cursor(&state, "receiver")
+        .await
+        .expect("provider receipt cursor");
+    let wait = wait_for_provider_turn_started_after_submit(&state, "receiver", &cursor);
+    tokio::pin!(wait);
+    crate::manager::record_agent_turn_started_for_watch(&state, "receiver").await;
+    wait.await
+        .expect("a parsed Codex lifecycle start satisfies the real receipt waiter");
+}

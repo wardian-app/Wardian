@@ -11,6 +11,9 @@ pub enum AgentEvent {
     },
     /// A user query was submitted.
     UserQuery,
+    /// The provider accepted a turn and assigned it an identity. This is a
+    /// lifecycle signal, not another user query.
+    TurnStarted { turn_id: String },
     /// The model has finished responding (agent is now idle).
     ModelResponse,
     /// The model is actively generating a response (agent is processing).

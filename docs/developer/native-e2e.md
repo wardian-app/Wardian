@@ -338,6 +338,11 @@ It verifies assigned work, the provider's correlated reply, and consumption by
 the sender in the bound provider sessions. Native acceptance and the documented
 Claude/Antigravity composer exceptions remain separate results.
 
+The delivery suite limits Claude to Bash and an empty strict MCP configuration,
+and disables its cross-session messaging tools. This qualifies the canonical CLI
+reply through the composer exception; it does not qualify Claude MCP delivery or
+provider-native collaboration tools. These limits apply only to the test agent.
+
 The older `provider-native-broker-real-native.test.mjs` integration path uses
 the retired `wardian send` command. Its retained reports describe historical
 builds; that path cannot qualify the current canonical messaging implementation.

@@ -84,6 +84,13 @@ const DEFAULT_PROVIDER_EFFORTS = {
   codex: "low",
 };
 const COMPOSER_EXCEPTION_PROVIDERS = ["claude", "antigravity"];
+const CLAUDE_ISOLATED_PROVIDER_CONFIG = {
+  type: "claude",
+  tools: ["Bash"],
+  disallowed_tools: ["SendMessage", "ListAgents"],
+  mcp_config: JSON.stringify({ mcpServers: {} }),
+  strict_mcp_config: true,
+};
 // Match the established Codex model-selection spawn contract. The larger
 // budget is scoped to Codex spawn_agent and observation is restored afterward.
 const SPAWN_SCRIPT_MS = 2 * 120_000 + 60_000;
@@ -93,6 +100,23 @@ const CANONICAL_REPLY_EXACT_BYTES_INSTRUCTION =
   " The canonical reply tool message must contain exactly the requested text bytes. " +
   "If using stdin, write those bytes without a trailing newline; do not use shell echo, " +
   "which appends a newline. Do not trim or otherwise transform the returned message.";
+const CANONICAL_REPLY_TOOL_ALLOWANCE =
+  "You may use the canonical reply MCP tool, or use Bash solely to invoke Wardian's " +
+  "canonical message reply command (`wardian message reply <request_id> --status done --stdin`) " +
+  "with the exact requested text on stdin. " +
+  "Use no other tools, shell commands, or file access.";
+
+function buildCanonicalReplyTaskPrompt(inputCase, marker) {
+  const base = inputCase.prompt(marker)
+    .replace("Do not access files or run tools.", CANONICAL_REPLY_TOOL_ALLOWANCE)
+    .replace("No tools.", CANONICAL_REPLY_TOOL_ALLOWANCE);
+  const withAllowance = base.includes(CANONICAL_REPLY_TOOL_ALLOWANCE)
+    ? base
+    : `${base} ${CANONICAL_REPLY_TOOL_ALLOWANCE}`;
+  return withAllowance +
+    " Complete this task using the canonical reply tool with status done and exactly the requested text as its message." +
+    CANONICAL_REPLY_EXACT_BYTES_INSTRUCTION;
+}
 
 const runRealDelivery = process.env.WARDIAN_E2E_REAL_DELIVERY === "1";
 const verifyFreshTranscript = process.env.WARDIAN_E2E_REAL_FRESH_TRANSCRIPT === "1";
@@ -257,6 +281,14 @@ function configOverrideForProvider(provider, environment = process.env) {
   }
   if (effort) {
     config.provider_config = { type: provider, reasoning_effort: effort };
+  }
+  if (provider === "claude") {
+    config.provider_config = {
+      ...config.provider_config,
+      ...CLAUDE_ISOLATED_PROVIDER_CONFIG,
+      tools: [...CLAUDE_ISOLATED_PROVIDER_CONFIG.tools],
+      disallowed_tools: [...CLAUDE_ISOLATED_PROVIDER_CONFIG.disallowed_tools],
+    };
   }
   return config;
 }
@@ -1211,9 +1243,7 @@ async function runRealDeliveryCase({
 async function runNativeTaskCase({ driver, cliPath, harness, provider, agent, sender, inputCase, identity, terminal, report, save }) {
   const marker = `NATIVE_TASK_${provider}_${Date.now()}`;
   const expected = inputCase.name === "prompt-multiline" ? `${marker}_LINE_1\n${marker}_LINE_2` : marker;
-  const body = inputCase.prompt(marker).replace("Do not access files or run tools.", "Do not access files or run tools except the canonical reply tool.") +
-    " Complete this task using the canonical reply tool with status done and exactly the requested text as its message." +
-    CANONICAL_REPLY_EXACT_BYTES_INSTRUCTION;
+  const body = buildCanonicalReplyTaskPrompt(inputCase, marker);
   const evidence = { provider, case: inputCase.name, status: "running", identity, attempts: 0, admission_state: "idle" };
   report.native_cases.push(evidence);
   const initial = await messageCli(cliPath, harness.isolatedHome, harness.repoRoot, sender.session_id, ["receive", "--timeout-ms", "0"]);
@@ -1279,9 +1309,7 @@ async function runNativeTaskCase({ driver, cliPath, harness, provider, agent, se
 async function runComposerExceptionTaskCase({ driver, cliPath, harness, provider, agent, sender, inputCase, report, save }) {
   const marker = `COMPOSER_EXCEPTION_TASK_${provider}_${Date.now()}`;
   const expected = inputCase.name === "prompt-multiline" ? `${marker}_LINE_1\n${marker}_LINE_2` : marker;
-  const body = inputCase.prompt(marker).replace("Do not access files or run tools.", "Do not access files or run tools except the canonical reply tool.") +
-    " Complete this task using the canonical reply tool with status done and exactly the requested text as its message." +
-    CANONICAL_REPLY_EXACT_BYTES_INSTRUCTION;
+  const body = buildCanonicalReplyTaskPrompt(inputCase, marker);
   const evidence = {
     provider,
     case: inputCase.name,
@@ -2051,6 +2079,18 @@ test("canonical reply task prompt requires exact stdin bytes", () => {
   assert.match(CANONICAL_REPLY_EXACT_BYTES_INSTRUCTION, /Do not trim/);
 });
 
+test("native and composer task routes share the canonical reply allowance", () => {
+  for (const inputCase of INPUT_CASES) {
+    const prompt = buildCanonicalReplyTaskPrompt(inputCase, "SHARED_ROUTE_MARKER");
+    assert.match(prompt, /canonical reply MCP tool/);
+    assert.match(prompt, /Bash solely to invoke Wardian's canonical message reply command/);
+    assert.match(prompt, /wardian message reply <request_id> --status done --stdin/);
+    assert.match(prompt, /exact requested text on stdin/);
+    assert.match(prompt, /Use no other tools, shell commands, or file access/);
+    assert.doesNotMatch(prompt, /Do not access files or run tools\.|No tools\./);
+  }
+});
+
 test("OpenCode native mode defaults to resume and exposes fresh explicitly", () => {
   assert.equal(parseOpenCodeNativeMode(undefined), "resume");
   assert.equal(parseOpenCodeNativeMode("fresh"), "fresh");
@@ -2069,6 +2109,18 @@ test("provider effort override uses the core provider_config field", () => {
   assert.equal(override.provider_config?.type, "codex");
   assert.equal(override.provider_config?.reasoning_effort, "low");
   assert.equal(override.custom_args, undefined);
+});
+
+test("isolated Claude launch exposes only Bash and no configured MCP servers", () => {
+  const override = configOverrideForProvider("claude", {});
+  const providerConfig = override.provider_config;
+
+  assert.equal(providerConfig?.type, "claude");
+  assert.deepEqual(providerConfig?.tools, ["Bash"]);
+  assert.deepEqual(providerConfig?.disallowed_tools, ["SendMessage", "ListAgents"]);
+  assert.equal(providerConfig?.allowed_tools, undefined);
+  assert.deepEqual(JSON.parse(providerConfig?.mcp_config ?? "null"), { mcpServers: {} });
+  assert.equal(providerConfig?.strict_mcp_config, true);
 });
 
 test("human delivery waits for provider input readiness before submission", () => {

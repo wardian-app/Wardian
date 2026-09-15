@@ -1,6 +1,10 @@
 //! Receiver-first messaging admission and dispatch. Provider integrations must
 //! acquire the same durable delivery claim before exposing canonical task text.
 use super::*;
+use crate::delivery::native_broker::{
+    log_opencode_dispatch_diagnostic, OpenCodeDispatchDiagnosticReason,
+    OpenCodeDispatchDiagnosticStage,
+};
 use wardian_core::agent_messaging::{
     AgentMessagingError, AgentMessagingRequest as Request, AgentMessagingResponse as Response,
     MAX_RECEIVE_ITEMS, MAX_RECEIVE_TIMEOUT_MS,
@@ -341,7 +345,7 @@ pub(super) async fn dispatch_pending_queue(
         if before.is_none() {
             return Ok(());
         }
-        let outcome = dispatch_one(app, state, recipient).await;
+        let outcome = dispatch_one_with_request(app, state, recipient, before.as_deref()).await;
         let after = store::with_db(|conn| store::next_pending_task_id(conn, recipient))
             .map_err(control_error)?;
         if after == before {
@@ -381,37 +385,97 @@ fn task_dispatch_route(
     }
 }
 
-async fn dispatch_one(
+async fn dispatch_one_with_request(
     app: Option<&AppHandle>,
     state: &AppState,
     recipient: &str,
+    request_id: Option<&str>,
 ) -> Result<(), ControlError> {
     let info = delivery_target_info(state, recipient).await?;
     // A background owner keeps the conversation out of every competing route.
     if active_conversation_lease_for_delivery(&info) {
+        log_opencode_dispatch_stage(
+            state,
+            &info,
+            request_id,
+            OpenCodeDispatchDiagnosticStage::Preclaim,
+            OpenCodeDispatchDiagnosticReason::ConversationLease,
+        )
+        .await;
         return Ok(());
     }
     let selected_native_owner = native::selected_native_owner_for_dispatch(state, &info).await;
-    match task_dispatch_route(
+    let route = task_dispatch_route(
         &info.provider,
         info.config.is_off,
         &info.status,
         selected_native_owner,
-    ) {
-        TaskDispatchRoute::Native => return native::dispatch_attached_task(state, &info).await,
+    );
+    let route_reason = match route {
+        TaskDispatchRoute::Native => OpenCodeDispatchDiagnosticReason::RouteNative,
+        TaskDispatchRoute::Background => OpenCodeDispatchDiagnosticReason::RouteBackground,
+        TaskDispatchRoute::Surface => OpenCodeDispatchDiagnosticReason::RouteSurface,
+    };
+    log_opencode_dispatch_stage(
+        state,
+        &info,
+        request_id,
+        OpenCodeDispatchDiagnosticStage::Preclaim,
+        route_reason,
+    )
+    .await;
+    match route {
+        TaskDispatchRoute::Native => {
+            return native::dispatch_attached_task_with_request(state, &info, request_id).await
+        }
         TaskDispatchRoute::Background => return dispatch_background_task(app, state, &info).await,
         TaskDispatchRoute::Surface => {}
     }
     // Never wait behind a long-running lifecycle action. A subsequent idle
     // observation or receive call can claim still-pending work.
     let Some(_lifecycle) = state.try_lock_agent_lifecycle(recipient).await else {
+        log_opencode_dispatch_stage(
+            state,
+            &info,
+            request_id,
+            OpenCodeDispatchDiagnosticStage::Preclaim,
+            OpenCodeDispatchDiagnosticReason::LifecycleBusy,
+        )
+        .await;
         return Ok(());
     };
     let info = delivery_target_info(state, recipient).await?;
-    if info.status != "idle"
-        || provider_input_blocks_task_dispatch(state, recipient).await
-        || active_conversation_lease_for_delivery(&info)
-    {
+    if info.status != "idle" {
+        log_opencode_dispatch_stage(
+            state,
+            &info,
+            request_id,
+            OpenCodeDispatchDiagnosticStage::Preclaim,
+            OpenCodeDispatchDiagnosticReason::ProviderNotReady,
+        )
+        .await;
+        return Ok(());
+    }
+    if provider_input_blocks_task_dispatch(state, recipient).await {
+        log_opencode_dispatch_stage(
+            state,
+            &info,
+            request_id,
+            OpenCodeDispatchDiagnosticStage::Preclaim,
+            OpenCodeDispatchDiagnosticReason::ProviderInputBusy,
+        )
+        .await;
+        return Ok(());
+    }
+    if active_conversation_lease_for_delivery(&info) {
+        log_opencode_dispatch_stage(
+            state,
+            &info,
+            request_id,
+            OpenCodeDispatchDiagnosticStage::Preclaim,
+            OpenCodeDispatchDiagnosticReason::ConversationLease,
+        )
+        .await;
         return Ok(());
     }
     if state
@@ -420,6 +484,14 @@ async fn dispatch_one(
         .await
         .is_err()
     {
+        log_opencode_dispatch_stage(
+            state,
+            &info,
+            request_id,
+            OpenCodeDispatchDiagnosticStage::Preclaim,
+            OpenCodeDispatchDiagnosticReason::BrokerUnavailable,
+        )
+        .await;
         return Ok(());
     }
     let generation = state
@@ -433,8 +505,23 @@ async fn dispatch_one(
         .await
         .map_err(control_error)?
     else {
+        log_opencode_dispatch_diagnostic_for_info(
+            &info,
+            request_id,
+            generation,
+            OpenCodeDispatchDiagnosticStage::Preclaim,
+            OpenCodeDispatchDiagnosticReason::NoClaim,
+        );
         return Ok(());
     };
+    if info.provider == "opencode" {
+        log_opencode_dispatch_diagnostic(
+            &claim.record.id,
+            generation,
+            OpenCodeDispatchDiagnosticStage::PostclaimPreNativeAdmission,
+            OpenCodeDispatchDiagnosticReason::ClaimAcquired,
+        );
+    }
     let prompt = message_with_structured_reply_instruction(
         &prepare_claim_context(state, &claim).await?,
         &claim.record.id,
@@ -462,6 +549,14 @@ async fn dispatch_one(
         },
     )
     .await;
+    if info.provider == "opencode" {
+        log_opencode_dispatch_diagnostic(
+            &claim.record.id,
+            generation,
+            OpenCodeDispatchDiagnosticStage::ActualDispatch,
+            OpenCodeDispatchDiagnosticReason::SurfaceSubmit,
+        );
+    }
     let outcome = match &result {
         Ok(_) => "provider_visible",
         Err(error) if error.retry_safe => "failed_before_submit",
@@ -473,6 +568,38 @@ async fn dispatch_one(
         .await
         .map_err(control_error)?;
     Ok(())
+}
+
+async fn log_opencode_dispatch_stage(
+    state: &AppState,
+    info: &DeliveryTargetInfo,
+    request_id: Option<&str>,
+    stage: OpenCodeDispatchDiagnosticStage,
+    reason: OpenCodeDispatchDiagnosticReason,
+) {
+    let Some(request_id) = request_id.filter(|_| info.provider == "opencode") else {
+        return;
+    };
+    let generation = state
+        .interactions
+        .current_provider_input_generation(&info.uuid)
+        .await
+        .unwrap_or(0);
+    log_opencode_dispatch_diagnostic(request_id, generation, stage, reason);
+}
+
+fn log_opencode_dispatch_diagnostic_for_info(
+    info: &DeliveryTargetInfo,
+    request_id: Option<&str>,
+    generation: u64,
+    stage: OpenCodeDispatchDiagnosticStage,
+    reason: OpenCodeDispatchDiagnosticReason,
+) {
+    if info.provider == "opencode" {
+        if let Some(request_id) = request_id {
+            log_opencode_dispatch_diagnostic(request_id, generation, stage, reason);
+        }
+    }
 }
 
 /// The existing off-agent policy permits explicit work to run headlessly.

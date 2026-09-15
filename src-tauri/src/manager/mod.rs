@@ -802,13 +802,15 @@ pub(crate) enum ProviderStatusEventPolicy {
 }
 
 impl ProviderStatusEventPolicy {
-    /// Claude's interactive stream does not echo the typed user message. Its
-    /// first assistant stream event is the provider-owned confirmation that
-    /// the submitted turn has begun.
-    fn confirms_turn_started(self, event: &AgentEvent) -> bool {
-        matches!(event, AgentEvent::UserQuery)
-            || (matches!(event, AgentEvent::Generating)
-                && matches!(self, Self::PreserveActionRequiredUntilTurnCompleted))
+    /// Provider-owned lifecycle events confirm that a submitted turn has
+    /// begun. Claude's interactive stream also uses its first assistant
+    /// stream event because it does not echo the typed user message.
+    pub(crate) fn confirms_turn_started(self, event: &AgentEvent) -> bool {
+        matches!(
+            event,
+            AgentEvent::UserQuery | AgentEvent::TurnStarted { .. }
+        ) || (matches!(event, AgentEvent::Generating)
+            && matches!(self, Self::PreserveActionRequiredUntilTurnCompleted))
     }
 
     fn preserves_action_required(self) -> bool {
@@ -832,7 +834,7 @@ pub(crate) fn provider_status_from_event(
     policy: ProviderStatusEventPolicy,
 ) -> Option<&'static str> {
     match event {
-        AgentEvent::UserQuery | AgentEvent::Generating => {
+        AgentEvent::UserQuery | AgentEvent::TurnStarted { .. } | AgentEvent::Generating => {
             if policy.preserves_action_required()
                 && wardian_core::identity::normalize_status(current_status) == "action_required"
             {
@@ -1317,7 +1319,7 @@ fn ensure_claude_bash_env_script() -> Result<Option<String>, String> {
     }
     let bin_path = windows_path_to_msys_shell_path(&home.join("bin"));
     let contents = format!(
-        "# wardian Claude tool shell PATH\nwardian_bin={}\ncase \":$PATH:\" in\n  *\":$wardian_bin:\"*) ;;\n  *) export PATH=\"$wardian_bin:$PATH\" ;;\nesac\n",
+        "# wardian Claude tool shell PATH\nwardian_bin={}\ncase \":$PATH:\" in\n  \":$wardian_bin:\"*) ;;\n  *) export PATH=\"$wardian_bin:$PATH\" ;;\nesac\n",
         shell_single_quote(&bin_path)
     );
     std::fs::write(&script_path, contents).map_err(|err| {
@@ -1666,6 +1668,8 @@ mod tests {
             .join("claude-bash-env.sh");
         let script = std::fs::read_to_string(&script_path).expect("bash env script");
         assert!(script.contains("export PATH=\"$wardian_bin:$PATH\""));
+        assert!(script.contains("\n  \":$wardian_bin:\"*) ;;\n"));
+        assert!(!script.contains("\n  *\":$wardian_bin:\"*) ;;\n"));
         assert!(script.contains(&windows_path_to_msys_shell_path(&home.path().join("bin"))));
 
         match previous_home {

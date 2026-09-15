@@ -226,6 +226,24 @@ async fn attached_opencode_task_admits_native_record_before_followup() {
         .expect("attached dispatch must admit a native delivery");
     assert_eq!(native.phase, NativeDeliveryPhase::ProviderAccepted);
     assert_eq!(owner(&admitted.record.id), "provider_accepted");
+    let debug_log = std::fs::read_to_string(home.path().join("wardian_debug.log"))
+        .expect("OpenCode diagnostic log");
+    for expected in [
+        "stage=preclaim reason=route_native",
+        "stage=preclaim reason=native_admission_ready",
+        "stage=postclaim_pre_native_admission reason=claim_acquired",
+        "stage=postclaim_pre_native_admission reason=native_admit",
+        "stage=native_admission reason=native_record_queued",
+        "stage=actual_dispatch reason=http_submit",
+    ] {
+        assert!(
+            debug_log.lines().any(|line| {
+                line.contains(expected)
+                    && line.contains(&format!("request_id={}", admitted.record.id))
+            }),
+            "missing OpenCode diagnostic: {expected}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1484,7 +1502,9 @@ async fn off_codex_status_drift_dispatches_second_task_after_lease_without_repla
         delivery_target_info(&state, RECEIVER).await.unwrap().status,
         "idle"
     );
-    dispatch_one(None, &state, RECEIVER).await.unwrap();
+    dispatch_one_with_request(None, &state, RECEIVER, None)
+        .await
+        .unwrap();
     assert_eq!(snapshot(), before);
     assert_eq!(
         state
@@ -1495,10 +1515,13 @@ async fn off_codex_status_drift_dispatches_second_task_after_lease_without_repla
     );
     config.lock().unwrap().is_off = true;
 
-    let error = tokio::time::timeout(Duration::from_secs(5), dispatch_one(None, &state, RECEIVER))
-        .await
-        .expect("process-free startup guard must finish promptly")
-        .expect_err("configured Off must reach the real background startup guard");
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        dispatch_one_with_request(None, &state, RECEIVER, None),
+    )
+    .await
+    .expect("process-free startup guard must finish promptly")
+    .expect_err("configured Off must reach the real background startup guard");
     assert_eq!(error.code, "native_followup_unavailable");
     assert!(error
         .message

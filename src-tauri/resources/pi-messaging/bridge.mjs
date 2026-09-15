@@ -1,12 +1,22 @@
 import { FrameDecoder, encodeFrame, exact, sameSecret, validateDelivery, customMessage } from './protocol.mjs';
 
+function reportListenerHandoff(code) {
+  console.error(`[Wardian] Pi bridge stage=listener_child_handoff code=${code}`);
+}
+
 /** One connection per extension runtime. Disconnection never reconnects or replays. */
 export function createBridge({ config, runtimeNonce, pid, pi, ctx, socket, handshakeMs = 5000 }) {
   const binding = Object.freeze({ target_id: config.target_id, generation: config.generation,
     session_id: config.session_id, runtime_nonce: runtimeNonce });
   const decoder = new FrameDecoder();
   let stopped = false, authenticated = false, rx = 0, tx = 0, pending = null;
+  let terminalHandoffReported = false;
   const seen = new Set();
+  const reportTerminalHandoff = code => {
+    if (terminalHandoffReported) return;
+    terminalHandoffReported = true;
+    reportListenerHandoff(code);
+  };
   const identityValid = () => ctx.mode === 'tui' && ctx.sessionManager.getSessionId() === config.session_id
     && ctx.sessionManager.getSessionFile() === config.session_file;
   const stop = () => { if (stopped) return; stopped = true; clearTimeout(timer); socket.destroy(); };
@@ -18,7 +28,10 @@ export function createBridge({ config, runtimeNonce, pid, pi, ctx, socket, hands
     } catch { stop(); return false; }
     return true;
   };
-  const timer = setTimeout(stop, handshakeMs);
+  const timer = setTimeout(() => {
+    if (!stopped && !authenticated) reportTerminalHandoff('handshake_timeout');
+    stop();
+  }, handshakeMs);
   timer.unref?.();
   function receive(frame) {
     if (stopped) return;
@@ -51,12 +64,28 @@ export function createBridge({ config, runtimeNonce, pid, pi, ctx, socket, hands
     catch { stop(); } // No retry, no false rejection after possible handoff.
   }
   socket.on('connect', () => {
-    if (!identityValid()) { stop(); return; }
-    send({ type: 'hello', token: config.token, pid, session_file: config.session_file });
+    if (stopped) return;
+    reportListenerHandoff('socket_connected');
+    if (!identityValid()) {
+      reportTerminalHandoff('identity_changed_before_hello');
+      stop();
+      return;
+    }
+    if (send({ type: 'hello', token: config.token, pid, session_file: config.session_file })) {
+      reportListenerHandoff('hello_sent');
+    } else {
+      reportTerminalHandoff('hello_write_failed');
+    }
   });
   socket.on('data', data => { try { decoder.feed(data, receive); } catch { stop(); } });
-  socket.on('error', stop);
-  socket.on('close', stop);
+  socket.on('error', () => {
+    if (!stopped && !authenticated) reportTerminalHandoff('socket_error_before_ready');
+    stop();
+  });
+  socket.on('close', () => {
+    if (!stopped && !authenticated) reportTerminalHandoff('socket_closed_before_ready');
+    stop();
+  });
   return {
     stop,
     messageStart(event) {

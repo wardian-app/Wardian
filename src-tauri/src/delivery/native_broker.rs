@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::{Mutex as StdMutex, OnceLock};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,182 @@ const SESSION_COMMAND_CAPACITY: usize = 64;
 const BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const PROTOCOL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const STDERR_TAIL_BYTES: usize = 4 * 1024;
+const OPENCODE_DISPATCH_DIAGNOSTIC_CAPACITY: usize = 256;
+
+/// Fixed diagnostic stages keep request delivery observations useful without
+/// admitting provider payloads, credentials, or raw error text into the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenCodeDispatchDiagnosticStage {
+    Preclaim,
+    PostclaimPreNativeAdmission,
+    NativeAdmission,
+    ActualDispatch,
+}
+
+impl OpenCodeDispatchDiagnosticStage {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Preclaim => "preclaim",
+            Self::PostclaimPreNativeAdmission => "postclaim_pre_native_admission",
+            Self::NativeAdmission => "native_admission",
+            Self::ActualDispatch => "actual_dispatch",
+        }
+    }
+}
+
+/// Fixed reason codes make the diagnostic path non-throwing and prevent raw
+/// provider state from becoming an accidental observability channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenCodeDispatchDiagnosticReason {
+    RouteNative,
+    RouteBackground,
+    RouteSurface,
+    LifecycleBusy,
+    StaleIncarnation,
+    ConversationLease,
+    AgentOff,
+    ProviderNotReady,
+    ProviderInputBusy,
+    BrokerUnavailable,
+    NativeAdmissionReady,
+    NativeAdmissionRejected,
+    NoClaim,
+    ClaimAcquired,
+    NativeAdmit,
+    NativeRecordQueued,
+    NativeRecordTerminal,
+    NativeRecordRejected,
+    HttpSubmit,
+    SurfaceSubmit,
+    ProviderAccepted,
+    SubmitFailed,
+}
+
+impl OpenCodeDispatchDiagnosticReason {
+    fn code(self) -> &'static str {
+        match self {
+            Self::RouteNative => "route_native",
+            Self::RouteBackground => "route_background",
+            Self::RouteSurface => "route_surface",
+            Self::LifecycleBusy => "lifecycle_busy",
+            Self::StaleIncarnation => "stale_incarnation",
+            Self::ConversationLease => "conversation_lease",
+            Self::AgentOff => "agent_off",
+            Self::ProviderNotReady => "provider_not_ready",
+            Self::ProviderInputBusy => "provider_input_busy",
+            Self::BrokerUnavailable => "broker_unavailable",
+            Self::NativeAdmissionReady => "native_admission_ready",
+            Self::NativeAdmissionRejected => "native_admission_rejected",
+            Self::NoClaim => "no_claim",
+            Self::ClaimAcquired => "claim_acquired",
+            Self::NativeAdmit => "native_admit",
+            Self::NativeRecordQueued => "native_record_queued",
+            Self::NativeRecordTerminal => "native_record_terminal",
+            Self::NativeRecordRejected => "native_record_rejected",
+            Self::HttpSubmit => "http_submit",
+            Self::SurfaceSubmit => "surface_submit",
+            Self::ProviderAccepted => "provider_accepted",
+            Self::SubmitFailed => "submit_failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpenCodeDispatchDiagnosticKey {
+    stage: OpenCodeDispatchDiagnosticStage,
+    reason: OpenCodeDispatchDiagnosticReason,
+}
+
+#[derive(Debug, Default)]
+struct OpenCodeDispatchDiagnosticGuard {
+    order: VecDeque<(String, u64)>,
+    last: HashMap<(String, u64), OpenCodeDispatchDiagnosticKey>,
+}
+
+impl OpenCodeDispatchDiagnosticGuard {
+    fn record(
+        &mut self,
+        request_id: &str,
+        generation: u64,
+        key: OpenCodeDispatchDiagnosticKey,
+    ) -> bool {
+        let request = (request_id.to_string(), generation);
+        if self.last.get(&request).copied() == Some(key) {
+            return false;
+        }
+        if !self.last.contains_key(&request) {
+            if self.order.len() >= OPENCODE_DISPATCH_DIAGNOSTIC_CAPACITY {
+                if let Some(evicted) = self.order.pop_front() {
+                    self.last.remove(&evicted);
+                }
+            }
+            self.order.push_back(request.clone());
+        }
+        self.last.insert(request, key);
+        true
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.last.len()
+    }
+
+    #[cfg(test)]
+    fn contains(&self, request_id: &str, generation: u64) -> bool {
+        self.last
+            .contains_key(&(request_id.to_string(), generation))
+    }
+}
+
+static OPENCODE_DISPATCH_DIAGNOSTIC_GUARD: OnceLock<StdMutex<OpenCodeDispatchDiagnosticGuard>> =
+    OnceLock::new();
+
+fn opencode_dispatch_diagnostic_guard() -> &'static StdMutex<OpenCodeDispatchDiagnosticGuard> {
+    OPENCODE_DISPATCH_DIAGNOSTIC_GUARD.get_or_init(|| StdMutex::new(Default::default()))
+}
+
+fn sanitized_opencode_request_id(request_id: &str) -> Option<String> {
+    if request_id.is_empty() || request_id.len() > 96 {
+        return None;
+    }
+    if !request_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':'))
+    {
+        return None;
+    }
+    Some(request_id.to_string())
+}
+
+/// Record one bounded OpenCode request-stage transition. Diagnostic failure is
+/// deliberately swallowed so it cannot alter delivery, claim, or lock paths.
+pub(crate) fn log_opencode_dispatch_diagnostic(
+    request_id: &str,
+    generation: u64,
+    stage: OpenCodeDispatchDiagnosticStage,
+    reason: OpenCodeDispatchDiagnosticReason,
+) {
+    let Some(request_id) = sanitized_opencode_request_id(request_id) else {
+        return;
+    };
+    let key = OpenCodeDispatchDiagnosticKey { stage, reason };
+    let should_log = opencode_dispatch_diagnostic_guard()
+        .lock()
+        .ok()
+        .is_some_and(|mut guard| guard.record(&request_id, generation, key));
+    if !should_log {
+        return;
+    }
+    let line = format!(
+        "[WARDIAN] opencode_dispatch stage={} reason={} request_id={} generation={generation}",
+        stage.code(),
+        reason.code(),
+        request_id,
+    );
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::manager::log_debug(&line);
+    }));
+}
 
 #[derive(Debug, Clone)]
 pub struct NativeDeliveryAdmission {
@@ -444,13 +621,29 @@ impl NativeDeliveryBroker {
                 false,
             ));
         }
-        self.opencode_http_admission(
-            &spec.target_agent_id,
+        if let Err(error) = self
+            .opencode_http_admission(
+                &spec.target_agent_id,
+                spec.generation,
+                &spec.config,
+                &spec.workspace,
+            )
+            .await
+        {
+            log_opencode_dispatch_diagnostic(
+                &record.envelope.interaction_id,
+                spec.generation,
+                OpenCodeDispatchDiagnosticStage::NativeAdmission,
+                OpenCodeDispatchDiagnosticReason::NativeAdmissionRejected,
+            );
+            return Err(error);
+        }
+        log_opencode_dispatch_diagnostic(
+            &record.envelope.interaction_id,
             spec.generation,
-            &spec.config,
-            &spec.workspace,
-        )
-        .await?;
+            OpenCodeDispatchDiagnosticStage::NativeAdmission,
+            OpenCodeDispatchDiagnosticReason::NativeAdmissionReady,
+        );
         let registration = self
             .opencode_http
             .lock()
@@ -487,6 +680,12 @@ impl NativeDeliveryBroker {
                 "opencode_http_dispatching",
             )
             .await?;
+        log_opencode_dispatch_diagnostic(
+            &dispatching.envelope.interaction_id,
+            dispatching.envelope.generation,
+            OpenCodeDispatchDiagnosticStage::ActualDispatch,
+            OpenCodeDispatchDiagnosticReason::HttpSubmit,
+        );
         match registration
             .owner
             .submit_once(
@@ -497,6 +696,12 @@ impl NativeDeliveryBroker {
             .await
         {
             Ok(receipt) => {
+                log_opencode_dispatch_diagnostic(
+                    &dispatching.envelope.interaction_id,
+                    dispatching.envelope.generation,
+                    OpenCodeDispatchDiagnosticStage::ActualDispatch,
+                    OpenCodeDispatchDiagnosticReason::ProviderAccepted,
+                );
                 let detail = match registration.owner.reconcile_user_message(&prompt).await {
                     Ok(Some(_)) => {
                         "OpenCode HTTP returned 204 and the exact user message was reconciled"
@@ -526,6 +731,12 @@ impl NativeDeliveryBroker {
                 })
             }
             Err(failure) => {
+                log_opencode_dispatch_diagnostic(
+                    &dispatching.envelope.interaction_id,
+                    dispatching.envelope.generation,
+                    OpenCodeDispatchDiagnosticStage::ActualDispatch,
+                    OpenCodeDispatchDiagnosticReason::SubmitFailed,
+                );
                 let phase = if failure.provider_boundary_crossed {
                     NativeDeliveryPhase::SubmittedUnconfirmed
                 } else {
@@ -1124,8 +1335,24 @@ impl NativeDeliveryBroker {
             serde_json::to_string(&provenance).unwrap_or_else(|_| "{}".to_string()),
             crate::control::message_with_structured_reply_instruction(body, message_id,)
         );
-        self.opencode_http_admission(target_agent_id, generation, config, workspace)
-            .await?;
+        if let Err(error) = self
+            .opencode_http_admission(target_agent_id, generation, config, workspace)
+            .await
+        {
+            log_opencode_dispatch_diagnostic(
+                interaction_id,
+                generation,
+                OpenCodeDispatchDiagnosticStage::NativeAdmission,
+                OpenCodeDispatchDiagnosticReason::NativeAdmissionRejected,
+            );
+            return Err(error);
+        }
+        log_opencode_dispatch_diagnostic(
+            interaction_id,
+            generation,
+            OpenCodeDispatchDiagnosticStage::NativeAdmission,
+            OpenCodeDispatchDiagnosticReason::NativeAdmissionReady,
+        );
         let registration = self
             .opencode_http
             .lock()
@@ -1162,6 +1389,12 @@ impl NativeDeliveryBroker {
                 "opencode_http_dispatching",
             )
             .await?;
+        log_opencode_dispatch_diagnostic(
+            &dispatching.envelope.interaction_id,
+            dispatching.envelope.generation,
+            OpenCodeDispatchDiagnosticStage::ActualDispatch,
+            OpenCodeDispatchDiagnosticReason::HttpSubmit,
+        );
         match registration
             .owner
             .submit_once(
@@ -1172,6 +1405,12 @@ impl NativeDeliveryBroker {
             .await
         {
             Ok(receipt) => {
+                log_opencode_dispatch_diagnostic(
+                    &dispatching.envelope.interaction_id,
+                    dispatching.envelope.generation,
+                    OpenCodeDispatchDiagnosticStage::ActualDispatch,
+                    OpenCodeDispatchDiagnosticReason::ProviderAccepted,
+                );
                 let detail = match registration.owner.reconcile_user_message(&prompt).await {
                     Ok(Some(_)) => {
                         "OpenCode HTTP returned 204 and the exact user message was reconciled"
@@ -1196,6 +1435,12 @@ impl NativeDeliveryBroker {
                 Ok("provider_accepted".to_string())
             }
             Err(failure) => {
+                log_opencode_dispatch_diagnostic(
+                    &dispatching.envelope.interaction_id,
+                    dispatching.envelope.generation,
+                    OpenCodeDispatchDiagnosticStage::ActualDispatch,
+                    OpenCodeDispatchDiagnosticReason::SubmitFailed,
+                );
                 let phase = if failure.provider_boundary_crossed {
                     NativeDeliveryPhase::SubmittedUnconfirmed
                 } else {
@@ -3378,6 +3623,30 @@ mod tests {
         retry.interaction_id = "two".into();
         retry.message_id = "message-two".into();
         assert_eq!(canonical_hash(&request), canonical_hash(&retry));
+    }
+
+    #[test]
+    fn opencode_dispatch_diagnostics_deduplicate_transitions_and_evict_old_requests() {
+        let mut guard = OpenCodeDispatchDiagnosticGuard::default();
+        let route = OpenCodeDispatchDiagnosticKey {
+            stage: OpenCodeDispatchDiagnosticStage::Preclaim,
+            reason: OpenCodeDispatchDiagnosticReason::RouteNative,
+        };
+        let claim = OpenCodeDispatchDiagnosticKey {
+            stage: OpenCodeDispatchDiagnosticStage::PostclaimPreNativeAdmission,
+            reason: OpenCodeDispatchDiagnosticReason::ClaimAcquired,
+        };
+
+        assert!(guard.record("ask_first", 1, route));
+        assert!(!guard.record("ask_first", 1, route));
+        assert!(guard.record("ask_first", 1, claim));
+
+        for index in 0..OPENCODE_DISPATCH_DIAGNOSTIC_CAPACITY {
+            assert!(guard.record(&format!("ask_{index}"), 1, route));
+        }
+        assert_eq!(guard.len(), OPENCODE_DISPATCH_DIAGNOSTIC_CAPACITY);
+        assert!(!guard.contains("ask_first", 1));
+        assert!(guard.contains("ask_255", 1));
     }
 
     /// `opencode acp` exits 1 and prints its usage when an interactive flag
