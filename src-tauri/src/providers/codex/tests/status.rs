@@ -86,7 +86,24 @@ fn parse_output_agent_message_event() {
 fn parse_output_task_started_event() {
     let p = make_provider();
     let line = r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"abc"}}"#;
-    assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
+    assert_eq!(
+        p.parse_output(line).unwrap(),
+        AgentEvent::TurnStarted {
+            turn_id: "abc".into()
+        }
+    );
+}
+
+#[test]
+fn parse_output_task_started_rejects_missing_or_blank_turn_id() {
+    let p = make_provider();
+    for line in [
+        r#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
+        r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":""}}"#,
+        r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"   "}}"#,
+    ] {
+        assert_eq!(p.parse_output(line), Some(AgentEvent::Unknown), "{line}");
+    }
 }
 
 #[test]
@@ -163,6 +180,7 @@ fn parse_output_response_item_function_call_without_approval_sets_generating() {
     assert_eq!(p.parse_output(line).unwrap(), AgentEvent::Generating);
 }
 const STARTUP: &str = include_str!("fixtures/startup-host-context.jsonl");
+const REAL_DELIVERY: &str = include_str!("../../fixtures/codex-real-delivery-mirror.jsonl");
 
 fn replay(path: &Path) -> Vec<AgentEvent> {
     let provider = make_provider();
@@ -255,6 +273,60 @@ fn canonical_user_after_startup_replay_starts_exactly_one_query() {
 }
 
 #[test]
+fn real_delivery_task_start_is_lifecycle_only_and_keeps_baseline_user_queries() {
+    let provider = make_provider();
+    let events = REAL_DELIVERY
+        .lines()
+        .map(|line| provider.parse_output(line).expect("fixture event"))
+        .collect::<Vec<_>>();
+    let baseline_events = REAL_DELIVERY
+        .lines()
+        .skip(1)
+        .map(|line| provider.parse_output(line).expect("fixture event"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TurnStarted { turn_id } => Some(turn_id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        ["01a0a1e5-2f6d-7530-bebc-f44c8c299bb7"]
+    );
+    let user_queries = events
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::UserQuery))
+        .count();
+    let baseline_user_queries = baseline_events
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::UserQuery))
+        .count();
+    assert_eq!(
+        baseline_user_queries, 2,
+        "fixture user mirrors are intentional"
+    );
+    assert_eq!(user_queries, baseline_user_queries);
+
+    let lifecycle_start = events
+        .iter()
+        .find(|event| matches!(event, AgentEvent::TurnStarted { .. }))
+        .expect("provider lifecycle start");
+    assert!(
+        ProviderStatusEventPolicy::PreserveActionRequired.confirms_turn_started(lifecycle_start)
+    );
+    assert_eq!(
+        provider_status_from_event(
+            "Idle",
+            lifecycle_start,
+            ProviderStatusEventPolicy::PreserveActionRequired,
+        ),
+        Some("Processing...")
+    );
+}
+
+#[test]
 fn explicit_user_kinds_and_legacy_user_records_still_start_work() {
     let provider = make_provider();
     let mut records = vec![
@@ -333,8 +405,10 @@ fn actual_activity_completion_and_approval_keep_the_existing_status_policy() {
             "Processing...",
         ),
         (
-            json!({"type":"event_msg","payload":{"type":"task_started"}}),
-            AgentEvent::Generating,
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"fixture-turn"}}),
+            AgentEvent::TurnStarted {
+                turn_id: "fixture-turn".into(),
+            },
             "Processing...",
         ),
         (

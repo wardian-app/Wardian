@@ -7,7 +7,6 @@ pub mod change_snapshot_runtime;
 pub mod conversation_archive;
 pub mod file_resources;
 pub mod interactions;
-pub mod mailbox;
 pub mod telemetry_ingest;
 pub mod telemetry_maintenance;
 pub mod terminal_session;
@@ -29,9 +28,5 @@ pub use file_resources::{
     UserFileGrantV1, FILE_RESOURCE_REVISION_EVENT,
 };
 pub use interactions::InteractionState;
-pub use mailbox::{
-    MailboxDeliveryPhase, MailboxMessageDraft, MailboxMessageRecord, MailboxMessageStatus,
-    MailboxState,
-};
 pub use terminal_session::TerminalSessionBroker;
 pub use user_terminal::UserTerminalSession;

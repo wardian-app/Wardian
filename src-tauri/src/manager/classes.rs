@@ -383,23 +383,27 @@ mod tests {
 
         for (concepts, contract) in [
             (
-                &["broadcasts", "local", "authorized"][..],
-                "bounded broadcast authority",
+                &["authenticated", "managed", "never", "impersonate"][..],
+                "managed sender authentication",
             ),
             (
-                &["command mode", "exactly one", "rejects", "class:"][..],
-                "single-target provider commands",
+                &["one exact", "broadcast", "unsupported"][..],
+                "single recipient without legacy selectors",
             ),
             (
-                &["--targets", "explicit", "--until reply"][..],
-                "explicit structured fan-out",
+                &[
+                    "parent_interaction_id",
+                    "saved id",
+                    "do not infer completion",
+                ][..],
+                "correlated task completion",
             ),
             (
-                &["approval action", "only", "outstanding provider approval"][..],
-                "provider approval boundary",
+                &["provider commands", "approval actions", "not peer"][..],
+                "human provider controls remain separate",
             ),
             (
-                &["timeout", "do not", "replay"][..],
+                &["receive timeout", "never resubmits", "uncertainty"][..],
                 "no automatic replay after timeout",
             ),
         ] {

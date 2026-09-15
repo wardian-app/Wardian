@@ -8,7 +8,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 fn handshake() -> Vec<Value> {
     vec![
@@ -99,6 +99,12 @@ async fn exchange(stream: impl AsyncRead + AsyncWrite + Unpin, response: Value) 
         .await
         .unwrap();
     stream.flush().await.unwrap();
+    // Tokio flush hands bytes to the pipe but does not prove that the client
+    // consumed them. Keep the server endpoint alive until the client closes
+    // its side so a malformed receipt remains invalid_receipt rather than
+    // being misreported as a lost transport response.
+    let mut closed = [0u8; 1];
+    let _ = stream.read(&mut closed).await;
     request
 }
 

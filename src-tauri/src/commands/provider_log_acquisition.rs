@@ -604,6 +604,129 @@ mod tests {
     use wardian_core::models::chat::{AgentChatEventKind, AgentChatRole};
 
     #[test]
+    fn owned_fresh_prefix_is_acquired_before_first_poll_but_resume_and_disabled_prefixes_are_not() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("owned-provider.jsonl");
+        let owned_prefix = concat!(
+            r#"{"type":"turn_context","payload":{"turn_id":"owned-turn"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"user_message","message":"Owned request"}}"#,
+            "\n"
+        );
+        std::fs::write(&path, owned_prefix).expect("write owned fresh prefix");
+
+        let fresh = acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            "codex:session:fresh",
+            None,
+            true,
+        )
+        .expect("acquire owned prefix from the first poll");
+        assert_eq!(
+            fresh
+                .events
+                .iter()
+                .filter(|event| event.role == Some(AgentChatRole::User))
+                .count(),
+            1
+        );
+        assert_eq!(fresh.next.unknown_before_offset, None);
+
+        let resumed = acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            "codex:session:resume",
+            None,
+            false,
+        )
+        .expect("baseline a resume-only source");
+        assert!(resumed.events.is_empty());
+        assert_eq!(
+            resumed.next.unknown_before_offset,
+            Some(std::fs::metadata(&path).unwrap().len())
+        );
+
+        let disabled_path = temp.path().join("disabled-provider.jsonl");
+        std::fs::write(
+            &disabled_path,
+            r#"{"type":"event_msg","payload":{"type":"user_message","message":"Before disabled"}}"#
+                .to_string()
+                + "\n",
+        )
+        .expect("write disabled prefix");
+        let disabled = observe_provider_log_policy(
+            &disabled_path,
+            "codex:session:disabled",
+            None,
+            false,
+            true,
+        )
+        .expect("open disabled policy");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&disabled_path)
+            .and_then(|mut file| {
+                use std::io::Write as _;
+                writeln!(
+                    file,
+                    r#"{{"type":"event_msg","payload":{{"type":"user_message","message":"Hidden while disabled"}}}}"#
+                )
+            })
+            .expect("write disabled bytes");
+        let enabled = observe_provider_log_policy(
+            &disabled_path,
+            "codex:session:disabled",
+            Some(disabled.next),
+            true,
+            true,
+        )
+        .expect("close disabled policy");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&disabled_path)
+            .and_then(|mut file| {
+                use std::io::Write as _;
+                writeln!(
+                    file,
+                    r#"{{"type":"event_msg","payload":{{"type":"user_message","message":"Visible after disabled"}}}}"#
+                )
+            })
+            .expect("write enabled bytes");
+
+        let skipped = acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &disabled_path,
+            "codex:session:disabled",
+            Some(enabled.next),
+            true,
+        )
+        .expect("skip disabled span despite fresh trust");
+        assert!(skipped.events.is_empty());
+        assert!(skipped.continue_immediately);
+        let visible = acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &disabled_path,
+            "codex:session:disabled",
+            Some(skipped.next),
+            true,
+        )
+        .expect("acquire only post-policy bytes");
+        assert_eq!(
+            visible
+                .events
+                .iter()
+                .filter_map(|event| event.text.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["Visible after disabled"]
+        );
+    }
+
+    #[test]
     fn forward_batches_keep_tool_relationships_across_a_two_mib_burst() {
         let temp = tempfile::tempdir().expect("temp dir");
         let path = temp.path().join("provider.jsonl");

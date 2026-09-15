@@ -58,12 +58,21 @@ pub enum TaskDeliveryOwner {
     Scheduler,
 }
 
+/// Trusted host attribution, separate from registered agent identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostAutomationProvenance {
+    pub run_id: String,
+    pub node: String,
+}
+
 /// A projection of one canonical interaction available to this recipient.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentMessage {
     pub interaction_id: String,
     pub kind: InteractionKind,
     pub sender: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_automation: Option<HostAutomationProvenance>,
     pub message: String,
     pub parent_interaction_id: Option<String>,
     pub reply_status: Option<ReplyStatus>,
@@ -91,6 +100,8 @@ pub struct AgentMessagePage {
 pub struct AgentMessageContext {
     pub schema_version: u8,
     pub sender: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_automation: Option<HostAutomationProvenance>,
     pub recipient: String,
     pub kind: InteractionKind,
     pub interaction_id: String,

@@ -21,6 +21,9 @@ import { ContextMenu, ContextMenuItem } from "../components/ContextMenu";
 import { normalizeAgentStatus } from "../utils/statusUtils";
 import {
   RootTemporaryWorkerInspector,
+  hasRootWorkers,
+  normalizeRootWorkerSummary,
+  type RawRootWorkerSummary,
   type RootWorkerSummary,
 } from "../features/agents/RootTemporaryWorkerInspector";
 
@@ -204,9 +207,12 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
     let disposed = false;
     const refresh = async () => {
       try {
-        const result = await invoke<{ summaries: RootWorkerSummary[] }>('temporary_worker_root_summaries');
+        const result = await invoke<{ summaries?: RawRootWorkerSummary[] }>('temporary_worker_root_summaries');
         if (!disposed) {
-          setWorkerSummaries(Object.fromEntries(result.summaries.map((summary) => [summary.root_agent_id, summary])));
+          const summaries = (result.summaries ?? [])
+            .map(normalizeRootWorkerSummary)
+            .filter((summary): summary is RootWorkerSummary => summary !== null);
+          setWorkerSummaries(Object.fromEntries(summaries.map((summary) => [summary.root_agent_id, summary])));
         }
       } catch {
         // Older backends and startup migration windows have no child summary.
@@ -543,7 +549,7 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
                     {agent.session_name} <span className="text-xs leading-4 text-muted-neutral font-normal">({agent.agent_class})</span>
                   </h3>
                 )}
-                {workerSummary?.total ? (
+                {workerSummary && hasRootWorkers(workerSummary) ? (
                   <RootTemporaryWorkerInspector
                     agentName={agent.session_name}
                     summary={workerSummary}

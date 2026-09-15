@@ -2657,6 +2657,82 @@ async fn terminal_session_pause_drops_runtime_handles_and_closes_input_channel()
     );
 }
 
+#[tokio::test]
+async fn terminal_session_input_pause_rejects_composer_input_and_keeps_native_writer_live() {
+    let broker = TerminalSessionBroker::default();
+    let (runtime, mut input_rx, _) = runtime();
+    let generation = broker
+        .start_or_replace_runtime("input-paused", runtime, geometry(80, 24))
+        .await
+        .expect("start runtime");
+
+    let before = broker
+        .send_legacy_input("input-paused", b"before-pause".to_vec())
+        .await
+        .expect("pre-pause input decision");
+    assert_eq!(before.status, TerminalLeaseDecisionStatus::Accepted);
+    assert_eq!(
+        input_rx.recv().await.as_deref(),
+        Some(b"before-pause".as_slice())
+    );
+
+    let state = broker
+        .pause_input_sender("input-paused", generation)
+        .await
+        .expect("pause input sender");
+    assert_eq!(state.runtime_state, TerminalRuntimeState::Live);
+
+    let rejected = broker
+        .send_legacy_input("input-paused", b"composer-must-not-write".to_vec())
+        .await
+        .expect("paused input decision");
+    assert_eq!(rejected.status, TerminalLeaseDecisionStatus::Rejected);
+    assert_eq!(
+        rejected.reason,
+        Some(TerminalLeaseRejectionReason::RuntimeUnavailable)
+    );
+    assert!(input_rx.try_recv().is_err());
+
+    broker
+        .send_privileged_input("input-paused", b"native-control".to_vec())
+        .await
+        .expect("privileged input remains available");
+    assert_eq!(
+        input_rx.recv().await.as_deref(),
+        Some(b"native-control".as_slice())
+    );
+}
+
+#[tokio::test]
+async fn terminal_session_composer_input_rejects_stale_generation_before_successor_write() {
+    let broker = TerminalSessionBroker::default();
+    let (first_runtime, _, _) = runtime();
+    let first_generation = broker
+        .start_or_replace_runtime("composer-generation", first_runtime, geometry(80, 24))
+        .await
+        .expect("first runtime");
+    let (successor_runtime, mut successor_input_rx, _) = runtime();
+    let successor_generation = broker
+        .start_or_replace_runtime("composer-generation", successor_runtime, geometry(80, 24))
+        .await
+        .expect("successor runtime");
+
+    assert_eq!(
+        broker
+            .send_composer_input(
+                "composer-generation",
+                first_generation,
+                b"stale-composer-input".to_vec(),
+            )
+            .await,
+        Err(TerminalBrokerError::StaleRuntimeGeneration {
+            expected: successor_generation,
+            received: first_generation,
+        })
+    );
+    assert!(successor_input_rx.try_recv().is_err());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_session_legacy_read_cursor_is_generation_scoped() {
     let broker = Arc::new(TerminalSessionBroker::default());

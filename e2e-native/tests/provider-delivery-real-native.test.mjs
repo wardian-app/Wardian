@@ -1,13 +1,19 @@
 // @tier manual — Needs a real provider or a logged-in CLI. Run it deliberately.
-import test from "node:test";
 import { cleanupConformanceSession, pauseConformanceAgents } from "../lib/conformance-cleanup.mjs";
-
+import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
+import {
+  messageCli,
+  correlatedReply,
+  assertNativeSession,
+  assertOpenCodeHttpSession,
+  assertOpenCodeCompletedAnswer,
+} from "../lib/canonical-messaging.mjs";
 
 import {
   createNativeHarness,
@@ -30,7 +36,7 @@ function longLabels(marker) {
 
 export const INPUT_CASES = [
   {
-    name: "mailbox-short",
+    name: "prompt-short",
     prompt: (marker) =>
       "This is Wardian's local integration test for terminal message delivery. " +
       "It is a direct test prompt, not an instruction from another agent. " +
@@ -39,17 +45,17 @@ export const INPUT_CASES = [
     expectOutput: true,
   },
   {
-    name: "mailbox-multiline",
+    name: "prompt-multiline",
     prompt: (marker) => `Reply with these two lines:\n${marker}_LINE_1\n${marker}_LINE_2`,
     expectOutput: true,
   },
   {
-    name: "mailbox-trailing-newline",
+    name: "prompt-trailing-newline",
     prompt: (marker) => `Reply with exactly ${marker}.\n`,
     expectOutput: true,
   },
   {
-    name: "mailbox-long-paste",
+    name: "prompt-long-paste",
     prompt: (marker) => {
       const labels = longLabels(marker);
       return `No tools. Reply with ${marker} followed by the three LABEL values in source order, separated by |.\n` +
@@ -61,17 +67,81 @@ export const INPUT_CASES = [
   },
 ];
 
-const DEFAULT_CASES = ["mailbox-short"];
+function assertTerminalRuntimePreserved(before, after) {
+  assert.equal(after.session_id, before.session_id);
+  assert.equal(after.runtime_generation, before.runtime_generation, "Messaging recreated a PTY runtime");
+  // OpenCode HTTP output may advance the stream while the provider owns the
+  // session. Runtime identity, rather than sequence_barrier, proves that the
+  // debug input-disable hook preserved the session.
+}
+
+const DEFAULT_CASES = ["prompt-short"];
 const DEFAULT_PROVIDER_MODELS = {
   claude: "haiku",
   opencode: "opencode/deepseek-v4-flash-free",
 };
+const DEFAULT_PROVIDER_EFFORTS = {
+  codex: "low",
+};
+const COMPOSER_EXCEPTION_PROVIDERS = ["claude", "antigravity"];
+const CLAUDE_ISOLATED_PROVIDER_CONFIG = {
+  type: "claude",
+  tools: ["Bash"],
+  disallowed_tools: ["SendMessage", "ListAgents"],
+  mcp_config: JSON.stringify({ mcpServers: {} }),
+  strict_mcp_config: true,
+};
+// Match the established Codex model-selection spawn contract. The larger
+// budget is scoped to Codex spawn_agent and observation is restored afterward.
+const SPAWN_SCRIPT_MS = 2 * 120_000 + 60_000;
+const OBSERVATION_SCRIPT_MS = 30_000;
+const PROVIDER_READY_MS = 120_000;
+const CANONICAL_REPLY_EXACT_BYTES_INSTRUCTION =
+  " The canonical reply tool message must contain exactly the requested text bytes. " +
+  "If using stdin, write those bytes without a trailing newline; do not use shell echo, " +
+  "which appends a newline. Do not trim or otherwise transform the returned message.";
+const CANONICAL_REPLY_TOOL_ALLOWANCE =
+  "You may use the canonical reply MCP tool, or use Bash solely to invoke Wardian's " +
+  "canonical message reply command (`wardian message reply <request_id> --status done --stdin`) " +
+  "with the exact requested text on stdin. Bash's `printf` builtin is allowed solely " +
+  "to supply those exact stdin bytes. A text-only response does not complete the task. " +
+  "Use no other tools, shell commands, or file access.";
+
+function buildCanonicalReplyTaskPrompt(inputCase, marker) {
+  const base = inputCase.prompt(marker)
+    .replace("Do not access files or run tools.", CANONICAL_REPLY_TOOL_ALLOWANCE)
+    .replace("No tools.", CANONICAL_REPLY_TOOL_ALLOWANCE);
+  const withAllowance = base.includes(CANONICAL_REPLY_TOOL_ALLOWANCE)
+    ? base
+    : `${base} ${CANONICAL_REPLY_TOOL_ALLOWANCE}`;
+  return withAllowance +
+    " Complete this task using the canonical reply tool with status done and exactly the requested text as its message." +
+    CANONICAL_REPLY_EXACT_BYTES_INSTRUCTION;
+}
 
 const runRealDelivery = process.env.WARDIAN_E2E_REAL_DELIVERY === "1";
 const verifyFreshTranscript = process.env.WARDIAN_E2E_REAL_FRESH_TRANSCRIPT === "1";
 const allowPartialDelivery = process.env.WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL === "1";
 const workspacePath = process.env.WARDIAN_E2E_REAL_WORKSPACE || process.cwd();
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
+function parseOpenCodeNativeMode(value) {
+  const mode = value?.trim().toLowerCase() || "resume";
+  if (!new Set(["resume", "fresh"]).has(mode)) {
+    throw new Error(`WARDIAN_E2E_OPENCODE_NATIVE_MODE must be resume or fresh, got: ${mode}`);
+  }
+  return mode;
+}
+
+const opencodeNativeMode = parseOpenCodeNativeMode(process.env.WARDIAN_E2E_OPENCODE_NATIVE_MODE);
+// Explicit candidates, not a provider-wide unsupported/manual-only classification.
+// Unselected providers retain the separate human composer matrix.
+const nativeProviders = parseCommaList(process.env.WARDIAN_E2E_DELIVERY_NATIVE_PROVIDERS, []);
+// These providers retain the input sender and exercise the canonical task
+// route through the existing composer fallback. They never claim native delivery.
+const composerTaskProviders = parseCommaList(
+  process.env.WARDIAN_E2E_DELIVERY_COMPOSER_TASK_PROVIDERS,
+  [],
+);
 
 function buildCli(harness) {
   if (skipNativeBuild) {
@@ -95,15 +165,17 @@ function buildCli(harness) {
   return freezeBuiltCliForRun(harness);
 }
 
-function runCli(cliPath, harness, args) {
-  return spawnSync(cliPath, args, {
+function runCli(cliPath, harness, args, timeoutMs = undefined) {
+  const options = {
     cwd: harness.repoRoot,
     env: {
       ...process.env,
       WARDIAN_HOME: harness.isolatedHome,
     },
     encoding: "utf8",
-  });
+  };
+  if (timeoutMs !== undefined) options.timeout = timeoutMs;
+  return spawnSync(cliPath, args, options);
 }
 
 function runCliOk(cliPath, harness, args) {
@@ -114,6 +186,12 @@ function runCliOk(cliPath, harness, args) {
     `wardian ${args.join(" ")} failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
   );
   return result;
+}
+
+function assertProviderNativeSession(provider, capability, agentId, expected = null) {
+  return provider === "opencode"
+    ? assertOpenCodeHttpSession(capability, agentId, expected)
+    : assertNativeSession(capability, agentId, provider, expected);
 }
 
 function parseCommaList(value, fallback) {
@@ -147,30 +225,95 @@ function missingProviders(providers) {
   return PROVIDERS.filter((provider) => !selected.has(provider));
 }
 
-function providerModel(provider) {
+function assertDeliveryRouteCandidates(selectedProviders, nativeCandidates, composerCandidates) {
+  assert.deepEqual(
+    unknownValues(nativeCandidates, selectedProviders),
+    [],
+    "Native candidates must be in the selected provider matrix",
+  );
+  assert.deepEqual(
+    unknownValues(composerCandidates, selectedProviders),
+    [],
+    "Composer exception candidates must be in the selected provider matrix",
+  );
+  assert.deepEqual(
+    unknownValues(composerCandidates, COMPOSER_EXCEPTION_PROVIDERS),
+    [],
+    "Composer exception tasks are maintained only for Claude and Antigravity",
+  );
+  assert.deepEqual(
+    nativeCandidates.filter((provider) => composerCandidates.includes(provider)),
+    [],
+    "A provider cannot be assigned both native and composer-exception task routes",
+  );
+}
+
+function providerModel(provider, environment = process.env) {
   const envName = `WARDIAN_E2E_DELIVERY_${provider.toUpperCase()}_MODEL`;
-  if (Object.prototype.hasOwnProperty.call(process.env, envName)) {
-    return process.env[envName]?.trim() || null;
+  if (Object.prototype.hasOwnProperty.call(environment, envName)) {
+    return environment[envName]?.trim() || null;
   }
   return DEFAULT_PROVIDER_MODELS[provider] ?? null;
 }
 
-function providerCustomArgs(provider) {
+function providerCustomArgs(provider, environment = process.env) {
   const envName = `WARDIAN_E2E_DELIVERY_${provider.toUpperCase()}_ARGS`;
-  return process.env[envName]?.trim() || null;
+  return environment[envName]?.trim() || null;
 }
 
-function configOverrideForProvider(provider) {
+function providerEffort(provider, environment = process.env) {
+  const envName = `WARDIAN_E2E_DELIVERY_${provider.toUpperCase()}_EFFORT`;
+  if (Object.prototype.hasOwnProperty.call(environment, envName)) {
+    return environment[envName]?.trim() || null;
+  }
+  return DEFAULT_PROVIDER_EFFORTS[provider] ?? null;
+}
+
+function configOverrideForProvider(provider, environment = process.env) {
   const config = { provider };
-  const model = providerModel(provider);
-  const customArgs = providerCustomArgs(provider);
+  const model = providerModel(provider, environment);
+  const customArgs = providerCustomArgs(provider, environment);
+  const effort = providerEffort(provider, environment);
   if (model) {
     config.model = model;
   }
   if (customArgs) {
     config.custom_args = customArgs;
   }
+  if (effort) {
+    config.provider_config = { type: provider, reasoning_effort: effort };
+  }
+  if (provider === "claude") {
+    config.provider_config = {
+      ...config.provider_config,
+      ...CLAUDE_ISOLATED_PROVIDER_CONFIG,
+      tools: [...CLAUDE_ISOLATED_PROVIDER_CONFIG.tools],
+      disallowed_tools: [...CLAUDE_ISOLATED_PROVIDER_CONFIG.disallowed_tools],
+    };
+  }
   return config;
+}
+
+function providerInputReadinessObserved(provider, metric, visibleGrid = "") {
+  if (metric?.current_status?.toLowerCase() !== "idle") {
+    return false;
+  }
+  if (provider !== "opencode") {
+    return true;
+  }
+
+  const screen = String(visibleGrid).toLowerCase();
+  const startupBlocked = ["loading", "connecting", "permission required", "do you trust"]
+    .some((text) => screen.includes(text));
+  if (startupBlocked) {
+    return false;
+  }
+
+  const placeholderComposer = screen.includes("ask anything") &&
+    screen.includes("ctrl+p") && screen.includes("commands");
+  const restoredComposer = screen.includes("ctrl+p") &&
+    screen.includes("commands") && screen.includes("opencode");
+  return placeholderComposer || restoredComposer;
 }
 
 async function readDebugTail(harness) {
@@ -498,7 +641,7 @@ async function capturePiFailureEvidence(driver, harness, agent, providerError) {
   }
 
   const manifest = {
-    status: sessionReadError ? "session-read-failed" : "captured-before-kill",
+    status: sessionReadError ? "session-read-failed" : "captured-before-pause",
     provider: "pi",
     wardian_session_id: sessionId,
     owned_run_home: ownedRunHome,
@@ -524,22 +667,290 @@ async function capturePiFailureEvidence(driver, harness, agent, providerError) {
   return { status: manifest.status, path: safeEvidenceRoot, files: files.length };
 }
 
+const FAILURE_CAPTURE_MAX_EVENTS = 64;
+const FAILURE_CAPTURE_MAX_TEXT_BYTES = 4096;
+const FAILURE_CAPTURE_MAX_ROWS = 8;
+const FAILURE_CAPTURE_CAPABILITY_TIMEOUT_MS = 5000;
+const FAILURE_CAPTURE_NATIVE_METADATA_KEYS = [
+  "provider_log",
+  "provider_turn_id",
+  "provider_session_id",
+  "opencode_session_id",
+  "message_id",
+  "turn_id",
+  "part_id",
+  "provider_phase",
+  "log_path",
+  "source_path",
+  "raw_type",
+  "request_root_id",
+  "provider_observation_ids",
+  "input_origin",
+  "input_purpose",
+];
+
+function boundedFailureString(value, maxBytes = FAILURE_CAPTURE_MAX_TEXT_BYTES) {
+  const text = String(value ?? "");
+  const bytes = Buffer.from(text, "utf8");
+  return bytes.length <= maxBytes ? text : bytes.subarray(0, maxBytes).toString("utf8");
+}
+
+function boundedFailureValue(value) {
+  if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value === "string") return boundedFailureString(value);
+  if (Array.isArray(value)) return value.slice(0, 16).map(boundedFailureValue);
+  if (value && typeof value === "object") return boundedFailureString(JSON.stringify(value));
+  return undefined;
+}
+
+function boundedFailureTranscriptEvent(event) {
+  const text = typeof event?.text === "string" ? event.text : "";
+  const textBytes = Buffer.from(text, "utf8");
+  const metadata = event?.metadata && typeof event.metadata === "object" ? event.metadata : {};
+  const nativeMetadata = Object.fromEntries(FAILURE_CAPTURE_NATIVE_METADATA_KEYS
+    .filter((key) => Object.prototype.hasOwnProperty.call(metadata, key))
+    .map((key) => [key, boundedFailureValue(metadata[key])]));
+  return {
+    id: typeof event?.id === "string" ? event.id : null,
+    provider: diagnosticProvider(event?.provider),
+    kind: typeof event?.kind === "string" ? event.kind : "absent",
+    role: typeof event?.role === "string" ? event.role : "absent",
+    source: typeof event?.source === "string" ? event.source : null,
+    turn_id: typeof event?.turn_id === "string" ? event.turn_id : null,
+    native_metadata: nativeMetadata,
+    text: textBytes.length <= FAILURE_CAPTURE_MAX_TEXT_BYTES
+      ? text
+      : textBytes.subarray(0, FAILURE_CAPTURE_MAX_TEXT_BYTES).toString("utf8"),
+    text_truncated: textBytes.length > FAILURE_CAPTURE_MAX_TEXT_BYTES,
+    text_sha256: createHash("sha256").update(text).digest("hex"),
+    text_byte_count: textBytes.length,
+  };
+}
+
+function boundedFailureTranscript(events) {
+  const source = Array.isArray(events) ? events : [];
+  return {
+    total_events: source.length,
+    captured_events: Math.min(source.length, FAILURE_CAPTURE_MAX_EVENTS),
+    truncated: source.length > FAILURE_CAPTURE_MAX_EVENTS,
+    order: "source_order_tail",
+    events: source.slice(-FAILURE_CAPTURE_MAX_EVENTS).map(boundedFailureTranscriptEvent),
+  };
+}
+
+function failureAgentIdentity(agent) {
+  const keys = [
+    "session_id",
+    "provider",
+    "resume_session",
+    "fresh_provider_session_id",
+    "runtime_generation",
+    "session_name",
+    "agent_class",
+    "is_off",
+    "last_pid",
+  ];
+  return Object.fromEntries(keys
+    .filter((key) => Object.prototype.hasOwnProperty.call(agent ?? {}, key))
+    .map((key) => [key, boundedFailureValue(agent[key])]));
+}
+
+function latestProviderCase(report, provider) {
+  return [
+    ...(Array.isArray(report?.native_cases) ? report.native_cases : []),
+    ...(Array.isArray(report?.composer_task_cases) ? report.composer_task_cases : []),
+  ].filter((entry) => entry?.provider === provider).at(-1) ?? null;
+}
+
+function failureRequestId(entry) {
+  return [
+    entry?.receipt?.request_id,
+    entry?.claim?.request_id,
+    entry?.request_id,
+  ].find((value) => typeof value === "string" && value.trim()) ?? null;
+}
+
+function failureCaseAttempt(entry) {
+  if (!entry) return null;
+  return {
+    provider: entry.provider ?? null,
+    case: entry.case ?? null,
+    status: entry.status ?? null,
+    request_id: failureRequestId(entry),
+    attempts: entry.attempts ?? null,
+    admission_state: entry.admission_state ?? null,
+    receipt: boundedFailureValue(entry.receipt),
+    claim: boundedFailureValue(entry.claim),
+  };
+}
+
+function boundedFailureRow(row) {
+  return Object.fromEntries(Object.entries(row ?? {}).map(([key, value]) => [
+    key,
+    boundedFailureValue(value),
+  ]));
+}
+
+async function readFailureDeliveryAttempt(harness, entry) {
+  const requestId = failureRequestId(entry);
+  const result = { status: requestId ? "unread" : "unavailable", request_id: requestId, tables: {}, errors: [] };
+  if (!requestId) {
+    result.reason = "no_request_id";
+    return result;
+  }
+
+  let db;
+  try {
+    const { DatabaseSync } = await import("node:sqlite");
+    db = new DatabaseSync(path.join(harness.isolatedHome, "state.db"), { readOnly: true });
+    for (const table of [
+      "native_deliveries",
+      "native_delivery_evidence",
+      "agent_message_delivery",
+      "interaction_delivery_attempts",
+    ]) {
+      try {
+        result.tables[table] = db
+          .prepare(`SELECT * FROM ${table} WHERE interaction_id=? LIMIT ${FAILURE_CAPTURE_MAX_ROWS}`)
+          .all(requestId)
+          .map(boundedFailureRow);
+      } catch (error) {
+        result.errors.push(`${table}: ${boundedFailureString(error)}`);
+      }
+    }
+    result.status = "read";
+  } catch (error) {
+    result.errors.push(boundedFailureString(error));
+  } finally {
+    db?.close();
+  }
+  return result;
+}
+
+function failureCapabilityProbeError(result) {
+  if (result?.error?.code === "ETIMEDOUT") {
+    const error = new Error(
+      `ETIMEDOUT: failure capability probe exceeded ${FAILURE_CAPTURE_CAPABILITY_TIMEOUT_MS}ms`,
+    );
+    error.code = "ETIMEDOUT";
+    return error;
+  }
+  if (result?.status !== 0) {
+    return new Error(`exit=${result?.status}: ${boundedFailureString(result?.stderr || result?.stdout)}`);
+  }
+  return null;
+}
+
+async function captureProviderFailureEvidence({ driver, cliPath, harness, agent, provider, report }) {
+  const sessionId = agent?.session_id ?? null;
+  const capture = {
+    status: "captured-before-pause",
+    provider,
+    session_id: sessionId,
+    captured_at: new Date().toISOString(),
+    transcript: { status: "unread", events: [], errors: [] },
+    capability: { status: "unread", value: null, errors: [] },
+    current_agent_identity: failureAgentIdentity(agent),
+    delivery_attempt: null,
+    capture_errors: [],
+  };
+
+  try {
+    const events = await invokeTauri(driver, "load_agent_chat_transcript", { sessionId });
+    if (!Array.isArray(events)) throw new Error("load_agent_chat_transcript returned a non-array");
+    capture.transcript = { status: "read", ...boundedFailureTranscript(events), errors: [] };
+  } catch (error) {
+    capture.transcript = { status: "capture-failed", events: [], errors: [boundedFailureString(error)] };
+    capture.capture_errors.push(`transcript: ${boundedFailureString(error)}`);
+  }
+
+  try {
+    const agents = await invokeTauri(driver, "list_agents");
+    const current = Array.isArray(agents) ? agents.find((entry) => entry.session_id === sessionId) : null;
+    if (!current) throw new Error("current agent identity was not present in list_agents");
+    capture.current_agent_identity = failureAgentIdentity(current);
+  } catch (error) {
+    capture.current_agent_identity_error = boundedFailureString(error);
+    capture.capture_errors.push(`agent_identity: ${boundedFailureString(error)}`);
+  }
+
+  if (!cliPath) {
+    capture.capability = { status: "unavailable", value: null, errors: ["CLI path unavailable"] };
+  } else {
+    try {
+      const result = runCli(
+        cliPath,
+        harness,
+        ["delivery", "capabilities", sessionId],
+        FAILURE_CAPTURE_CAPABILITY_TIMEOUT_MS,
+      );
+      const probeError = failureCapabilityProbeError(result);
+      if (probeError) throw probeError;
+      capture.capability = { status: "read", value: JSON.parse(result.stdout), errors: [] };
+    } catch (error) {
+      capture.capability = { status: "capture-failed", value: null, errors: [boundedFailureString(error)] };
+      capture.capture_errors.push(`capability: ${boundedFailureString(error)}`);
+    }
+  }
+
+  const entry = latestProviderCase(report, provider);
+  capture.delivery_attempt = {
+    report_case: failureCaseAttempt(entry),
+    state: await readFailureDeliveryAttempt(harness, entry),
+  };
+  if (capture.delivery_attempt.state.errors.length) {
+    capture.capture_errors.push(...capture.delivery_attempt.state.errors.map((error) => `delivery: ${error}`));
+  }
+  return capture;
+}
+
+async function pauseRealProviderAgent(driver, sessionId) {
+  await invokeTauri(driver, "pause_agent", { sessionId });
+  const agents = await invokeTauri(driver, "list_agents");
+  const retained = Array.isArray(agents) && agents.find((entry) => entry.session_id === sessionId);
+  assert.ok(retained, `real provider pause was acknowledged but agent ${sessionId} was not retained`);
+  return retained;
+}
+
+function markActiveProviderCasesFailed(report, provider, error) {
+  const message = String(error?.message ?? error);
+  for (const entry of [
+    ...(Array.isArray(report?.native_cases) ? report.native_cases : []),
+    ...(Array.isArray(report?.composer_task_cases) ? report.composer_task_cases : []),
+  ]) {
+    if (entry.provider === provider && entry.status === "running") {
+      entry.status = "fail";
+      entry.error = message;
+    }
+  }
+}
+
 async function spawnRealProviderAgent(driver, provider, sessionName, folder) {
   const configOverride = configOverrideForProvider(provider);
-  const result = await driver.executeAsyncScript((sessionName, provider, folder, configOverride, done) => {
-    window.__TAURI_INTERNALS__.invoke("spawn_agent", {
-      req: {
-        sessionName,
-        agentClass: "Reviewer",
-        folder,
-        isOff: false,
-        configOverride,
-      },
-    }).then(
-      (agent) => done({ ok: true, agent }),
-      (error) => done({ ok: false, error: String(error), provider }),
-    );
-  }, sessionName, provider, folder, configOverride);
+  let result;
+  try {
+    if (provider === "codex") {
+      await driver.manage().setTimeouts({ script: SPAWN_SCRIPT_MS });
+    }
+    result = await driver.executeAsyncScript((sessionName, provider, folder, configOverride, done) => {
+      window.__TAURI_INTERNALS__.invoke("spawn_agent", {
+        req: {
+          sessionName,
+          agentClass: "Reviewer",
+          folder,
+          isOff: false,
+          configOverride,
+        },
+      }).then(
+        (agent) => done({ ok: true, agent }),
+        (error) => done({ ok: false, error: String(error), provider }),
+      );
+    }, sessionName, provider, folder, configOverride);
+  } finally {
+    if (provider === "codex") {
+      await driver.manage().setTimeouts({ script: OBSERVATION_SCRIPT_MS });
+    }
+  }
 
   assert.equal(
     result.ok,
@@ -548,106 +959,6 @@ async function spawnRealProviderAgent(driver, provider, sessionName, folder) {
   );
   assert.equal(result.agent.provider, provider);
   return result.agent;
-}
-
-async function killRealProviderAgent(driver, sessionId) {
-  if (!sessionId) {
-    return;
-  }
-
-  const result = await driver.executeAsyncScript((sid, done) => {
-    window.__TAURI_INTERNALS__.invoke("kill_agent", { sessionId: sid }).then(
-      () => done({ ok: true }),
-      (error) => done({ ok: false, error: String(error) }),
-    );
-  }, sessionId);
-
-  assert.equal(
-    result.ok,
-    true,
-    `real provider cleanup failed for ${sessionId}: ${result.error}`,
-  );
-}
-
-async function waitForDeliveryState(
-  cliPath,
-  harness,
-  target,
-  agentSessionId,
-  state,
-  messageId,
-  timeoutMs = 60000,
-) {
-  const startedAt = Date.now();
-  let lastResult = null;
-
-  while (Date.now() - startedAt < timeoutMs) {
-    lastResult = runCli(cliPath, harness, [
-      "agent",
-      "watch",
-      target,
-      "--since",
-      `${agentSessionId}:0`,
-      "--until",
-      `delivery:${state}`,
-      "--include",
-      "delivery,events",
-      "--timeout",
-      "2s",
-    ]);
-
-    if (lastResult.status === 0) {
-      const json = JSON.parse(lastResult.stdout);
-      const details = [
-        ...(json.delivery?.delivery ?? []),
-        ...(json.events ?? [])
-          .filter((event) => event.kind === "delivery")
-          .map((event) => event.payload),
-      ];
-      const detail = details.find((candidate) => {
-        if (candidate.delivery_state !== state) {
-          return false;
-        }
-        return !messageId || candidate.message_id === messageId;
-      });
-      if (detail) {
-        return detail;
-      }
-    }
-
-    const failedResult = runCli(cliPath, harness, [
-      "agent",
-      "watch",
-      target,
-      "--since",
-      `${agentSessionId}:0`,
-      "--until",
-      "delivery:failed",
-      "--include",
-      "delivery,events",
-      "--timeout",
-      "2s",
-    ]);
-    if (failedResult.status === 0) {
-      const json = JSON.parse(failedResult.stdout);
-      const details = [
-        ...(json.delivery?.delivery ?? []),
-        ...(json.events ?? [])
-          .filter((event) => event.kind === "delivery")
-          .map((event) => event.payload),
-      ];
-      const failed = details.find((candidate) =>
-        candidate.delivery_state === "failed" &&
-        (!messageId || candidate.message_id === messageId));
-      if (failed) {
-        assert.fail(`Delivery ${messageId} failed before ${state}: ${JSON.stringify(failed)}`);
-      }
-    }
-  }
-
-  assert.fail(
-    `Timed out waiting for delivery ${state} message ${messageId}; last result: ${JSON.stringify(lastResult)}`,
-  );
 }
 
 async function antigravityStartupNeedsAction(cliPath, harness, agentName, timeoutMs = 15000) {
@@ -696,61 +1007,374 @@ async function waitForPersistedOpenCodeSession(harness, sessionId, timeoutMs = 1
   );
 }
 
+async function waitForProviderInputReady(driver, provider, sessionId, timeoutMs = PROVIDER_READY_MS) {
+  let lastStatus = "unknown";
+  let lastScreenState = provider === "opencode" ? "unobserved" : "not-required";
+  try {
+    return await driver.wait(async () => {
+      try {
+        const metrics = await invokeTauri(driver, "list_agent_metrics");
+        const metric = metrics.find((entry) => entry.session_id === sessionId);
+        lastStatus = metric?.current_status ?? "missing";
+        if (provider !== "opencode") {
+          return providerInputReadinessObserved(provider, metric);
+        }
+
+        if (metric?.current_status?.toLowerCase() !== "idle") {
+          lastScreenState = "awaiting-idle";
+          return false;
+        }
+        const snapshot = await invokeTauri(driver, "request_terminal_snapshot", {
+          request: { session_id: sessionId },
+        });
+        const ready = providerInputReadinessObserved(provider, metric, snapshot.visible_grid);
+        lastScreenState = ready ? "ready" : "not-ready";
+        return ready;
+      } catch {
+        lastScreenState = "observation-error";
+        return false;
+      }
+    }, timeoutMs, `${provider} provider input did not become ready before submission`, 250);
+  } catch (error) {
+    throw new Error(
+      `${provider} provider input readiness timed out (status=${lastStatus}, screen=${lastScreenState})`,
+      { cause: error },
+    );
+  }
+}
+
+async function waitForExistingAgentIdle(driver, sessionId, timeoutMs = OBSERVATION_SCRIPT_MS) {
+  let lastStatus = "unknown";
+  try {
+    await driver.wait(async () => {
+      const metrics = await invokeTauri(driver, "list_agent_metrics");
+      lastStatus = metrics.find((row) => row.session_id === sessionId)?.current_status ?? "missing";
+      return existingAgentIsIdle(metrics, sessionId);
+    }, timeoutMs, "Existing receiver not observed idle before native runtime detachment", 200);
+  } catch (error) {
+    throw new Error(
+      `Existing receiver idle observation timed out (status=${lastStatus})`,
+      { cause: error },
+    );
+  }
+}
+
+function existingAgentIsIdle(metrics, sessionId) {
+  return metrics.find((row) => row.session_id === sessionId)?.current_status?.toLowerCase() === "idle";
+}
+
+function assertOpenCodeResumeIdentity(before, after, providerSessionId) {
+  assert.equal(after?.session_id, before?.session_id, "OpenCode resume replaced the Wardian agent identity");
+  assert.equal(before?.resume_session, providerSessionId, "OpenCode setup did not persist the discovered provider session");
+  assert.equal(after?.resume_session, providerSessionId, "OpenCode resume changed the discovered provider session");
+  return after;
+}
+
+function assertPiResumeIdentity(before, after, providerSessionId) {
+  assert.equal(after?.session_id, before?.session_id, "Pi resume replaced the Wardian agent identity");
+  assert.equal(before?.resume_session, providerSessionId, "Pi setup did not persist the provider session");
+  assert.equal(after?.resume_session, providerSessionId, "Pi resume changed the provider session");
+  return after;
+}
+
+async function resumeOpenCodeExistingSession(driver, agentSessionId, providerSessionId) {
+  const before = (await invokeTauri(driver, "list_agents"))
+    .find((entry) => entry.session_id === agentSessionId);
+  assert.ok(before, "OpenCode agent missing before same-session resume");
+  assertOpenCodeResumeIdentity(before, before, providerSessionId);
+
+  await invokeTauri(driver, "pause_agent", { sessionId: agentSessionId });
+  await invokeTauri(driver, "resume_agent", { sessionId: agentSessionId });
+
+  return driver.wait(async () => {
+    const after = (await invokeTauri(driver, "list_agents"))
+      .find((entry) => entry.session_id === agentSessionId);
+    if (!after?.resume_session) return false;
+    return assertOpenCodeResumeIdentity(before, after, providerSessionId);
+  }, 120_000, "OpenCode same-session resume did not preserve the discovered provider session", 250);
+}
+
+async function resumePiExistingSession(driver, agentSessionId, providerSessionId) {
+  const before = (await invokeTauri(driver, "list_agents"))
+    .find((entry) => entry.session_id === agentSessionId);
+  assert.ok(before, "Pi agent missing before same-session resume");
+  assertPiResumeIdentity(before, before, providerSessionId);
+
+  await invokeTauri(driver, "pause_agent", { sessionId: agentSessionId });
+  await invokeTauri(driver, "resume_agent", { sessionId: agentSessionId });
+
+  return driver.wait(async () => {
+    const after = (await invokeTauri(driver, "list_agents"))
+      .find((entry) => entry.session_id === agentSessionId);
+    if (!after?.resume_session) return false;
+    return assertPiResumeIdentity(before, after, providerSessionId);
+  }, 120_000, "Pi same-session resume did not preserve the provider session", 250);
+}
+
+async function waitForOpenCodeNativeOwner(driver, cliPath, harness, agentSessionId, providerSessionId) {
+  return driver.wait(async () => {
+    const capability = JSON.parse(runCliOk(cliPath, harness, ["delivery", "capabilities", agentSessionId]).stdout);
+    const binding = capability.binding;
+    if (!capability.native_negotiated || binding?.provider_session_id !== providerSessionId) return false;
+    assert.equal(binding.target_agent_id, agentSessionId);
+    assert.equal(binding.provider, "opencode");
+    assert.equal(binding.transport, "opencode_http");
+    return capability;
+  }, 30_000, "OpenCode same-session HTTP owner was not registered after resume", 250);
+}
+
+function assertPiNativeOwnerCapability(capability, agentSessionId, providerSessionId) {
+  assert.equal(
+    capability.binding?.provider_session_id,
+    providerSessionId,
+    "Pi native binding replaced the resumed provider session",
+  );
+  assertProviderNativeSession("pi", capability, agentSessionId);
+  return capability;
+}
+
+async function waitForPiNativeOwner(driver, cliPath, harness, agentSessionId, providerSessionId) {
+  return driver.wait(async () => {
+    const capability = JSON.parse(runCliOk(cliPath, harness, ["delivery", "capabilities", agentSessionId]).stdout);
+    if (!capability.native_negotiated) return false;
+    const config = (await invokeTauri(driver, "list_agents"))
+      .find((entry) => entry.session_id === agentSessionId);
+    assertPiResumeIdentity(
+      { session_id: agentSessionId, resume_session: providerSessionId },
+      config,
+      providerSessionId,
+    );
+    return assertPiNativeOwnerCapability(capability, agentSessionId, providerSessionId);
+  }, 30_000, "Pi native owner was not registered after same-session resume", 250);
+}
+
+function classifyLocalDeliveryReply(rawMessage, expected) {
+  if (typeof rawMessage !== "string") {
+    return {
+      rawMessage,
+      lineEnding: "unknown",
+      accepted: false,
+      rejection: "non_string",
+    };
+  }
+
+  const lineEnding = rawMessage.endsWith("\r\n")
+    ? "crlf"
+    : rawMessage.endsWith("\n")
+      ? "lf"
+      : rawMessage.endsWith("\r")
+        ? "cr"
+        : "none";
+  const accepted = rawMessage === expected ||
+    rawMessage === `${expected}\n` ||
+    rawMessage === `${expected}\r\n`;
+  if (accepted) {
+    return { rawMessage, lineEnding, accepted: true, rejection: null };
+  }
+
+  const body = lineEnding === "crlf" ? rawMessage.slice(0, -2)
+    : ["lf", "cr"].includes(lineEnding) ? rawMessage.slice(0, -1) : rawMessage;
+  const countLineBreaks = (value) => (value.match(/\r\n|\r|\n/g) ?? []).length;
+  const rejection = countLineBreaks(body) > countLineBreaks(expected)
+    ? "multiple_lines"
+    : lineEnding === "cr"
+      ? "unsupported_line_ending"
+      : "wrong_content";
+  return { rawMessage, lineEnding, accepted: false, rejection };
+}
+
+function qualifyLocalDeliveryReply(page, requestId, expected) {
+  const replies = page.messages.filter((row) =>
+    row.kind === "reply" && row.parent_interaction_id === requestId);
+  const candidates = replies.map((reply) => ({
+    reply,
+    ...classifyLocalDeliveryReply(reply.message, expected),
+  }));
+  return candidates.find((candidate) => candidate.accepted) ?? candidates.at(-1) ?? null;
+}
+
 async function runRealDeliveryCase({
   driver,
-  cliPath,
   harness,
   provider,
   agentSessionId,
-  agentName,
   inputCase,
   runId,
+  report,
+  save,
 }) {
   const marker = `WARDIAN_REAL_DELIVERY_${provider.toUpperCase()}_${inputCase.name.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_${runId}`;
   const prompt = inputCase.prompt(marker);
-  const queued = runCliOk(cliPath, harness, [
-    "send",
-    prompt,
-    "--to",
-    agentName,
-    "--queue-policy",
-    "mailbox-only",
-  ]);
-  const queuedDelivery = JSON.parse(queued.stdout).delivery[0];
-  assert.equal(queuedDelivery.delivery_state, "queued");
-  assert.equal(queuedDelivery.runtime_state, "mailbox_only");
-  assert.match(queuedDelivery.message_id, /^msg_/);
+  // Human composer coverage only. Peer tasks use the canonical messaging suite.
+  await waitForProviderInputReady(driver, provider, agentSessionId);
+  const delivery = await invokeTauri(driver, "submit_prompt_to_agent", {
+    sessionId: agentSessionId, prompt, inputMode: "message",
+  });
+  assert.equal(delivery.provider, provider);
+  assert.ok(["provider_accepted", "queued"].includes(delivery.delivery_state));
+  // Admission alone is not a PASS: provider-authored transcript and archive
+  // evidence are observed below.
 
-  const drained = await waitForDeliveryState(
-    cliPath,
-    harness,
-    agentName,
-    agentSessionId,
-    "provider_accepted",
-    queuedDelivery.message_id,
-  );
-  assert.equal(drained.runtime_state, "mailbox_drain");
-  assert.equal(drained.provider, provider);
-
+  let providerSessionId = null;
   if (provider === "opencode") {
-    await waitForPersistedOpenCodeSession(harness, agentSessionId);
+    providerSessionId = await waitForPersistedOpenCodeSession(harness, agentSessionId);
   }
 
-  const conformance = await assertRealChatConformance(driver, agentSessionId, provider, marker);
-
+  const conformance = await assertRealChatConformance(driver, agentSessionId, provider, marker, { report, save });
   if (inputCase.expectOutput) {
     const expected = inputCase.expectedOutput?.(marker) ??
-      (inputCase.name === "mailbox-multiline" ? `${marker}_LINE_1\n${marker}_LINE_2` : marker);
+      (inputCase.name === "prompt-multiline" ? `${marker}_LINE_1\n${marker}_LINE_2` : marker);
     assert.ok(
       conformance.assistantEvents.some((event) => (event.text ?? "").includes(expected)),
       `${provider} provider transcript response did not include ${expected}`,
     );
     assert.ok(conformance.events.some((event) => event.role === "user" &&
       event.metadata?.provider_log === true && event.text?.includes(prompt.trimEnd())),
-    "Native user evidence must retain the complete submitted payload");
+    "Provider user evidence must retain the complete submitted payload");
   }
 
-  return { marker, expected: inputCase.name === "mailbox-multiline" ? `${marker}_LINE_2` : marker };
+  return {
+    marker,
+    expected: inputCase.expectedOutput?.(marker) ??
+      (inputCase.name === "prompt-multiline" ? `${marker}_LINE_1\n${marker}_LINE_2` : marker),
+    providerSessionId,
+  };
+}
+
+async function runNativeTaskCase({ driver, cliPath, harness, provider, agent, sender, inputCase, identity, terminal, report, save }) {
+  const marker = `NATIVE_TASK_${provider}_${Date.now()}`;
+  const expected = inputCase.name === "prompt-multiline" ? `${marker}_LINE_1\n${marker}_LINE_2` : marker;
+  const body = buildCanonicalReplyTaskPrompt(inputCase, marker);
+  const evidence = { provider, case: inputCase.name, status: "running", identity, attempts: 0, admission_state: "idle" };
+  report.native_cases.push(evidence);
+  const initial = await messageCli(cliPath, harness.isolatedHome, harness.repoRoot, sender.session_id, ["receive", "--timeout-ms", "0"]);
+  let cursor = initial.next_cursor;
+  evidence.attempts = 1;
+  await save();
+  let finalCapability = null;
+  const task = await messageCli(cliPath, harness.isolatedHome, harness.repoRoot, sender.session_id, ["followup", agent.session_id, body]);
+  assert.equal(task.operation, "followup_task");
+  assert.ok(task.request_id);
+  evidence.receipt = task;
+  await save();
+  let reply;
+  await driver.wait(async () => {
+    const capability = JSON.parse(runCliOk(cliPath, harness, ["delivery", "capabilities", agent.session_id]).stdout);
+    finalCapability = capability;
+    assertProviderNativeSession(provider, capability, agent.session_id, identity);
+    const config = (await invokeTauri(driver, "list_agents")).find((row) => row.session_id === agent.session_id);
+    assert.equal(config?.resume_session, identity.provider_session_id);
+    assertTerminalRuntimePreserved(terminal, await invokeTauri(driver, "request_terminal_snapshot", { request: { session_id: agent.session_id } }));
+    const page = await messageCli(cliPath, harness.isolatedHome, harness.repoRoot, sender.session_id,
+      ["receive", "--cursor", cursor, "--timeout-ms", "0"]);
+    cursor = page.next_cursor;
+    const qualified = qualifyLocalDeliveryReply(page, task.request_id, expected);
+    if (qualified) {
+      evidence.reply_raw_message = qualified.rawMessage;
+      evidence.reply_line_ending = qualified.lineEnding;
+      evidence.reply_qualification = qualified.accepted
+        ? `accepted_${qualified.lineEnding}`
+        : `rejected_${qualified.rejection}`;
+      assert.ok(qualified.accepted, `Canonical reply rejected: ${evidence.reply_qualification}`);
+      reply ??= correlatedReply(page, task.request_id, agent.session_id, qualified.rawMessage);
+    }
+    return !!reply;
+  }, 120_000, "Native canonical reply missing; no fallback or replay", 250);
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(path.join(harness.isolatedHome, "state.db"), { readOnly: true });
+  try {
+    const claim = db.prepare("SELECT d.interaction_id AS request_id,d.recipient,d.sender,d.generation,d.owner,i.status FROM agent_message_delivery d JOIN interactions i ON i.id=d.interaction_id WHERE d.interaction_id=?").get(task.request_id);
+    assert.equal(claim?.recipient, agent.session_id);
+    assert.equal(claim.sender, sender.session_id);
+    assert.equal(claim.generation, identity.generation);
+    assert.ok(["provider_accepted", "provider_visible", "provider_completed"].includes(claim.owner), "Canonical task lacks a native provider claim");
+    assert.equal(claim.status, "completed");
+    evidence.claim = claim;
+    if (provider === "opencode") {
+      evidence.provider_answer = assertOpenCodeCompletedAnswer({
+        capability: finalCapability,
+        agentId: agent.session_id,
+        expected: identity,
+        requestId: task.request_id,
+        reply,
+        claim,
+        expectedMessage: reply.message,
+      });
+    }
+  } finally { db.close(); }
+  evidence.reply = reply;
+  evidence.status = "pass";
+  await save();
+}
+
+async function runComposerExceptionTaskCase({ driver, cliPath, harness, provider, agent, sender, inputCase, report, save }) {
+  const marker = `COMPOSER_EXCEPTION_TASK_${provider}_${Date.now()}`;
+  const expected = inputCase.name === "prompt-multiline" ? `${marker}_LINE_1\n${marker}_LINE_2` : marker;
+  const body = buildCanonicalReplyTaskPrompt(inputCase, marker);
+  const evidence = {
+    provider,
+    case: inputCase.name,
+    route: "composer_exception",
+    status: "running",
+    input_attached: true,
+    native_negotiated: false,
+    native_record: null,
+    attempts: 0,
+  };
+  report.composer_task_cases.push(evidence);
+  await driver.wait(async () => {
+    const metrics = await invokeTauri(driver, "list_agent_metrics");
+    return metrics.find((row) => row.session_id === agent.session_id)?.current_status?.toLowerCase() === "idle";
+  }, 30_000, "Existing receiver not observed idle before composer-exception task admission", 200);
+  const capability = JSON.parse(runCliOk(cliPath, harness, ["delivery", "capabilities", agent.session_id]).stdout);
+  assert.equal(capability.native_negotiated, false, `${provider} composer exception unexpectedly negotiated native delivery`);
+  evidence.capability = {
+    native_negotiated: capability.native_negotiated,
+    transport: capability.binding?.transport ?? null,
+  };
+  const terminal = await invokeTauri(driver, "request_terminal_snapshot", { request: { session_id: agent.session_id } });
+  const initial = await messageCli(cliPath, harness.isolatedHome, harness.repoRoot, sender.session_id, ["receive", "--timeout-ms", "0"]);
+  let cursor = initial.next_cursor;
+  evidence.attempts = 1;
+  await save();
+  const task = await messageCli(cliPath, harness.isolatedHome, harness.repoRoot, sender.session_id, ["followup", agent.session_id, body]);
+  assert.equal(task.operation, "followup_task");
+  assert.ok(task.request_id);
+  evidence.receipt = task;
+  await save();
+  let reply;
+  await driver.wait(async () => {
+    const page = await messageCli(cliPath, harness.isolatedHome, harness.repoRoot, sender.session_id,
+      ["receive", "--cursor", cursor, "--timeout-ms", "0"]);
+    cursor = page.next_cursor;
+    const qualified = qualifyLocalDeliveryReply(page, task.request_id, expected);
+    if (qualified) {
+      evidence.reply_raw_message = qualified.rawMessage;
+      evidence.reply_line_ending = qualified.lineEnding;
+      evidence.reply_qualification = qualified.accepted
+        ? `accepted_${qualified.lineEnding}`
+        : `rejected_${qualified.rejection}`;
+      assert.ok(qualified.accepted, `Canonical reply rejected: ${evidence.reply_qualification}`);
+      reply ??= correlatedReply(page, task.request_id, agent.session_id, qualified.rawMessage);
+    }
+    return !!reply;
+  }, 120_000, "Composer-exception canonical reply missing", 250);
+  assertTerminalRuntimePreserved(terminal, await invokeTauri(driver, "request_terminal_snapshot", { request: { session_id: agent.session_id } }));
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(path.join(harness.isolatedHome, "state.db"), { readOnly: true });
+  try {
+    const claim = db.prepare("SELECT d.interaction_id AS request_id,d.recipient,d.sender,d.generation,d.owner,i.status FROM agent_message_delivery d JOIN interactions i ON i.id=d.interaction_id WHERE d.interaction_id=?").get(task.request_id);
+    assert.equal(claim?.recipient, agent.session_id);
+    assert.equal(claim.sender, sender.session_id);
+    assert.equal(claim?.owner, "provider_visible");
+    assert.equal(claim?.status, "completed");
+    const nativeRecord = db.prepare("SELECT interaction_id,phase FROM native_deliveries WHERE interaction_id=?").get(task.request_id);
+    assert.equal(nativeRecord, undefined, "Composer exception task unexpectedly created a native delivery record");
+    evidence.claim = claim;
+  } finally { db.close(); }
+  evidence.reply = reply;
+  evidence.status = "pass";
+  await save();
 }
 
 function isProviderAuthoredAssistantEvent(event, provider, marker) {
@@ -761,6 +1385,28 @@ function isProviderAuthoredAssistantEvent(event, provider, marker) {
     typeof event?.source === "string" &&
     event.source.trim().length > 0 &&
     (event.text ?? "").includes(marker);
+}
+
+// AgentChatView renders every semantic assistant message, including watch and
+// terminal-fallback rows that do not carry provider-log provenance. Keep this
+// count separate from the provider-authored evidence predicate above.
+function visibleSemanticAssistantMessageRows(events, marker) {
+  return events.filter((event) => {
+    if (event?.kind !== "message") return false;
+    const role = event.role ?? "assistant";
+    const visibleText = event.text?.trimEnd() || event.title || "";
+    return role === "assistant" && visibleText.includes(marker);
+  });
+}
+
+function assertVisibleSemanticAssistantMessageOnce(events, marker) {
+  const rows = visibleSemanticAssistantMessageRows(events, marker);
+  assert.equal(
+    rows.length,
+    1,
+    `Chat contains ${rows.length} visible semantic assistant-message rows for ${marker}`,
+  );
+  return rows;
 }
 
 const SAFE_IPC_ERROR_NAMES = new Set([
@@ -854,6 +1500,7 @@ function summarizeTranscript(candidate, provider, marker) {
       provider_log_true: providerLogEvents.length,
       source_present: sourceEvents.length,
       marker: markerEvents.length,
+      visible_assistant_marker: visibleSemanticAssistantMessageRows(events, marker).length,
     },
     provider: [...new Set(events.map((event) => diagnosticProvider(event?.provider)))],
     source: [...new Set(sourceEvents.map((event) => diagnosticSource(event.source)))],
@@ -878,7 +1525,8 @@ async function assertRealChatConformance(driver, sessionId, provider, marker, { 
     hasUser: false,
     hasAssistant: false,
     counts: { events: 0, user_marker: 0, assistant_role: 0, provider_match: 0,
-      message_kind: 0, provider_log_true: 0, source_present: 0, marker: 0 },
+      message_kind: 0, provider_log_true: 0, source_present: 0, marker: 0,
+      visible_assistant_marker: 0 },
     provider: [],
     source: [],
     provider_log: [],
@@ -934,6 +1582,7 @@ async function assertRealChatConformance(driver, sessionId, provider, marker, { 
     1,
     `${provider} chat replay duplicated or omitted the assistant response for ${marker}`,
   );
+  assertVisibleSemanticAssistantMessageOnce(events, marker);
   assert.equal(new Set(events.map((event) => event.id)).size, events.length, `${provider} chat replay contains duplicate event IDs`);
 
   const metrics = await invokeTauri(driver, "list_agent_metrics");
@@ -976,6 +1625,74 @@ test("delivery deterministic: fresh readiness cannot filter away separate stale 
     assert.throws(() => assertNoStaleTranscript(events, "OLD"), /previous provider transcript/);
   }
   assertNoStaleTranscript([fresh], "OLD");
+});
+
+test("delivery deterministic: an unbound watch answer fails visible assistant cardinality", () => {
+  const marker = "WARDIAN_REAL_DELIVERY_DUPLICATE_MARKER";
+  const qualifiedNative = {
+    id: "native-response-item",
+    provider: "codex",
+    kind: "message",
+    role: "assistant",
+    text: marker,
+    source: "response_item",
+    turn_id: "msg-native",
+    metadata: {
+      provider_log: true,
+      provider_turn_id: "turn-native",
+      provider_phase: "final_answer",
+    },
+  };
+  const unboundWatch = {
+    ...qualifiedNative,
+    id: "watch-event-msg",
+    source: "event_msg",
+    turn_id: null,
+    metadata: {
+      transcript_cursor: "agent:0000000000000003:event_msg",
+      raw_role: "assistant",
+      provider_source: "event",
+    },
+  };
+
+  assert.equal(isProviderAuthoredAssistantEvent(qualifiedNative, "codex", marker), true);
+  assert.equal(isProviderAuthoredAssistantEvent(unboundWatch, "codex", marker), false);
+  assert.equal(visibleSemanticAssistantMessageRows([qualifiedNative], marker).length, 1);
+  assert.equal(visibleSemanticAssistantMessageRows([qualifiedNative, unboundWatch], marker).length, 2);
+  assert.throws(
+    () => assertVisibleSemanticAssistantMessageOnce([qualifiedNative, unboundWatch], marker),
+    /visible semantic assistant-message rows/,
+  );
+});
+
+test("transcript timeout diagnostics retain incomplete provider metadata without raw errors", () => {
+  const summary = summarizeTranscript([
+    { provider: "opencode", kind: "message", role: "user", text: "MARKER",
+      source: "provider_session", metadata: { provider_log: true } },
+    { provider: "opencode", kind: "message", role: "assistant", text: "MARKER",
+      source: "provider_session", metadata: { provider_log: false } },
+  ], "opencode", "MARKER");
+  assert.equal(summary.hasUser, true);
+  assert.equal(summary.hasAssistant, false);
+  assert.deepEqual(summary.counts, {
+    events: 2,
+    user_marker: 1,
+    assistant_role: 1,
+    provider_match: 2,
+    message_kind: 2,
+    provider_log_true: 1,
+    source_present: 2,
+    marker: 2,
+    visible_assistant_marker: 1,
+  });
+  assert.deepEqual(summary.provider, ["opencode"]);
+  assert.deepEqual(summary.source, ["other"]);
+  assert.deepEqual(summary.provider_log, [true, false]);
+  assert.equal(summary.last_event.source, "other");
+
+  const classified = classifyIpcError(new Error("private IPC details are excluded"));
+  assert.deepEqual(classified, { classification: "transcript_invoke_rejected", name: "Error" });
+  assert.equal(Object.hasOwn(classified, "message"), false);
 });
 
 function piSessionBytes(sessionId, totalBytes = 256) {
@@ -1070,6 +1787,83 @@ test("Pi failure evidence rejects escape, reparse, and bounded-file violations",
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+test("failure transcript capture preserves native fields and source order within its bound", () => {
+  const source = Array.from({ length: FAILURE_CAPTURE_MAX_EVENTS + 2 }, (_, index) => ({
+    id: `event-${index}`,
+    provider: "codex",
+    kind: "message",
+    role: index % 2 ? "assistant" : "user",
+    source: index % 2 ? "response_item" : "event_msg",
+    turn_id: index % 2 ? `turn-${index}` : null,
+    text: `event text ${index}`,
+    metadata: {
+      provider_log: true,
+      provider_turn_id: `turn-${index}`,
+      message_id: `message-${index}`,
+      provider_observation_ids: [`observation-${index}`],
+    },
+  }));
+
+  const captured = boundedFailureTranscript(source);
+  assert.equal(captured.total_events, FAILURE_CAPTURE_MAX_EVENTS + 2);
+  assert.equal(captured.captured_events, FAILURE_CAPTURE_MAX_EVENTS);
+  assert.equal(captured.truncated, true);
+  assert.deepEqual(
+    captured.events.map((event) => event.id),
+    source.slice(-FAILURE_CAPTURE_MAX_EVENTS).map((event) => event.id),
+  );
+  assert.equal(captured.events[0].text, "event text 2");
+  assert.equal(captured.events.at(-1).native_metadata.message_id, "message-65");
+  assert.deepEqual(captured.events.at(-1).native_metadata.provider_observation_ids, ["observation-65"]);
+});
+
+test("provider pause requires acknowledgement and retains the owned agent", async () => {
+  const retained = { session_id: "owned-agent", provider: "codex", is_off: true };
+  const commands = [];
+  const driver = {
+    async executeAsyncScript(_script, command) {
+      commands.push(command);
+      if (command === "pause_agent") return { ok: true, value: null };
+      if (command === "list_agents") return { ok: true, value: [retained] };
+      throw new Error(`unexpected command: ${command}`);
+    },
+  };
+
+  assert.deepEqual(await pauseRealProviderAgent(driver, retained.session_id), retained);
+  assert.deepEqual(commands, ["pause_agent", "list_agents"]);
+});
+
+test("failure capture records component errors and fails the active case", async () => {
+  const driver = {
+    async executeAsyncScript() {
+      throw new Error("diagnostic read unavailable");
+    },
+  };
+  const report = {
+    native_cases: [{ provider: "codex", case: "prompt-short", status: "running" }],
+    composer_task_cases: [{ provider: "codex", case: "prompt-multiline", status: "pass" }],
+  };
+  const capture = await captureProviderFailureEvidence({
+    driver,
+    cliPath: null,
+    harness: { isolatedHome: path.join(tmpdir(), "missing-failure-capture-home") },
+    agent: { session_id: "owned-agent", provider: "codex", resume_session: "provider-session" },
+    provider: "codex",
+    report,
+  });
+
+  assert.equal(capture.status, "captured-before-pause");
+  assert.equal(capture.transcript.status, "capture-failed");
+  assert.equal(capture.capability.status, "unavailable");
+  assert.equal(capture.delivery_attempt.state.reason, "no_request_id");
+  assert.ok(capture.capture_errors.some((error) => error.startsWith("transcript:")));
+  assert.ok(capture.capture_errors.some((error) => error.startsWith("agent_identity:")));
+
+  markActiveProviderCasesFailed(report, "codex", new Error("replay failed"));
+  assert.equal(report.native_cases[0].status, "fail");
+  assert.equal(report.composer_task_cases[0].status, "pass");
 });
 
 async function waitForFreshTranscript(driver, sessionId, provider, freshMarker) {
@@ -1172,19 +1966,271 @@ async function readProviderTerminalTail(driver, sessionId) {
   return result.output || "<provider terminal emitted no readable output>";
 }
 
+test("OpenCode same-session resume keeps the discovered provider identity", () => {
+  const before = { session_id: "wardian-agent", resume_session: "ses_discovered" };
+  const after = { session_id: "wardian-agent", resume_session: "ses_discovered" };
+  assert.deepEqual(
+    assertOpenCodeResumeIdentity(before, after, "ses_discovered"),
+    after,
+  );
+  assert.throws(
+    () => assertOpenCodeResumeIdentity(before, { ...after, resume_session: "ses_replaced" }, "ses_discovered"),
+    /changed the discovered provider session/,
+  );
+});
+
+test("Pi native qualification keeps the existing provider session across resume", () => {
+  const before = { session_id: "wardian-agent", resume_session: "pi-session" };
+  const after = { session_id: "wardian-agent", resume_session: "pi-session" };
+  assert.deepEqual(assertPiResumeIdentity(before, after, "pi-session"), after);
+  assert.throws(
+    () => assertPiResumeIdentity(before, { ...after, session_id: "other-agent" }, "pi-session"),
+    /replaced the Wardian agent identity/,
+  );
+  assert.throws(
+    () => assertPiResumeIdentity(before, { ...after, resume_session: "new-session" }, "pi-session"),
+    /changed the provider session/,
+  );
+});
+
+test("Pi native owner validation returns the capability shape", () => {
+  const capability = {
+    native_negotiated: true,
+    binding: {
+      target_agent_id: "wardian-agent",
+      provider: "pi",
+      provider_session_id: "pi-session",
+      generation: 4,
+      transport: "pi_native",
+      capabilities: { persistent_session: true, positive_turn_start: true },
+    },
+  };
+  const returned = assertPiNativeOwnerCapability(capability, "wardian-agent", "pi-session");
+  assert.strictEqual(returned, capability);
+  assert.equal(returned.native_negotiated, true);
+  assert.equal(returned.binding.provider_session_id, "pi-session");
+});
+
+test("local delivery reply qualification preserves raw CLI line endings", () => {
+  const expected = "DELIVERY_MARKER";
+  const makePage = (message, extra = []) => ({
+    messages: [{
+      kind: "reply",
+      parent_interaction_id: "task-1",
+      sender: "agent-1",
+      reply_status: "done",
+      interaction_id: "reply-1",
+      message,
+    }, ...extra],
+  });
+
+  for (const [rawMessage, lineEnding] of [
+    [expected, "none"],
+    [`${expected}\n`, "lf"],
+    [`${expected}\r\n`, "crlf"],
+  ]) {
+    const qualified = qualifyLocalDeliveryReply(makePage(rawMessage), "task-1", expected);
+    assert.equal(qualified.accepted, true);
+    assert.equal(qualified.rawMessage, rawMessage);
+    assert.equal(qualified.lineEnding, lineEnding);
+    assert.equal(correlatedReply(makePage(rawMessage), "task-1", "agent-1", qualified.rawMessage).message, rawMessage);
+  }
+
+  const multilineExpected = "DELIVERY_LINE_1\nDELIVERY_LINE_2";
+  const multilineQualified = qualifyLocalDeliveryReply(
+    makePage(`${multilineExpected}\r\n`),
+    "task-1",
+    multilineExpected,
+  );
+  assert.equal(multilineQualified.accepted, true);
+  assert.equal(multilineQualified.lineEnding, "crlf");
+
+  for (const [label, rawMessage, rejection] of [
+    ["leading whitespace", ` ${expected}`, "wrong_content"],
+    ["multiple lines", `${expected}\nSECOND_LINE`, "multiple_lines"],
+    ["wrong marker with CRLF", `OTHER_MARKER\r\n`, "wrong_content"],
+    ["prefix", `PREFIX_${expected}`, "wrong_content"],
+    ["suffix", `${expected}_SUFFIX`, "wrong_content"],
+    ["unsupported CR terminator", `${expected}\r`, "unsupported_line_ending"],
+  ]) {
+    const qualified = qualifyLocalDeliveryReply(makePage(rawMessage), "task-1", expected);
+    assert.equal(qualified.accepted, false, label);
+    assert.equal(qualified.rawMessage, rawMessage, label);
+    assert.equal(qualified.rejection, rejection, label);
+  }
+
+  const duplicatePage = makePage(`${expected}\n`, [{
+    kind: "reply",
+    parent_interaction_id: "task-1",
+    sender: "agent-1",
+    reply_status: "done",
+    interaction_id: "reply-2",
+    message: `${expected}\n`,
+  }]);
+  const duplicate = qualifyLocalDeliveryReply(duplicatePage, "task-1", expected);
+  assert.throws(
+    () => correlatedReply(duplicatePage, "task-1", "agent-1", duplicate.rawMessage),
+    /Duplicate replies to the same task/,
+  );
+});
+
+test("canonical reply task prompt requires exact stdin bytes", () => {
+  assert.match(CANONICAL_REPLY_EXACT_BYTES_INSTRUCTION, /without a trailing newline/);
+  assert.match(CANONICAL_REPLY_EXACT_BYTES_INSTRUCTION, /do not use shell echo/);
+  assert.match(CANONICAL_REPLY_EXACT_BYTES_INSTRUCTION, /Do not trim/);
+});
+
+test("native and composer task routes share the canonical reply allowance", () => {
+  for (const inputCase of INPUT_CASES) {
+    const prompt = buildCanonicalReplyTaskPrompt(inputCase, "SHARED_ROUTE_MARKER");
+    assert.match(prompt, /canonical reply MCP tool/);
+    assert.match(prompt, /Bash solely to invoke Wardian's canonical message reply command/);
+    assert.match(prompt, /wardian message reply <request_id> --status done --stdin/);
+    assert.match(prompt, /exact requested text on stdin/);
+    assert.match(prompt, /Use no other tools, shell commands, or file access/);
+    assert.doesNotMatch(prompt, /Do not access files or run tools\.|No tools\./);
+  }
+});
+
+test("canonical reply prompt permits printf only for the canonical stdin route", () => {
+  const prompt = buildCanonicalReplyTaskPrompt(INPUT_CASES[0], "PRINTF_ROUTE_MARKER");
+  assert.match(prompt, /Bash's `printf` builtin is allowed solely/);
+  assert.match(prompt, /wardian message reply <request_id> --status done --stdin/);
+  assert.match(prompt, /exact requested text on stdin/);
+  assert.match(prompt, /text-only response does not complete the task/);
+  assert.match(prompt, /Use no other tools, shell commands, or file access/);
+});
+
+test("OpenCode native mode defaults to resume and exposes fresh explicitly", () => {
+  assert.equal(parseOpenCodeNativeMode(undefined), "resume");
+  assert.equal(parseOpenCodeNativeMode("fresh"), "fresh");
+  assert.throws(
+    () => parseOpenCodeNativeMode("implicit"),
+    /must be resume or fresh/,
+  );
+});
+
+test("provider effort override uses the core provider_config field", () => {
+  const override = configOverrideForProvider("codex", {
+    WARDIAN_E2E_DELIVERY_CODEX_MODEL: "gpt-5.6-luna",
+    WARDIAN_E2E_DELIVERY_CODEX_EFFORT: "low",
+  });
+  assert.equal(override.model, "gpt-5.6-luna");
+  assert.equal(override.provider_config?.type, "codex");
+  assert.equal(override.provider_config?.reasoning_effort, "low");
+  assert.equal(override.custom_args, undefined);
+});
+
+test("isolated Claude launch exposes only Bash and no configured MCP servers", () => {
+  const override = configOverrideForProvider("claude", {});
+  const providerConfig = override.provider_config;
+
+  assert.equal(providerConfig?.type, "claude");
+  assert.deepEqual(providerConfig?.tools, ["Bash"]);
+  assert.deepEqual(providerConfig?.disallowed_tools, ["SendMessage", "ListAgents"]);
+  assert.equal(providerConfig?.allowed_tools, undefined);
+  assert.deepEqual(JSON.parse(providerConfig?.mcp_config ?? "null"), { mcpServers: {} });
+  assert.equal(providerConfig?.strict_mcp_config, true);
+});
+
+test("human delivery waits for provider input readiness before submission", () => {
+  assert.equal(
+    providerInputReadinessObserved(
+      "opencode",
+      { current_status: "Idle" },
+      "Ask anything...\nctrl+p commands",
+    ),
+    true,
+  );
+  assert.equal(
+    providerInputReadinessObserved(
+      "opencode",
+      { current_status: "Idle" },
+      "Loading session...\nAsk anything...\nctrl+p commands",
+    ),
+    false,
+  );
+  assert.equal(
+    providerInputReadinessObserved("opencode", { current_status: "Processing" }, "Ask anything... ctrl+p commands"),
+    false,
+  );
+  assert.equal(providerInputReadinessObserved("claude", { current_status: "Idle" }), true);
+});
+
+test("native idle observation matches the existing receiver", () => {
+  assert.equal(existingAgentIsIdle([
+    { session_id: "other-agent", current_status: "Idle" },
+    { session_id: "receiver", current_status: "Processing..." },
+  ], "receiver"), false);
+  assert.equal(existingAgentIsIdle([
+    { session_id: "receiver", current_status: "Idle" },
+  ], "receiver"), true);
+  assert.equal(existingAgentIsIdle([], "receiver"), false);
+});
+
+test("Codex spawn restores the bounded observation timeout", async () => {
+  const timeouts = [];
+  const driver = {
+    manage: () => ({
+      setTimeouts: async (value) => timeouts.push(value),
+    }),
+    executeAsyncScript: async () => ({ ok: true, agent: { provider: "codex" } }),
+  };
+
+  const agent = await spawnRealProviderAgent(driver, "codex", "codex-test", "workspace");
+  assert.equal(agent.provider, "codex");
+  assert.deepEqual(timeouts, [
+    { script: SPAWN_SCRIPT_MS },
+    { script: OBSERVATION_SCRIPT_MS },
+  ]);
+});
+
+test("failure capability probes classify a bounded child timeout", () => {
+  const result = runCli(
+    process.execPath,
+    { repoRoot: process.cwd(), isolatedHome: path.join(tmpdir(), "wardian-cli-timeout-test") },
+    ["-e", "setTimeout(() => {}, 1000)"],
+    50,
+  );
+  assert.equal(result.error?.code, "ETIMEDOUT");
+  assert.equal(failureCapabilityProbeError(result)?.code, "ETIMEDOUT");
+  assert.match(
+    failureCapabilityProbeError(result)?.message ?? "",
+    /failure capability probe exceeded 5000ms/,
+  );
+});
+
+test("composer exception task candidates stay on their maintained providers", () => {
+  assert.doesNotThrow(() => assertDeliveryRouteCandidates(
+    ["claude", "antigravity"],
+    [],
+    ["claude", "antigravity"],
+  ));
+  assert.throws(
+    () => assertDeliveryRouteCandidates(["codex"], [], ["codex"]),
+    /maintained only for Claude and Antigravity/,
+  );
+  assert.throws(
+    () => assertDeliveryRouteCandidates(["claude"], ["claude"], ["claude"]),
+    /both native and composer-exception/,
+  );
+});
+
 test("real provider delivery case parser expands all only as the sole entry", () => {
   assert.deepEqual(
     parseDeliveryCases("all"),
     INPUT_CASES.map((inputCase) => inputCase.name),
   );
-  assert.deepEqual(parseDeliveryCases("all,mailbox-short"), ["all", "mailbox-short"]);
+  assert.deepEqual(parseDeliveryCases("all,prompt-short"), ["all", "prompt-short"]);
 });
 
-test("real provider delivery validation uses actual provider CLIs", { timeout: 900000 }, async (t) => {
+test("human composer delivery uses actual providers; not peer messaging", { timeout: 900000 }, async (t) => {
   const providers = parseDeliveryProviders(process.env.WARDIAN_E2E_DELIVERY_PROVIDERS);
   const caseNames = parseDeliveryCases(process.env.WARDIAN_E2E_DELIVERY_CASES);
   const unknownProviders = unknownValues(providers, PROVIDERS);
   const unknownCases = unknownValues(caseNames, INPUT_CASES.map((inputCase) => inputCase.name));
+  assertDeliveryRouteCandidates(providers, nativeProviders, composerTaskProviders);
+  assert.ok(!nativeProviders.length || !verifyFreshTranscript, "Existing-session qualification and intentional fresh-session replacement are separate runs");
 
   assert.deepEqual(
     unknownProviders,
@@ -1221,22 +2267,33 @@ test("real provider delivery validation uses actual provider CLIs", { timeout: 9
     return;
   }
 
-  let session;
-  let startupAttempted = false;
-  let cleanupFailure;
-  t.after(() => cleanupConformanceSession({
-    harness, session, startupAttempted,
-    pause: async () => {
-      await pauseConformanceAgents((command, args) => invokeTauri(session.driver, command, args));
-      if (cleanupFailure) throw cleanupFailure;
-    },
-    save: (cleanup) => fs.writeFile(path.join(harness.isolatedHome, "delivery-cleanup.json"), JSON.stringify(cleanup, null, 2)),
-  }));
   prepareIsolatedHome(harness);
   await enableIsolatedCodexWorkspaceTrust(harness);
   const cliPath = buildCli(harness);
   const runId = `${process.pid}_${Date.now()}`;
+  const report = { status: "running", scope: nativeProviders.length || composerTaskProviders.length ? "selected_delivery_routes" : "human_composer",
+    native_cases: [], native_candidates: nativeProviders, composer_task_cases: [],
+    composer_task_candidates: composerTaskProviders, blocked_providers: [],
+    opencode_native_mode: nativeProviders.includes("opencode") ? opencodeNativeMode : null,
+    pi_native_mode: nativeProviders.includes("pi") ? "resume" : null };
+  const save = () => fs.writeFile(path.join(harness.isolatedHome, "provider-delivery-report.json"), JSON.stringify(report, null, 2));
 
+  let session;
+  let startupAttempted = false;
+  let cleanupFailure;
+  t.after(() => cleanupConformanceSession({
+    harness,
+    session,
+    startupAttempted,
+    pause: async () => {
+      await pauseConformanceAgents((command, args) => invokeTauri(session.driver, command, args));
+      if (cleanupFailure) throw cleanupFailure;
+    },
+    save: (cleanup) => fs.writeFile(
+      path.join(harness.isolatedHome, "delivery-cleanup.json"),
+      JSON.stringify(cleanup, null, 2),
+    ),
+  }));
   try {
     startupAttempted = true;
     session = await startNativeSession(harness);
@@ -1253,7 +2310,7 @@ test("real provider delivery validation uses actual provider CLIs", { timeout: 9
     let agent = null;
     let providerError = null;
     let providerTerminalTail = null;
-    let piFailureEvidence = null;
+    let failureEvidence = null;
     try {
       agent = await spawnRealProviderAgent(session.driver, provider, agentName, workspacePath);
       if (provider === "antigravity" && await antigravityStartupNeedsAction(cliPath, harness, agentName)) {
@@ -1263,10 +2320,79 @@ test("real provider delivery validation uses actual provider CLIs", { timeout: 9
           /not signed in|trust the contents of this project/i,
           "Antigravity reported Action Needed without an account or workspace prompt",
         );
+        report.blocked_providers.push({ provider, reason: "account_or_workspace_prompt" });
+        await save();
+        assert.ok(!nativeProviders.includes(provider) && !composerTaskProviders.includes(provider), "Delivery candidate blocked before qualification; this is not unsupported-route evidence");
         continue;
       }
       const deliveredCases = [];
+      let nativeCase;
+      let composerTaskOrigin;
+      if (nativeProviders.includes(provider)) {
+        // Establish a real session through the existing human path before disabling it.
+        // Setup is not native task acceptance and never substitutes for the case below.
+        const setupDelivery = await runRealDeliveryCase({ driver: session.driver, harness, provider,
+          agentSessionId: agent.session_id, inputCase: INPUT_CASES[0], runId: `setup-${runId}`, report, save });
+        if (provider === "opencode") {
+          assert.ok(setupDelivery.providerSessionId, "OpenCode setup did not return its discovered provider session");
+          if (opencodeNativeMode === "resume") {
+            await resumeOpenCodeExistingSession(session.driver, agent.session_id, setupDelivery.providerSessionId);
+          }
+        }
+        let piProviderSessionId = null;
+        if (provider === "pi") {
+          const config = (await invokeTauri(session.driver, "list_agents"))
+            .find((entry) => entry.session_id === agent.session_id);
+          assert.equal(config?.session_id, agent.session_id, "Pi setup changed the Wardian agent identity");
+          assert.equal(config?.provider, "pi", "Pi setup changed the provider identity");
+          assert.ok(
+            typeof config?.resume_session === "string" && config.resume_session.trim(),
+            "Pi setup did not persist the provider session",
+          );
+          piProviderSessionId = config.resume_session;
+          await resumePiExistingSession(session.driver, agent.session_id, piProviderSessionId);
+        }
+        const capability = provider === "opencode"
+          ? await waitForOpenCodeNativeOwner(session.driver, cliPath, harness, agent.session_id, setupDelivery.providerSessionId)
+          : provider === "pi"
+            ? await waitForPiNativeOwner(session.driver, cliPath, harness, agent.session_id, piProviderSessionId)
+            : JSON.parse(runCliOk(cliPath, harness, ["delivery", "capabilities", agent.session_id]).stdout);
+        const identity = assertProviderNativeSession(provider, capability, agent.session_id);
+        await waitForExistingAgentIdle(session.driver, agent.session_id);
+        await invokeTauri(session.driver, "debug_pause_agent_input_sender", { sessionId: agent.session_id });
+        const terminal = await invokeTauri(session.driver, "request_terminal_snapshot", { request: { session_id: agent.session_id } });
+        const sender = await invokeTauri(session.driver, "spawn_agent", { req: {
+          sessionName: `Native-Task-Origin-${provider}-${runId}`, agentClass: "TestClass", folder: workspacePath,
+          isOff: true, resumeSession: null, configOverride: { provider: "mock" },
+        } });
+        nativeCase = { identity, terminal, sender };
+        // Off mock origin owns no provider process; retain its identity in this isolated report.
+        report.native_origin = sender.session_id;
+        await save();
+      } else if (composerTaskProviders.includes(provider)) {
+        // Establish a real provider session through the human path, then keep
+        // its input sender attached for the canonical task fallback case.
+        deliveredCases.push(await runRealDeliveryCase({ driver: session.driver, harness, provider,
+          agentSessionId: agent.session_id, inputCase: INPUT_CASES[0], runId: `setup-${runId}`, report, save }));
+        composerTaskOrigin = await invokeTauri(session.driver, "spawn_agent", { req: {
+          sessionName: `Composer-Task-Origin-${provider}-${runId}`, agentClass: "TestClass", folder: workspacePath,
+          isOff: true, resumeSession: null, configOverride: { provider: "mock" },
+        } });
+        report.composer_task_origin ??= {};
+        report.composer_task_origin[provider] = composerTaskOrigin.session_id;
+        await save();
+      }
       for (const inputCase of selectedCases) {
+        if (nativeCase) {
+          await runNativeTaskCase({ driver: session.driver, cliPath, harness, provider, agent,
+            inputCase, ...nativeCase, report, save });
+          continue;
+        }
+        if (composerTaskOrigin) {
+          await runComposerExceptionTaskCase({ driver: session.driver, cliPath, harness, provider, agent,
+            sender: composerTaskOrigin, inputCase, report, save });
+          continue;
+        }
         deliveredCases.push(await runRealDeliveryCase({
           driver: session.driver,
           cliPath,
@@ -1276,6 +2402,8 @@ test("real provider delivery validation uses actual provider CLIs", { timeout: 9
           agentName,
           inputCase,
           runId,
+          report,
+          save,
         }));
       }
       if (verifyFreshTranscript) {
@@ -1295,27 +2423,61 @@ test("real provider delivery validation uses actual provider CLIs", { timeout: 9
     } catch (error) {
       providerError = error;
       if (agent?.session_id) {
-        providerTerminalTail = await readProviderTerminalTail(session.driver, agent.session_id);
+        try {
+          providerTerminalTail = await readProviderTerminalTail(session.driver, agent.session_id);
+        } catch (tailError) {
+          providerTerminalTail = `Unable to read provider terminal output: ${tailError}`;
+        }
       }
     } finally {
       if (agent?.session_id) {
-        if (provider === "pi" && providerError) {
+        if (providerError) {
+          report.status = "fail";
+          report.error = providerError.message;
           try {
-            piFailureEvidence = await capturePiFailureEvidence(
-              session.driver,
+            failureEvidence = await captureProviderFailureEvidence({
+              driver: session.driver,
+              cliPath,
               harness,
               agent,
-              providerError,
-            );
+              provider,
+              report,
+            });
           } catch (captureError) {
-            piFailureEvidence = {
+            failureEvidence = {
               status: "capture-failed",
+              provider,
+              session_id: agent.session_id,
               error: String(captureError),
             };
           }
+          if (provider === "pi") {
+            try {
+              failureEvidence.pi_session_snapshot = await capturePiFailureEvidence(
+                session.driver,
+                harness,
+                agent,
+                providerError,
+              );
+            } catch (captureError) {
+              failureEvidence.pi_session_snapshot = {
+                status: "capture-failed",
+                error: String(captureError),
+              };
+            }
+          }
+          report.failure_evidence ??= {};
+          report.failure_evidence[provider] = failureEvidence;
+          markActiveProviderCasesFailed(report, provider, providerError);
+          try {
+            await save();
+          } catch (saveError) {
+            cleanupFailure ??= saveError;
+            providerError ??= saveError;
+          }
         }
         try {
-          await killRealProviderAgent(session.driver, agent.session_id);
+          await pauseRealProviderAgent(session.driver, agent.session_id);
         } catch (cleanupError) {
           cleanupFailure ??= cleanupError;
           providerError ??= cleanupError;
@@ -1324,15 +2486,20 @@ test("real provider delivery validation uses actual provider CLIs", { timeout: 9
     }
 
     if (providerError) {
+      report.status = "fail";
+      report.error = providerError.message;
+      await save();
       const debugTail = await readDebugTail(harness);
       assert.fail(
         `Real provider delivery failed for ${provider}: ${providerError.message}\n\n` +
           `Model: ${providerModel(provider) ?? "<provider default>"}\n` +
         `Custom args: ${providerCustomArgs(provider) ?? "<none>"}\n` +
-          `--- Pi failure evidence ---\n${piFailureEvidence ? JSON.stringify(piFailureEvidence) : "<not-applicable>"}\n` +
+          `--- Failure evidence ---\n${failureEvidence ? JSON.stringify(failureEvidence) : "<not-captured>"}\n` +
           `--- Provider terminal tail ---\n${providerTerminalTail ?? "<unavailable>"}\n` +
           `--- Wardian debug tail ---\n${debugTail}`,
       );
     }
   }
+  report.status = report.blocked_providers.length ? "blocked" : "pass";
+  await save();
 });

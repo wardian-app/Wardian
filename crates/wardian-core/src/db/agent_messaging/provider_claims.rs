@@ -97,6 +97,7 @@ pub fn message_context(
     Ok(AgentMessageContext {
         schema_version: 1,
         sender: record.sender_session_id.clone().unwrap_or_default(),
+        host_automation: super::host_automation_provenance(conn, &record.id)?,
         recipient,
         kind: record.kind,
         interaction_id: record.id.clone(),

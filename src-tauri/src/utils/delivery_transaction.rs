@@ -27,9 +27,16 @@ impl TerminalInputSink for Sender<Vec<u8>> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum BrokerTerminalInputMode {
+    Privileged,
+    Composer { runtime_generation: u64 },
+}
+
 pub struct BrokerTerminalInputSink {
     broker: Arc<crate::state::terminal_session::TerminalSessionBroker>,
     session_id: String,
+    mode: BrokerTerminalInputMode,
 }
 
 impl BrokerTerminalInputSink {
@@ -40,6 +47,21 @@ impl BrokerTerminalInputSink {
         Self {
             broker,
             session_id: session_id.into(),
+            mode: BrokerTerminalInputMode::Privileged,
+        }
+    }
+
+    /// Creates a composer sink that remains bound to one terminal generation
+    /// and observes the input-only pause at the actor write boundary.
+    pub fn new_for_composer(
+        broker: Arc<crate::state::terminal_session::TerminalSessionBroker>,
+        session_id: impl Into<String>,
+        runtime_generation: u64,
+    ) -> Self {
+        Self {
+            broker,
+            session_id: session_id.into(),
+            mode: BrokerTerminalInputMode::Composer { runtime_generation },
         }
     }
 }
@@ -50,10 +72,19 @@ impl TerminalInputSink for BrokerTerminalInputSink {
         bytes: Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
         Box::pin(async move {
-            self.broker
-                .send_privileged_input(&self.session_id, bytes)
-                .await
-                .map_err(|error| error.to_string())
+            let result = match self.mode {
+                BrokerTerminalInputMode::Privileged => {
+                    self.broker
+                        .send_privileged_input(&self.session_id, bytes)
+                        .await
+                }
+                BrokerTerminalInputMode::Composer { runtime_generation } => {
+                    self.broker
+                        .send_composer_input(&self.session_id, runtime_generation, bytes)
+                        .await
+                }
+            };
+            result.map_err(|error| error.to_string())
         })
     }
 }

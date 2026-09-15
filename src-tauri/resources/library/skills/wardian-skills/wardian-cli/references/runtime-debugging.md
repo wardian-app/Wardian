@@ -69,21 +69,23 @@ preserved as strings, including unfamiliar codes; this list is not exhaustive:
   JSON, not an object, or incompatible with the requested input type.
 - `not_in_session`: Self lookup was requested outside a managed process; pass
   an explicit name or UUID.
+- `missing_managed_sender`: Peer messaging requires an existing managed
+  session. Do not invent or override its identity.
 - `not_found`: The target does not exist; list agents and use its UUID.
 - `ambiguous`: A name matched multiple agents; use the UUID.
 - `db_unavailable`: The required state database could not be located, opened,
   or prepared; this does not mean an answering app's error was ignored.
 - `app_not_running`: A live-control command could not reach the app; this is
   exit code 6.
-- `not_supported`: The command shape is recognized but not implemented, such
-  as `send --thread`.
+- `not_supported`: The requested operation is unavailable. Retired command
+  spellings and flags are parser errors, not compatibility routes.
 - `control_endpoint_timeout`: The endpoint did not answer in time; persisted
   fallback is not used to mask this failure.
 - `memory_identity_required` / `invalid_memory_capability`: Memory requires
   managed identity and its inherited capability; `--agent` is not a bypass.
 
-Inspect JSON on stdout as well as errors on stderr. `ok: true` can coexist
-with `watch_error`, a failed structured reply, or failed fan-out targets.
+Inspect JSON on stdout as well as errors on stderr. A messaging admission
+receipt is not task completion; inspect the correlated reply's `reply_status`.
 Timeout does not imply non-delivery or authorize replay; use
 [messaging](messaging.md) to interpret evidence before another action.
 

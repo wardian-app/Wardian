@@ -1,7 +1,12 @@
 //! Messaging authorization, ownership, correlation, and queue progression tests.
 use super::super::test_support::TestWardianHome;
 use super::*;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use wardian_core::agent_messaging::{AgentMessagePage, TaskDeliveryOwner};
+use wardian_core::control::ReplyStatus;
 
 async fn agent(state: &AppState, id: &str, name: &str) {
     let agent = super::super::tests::test_agent(id, name, "Test");
@@ -70,6 +75,553 @@ fn stored_status(id: &str) -> String {
         )
     })
     .unwrap()
+}
+
+fn opencode_json_response(
+    status: axum::http::StatusCode,
+    value: serde_json::Value,
+) -> axum::response::Response {
+    axum::response::Response::builder()
+        .status(status)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(value.to_string()))
+        .unwrap()
+}
+
+async fn opencode_test_server(
+    request: axum::http::Request<axum::body::Body>,
+    workspace: String,
+    post_count: Option<Arc<AtomicUsize>>,
+) -> axum::response::Response {
+    use axum::http::{header::AUTHORIZATION, Method, StatusCode};
+
+    if request.headers().get(AUTHORIZATION).is_none() {
+        return opencode_json_response(StatusCode::UNAUTHORIZED, serde_json::json!({}));
+    }
+
+    let method = request.method().clone();
+    let path = request.uri().path();
+    match (method, path) {
+        (Method::GET, "/global/health") => opencode_json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "healthy": true,
+                "version": "test",
+            }),
+        ),
+        (Method::GET, "/session/ses_r13_test") => opencode_json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "id": "ses_r13_test",
+                "directory": workspace,
+            }),
+        ),
+        (Method::GET, "/session/status") => opencode_json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "ses_r13_test": "idle",
+            }),
+        ),
+        (Method::GET, "/global/event") => axum::response::Response::builder()
+            .status(StatusCode::OK)
+            .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+            .body(axum::body::Body::from_stream(
+                futures_util::stream::pending::<Result<String, std::convert::Infallible>>(),
+            ))
+            .unwrap(),
+        (Method::POST, "/session/ses_r13_test/prompt_async") => {
+            if let Some(post_count) = post_count {
+                post_count.fetch_add(1, Ordering::SeqCst);
+            }
+            axum::response::Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        }
+        (Method::GET, "/session/ses_r13_test/message") => {
+            opencode_json_response(StatusCode::OK, serde_json::json!([]))
+        }
+        _ => opencode_json_response(StatusCode::NOT_FOUND, serde_json::json!({})),
+    }
+}
+
+#[tokio::test]
+async fn attached_opencode_task_admits_native_record_before_followup() {
+    use crate::delivery::native_broker::opencode_http_config_fingerprint;
+    use crate::delivery::opencode_http::OpenCodeHttpLaunchPlan;
+    use axum::{routing::any, Router};
+    use wardian_core::control::ProviderInputReadiness;
+    use wardian_core::native_transport::NativeDeliveryPhase;
+
+    let home = TestWardianHome::new_async().await;
+    let state = AppState::new();
+    agent(&state, "sender", "Sender").await;
+    agent(&state, "receiver", "Receiver").await;
+    {
+        let agents = state.agents.lock().await;
+        let receiver = agents.get("receiver").unwrap();
+        let mut config = receiver.config.lock().unwrap();
+        config.provider = "opencode".into();
+        config.folder = home.path().to_string_lossy().into_owned();
+        config.resume_session = Some("ses_r13_test".into());
+        *receiver.current_status.lock().unwrap() = "Idle".into();
+    }
+    let generation = state
+        .interactions
+        .start_provider_input_generation("receiver", ProviderInputReadiness::Ready, None)
+        .await
+        .generation;
+    assert_eq!(generation, 1);
+
+    let info = delivery_target_info(&state, "receiver").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let workspace = info.cwd.to_string_lossy().into_owned();
+    let app = Router::new().fallback(any(move |request| {
+        let workspace = workspace.clone();
+        async move { opencode_test_server(request, workspace, None).await }
+    }));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let fingerprint = opencode_http_config_fingerprint(&info.config, &info.cwd);
+    state
+        .native_delivery
+        .prepare_opencode_http("receiver", generation, fingerprint.clone())
+        .await
+        .unwrap();
+    state
+        .native_delivery
+        .register_opencode_http(
+            "receiver".into(),
+            OpenCodeHttpLaunchPlan::new(generation, 1, port).unwrap(),
+            "ses_r13_test".into(),
+            "test-process".into(),
+            "test-listener".into(),
+            info.cwd.clone(),
+            fingerprint,
+        )
+        .await
+        .unwrap();
+
+    let admitted = task(&state).await;
+    assert!(
+        wardian_core::db::native_delivery(&admitted.record.id)
+            .unwrap()
+            .is_none(),
+        "core admission must not pre-create the native delivery row"
+    );
+    let dispatch_result = dispatch_pending_queue(None, &state, "receiver").await;
+    let native_dispose = state
+        .native_delivery
+        .dispose_opencode_http("receiver", Some(generation))
+        .await;
+    server.abort();
+    native_dispose.unwrap();
+
+    dispatch_result.unwrap();
+    let native = wardian_core::db::native_delivery(&admitted.record.id)
+        .unwrap()
+        .expect("attached dispatch must admit a native delivery");
+    assert_eq!(native.phase, NativeDeliveryPhase::ProviderAccepted);
+    assert_eq!(owner(&admitted.record.id), "provider_accepted");
+    let debug_log = std::fs::read_to_string(home.path().join("wardian_debug.log"))
+        .expect("OpenCode diagnostic log");
+    for expected in [
+        "stage=preclaim reason=route_native",
+        "stage=preclaim reason=native_admission_ready",
+        "stage=postclaim_pre_native_admission reason=claim_acquired",
+        "stage=postclaim_pre_native_admission reason=native_admit",
+        "stage=native_admission reason=native_record_queued",
+        "stage=actual_dispatch reason=http_submit",
+    ] {
+        assert!(
+            debug_log.lines().any(|line| {
+                line.contains(expected)
+                    && line.contains(&format!("request_id={}", admitted.record.id))
+            }),
+            "missing OpenCode diagnostic: {expected}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn request_context_dispatches_pending_opencode_worker() {
+    use crate::delivery::native_broker::opencode_http_config_fingerprint;
+    use crate::delivery::opencode_http::OpenCodeHttpLaunchPlan;
+    use axum::{routing::any, Router};
+    use tauri::Manager;
+    use wardian_core::control::ProviderInputReadiness;
+    use wardian_core::native_transport::NativeDeliveryPhase;
+
+    let home = TestWardianHome::new_async().await;
+    let app = tauri::test::mock_app();
+    app.manage(AppState::new());
+    let state = app.state::<AppState>();
+    agent(&state, "sender", "Sender").await;
+    agent(&state, "receiver", "Receiver").await;
+    {
+        let agents = state.agents.lock().await;
+        let receiver = agents.get("receiver").unwrap();
+        let mut config = receiver.config.lock().unwrap();
+        config.provider = "opencode".into();
+        config.folder = home.path().to_string_lossy().into_owned();
+        config.resume_session = Some("ses_r13_test".into());
+        *receiver.current_status.lock().unwrap() = "Idle".into();
+    }
+    let generation = state
+        .interactions
+        .start_provider_input_generation("receiver", ProviderInputReadiness::Ready, None)
+        .await
+        .generation;
+    let info = delivery_target_info(&state, "receiver").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let workspace = info.cwd.to_string_lossy().into_owned();
+    let post_count = Arc::new(AtomicUsize::new(0));
+    let app_router = Router::new().fallback(any({
+        let post_count = Arc::clone(&post_count);
+        move |request| {
+            let workspace = workspace.clone();
+            let post_count = Arc::clone(&post_count);
+            async move { opencode_test_server(request, workspace, Some(post_count)).await }
+        }
+    }));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app_router).await.unwrap();
+    });
+
+    let fingerprint = opencode_http_config_fingerprint(&info.config, &info.cwd);
+    state
+        .native_delivery
+        .prepare_opencode_http("receiver", generation, fingerprint.clone())
+        .await
+        .unwrap();
+    state
+        .native_delivery
+        .register_opencode_http(
+            "receiver".into(),
+            OpenCodeHttpLaunchPlan::new(generation, 1, port).unwrap(),
+            "ses_r13_test".into(),
+            "test-process".into(),
+            "test-listener".into(),
+            info.cwd.clone(),
+            fingerprint,
+        )
+        .await
+        .unwrap();
+
+    let admitted = task(&state).await;
+    // The mock app exposes AppHandle<MockRuntime>, while the production idle
+    // wrapper is Wry-typed. Drive the same detached queue worker directly with
+    // the admitted request context so this fixture proves worker execution
+    // without changing production runtime generics or claiming wrapper coverage.
+    dispatch_pending_queue_with_request(
+        None,
+        &state,
+        "receiver",
+        Some(&admitted.record.id),
+        Some(generation),
+        Some(WorkerProviderClassification::OpenCode),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(post_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        wardian_core::db::native_delivery(&admitted.record.id)
+            .unwrap()
+            .map(|record| record.phase),
+        Some(NativeDeliveryPhase::ProviderAccepted)
+    );
+    assert!(
+        store::with_db(|conn| store::next_pending_task_id(conn, "receiver"))
+            .unwrap()
+            .is_none()
+    );
+
+    assert_eq!(owner(&admitted.record.id), "provider_accepted");
+    let debug_log = std::fs::read_to_string(home.path().join("wardian_debug.log"))
+        .expect("OpenCode diagnostic log");
+    for expected in [
+        "stage=worker_entry reason=worker_started",
+        "stage=worker_entry reason=queue_head_matches",
+        "stage=worker_entry reason=queue_head_advanced",
+    ] {
+        assert!(
+            debug_log.lines().any(|line| {
+                line.contains(expected)
+                    && line.contains(&format!("request_id={}", admitted.record.id))
+                    && line.contains(&format!("generation={generation}"))
+            }),
+            "missing OpenCode worker diagnostic: {expected}"
+        );
+    }
+    state
+        .native_delivery
+        .dispose_opencode_http("receiver", Some(generation))
+        .await
+        .unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn attached_opencode_terminal_native_phase_does_not_replay_or_release_task() {
+    use crate::delivery::native_broker::{
+        opencode_http_config_fingerprint, NativeDeliveryAdmission,
+    };
+    use crate::delivery::opencode_http::OpenCodeHttpLaunchPlan;
+    use axum::{routing::any, Router};
+    use wardian_core::control::ProviderInputReadiness;
+    use wardian_core::native_transport::{NativeDeliveryPhase, NativeMessageOperation};
+
+    let home = TestWardianHome::new_async().await;
+    let state = AppState::new();
+    agent(&state, "sender", "Sender").await;
+    agent(&state, "receiver", "Receiver").await;
+    {
+        let agents = state.agents.lock().await;
+        let receiver = agents.get("receiver").unwrap();
+        let mut config = receiver.config.lock().unwrap();
+        config.provider = "opencode".into();
+        config.folder = home.path().to_string_lossy().into_owned();
+        config.resume_session = Some("ses_r13_test".into());
+        *receiver.current_status.lock().unwrap() = "Idle".into();
+    }
+    let generation = state
+        .interactions
+        .start_provider_input_generation("receiver", ProviderInputReadiness::Ready, None)
+        .await
+        .generation;
+    assert_eq!(generation, 1);
+
+    let info = delivery_target_info(&state, "receiver").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let workspace = info.cwd.to_string_lossy().into_owned();
+    let post_count = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().fallback(any({
+        let post_count = Arc::clone(&post_count);
+        move |request| {
+            let workspace = workspace.clone();
+            let post_count = Arc::clone(&post_count);
+            async move { opencode_test_server(request, workspace, Some(post_count)).await }
+        }
+    }));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let fingerprint = opencode_http_config_fingerprint(&info.config, &info.cwd);
+    state
+        .native_delivery
+        .prepare_opencode_http("receiver", generation, fingerprint.clone())
+        .await
+        .unwrap();
+    state
+        .native_delivery
+        .register_opencode_http(
+            "receiver".into(),
+            OpenCodeHttpLaunchPlan::new(generation, 1, port).unwrap(),
+            "ses_r13_test".into(),
+            "test-process".into(),
+            "test-listener".into(),
+            info.cwd.clone(),
+            fingerprint,
+        )
+        .await
+        .unwrap();
+
+    let failed_task = task(&state).await;
+    let uncertain_task = task(&state).await;
+    let dispatching_task = task(&state).await;
+    let native_admission = |admitted: &store::Admitted| NativeDeliveryAdmission {
+        interaction_id: admitted.record.id.clone(),
+        message_id: admitted.record.id.clone(),
+        target_agent_id: "receiver".into(),
+        sender_agent_id: admitted.record.sender_session_id.clone(),
+        provider: "opencode".into(),
+        generation,
+        operation: NativeMessageOperation::StartTurn,
+        caller_idempotency_key: Some(admitted.record.id.clone()),
+        parent_interaction_id: admitted.record.parent_interaction_id.clone(),
+        deadline_at: None,
+        body: match &admitted.record.body_ref {
+            wardian_core::control::InteractionBodyRef::Inline { body } => body.clone(),
+            wardian_core::control::InteractionBodyRef::File { .. } => {
+                unreachable!("test task bodies are inline")
+            }
+        },
+    };
+    let mut failed_record = state
+        .native_delivery
+        .admit(native_admission(&failed_task))
+        .await
+        .unwrap();
+    failed_record.phase = NativeDeliveryPhase::FailedBeforeSubmit;
+    failed_record.detail = Some("pre-provider submission failed".into());
+    wardian_core::db::upsert_native_delivery(&failed_record).unwrap();
+
+    let mut uncertain_record = state
+        .native_delivery
+        .admit(native_admission(&uncertain_task))
+        .await
+        .unwrap();
+    uncertain_record.phase = NativeDeliveryPhase::SubmittedUnconfirmed;
+    uncertain_record.detail = Some("provider boundary was crossed without confirmation".into());
+    wardian_core::db::upsert_native_delivery(&uncertain_record).unwrap();
+
+    let mut dispatching_record = state
+        .native_delivery
+        .admit(native_admission(&dispatching_task))
+        .await
+        .unwrap();
+    dispatching_record.phase = NativeDeliveryPhase::Dispatching;
+    dispatching_record.detail = Some("dispatch persistence is ambiguous".into());
+    wardian_core::db::upsert_native_delivery(&dispatching_record).unwrap();
+
+    let dispatch_result = dispatch_pending_queue(None, &state, "receiver").await;
+    let native_dispose = state
+        .native_delivery
+        .dispose_opencode_http("receiver", Some(generation))
+        .await;
+    server.abort();
+
+    dispatch_result.unwrap();
+    native_dispose.unwrap();
+    assert_eq!(owner(&failed_task.record.id), "failed_before_submit");
+    assert_eq!(owner(&uncertain_task.record.id), "uncertain");
+    assert_eq!(owner(&dispatching_task.record.id), "uncertain");
+    assert_eq!(stored_status(&failed_task.record.id), "awaiting_reply");
+    assert_eq!(stored_status(&uncertain_task.record.id), "awaiting_reply");
+    assert_eq!(stored_status(&dispatching_task.record.id), "awaiting_reply");
+    assert!(
+        store::with_db(|conn| store::next_pending_task_id(conn, "receiver"))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(post_count.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        wardian_core::db::native_delivery(&dispatching_task.record.id)
+            .unwrap()
+            .unwrap()
+            .phase,
+        NativeDeliveryPhase::Dispatching
+    );
+
+    dispatch_pending_queue(None, &state, "receiver")
+        .await
+        .unwrap();
+    assert_eq!(post_count.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        wardian_core::db::native_delivery(&failed_task.record.id)
+            .unwrap()
+            .unwrap()
+            .phase,
+        NativeDeliveryPhase::FailedBeforeSubmit
+    );
+    assert_eq!(
+        wardian_core::db::native_delivery(&uncertain_task.record.id)
+            .unwrap()
+            .unwrap()
+            .phase,
+        NativeDeliveryPhase::SubmittedUnconfirmed
+    );
+}
+
+#[test]
+fn selected_native_owner_precedes_off_display_for_supported_providers() {
+    for provider in ["codex", "pi", "opencode"] {
+        assert_eq!(
+            task_dispatch_route(provider, false, "off", true),
+            TaskDispatchRoute::Native,
+            "{provider} owner must win over display status"
+        );
+    }
+}
+
+#[test]
+fn explicit_off_and_absent_owner_keep_existing_fallbacks() {
+    for provider in ["codex", "pi", "opencode"] {
+        assert_eq!(
+            task_dispatch_route(provider, true, "off", true),
+            TaskDispatchRoute::Background,
+            "{provider} explicit off must retain background policy"
+        );
+        assert_eq!(
+            task_dispatch_route(provider, false, "off", false),
+            TaskDispatchRoute::Background,
+            "{provider} without a selected owner must retain fallback"
+        );
+    }
+}
+
+#[test]
+fn worker_entry_without_provider_context_emits_bounded_unknown() {
+    let home = TestWardianHome::new();
+    let entry = OpenCodeDispatchWorkerEntry {
+        request_id: "worker-context-unknown".into(),
+        generation: 7,
+        provider: WorkerProviderClassification::Unknown,
+    };
+
+    log_opencode_worker_entry(
+        &entry,
+        crate::delivery::native_broker::OpenCodeDispatchDiagnosticReason::WorkerStarted,
+    );
+
+    let debug_log = std::fs::read_to_string(home.path().join("wardian_debug.log"))
+        .expect("OpenCode diagnostic log");
+    assert!(debug_log.lines().any(|line| {
+        line.contains("stage=worker_entry reason=worker_provider_unknown")
+            && line.contains("request_id=worker-context-unknown")
+            && line.contains("generation=7")
+    }));
+}
+
+#[test]
+fn opencode_pending_or_failed_owner_has_zero_pty_writes_and_ready_uses_native() {
+    use crate::delivery::native_broker::OpenCodeHttpEligibility;
+
+    let eligible_states = [
+        OpenCodeHttpEligibility::Pending,
+        OpenCodeHttpEligibility::Failed,
+        OpenCodeHttpEligibility::Ready,
+    ];
+    let mut composer_pty_writes = 0;
+    for eligibility in eligible_states {
+        assert!(native::opencode_native_owner_eligibility(eligibility));
+        if !native::opencode_native_owner_eligibility(eligibility) {
+            composer_pty_writes += 1;
+        }
+    }
+    assert_eq!(composer_pty_writes, 0);
+    assert!(!native::opencode_native_owner_eligibility(
+        OpenCodeHttpEligibility::Unsupported
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn opencode_owner_handoff_states_route_without_composer_pty_writes() {
+    use crate::delivery::native_broker::{NativeDeliveryBroker, OpenCodeHttpEligibility};
+
+    let broker = NativeDeliveryBroker::new();
+    broker
+        .prepare_opencode_http("opencode-agent", 7, "config-7".into())
+        .await
+        .expect("eligible owner state");
+    let pending = broker.opencode_http_eligibility("opencode-agent", 7).await;
+    assert_eq!(pending, OpenCodeHttpEligibility::Pending);
+    assert!(native::opencode_native_owner_eligibility(pending));
+
+    broker.fail_opencode_http("opencode-agent", 7).await;
+    let failed = broker.opencode_http_eligibility("opencode-agent", 7).await;
+    assert_eq!(failed, OpenCodeHttpEligibility::Failed);
+    assert!(native::opencode_native_owner_eligibility(failed));
+    assert!(native::opencode_native_owner_eligibility(
+        OpenCodeHttpEligibility::Ready
+    ));
 }
 
 fn count(table: &str) -> i64 {
@@ -727,122 +1279,6 @@ async fn startup_failure_after_deletion_does_not_recreate_claim_or_reply() {
 }
 
 #[tokio::test]
-async fn legacy_reply_to_v2_task_uses_atomic_available_reply() {
-    let _home = TestWardianHome::new_async().await;
-    let state = AppState::new();
-    agent(&state, "sender", "Sender").await;
-    agent(&state, "receiver", "Receiver").await;
-    let task = task(&state).await;
-    let request_id = &task.record.id;
-    for caller in [None, Some(origin("sender"))] {
-        assert_eq!(
-            submit_structured_reply(
-                &state,
-                request_id,
-                ReplyStatus::Done,
-                "legacy\nλ",
-                caller.as_ref(),
-                None
-            )
-            .await
-            .unwrap_err()
-            .code,
-            "unauthorized"
-        );
-    }
-    store::with_db(|conn| {
-        conn.execute_batch("CREATE TRIGGER fail_reply_available BEFORE INSERT ON agent_message_availability BEGIN SELECT RAISE(ABORT,'injected'); END;")?; Ok(())
-    }).unwrap();
-    assert!(submit_structured_reply(
-        &state,
-        request_id,
-        ReplyStatus::Done,
-        "legacy\nλ",
-        Some(&origin("receiver")),
-        None
-    )
-    .await
-    .is_err());
-    assert_eq!(stored_status(request_id), "awaiting_reply");
-    assert_eq!(
-        state.interactions.interaction(request_id).await.unwrap(),
-        task.record
-    );
-    assert!(state
-        .interactions
-        .structured_reply(request_id)
-        .await
-        .is_none());
-    assert_eq!(count("interactions"), 1);
-    assert_eq!(count("structured_replies"), 0);
-    assert_eq!(count("agent_message_availability"), 1);
-    store::with_db(|conn| {
-        conn.execute_batch("DROP TRIGGER fail_reply_available")?;
-        Ok(())
-    })
-    .unwrap();
-    let reply = submit_structured_reply(
-        &state,
-        request_id,
-        ReplyStatus::Done,
-        "legacy\nλ",
-        Some(&origin("receiver")),
-        None,
-    )
-    .await
-    .unwrap();
-    assert_eq!(reply.request_id, *request_id);
-    assert_eq!(reply.source_session_id.as_deref(), Some("receiver"));
-    assert_eq!(reply.body, "legacy\nλ");
-    assert_eq!(stored_status(request_id), "completed");
-    assert_eq!(
-        state
-            .interactions
-            .structured_reply(request_id)
-            .await
-            .unwrap(),
-        reply
-    );
-    let page = receive(&state, "sender").await;
-    assert_eq!(page.messages.len(), 1);
-    assert_eq!(
-        page.messages[0].parent_interaction_id.as_deref(),
-        Some(request_id.as_str())
-    );
-    assert_eq!(page.messages[0].message, reply.body);
-    assert_eq!(
-        submit_structured_reply(
-            &state,
-            request_id,
-            ReplyStatus::Done,
-            "legacy\nλ",
-            Some(&origin("receiver")),
-            None
-        )
-        .await
-        .unwrap(),
-        reply
-    );
-    assert_eq!(
-        submit_structured_reply(
-            &state,
-            request_id,
-            ReplyStatus::Done,
-            "different",
-            Some(&origin("receiver")),
-            None
-        )
-        .await
-        .unwrap_err()
-        .code,
-        "conflicting_reply"
-    );
-    assert_eq!(count("structured_replies"), 1);
-    assert_eq!(count("interactions"), 2);
-    assert_eq!(receive(&state, "sender").await, page);
-}
-
-#[tokio::test]
 async fn discovery_uses_normal_neighbors_including_self_and_excludes_unrelated_roster() {
     let home = TestWardianHome::new_async().await;
     let state = AppState::new();
@@ -869,7 +1305,7 @@ async fn discovery_uses_normal_neighbors_including_self_and_excludes_unrelated_r
     assert_eq!(agents[1].visibility, None);
     // Discovery is narrower than the still-supported explicit exact targeting.
     assert_eq!(
-        resolve_exact(&state, "Unrelated").await.unwrap(),
+        resolve_exact(&state, "Unrelated").await.unwrap().id,
         "unrelated"
     );
     assert_eq!(count("interactions"), 0);
@@ -885,6 +1321,7 @@ async fn deleted_receiver_cannot_recreate_cursor_metadata_after_authentication()
     authenticate(&state, "receiver").await.unwrap();
     let page = receive(&state, "receiver").await;
     assert_eq!(page.messages[0].interaction_id, task.record.id);
+    assert!(page.messages[0].host_automation.is_none());
     assert!(count("agent_message_cursors") > 0);
     // Model an already-authenticated call retaining a roster entry while durable
     // deletion commits. InteractionState's own fence must reject the late read.
@@ -1208,7 +1645,9 @@ async fn off_codex_status_drift_dispatches_second_task_after_lease_without_repla
         delivery_target_info(&state, RECEIVER).await.unwrap().status,
         "idle"
     );
-    dispatch_one(None, &state, RECEIVER).await.unwrap();
+    dispatch_one_with_request(None, &state, RECEIVER, None)
+        .await
+        .unwrap();
     assert_eq!(snapshot(), before);
     assert_eq!(
         state
@@ -1219,10 +1658,13 @@ async fn off_codex_status_drift_dispatches_second_task_after_lease_without_repla
     );
     config.lock().unwrap().is_off = true;
 
-    let error = tokio::time::timeout(Duration::from_secs(5), dispatch_one(None, &state, RECEIVER))
-        .await
-        .expect("process-free startup guard must finish promptly")
-        .expect_err("configured Off must reach the real background startup guard");
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        dispatch_one_with_request(None, &state, RECEIVER, None),
+    )
+    .await
+    .expect("process-free startup guard must finish promptly")
+    .expect_err("configured Off must reach the real background startup guard");
     assert_eq!(error.code, "native_followup_unavailable");
     assert!(error
         .message
@@ -1338,4 +1780,254 @@ async fn context_failure_releases_claim_before_any_provider_boundary() {
     .unwrap();
     assert_eq!(owner, "stored");
     assert!(!store::with_db(|conn| store::owns_claim(conn, &claim)).unwrap());
+}
+
+#[tokio::test]
+async fn retired_records_survive_restore_and_idle_without_pty_or_v2_replay() {
+    use wardian_core::control::{MailboxDeliveryPhase, MailboxMessageRecord, MailboxMessageStatus};
+    let _home = TestWardianHome::new_async().await;
+    let original = AppState::new();
+    for (index, (status, phase)) in [
+        (MailboxMessageStatus::Pending, MailboxDeliveryPhase::Queued),
+        (
+            MailboxMessageStatus::InFlight,
+            MailboxDeliveryPhase::Dispatching,
+        ),
+        (
+            MailboxMessageStatus::InFlight,
+            MailboxDeliveryPhase::Submitted,
+        ),
+        (
+            MailboxMessageStatus::Delivered,
+            MailboxDeliveryPhase::Terminal,
+        ),
+        (MailboxMessageStatus::Failed, MailboxDeliveryPhase::Terminal),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let message = original
+            .interactions
+            .create_message_durable(
+                Some("old-sender".into()),
+                vec!["receiver".into()],
+                InteractionBodyRef::Inline {
+                    body: format!("old payload {index}"),
+                },
+            )
+            .await
+            .unwrap();
+        wardian_core::db::upsert_mailbox_message(&MailboxMessageRecord {
+            id: format!("legacy-{index}"),
+            interaction_id: message.id,
+            target_session_id: "receiver".into(),
+            body: format!("old payload {index}"),
+            input_mode: MessageInputMode::Message,
+            queue_policy: QueuePolicy::QueueIfBusy,
+            approval_action: None,
+            origin: Some(origin("old-sender")),
+            created_at: "2020-01-01T00:00:00Z".into(),
+            status,
+            phase,
+        })
+        .unwrap();
+    }
+    original
+        .interactions
+        .create_task(
+            None,
+            "receiver".into(),
+            InteractionBodyRef::Inline {
+                body: "old automation".into(),
+            },
+        )
+        .await;
+    let rows = wardian_core::db::list_mailbox_messages().unwrap();
+    let interactions = wardian_core::db::list_interaction_records().unwrap();
+    for _ in 0..2 {
+        let restored = AppState::new();
+        agent(&restored, "receiver", "Receiver").await;
+        {
+            let agents = restored.agents.lock().await;
+            let recipient = agents.get("receiver").unwrap();
+            recipient.config.lock().unwrap().provider = "codex".into();
+            *recipient.current_status.lock().unwrap() = "Idle".into();
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        restored
+            .terminal_sessions
+            .start_or_replace_runtime(
+                "receiver",
+                crate::state::terminal_session::TerminalRuntimeHandles::new(tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry { cols: 80, rows: 24 },
+            )
+            .await
+            .unwrap();
+        restored.interactions.hydrate_from_persistence().await;
+        super::super::dispatch_agent_messaging_from_status_observation(None, &restored, "receiver")
+            .await;
+        assert!(
+            rx.try_recv().is_err(),
+            "legacy restore/idle must never write PTY"
+        );
+        assert!(receive(&restored, "receiver").await.messages.is_empty());
+        assert!(
+            store::with_db(|conn| store::next_pending_task_id(conn, "receiver"))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(wardian_core::db::list_mailbox_messages().unwrap(), rows);
+        assert_eq!(
+            wardian_core::db::list_interaction_records().unwrap(),
+            interactions
+        );
+        for record in &interactions {
+            assert_eq!(
+                restored.interactions.interaction(&record.id).await.as_ref(),
+                Some(record)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn host_automation_uses_canonical_manual_claim_and_authorized_correlated_reply() {
+    let _home = TestWardianHome::new_async().await;
+    let state = AppState::new();
+    agent(&state, "receiver", "Receiver").await;
+    agent(&state, "other", "Other").await;
+    let task = state
+        .interactions
+        .admit_host_automation_task("run-1288", "review", "receiver", "host work")
+        .await
+        .unwrap();
+    assert_eq!(task.record.sender_session_id, None);
+    assert_eq!(
+        store::with_db(|conn| store::host_automation_provenance(conn, &task.record.id)).unwrap(),
+        Some(wardian_core::agent_messaging::HostAutomationProvenance {
+            run_id: "run-1288".into(),
+            node: "review".into()
+        })
+    );
+    assert_eq!(
+        state.agents.lock().await.len(),
+        2,
+        "host is not a fake agent"
+    );
+    let page = receive(&state, "receiver").await;
+    assert_eq!(page.messages.len(), 1);
+    assert_eq!(page.messages[0].interaction_id, task.record.id);
+    assert_eq!(
+        page.messages[0].host_automation.as_ref().unwrap().run_id,
+        "run-1288"
+    );
+    assert!(
+        state
+            .interactions
+            .claim_agent_task("receiver", 0)
+            .await
+            .unwrap()
+            .is_none(),
+        "manual receive owns the exact canonical task"
+    );
+    let request = || Request::Reply {
+        request_id: task.record.id.clone(),
+        status: ReplyStatus::Done,
+        message: "exact host result".into(),
+    };
+    assert_eq!(
+        handle_in_state(None, &state, request(), origin("other"))
+            .await
+            .unwrap_err()
+            .code,
+        "unauthorized"
+    );
+    assert!(
+        handle_in_state(None, &state, request(), origin("host:automation:run-1288"))
+            .await
+            .is_err()
+    );
+    handle_in_state(None, &state, request(), origin("receiver"))
+        .await
+        .unwrap();
+    handle_in_state(None, &state, request(), origin("receiver"))
+        .await
+        .unwrap();
+    let reply = state
+        .interactions
+        .structured_reply(&task.record.id)
+        .await
+        .unwrap();
+    assert_eq!(reply.source_session_id.as_deref(), Some("receiver"));
+    assert_eq!(reply.body, "exact host result");
+    assert_eq!(count("structured_replies"), 1);
+    assert_eq!(
+        count("agent_message_availability"),
+        1,
+        "host reply is durable without a fake recipient inbox"
+    );
+}
+
+#[tokio::test]
+async fn host_automation_native_claim_keeps_provenance_and_atomic_reply() {
+    let _home = TestWardianHome::new_async().await;
+    let state = AppState::new();
+    let task = state
+        .interactions
+        .admit_host_automation_task("run-native", "build", "receiver", "work")
+        .await
+        .unwrap();
+    let claim = state
+        .interactions
+        .claim_agent_task("receiver", 0)
+        .await
+        .unwrap()
+        .unwrap();
+    let frame: serde_json::Value =
+        serde_json::from_str(&prepare_claim_context(&state, &claim).await.unwrap()).unwrap();
+    assert_eq!(frame["host_automation"]["run_id"], "run-native");
+    assert_eq!(frame["host_automation"]["node"], "build");
+    assert!(state
+        .interactions
+        .receive_agent_messages("receiver", None, None, 100)
+        .await
+        .unwrap()
+        .messages
+        .is_empty());
+    store::with_db(|conn| { conn.execute_batch("CREATE TRIGGER fail_host_reply BEFORE INSERT ON structured_replies BEGIN SELECT RAISE(ABORT,'injected'); END;")?; Ok(()) }).unwrap();
+    assert!(state
+        .interactions
+        .reply_agent_message("receiver", &task.record.id, ReplyStatus::Done, "result")
+        .await
+        .is_err());
+    assert_eq!(stored_status(&task.record.id), "awaiting_reply");
+    assert!(state
+        .interactions
+        .structured_reply(&task.record.id)
+        .await
+        .is_none());
+    store::with_db(|conn| {
+        conn.execute_batch("DROP TRIGGER fail_host_reply")?;
+        Ok(())
+    })
+    .unwrap();
+    state
+        .interactions
+        .finish_agent_task(&claim, "provider_visible")
+        .await
+        .unwrap();
+    state
+        .interactions
+        .reply_agent_message("receiver", &task.record.id, ReplyStatus::Done, "result")
+        .await
+        .unwrap();
+    assert_eq!(
+        state
+            .interactions
+            .structured_reply(&task.record.id)
+            .await
+            .unwrap()
+            .body,
+        "result"
+    );
 }

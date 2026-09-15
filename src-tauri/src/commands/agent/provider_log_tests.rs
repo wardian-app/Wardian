@@ -1,4 +1,4 @@
-use super::agent_lifecycle::fresh_pi_session_for_initial_capture;
+use super::agent_lifecycle::fresh_provider_session_for_initial_capture;
 use super::tests::{make_test_agent, WardianHomeGuard};
 use super::{
     lifecycle_config_for_session, persist_agent_config_while_lifecycle_locked,
@@ -35,11 +35,11 @@ fn pi_initial_capture_provenance_requires_the_launch_owned_identity() {
         ..AgentConfig::default()
     };
     assert_eq!(
-        fresh_pi_session_for_initial_capture(&fresh_config, Some("pi-fresh-session")),
+        fresh_provider_session_for_initial_capture(&fresh_config, Some("pi-fresh-session")),
         Some("pi-fresh-session".to_string())
     );
     assert_eq!(
-        fresh_pi_session_for_initial_capture(&fresh_config, Some("different-session")),
+        fresh_provider_session_for_initial_capture(&fresh_config, Some("different-session")),
         None
     );
 
@@ -50,9 +50,172 @@ fn pi_initial_capture_provenance_requires_the_launch_owned_identity() {
         ..AgentConfig::default()
     };
     assert_eq!(
-        fresh_pi_session_for_initial_capture(&resumed_config, Some("pi-resumed-session")),
+        fresh_provider_session_for_initial_capture(&resumed_config, Some("pi-resumed-session")),
         None
     );
+}
+
+#[test]
+fn pi_provider_log_policy_baselines_resume_and_skips_disabled_span() {
+    // Acquisition policy evidence only. The provider Init-to-capture
+    // regression belongs at the actual spawn helper seam.
+    let temp = tempfile::tempdir().expect("provider log temp dir");
+    let resume_path = temp.path().join("resume-pi.jsonl");
+    std::fs::write(
+        &resume_path,
+        concat!(
+            r#"{"type":"session","id":"pi-historical-session"}"#,
+            "\n",
+            r#"{"type":"message_end","message":{"role":"assistant","content":"Historical prefix","stopReason":"stop"}}"#,
+            "\n"
+        ),
+    )
+    .expect("write historical Pi prefix");
+
+    let resumed_config = AgentConfig {
+        provider: "pi".to_string(),
+        resume_session: Some("pi-resumed-session".to_string()),
+        ..AgentConfig::default()
+    };
+    let resumed_identity =
+        fresh_provider_session_for_initial_capture(&resumed_config, Some("pi-resumed-session"));
+    assert!(resumed_identity.is_none());
+    let resumed = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        "agent-1",
+        "pi",
+        &resume_path,
+        "pi:session:pi-resumed-session",
+        None,
+        false,
+    )
+    .expect("baseline ordinary Pi resume");
+    assert!(resumed.events.is_empty());
+    assert_eq!(
+        resumed.next.unknown_before_offset,
+        Some(std::fs::metadata(&resume_path).unwrap().len())
+    );
+
+    let disabled_path = temp.path().join("disabled-pi.jsonl");
+    std::fs::write(
+        &disabled_path,
+        r#"{"type":"message_end","message":{"role":"assistant","content":"Before disabled","stopReason":"stop"}}
+"#,
+    )
+    .expect("write disabled Pi prefix");
+    let disabled = crate::commands::provider_log_acquisition::observe_provider_log_policy(
+        &disabled_path,
+        "pi:session:disabled",
+        None,
+        false,
+        true,
+    )
+    .expect("open disabled Pi policy");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&disabled_path)
+        .and_then(|mut file| {
+            use std::io::Write as _;
+            writeln!(
+                file,
+                r#"{{"type":"message_end","message":{{"role":"assistant","content":"Hidden while disabled","stopReason":"stop"}}}}"#
+            )
+        })
+        .expect("write disabled Pi answer");
+    let enabled = crate::commands::provider_log_acquisition::observe_provider_log_policy(
+        &disabled_path,
+        "pi:session:disabled",
+        Some(disabled.next),
+        true,
+        true,
+    )
+    .expect("close disabled Pi policy");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&disabled_path)
+        .and_then(|mut file| {
+            use std::io::Write as _;
+            writeln!(
+                file,
+                r#"{{"type":"message_end","message":{{"role":"assistant","content":"Visible after disabled","stopReason":"stop"}}}}"#
+            )
+        })
+        .expect("write enabled Pi answer");
+
+    let skipped = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        "agent-1",
+        "pi",
+        &disabled_path,
+        "pi:session:disabled",
+        Some(enabled.next),
+        true,
+    )
+    .expect("skip the disabled Pi span");
+    assert!(skipped.events.is_empty());
+    assert!(skipped.continue_immediately);
+    let visible = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        "agent-1",
+        "pi",
+        &disabled_path,
+        "pi:session:disabled",
+        Some(skipped.next),
+        true,
+    )
+    .expect("capture only post-policy Pi bytes");
+    assert_eq!(
+        visible
+            .events
+            .iter()
+            .filter_map(|event| event.text.as_deref())
+            .collect::<Vec<_>>(),
+        vec!["Visible after disabled"]
+    );
+}
+
+#[test]
+fn generated_claude_and_captured_codex_identities_survive_registration_shape() {
+    for provider in ["claude", "codex"] {
+        let mut fresh_config = AgentConfig {
+            provider: provider.to_string(),
+            fresh_provider_session_id: Some("fresh-provider-session".to_string()),
+            ..AgentConfig::default()
+        };
+        assert_eq!(
+            fresh_provider_session_for_initial_capture(
+                &fresh_config,
+                Some("fresh-provider-session")
+            ),
+            Some("fresh-provider-session".to_string())
+        );
+        fresh_config.resume_session = Some("fresh-provider-session".to_string());
+        assert_eq!(
+            fresh_provider_session_for_initial_capture(
+                &fresh_config,
+                Some("fresh-provider-session")
+            ),
+            Some("fresh-provider-session".to_string())
+        );
+    }
+}
+
+#[test]
+fn empty_or_mismatched_runtime_identity_fails_closed() {
+    let cases = [
+        (Some("fresh-provider-session"), Some("different-session")),
+        (Some(""), Some("fresh-provider-session")),
+        (Some("fresh-provider-session"), Some("")),
+    ];
+    for (fresh, resume) in cases {
+        let config = AgentConfig {
+            provider: "claude".to_string(),
+            fresh_provider_session_id: fresh.map(str::to_string),
+            resume_session: resume.map(str::to_string),
+            ..AgentConfig::default()
+        };
+        assert_eq!(
+            fresh_provider_session_for_initial_capture(&config, Some("fresh-provider-session")),
+            None
+        );
+    }
 }
 
 #[tokio::test]

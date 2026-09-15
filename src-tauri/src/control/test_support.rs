@@ -111,18 +111,18 @@ pub(super) fn insert_opencode_user_receipt(
         .expect("insert OpenCode user part");
 }
 
-pub(super) struct TestWardianHome {
+pub(crate) struct TestWardianHome {
     _lock: tokio::sync::MutexGuard<'static, ()>,
     previous_home: Option<OsString>,
     _temp: tempfile::TempDir,
 }
 
 impl TestWardianHome {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::from_guard(crate::utils::wardian_test_env_lock())
     }
 
-    pub(super) async fn new_async() -> Self {
+    pub(crate) async fn new_async() -> Self {
         Self::from_guard(crate::utils::wardian_test_env_lock_async().await)
     }
 
@@ -140,7 +140,7 @@ impl TestWardianHome {
         fixture
     }
 
-    pub(super) fn path(&self) -> &std::path::Path {
+    pub(crate) fn path(&self) -> &std::path::Path {
         self._temp.path()
     }
 }

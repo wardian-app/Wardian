@@ -33,6 +33,7 @@ fn captured_background_config(
     let mut updated = current.clone();
     if started_fresh {
         updated.resume_session = None;
+        updated.fresh_provider_session_id = None;
     }
     super::apply_provider_identity("codex", &mut updated, native_id)?;
     Ok(updated)
@@ -336,7 +337,11 @@ mod tests {
             next.session_persistence,
             AgentSessionPersistenceOverride::Fresh
         );
+        assert_eq!(next.fresh_provider_session_id.as_deref(), Some(next_id));
         assert!(background_starts_fresh(&next));
+        let resumed = captured_background_config(&next, &next, next_id, false).unwrap();
+        assert_eq!(resumed.resume_session.as_deref(), Some(next_id));
+        assert_eq!(resumed.fresh_provider_session_id.as_deref(), Some(next_id));
         // An old publication cannot overwrite a changed resume target/clear.
         assert!(captured_background_config(&captured, &initial, first_id, false).is_err());
         assert!(

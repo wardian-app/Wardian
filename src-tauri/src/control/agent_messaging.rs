@@ -1,6 +1,10 @@
 //! Receiver-first messaging admission and dispatch. Provider integrations must
 //! acquire the same durable delivery claim before exposing canonical task text.
 use super::*;
+use crate::delivery::native_broker::{
+    log_opencode_dispatch_diagnostic, OpenCodeDispatchDiagnosticReason,
+    OpenCodeDispatchDiagnosticStage,
+};
 use wardian_core::agent_messaging::{
     AgentMessagingError, AgentMessagingRequest as Request, AgentMessagingResponse as Response,
     MAX_RECEIVE_ITEMS, MAX_RECEIVE_TIMEOUT_MS,
@@ -100,7 +104,9 @@ async fn handle_in_state(
                 .map_err(control_error)?;
             if let Some(app) = app {
                 let _ = app.emit("pair-activity-changed", ());
-                native::spawn_information(app, &replied.record.target_session_ids[0]);
+                if let Some(recipient) = replied.record.target_session_ids.first() {
+                    native::spawn_information(app, recipient);
+                }
             }
             Ok(Response::Reply {
                 request_id,
@@ -209,7 +215,33 @@ async fn authenticate(state: &AppState, sender: &str) -> Result<(), ControlError
     Ok(())
 }
 
-async fn resolve_exact(state: &AppState, target: &str) -> Result<String, ControlError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerProviderClassification {
+    OpenCode,
+    Other,
+    Unknown,
+}
+
+impl WorkerProviderClassification {
+    fn from_config(provider: &str) -> Self {
+        let provider = provider.trim();
+        if provider.is_empty() {
+            Self::Unknown
+        } else if provider.eq_ignore_ascii_case("opencode") {
+            Self::OpenCode
+        } else {
+            Self::Other
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedRecipient {
+    id: String,
+    provider: WorkerProviderClassification,
+}
+
+async fn resolve_exact(state: &AppState, target: &str) -> Result<ResolvedRecipient, ControlError> {
     let selector = target.to_ascii_lowercase();
     if target.trim().is_empty()
         || target != target.trim()
@@ -232,11 +264,17 @@ async fn resolve_exact(state: &AppState, target: &str) -> Result<String, Control
             .lock()
             .map_err(|_| ControlError::request_failed("Agent configuration lock poisoned."))?;
         if id == target || config.session_name == target {
-            matches.push(id.clone());
+            matches.push((
+                id.clone(),
+                WorkerProviderClassification::from_config(&config.provider),
+            ));
         }
     }
     match matches.as_slice() {
-        [id] => Ok(id.clone()),
+        [(id, provider)] => Ok(ResolvedRecipient {
+            id: id.clone(),
+            provider: *provider,
+        }),
         [] => Err(ControlError::not_found("No exact recipient exists.")),
         _ => Err(ControlError::coded(
             "ambiguous_target",
@@ -266,7 +304,8 @@ async fn admit(
         task,
     } = input;
     store::validate_message(message).map_err(control_error)?;
-    let recipient = resolve_exact(state, target).await?;
+    let resolved = resolve_exact(state, target).await?;
+    let recipient = resolved.id;
     let generation = state
         .interactions
         .current_provider_input_generation(&recipient)
@@ -287,7 +326,13 @@ async fn admit(
     if let Some(app) = app {
         let _ = app.emit("pair-activity-changed", ());
         if task && !admitted.duplicate {
-            spawn_pending_tasks(app, &recipient);
+            spawn_pending_tasks_with_request(
+                app,
+                &recipient,
+                Some(admitted.record.id.clone()),
+                Some(generation),
+                Some(resolved.provider),
+            );
         } else if !task && !admitted.duplicate {
             native::spawn_information(app, &recipient);
         }
@@ -311,14 +356,31 @@ async fn admit(
 /// Idle status observations and new admissions give unclaimed work a chance to
 /// run. Received or uncertain work is excluded by the durable claim transaction.
 pub(crate) fn spawn_pending_tasks(app: &AppHandle, recipient: &str) {
+    spawn_pending_tasks_with_request(app, recipient, None, None, None);
+}
+
+fn spawn_pending_tasks_with_request(
+    app: &AppHandle,
+    recipient: &str,
+    request_id: Option<String>,
+    generation: Option<u64>,
+    provider: Option<WorkerProviderClassification>,
+) {
     // Ready/idle observations also give stored information a push opportunity;
     // this path itself can only inspect an already-existing native owner.
     native::spawn_information(app, recipient);
     let app = app.clone();
     let recipient = recipient.to_string();
     tauri::async_runtime::spawn(async move {
-        if let Err(error) =
-            dispatch_pending_queue(Some(&app), &app.state::<AppState>(), &recipient).await
+        if let Err(error) = dispatch_pending_queue_with_request(
+            Some(&app),
+            &app.state::<AppState>(),
+            &recipient,
+            request_id.as_deref(),
+            generation,
+            provider,
+        )
+        .await
         {
             manager::log_debug(&format!("[WARDIAN] v2 task dispatch: {error}"));
         }
@@ -328,20 +390,71 @@ pub(crate) fn spawn_pending_tasks(app: &AppHandle, recipient: &str) {
 /// After a completed dispatch returns, its lease/execution guard has dropped.
 /// A changed queue head is distinct admitted work. An unchanged head means busy
 /// or unsupported and stops this opportunity without polling or replay.
-async fn dispatch_pending_queue(
+pub(super) async fn dispatch_pending_queue(
     app: Option<&AppHandle>,
     state: &AppState,
     recipient: &str,
 ) -> Result<(), ControlError> {
+    dispatch_pending_queue_with_request(app, state, recipient, None, None, None).await
+}
+
+#[derive(Debug)]
+struct OpenCodeDispatchWorkerEntry {
+    request_id: String,
+    generation: u64,
+    provider: WorkerProviderClassification,
+}
+
+async fn dispatch_pending_queue_with_request(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    recipient: &str,
+    request_id: Option<&str>,
+    generation: Option<u64>,
+    provider: Option<WorkerProviderClassification>,
+) -> Result<(), ControlError> {
+    let worker_entry =
+        request_id
+            .zip(generation)
+            .map(|(request_id, generation)| OpenCodeDispatchWorkerEntry {
+                request_id: request_id.to_string(),
+                generation,
+                provider: provider.unwrap_or(WorkerProviderClassification::Unknown),
+            });
+    let mut worker_entry = Some(worker_entry);
     loop {
+        let entry = worker_entry.take().flatten();
+        if let Some(entry) = entry.as_ref() {
+            log_opencode_worker_entry(entry, OpenCodeDispatchDiagnosticReason::WorkerStarted);
+        }
         let before = store::with_db(|conn| store::next_pending_task_id(conn, recipient))
             .map_err(control_error)?;
+        if let Some(entry) = entry.as_ref() {
+            let reason = match before.as_deref() {
+                Some(id) if id == entry.request_id => {
+                    OpenCodeDispatchDiagnosticReason::QueueHeadMatches
+                }
+                Some(_) => OpenCodeDispatchDiagnosticReason::QueueHeadOther,
+                None => OpenCodeDispatchDiagnosticReason::QueueHeadEmpty,
+            };
+            log_opencode_worker_entry(entry, reason);
+        }
         if before.is_none() {
             return Ok(());
         }
-        let outcome = dispatch_one(app, state, recipient).await;
+        let outcome = dispatch_one_with_request(app, state, recipient, before.as_deref()).await;
         let after = store::with_db(|conn| store::next_pending_task_id(conn, recipient))
             .map_err(control_error)?;
+        if let Some(entry) = entry.as_ref() {
+            log_opencode_worker_entry(
+                entry,
+                if after == before {
+                    OpenCodeDispatchDiagnosticReason::QueueHeadUnchanged
+                } else {
+                    OpenCodeDispatchDiagnosticReason::QueueHeadAdvanced
+                },
+            );
+        }
         if after == before {
             return outcome;
         }
@@ -353,36 +466,145 @@ async fn dispatch_pending_queue(
     }
 }
 
-async fn dispatch_one(
+fn log_opencode_worker_entry(
+    entry: &OpenCodeDispatchWorkerEntry,
+    reason: OpenCodeDispatchDiagnosticReason,
+) {
+    let reason = match entry.provider {
+        WorkerProviderClassification::OpenCode => reason,
+        WorkerProviderClassification::Other => return,
+        WorkerProviderClassification::Unknown => {
+            if reason != OpenCodeDispatchDiagnosticReason::WorkerStarted {
+                return;
+            }
+            OpenCodeDispatchDiagnosticReason::WorkerProviderUnknown
+        }
+    };
+    log_opencode_dispatch_diagnostic(
+        &entry.request_id,
+        entry.generation,
+        OpenCodeDispatchDiagnosticStage::WorkerEntry,
+        reason,
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskDispatchRoute {
+    Native,
+    Background,
+    Surface,
+}
+
+fn task_dispatch_route(
+    provider: &str,
+    explicit_off: bool,
+    status: &str,
+    selected_native_owner: bool,
+) -> TaskDispatchRoute {
+    if explicit_off {
+        TaskDispatchRoute::Background
+    } else if selected_native_owner {
+        TaskDispatchRoute::Native
+    } else if status_uses_headless_delivery(status) {
+        TaskDispatchRoute::Background
+    } else if provider == "codex" {
+        TaskDispatchRoute::Native
+    } else {
+        TaskDispatchRoute::Surface
+    }
+}
+
+async fn dispatch_one_with_request(
     app: Option<&AppHandle>,
     state: &AppState,
     recipient: &str,
+    request_id: Option<&str>,
 ) -> Result<(), ControlError> {
     let info = delivery_target_info(state, recipient).await?;
-    if info.provider == "codex" {
-        // A background acquisition owns its entire run and shutdown. Further
-        // tasks wait for release instead of joining an owner about to exit.
-        if active_conversation_lease_for_delivery(&info) {
-            return Ok(());
-        }
-        if status_uses_headless_delivery(&info.status) {
-            return dispatch_background_task(app, state, &info).await;
-        }
-        return native::dispatch_attached_task(state, &info).await;
+    // A background owner keeps the conversation out of every competing route.
+    if active_conversation_lease_for_delivery(&info) {
+        log_opencode_dispatch_stage(
+            state,
+            &info,
+            request_id,
+            OpenCodeDispatchDiagnosticStage::Preclaim,
+            OpenCodeDispatchDiagnosticReason::ConversationLease,
+        )
+        .await;
+        return Ok(());
     }
-    if status_uses_headless_delivery(&info.status) {
-        return dispatch_background_task(app, state, &info).await;
+    let selected_native_owner = native::selected_native_owner_for_dispatch(state, &info).await;
+    let route = task_dispatch_route(
+        &info.provider,
+        info.config.is_off,
+        &info.status,
+        selected_native_owner,
+    );
+    let route_reason = match route {
+        TaskDispatchRoute::Native => OpenCodeDispatchDiagnosticReason::RouteNative,
+        TaskDispatchRoute::Background => OpenCodeDispatchDiagnosticReason::RouteBackground,
+        TaskDispatchRoute::Surface => OpenCodeDispatchDiagnosticReason::RouteSurface,
+    };
+    log_opencode_dispatch_stage(
+        state,
+        &info,
+        request_id,
+        OpenCodeDispatchDiagnosticStage::Preclaim,
+        route_reason,
+    )
+    .await;
+    match route {
+        TaskDispatchRoute::Native => {
+            return native::dispatch_attached_task_with_request(state, &info, request_id).await
+        }
+        TaskDispatchRoute::Background => return dispatch_background_task(app, state, &info).await,
+        TaskDispatchRoute::Surface => {}
     }
     // Never wait behind a long-running lifecycle action. A subsequent idle
     // observation or receive call can claim still-pending work.
     let Some(_lifecycle) = state.try_lock_agent_lifecycle(recipient).await else {
+        log_opencode_dispatch_stage(
+            state,
+            &info,
+            request_id,
+            OpenCodeDispatchDiagnosticStage::Preclaim,
+            OpenCodeDispatchDiagnosticReason::LifecycleBusy,
+        )
+        .await;
         return Ok(());
     };
     let info = delivery_target_info(state, recipient).await?;
-    if info.status != "idle"
-        || provider_input_blocks_mailbox_drain(state, recipient).await
-        || active_conversation_lease_for_delivery(&info)
-    {
+    if info.status != "idle" {
+        log_opencode_dispatch_stage(
+            state,
+            &info,
+            request_id,
+            OpenCodeDispatchDiagnosticStage::Preclaim,
+            OpenCodeDispatchDiagnosticReason::ProviderNotReady,
+        )
+        .await;
+        return Ok(());
+    }
+    if provider_input_blocks_task_dispatch(state, recipient).await {
+        log_opencode_dispatch_stage(
+            state,
+            &info,
+            request_id,
+            OpenCodeDispatchDiagnosticStage::Preclaim,
+            OpenCodeDispatchDiagnosticReason::ProviderInputBusy,
+        )
+        .await;
+        return Ok(());
+    }
+    if active_conversation_lease_for_delivery(&info) {
+        log_opencode_dispatch_stage(
+            state,
+            &info,
+            request_id,
+            OpenCodeDispatchDiagnosticStage::Preclaim,
+            OpenCodeDispatchDiagnosticReason::ConversationLease,
+        )
+        .await;
         return Ok(());
     }
     if state
@@ -391,6 +613,14 @@ async fn dispatch_one(
         .await
         .is_err()
     {
+        log_opencode_dispatch_stage(
+            state,
+            &info,
+            request_id,
+            OpenCodeDispatchDiagnosticStage::Preclaim,
+            OpenCodeDispatchDiagnosticReason::BrokerUnavailable,
+        )
+        .await;
         return Ok(());
     }
     let generation = state
@@ -404,8 +634,23 @@ async fn dispatch_one(
         .await
         .map_err(control_error)?
     else {
+        log_opencode_dispatch_diagnostic_for_info(
+            &info,
+            request_id,
+            generation,
+            OpenCodeDispatchDiagnosticStage::Preclaim,
+            OpenCodeDispatchDiagnosticReason::NoClaim,
+        );
         return Ok(());
     };
+    if info.provider == "opencode" {
+        log_opencode_dispatch_diagnostic(
+            &claim.record.id,
+            generation,
+            OpenCodeDispatchDiagnosticStage::PostclaimPreNativeAdmission,
+            OpenCodeDispatchDiagnosticReason::ClaimAcquired,
+        );
+    }
     let prompt = message_with_structured_reply_instruction(
         &prepare_claim_context(state, &claim).await?,
         &claim.record.id,
@@ -433,6 +678,14 @@ async fn dispatch_one(
         },
     )
     .await;
+    if info.provider == "opencode" {
+        log_opencode_dispatch_diagnostic(
+            &claim.record.id,
+            generation,
+            OpenCodeDispatchDiagnosticStage::ActualDispatch,
+            OpenCodeDispatchDiagnosticReason::SurfaceSubmit,
+        );
+    }
     let outcome = match &result {
         Ok(_) => "provider_visible",
         Err(error) if error.retry_safe => "failed_before_submit",
@@ -444,6 +697,38 @@ async fn dispatch_one(
         .await
         .map_err(control_error)?;
     Ok(())
+}
+
+async fn log_opencode_dispatch_stage(
+    state: &AppState,
+    info: &DeliveryTargetInfo,
+    request_id: Option<&str>,
+    stage: OpenCodeDispatchDiagnosticStage,
+    reason: OpenCodeDispatchDiagnosticReason,
+) {
+    let Some(request_id) = request_id.filter(|_| info.provider == "opencode") else {
+        return;
+    };
+    let generation = state
+        .interactions
+        .current_provider_input_generation(&info.uuid)
+        .await
+        .unwrap_or(0);
+    log_opencode_dispatch_diagnostic(request_id, generation, stage, reason);
+}
+
+fn log_opencode_dispatch_diagnostic_for_info(
+    info: &DeliveryTargetInfo,
+    request_id: Option<&str>,
+    generation: u64,
+    stage: OpenCodeDispatchDiagnosticStage,
+    reason: OpenCodeDispatchDiagnosticReason,
+) {
+    if info.provider == "opencode" {
+        if let Some(request_id) = request_id {
+            log_opencode_dispatch_diagnostic(request_id, generation, stage, reason);
+        }
+    }
 }
 
 /// The existing off-agent policy permits explicit work to run headlessly.
@@ -568,36 +853,6 @@ async fn dispatch_background_task(
     Ok(())
 }
 
-/// Legacy `wardian reply` to a v2 request uses the same atomic completion path.
-pub(super) async fn legacy_reply(
-    state: &AppState,
-    request_id: &str,
-    status: ReplyStatus,
-    body: &str,
-    origin: Option<&MessageOrigin>,
-    app: Option<&AppHandle>,
-) -> Result<Option<StructuredReply>, ControlError> {
-    if !store::with_db(|conn| store::is_task(conn, request_id)).map_err(control_error)? {
-        return Ok(None);
-    }
-    let Some(MessageOrigin::WardianAgent { session_id }) = origin else {
-        return Err(ControlError::coded(
-            "unauthorized",
-            "A managed reply origin is required.",
-        ));
-    };
-    authenticate(state, session_id).await?;
-    let result = state
-        .interactions
-        .reply_agent_message(session_id, request_id, status, body)
-        .await
-        .map_err(control_error)?;
-    if let Some(app) = app {
-        native::spawn_information(app, &result.record.target_session_ids[0]);
-    }
-    Ok(Some(result.reply))
-}
-
 /// Framing precedes provider I/O. Failure explicitly releases the exact claim
 /// rather than leaving a message permanently owned without crossing a boundary.
 async fn prepare_claim_context(
@@ -640,9 +895,9 @@ fn control_error(error: AgentMessagingError) -> ControlError {
     ControlError::coded(code, error.message)
 }
 
-pub(super) fn message_with_structured_reply_instruction(message: &str, request_id: &str) -> String {
+pub(crate) fn message_with_structured_reply_instruction(message: &str, request_id: &str) -> String {
     format!(
-        "{message}\n\nWardian request id: {request_id}\nWhen finished, execute this command from your shell/tool with the reply body on stdin:\nwardian reply {request_id} --status done --stdin\nUse --status blocked or --status failed if you cannot complete it. Do not print the command as your final answer; run it so Wardian can record the structured reply."
+        "{message}\n\nWardian request id: {request_id}\nWhen finished, use the canonical reply tool with request_id {request_id}, status done, and message containing your reply, or run wardian message reply {request_id} --status done --stdin with the reply body on stdin. Use status blocked or failed if you cannot complete it. Printing a final answer alone does not record the structured reply."
     )
 }
 

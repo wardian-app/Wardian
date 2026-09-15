@@ -76,11 +76,13 @@ within the authorized task, use the [agents](agents.md) reference; otherwise
 use the existing peer's queue or report its availability.
 
 ```bash
-wardian ask review-cli-surface --file review-request.md --tail 0 --timeout 10m
+wardian message followup review-cli-surface --file review-request.md
+wardian message receive --timeout-ms 60000
 ```
 
-Inspect the structured reply and delivery evidence; an additional `wait --next`
-would wait for a later status observation, not prove the completed ask.
-Timeout means the requested observation did not arrive, not necessarily that
-delivery failed or execution stopped. Do not resend automatically. Use
-[messaging](messaging.md) for reply outcomes and delivery inspection.
+Save the exact canonical `request_id`. Receive until a reply's
+`parent_interaction_id` matches it, then inspect its `reply_status` and body.
+Continue from each returned `next_cursor` within the caller's deadline; empty
+pages and timeouts do not complete the task or authorize resubmission. The
+followup receipt proves admission, not the peer's result. Use
+[messaging](messaging.md) for acknowledgement and reply semantics.

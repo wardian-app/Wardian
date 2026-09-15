@@ -1,66 +1,57 @@
 # Native orchestration delivery
 
-Wardian can deliver ordinary agent messages through a provider's structured
-session protocol while keeping Wardian identity and delivery policy
-authoritative. Use this surface for independently managed agents that are not
-currently attached to a live Wardian terminal.
+Wardian peer messaging uses the canonical information, task, receive and reply
+operations described in [agent messaging tools](./agent-messaging-tools.md).
+Native provider connections are delivery mechanisms behind that service.
 
-Maintained native transports are Claude persistent stream JSON, Codex
-app-server JSON-RPC, Antigravity persistent stream JSON, OpenCode ACP, and Pi
-RPC. Gemini is intentionally excluded. These transports require the provider
-CLI but no Wardian orchestration plugin; provider plugins and private team
-graphs are not part of the routing boundary.
+An attached Codex session uses its generation-bound app-server connection.
+Information enters through `thread/inject_items`; tasks enter through
+`turn/start` with structured host context. Neither operation uses the terminal
+composer. Candidate adapter capabilities alone do not establish that a given
+session has a negotiated native delivery connection.
 
 Start an accountable request with a caller-owned idempotency key:
 
 ```sh
-wardian ask <agent-name-or-uuid> "Review the change" \
-  --idempotency-key <stable-request-key> \
-  --expires-in 10m
+wardian message followup <agent-name-or-uuid> "Review the change" \
+  --idempotency-key <stable-request-key>
 ```
 
 PowerShell:
 
 ```powershell
-wardian ask <agent-name-or-uuid> "Review the change" `
-  --idempotency-key <stable-request-key> `
-  --expires-in 10m
+wardian message followup <agent-name-or-uuid> "Review the change" `
+  --idempotency-key <stable-request-key>
 ```
 
-Use `wardian send` for fire-and-forget delivery. Ordinary messages queue until
-the provider is idle. `--invalidate-premise` is the only operation permitted to
-steer an active turn, and only providers that advertise that capability accept
-it.
+Use `wardian message send` for information without waking or interrupting the
+recipient. Use `wardian message receive` for a bounded inbox read and
+`wardian message reply` to complete a canonical task. Interruption is explicit
+through `wardian message interrupt`; a correction message does not imply it.
 
-Inspect or mutate a delivery by its Wardian interaction ID:
+Inspect session capabilities and retained native-delivery evidence:
 
 ```sh
 wardian delivery show <interaction-id>
-wardian delivery withdraw <interaction-id>
-wardian delivery replace <interaction-id> "Corrected message" \
-  --idempotency-key <replacement-key>
-wardian delivery cancel <interaction-id>
 wardian delivery capabilities <agent-name-or-uuid>
 ```
 
-Withdrawal and replacement succeed only before provider submission.
-Cancellation remains `cancel_requested` until provider evidence confirms the
-result. Never automatically retry `submitted_unconfirmed`; inspect its evidence
-and wait for late reconciliation or make an explicit replacement decision.
+Historical native-delivery evidence is distinct from a canonical task receipt.
+Never automatically retry uncertain submission. A task is complete only when
+its authorized recipient records a correlated reply; native acceptance and
+terminal status do not establish completion.
 
 Provider and provider-session identifiers in capability or evidence output are
 diagnostics. Address all operations with Wardian agent UUIDs or names and
 Wardian interaction IDs.
 
-`send --wait-until idle` waits on the exact native interaction until the broker
-records provider-confirmed completion. It does not infer completion from the
-roster status. A restored agent that has no terminal input channel reuses its
-persistent native session, while an attached PTY remains the preferred live
-surface.
+Manual receive and automatic dispatch share durable claim ownership. If a native
+connection is unavailable, that condition cannot activate the retired Codex
+composer fallback or replay the legacy mailbox. Background execution uses the
+canonical task's recorded ownership and provider lifecycle.
 
-For deployment validation, use an isolated Wardian home and native packaged
-runtime. Create one temporary agent per provider, pause it, then require two
-messages to report `native_provider_session`, `completed`, positive turn-start
-capability, the expected native transport, and the same diagnostic provider
-session binding. A headless fallback is a failed native acceptance even if the
-provider eventually returns an answer.
+Validation uses an isolated Wardian home, browser profile, and matching packaged
+runtime. Record the actual provider/session binding, task claim, native
+acceptance and correlated reply. For Codex, require successful information/task
+delivery with terminal writes disabled in the test. Preserve failed or uncertain
+attempts; do not replace their evidence with a later run's result.

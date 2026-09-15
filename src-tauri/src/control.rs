@@ -10,23 +10,22 @@ pub(crate) use startup_readiness::{
 
 use crate::manager;
 mod agent_messaging;
+pub(crate) use agent_messaging::message_with_structured_reply_instruction;
 mod codex_background;
 mod headless_delivery;
 use crate::remote::operations::inbox_list_control as list_inbox_control;
 use crate::state::conversation_archive::{
     effective_conversation_logging, ConversationArchiveContext,
 };
-use crate::state::{AppState, MailboxMessageDraft, MailboxMessageRecord};
+use crate::state::AppState;
 use crate::utils::strip_ansi_controls;
-use agent_messaging::{
-    bounded_headless_delivery_timeout, message_with_structured_reply_instruction,
-    HeadlessMessageDeliveryRequest,
-};
+#[cfg(test)]
+use agent_messaging::bounded_headless_delivery_timeout;
+use agent_messaging::HeadlessMessageDeliveryRequest;
 use headless_delivery::deliver_headless_message;
-use sha2::{Digest, Sha256};
 use std::{
     fmt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -35,19 +34,15 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::control::{
     AgentDoctorResponse, AgentListResponse, AgentResponse, AgentUpdateResponse, AgentWatchResponse,
     AgentWorktreeListResponse, AgentWorktreeMutationResponse, AgentWorktreeSummary, ApprovalAction,
-    AskManyResponse, AskResponse, AskTargetOutcome, AskTargetResponse, CodexPluginDiagnostic,
-    ControlRequest, ConversationListResponse, ConversationShowResponse, DeliveryDetail,
-    DeliveryErrorDetail, DeliveryTransportKind, InboxNotificationKind, InboxNotificationPayload,
-    InboxNotificationResponse, InteractionBodyRef, InteractionKind, InteractionStatus,
+    CodexPluginDiagnostic, ControlRequest, ConversationListResponse, ConversationShowResponse,
+    DeliveryDetail, DeliveryErrorDetail, DeliveryTransportKind, InboxNotificationKind,
+    InboxNotificationPayload, InboxNotificationResponse, InteractionBodyRef, InteractionStatus,
     MessageInputMode, MessageOrigin, OkResponse, ProviderInputReadiness, ProviderReadyEvidence,
-    QueuePolicy, ReplyResponse, ReplyStatus, SendMessageResponse, StructuredReply,
-    WatchAgentSnapshot, WatchDeliverySnapshot, WatchEvidenceError,
+    QueuePolicy, WatchAgentSnapshot, WatchDeliverySnapshot,
 };
 use wardian_core::conversations::ConversationLoggingSetting;
 use wardian_core::identity::{normalize_status, AgentIdentity, StatusSource};
 use wardian_core::models::{AgentChatEvent, AgentChatEventKind, AgentChatRole};
-const STRUCTURED_ASK_INLINE_MESSAGE_MAX_BYTES: usize = 4096;
-const STRUCTURED_ASK_REQUESTS_DIR: &str = "requests";
 const PROVIDER_TURN_START_TIMEOUT_MS: u64 = 10_000;
 const MAX_HEADLESS_DELIVERY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
@@ -814,44 +809,6 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             handle_automation_run_control(app, automation_run_control_launch(request)?).await
         }
 
-        ControlRequest::SendMessage {
-            target,
-            message,
-            thread,
-            input_mode,
-            queue_policy,
-            approval_action,
-            origin,
-            target_scope,
-            headless_timeout_ms,
-            orchestration,
-        } => {
-            let state = app.state::<AppState>();
-            let scope_all = target_scope.as_deref() == Some("all");
-            let delivery = deliver_message_to_target_with_delivery_options(
-                Some(app),
-                &state,
-                &target,
-                &message,
-                thread.as_deref(),
-                input_mode,
-                queue_policy,
-                approval_action.as_ref(),
-                origin.as_ref(),
-                scope_all,
-                bounded_headless_delivery_timeout(headless_timeout_ms),
-                orchestration.as_ref(),
-                None,
-            )
-            .await?;
-            record_conversation_delivery(&state, &delivery, &message, origin.as_ref()).await;
-            ok_json(&SendMessageResponse {
-                schema: wardian_core::control::CONTROL_SCHEMA,
-                ok: true,
-                delivery,
-            })
-        }
-
         ControlRequest::NotifyCreate {
             notification,
             origin,
@@ -931,74 +888,6 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             }
         }
 
-        ControlRequest::Ask {
-            target,
-            message,
-            thread,
-            tail_bytes,
-            timeout_ms,
-            origin,
-            orchestration,
-        } => {
-            handle_structured_ask(
-                app,
-                &target,
-                &message,
-                thread.as_deref(),
-                tail_bytes,
-                Duration::from_millis(timeout_ms.unwrap_or(30_000)),
-                origin.as_ref(),
-                orchestration.as_ref(),
-            )
-            .await
-        }
-
-        ControlRequest::AskMany {
-            targets,
-            message,
-            thread,
-            tail_bytes,
-            timeout_ms,
-            origin,
-            orchestration,
-        } => {
-            handle_structured_ask_many(
-                app,
-                &targets,
-                &message,
-                thread.as_deref(),
-                tail_bytes,
-                Duration::from_millis(timeout_ms.unwrap_or(30_000)),
-                origin.as_ref(),
-                orchestration.as_ref(),
-            )
-            .await
-        }
-
-        ControlRequest::SubmitReply {
-            request_id,
-            status,
-            body,
-            origin,
-        } => {
-            let state = app.state::<AppState>();
-            let reply = submit_structured_reply(
-                &state,
-                &request_id,
-                status,
-                &body,
-                origin.as_ref(),
-                Some(app),
-            )
-            .await?;
-            ok_json(&ReplyResponse {
-                schema: wardian_core::control::CONTROL_SCHEMA,
-                ok: true,
-                request_id,
-                reply,
-            })
-        }
-
         ControlRequest::DeliveryGet {
             interaction_id,
             evidence_limit,
@@ -1059,77 +948,6 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             })
         }
 
-        ControlRequest::DeliveryReplace {
-            interaction_id,
-            message,
-            idempotency_key,
-            deadline_at,
-        } => {
-            let state = app.state::<AppState>();
-            let old_interaction = state
-                .interactions
-                .interaction(&interaction_id)
-                .await
-                .ok_or_else(|| ControlError::not_found("interaction not found"))?;
-            if old_interaction.kind != InteractionKind::Message {
-                return Err(ControlError::not_supported(
-                    "replacement currently applies only to queued notify/send interactions",
-                ));
-            }
-            let replacement = state
-                .native_delivery
-                .replace(
-                    &interaction_id,
-                    message.clone(),
-                    idempotency_key,
-                    deadline_at,
-                )
-                .await
-                .map_err(native_broker_control_error)?;
-            let _ = state
-                .interactions
-                .update_message_status_durable(&interaction_id, InteractionStatus::Failed)
-                .await;
-            state
-                .interactions
-                .create_message_durable_with_id(
-                    replacement.envelope.interaction_id.clone(),
-                    replacement.envelope.sender_agent_id.clone(),
-                    vec![replacement.envelope.target_agent_id.clone()],
-                    InteractionBodyRef::Inline { body: message },
-                )
-                .await
-                .map_err(ControlError::request_failed)?;
-            let info = delivery_target_info(&state, &replacement.envelope.target_agent_id).await?;
-            state
-                .native_delivery
-                .dispatch(
-                    crate::delivery::native_broker::NativeSessionSpec {
-                        target_agent_id: info.uuid,
-                        provider: info.provider,
-                        generation: replacement.envelope.generation,
-                        workspace: info.cwd,
-                        config: info.config,
-                    },
-                    replacement.clone(),
-                )
-                .await
-                .map_err(native_broker_control_error)?;
-            let record = state
-                .native_delivery
-                .get(&replacement.envelope.interaction_id)
-                .map_err(native_broker_control_error)?;
-            let evidence = state
-                .native_delivery
-                .evidence(&record.envelope.interaction_id, 100)
-                .map_err(native_broker_control_error)?;
-            ok_json(&wardian_core::control::NativeDeliveryInspectResponse {
-                schema: wardian_core::control::CONTROL_SCHEMA,
-                record,
-                evidence,
-            })
-        }
-
         ControlRequest::DeliveryCapabilities { target } => {
             let state = app.state::<AppState>();
             let target_agent_id = resolve_target_uuid_in_state(&state, &target)
@@ -1145,8 +963,8 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
                     info.provider
                 ))
             })?;
-            let binding = wardian_core::db::latest_native_session_binding(&target_agent_id)
-                .map_err(|error| ControlError::request_failed(error.to_string()))?;
+            let binding =
+                native_capability_binding(&state, &target_agent_id, &info.provider).await?;
             let candidate_capabilities = protocol.capabilities("unverified");
             ok_json(&wardian_core::control::NativeDeliveryCapabilitiesResponse {
                 schema: wardian_core::control::CONTROL_SCHEMA,
@@ -1892,16 +1710,25 @@ async fn deliver_message_to_target_with_delivery_options(
 
     let target_infos = delivery_target_infos(state, &session_ids).await?;
     let mut delivered = 0usize;
-    let mut queued = 0usize;
     let mut failures = Vec::new();
     let mut delivery = Vec::with_capacity(session_ids.len());
     for initial_info in target_infos {
-        let (lifecycle_was_busy, target_lifecycle_guard) =
-            match state.try_lock_agent_lifecycle(&initial_info.uuid).await {
-                Some(guard) => (false, guard),
-                None => (true, state.lock_agent_lifecycle(&initial_info.uuid).await),
-            };
+        let target_lifecycle_guard = match state.try_lock_agent_lifecycle(&initial_info.uuid).await
+        {
+            Some(guard) => guard,
+            None => state.lock_agent_lifecycle(&initial_info.uuid).await,
+        };
         let info = delivery_target_info(state, &initial_info.uuid).await?;
+        if !same_delivery_target_incarnation(&initial_info, &info) {
+            failures.push(format!("{}: target_replaced", initial_info.uuid));
+            delivery.push(rejected_delivery_detail(
+                initial_info,
+                "target_replaced",
+                input_mode,
+                queue_policy,
+            ));
+            continue;
+        }
         let outbound_message = message_with_origin(
             state,
             message,
@@ -1917,14 +1744,7 @@ async fn deliver_message_to_target_with_delivery_options(
             .broker_state(&info.uuid)
             .await
             .is_ok();
-        let route = if input_mode != MessageInputMode::ApprovalAction
-            && matches!(queue_policy, QueuePolicy::QueueIfBusy)
-            && lifecycle_was_busy
-        {
-            DeliveryRoute::Mailbox {
-                runtime_state: "conversation_leased",
-            }
-        } else if input_mode == MessageInputMode::ApprovalAction
+        let route = if input_mode == MessageInputMode::ApprovalAction
             || matches!(queue_policy, QueuePolicy::MailboxOnly)
         {
             decide_delivery_route(&info.status, input_mode, queue_policy, approval_action)
@@ -1940,8 +1760,8 @@ async fn deliver_message_to_target_with_delivery_options(
             && !provider_idle_status_allows_live_delivery(&info, queue_policy)
         {
             match queue_policy {
-                QueuePolicy::QueueIfBusy => DeliveryRoute::Mailbox {
-                    runtime_state: "provider_input_not_ready",
+                QueuePolicy::QueueIfBusy => DeliveryRoute::Reject {
+                    failure: "provider_input_not_ready",
                 },
                 QueuePolicy::LiveOnly => DeliveryRoute::Reject {
                     failure: "not_input_ready",
@@ -1950,8 +1770,8 @@ async fn deliver_message_to_target_with_delivery_options(
             }
         } else if active_conversation_lease_for_delivery(&info) {
             match queue_policy {
-                QueuePolicy::QueueIfBusy => DeliveryRoute::Mailbox {
-                    runtime_state: "conversation_leased",
+                QueuePolicy::QueueIfBusy => DeliveryRoute::Reject {
+                    failure: "conversation_leased",
                 },
                 QueuePolicy::LiveOnly => DeliveryRoute::Reject {
                     failure: "conversation_leased",
@@ -2007,36 +1827,6 @@ async fn deliver_message_to_target_with_delivery_options(
             let _ = app.emit("pair-activity-changed", ());
         }
         match route {
-            DeliveryRoute::Mailbox { runtime_state } => {
-                queued += 1;
-                let queued_uuid = info.uuid.clone();
-                let queued_status = info.status.clone();
-                let detail = enqueue_mailbox_delivery(
-                    state,
-                    interaction_id.clone(),
-                    info,
-                    outbound_message,
-                    input_mode,
-                    queue_policy,
-                    approval_action,
-                    origin,
-                    runtime_state,
-                )
-                .await?;
-                persist_interaction_delivery_attempt(
-                    state,
-                    &interaction_id,
-                    &detail.uuid,
-                    DeliveryTransportKind::LiveSurface,
-                    &detail,
-                )
-                .await;
-                record_delivery_attempt(state, &detail).await;
-                if let Some(app) = app {
-                    spawn_mailbox_drain_if_idle(app, &queued_uuid, &queued_status);
-                }
-                delivery.push(detail);
-            }
             DeliveryRoute::Reject { failure } => {
                 failures.push(format!("{}: {failure}", info.uuid));
                 let detail = rejected_delivery_detail(info, failure, input_mode, queue_policy);
@@ -2196,46 +1986,19 @@ async fn deliver_message_to_target_with_delivery_options(
                         delivery.push(*detail);
                     }
                     HeadlessMessageDelivery::Busy(current_info) => {
-                        // The preflight lease check is intentionally only an
-                        // optimization. A competing sender or lifecycle
-                        // operation can claim the agent after it; QueueIfBusy
-                        // must still queue rather than start a second provider
-                        // process against the same conversation.
-                        queued += 1;
-                        let current_info = *current_info;
-                        let queued_uuid = current_info.uuid.clone();
-                        let queued_status = current_info.status.clone();
-                        let detail = enqueue_mailbox_delivery(
-                            state,
-                            interaction_id.clone(),
-                            current_info,
-                            outbound_message,
+                        failures.push(format!("{}: conversation_leased", current_info.uuid));
+                        delivery.push(rejected_delivery_detail(
+                            *current_info,
+                            "conversation_leased",
                             input_mode,
                             queue_policy,
-                            approval_action,
-                            origin,
-                            "conversation_leased",
-                        )
-                        .await?;
-                        persist_interaction_delivery_attempt(
-                            state,
-                            &interaction_id,
-                            &detail.uuid,
-                            DeliveryTransportKind::LiveSurface,
-                            &detail,
-                        )
-                        .await;
-                        record_delivery_attempt(state, &detail).await;
-                        if let Some(app) = app {
-                            spawn_mailbox_drain_if_idle(app, &queued_uuid, &queued_status);
-                        }
-                        delivery.push(detail);
+                        ));
                     }
                 }
             }
         }
     }
-    if delivered + queued == 0 {
+    if delivered == 0 {
         return Err(ControlError::request_failed(format!(
             "message was not delivered to any matched agents: {}",
             failures.join("; ")
@@ -2252,6 +2015,31 @@ async fn deliver_message_to_target_with_delivery_options(
         .with_details(delivery_details_json(&delivery)));
     }
     Ok(delivery)
+}
+
+async fn native_capability_binding(
+    state: &AppState,
+    target_agent_id: &str,
+    provider: &str,
+) -> Result<Option<wardian_core::native_transport::NativeSessionBinding>, ControlError> {
+    if provider == "pi" {
+        let binding = match state
+            .interactions
+            .current_provider_input_generation(target_agent_id)
+            .await
+        {
+            Some(generation) => state
+                .native_delivery
+                .pi_binding(target_agent_id, generation)
+                .await
+                .ok(),
+            None => None,
+        };
+        return Ok(binding);
+    }
+
+    wardian_core::db::latest_native_session_binding(target_agent_id)
+        .map_err(|error| ControlError::request_failed(error.to_string()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2470,7 +2258,6 @@ fn provider_idle_status_allows_live_delivery(
 enum DeliveryRoute {
     Live,
     Headless,
-    Mailbox { runtime_state: &'static str },
     Reject { failure: &'static str },
 }
 
@@ -2490,16 +2277,16 @@ fn decide_delivery_route(
         };
     }
     if matches!(queue_policy, QueuePolicy::MailboxOnly) {
-        return DeliveryRoute::Mailbox {
-            runtime_state: "mailbox_only",
+        return DeliveryRoute::Reject {
+            failure: "mailbox_only",
         };
     }
 
     match status {
         "idle" => DeliveryRoute::Live,
         "processing" => match queue_policy {
-            QueuePolicy::QueueIfBusy => DeliveryRoute::Mailbox {
-                runtime_state: "target_processing",
+            QueuePolicy::QueueIfBusy => DeliveryRoute::Reject {
+                failure: "target_processing",
             },
             QueuePolicy::LiveOnly => DeliveryRoute::Reject {
                 failure: "not_input_ready",
@@ -2510,8 +2297,8 @@ fn decide_delivery_route(
             if matches!(queue_policy, QueuePolicy::QueueIfBusy)
                 && input_mode == MessageInputMode::Message
             {
-                DeliveryRoute::Mailbox {
-                    runtime_state: "target_action_required",
+                DeliveryRoute::Reject {
+                    failure: "target_action_required",
                 }
             } else {
                 DeliveryRoute::Reject {
@@ -2523,16 +2310,16 @@ fn decide_delivery_route(
             QueuePolicy::QueueIfBusy if input_mode == MessageInputMode::Message => {
                 DeliveryRoute::Headless
             }
-            QueuePolicy::QueueIfBusy | QueuePolicy::MailboxOnly => DeliveryRoute::Mailbox {
-                runtime_state: "queued_not_live",
+            QueuePolicy::QueueIfBusy | QueuePolicy::MailboxOnly => DeliveryRoute::Reject {
+                failure: "queued_not_live",
             },
             QueuePolicy::LiveOnly => DeliveryRoute::Reject {
                 failure: "target_not_live",
             },
         },
         "headless" => match queue_policy {
-            QueuePolicy::QueueIfBusy => DeliveryRoute::Mailbox {
-                runtime_state: "conversation_leased",
+            QueuePolicy::QueueIfBusy => DeliveryRoute::Reject {
+                failure: "conversation_leased",
             },
             QueuePolicy::LiveOnly => DeliveryRoute::Reject {
                 failure: "conversation_leased",
@@ -2606,55 +2393,6 @@ where
             reason: None,
         },
     )
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn enqueue_mailbox_delivery(
-    state: &AppState,
-    interaction_id: String,
-    info: DeliveryTargetInfo,
-    body: String,
-    input_mode: MessageInputMode,
-    queue_policy: QueuePolicy,
-    approval_action: Option<&ApprovalAction>,
-    origin: Option<&MessageOrigin>,
-    runtime_state: &str,
-) -> Result<DeliveryDetail, ControlError> {
-    let record = {
-        let mut mailbox = state.mailbox.lock().await;
-        let record = mailbox.enqueue(MailboxMessageDraft {
-            interaction_id,
-            target_session_id: info.uuid.clone(),
-            body,
-            input_mode,
-            queue_policy,
-            approval_action: approval_action.cloned(),
-            origin: origin.cloned(),
-        });
-        if let Err(error) = wardian_core::db::upsert_mailbox_message(&record) {
-            mailbox.remove(&record.id);
-            return Err(ControlError::request_failed(format!(
-                "failed to persist queued mailbox message: {error}"
-            )));
-        }
-        record
-    };
-
-    Ok(DeliveryDetail {
-        uuid: info.uuid,
-        name: info.name,
-        provider: info.provider,
-        runtime_state: runtime_state.to_string(),
-        delivery_state: "queued".to_string(),
-        input_mode,
-        queue_policy,
-        message_id: Some(record.id),
-        delivery_phase: Some("queued".to_string()),
-        observed_state: None,
-        reason: Some("target was not safe for live delivery".to_string()),
-        profile: None,
-        error: None,
-    })
 }
 
 enum HeadlessMessageDelivery {
@@ -2809,6 +2547,7 @@ async fn record_headless_message_response(
         provider: info.provider.clone(),
         turn_id: Some(interaction_id.to_string()),
         source: Some("headless_process".to_string()),
+        provider_provenance: None,
     });
 }
 
@@ -3086,7 +2825,7 @@ async fn provider_input_current_state(
     (input.generation == current_generation).then_some(input.state)
 }
 
-async fn provider_input_blocks_mailbox_drain(state: &AppState, session_id: &str) -> bool {
+async fn provider_input_blocks_task_dispatch(state: &AppState, session_id: &str) -> bool {
     provider_input_current_state(state, session_id)
         .await
         .is_some_and(|input_state| input_state != ProviderInputReadiness::Ready)
@@ -3374,848 +3113,6 @@ pub(crate) async fn mark_delivered_agents_prompt_started(
             }
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn handle_structured_ask(
-    app: &AppHandle,
-    target: &str,
-    message: &str,
-    thread: Option<&str>,
-    tail_bytes: Option<usize>,
-    timeout: Duration,
-    origin: Option<&MessageOrigin>,
-    orchestration: Option<&wardian_core::control::OrchestrationDeliveryOptions>,
-) -> Result<String, ControlError> {
-    validate_send_message_thread(thread)?;
-    validate_watch_target(target)?;
-    let state = app.state::<AppState>();
-    let target_uuid = resolve_target_uuid_in_state(&state, target)
-        .await
-        .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
-    let watch_state = agent_watch_state(&state, &target_uuid).await?;
-    let initial_cursor = watch_state
-        .lock()
-        .map_err(|_| ControlError::request_failed("watch state lock poisoned"))?
-        .latest_cursor();
-    let sender_session_id =
-        origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.clone());
-    let request_id =
-        structured_ask_request_id(orchestration, sender_session_id.as_deref(), &target_uuid);
-    let wardian_home = crate::utils::fs::get_wardian_home()
-        .ok_or_else(|| ControlError::request_failed("could not resolve Wardian home"))?;
-    let structured_delivery =
-        build_structured_ask_delivery_message(&wardian_home, &target_uuid, message, &request_id)?;
-    let body_ref = structured_delivery
-        .body_file
-        .as_ref()
-        .map(|path| InteractionBodyRef::File {
-            path: path.display().to_string(),
-        })
-        .unwrap_or_else(|| InteractionBodyRef::Inline {
-            body: message.to_string(),
-        });
-    let task = state
-        .interactions
-        .create_task_with_id(
-            request_id.clone(),
-            sender_session_id,
-            target_uuid.clone(),
-            body_ref,
-        )
-        .await;
-    if task.status == InteractionStatus::Failed {
-        return Err(ControlError::not_found(format!(
-            "agent not found: {target}"
-        )));
-    }
-    let _ = app.emit("pair-activity-changed", ());
-    let mut payload = serde_json::json!({
-        "request_id": task.id,
-        "target_session_id": target_uuid,
-        "status": "pending",
-        "created_at": task.created_at,
-    });
-    if let Some(body_file) = structured_delivery.body_file.as_deref() {
-        if let Some(payload) = payload.as_object_mut() {
-            payload.insert(
-                "body_file".to_string(),
-                serde_json::Value::String(body_file.display().to_string()),
-            );
-        }
-    }
-    push_watch_event_for_agent(&state, &target_uuid, "request", payload).await?;
-    let delivery = match deliver_message_to_target_with_delivery_options(
-        Some(app),
-        &state,
-        target,
-        &structured_delivery.prompt,
-        thread,
-        MessageInputMode::Message,
-        QueuePolicy::QueueIfBusy,
-        None,
-        origin,
-        false,
-        timeout.min(MAX_HEADLESS_DELIVERY_TIMEOUT),
-        orchestration,
-        Some(&request_id),
-    )
-    .await
-    {
-        Ok(delivery) => delivery,
-        Err(error) => {
-            return Err(error);
-        }
-    };
-    let reply = match wait_for_structured_reply(&state, &request_id, timeout).await {
-        Ok(reply) => reply,
-        Err(error) => {
-            return Err(error);
-        }
-    };
-    let fallback_agent = ask_fallback_agent_snapshot(&state, &target_uuid, target).await;
-    let watch_result = structured_ask_watch_response(
-        &state,
-        &target_uuid,
-        watch_state,
-        &initial_cursor,
-        tail_bytes,
-    )
-    .await;
-    let response = build_ask_response_with_watch_result(
-        request_id.clone(),
-        target.to_string(),
-        delivery,
-        reply,
-        fallback_agent,
-        watch_result,
-    );
-    ok_json(&response)
-}
-
-/// Delivers every valid request before waiting for any reply. Each pending request
-/// shares one deadline; a timeout is recorded as a terminal failed reply so a
-/// later `wardian reply` cannot revive an expired correlation.
-#[allow(clippy::too_many_arguments)]
-async fn handle_structured_ask_many(
-    app: &AppHandle,
-    targets: &[String],
-    message: &str,
-    thread: Option<&str>,
-    tail_bytes: Option<usize>,
-    timeout: Duration,
-    origin: Option<&MessageOrigin>,
-    orchestration: Option<&wardian_core::control::OrchestrationDeliveryOptions>,
-) -> Result<String, ControlError> {
-    validate_send_message_thread(thread)?;
-    if targets.len() < 2 {
-        return Err(ControlError::bad_request(
-            "multi-target ask requires at least two explicit targets",
-        ));
-    }
-
-    let state = app.state::<AppState>();
-    let wardian_home = crate::utils::fs::get_wardian_home()
-        .ok_or_else(|| ControlError::request_failed("could not resolve Wardian home"))?;
-    let sender_session_id =
-        origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.clone());
-    let mut pending = Vec::new();
-    let mut results = Vec::with_capacity(targets.len());
-
-    for target in targets {
-        validate_watch_target(target)?;
-        let Some(target_uuid) = resolve_target_uuid_in_state(&state, target).await else {
-            results.push(ask_target_failure(
-                target,
-                AskTargetOutcome::DeliveryFailed,
-                "not_found",
-                format!("agent not found: {target}"),
-            ));
-            continue;
-        };
-        let watch_state = match agent_watch_state(&state, &target_uuid).await {
-            Ok(watch_state) => watch_state,
-            Err(error) => {
-                results.push(ask_target_failure(
-                    target,
-                    AskTargetOutcome::DeliveryFailed,
-                    error.code(),
-                    error.to_string(),
-                ));
-                continue;
-            }
-        };
-        let initial_cursor = match watch_state.lock() {
-            Ok(watch) => watch.latest_cursor(),
-            Err(_) => {
-                results.push(ask_target_failure(
-                    target,
-                    AskTargetOutcome::DeliveryFailed,
-                    "request_failed",
-                    "watch state lock poisoned".to_string(),
-                ));
-                continue;
-            }
-        };
-        let request_id =
-            structured_ask_request_id(orchestration, sender_session_id.as_deref(), &target_uuid);
-        let structured_delivery = match build_structured_ask_delivery_message(
-            &wardian_home,
-            &target_uuid,
-            message,
-            &request_id,
-        ) {
-            Ok(delivery) => delivery,
-            Err(error) => {
-                results.push(ask_target_failure(
-                    target,
-                    AskTargetOutcome::DeliveryFailed,
-                    error.code(),
-                    error.to_string(),
-                ));
-                continue;
-            }
-        };
-        let body_ref = structured_delivery
-            .body_file
-            .as_ref()
-            .map(|path| InteractionBodyRef::File {
-                path: path.display().to_string(),
-            })
-            .unwrap_or_else(|| InteractionBodyRef::Inline {
-                body: message.to_string(),
-            });
-        let task = state
-            .interactions
-            .create_task_with_id(
-                request_id.clone(),
-                sender_session_id.clone(),
-                target_uuid.clone(),
-                body_ref,
-            )
-            .await;
-        if task.status == InteractionStatus::Failed {
-            results.push(ask_target_failure(
-                target,
-                AskTargetOutcome::DeliveryFailed,
-                "not_found",
-                format!("agent not found: {target}"),
-            ));
-            continue;
-        }
-        let _ = app.emit("pair-activity-changed", ());
-        let mut payload = serde_json::json!({
-            "request_id": task.id,
-            "target_session_id": target_uuid,
-            "status": "pending",
-            "created_at": task.created_at,
-        });
-        if let Some(body_file) = structured_delivery.body_file.as_deref() {
-            if let Some(payload) = payload.as_object_mut() {
-                payload.insert(
-                    "body_file".to_string(),
-                    serde_json::Value::String(body_file.display().to_string()),
-                );
-            }
-        }
-        push_watch_event_for_agent(&state, &target_uuid, "request", payload).await?;
-
-        match deliver_message_to_target_with_delivery_options(
-            Some(app),
-            &state,
-            target,
-            &structured_delivery.prompt,
-            thread,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            origin,
-            false,
-            timeout.min(MAX_HEADLESS_DELIVERY_TIMEOUT),
-            orchestration,
-            Some(&request_id),
-        )
-        .await
-        {
-            Ok(delivery) => pending.push((
-                target.clone(),
-                target_uuid,
-                request_id,
-                delivery,
-                watch_state,
-                initial_cursor,
-            )),
-            Err(error) => {
-                let reply = fail_structured_ask_request(
-                    &state,
-                    &request_id,
-                    &target_uuid,
-                    &format!("delivery failed: {error}"),
-                    Some(app),
-                )
-                .await;
-                results.push(AskTargetResponse {
-                    target: target.clone(),
-                    request_id: Some(request_id),
-                    outcome: AskTargetOutcome::DeliveryFailed,
-                    delivery: Vec::new(),
-                    reply,
-                    watch: None,
-                    watch_error: None,
-                    failure: Some(WatchEvidenceError {
-                        code: error.code().to_string(),
-                        message: error.to_string(),
-                    }),
-                });
-            }
-        }
-    }
-
-    let deadline = std::time::Instant::now() + timeout;
-    for (target, target_uuid, request_id, delivery, watch_state, initial_cursor) in pending {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        let reply = wait_for_structured_reply(&state, &request_id, remaining).await;
-        let fallback_agent = ask_fallback_agent_snapshot(&state, &target_uuid, &target).await;
-        let watch_result = structured_ask_watch_response(
-            &state,
-            &target_uuid,
-            watch_state,
-            &initial_cursor,
-            tail_bytes,
-        )
-        .await;
-        let (outcome, reply, failure) = match reply {
-            Ok(reply) => (AskTargetOutcome::Completed, Some(reply), None),
-            Err(error) if error.code() == "watch_timeout" => {
-                let reply = fail_structured_ask_request(
-                    &state,
-                    &request_id,
-                    &target_uuid,
-                    "structured reply timed out",
-                    Some(app),
-                )
-                .await;
-                (
-                    AskTargetOutcome::TimedOut,
-                    reply,
-                    Some(WatchEvidenceError {
-                        code: error.code().to_string(),
-                        message: error.to_string(),
-                    }),
-                )
-            }
-            Err(error) => {
-                let reply = fail_structured_ask_request(
-                    &state,
-                    &request_id,
-                    &target_uuid,
-                    &format!("ask cancelled: {error}"),
-                    Some(app),
-                )
-                .await;
-                (
-                    AskTargetOutcome::Cancelled,
-                    reply,
-                    Some(WatchEvidenceError {
-                        code: error.code().to_string(),
-                        message: error.to_string(),
-                    }),
-                )
-            }
-        };
-        let (watch, watch_error) = ask_watch_parts(fallback_agent, watch_result);
-        results.push(AskTargetResponse {
-            target,
-            request_id: Some(request_id),
-            outcome,
-            delivery,
-            reply,
-            watch: Some(watch),
-            watch_error,
-            failure,
-        });
-    }
-
-    ok_json(&AskManyResponse {
-        schema: wardian_core::control::CONTROL_SCHEMA,
-        ok: true,
-        targets: results,
-    })
-}
-
-fn ask_target_failure(
-    target: &str,
-    outcome: AskTargetOutcome,
-    code: &str,
-    message: String,
-) -> AskTargetResponse {
-    AskTargetResponse {
-        target: target.to_string(),
-        request_id: None,
-        outcome,
-        delivery: Vec::new(),
-        reply: None,
-        watch: None,
-        watch_error: None,
-        failure: Some(WatchEvidenceError {
-            code: code.to_string(),
-            message,
-        }),
-    }
-}
-
-fn ask_watch_parts(
-    fallback_agent: WatchAgentSnapshot,
-    watch_result: Result<AgentWatchResponse, ControlError>,
-) -> (AgentWatchResponse, Option<WatchEvidenceError>) {
-    match watch_result {
-        Ok(watch) => (watch, None),
-        Err(error) => (
-            minimal_ask_watch_response(fallback_agent),
-            Some(WatchEvidenceError {
-                code: error.code().to_string(),
-                message: error.to_string(),
-            }),
-        ),
-    }
-}
-
-async fn fail_structured_ask_request(
-    state: &AppState,
-    request_id: &str,
-    target_session_id: &str,
-    body: &str,
-    app: Option<&AppHandle>,
-) -> Option<StructuredReply> {
-    let reply = state
-        .interactions
-        .fail_task_with_reply(request_id, target_session_id, body)
-        .await
-        .ok()?;
-    if let Some(app) = app {
-        let _ = app.emit("pair-activity-changed", ());
-    }
-    let _ = push_watch_event_for_agent(
-        state,
-        &reply.target_session_id,
-        "reply",
-        serde_json::json!({
-            "request_id": reply.request_id,
-            "status": reply.status,
-            "target_session_id": reply.target_session_id,
-            "source_session_id": reply.source_session_id,
-            "replied_at": reply.replied_at,
-        }),
-    )
-    .await;
-    Some(reply)
-}
-
-async fn structured_ask_watch_response(
-    state: &AppState,
-    target_uuid: &str,
-    watch_state: Arc<Mutex<crate::state::AgentWatchState>>,
-    initial_cursor: &str,
-    tail_bytes: Option<usize>,
-) -> Result<AgentWatchResponse, ControlError> {
-    let snapshot = watch_state
-        .lock()
-        .map_err(|_| ControlError::request_failed("watch state lock poisoned"))?
-        .snapshot_since(Some(initial_cursor), tail_bytes)
-        .map_err(control_error_from_watch_state)?;
-    let agent = watch_agent_snapshot(state, target_uuid).await?;
-
-    Ok(build_agent_watch_response(
-        agent,
-        snapshot,
-        &WatchIncludes::from_values(&[
-            "events".to_string(),
-            "transcript".to_string(),
-            "output".to_string(),
-            "delivery".to_string(),
-        ]),
-    ))
-}
-
-fn build_ask_response_with_watch_result(
-    request_id: String,
-    target: String,
-    delivery: Vec<DeliveryDetail>,
-    reply: StructuredReply,
-    fallback_agent: WatchAgentSnapshot,
-    watch_result: Result<AgentWatchResponse, ControlError>,
-) -> AskResponse {
-    match watch_result {
-        Ok(watch) => AskResponse {
-            schema: wardian_core::control::CONTROL_SCHEMA,
-            ok: true,
-            request_id,
-            target,
-            delivery,
-            reply,
-            watch,
-            watch_error: None,
-        },
-        Err(error) => AskResponse {
-            schema: wardian_core::control::CONTROL_SCHEMA,
-            ok: true,
-            request_id,
-            target,
-            delivery,
-            reply,
-            watch: minimal_ask_watch_response(fallback_agent),
-            watch_error: Some(WatchEvidenceError {
-                code: error.code().to_string(),
-                message: error.to_string(),
-            }),
-        },
-    }
-}
-
-fn minimal_ask_watch_response(agent: WatchAgentSnapshot) -> AgentWatchResponse {
-    let cursor = format!("{}:degraded", agent.uuid);
-    AgentWatchResponse {
-        schema: wardian_core::control::CONTROL_SCHEMA,
-        agent,
-        cursor: cursor.clone(),
-        events: Vec::new(),
-        output: wardian_core::control::WatchOutput {
-            cursor,
-            text: String::new(),
-            truncated: false,
-            omitted_bytes: 0,
-        },
-        transcript: None,
-        raw_output: None,
-        delivery: WatchDeliverySnapshot {
-            delivery: Vec::new(),
-        },
-    }
-}
-
-async fn ask_fallback_agent_snapshot(
-    state: &AppState,
-    target_uuid: &str,
-    target: &str,
-) -> WatchAgentSnapshot {
-    watch_agent_snapshot(state, target_uuid)
-        .await
-        .unwrap_or_else(|_| WatchAgentSnapshot {
-            uuid: target_uuid.to_string(),
-            name: target.to_string(),
-            provider: String::new(),
-            status: "unknown".to_string(),
-            last_status_at: None,
-        })
-}
-
-#[derive(Debug)]
-struct StructuredAskDeliveryMessage {
-    prompt: String,
-    body_file: Option<PathBuf>,
-}
-
-fn build_structured_ask_delivery_message(
-    wardian_home: &Path,
-    target_session_id: &str,
-    message: &str,
-    request_id: &str,
-) -> Result<StructuredAskDeliveryMessage, ControlError> {
-    if message.len() <= STRUCTURED_ASK_INLINE_MESSAGE_MAX_BYTES {
-        return Ok(StructuredAskDeliveryMessage {
-            prompt: message_with_structured_reply_instruction(message, request_id),
-            body_file: None,
-        });
-    }
-
-    let body_digest = format!("{:x}", Sha256::digest(message.as_bytes()));
-    let body_file = wardian_home
-        .join("agents")
-        .join(target_session_id)
-        .join("habitat")
-        .join(STRUCTURED_ASK_REQUESTS_DIR)
-        .join(format!("{request_id}-{}.md", &body_digest[..16]));
-    if let Some(parent) = body_file.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            ControlError::request_failed(format!("failed to create ask request directory: {error}"))
-        })?;
-    }
-    std::fs::write(&body_file, message).map_err(|error| {
-        ControlError::request_failed(format!("failed to write ask request body: {error}"))
-    })?;
-
-    Ok(StructuredAskDeliveryMessage {
-        prompt: message_with_structured_reply_instruction(
-            &format!(
-                "Wardian structured request {request_id} is too large to paste safely.\nBody SHA-256: {body_digest}\nRead the full request body from:\n{}",
-                body_file.display(),
-            ),
-            request_id,
-        ),
-        body_file: Some(body_file),
-    })
-}
-
-fn new_ask_request_id() -> String {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos() as u64)
-        .unwrap_or(0);
-    format!("ask_{:016x}", nanos ^ counter)
-}
-
-fn structured_ask_request_id(
-    orchestration: Option<&wardian_core::control::OrchestrationDeliveryOptions>,
-    sender_session_id: Option<&str>,
-    target_session_id: &str,
-) -> String {
-    let Some(key) = orchestration
-        .and_then(|options| options.idempotency_key.as_deref())
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
-    else {
-        return new_ask_request_id();
-    };
-    let operation = orchestration
-        .map(|options| options.operation)
-        .unwrap_or_default();
-    let canonical = format!(
-        "wardian-ask-v1\0{}\0{target_session_id}\0{operation:?}\0{key}",
-        sender_session_id.unwrap_or_default()
-    );
-    let digest = format!("{:x}", Sha256::digest(canonical.as_bytes()));
-    format!("ask_{}", &digest[..32])
-}
-
-#[cfg(test)]
-async fn create_pending_ask_request(
-    state: &AppState,
-    target_session_id: &str,
-) -> Result<String, ControlError> {
-    let request_id = new_ask_request_id();
-    create_pending_ask_request_with_id(state, target_session_id, request_id.clone(), None).await?;
-    Ok(request_id)
-}
-
-#[cfg(test)]
-async fn create_pending_ask_request_with_id(
-    state: &AppState,
-    target_session_id: &str,
-    request_id: String,
-    body_file: Option<&Path>,
-) -> Result<(), ControlError> {
-    if !state.agents.lock().await.contains_key(target_session_id) {
-        return Err(ControlError::not_found(format!(
-            "agent not found: {target_session_id}"
-        )));
-    }
-
-    let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    state.ask_requests.lock().await.insert(
-        request_id.clone(),
-        crate::state::app_state::AskRequestRecord {
-            request_id: request_id.clone(),
-            target_session_id: target_session_id.to_string(),
-            created_at: created_at.clone(),
-            reply: None,
-        },
-    );
-    let mut payload = serde_json::json!({
-        "request_id": request_id,
-        "target_session_id": target_session_id,
-        "status": "pending",
-        "created_at": created_at,
-    });
-    if let Some(body_file) = body_file {
-        if let Some(payload) = payload.as_object_mut() {
-            payload.insert(
-                "body_file".to_string(),
-                serde_json::Value::String(body_file.display().to_string()),
-            );
-        }
-    }
-    push_watch_event_for_agent(state, target_session_id, "request", payload).await?;
-    Ok(())
-}
-
-async fn submit_structured_reply(
-    state: &AppState,
-    request_id: &str,
-    status: ReplyStatus,
-    body: &str,
-    origin: Option<&MessageOrigin>,
-    app: Option<&AppHandle>,
-) -> Result<StructuredReply, ControlError> {
-    if let Some(reply) =
-        agent_messaging::legacy_reply(state, request_id, status.clone(), body, origin, app).await?
-    {
-        if let Some(app) = app {
-            let _ = app.emit("pair-activity-changed", ());
-        }
-        return Ok(reply);
-    }
-    let source_session_id =
-        origin.map(|MessageOrigin::WardianAgent { session_id }| session_id.clone());
-
-    if state.interactions.interaction(request_id).await.is_some() {
-        let reply = state
-            .interactions
-            .complete_task_with_reply(
-                request_id,
-                source_session_id.as_deref(),
-                status.clone(),
-                body,
-            )
-            .await
-            .map_err(|code| match code {
-                "not_found" => {
-                    ControlError::not_found(format!("ask request not found: {request_id}"))
-                }
-                "unauthorized" => {
-                    ControlError::coded("unauthorized", "reply origin does not match ask target")
-                }
-                "duplicate_reply" => ControlError::coded(
-                    "duplicate_reply",
-                    "ask request already has a terminal reply",
-                ),
-                _ => ControlError::request_failed("failed to complete ask interaction"),
-            })?;
-
-        if let Some(app) = app {
-            let _ = app.emit("pair-activity-changed", ());
-        }
-
-        push_watch_event_for_agent(
-            state,
-            &reply.target_session_id,
-            "reply",
-            serde_json::json!({
-                "request_id": reply.request_id,
-                "status": reply.status,
-                "target_session_id": reply.target_session_id,
-                "source_session_id": reply.source_session_id,
-                "replied_at": reply.replied_at,
-            }),
-        )
-        .await?;
-        return Ok(reply);
-    }
-
-    let reply = {
-        let mut requests = state.ask_requests.lock().await;
-        let request = requests.get_mut(request_id).ok_or_else(|| {
-            ControlError::not_found(format!("ask request not found: {request_id}"))
-        })?;
-        if let Some(source) = &source_session_id {
-            if source != &request.target_session_id {
-                return Err(ControlError::coded(
-                    "unauthorized",
-                    "reply origin does not match ask target",
-                ));
-            }
-        }
-        if request.reply.is_some() {
-            return Err(ControlError::coded(
-                "duplicate_reply",
-                "ask request already has a terminal reply",
-            ));
-        }
-
-        let replied_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let reply = StructuredReply {
-            request_id: request.request_id.clone(),
-            status,
-            body: body.to_string(),
-            target_session_id: request.target_session_id.clone(),
-            source_session_id,
-            replied_at,
-        };
-        request.reply = Some(reply.clone());
-        reply
-    };
-
-    push_watch_event_for_agent(
-        state,
-        &reply.target_session_id,
-        "reply",
-        serde_json::json!({
-            "request_id": reply.request_id,
-            "status": reply.status,
-            "target_session_id": reply.target_session_id,
-            "source_session_id": reply.source_session_id,
-            "replied_at": reply.replied_at,
-        }),
-    )
-    .await?;
-    Ok(reply)
-}
-
-async fn wait_for_structured_reply(
-    state: &AppState,
-    request_id: &str,
-    timeout: Duration,
-) -> Result<StructuredReply, ControlError> {
-    let started = std::time::Instant::now();
-    loop {
-        if state.interactions.interaction(request_id).await.is_some() {
-            if let Some(reply) = state.interactions.structured_reply(request_id).await {
-                return Ok(reply);
-            }
-            if started.elapsed() >= timeout {
-                return Err(ControlError::watch_timeout("structured reply timed out")
-                    .with_details(serde_json::json!({
-                        "request_id": request_id,
-                        "until": "reply",
-                    })));
-            }
-            let remaining = timeout.saturating_sub(started.elapsed());
-            tokio::time::sleep(remaining.min(Duration::from_millis(25))).await;
-            continue;
-        }
-
-        let reply = {
-            let requests = state.ask_requests.lock().await;
-            let request = requests.get(request_id).ok_or_else(|| {
-                ControlError::not_found(format!("ask request not found: {request_id}"))
-            })?;
-            request.reply.clone()
-        };
-        if let Some(reply) = reply {
-            return Ok(reply);
-        }
-        if started.elapsed() >= timeout {
-            return Err(
-                ControlError::watch_timeout("structured reply timed out").with_details(
-                    serde_json::json!({
-                        "request_id": request_id,
-                        "until": "reply",
-                    }),
-                ),
-            );
-        }
-        let remaining = timeout.saturating_sub(started.elapsed());
-        tokio::time::sleep(remaining.min(Duration::from_millis(25))).await;
-    }
-}
-
-async fn push_watch_event_for_agent(
-    state: &AppState,
-    session_id: &str,
-    kind: &str,
-    payload: serde_json::Value,
-) -> Result<(), ControlError> {
-    let agents = state.agents.lock().await;
-    let agent = agents
-        .get(session_id)
-        .ok_or_else(|| ControlError::not_found(format!("agent not found: {session_id}")))?;
-    agent
-        .watch_state
-        .lock()
-        .map_err(|_| ControlError::request_failed("watch state lock poisoned"))?
-        .push_event(kind, payload);
-    Ok(())
 }
 
 async fn handle_agent_watch(
@@ -4748,7 +3645,7 @@ async fn delivery_target_info(
         name: config.session_name.clone(),
         provider: config.provider.clone(),
         resume_session: config.resume_session.clone(),
-        cwd: PathBuf::from(&config.folder),
+        cwd: crate::utils::fs::resolve_cwd(&config.folder, &config.session_id),
         config: config.clone(),
         config_identity: agent.config.clone(),
         // Provider log activity can outlive a leased background owner. Off is
@@ -5015,307 +3912,24 @@ pub(crate) async fn mark_delivered_agents_prompt_started_for_delivery_service(
     mark_delivered_agents_prompt_started(app, state, session_ids).await;
 }
 
-pub(crate) fn spawn_mailbox_drain_if_idle(
-    app: &AppHandle,
-    session_id: &str,
-    observed_status: &str,
-) {
-    if matches!(normalize_status(observed_status).as_str(), "idle" | "off") {
+/// Only canonical v2 work is eligible at status and restore opportunities.
+pub(crate) fn spawn_agent_messaging_if_idle(app: &AppHandle, session_id: &str, status: &str) {
+    if matches!(normalize_status(status).as_str(), "idle" | "off") {
         agent_messaging::spawn_pending_tasks(app, session_id);
     }
-    if normalize_status(observed_status) != "idle" {
-        return;
-    }
-    let app = app.clone();
-    let session_id = session_id.to_string();
-    tauri::async_runtime::spawn(async move {
-        let state = app.state::<AppState>();
-        let _ = drain_next_mailbox_message_for_idle_agent(Some(&app), &state, &session_id).await;
-    });
 }
 
-/// Gives restored durable mailbox work one immediate, status-gated chance to
-/// drain. Later provider idle observations remain the normal delivery trigger;
-/// this does not poll or retry terminal input.
-pub(crate) fn spawn_mailbox_drain_after_restore(app: &AppHandle, session_id: &str) {
+pub(crate) fn spawn_agent_messaging_after_restore(app: &AppHandle, session_id: &str) {
     agent_messaging::spawn_pending_tasks(app, session_id);
-    let app = app.clone();
-    let session_id = session_id.to_string();
-    tauri::async_runtime::spawn(async move {
-        let state = app.state::<AppState>();
-        let _ = drain_next_mailbox_message_for_idle_agent(Some(&app), &state, &session_id).await;
-    });
 }
 
-pub(crate) fn spawn_native_delivery_recovery(app: &AppHandle) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let state = app.state::<AppState>();
-        let queued = match state.native_delivery.recover_after_restart(10_000).await {
-            Ok(queued) => queued,
-            Err(error) => {
-                crate::manager::log_debug(&format!(
-                    "[WARDIAN] native delivery recovery failed: {error}"
-                ));
-                return;
-            }
-        };
-        for record in queued {
-            let target = record.envelope.target_agent_id.clone();
-            let recovered = {
-                let agents = state.agents.lock().await;
-                agents.get(&target).and_then(|agent| {
-                    let status = agent.current_status.lock().ok()?.clone();
-                    let config = agent.config.lock().ok()?.clone();
-                    (status.eq_ignore_ascii_case("headless") && config.provider == record.provider)
-                        .then_some(config)
-                })
-            };
-            let Some(config) = recovered else {
-                continue;
-            };
-            let generation = state
-                .interactions
-                .current_provider_input_generation(&target)
-                .await
-                .unwrap_or(record.envelope.generation);
-            let workspace = crate::utils::fs::resolve_cwd(&config.folder, "");
-            let app_for_result = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let state = app_for_result.state::<AppState>();
-                let _lifecycle = state.lock_agent_lifecycle(&target).await;
-                let result = state
-                    .native_delivery
-                    .dispatch(
-                        crate::delivery::native_broker::NativeSessionSpec {
-                            target_agent_id: target.clone(),
-                            provider: config.provider.clone(),
-                            generation,
-                            workspace,
-                            config,
-                        },
-                        record.clone(),
-                    )
-                    .await;
-                if result.is_ok() {
-                    let _ = state
-                        .interactions
-                        .update_message_status_durable(
-                            &record.envelope.interaction_id,
-                            InteractionStatus::Delivered,
-                        )
-                        .await;
-                }
-                let _ = app_for_result.emit("pair-activity-changed", ());
-            });
-        }
-    });
-}
-
-pub(crate) async fn drain_mailbox_for_idle_agent_from_status_observation(
+pub(crate) async fn dispatch_agent_messaging_from_status_observation(
     app: Option<&AppHandle>,
     state: &AppState,
     session_id: &str,
 ) {
-    let _ = drain_next_mailbox_message_for_idle_agent(app, state, session_id).await;
-}
-
-async fn drain_next_mailbox_message_for_idle_agent(
-    app: Option<&AppHandle>,
-    state: &AppState,
-    session_id: &str,
-) -> Result<Option<DeliveryDetail>, ControlError> {
-    let info = delivery_target_infos(state, &[session_id.to_string()])
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(|| ControlError::not_found(format!("agent not found: {session_id}")))?;
-    if info.status != "idle" {
-        return Ok(None);
-    }
-    if provider_input_blocks_mailbox_drain(state, session_id).await {
-        return Ok(None);
-    }
-    if active_conversation_lease_for_delivery(&info) {
-        return Ok(None);
-    }
-
-    let record = {
-        let mut mailbox = state.mailbox.lock().await;
-        mailbox.take_next_pending_for_target(session_id)
-    };
-    let Some(record) = record else {
-        return Ok(None);
-    };
-
-    let dispatch_persist_error = wardian_core::db::upsert_mailbox_message(&record)
-        .err()
-        .map(|error| error.to_string());
-    if let Some(error) = dispatch_persist_error {
-        state.mailbox.lock().await.mark_pending(&record.id);
-        return Err(ControlError::request_failed(format!(
-            "failed to persist mailbox dispatch state: {error}"
-        )));
-    }
-    if let Err(error) = state
-        .interactions
-        .update_message_status_durable(&record.interaction_id, InteractionStatus::Delivering)
-        .await
-    {
-        let requeued = state.mailbox.lock().await.mark_pending(&record.id);
-        if let Some(requeued) = requeued {
-            let _ = wardian_core::db::upsert_mailbox_message(&requeued);
-        }
-        return Err(ControlError::request_failed(error));
-    }
-
-    let target_uuid = info.uuid.clone();
-    let submit_started = DeliveryDetail {
-        uuid: info.uuid.clone(),
-        name: info.name.clone(),
-        provider: info.provider.clone(),
-        runtime_state: "mailbox_drain".to_string(),
-        delivery_state: "submit_started".to_string(),
-        input_mode: record.input_mode,
-        queue_policy: record.queue_policy,
-        message_id: Some(record.id.clone()),
-        delivery_phase: Some("payload_sent".to_string()),
-        observed_state: Some("payload_sent".to_string()),
-        reason: None,
-        profile: Some(crate::utils::delivery_profile::delivery_profile(&info.provider).provider),
-        error: None,
-    };
-    let result = crate::delivery::submit_live_surface_prompt(
-        app,
-        state,
-        crate::delivery::LiveSurfacePromptRequest {
-            session_id: session_id.to_string(),
-            prompt: record.body.clone(),
-            interaction_id: Some(record.interaction_id.clone()),
-            input_mode: record.input_mode,
-            queue_policy: record.queue_policy,
-            approval_action: record.approval_action.clone(),
-            origin: record.origin.clone(),
-            runtime_state: "mailbox_drain",
-            mark_prompt_started: true,
-            require_provider_turn_receipt: true,
-            payload_sent_detail: Some(submit_started),
-            delivery_message_id: Some(record.id.clone()),
-        },
-    )
-    .await;
-
-    let detail = match result {
-        Ok(result) => {
-            state.mailbox.lock().await.mark_delivered(&record.id);
-            let _ = wardian_core::db::delete_mailbox_message(&record.id);
-            let _ = state
-                .interactions
-                .update_message_status_durable(&record.interaction_id, InteractionStatus::Delivered)
-                .await;
-            let mut detail = result.detail;
-            detail.message_id = Some(record.id.clone());
-            detail
-        }
-        Err(error) => {
-            let missing_ready_input_channel = error.detail.as_ref().is_some_and(|detail| {
-                detail
-                    .error
-                    .as_ref()
-                    .is_some_and(|error| error.code == "no_input_channel")
-            }) && matches!(
-                provider_input_current_state(state, session_id).await,
-                Some(ProviderInputReadiness::Ready)
-            );
-            let retry_safe = error.retry_safe && !missing_ready_input_channel;
-            if retry_safe {
-                let requeued = state.mailbox.lock().await.mark_pending(&record.id);
-                if let Some(requeued) = requeued {
-                    let _ = wardian_core::db::upsert_mailbox_message(&requeued);
-                }
-                let _ = state
-                    .interactions
-                    .update_message_status_durable(
-                        &record.interaction_id,
-                        InteractionStatus::Queued,
-                    )
-                    .await;
-            } else {
-                let terminal = state.mailbox.lock().await.mark_failed(&record.id);
-                if let Some(terminal) = terminal {
-                    persist_terminal_mailbox_record(&terminal);
-                }
-                let _ = state
-                    .interactions
-                    .update_message_status_durable(
-                        &record.interaction_id,
-                        InteractionStatus::Failed,
-                    )
-                    .await;
-            }
-            let service_recorded_detail = error.detail.is_some();
-            let mut detail = if let Some(detail) = error.detail {
-                detail
-            } else {
-                failed_delivery_detail(
-                    info,
-                    "mailbox_drain",
-                    "send_failed",
-                    error.to_string(),
-                    record.input_mode,
-                    record.queue_policy,
-                )
-            };
-            detail.message_id = Some(record.id.clone());
-            if detail.delivery_phase.is_none() {
-                detail.delivery_phase = Some(if retry_safe {
-                    "queued".to_string()
-                } else {
-                    "terminal_state_unknown".to_string()
-                });
-            }
-            detail.reason = Some(if retry_safe {
-                "queued message remains pending until a new idle or ready observation".to_string()
-            } else if missing_ready_input_channel {
-                "agent reported ready but its input channel was unavailable; delivery stopped to prevent late delivery".to_string()
-            } else {
-                "queued message marked failed because terminal state is partial or unknown"
-                    .to_string()
-            });
-            if !service_recorded_detail {
-                persist_interaction_delivery_attempt(
-                    state,
-                    &record.interaction_id,
-                    &target_uuid,
-                    DeliveryTransportKind::LiveSurface,
-                    &detail,
-                )
-                .await;
-                record_delivery_attempt(state, &detail).await;
-            }
-            detail
-        }
-    };
-
-    Ok(Some(detail))
-}
-
-fn persist_terminal_mailbox_record(record: &MailboxMessageRecord) {
-    // Persist the terminal marker before removing the durable queue row. If a
-    // shutdown lands between the two writes, startup still fails the in-flight
-    // record rather than replaying an ambiguous terminal payload.
-    if let Err(error) = wardian_core::db::upsert_mailbox_message(record) {
-        manager::log_debug(&format!(
-            "[Wardian] failed to persist terminal mailbox message {}: {error}",
-            record.id
-        ));
-    }
-    if let Err(error) = wardian_core::db::delete_mailbox_message(&record.id) {
-        manager::log_debug(&format!(
-            "[Wardian] failed to remove terminal mailbox message {}: {error}",
-            record.id
-        ));
-    }
+    let _ = agent_messaging::push_native_information(state, session_id).await;
+    let _ = agent_messaging::dispatch_pending_queue(app, state, session_id).await;
 }
 
 async fn agent_config_to_identity(
@@ -5774,22 +4388,201 @@ fn agent_update_requires_restart(updated_fields: &[String], is_off: bool) -> boo
 }
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     include!("control/tests/registrations.rs");
+    include!("control/tests/lifecycle_delivery.rs");
 
     use super::*;
     use crate::state::ActiveAgent;
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
     use wardian_core::models::{
         AgentConfig, AgentConversationMode, AutomationRoleAssignment, BusyPolicy,
     };
 
     use super::test_support::TestWardianHome;
+
+    async fn write_pi_test_frame(stream: &mut TcpStream, value: &serde_json::Value) {
+        let body = serde_json::to_vec(value).expect("encode Pi test frame");
+        let length = u32::try_from(body.len()).expect("Pi test frame length");
+        stream
+            .write_all(&length.to_be_bytes())
+            .await
+            .expect("write Pi test frame length");
+        stream
+            .write_all(&body)
+            .await
+            .expect("write Pi test frame body");
+    }
+
+    async fn read_pi_test_frame(stream: &mut TcpStream) -> serde_json::Value {
+        let mut prefix = [0_u8; 4];
+        stream
+            .read_exact(&mut prefix)
+            .await
+            .expect("read Pi test frame length");
+        let mut body = vec![0_u8; u32::from_be_bytes(prefix) as usize];
+        stream
+            .read_exact(&mut body)
+            .await
+            .expect("read Pi test frame body");
+        serde_json::from_slice(&body).expect("decode Pi test frame")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pi_capability_query_uses_ready_live_binding_for_current_generation() {
+        let _home = TestWardianHome::new_async().await;
+        let state = AppState::new();
+        let target_agent_id = "pi-capability-agent";
+        let generation = 7;
+        state
+            .interactions
+            .record_provider_input_state(
+                target_agent_id,
+                generation,
+                ProviderInputReadiness::Booting,
+                None,
+            )
+            .await;
+
+        let temp = tempfile::tempdir().expect("Pi capability fixture directory");
+        let session_file = temp.path().join("session.jsonl");
+        std::fs::write(&session_file, "{}\n").expect("write Pi session fixture");
+        let extension_path = temp.path().join("extension.mjs");
+        std::fs::write(&extension_path, "export default {};\n")
+            .expect("write Pi extension fixture");
+        let config = AgentConfig {
+            provider: "pi".to_string(),
+            session_id: target_agent_id.to_string(),
+            folder: temp.path().display().to_string(),
+            resume_session: Some("pi-session".to_string()),
+            ..Default::default()
+        };
+        let plan = state
+            .native_delivery
+            .prepare_pi_tui(
+                crate::delivery::native_broker::NativeSessionSpec {
+                    target_agent_id: target_agent_id.to_string(),
+                    provider: "pi".to_string(),
+                    generation,
+                    workspace: temp.path().to_path_buf(),
+                    config,
+                },
+                session_file.clone(),
+                extension_path,
+            )
+            .await
+            .expect("prepare Pi bridge");
+
+        wardian_core::db::upsert_native_session_binding(
+            &wardian_core::native_transport::NativeSessionBinding {
+                target_agent_id: target_agent_id.to_string(),
+                generation: generation - 1,
+                provider: "pi".to_string(),
+                transport: "stale".to_string(),
+                provider_session_id: Some("stale-session".to_string()),
+                capabilities: wardian_core::native_transport::NativeTransportCapabilities::degraded(
+                    "pi", "stale",
+                ),
+                observed_at: "2026-09-15T00:00:00Z".to_string(),
+            },
+        )
+        .expect("write stale Pi binding fixture");
+        assert!(native_capability_binding(&state, target_agent_id, "pi")
+            .await
+            .expect("query unready Pi capability")
+            .is_none());
+
+        let bridge_config: serde_json::Value =
+            serde_json::from_str(plan.config()).expect("decode Pi bridge test config");
+        plan.register_process(std::process::id());
+        let host = bridge_config["host"].as_str().expect("Pi bridge host");
+        let port = bridge_config["port"].as_u64().expect("Pi bridge port") as u16;
+        let mut stream = TcpStream::connect((host, port))
+            .await
+            .expect("connect Pi bridge test client");
+        let runtime_nonce = "pi-capability-test-nonce";
+        write_pi_test_frame(
+            &mut stream,
+            &serde_json::json!({
+                "version": 1,
+                "target_id": target_agent_id,
+                "generation": generation,
+                "session_id": "pi-session",
+                "runtime_nonce": runtime_nonce,
+                "seq": 1,
+                "type": "hello",
+                "token": bridge_config["token"],
+                "pid": std::process::id(),
+                "session_file": session_file.to_string_lossy(),
+            }),
+        )
+        .await;
+        assert_eq!(read_pi_test_frame(&mut stream).await["type"], "welcome");
+        write_pi_test_frame(
+            &mut stream,
+            &serde_json::json!({
+                "version": 1,
+                "target_id": target_agent_id,
+                "generation": generation,
+                "session_id": "pi-session",
+                "runtime_nonce": runtime_nonce,
+                "seq": 2,
+                "type": "ready",
+                "capabilities": {
+                    "task": true,
+                    "information": false,
+                    "cancel": false,
+                    "completion": false,
+                },
+            }),
+        )
+        .await;
+
+        let binding = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Ok(Some(binding)) =
+                    native_capability_binding(&state, target_agent_id, "pi").await
+                {
+                    break binding;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("Pi live capability should become ready");
+        assert_eq!(binding.target_agent_id, target_agent_id);
+        assert_eq!(binding.generation, generation);
+        assert_eq!(binding.provider, "pi");
+        assert_eq!(binding.transport, "pi_tui_bridge");
+        assert_eq!(binding.provider_session_id.as_deref(), Some("pi-session"));
+        assert!(binding.capabilities.persistent_session);
+        assert!(native_capability_binding(&state, target_agent_id, "pi")
+            .await
+            .expect("query ready Pi capability")
+            .is_some());
+        assert!(state
+            .native_delivery
+            .pi_binding(target_agent_id, generation + 1)
+            .await
+            .is_err());
+
+        state
+            .native_delivery
+            .dispose_pi_generation(target_agent_id, Some(generation))
+            .await
+            .expect("dispose Pi bridge");
+        assert!(native_capability_binding(&state, target_agent_id, "pi")
+            .await
+            .expect("query disposed Pi capability")
+            .is_none());
+    }
 
     #[test]
     fn agent_description_update_does_not_require_restart() {
@@ -5932,7 +4725,7 @@ mod tests {
         assert!(authenticate_automation_memory_principal(Some("agent-a"), None).is_err());
     }
 
-    pub(super) fn test_agent(
+    pub(crate) fn test_agent(
         session_id: &str,
         session_name: &str,
         agent_class: &str,
@@ -6043,11 +4836,26 @@ mod tests {
         }
     }
 
-    fn expected_terminal_chunks(provider: &str, prompt: &str) -> Vec<Vec<u8>> {
-        let chunks =
-            crate::utils::terminal_input::provider_submit_chunks(provider, prompt).unwrap();
-        assert_eq!(chunks.len(), 2);
-        chunks
+    #[tokio::test]
+    async fn human_prompt_busy_rejects_without_pty_or_legacy_admission() {
+        let _home = TestWardianHome::new_async().await;
+        let state = AppState::new();
+        insert_test_agent(&state, "receiver", "Receiver", "Test").await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        install_test_terminal_runtime(&state, "receiver", tx).await;
+        assert!(deliver_prompt_to_agent(
+            None,
+            &state,
+            "receiver",
+            "human prompt",
+            MessageInputMode::Message
+        )
+        .await
+        .is_err());
+        assert!(rx.try_recv().is_err());
+        assert!(wardian_core::db::list_mailbox_messages()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -6137,69 +4945,6 @@ mod tests {
     }
 
     include!("control/opencode_receipt_tests.rs");
-
-    #[tokio::test]
-    async fn native_codex_delivery_waits_for_provider_applied_payload() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "codex".to_string();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-        record_provider_ready_evidence(&state, "agent-1", 0, ProviderReadyEvidence::PromptDetected)
-            .await;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime_with_write_receipts(&state, "agent-1", tx).await;
-
-        let delivery = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "hello",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        );
-        tokio::pin!(delivery);
-
-        let payload = tokio::select! {
-            request = rx.recv() => request.expect("payload write request"),
-            result = &mut delivery => panic!("delivery completed before payload write: {result:?}"),
-        };
-        assert_eq!(payload.bytes, b"\x1b[200~hello\x1b[201~".to_vec());
-        payload.completion.send(Ok(())).expect("payload receipt");
-
-        // The PTY receipt alone must not release Return. Codex's repaint is the
-        // provider-owned proof that its composer consumed the paste.
-        crate::delivery::codex_composer::tests::record_active_composer_repaint(
-            &state,
-            "agent-1",
-            b"\r\n\xe2\x80\xba hello",
-        )
-        .await;
-
-        let submit = tokio::select! {
-            request = rx.recv() => request.expect("submit write request"),
-            result = &mut delivery => panic!("delivery completed before submit write: {result:?}"),
-            _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {
-                panic!("Codex submit did not follow provider-applied payload evidence")
-            }
-        };
-        assert_eq!(submit.bytes, b"\r".to_vec());
-        submit.completion.send(Ok(())).expect("submit receipt");
-
-        crate::manager::record_agent_turn_started_for_watch(&state, "agent-1").await;
-        let delivery = delivery.await.expect("delivered after provider receipt");
-
-        assert_eq!(delivery[0].delivery_state, "provider_accepted");
-        assert_eq!(delivery[0].delivery_phase.as_deref(), Some("turn_started"));
-    }
 
     #[tokio::test]
     async fn message_delivery_archives_unconfirmed_live_input_with_agent_origin() {
@@ -6429,60 +5174,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn message_delivery_queues_when_current_conversation_is_leased() {
-        let _home = TestWardianHome::new_async().await;
-
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            let mut config = agent.config.lock().unwrap();
-            config.provider = "mock".to_string();
-            config.resume_session = Some("resume-1".to_string());
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-        wardian_core::conversation_lease::acquire_lease(
-            wardian_core::conversation_lease::ConversationLease {
-                agent_id: "agent-1".to_string(),
-                provider: "mock".to_string(),
-                resume_session: "resume-1".to_string(),
-                owner_kind: "automation_run".to_string(),
-                owner_id: "wf/run-1/node-1".to_string(),
-                acquisition_id: "test-acquisition-1".to_string(),
-                owner_node_id: Some("node-1".to_string()),
-                mode: "background_resume".to_string(),
-                started_at: "2026-06-01T00:00:00Z".to_string(),
-                heartbeat_at: "2026-06-01T00:00:00Z".to_string(),
-                expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
-            },
-            &chrono::Utc::now().to_rfc3339(),
-        )
-        .expect("lease");
-
-        let delivery = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "hello",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(delivery[0].delivery_state, "queued");
-        assert_eq!(delivery[0].runtime_state, "conversation_leased");
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
     async fn fresh_headless_message_lease_marks_the_off_agent_headless() {
         let _home = TestWardianHome::new_async().await;
         let state = AppState::new();
@@ -6511,54 +5202,6 @@ mod tests {
             &lease.owner_id,
         )
         .expect("release lease");
-    }
-
-    #[tokio::test]
-    async fn offline_message_does_not_start_while_worktree_mutation_is_active() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").expect("agent");
-            *agent.current_status.lock().expect("status") = "Off".to_string();
-        }
-        let _mutation =
-            wardian_core::automation_execution_lock::try_acquire_worktree_mutation_guard()
-                .expect("worktree mutation lock")
-                .expect("exclusive worktree mutation lock");
-
-        let error = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "do not start a provider",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .expect_err("active deletion must block direct headless delivery");
-
-        assert_eq!(error.code(), "request_failed");
-        let detail = error
-            .details()
-            .and_then(|details| details.get("delivery"))
-            .and_then(serde_json::Value::as_array)
-            .and_then(|delivery| delivery.first())
-            .expect("failed delivery detail");
-        assert_eq!(detail["delivery_state"], "failed");
-        assert_eq!(detail["error"]["code"], "headless_execution_blocked");
-        assert!(wardian_core::conversation_lease::load_leases().is_empty());
-
-        let status = {
-            let agents = state.agents.lock().await;
-            snapshot_agent(agents.get("agent-1").expect("agent")).status
-        };
-        assert_eq!(status, "off");
     }
 
     #[tokio::test]
@@ -6638,44 +5281,6 @@ mod tests {
 
         crate::manager::record_agent_turn_started_for_watch(&state, "agent-1").await;
         wait.await.expect("post-submit provider turn receipt");
-    }
-
-    #[tokio::test]
-    async fn headless_message_queues_while_a_resume_lifecycle_gate_is_held() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").expect("agent");
-            *agent.current_status.lock().expect("status") = "Off".to_string();
-        }
-
-        let lifecycle_guard = state.lock_agent_lifecycle("agent-1").await;
-        let delivery = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "do not overlap a resume",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        );
-        tokio::pin!(delivery);
-        tokio::select! {
-            _ = &mut delivery => panic!("delivery must wait for the lifecycle transition"),
-            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
-        }
-        drop(lifecycle_guard);
-        let delivery = delivery
-            .await
-            .expect("queue after lifecycle transition releases the gate");
-
-        assert_eq!(delivery[0].delivery_state, "queued");
-        assert_eq!(delivery[0].runtime_state, "conversation_leased");
     }
 
     #[tokio::test]
@@ -6790,79 +5395,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_offline_messages_queue_instead_of_failing_on_a_lease_race() {
-        if !node_available() {
-            return;
-        }
-        let _home = TestWardianHome::new_async().await;
-        let _scenario = ScopedEnvVar::set("WARDIAN_MOCK_SCENARIO", "headless_delayed");
-        let _delay = ScopedEnvVar::set("WARDIAN_MOCK_DELAY_MS", "250");
-        let workspace = tempfile::tempdir().expect("workspace");
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").expect("agent");
-            let mut config = agent.config.lock().expect("config");
-            config.provider = "mock".to_string();
-            config.folder = workspace.path().to_string_lossy().to_string();
-            *agent.current_status.lock().expect("status") = "Off".to_string();
-        }
-
-        let (first, second) = tokio::join!(
-            deliver_message_to_target(
-                None,
-                &state,
-                "CoderOne",
-                "first offline message",
-                None,
-                MessageInputMode::Message,
-                QueuePolicy::QueueIfBusy,
-                None,
-                None,
-                false,
-            ),
-            deliver_message_to_target(
-                None,
-                &state,
-                "CoderOne",
-                "second offline message",
-                None,
-                MessageInputMode::Message,
-                QueuePolicy::QueueIfBusy,
-                None,
-                None,
-                false,
-            ),
-        );
-        let delivery = [
-            first.expect("first delivery").remove(0),
-            second.expect("second delivery").remove(0),
-        ];
-
-        assert_eq!(
-            delivery
-                .iter()
-                .filter(|detail| detail.delivery_state == "provider_applied")
-                .count(),
-            1
-        );
-        assert_eq!(
-            delivery
-                .iter()
-                .filter(|detail| {
-                    detail.delivery_state == "queued"
-                        && detail.runtime_state == "conversation_leased"
-                })
-                .count(),
-            1
-        );
-        assert!(delivery
-            .iter()
-            .all(|detail| detail.delivery_state != "failed"));
-    }
-
-    #[tokio::test]
     async fn ordinary_prompt_entry_starts_headless_execution_for_offline_agent() {
         if !node_available() {
             return;
@@ -6894,73 +5426,6 @@ mod tests {
         assert_eq!(detail.runtime_state, "headless_process");
         assert_eq!(detail.delivery_state, "provider_applied");
         assert_eq!(detail.queue_policy, QueuePolicy::QueueIfBusy);
-    }
-
-    #[tokio::test]
-    async fn successful_headless_target_archives_before_a_mixed_send_reports_failure() {
-        if !node_available() {
-            return;
-        }
-        let _home = TestWardianHome::new_async().await;
-        let _scenario = ScopedEnvVar::set("WARDIAN_MOCK_SCENARIO", "headless");
-        let workspace = tempfile::tempdir().expect("workspace");
-        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
-            conversation_logging: wardian_core::conversations::ConversationLoggingSetting::Enabled,
-            ..Default::default()
-        })
-        .expect("save shell settings");
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-success", "Success", "Coder").await;
-        insert_test_agent(&state, "agent-failure", "Failure", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let success = agents.get("agent-success").expect("success agent");
-            let mut success_config = success.config.lock().expect("success config");
-            success_config.provider = "mock".to_string();
-            success_config.folder = workspace.path().to_string_lossy().to_string();
-            *success.current_status.lock().expect("success status") = "Off".to_string();
-
-            let failure = agents.get("agent-failure").expect("failure agent");
-            failure.config.lock().expect("failure config").provider = "not-a-provider".to_string();
-            *failure.current_status.lock().expect("failure status") = "Off".to_string();
-        }
-
-        let error = deliver_message_to_target(
-            None,
-            &state,
-            "all",
-            "record this before aggregate failure",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            true,
-        )
-        .await
-        .expect_err("one target cannot launch");
-
-        assert_eq!(error.code, "request_failed");
-        let conversation_id = state
-            .conversation_archive
-            .active_conversation_id_for_test("agent-success")
-            .expect("successful target archive");
-        let records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
-            wardian_core::conversations::read_jsonl_records(
-                &wardian_core::paths::agent_conversation_dir("agent-success", &conversation_id)
-                    .expect("conversation dir")
-                    .join("conversation.jsonl"),
-            )
-            .expect("conversation records");
-        assert_eq!(records.len(), 2);
-        assert_eq!(
-            records[0].text.as_deref(),
-            Some("record this before aggregate failure")
-        );
-        assert_eq!(
-            records[1].text.as_deref(),
-            Some("Mock headless execution completed successfully.")
-        );
     }
 
     #[tokio::test]
@@ -7004,16 +5469,16 @@ mod tests {
                     MessageInputMode::Message,
                     QueuePolicy::MailboxOnly,
                     None,
-                    DeliveryRoute::Mailbox {
-                        runtime_state: "mailbox_only",
+                    DeliveryRoute::Reject {
+                        failure: "mailbox_only",
                     },
                 ),
                 (
                     MessageInputMode::Command,
                     QueuePolicy::QueueIfBusy,
                     None,
-                    DeliveryRoute::Mailbox {
-                        runtime_state: "queued_not_live",
+                    DeliveryRoute::Reject {
+                        failure: "queued_not_live",
                     },
                 ),
                 (
@@ -7055,7 +5520,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_route_queues_processing_message_when_queue_if_busy() {
+    fn human_prompt_rejects_processing_without_queueing() {
         let route = decide_delivery_route(
             "processing",
             MessageInputMode::Message,
@@ -7065,8 +5530,8 @@ mod tests {
 
         assert_eq!(
             route,
-            DeliveryRoute::Mailbox {
-                runtime_state: "target_processing"
+            DeliveryRoute::Reject {
+                failure: "target_processing"
             }
         );
     }
@@ -7108,7 +5573,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_route_queues_message_for_an_active_headless_turn() {
+    fn human_prompt_rejects_an_active_headless_turn() {
         let route = decide_delivery_route(
             "headless",
             MessageInputMode::Message,
@@ -7118,8 +5583,8 @@ mod tests {
 
         assert_eq!(
             route,
-            DeliveryRoute::Mailbox {
-                runtime_state: "conversation_leased"
+            DeliveryRoute::Reject {
+                failure: "conversation_leased"
             }
         );
     }
@@ -7141,7 +5606,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_route_keeps_off_provider_command_in_the_mailbox() {
+    fn human_prompt_rejects_off_provider_command() {
         let route = decide_delivery_route(
             "off",
             MessageInputMode::Command,
@@ -7151,8 +5616,8 @@ mod tests {
 
         assert_eq!(
             route,
-            DeliveryRoute::Mailbox {
-                runtime_state: "queued_not_live"
+            DeliveryRoute::Reject {
+                failure: "queued_not_live"
             }
         );
     }
@@ -7175,7 +5640,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_route_queues_action_required_message_when_queue_if_busy() {
+    fn human_prompt_rejects_action_required_without_queueing() {
         let route = decide_delivery_route(
             "action_required",
             MessageInputMode::Message,
@@ -7185,8 +5650,8 @@ mod tests {
 
         assert_eq!(
             route,
-            DeliveryRoute::Mailbox {
-                runtime_state: "target_action_required"
+            DeliveryRoute::Reject {
+                failure: "target_action_required"
             }
         );
     }
@@ -7556,52 +6021,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn message_delivery_writes_terminal_bytes_to_matched_agent() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "codex".to_string();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-            *agent.query_count.lock().unwrap() = 0;
-            agent
-                .watch_state
-                .lock()
-                .unwrap()
-                .push_output(b"\r\n\x1b[1m\r\n\xe2\x80\xba\x1b[22m Write tests for @filename");
-        }
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "hello",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-
-        let expected = expected_terminal_chunks("codex", "hello");
-        assert_eq!(rx.recv().await.unwrap(), expected[0]);
-        assert_eq!(rx.recv().await.unwrap(), expected[1]);
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            assert_eq!(agent.current_status.lock().unwrap().as_str(), "Idle");
-            assert_eq!(*agent.query_count.lock().unwrap(), 1);
-        }
-    }
-
-    #[tokio::test]
     async fn codex_ready_prompt_is_not_ready_while_agent_is_processing() {
         let state = AppState::new();
         insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
@@ -7628,80 +6047,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn message_delivery_prefixes_agent_origin_with_sender_name() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "source-1", "PlannerOne", "Planner").await;
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "check this",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            Some(&wardian_core::control::MessageOrigin::WardianAgent {
-                session_id: "source-1".to_string(),
-            }),
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            rx.recv().await.unwrap(),
-            b"From PlannerOne: check this".to_vec()
-        );
-        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
-    }
-
-    #[tokio::test]
-    async fn command_delivery_keeps_origin_unattributed_and_records_input_mode() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "source-1", "PlannerOne", "Planner").await;
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        let delivery = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "/goal test",
-            None,
-            MessageInputMode::Command,
-            QueuePolicy::QueueIfBusy,
-            None,
-            Some(&wardian_core::control::MessageOrigin::WardianAgent {
-                session_id: "source-1".to_string(),
-            }),
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(rx.recv().await.unwrap(), b"/goal test".to_vec());
-        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
-        assert_eq!(delivery[0].input_mode, MessageInputMode::Command);
-    }
-
     #[test]
     fn command_delivery_rejects_multi_target_selectors() {
         let all =
@@ -7717,83 +6062,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn message_delivery_queues_bare_approval_responses_when_action_required() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "source-1", "PlannerOne", "Planner").await;
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            *agent.current_status.lock().unwrap() = "Action Needed".to_string();
-        }
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        let delivery = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "y",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            Some(&wardian_core::control::MessageOrigin::WardianAgent {
-                session_id: "source-1".to_string(),
-            }),
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert!(rx.try_recv().is_err());
-        assert_eq!(delivery[0].runtime_state, "target_action_required");
-        assert_eq!(delivery[0].delivery_state, "queued");
-        let queued = state.mailbox.lock().await.list_for_target("agent-1");
-        assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].body, "y");
-    }
-
-    #[tokio::test]
-    async fn approval_action_delivery_sends_provider_approval_key() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "codex".to_string();
-            *agent.current_status.lock().unwrap() = "Action Needed".to_string();
-        }
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        let delivery = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "",
-            None,
-            MessageInputMode::ApprovalAction,
-            QueuePolicy::QueueIfBusy,
-            Some(&ApprovalAction::Accept),
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
-        assert_eq!(delivery[0].runtime_state, "live_pty_available");
-        assert_eq!(delivery[0].delivery_state, "approval_submitted");
-        assert_eq!(
-            delivery[0].delivery_phase.as_deref(),
-            Some("approval_key_sent")
-        );
-    }
-
-    #[tokio::test]
     async fn approval_send_failure_is_not_retry_safe_after_the_terminal_boundary() {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         drop(rx);
@@ -7804,1599 +6072,6 @@ mod tests {
 
         assert_eq!(error.phase, "approval_send_failed");
         assert!(!error.retry_safe);
-    }
-
-    #[tokio::test]
-    async fn mailbox_drain_submits_next_pending_message_when_target_is_idle() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "codex".to_string();
-            *agent.current_status.lock().unwrap() = "Processing".to_string();
-            agent
-                .watch_state
-                .lock()
-                .unwrap()
-                .push_output(b"\r\n\x1b[1m\xe2\x80\xba\x1b[22m Ready");
-        }
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        let queued = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "queued work",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-        let message_id = queued[0].message_id.clone().unwrap();
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-
-        let drained = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
-            .await
-            .unwrap()
-            .expect("drained message");
-
-        let expected = expected_terminal_chunks("codex", "queued work");
-        assert_eq!(rx.recv().await.unwrap(), expected[0]);
-        assert_eq!(rx.recv().await.unwrap(), expected[1]);
-        assert_eq!(drained.runtime_state, "mailbox_drain");
-        assert_eq!(drained.delivery_state, "submit_sent_unconfirmed");
-        assert_eq!(drained.message_id.as_deref(), Some(message_id.as_str()));
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            let snapshot = agent
-                .watch_state
-                .lock()
-                .unwrap()
-                .snapshot_since(None, None)
-                .unwrap();
-            assert!(snapshot.events.iter().any(|event| {
-                event.kind == "delivery"
-                    && event.payload["delivery_state"] == "submit_started"
-                    && event.payload["message_id"] == message_id.as_str()
-            }));
-            assert!(snapshot.events.iter().any(|event| {
-                event.kind == "delivery"
-                    && event.payload["runtime_state"] == "mailbox_drain"
-                    && event.payload["delivery_state"] == "submit_sent_unconfirmed"
-                    && event.payload["message_id"] == message_id.as_str()
-            }));
-        }
-        let records = state.mailbox.lock().await.list_for_target("agent-1");
-        assert_eq!(
-            records[0].status,
-            crate::state::MailboxMessageStatus::Delivered
-        );
-        assert_eq!(
-            records[0].phase,
-            crate::state::MailboxDeliveryPhase::Terminal
-        );
-    }
-
-    #[tokio::test]
-    async fn provider_non_ready_state_queues_live_delivery_when_status_is_idle() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-        state
-            .interactions
-            .record_provider_input_state(
-                "agent-1",
-                4,
-                wardian_core::control::ProviderInputReadiness::Busy,
-                None,
-            )
-            .await;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        let delivery = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "queued work",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(delivery[0].runtime_state, "provider_input_not_ready");
-        assert_eq!(delivery[0].delivery_state, "queued");
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn claude_idle_status_allows_live_delivery_despite_stale_readiness() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "ClaudeOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "claude".to_string();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-        state
-            .interactions
-            .record_provider_input_state(
-                "agent-1",
-                4,
-                wardian_core::control::ProviderInputReadiness::Busy,
-                None,
-            )
-            .await;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        let delivery = deliver_message_to_target(
-            None,
-            &state,
-            "ClaudeOne",
-            "queued work",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::LiveOnly,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(rx.recv().await.unwrap(), b"queued work".to_vec());
-        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
-        assert_eq!(delivery[0].runtime_state, "live_pty_available");
-    }
-
-    #[tokio::test]
-    async fn mailbox_drain_waits_for_codex_prompt_evidence() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "codex".to_string();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-            agent
-                .watch_state
-                .lock()
-                .unwrap()
-                .push_output(b"\r\n\x1b[1m\xe2\x80\xba\x1b[22m Ready");
-        }
-        state
-            .interactions
-            .record_provider_input_state(
-                "agent-1",
-                4,
-                wardian_core::control::ProviderInputReadiness::Booting,
-                None,
-            )
-            .await;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        let queued = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "queued work",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-        let message_id = queued[0].message_id.clone().unwrap();
-        assert_eq!(queued[0].runtime_state, "provider_input_not_ready");
-        assert_eq!(queued[0].delivery_state, "queued");
-
-        startup_readiness::record_provider_ready_prompt(&state, "agent-1", 4).await;
-
-        let drained = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
-            .await
-            .unwrap()
-            .expect("drained message");
-
-        let expected = expected_terminal_chunks("codex", "queued work");
-        assert_eq!(rx.recv().await.unwrap(), expected[0]);
-        assert_eq!(rx.recv().await.unwrap(), expected[1]);
-        assert_eq!(drained.runtime_state, "mailbox_drain");
-        assert_eq!(drained.delivery_state, "submit_sent_unconfirmed");
-        assert_eq!(drained.message_id.as_deref(), Some(message_id.as_str()));
-        let input_state = state
-            .interactions
-            .provider_input_state("agent-1")
-            .await
-            .unwrap();
-        assert_eq!(
-            input_state.state,
-            wardian_core::control::ProviderInputReadiness::Busy
-        );
-    }
-
-    #[tokio::test]
-    async fn mailbox_drain_waits_for_claude_prompt_evidence() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "ClaudeOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "claude".to_string();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-        state
-            .interactions
-            .record_provider_input_state(
-                "agent-1",
-                4,
-                wardian_core::control::ProviderInputReadiness::Booting,
-                None,
-            )
-            .await;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        let queued = deliver_message_to_target(
-            None,
-            &state,
-            "ClaudeOne",
-            "queued work",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-        let message_id = queued[0].message_id.clone().unwrap();
-        assert_eq!(queued[0].runtime_state, "provider_input_not_ready");
-        assert_eq!(queued[0].delivery_state, "queued");
-
-        startup_readiness::record_provider_ready_prompt(&state, "agent-1", 4).await;
-
-        let drained = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1"),
-        )
-        .await
-        .expect("mailbox drain should not hang")
-        .unwrap()
-        .expect("drained message");
-
-        assert_eq!(drained.runtime_state, "mailbox_drain");
-        assert_eq!(drained.delivery_state, "submit_sent_unconfirmed");
-        assert_eq!(drained.message_id.as_deref(), Some(message_id.as_str()));
-        assert_eq!(rx.try_recv().unwrap(), b"queued work".to_vec());
-        assert_eq!(rx.try_recv().unwrap(), b"\r".to_vec());
-        let input_state = state
-            .interactions
-            .provider_input_state("agent-1")
-            .await
-            .unwrap();
-        assert_eq!(
-            input_state.state,
-            wardian_core::control::ProviderInputReadiness::Busy
-        );
-    }
-
-    #[test]
-    fn claude_ready_prompt_detector_accepts_visible_prompt_tail() {
-        assert!(claude_output_has_ready_prompt(
-            "ClaudeCode v2.1.150\r\n❯ Try \"write a test\"\r\n────────────────⏵⏵ dontask on · Haiku 4.5"
-        ));
-    }
-
-    #[tokio::test]
-    async fn mailbox_drain_waits_for_gemini_prompt_evidence() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "GeminiOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "gemini".to_string();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-            agent.watch_state.lock().unwrap().push_output(
-                "\r\n? for shortcuts\r\n────────────────────────────────────────────────────────\r\n YOLO Ctrl+Y                                      5 context files · 2 MCP servers · 25 skills\r\n▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\r\n *  Type your message or @path/to/file\r\n▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\r\n workspace (/directory)              /model                      context                quota\r\n".as_bytes(),
-            );
-        }
-        state
-            .interactions
-            .record_provider_input_state(
-                "agent-1",
-                4,
-                wardian_core::control::ProviderInputReadiness::Booting,
-                None,
-            )
-            .await;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        let queued = deliver_message_to_target(
-            None,
-            &state,
-            "GeminiOne",
-            "queued work",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-        let message_id = queued[0].message_id.clone().unwrap();
-        assert_eq!(queued[0].runtime_state, "provider_input_not_ready");
-        assert_eq!(queued[0].delivery_state, "queued");
-
-        startup_readiness::record_provider_ready_prompt(&state, "agent-1", 4).await;
-
-        let drained = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
-            .await
-            .unwrap()
-            .expect("drained message");
-
-        assert_eq!(drained.runtime_state, "mailbox_drain");
-        assert_eq!(drained.delivery_state, "submit_sent_unconfirmed");
-        assert_eq!(drained.message_id.as_deref(), Some(message_id.as_str()));
-        assert_eq!(rx.try_recv().unwrap(), b"queued work".to_vec());
-        assert_eq!(rx.try_recv().unwrap(), b"\r".to_vec());
-        let input_state = state
-            .interactions
-            .provider_input_state("agent-1")
-            .await
-            .unwrap();
-        assert_eq!(
-            input_state.state,
-            wardian_core::control::ProviderInputReadiness::Busy
-        );
-    }
-
-    #[tokio::test]
-    async fn mailbox_drain_waits_for_antigravity_prompt_evidence() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "AntigravityOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "antigravity".to_string();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-            agent.watch_state.lock().unwrap().push_output(
-                "\r\n────────────────────────────────────────────────────────\r\n>\r\n────────────────────────────────────────────────────────\r\n  Press up to edit queued messages                                               Gemini 3.5 Flash (High)\r\n".as_bytes(),
-            );
-        }
-        state
-            .interactions
-            .record_provider_input_state(
-                "agent-1",
-                4,
-                wardian_core::control::ProviderInputReadiness::Booting,
-                None,
-            )
-            .await;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        let queued = deliver_message_to_target(
-            None,
-            &state,
-            "AntigravityOne",
-            "queued work",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-        let message_id = queued[0].message_id.clone().unwrap();
-        assert_eq!(queued[0].runtime_state, "provider_input_not_ready");
-        assert_eq!(queued[0].delivery_state, "queued");
-
-        startup_readiness::record_provider_ready_prompt(&state, "agent-1", 4).await;
-
-        let drained = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
-            .await
-            .unwrap()
-            .expect("drained message");
-
-        assert_eq!(drained.runtime_state, "mailbox_drain");
-        assert_eq!(drained.delivery_state, "submit_sent_unconfirmed");
-        assert_eq!(drained.message_id.as_deref(), Some(message_id.as_str()));
-        assert_eq!(rx.try_recv().unwrap(), b"queued work".to_vec());
-        assert_eq!(rx.try_recv().unwrap(), b"\r".to_vec());
-        let input_state = state
-            .interactions
-            .provider_input_state("agent-1")
-            .await
-            .unwrap();
-        assert_eq!(
-            input_state.state,
-            wardian_core::control::ProviderInputReadiness::Busy
-        );
-    }
-
-    #[tokio::test]
-    async fn mailbox_drain_marks_provider_busy_after_one_submitted_message() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "codex".to_string();
-            *agent.current_status.lock().unwrap() = "Processing".to_string();
-            agent
-                .watch_state
-                .lock()
-                .unwrap()
-                .push_output(b"\r\n\x1b[1m\xe2\x80\xba\x1b[22m Ready");
-        }
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        let first = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "first queued work",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-        let second = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "second queued work",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-        assert_eq!(first[0].delivery_state, "queued");
-        assert_eq!(second[0].delivery_state, "queued");
-        state
-            .interactions
-            .record_provider_input_state(
-                "agent-1",
-                4,
-                wardian_core::control::ProviderInputReadiness::Ready,
-                Some(wardian_core::control::ProviderReadyEvidence::PromptDetected),
-            )
-            .await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-
-        let drained = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
-            .await
-            .unwrap()
-            .expect("first message drains");
-        let blocked = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
-            .await
-            .unwrap();
-
-        assert_eq!(drained.delivery_state, "submit_sent_unconfirmed");
-        assert!(blocked.is_none());
-        let expected = expected_terminal_chunks("codex", "first queued work");
-        assert_eq!(rx.try_recv().unwrap(), expected[0]);
-        assert_eq!(rx.try_recv().unwrap(), expected[1]);
-        assert!(rx.try_recv().is_err());
-        let input_state = state
-            .interactions
-            .provider_input_state("agent-1")
-            .await
-            .unwrap();
-        assert_eq!(
-            input_state.state,
-            wardian_core::control::ProviderInputReadiness::Busy
-        );
-    }
-
-    #[tokio::test]
-    async fn provider_non_ready_state_rejects_approval_action_instead_of_queueing() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-        state
-            .interactions
-            .record_provider_input_state(
-                "agent-1",
-                4,
-                wardian_core::control::ProviderInputReadiness::Busy,
-                None,
-            )
-            .await;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        let error = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "approve",
-            None,
-            MessageInputMode::ApprovalAction,
-            QueuePolicy::QueueIfBusy,
-            Some(&ApprovalAction::Accept),
-            None,
-            false,
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(error.code, "request_failed");
-        let records = state.mailbox.lock().await.list_for_target("agent-1");
-        assert!(records.is_empty());
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn stale_readiness_generation_does_not_drain_mailbox() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        state
-            .interactions
-            .record_provider_input_state(
-                "agent-1",
-                2,
-                wardian_core::control::ProviderInputReadiness::Busy,
-                None,
-            )
-            .await;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        let queued = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "queued work",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(queued[0].delivery_state, "queued");
-        state
-            .interactions
-            .record_provider_input_state(
-                "agent-1",
-                1,
-                wardian_core::control::ProviderInputReadiness::Ready,
-                Some(wardian_core::control::ProviderReadyEvidence::PromptDetected),
-            )
-            .await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-
-        let drained = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
-            .await
-            .unwrap();
-
-        assert!(drained.is_none());
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn mailbox_drain_waits_until_target_is_idle() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "queued work",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-
-        let drained = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
-            .await
-            .unwrap();
-
-        assert!(drained.is_none());
-        assert!(rx.try_recv().is_err());
-        let records = state.mailbox.lock().await.list_for_target("agent-1");
-        assert_eq!(
-            records[0].status,
-            crate::state::MailboxMessageStatus::Pending
-        );
-
-        // Even a stale Idle metric must not drain startup/consent input. Once
-        // provider-owned readiness arrives, deliver the same message once.
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "claude".to_string();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-        for readiness in [
-            ProviderInputReadiness::Booting,
-            ProviderInputReadiness::ActionRequired,
-        ] {
-            state
-                .interactions
-                .record_provider_input_state("agent-1", 1, readiness, None)
-                .await;
-            assert!(
-                drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
-                    .await
-                    .unwrap()
-                    .is_none()
-            );
-            assert!(rx.try_recv().is_err());
-            assert_eq!(
-                state.mailbox.lock().await.list_for_target("agent-1")[0].status,
-                crate::state::MailboxMessageStatus::Pending
-            );
-        }
-        state
-            .interactions
-            .record_provider_input_state(
-                "agent-1",
-                1,
-                ProviderInputReadiness::Ready,
-                Some(ProviderReadyEvidence::ProviderEvent),
-            )
-            .await;
-        let drained = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
-            .await
-            .unwrap()
-            .expect("same queued message drains when ready");
-        assert_eq!(drained.message_id.as_deref(), Some(records[0].id.as_str()));
-        for chunk in expected_terminal_chunks("claude", "queued work") {
-            assert_eq!(rx.recv().await.unwrap(), chunk);
-        }
-        assert!(
-            drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn mailbox_drain_waits_while_current_conversation_is_leased() {
-        let _home = TestWardianHome::new_async().await;
-
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            let mut config = agent.config.lock().unwrap();
-            config.resume_session = Some("resume-1".to_string());
-            *agent.current_status.lock().unwrap() = "Processing".to_string();
-        }
-        let queued = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "queued work",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-        let message_id = queued[0].message_id.clone().unwrap();
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-        wardian_core::conversation_lease::acquire_lease(
-            wardian_core::conversation_lease::ConversationLease {
-                agent_id: "agent-1".to_string(),
-                provider: "mock".to_string(),
-                resume_session: "resume-1".to_string(),
-                owner_kind: "automation_run".to_string(),
-                owner_id: "wf/run-1/node-1".to_string(),
-                acquisition_id: "test-acquisition-2".to_string(),
-                owner_node_id: Some("node-1".to_string()),
-                mode: "background_resume".to_string(),
-                started_at: "2026-06-01T00:00:00Z".to_string(),
-                heartbeat_at: "2026-06-01T00:00:00Z".to_string(),
-                expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
-            },
-            &chrono::Utc::now().to_rfc3339(),
-        )
-        .expect("lease");
-
-        let drained = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
-            .await
-            .unwrap();
-
-        assert!(drained.is_none());
-        let records = state.mailbox.lock().await.list_for_target("agent-1");
-        assert_eq!(records[0].id, message_id);
-        assert_eq!(
-            records[0].status,
-            crate::state::MailboxMessageStatus::Pending
-        );
-    }
-
-    #[tokio::test]
-    async fn mailbox_drain_missing_sender_leaves_message_pending_for_next_observation() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            *agent.current_status.lock().unwrap() = "Action Required".to_string();
-        }
-
-        let queued = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "queued work",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-        let message_id = queued[0].message_id.clone().unwrap();
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-
-        let attempt = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
-            .await
-            .unwrap()
-            .expect("drain attempt");
-
-        assert_eq!(attempt.runtime_state, "mailbox_drain");
-        assert_eq!(attempt.delivery_state, "failed");
-        assert_eq!(attempt.message_id.as_deref(), Some(message_id.as_str()));
-        assert_eq!(
-            attempt.error.as_ref().map(|error| error.code.as_str()),
-            Some("no_input_channel")
-        );
-        let records = state.mailbox.lock().await.list_for_target("agent-1");
-        assert_eq!(
-            records[0].status,
-            crate::state::MailboxMessageStatus::Pending
-        );
-        assert_eq!(records[0].phase, crate::state::MailboxDeliveryPhase::Queued);
-    }
-
-    #[tokio::test]
-    async fn mailbox_drain_stops_when_a_ready_agent_has_no_input_channel() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            *agent.current_status.lock().unwrap() = "Action Required".to_string();
-        }
-
-        let queued = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "queued work",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-        let message_id = queued[0].message_id.clone().unwrap();
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-        state
-            .interactions
-            .record_provider_input_state(
-                "agent-1",
-                1,
-                ProviderInputReadiness::Ready,
-                Some(ProviderReadyEvidence::ProviderEvent),
-            )
-            .await;
-
-        let attempt = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
-            .await
-            .unwrap()
-            .expect("drain attempt");
-
-        assert_eq!(attempt.delivery_state, "failed");
-        assert_eq!(attempt.message_id.as_deref(), Some(message_id.as_str()));
-        assert_eq!(
-            attempt.error.as_ref().map(|error| error.code.as_str()),
-            Some("no_input_channel")
-        );
-        assert!(attempt
-            .reason
-            .as_deref()
-            .unwrap_or_default()
-            .contains("delivery stopped"));
-        let records = state.mailbox.lock().await.list_for_target("agent-1");
-        assert_eq!(
-            records[0].status,
-            crate::state::MailboxMessageStatus::Failed
-        );
-    }
-
-    #[tokio::test]
-    async fn mailbox_drain_submit_key_failure_marks_failed_without_retry() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "codex".to_string();
-            *agent.current_status.lock().unwrap() = "Processing".to_string();
-            agent
-                .watch_state
-                .lock()
-                .unwrap()
-                .push_output(b"\r\n\x1b[1m\xe2\x80\xba\x1b[22m Ready");
-        }
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        let queued = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "queued work",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-        let message_id = queued[0].message_id.clone().unwrap();
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-
-        let drain = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1");
-        tokio::pin!(drain);
-        let payload = tokio::select! {
-            payload = rx.recv() => payload.expect("payload"),
-            attempt = &mut drain => panic!("drain completed before payload was observed: {attempt:?}"),
-        };
-        let expected = expected_terminal_chunks("codex", "queued work");
-        assert_eq!(payload, expected[0]);
-        drop(rx);
-
-        let attempt = drain.await.unwrap().expect("drain attempt");
-
-        assert_eq!(attempt.runtime_state, "mailbox_drain");
-        assert_eq!(attempt.delivery_state, "failed");
-        assert_eq!(attempt.message_id.as_deref(), Some(message_id.as_str()));
-        assert_eq!(
-            attempt.delivery_phase.as_deref(),
-            Some("payload_sent_submit_failed")
-        );
-        assert_eq!(
-            attempt.error.as_ref().map(|error| error.code.as_str()),
-            Some("send_failed")
-        );
-        assert!(attempt
-            .reason
-            .as_deref()
-            .unwrap_or_default()
-            .contains("partial or unknown"));
-        let records = state.mailbox.lock().await.list_for_target("agent-1");
-        assert_eq!(
-            records[0].status,
-            crate::state::MailboxMessageStatus::Failed
-        );
-        assert_eq!(
-            records[0].phase,
-            crate::state::MailboxDeliveryPhase::Terminal
-        );
-
-        let second_attempt = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
-            .await
-            .unwrap();
-        assert!(second_attempt.is_none());
-    }
-
-    #[tokio::test]
-    async fn mailbox_drain_payload_send_failure_fails_without_replay() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            agent.config.lock().unwrap().provider = "codex".to_string();
-            *agent.current_status.lock().unwrap() = "Processing".to_string();
-            agent
-                .watch_state
-                .lock()
-                .unwrap()
-                .push_output(b"\r\n\x1b[1m\xe2\x80\xba\x1b[22m Ready");
-        }
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
-        drop(rx);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        let queued = deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "queued work",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-        let message_id = queued[0].message_id.clone().unwrap();
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-
-        let attempt = drain_next_mailbox_message_for_idle_agent(None, &state, "agent-1")
-            .await
-            .unwrap()
-            .expect("drain attempt");
-
-        assert_eq!(attempt.delivery_state, "failed");
-        assert_eq!(attempt.message_id.as_deref(), Some(message_id.as_str()));
-        assert_eq!(
-            attempt.delivery_phase.as_deref(),
-            Some("payload_send_failed")
-        );
-        let records = state.mailbox.lock().await.list_for_target("agent-1");
-        assert_eq!(
-            records[0].status,
-            crate::state::MailboxMessageStatus::Failed
-        );
-        let agents = state.agents.lock().await;
-        let agent = agents.get("agent-1").unwrap();
-        let snapshot = agent
-            .watch_state
-            .lock()
-            .unwrap()
-            .snapshot_since(None, None)
-            .unwrap();
-        assert!(!snapshot.events.iter().any(|event| {
-            event.kind == "delivery"
-                && event.payload["delivery_state"] == "submit_started"
-                && event.payload["message_id"] == message_id.as_str()
-        }));
-    }
-
-    #[tokio::test]
-    async fn message_delivery_prefixes_bare_approval_response_when_target_not_action_needed() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "source-1", "PlannerOne", "Planner").await;
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "yes",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            Some(&wardian_core::control::MessageOrigin::WardianAgent {
-                session_id: "source-1".to_string(),
-            }),
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(rx.recv().await.unwrap(), b"From PlannerOne: yes".to_vec());
-        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
-    }
-
-    #[tokio::test]
-    async fn message_delivery_reports_missing_target_as_not_found() {
-        let state = AppState::new();
-
-        let error = deliver_message_to_target(
-            None,
-            &state,
-            "ghost",
-            "hello",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(error.code(), "not_found");
-        assert!(error
-            .to_string()
-            .contains("no agents matched target: ghost"));
-    }
-
-    #[tokio::test]
-    async fn message_delivery_reports_agent_without_input_channel() {
-        let _home = TestWardianHome::new_async().await;
-
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            let agent = agents.get("agent-1").unwrap();
-            *agent.current_status.lock().unwrap() = "Idle".to_string();
-        }
-
-        let error = deliver_message_to_target(
-            None,
-            &state,
-            "agent-1",
-            "hello",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(error.code(), "request_failed");
-        assert!(error.to_string().contains("agent-1: no input channel"));
-        assert_eq!(
-            error.details().unwrap()["delivery"][0]["runtime_state"],
-            "restored_without_sender"
-        );
-        assert_eq!(
-            error.details().unwrap()["delivery"][0]["error"]["code"],
-            "no_input_channel"
-        );
-    }
-
-    #[tokio::test]
-    async fn message_delivery_reports_partial_failures_after_successful_delivery() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        insert_test_agent(&state, "agent-2", "CoderTwo", "Coder").await;
-        {
-            let agents = state.agents.lock().await;
-            *agents
-                .get("agent-1")
-                .unwrap()
-                .current_status
-                .lock()
-                .unwrap() = "Idle".to_string();
-            *agents
-                .get("agent-2")
-                .unwrap()
-                .current_status
-                .lock()
-                .unwrap() = "Idle".to_string();
-        }
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        let error = deliver_message_to_target(
-            None,
-            &state,
-            "class:Coder",
-            "hello",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(rx.recv().await.unwrap(), b"hello".to_vec());
-        assert_eq!(rx.recv().await.unwrap(), b"\r".to_vec());
-        assert_eq!(error.code(), "request_failed");
-        assert!(error
-            .to_string()
-            .contains("message delivery failed for 1 of 2 matched agents"));
-        assert!(error.to_string().contains("agent-2: no input channel"));
-        let details = error.details().unwrap()["delivery"]
-            .as_array()
-            .expect("delivery details");
-        let failed = details
-            .iter()
-            .find(|detail| detail["uuid"] == "agent-2")
-            .expect("failed agent detail");
-        assert_eq!(failed["delivery_state"], "failed");
-    }
-
-    #[tokio::test]
-    async fn delivery_attempt_records_watch_event() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        install_test_terminal_runtime(&state, "agent-1", tx).await;
-
-        deliver_message_to_target(
-            None,
-            &state,
-            "CoderOne",
-            "hello",
-            None,
-            MessageInputMode::Message,
-            QueuePolicy::QueueIfBusy,
-            None,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert!(rx.try_recv().is_err());
-        let agents = state.agents.lock().await;
-        let agent = agents.get("agent-1").unwrap();
-        let snapshot = agent
-            .watch_state
-            .lock()
-            .unwrap()
-            .snapshot_since(None, Some(4096))
-            .unwrap();
-        assert!(snapshot.events.iter().any(|event| event.kind == "delivery"));
-    }
-
-    #[test]
-    fn generated_ask_request_id_has_stable_shape() {
-        let request_id = new_ask_request_id();
-        let Some(suffix) = request_id.strip_prefix("ask_") else {
-            panic!("request id should use ask_ prefix: {request_id}");
-        };
-        assert_eq!(suffix.len(), 16);
-        assert!(suffix.chars().all(|ch| ch.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn long_structured_ask_materializes_body_file_and_sends_short_prompt() {
-        let temp = tempfile::tempdir().unwrap();
-        let request_id = "ask_testrequest01";
-        let message = "investigate this line\n".repeat(STRUCTURED_ASK_INLINE_MESSAGE_MAX_BYTES);
-
-        let delivery =
-            build_structured_ask_delivery_message(temp.path(), "agent-1", &message, request_id)
-                .unwrap();
-
-        let body_file = delivery
-            .body_file
-            .expect("long ask body should be materialized");
-        let digest = format!("{:x}", Sha256::digest(message.as_bytes()));
-        assert_eq!(
-            body_file,
-            temp.path()
-                .join("agents")
-                .join("agent-1")
-                .join("habitat")
-                .join("requests")
-                .join(format!("{request_id}-{}.md", &digest[..16]))
-        );
-        assert_eq!(std::fs::read_to_string(&body_file).unwrap(), message);
-        assert!(delivery.prompt.contains(request_id));
-        assert!(delivery.prompt.contains(&digest));
-        assert!(delivery.prompt.contains("Read the full request body from:"));
-        assert!(delivery
-            .prompt
-            .contains(&format!("wardian reply {request_id} --status done --stdin")));
-        assert!(delivery.prompt.contains("execute this command"));
-        assert!(delivery.prompt.contains("Do not print the command"));
-        assert!(
-            !delivery
-                .prompt
-                .contains("investigate this line\ninvestigate this line"),
-            "large body should not be pasted into the terminal prompt"
-        );
-    }
-
-    #[test]
-    fn ask_idempotency_key_stabilizes_correlation_per_sender_and_target() {
-        let options = wardian_core::control::OrchestrationDeliveryOptions {
-            idempotency_key: Some("caller-key".to_string()),
-            ..Default::default()
-        };
-        let first = structured_ask_request_id(Some(&options), Some("sender-1"), "target-1");
-        let replay = structured_ask_request_id(Some(&options), Some("sender-1"), "target-1");
-        let other_target = structured_ask_request_id(Some(&options), Some("sender-1"), "target-2");
-
-        assert_eq!(first, replay);
-        assert_ne!(first, other_target);
-        assert_eq!(first.len(), 36);
-    }
-
-    #[tokio::test]
-    async fn ask_request_lifecycle_accepts_matching_reply_and_emits_watch_event() {
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        let request_id = create_pending_ask_request(&state, "agent-1").await.unwrap();
-
-        let reply = submit_structured_reply(
-            &state,
-            &request_id,
-            wardian_core::control::ReplyStatus::Done,
-            "finished",
-            Some(&wardian_core::control::MessageOrigin::WardianAgent {
-                session_id: "agent-1".to_string(),
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(reply.request_id, request_id);
-        assert_eq!(reply.status, wardian_core::control::ReplyStatus::Done);
-        assert_eq!(reply.body, "finished");
-        assert_eq!(reply.source_session_id.as_deref(), Some("agent-1"));
-
-        let agents = state.agents.lock().await;
-        let snapshot = agents
-            .get("agent-1")
-            .unwrap()
-            .watch_state
-            .lock()
-            .unwrap()
-            .snapshot_since(None, Some(4096))
-            .unwrap();
-        assert!(snapshot
-            .events
-            .iter()
-            .any(|event| { event.kind == "request" && event.payload["request_id"] == request_id }));
-        assert!(snapshot.events.iter().any(|event| {
-            event.kind == "reply"
-                && event.payload["request_id"] == request_id
-                && event.payload["status"] == "done"
-        }));
-    }
-
-    #[tokio::test]
-    async fn ask_request_event_records_materialized_body_file() {
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        let body_file = PathBuf::from("agents/agent-1/habitat/requests/ask_test.md");
-
-        create_pending_ask_request_with_id(
-            &state,
-            "agent-1",
-            "ask_testrequest02".to_string(),
-            Some(&body_file),
-        )
-        .await
-        .unwrap();
-
-        let agents = state.agents.lock().await;
-        let snapshot = agents
-            .get("agent-1")
-            .unwrap()
-            .watch_state
-            .lock()
-            .unwrap()
-            .snapshot_since(None, Some(4096))
-            .unwrap();
-        assert!(snapshot.events.iter().any(|event| {
-            event.kind == "request"
-                && event.payload["request_id"] == "ask_testrequest02"
-                && event.payload["body_file"] == body_file.display().to_string()
-        }));
-    }
-
-    #[test]
-    fn ask_response_preserves_reply_when_watch_evidence_fails() {
-        let reply = wardian_core::control::StructuredReply {
-            request_id: "ask_testrequest03".to_string(),
-            status: wardian_core::control::ReplyStatus::Done,
-            body: "finished despite watch gap".to_string(),
-            target_session_id: "agent-1".to_string(),
-            source_session_id: Some("agent-1".to_string()),
-            replied_at: "2026-05-22T00:00:00.000Z".to_string(),
-        };
-        let response = build_ask_response_with_watch_result(
-            "ask_testrequest03".to_string(),
-            "CoderOne".to_string(),
-            Vec::new(),
-            reply,
-            WatchAgentSnapshot {
-                uuid: "agent-1".to_string(),
-                name: "CoderOne".to_string(),
-                provider: "codex".to_string(),
-                status: "idle".to_string(),
-                last_status_at: None,
-            },
-            Err(ControlError::coded(
-                "cursor_expired",
-                "watch evidence cursor expired",
-            )),
-        );
-
-        assert!(response.ok);
-        assert_eq!(response.reply.body, "finished despite watch gap");
-        assert_eq!(
-            response
-                .watch_error
-                .as_ref()
-                .map(|error| error.code.as_str()),
-            Some("cursor_expired")
-        );
-        assert_eq!(response.watch.agent.uuid, "agent-1");
-        assert_eq!(response.watch.output.text, "");
-    }
-
-    #[test]
-    fn multi_ask_delivery_failure_keeps_target_scoped_evidence() {
-        let result = ask_target_failure(
-            "missing-reviewer",
-            AskTargetOutcome::DeliveryFailed,
-            "not_found",
-            "agent not found: missing-reviewer".to_string(),
-        );
-
-        assert_eq!(result.target, "missing-reviewer");
-        assert_eq!(result.outcome, AskTargetOutcome::DeliveryFailed);
-        assert!(result.request_id.is_none());
-        assert_eq!(
-            result.failure.as_ref().map(|failure| failure.code.as_str()),
-            Some("not_found")
-        );
-    }
-
-    #[tokio::test]
-    async fn multi_ask_timeout_records_a_terminal_reply() {
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        let request_id = new_ask_request_id();
-        state
-            .interactions
-            .create_task_with_id(
-                request_id.clone(),
-                None,
-                "agent-1".to_string(),
-                InteractionBodyRef::Inline {
-                    body: "review this".to_string(),
-                },
-            )
-            .await;
-
-        let reply = fail_structured_ask_request(
-            &state,
-            &request_id,
-            "agent-1",
-            "structured reply timed out",
-            None,
-        )
-        .await
-        .expect("timeout should record a terminal reply");
-
-        assert_eq!(reply.status, wardian_core::control::ReplyStatus::Failed);
-        assert_eq!(reply.body, "structured reply timed out");
-        let late = submit_structured_reply(
-            &state,
-            &request_id,
-            wardian_core::control::ReplyStatus::Done,
-            "late",
-            Some(&wardian_core::control::MessageOrigin::WardianAgent {
-                session_id: "agent-1".to_string(),
-            }),
-            None,
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(late.code(), "duplicate_reply");
-    }
-
-    #[tokio::test]
-    async fn ask_reply_rejects_unknown_duplicate_and_foreign_request() {
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        insert_test_agent(&state, "agent-2", "CoderTwo", "Coder").await;
-
-        let unknown = submit_structured_reply(
-            &state,
-            "ask_deadbeefdeadbeef",
-            wardian_core::control::ReplyStatus::Done,
-            "finished",
-            None,
-            None,
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(unknown.code(), "not_found");
-
-        let request_id = create_pending_ask_request(&state, "agent-1").await.unwrap();
-        let foreign = submit_structured_reply(
-            &state,
-            &request_id,
-            wardian_core::control::ReplyStatus::Done,
-            "finished",
-            Some(&wardian_core::control::MessageOrigin::WardianAgent {
-                session_id: "agent-2".to_string(),
-            }),
-            None,
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(foreign.code(), "unauthorized");
-
-        submit_structured_reply(
-            &state,
-            &request_id,
-            wardian_core::control::ReplyStatus::Blocked,
-            "blocked on review",
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        let duplicate = submit_structured_reply(
-            &state,
-            &request_id,
-            wardian_core::control::ReplyStatus::Done,
-            "finished",
-            None,
-            None,
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(duplicate.code(), "duplicate_reply");
-    }
-
-    #[tokio::test]
-    async fn wait_for_structured_reply_times_out_without_terminal_status() {
-        let state = AppState::new();
-        insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-        let request_id = create_pending_ask_request(&state, "agent-1").await.unwrap();
-
-        let error =
-            wait_for_structured_reply(&state, &request_id, std::time::Duration::from_millis(10))
-                .await
-                .unwrap_err();
-
-        assert_eq!(error.code(), "watch_timeout");
-    }
-
-    #[tokio::test]
-    async fn wait_for_structured_reply_returns_blocked_and_failed_statuses() {
-        for status in [
-            wardian_core::control::ReplyStatus::Blocked,
-            wardian_core::control::ReplyStatus::Failed,
-        ] {
-            let state = AppState::new();
-            insert_test_agent(&state, "agent-1", "CoderOne", "Coder").await;
-            let request_id = create_pending_ask_request(&state, "agent-1").await.unwrap();
-            submit_structured_reply(
-                &state,
-                &request_id,
-                status.clone(),
-                "cannot continue",
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-
-            let reply =
-                wait_for_structured_reply(&state, &request_id, std::time::Duration::from_secs(1))
-                    .await
-                    .unwrap();
-
-            assert_eq!(reply.status, status);
-            assert_eq!(reply.body, "cannot continue");
-        }
     }
 
     #[test]

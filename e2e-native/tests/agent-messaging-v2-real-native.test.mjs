@@ -13,7 +13,10 @@
 // tools in the two already auto-registered private agent homes, before any turn.
 // WARDIAN_E2E_MESSAGING_V2_LIFECYCLE=1 additionally tests idle information and
 // one active-turn interrupt in attached_tui mode, with one extra provider task.
-// WARDIAN_E2E_MESSAGING_V2_MODE=background (default) or attached_tui.
+// WARDIAN_E2E_MESSAGING_V2_MODE=background (default), attached_tui, or without_pty.
+// without_pty removes both owned terminal runtimes before info/task admission;
+// it adds one bounded idle task and one busy task with correlated replies,
+// but no interrupt/continuity add-ons. Native execution remains opt-in.
 // Upgraded runs require WARDIAN_E2E_CODEX_EXPECTED_VERSION=0.154.0-alpha.6
 // and WARDIAN_E2E_CODEX_EXECUTABLE=<absolute-native-executable>. These are
 // evidence pins, not product executable overrides; readiness must match them.
@@ -23,6 +26,7 @@
 // WARDIAN_E2E_MESSAGING_V2_SCREENSHOTS=1 captures one private startup image per
 // agent for parent review. The harness never uploads screenshots.
 import test from "node:test";
+import { messageCli, correlatedReply, assertDetachedTerminal, assertNativeSession, assertBusyTaskDeferred } from "../lib/canonical-messaging.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { createReadStream } from "node:fs";
@@ -46,7 +50,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const SOURCES = [
   "Cargo.toml", "Cargo.lock", "src-tauri/Cargo.toml", "crates/wardian-cli/Cargo.toml", "crates/wardian-core/Cargo.toml",
   "e2e-native/tests/agent-messaging-v2-real-native.test.mjs", "e2e-native/lib/harness.mjs",
-  "e2e-native/lib/stdio-json-rpc.mjs",
+  "e2e-native/lib/stdio-json-rpc.mjs", "e2e-native/lib/canonical-messaging.mjs",
   "e2e-native/lib/codex-compact-home-evidence.mjs",
   "e2e-native/lib/sessionHome.mjs", "e2e-native/lib/sessionPorts.mjs",
   "e2e-native/lib/frozenArtifacts.mjs", "e2e-native/lib/native-artifact-resolution.mjs",
@@ -55,7 +59,7 @@ const SOURCES = [
   "scripts/native-e2e-windows-supervisor.ps1",
   "crates/wardian-cli/src/mcp.rs", "crates/wardian-cli/src/mcp/definitions.rs",
   "crates/wardian-cli/src/mcp/messaging.rs", "crates/wardian-cli/src/live/messaging.rs",
-  "crates/wardian-cli/src/main.rs", "crates/wardian-cli/src/live.rs",
+  "crates/wardian-cli/src/messaging.rs", "crates/wardian-cli/src/main.rs", "crates/wardian-cli/src/live.rs",
   "crates/wardian-cli/src/args.rs", "crates/wardian-cli/src/errors.rs", "crates/wardian-cli/tests/mcp_stdio.rs",
   "crates/wardian-core/src/agent_messaging.rs", "crates/wardian-core/src/db/agent_messaging.rs",
   "crates/wardian-core/src/db/agent_messaging/provider_claims.rs",
@@ -433,7 +437,7 @@ export function decodeHostDelivery(payload) {
       messageId = context.interaction_id;
       frameType = "canonical_task";
     } else {
-      // Initial ordinary `wardian send` remains a NativeMessageEnvelope,
+      // Historical ordinary delivery can retain a NativeMessageEnvelope,
       // directly serialized by dispatch_shared_codex. It is not a peer Task.
       assert.equal(output.operation, "start_turn");
       for (const field of ["interaction_id", "message_id", "target_agent_id"]) assert.ok(typeof output[field] === "string" && output[field].length > 0);
@@ -918,6 +922,68 @@ export function proveInterruptedTurn(before, after, receipt, agentId, turnId) {
 /** Explicit harness-authored lifecycle stimuli after the model-authored exchange.
  * Every operation is submitted once; observation timeout never causes replay.
  */
+async function busyTaskWithoutPty(DatabaseSync, session, cli, home, cwd, receiver, report, save) {
+  const origin = report.coordinator.session_id;
+  const evidence = report.optional_cases.busy_task_without_pty = { status: "running", attempts: 0 };
+  const trace = async () => {
+    const capability = await command(cli, home, cwd, ["delivery", "capabilities", receiver.session_id]);
+    assertNativeSession(capability, receiver.session_id, "codex", receiver.native_identity);
+    assertDetachedTerminal(receiver.detached_terminal, await invokeTauri(session.driver, "request_terminal_snapshot", {
+      request: { session_id: receiver.session_id },
+    }));
+    return visibleTrace(DatabaseSync, receiver.registration.codex_home, capability.binding, receiver.workspace);
+  };
+  await session.driver.wait(async () => (await trace()).turns.every((turn) => ["completed", "failed", "interrupted"].includes(turn.status)),
+    15_000, "Receiver was not idle before the idle-task case", 200);
+  let cursor = (await messageCli(cli, home, cwd, origin, ["receive", "--timeout-ms", "0"])).next_cursor;
+  const idleMarker = `IDLE_${randomUUID()}`;
+  const busyMarker = `BUSY_${randomUUID()}`;
+  evidence.attempts = 1;
+  await save();
+  evidence.idle_task = await messageCli(cli, home, cwd, origin, ["followup", receiver.session_id,
+    `Use your shell tool to sleep for ten seconds. Then use the reply tool to complete this request with exactly ${idleMarker}.`]);
+  await save();
+  let active;
+  let activeTurn;
+  await session.driver.wait(async () => {
+    active = await trace();
+    activeTurn = active.host_deliveries.find((row) => row.frame_type === "canonical_task" && row.message_id === evidence.idle_task.request_id)?.turn_id;
+    return !!activeTurn && active.turns.some((turn) => turn.turn_id === activeTurn && turn.status === "inProgress");
+  }, 30_000, "No actual active turn; busy coverage remains unqualified", 100);
+  evidence.busy_before = active;
+  evidence.attempts = 2;
+  await save();
+  evidence.busy_task = await messageCli(cli, home, cwd, origin, ["followup", receiver.session_id,
+    `Use the reply tool to complete this request with exactly ${busyMarker}. Do no other work.`]);
+  const admitted = await trace();
+  assert.ok(admitted.turns.some((turn) => turn.turn_id === activeTurn && turn.status === "inProgress"),
+    "Active turn ended during admission; do not replay to manufacture busy coverage");
+  evidence.busy_after_admission = admitted;
+  await save();
+  let latest;
+  await session.driver.wait(async () => {
+    latest = await trace();
+    const queuedTurn = assertBusyTaskDeferred(latest, activeTurn, evidence.busy_task.request_id);
+    const page = await messageCli(cli, home, cwd, origin, ["receive", "--cursor", cursor, "--timeout-ms", "0"]);
+    cursor = page.next_cursor;
+    evidence.idle_reply ??= correlatedReply(page, evidence.idle_task.request_id, receiver.session_id, idleMarker);
+    evidence.busy_reply ??= correlatedReply(page, evidence.busy_task.request_id, receiver.session_id, busyMarker);
+    if (!evidence.idle_reply || !evidence.busy_reply || !queuedTurn) return false;
+    assert.notEqual(queuedTurn, activeTurn);
+    for (const [task, reply, marker, turnId] of [[evidence.idle_task, evidence.idle_reply, idleMarker, activeTurn],
+      [evidence.busy_task, evidence.busy_reply, busyMarker, queuedTurn]]) {
+      const proof = canonicalProof(DatabaseSync, home, origin, receiver.session_id, task.request_id, 3);
+      if (proof.task_state !== "completed" || !latest.turns.some((turn) => turn.turn_id === turnId && turn.status === "completed")) return false;
+      if (!latest.items.some((item) => item.tool === "reply" && item.turn_id === turnId &&
+        item.arguments.request_id === task.request_id && item.arguments.message === marker && item.receipt?.interaction_id === reply.interaction_id)) return false;
+    }
+    return true;
+  }, 120_000, "Busy/idle tasks lack exact native completed replies; no retry", 200);
+  evidence.after = latest;
+  evidence.status = "pass";
+  await save();
+}
+
 async function lifecycleCases(DatabaseSync, session, cli, home, cwd, sender, receiver, report, save) {
   const client = startStdioRpc(cli, ["mcp", "serve"], {
     cwd, env: { ...process.env, WARDIAN_HOME: home, WARDIAN_SESSION_ID: sender.session_id },
@@ -1660,7 +1726,7 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
   }
   const expectedVersion = expectedTestVersion();
   const mode = process.env.WARDIAN_E2E_MESSAGING_V2_MODE ?? "background";
-  assert.ok(["background", "attached_tui"].includes(mode), "Unknown messaging mode; no provider was launched");
+  assert.ok(["background", "attached_tui", "without_pty"].includes(mode), "Unknown messaging mode; no provider was launched");
   if (process.env.WARDIAN_E2E_MESSAGING_V2_LIFECYCLE === "1") assert.equal(mode, "attached_tui");
   assert.equal(process.env.WARDIAN_NATIVE_SKIP_BUILD, "1", "This test never builds");
   const requestedCli = process.env.WARDIAN_E2E_MESSAGING_CLI;
@@ -1795,7 +1861,7 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
     }
     const [sender, receiver] = report.agents;
     report.topology = await command(cli, home, harness.repoRoot, ["graph", "link", sender.session_id, receiver.session_id]);
-    if (mode === "attached_tui") {
+    if (["attached_tui", "without_pty"].includes(mode)) {
       for (const agent of report.agents) {
         agent.resume_attempts = 1;
         await save();
@@ -1811,29 +1877,54 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
       }
       report.attached_tui = "both_original_terminals_attached";
     }
+    if (mode === "without_pty") {
+      assert.notEqual(process.env.WARDIAN_E2E_MESSAGING_V2_LIFECYCLE, "1", "Bounded case excludes extra lifecycle tasks");
+      for (const agent of report.agents) {
+        const capability = await command(cli, home, harness.repoRoot, ["delivery", "capabilities", agent.session_id]);
+        agent.native_identity = assertNativeSession(capability, agent.session_id, "codex");
+        agent.observed_identity = { provider_session_id: agent.native_identity.provider_session_id, generation: agent.native_identity.generation };
+        await invokeTauri(session.driver, "debug_remove_agent_input_sender", { sessionId: agent.session_id });
+        agent.detached_terminal = await invokeTauri(session.driver, "request_terminal_snapshot", { request: { session_id: agent.session_id } });
+      }
+      const before = await visibleTrace(null, receiver.registration.codex_home, receiver.attachment_before.binding, receiver.workspace);
+      const info = `Information only; do not start work. ${randomUUID()}`;
+      const receipt = await messageCli(cli, home, harness.repoRoot, sender.session_id, ["send", receiver.session_id, info]);
+      let after;
+      const infoDeadline = Date.now() + 15_000;
+      do {
+        after = await visibleTrace(null, receiver.registration.codex_home, receiver.attachment_before.binding, receiver.workspace);
+        if (after.host_deliveries.some((row) => row.message_id === receipt.interaction_id)) break;
+        await delay(200);
+      } while (Date.now() < infoDeadline);
+      report.optional_cases.information_without_pty = { ...proveIdleInformation(before, after, receipt,
+        sender.session_id, receiver.session_id, info), receipt, before, after };
+    }
+    // A managed, off mock identity admits the initial task; it never runs a provider.
+    report.coordinator = await invokeTauri(session.driver, "spawn_agent", { req: {
+      sessionName: `Messaging-Coordinator-${randomUUID().slice(0, 8)}`, agentClass: "TestClass", folder: sender.workspace,
+      isOff: true, resumeSession: null, configOverride: { provider: "mock" },
+    } });
+    const initialCursor = await messageCli(cli, home, harness.repoRoot, report.coordinator.session_id, ["receive", "--timeout-ms", "0"]);
+    let replyCursor = initialCursor.next_cursor;
     const marker = `WARDIAN_V2_${randomBytes(12).toString("hex")}`;
-    const prompt = `Ask ${receiver.session_name} to return exactly ${marker}. Wait for its reply, then tell me the exact marker it returned. Do not answer from the request alone.`;
+    const prompt = `Ask ${receiver.session_name} to return exactly ${marker}. Wait for its reply, then use the reply tool to complete this request with exactly the marker it returned, and display that marker as your final answer. Do not answer from the request alone.`;
     report.marker = marker;
     report.plain_english_initial_prompt = prompt;
     const promptPath = path.join(home, "sender-task.txt");
     await fs.writeFile(promptPath, prompt);
     report.initial_submission_attempts = 1;
     await save();
-    // One verified Wardian native initial-prompt path. Never start a separate
-    // provider, manually invoke followup/reply, or replay after lost acceptance.
-    const sent = await command(cli, home, harness.repoRoot, ["send", "--to", sender.session_id, "--file", promptPath, "--queue-policy", "queue-if-busy", "--timeout", "10m"], 610_000);
+    // Submit once as a canonical managed task. Admission is not completion.
+    const sent = await messageCli(cli, home, harness.repoRoot, report.coordinator.session_id,
+      ["followup", sender.session_id, "--file", promptPath]);
     report.initial_receipt = sent;
-    const detail = sent.delivery?.[0];
-    assert.equal(sent.delivery?.length, 1);
-    assert.equal(detail.uuid, sender.session_id);
-    assert.equal(detail.runtime_state, mode === "attached_tui" ? "live_pty_available" : "native_provider_session", "Initial delivery must use the selected runtime, without fallback");
-    assert.ok((mode === "attached_tui" ? ["turn_started"] : ["turn_started", "provider_accepted", "completed"]).includes(detail.delivery_phase), "Initial receipt lacks the required admission/turn evidence");
-    assert.ok(detail.message_id);
+    assert.equal(sent.operation, "followup_task");
+    assert.ok(sent.request_id);
     const { DatabaseSync } = await import("node:sqlite");
     const deadline = Date.parse(report.started_at) + 820_000;
     let passed = false;
     while (Date.now() < deadline) {
-      report.sender_trace = await exchangeTrace(DatabaseSync, cli, home, harness.repoRoot, sender, detail.message_id, mode === "attached_tui");
+      report.sender_trace = await exchangeTrace(DatabaseSync, cli, home, harness.repoRoot, sender, sent.request_id, mode === "attached_tui");
       if (report.sender_trace) {
         const tasks = report.sender_trace.items.filter((item) => item.tool === "followup_task");
         assert.ok(tasks.length <= 1, "Sender repeated a task; no replay is permitted");
@@ -1852,27 +1943,27 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
           }
         }
       }
-      if (mode === "attached_tui") {
-        // Live PTY delivery has an InteractionRecord, not a native-broker
-        // envelope. Its literal user message and completion must be observed
-        // on the very thread attached before submission.
-        const initialUsers = report.sender_trace?.items.filter((item) => item.type === "userMessage" && item.text === prompt) ?? [];
-        assert.ok(initialUsers.length <= 1, "Initial prompt appeared more than once; no replay permitted");
-        const initialTurn = initialUsers[0]?.turn_id;
-        const completed = initialTurn && report.sender_trace.turns.some((turn) => turn.turn_id === initialTurn && turn.status === "completed");
-        report.initial_delivery = { interaction_id: detail.message_id, phase: completed ? "completed" : "turn_started",
-          provider: "codex", provider_turn_id: initialTurn ?? null, target_agent_id: sender.session_id, runtime_state: detail.runtime_state };
-      } else {
-        const inspection = await command(cli, home, harness.repoRoot, ["delivery", "show", detail.message_id, "--evidence-limit", "100"]);
-        assert.equal(inspection.record?.envelope?.interaction_id, detail.message_id);
-        assert.equal(inspection.record?.envelope?.target_agent_id, sender.session_id);
-        assert.equal(inspection.record?.envelope?.body, prompt);
-        assert.equal(inspection.record?.provider, "codex");
-        report.initial_delivery = { interaction_id: inspection.record?.envelope?.interaction_id, phase: inspection.record?.phase,
-          provider: inspection.record?.provider, provider_turn_id: inspection.record?.provider_turn_id,
-          target_agent_id: inspection.record?.envelope?.target_agent_id,
-          phases: (inspection.evidence ?? []).map((entry) => ({ phase: entry.phase, source: entry.source })) };
-        assert.ok(!["failed", "failed_before_submit", "cancelled", "expired", "stale_generation"].includes(inspection.record?.phase), "Initial native delivery terminated unsuccessfully");
+      const initialProof = canonicalProof(DatabaseSync, home, report.coordinator.session_id, sender.session_id, sent.request_id);
+      const page = await messageCli(cli, home, harness.repoRoot, report.coordinator.session_id,
+        ["receive", "--cursor", replyCursor, "--timeout-ms", "0"]);
+      replyCursor = page.next_cursor;
+      report.initial_reply ??= correlatedReply(page, sent.request_id, sender.session_id, marker);
+      const completionCall = report.sender_trace?.items.find((item) => item.tool === "reply" && item.arguments.request_id === sent.request_id);
+      if (completionCall?.receipt) {
+        assert.equal(completionCall.arguments.status, "done");
+        assert.equal(completionCall.arguments.message, marker);
+        if (report.initial_reply) assert.equal(completionCall.receipt.interaction_id, report.initial_reply.interaction_id);
+      }
+      report.initial_delivery = { interaction_id: sent.request_id,
+        phase: initialProof.task_state === "completed" && report.initial_reply && completionCall?.receipt ? "completed" : "pending",
+        provider: "codex", provider_turn_id: report.sender_trace?.accepted_turn_id ?? null, canonical: initialProof };
+      if (mode === "without_pty") {
+        for (const agent of report.agents) {
+          assertNativeSession(await command(cli, home, harness.repoRoot, ["delivery", "capabilities", agent.session_id]),
+            agent.session_id, "codex", agent.native_identity);
+          const snapshot = await invokeTauri(session.driver, "request_terminal_snapshot", { request: { session_id: agent.session_id } });
+          assertDetachedTerminal(agent.detached_terminal, snapshot);
+        }
       }
       const failure = terminalExchangeFailure(report.sender_trace, report.initial_delivery.provider_turn_id, "followup_task");
       if (failure) { report.terminal_failure = failure; throw new Error(`${failure.reason}: ${failure.final_message}`); }
@@ -1885,6 +1976,9 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
     assert.ok(passed && report.initial_delivery.phase === "completed", "Correlated real-provider exchange timed out; no retry was made");
     report.cases.correlated_real_exchange = { status: "pass", request_id: report.canonical.request_id, reply_id: report.canonical.reply_id };
     report.actual_cases_passed = 1;
+    if (mode === "without_pty") {
+      await busyTaskWithoutPty(DatabaseSync, session, cli, home, harness.repoRoot, receiver, report, save);
+    }
     if (mode === "attached_tui") {
       for (const agent of report.agents) {
         const renderDeadline = Date.now() + 15_000;
@@ -1928,7 +2022,7 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
   } finally {
     let processesStopped = !session;
     if (session) {
-      for (const agent of [...report.agents].reverse()) {
+      for (const agent of [...report.agents, ...(report.coordinator ? [report.coordinator] : [])].reverse()) {
         try { await invokeTauri(session.driver, "pause_agent", { sessionId: agent.session_id }); report.cleanup.push({ agent_id: agent.session_id, paused: true }); }
         catch { report.cleanup.push({ agent_id: agent.session_id, paused: false }); }
       }

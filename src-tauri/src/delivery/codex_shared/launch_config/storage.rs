@@ -4,6 +4,32 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
 
+// Windows readers may deny delete sharing even though the file is writable.
+// Bound the wait to 200 ms per mutation; never bypass the snapshot checks.
+fn retry_sharing_conflict(error: &std::io::Error, retries: &mut u8) -> bool {
+    #[cfg(windows)]
+    if matches!(error.raw_os_error(), Some(5 | 32 | 33)) && *retries < 8 {
+        *retries += 1;
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        return true;
+    }
+    #[cfg(not(windows))]
+    let _ = (error, retries);
+    false
+}
+
+fn operation_failure(operation: &str, path: &Path, error: std::io::Error) -> CodexSharedError {
+    // Do not expose private home paths or arbitrary filenames in launch errors.
+    let file = if path.file_name().is_some_and(|name| name == "config.toml") {
+        "config.toml"
+    } else {
+        "launch journal"
+    };
+    failure(&format!(
+        "Codex launch file I/O failed while {operation} {file}: {error}"
+    ))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Snapshot {
     pub(super) text: String,
@@ -42,7 +68,9 @@ pub(super) fn read_snapshot(path: &Path) -> Result<Option<Snapshot>, CodexShared
         use std::os::windows::fs::OpenOptionsExt;
         options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
     }
-    let mut file = options.open(path).map_err(io_failure)?;
+    let mut file = options
+        .open(path)
+        .map_err(|error| operation_failure("opening", path, error))?;
     reject_destination(&file.metadata().map_err(io_failure)?)?;
     let (volume, index, links) = file_identity(&file).map_err(io_failure)?;
     if links != 1 {
@@ -91,17 +119,25 @@ pub(super) fn publish(
         .map_err(io_failure)?;
     temporary.write_all(bytes).map_err(io_failure)?;
     temporary.as_file().sync_all().map_err(io_failure)?;
-    // Detect observed edits, replacements (even identical bytes), new links or
-    // removal. External editors share no lock: the final check/rename race is
-    // bounded, not an OS compare-and-swap guarantee.
-    if let Some((peer_path, snapshot)) = peer {
-        compare_before_publish(peer_path, snapshot)?;
+    let mut retries = 0;
+    loop {
+        // Recheck after EVERY wait: readers or external editors can change
+        // either file during contention. This remains a bounded check/rename
+        // race, not an OS compare-and-swap guarantee.
+        if let Some((peer_path, snapshot)) = peer {
+            compare_before_publish(peer_path, snapshot)?;
+        }
+        compare_before_publish(path, before)?;
+        match temporary.persist(path) {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                if !retry_sharing_conflict(&error.error, &mut retries) {
+                    return Err(operation_failure("replacing", path, error.error));
+                }
+                temporary = error.file;
+            }
+        }
     }
-    compare_before_publish(path, before)?;
-    temporary
-        .persist(path)
-        .map_err(|error| io_failure(error.error))?;
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -166,6 +202,13 @@ pub(super) fn home_identity(home: &Path) -> Result<(u64, u64), CodexSharedError>
 }
 
 pub(super) fn remove(path: &Path, before: &Option<Snapshot>) -> Result<(), CodexSharedError> {
-    compare_before_publish(path, before)?;
-    fs::remove_file(path).map_err(io_failure)
+    let mut retries = 0;
+    loop {
+        compare_before_publish(path, before)?;
+        match fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if retry_sharing_conflict(&error, &mut retries) => {}
+            Err(error) => return Err(operation_failure("removing", path, error)),
+        }
+    }
 }

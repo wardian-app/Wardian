@@ -9,6 +9,7 @@ import {
   createNativeHarness,
   ensureNativeAppBuilt,
   freezeBuiltCliForRun,
+  invokeTauri,
   prepareIsolatedHome,
   startNativeSession,
   waitForAppShell,
@@ -180,12 +181,10 @@ test("native Antigravity CLI spawn, send, and watch round trip", { timeout: 2400
 
     await new Promise((resolve) => setTimeout(resolve, 8000));
 
-    runCliOk(cliPath, harness, [
-      "send",
-      `Reply with exactly ${marker}.`,
-      "--to",
-      agentName,
-    ]);
+    // Human prompt path; this does not qualify canonical peer messaging.
+    await invokeTauri(session.driver, "submit_prompt_to_agent", {
+      sessionId: spawned.uuid, prompt: `Reply with exactly ${marker}.`, inputMode: "message",
+    });
 
     const watchResult = runCliOk(cliPath, harness, [
       "agent",

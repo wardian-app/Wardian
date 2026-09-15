@@ -66,14 +66,22 @@ fn provider_log_source_is_fresh(
     resume_session: Option<&str>,
     fresh_provider_session_id: Option<&str>,
 ) -> bool {
-    if provider == "pi" {
-        return match (resume_session, fresh_provider_session_id) {
-            (None, Some(_)) => true,
-            (Some(resume), Some(fresh)) => resume == fresh,
-            _ => false,
-        };
+    if !matches!(provider, "claude" | "codex" | "pi") {
+        return false;
     }
-    resume_session.is_none() && fresh_provider_session_id.is_some()
+    let Some(fresh) = fresh_provider_session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    match resume_session {
+        None => true,
+        Some(resume) => {
+            let resume = resume.trim();
+            !resume.is_empty() && resume == fresh
+        }
+    }
 }
 
 #[tauri::command]
@@ -94,7 +102,8 @@ pub async fn load_agent_chat_transcript_for_state(
     }
 
     let result = archive_agent_chat_events_for_state(state, &session_id).await?;
-    let archived_events = state
+    let mut current_events = result.events;
+    let mut archived_events = state
         .conversation_archive
         .chat_events_for_capture(&result.context)
         .unwrap_or_else(|error| {
@@ -103,12 +112,13 @@ pub async fn load_agent_chat_transcript_for_state(
             ));
             Vec::new()
         });
+    coalesce_codex_watch_observations_across(&mut current_events, &mut archived_events);
 
     // Provider logs and the watch snapshot are live, bounded sources. Replay
     // only the active durable archive so a restart or log rotation does not
     // erase current chat rows, while a new provider session starts empty.
     let mut events = crate::state::conversation_archive::provenance::merge_current_capture(
-        result.events,
+        current_events,
         archived_events,
     )
     .map_err(|error| format!("conversation archive provenance refresh failed: {error}"))?;
@@ -1463,6 +1473,10 @@ fn merge_chat_events(
     watch_events: Vec<AgentChatEvent>,
     provider_events: Vec<AgentChatEvent>,
 ) -> Vec<AgentChatEvent> {
+    let mut watch_events = watch_events;
+    let mut provider_events = provider_events;
+    coalesce_codex_watch_observations(&mut watch_events, &mut provider_events);
+
     let mut seen = HashSet::new();
     let mut archived_event_ids = HashSet::new();
     let mut live_event_ids = HashSet::new();
@@ -1486,7 +1500,14 @@ fn merge_chat_events(
                             &merged[*existing_index],
                             &event,
                         ) {
-                            merged[*existing_index] = event;
+                            let mut replacement = event;
+                            retain_provider_observation_ids(
+                                &mut replacement,
+                                &merged[*existing_index],
+                            );
+                            merged[*existing_index] = replacement;
+                        } else {
+                            retain_provider_observation_ids(&mut merged[*existing_index], &event);
                         }
                         continue;
                     }
@@ -1523,6 +1544,145 @@ fn merge_chat_events(
     }
 
     merged
+}
+
+/// Reconciles a Codex watcher observation with its provider-log copy before
+/// the older event/response mirror rule runs. The watcher carries the native
+/// message ID in `turn_id`; the provider turn remains metadata. Every binding
+/// key is required, so equal text cannot establish a duplicate.
+fn coalesce_codex_watch_observations(
+    watch_events: &mut Vec<AgentChatEvent>,
+    provider_events: &mut [AgentChatEvent],
+) {
+    let mut removed = HashSet::new();
+    for (watch_index, watch_event) in watch_events.iter().enumerate() {
+        if !is_codex_watch_observation(watch_event) {
+            continue;
+        }
+        let native_matches = provider_events
+            .iter()
+            .enumerate()
+            .filter(|(_, native_event)| {
+                is_codex_native_observation(native_event)
+                    && codex_watch_native_observation_matches(watch_event, native_event)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if native_matches.len() != 1 {
+            continue;
+        }
+        let native_index = native_matches[0];
+
+        let mut canonical = provider_events[native_index].clone();
+        retain_provider_observation_ids(&mut canonical, watch_event);
+        provider_events[native_index] = canonical;
+        removed.insert(watch_index);
+    }
+
+    if !removed.is_empty() {
+        *watch_events = watch_events
+            .drain(..)
+            .enumerate()
+            .filter_map(|(index, event)| (!removed.contains(&index)).then_some(event))
+            .collect();
+    }
+}
+
+fn coalesce_codex_watch_observations_in_place(events: &mut Vec<AgentChatEvent>) {
+    let mut removed = HashSet::new();
+    for watch_index in 0..events.len() {
+        if removed.contains(&watch_index) || !is_codex_watch_observation(&events[watch_index]) {
+            continue;
+        }
+        let native_matches = (0..events.len())
+            .filter(|&native_index| {
+                native_index != watch_index
+                    && !removed.contains(&native_index)
+                    && is_codex_native_observation(&events[native_index])
+                    && codex_watch_native_observation_matches(
+                        &events[watch_index],
+                        &events[native_index],
+                    )
+            })
+            .collect::<Vec<_>>();
+        if native_matches.len() != 1 {
+            continue;
+        }
+        let native_index = native_matches[0];
+
+        let mut canonical = events[native_index].clone();
+        retain_provider_observation_ids(&mut canonical, &events[watch_index]);
+        events[native_index] = canonical;
+        removed.insert(watch_index);
+    }
+
+    if !removed.is_empty() {
+        *events = events
+            .drain(..)
+            .enumerate()
+            .filter_map(|(index, event)| (!removed.contains(&index)).then_some(event))
+            .collect();
+    }
+}
+
+fn coalesce_codex_watch_observations_across(
+    current_events: &mut Vec<AgentChatEvent>,
+    archived_events: &mut Vec<AgentChatEvent>,
+) {
+    coalesce_codex_watch_observations(current_events, archived_events);
+    coalesce_codex_watch_observations(archived_events, current_events);
+    coalesce_codex_watch_observations_in_place(current_events);
+    coalesce_codex_watch_observations_in_place(archived_events);
+}
+
+fn is_codex_watch_observation(event: &AgentChatEvent) -> bool {
+    event.provider.eq_ignore_ascii_case("codex")
+        && event.kind == AgentChatEventKind::Message
+        && event.role == Some(AgentChatRole::Assistant)
+        && matches!(event.source.as_deref(), Some("event_msg" | "response_item"))
+        && event.metadata.get("transcript_cursor").is_some()
+}
+
+fn is_codex_native_observation(event: &AgentChatEvent) -> bool {
+    event.provider.eq_ignore_ascii_case("codex")
+        && event.kind == AgentChatEventKind::Message
+        && event.role == Some(AgentChatRole::Assistant)
+        && matches!(event.source.as_deref(), Some("event_msg" | "response_item"))
+        && event.metadata["provider_log"] == true
+        && event.metadata.get("transcript_cursor").is_none()
+}
+
+fn event_metadata_string<'a>(event: &'a AgentChatEvent, key: &str) -> Option<&'a str> {
+    event
+        .metadata
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn codex_watch_native_observation_matches(watch: &AgentChatEvent, native: &AgentChatEvent) -> bool {
+    if watch.session_id != native.session_id
+        || watch.provider != native.provider
+        || watch.source != native.source
+        || watch.turn_id != native.turn_id
+    {
+        return false;
+    }
+    let same_path = event_metadata_string(watch, "log_path")
+        .zip(event_metadata_string(native, "log_path"))
+        .is_some_and(|(watch_path, native_path)| watch_path == native_path);
+    let same_provider_turn = event_metadata_string(watch, "provider_turn_id")
+        .zip(event_metadata_string(native, "provider_turn_id"))
+        .is_some_and(|(watch_turn, native_turn)| watch_turn == native_turn);
+    let same_provider_session = match (
+        event_metadata_string(watch, "provider_session_id"),
+        event_metadata_string(native, "provider_session_id"),
+    ) {
+        (Some(watch_session), Some(native_session)) => watch_session == native_session,
+        _ => true,
+    };
+    same_path && same_provider_turn && same_provider_session
 }
 
 /// Projects Codex's two native user-input records into one chat row while
@@ -1887,12 +2047,40 @@ fn message_event_from_transcript(
     });
     let provider = provider_for_event(Some(&message.provider), state_provider, &mut metadata);
     let role = role_from_str(&message.role);
+    let source = message
+        .source
+        .clone()
+        .or_else(|| Some("transcript".to_string()));
+    let is_bound_native_watch = (message.provider.eq_ignore_ascii_case("codex")
+        && matches!(source.as_deref(), Some("event_msg" | "response_item")))
+        || (message.provider.eq_ignore_ascii_case("pi")
+            && source.as_deref() == Some("session_jsonl"));
+    if is_bound_native_watch {
+        if let Some(provenance) = message.provider_provenance.as_ref().filter(|provenance| {
+            !provenance.provider_session_id.trim().is_empty()
+                && !provenance.source_path.trim().is_empty()
+                && !provenance.provider_turn_id.trim().is_empty()
+        }) {
+            set_metadata(&mut metadata, "provider_log", true);
+            set_metadata(
+                &mut metadata,
+                "provider_session_id",
+                provenance.provider_session_id.clone(),
+            );
+            set_metadata(&mut metadata, "log_path", provenance.source_path.clone());
+            set_metadata(
+                &mut metadata,
+                "provider_turn_id",
+                provenance.provider_turn_id.clone(),
+            );
+        }
+    }
 
     AgentChatEvent {
         id: event_id(
             session_id,
             sequence,
-            message.source.as_deref().unwrap_or("transcript"),
+            source.as_deref().unwrap_or("transcript"),
         ),
         session_id: session_id.to_string(),
         provider,
@@ -1902,10 +2090,7 @@ fn message_event_from_transcript(
         title: None,
         status: None,
         turn_id: message.turn_id.clone(),
-        source: message
-            .source
-            .clone()
-            .or_else(|| Some("transcript".to_string())),
+        source,
         command: None,
         exit_code: None,
         path: None,
@@ -2048,7 +2233,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pi_promoted_fresh_identity_trusts_prefix_but_resume_does_not() {
+    fn launch_owned_fresh_identity_trusts_prefix_but_resume_does_not() {
         assert!(provider_log_source_is_fresh(
             "pi",
             None,
@@ -2069,10 +2254,35 @@ mod tests {
             Some("pi-resumed-session"),
             Some("pi-other-session")
         ));
-        assert!(!provider_log_source_is_fresh(
+        assert!(provider_log_source_is_fresh(
             "codex",
             Some("codex-session"),
             Some("codex-session")
+        ));
+        assert!(!provider_log_source_is_fresh(
+            "codex",
+            Some("codex-session"),
+            None
+        ));
+        assert!(!provider_log_source_is_fresh(
+            "codex",
+            Some("codex-session"),
+            Some("other-session")
+        ));
+        assert!(!provider_log_source_is_fresh(
+            "codex",
+            Some(""),
+            Some("codex-session")
+        ));
+        assert!(!provider_log_source_is_fresh(
+            "codex",
+            Some("codex-session"),
+            Some("")
+        ));
+        assert!(!provider_log_source_is_fresh(
+            "opencode",
+            Some("opencode-session"),
+            Some("opencode-session")
         ));
     }
 
@@ -2096,6 +2306,110 @@ mod tests {
     }
 
     #[test]
+    fn projects_only_bound_codex_watch_messages_as_provider_observations() {
+        let bound = WatchTranscriptMessage {
+            role: "assistant".to_string(),
+            text: "Codex answer".to_string(),
+            provider: "codex".to_string(),
+            turn_id: None,
+            source: Some("event_msg".to_string()),
+            provider_provenance: Some(wardian_core::control::WatchTranscriptProvenance {
+                provider_session_id: "codex-session".to_string(),
+                source_path: "codex-session.jsonl".to_string(),
+                provider_turn_id: "turn-a".to_string(),
+            }),
+        };
+        let bound_event = message_event_from_transcript(
+            "agent-1",
+            "codex",
+            1,
+            &bound,
+            &transcript(vec![bound.clone()]),
+        );
+
+        assert_eq!(bound_event.turn_id, None);
+        assert_eq!(bound_event.metadata["provider_log"], true);
+        assert_eq!(bound_event.metadata["provider_session_id"], "codex-session");
+        assert_eq!(bound_event.metadata["log_path"], "codex-session.jsonl");
+        assert_eq!(bound_event.metadata["provider_turn_id"], "turn-a");
+
+        let response = WatchTranscriptMessage {
+            source: Some("response_item".to_string()),
+            turn_id: Some("msg-native".to_string()),
+            ..bound.clone()
+        };
+        let response_event = message_event_from_transcript(
+            "agent-1",
+            "codex",
+            2,
+            &response,
+            &transcript(vec![response.clone()]),
+        );
+        assert_eq!(response_event.turn_id.as_deref(), Some("msg-native"));
+        assert_eq!(response_event.metadata["provider_log"], true);
+        assert_eq!(response_event.metadata["provider_turn_id"], "turn-a");
+
+        let unbound = WatchTranscriptMessage {
+            provider_provenance: None,
+            ..bound
+        };
+        let unbound_event = message_event_from_transcript(
+            "agent-1",
+            "codex",
+            2,
+            &unbound,
+            &transcript(vec![unbound.clone()]),
+        );
+        assert_ne!(unbound_event.metadata["provider_log"], true);
+        assert!(unbound_event.metadata.get("provider_turn_id").is_none());
+    }
+
+    #[test]
+    fn projects_bound_pi_watch_messages_as_provider_observations() {
+        let bound = WatchTranscriptMessage {
+            role: "assistant".to_string(),
+            text: "Pi answer".to_string(),
+            provider: "pi".to_string(),
+            turn_id: Some("118bf261".to_string()),
+            source: Some("session_jsonl".to_string()),
+            provider_provenance: Some(wardian_core::control::WatchTranscriptProvenance {
+                provider_session_id: "1f2a5d81-5ca6-46bf-b15a-78c6295d64b7".to_string(),
+                source_path: "pi-session.jsonl".to_string(),
+                provider_turn_id: "118bf261".to_string(),
+            }),
+        };
+        let bound_event = message_event_from_transcript(
+            "dac9e431-f775-4c77-8b8e-0a61c6dba9e4",
+            "pi",
+            3,
+            &bound,
+            &transcript(vec![bound.clone()]),
+        );
+
+        assert_eq!(bound_event.metadata["provider_log"], true);
+        assert_eq!(
+            bound_event.metadata["provider_session_id"],
+            "1f2a5d81-5ca6-46bf-b15a-78c6295d64b7"
+        );
+        assert_eq!(bound_event.metadata["log_path"], "pi-session.jsonl");
+        assert_eq!(bound_event.metadata["provider_turn_id"], "118bf261");
+
+        let unbound = WatchTranscriptMessage {
+            provider_provenance: None,
+            ..bound
+        };
+        let unbound_event = message_event_from_transcript(
+            "dac9e431-f775-4c77-8b8e-0a61c6dba9e4",
+            "pi",
+            3,
+            &unbound,
+            &transcript(vec![unbound.clone()]),
+        );
+        assert_ne!(unbound_event.metadata["provider_log"], true);
+        assert!(unbound_event.metadata.get("provider_session_id").is_none());
+    }
+
+    #[test]
     fn maps_watch_status_transcript_and_terminal_output() {
         let events = vec![WatchEvent {
             cursor: "agent-1:0000000000000001".to_string(),
@@ -2111,6 +2425,7 @@ mod tests {
             provider: "mock".to_string(),
             turn_id: Some("turn-1".to_string()),
             source: Some("transcript".to_string()),
+            provider_provenance: None,
         }]);
 
         let output = output("raw terminal");
@@ -2146,6 +2461,7 @@ mod tests {
             provider: String::new(),
             turn_id: None,
             source: None,
+            provider_provenance: None,
         }]);
 
         let output = output("");
@@ -2212,6 +2528,7 @@ Do you want to proceed?
             provider: "antigravity".to_string(),
             turn_id: Some("turn-1".to_string()),
             source: Some("transcript".to_string()),
+            provider_provenance: None,
         }]);
 
         let chat_events = map_watch_snapshot_to_chat_events(WatchSnapshotChatInput {
@@ -2440,6 +2757,7 @@ Do you want to proceed?
                 provider: "opencode".to_string(),
                 turn_id: Some("ses_incremental".to_string()),
                 source: Some("opencode_db".to_string()),
+                provider_provenance: None,
             });
 
         let state = AppState::new();
@@ -3196,6 +3514,107 @@ Do you want to proceed?
             merge_chat_events(Vec::new(), vec![rooted_stream, rooted_completion]).len(),
             2
         );
+    }
+
+    #[test]
+    fn codex_four_row_watch_native_shape_coalesces_before_stream_pair() {
+        let task_started =
+            r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"provider-turn"}}"#;
+        let response_item = r#"{"type":"response_item","payload":{"type":"message","id":"msg-native","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"same final answer"}],"internal_chat_message_metadata_passthrough":{"turn_id":"provider-turn"}}}"#;
+        let event_message = r#"{"type":"event_msg","payload":{"type":"agent_message","message":"same final answer"}}"#;
+
+        let mut watch_binding = crate::providers::transcript::CodexWatchBindingState::default();
+        watch_binding.set_source("provider-session", "codex-session.jsonl");
+        watch_binding.observe_record(
+            task_started,
+            Some(&wardian_core::models::AgentEvent::TurnStarted {
+                turn_id: "provider-turn".to_string(),
+            }),
+        );
+        let watch_response = watch_binding
+            .extract_message(response_item)
+            .expect("watch response item");
+        let watch_event = watch_binding
+            .extract_message(event_message)
+            .expect("watch event message");
+        assert_eq!(watch_response.turn_id.as_deref(), Some("msg-native"));
+        assert_eq!(watch_event.turn_id, None);
+
+        let watch_transcript = WatchTranscript {
+            cursor: "agent-1:0000000000000004".to_string(),
+            messages: vec![watch_response.clone(), watch_event.clone()],
+            latest_text: "same final answer".to_string(),
+            truncated: false,
+            omitted_bytes: 0,
+        };
+        let watch_events = vec![
+            message_event_from_transcript(
+                "agent-1",
+                "codex",
+                1,
+                &watch_response,
+                &watch_transcript,
+            ),
+            message_event_from_transcript("agent-1", "codex", 2, &watch_event, &watch_transcript),
+        ];
+        assert!(watch_events
+            .iter()
+            .all(|event| event.metadata["provider_log"] == true));
+
+        let mut provider_events = normalize_chat_lines(
+            "agent-1",
+            "codex",
+            [
+                r#"{"type":"turn_context","payload":{"turn_id":"provider-turn"}}"#,
+                event_message,
+                response_item,
+            ],
+        )
+        .into_iter()
+        .filter(|event| event.role == Some(AgentChatRole::Assistant))
+        .collect::<Vec<_>>();
+        for event in &mut provider_events {
+            event.metadata["provider_log"] = serde_json::json!(true);
+            event.metadata["provider_session_id"] = serde_json::json!("provider-session");
+            event.metadata["log_path"] = serde_json::json!("codex-session.jsonl");
+        }
+        assert_eq!(provider_events.len(), 2);
+
+        let mut distinct_watch = vec![watch_events[0].clone()];
+        let mut distinct_native = vec![provider_events[1].clone()];
+        distinct_watch[0].turn_id = Some("msg-other".to_string());
+        distinct_watch[0].metadata["provider_turn_id"] = serde_json::json!("other-turn");
+        coalesce_codex_watch_observations(&mut distinct_watch, &mut distinct_native);
+        assert_eq!(distinct_watch.len(), 1);
+        assert_eq!(distinct_native.len(), 1);
+
+        let native_ids = provider_events
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<Vec<_>>();
+        let watch_ids = watch_events
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<Vec<_>>();
+        let chat_events = merge_chat_events(watch_events, provider_events);
+        let assistants = chat_events
+            .iter()
+            .filter(|event| event.role == Some(AgentChatRole::Assistant))
+            .collect::<Vec<_>>();
+
+        assert_eq!(assistants.len(), 1);
+        assert_eq!(assistants[0].turn_id.as_deref(), Some("msg-native"));
+        let observation_ids = assistants[0].metadata["provider_observation_ids"]
+            .as_array()
+            .expect("all four observation IDs retained")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(observation_ids.len(), 4);
+        assert!(native_ids
+            .iter()
+            .chain(watch_ids.iter())
+            .all(|id| observation_ids.contains(&id.as_str())));
     }
 
     #[test]

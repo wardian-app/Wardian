@@ -38,7 +38,7 @@ async fn publish_restored_agent(
     let state = app.state::<AppState>();
     let status = publication.publish(&state, agent).await;
     manager::publish_agent_status(app, session_id, &status);
-    crate::control::spawn_mailbox_drain_after_restore(app, session_id);
+    crate::control::spawn_agent_messaging_after_restore(app, session_id);
     let _ = app.emit("agents-updated", ());
 }
 
@@ -318,7 +318,6 @@ pub fn run() {
                 state.file_resources.attach_app_handle(app.handle().clone());
                 tauri::async_runtime::block_on(async {
                     state.interactions.hydrate_from_persistence().await;
-                    state.hydrate_mailbox_from_persistence().await;
                 });
                 crate::commands::terminal_session::start_terminal_session_event_bridge(
                     app.handle().clone(),
@@ -601,7 +600,7 @@ pub fn run() {
                                         &config.session_id,
                                         &status,
                                     );
-                                    crate::control::spawn_mailbox_drain_after_restore(
+                                    crate::control::spawn_agent_messaging_after_restore(
                                         &app_handle,
                                         &config.session_id,
                                     );
@@ -622,7 +621,6 @@ pub fn run() {
                         }
                     }
                 }
-                crate::control::spawn_native_delivery_recovery(&app_handle);
                 for recovered in recovered_replacements {
                     if let Some(intent) = recovered.session_close_intent {
                         if let Err(error) = crate::automation::session_close::invoke_matching(
@@ -716,6 +714,7 @@ pub fn run() {
             commands::change_review::save_change_review_prefs,
             commands::change_review::save_change_review_watermark,
             commands::debug::debug_remove_agent_input_sender,
+            commands::debug::debug_pause_agent_input_sender,
             commands::debug::debug_push_agent_watch_output,
             commands::debug::debug_set_agent_status,
             #[cfg(debug_assertions)]

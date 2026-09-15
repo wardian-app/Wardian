@@ -298,7 +298,7 @@ WARDIAN_E2E_REAL_CHAT_CONFORMANCE=1 \
 WARDIAN_E2E_CHAT_PROVIDERS=claude \
 WARDIAN_E2E_CHAT_CLAUDE_MODEL='<verified-low-cost-model>' \
 WARDIAN_NATIVE_APP='<absolute-packaged-app-path>' \
-node --test e2e-native/tests/provider-chat-conformance-real-native.test.mjs
+node scripts/run-native-e2e.mjs e2e-native/tests/provider-chat-conformance-real-native.test.mjs
 ```
 
 PowerShell:
@@ -308,7 +308,7 @@ $env:WARDIAN_E2E_REAL_CHAT_CONFORMANCE = '1'
 $env:WARDIAN_E2E_CHAT_PROVIDERS = 'claude'
 $env:WARDIAN_E2E_CHAT_CLAUDE_MODEL = '<verified-low-cost-model>'
 $env:WARDIAN_NATIVE_APP = '<absolute-packaged-app-path>'
-node --test e2e-native/tests/provider-chat-conformance-real-native.test.mjs
+node scripts/run-native-e2e.mjs e2e-native/tests/provider-chat-conformance-real-native.test.mjs
 ```
 
 Provider selection accepts `claude`, `codex`, `opencode`, `antigravity`, and `pi`.
@@ -332,33 +332,23 @@ inherited headless session boundaries. Independent provider-native records bind
 each headless answer to its request and session. Normalized automation output
 or saved agent configuration alone cannot establish that identity.
 
-The native broker suite creates an off agent and checks ordinary `wardian send`
-through the persistent provider transport. It requires provider-backed start and
-completion, second-turn recall of an omitted secret on the same session binding,
-and advertised cancellation followed by another successful turn. A headless
-fallback or a turn that completed before cancellation cannot count as a pass.
+For canonical task delivery, use the maintained
+[provider-delivery native acceptance](#provider-delivery-native-acceptance)
+procedure. The separate [Codex v2 Native acceptance procedure](./agent-messaging-tools.md#native-acceptance)
+covers the Codex v2 sender/receiver suite; its configuration and claims are
+separate from this provider-delivery matrix. The documented Claude/Antigravity
+composer exceptions remain separate results.
 
-```bash
-WARDIAN_E2E_REAL_NATIVE_BROKER=1 \
-WARDIAN_E2E_NATIVE_BROKER_PROVIDER=claude \
-WARDIAN_E2E_NATIVE_BROKER_MODEL='<verified-low-cost-model>' \
-WARDIAN_NATIVE_SKIP_BUILD=1 \
-WARDIAN_NATIVE_APP='<absolute-frozen-app-path>' \
-WARDIAN_E2E_NATIVE_BROKER_CLI='<absolute-adjacent-cli-path>' \
-node --test e2e-native/tests/provider-native-broker-real-native.test.mjs
-```
+The delivery suite limits Claude to Bash and an empty strict MCP configuration,
+and disables its cross-session messaging tools. This qualifies the canonical CLI
+reply through the composer exception; it does not qualify Claude MCP delivery or
+provider-native collaboration tools. These limits apply only to the test agent.
 
-PowerShell:
-
-```powershell
-$env:WARDIAN_E2E_REAL_NATIVE_BROKER = '1'
-$env:WARDIAN_E2E_NATIVE_BROKER_PROVIDER = 'claude'
-$env:WARDIAN_E2E_NATIVE_BROKER_MODEL = '<verified-low-cost-model>'
-$env:WARDIAN_NATIVE_SKIP_BUILD = '1'
-$env:WARDIAN_NATIVE_APP = '<absolute-frozen-app-path>'
-$env:WARDIAN_E2E_NATIVE_BROKER_CLI = '<absolute-adjacent-cli-path>'
-node --test e2e-native/tests/provider-native-broker-real-native.test.mjs
-```
+The older `provider-native-broker-real-native.test.mjs` integration path uses
+the retired `wardian send` command. Its retained reports describe historical
+builds; that path cannot qualify the current canonical messaging implementation.
+Run real-provider suites through `scripts/run-native-e2e.mjs` so the supervisor
+owns the isolated home lock and child processes.
 
 These suites retain disposable Wardian homes under `.tmp/e2e-native/`, with
 artifact/harness hashes and per-case observations. Raw logs and screenshots stay
@@ -369,6 +359,59 @@ all provider-owned history.
 Freeze a packaged runtime before verification commands that compile Cargo test
 targets. Those commands can replace the same debug executable with a dev-URL
 build. Check the artifact hash when associating a run with a source change.
+
+### Provider-delivery native acceptance
+
+The maintained provider-delivery real-native harness is
+`e2e-native/tests/provider-delivery-real-native.test.mjs`. Its real-provider
+opt-in and provider/case/native-route settings are documented in
+[Provider readiness](../guide/provider-readiness.md). Against a frozen
+packaged app and matching CLI, a bounded selected-provider run is:
+
+```bash
+WARDIAN_E2E_REAL_DELIVERY=1 \
+WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL=1 \
+WARDIAN_E2E_DELIVERY_PROVIDERS=<provider-list> \
+WARDIAN_E2E_DELIVERY_CASES=<case-list> \
+WARDIAN_E2E_DELIVERY_NATIVE_PROVIDERS=<native-provider-list> \
+WARDIAN_E2E_REAL_WORKSPACE=<absolute-workspace-path> \
+WARDIAN_NATIVE_SKIP_BUILD=1 \
+WARDIAN_NATIVE_APP=<absolute-packaged-app-path> \
+npm run test:e2e:native:fast -- e2e-native/tests/provider-delivery-real-native.test.mjs
+```
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_E2E_REAL_DELIVERY = '1'
+$env:WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL = '1'
+$env:WARDIAN_E2E_DELIVERY_PROVIDERS = '<provider-list>'
+$env:WARDIAN_E2E_DELIVERY_CASES = '<case-list>'
+$env:WARDIAN_E2E_DELIVERY_NATIVE_PROVIDERS = '<native-provider-list>'
+$env:WARDIAN_E2E_REAL_WORKSPACE = '<absolute-workspace-path>'
+$env:WARDIAN_NATIVE_SKIP_BUILD = '1'
+$env:WARDIAN_NATIVE_APP = '<absolute-packaged-app-path>'
+npm run test:e2e:native:fast -- e2e-native/tests/provider-delivery-real-native.test.mjs
+```
+
+The [Provider readiness](../guide/provider-readiness.md) guide documents the
+full matrix, case names, and Claude/Antigravity composer-exception setting.
+Acceptance requires an actual provider-authored reply correlated to the
+Wardian request and bound to the observed provider session, generation, and
+native evidence. Setup, a task claim, a receipt, a terminal echo, a historical
+receipt, or mock-provider output alone does not qualify as native acceptance.
+
+Attached runs use an input-only block that prevents composer/task input while
+keeping the attached runtime and native provider owner alive. Privileged control
+replies remain available; terminal pause or termination is not the acceptance
+mechanism. Failed or uncertain submissions remain failed or uncertain and are
+never replayed. Provider outcomes are evaluated separately, so one result does
+not establish acceptance for every provider.
+
+Wardian retains the canonical `ask_...` request identity for correlation.
+OpenCode receives a distinct deterministic `msg_...` provider message identity
+at its adapter boundary; evidence must keep those identities bound rather than
+substituting one for the other.
 
 ### Rendering evidence
 

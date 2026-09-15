@@ -42,6 +42,28 @@ pub async fn debug_remove_agent_input_sender(
 }
 
 #[tauri::command]
+pub async fn debug_pause_agent_input_sender(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if !cfg!(debug_assertions) {
+        return Err("debug commands are disabled in production builds".to_string());
+    }
+
+    let broker_state = state
+        .terminal_sessions
+        .broker_state(&session_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    state
+        .terminal_sessions
+        .pause_input_sender(&session_id, broker_state.runtime_generation)
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn debug_push_agent_watch_output(
     session_id: String,
     output: String,
@@ -69,6 +91,7 @@ pub async fn debug_push_agent_watch_output(
             provider: provider.unwrap_or_else(|| "mock".to_string()),
             turn_id: Some("debug-seed".to_string()),
             source: Some("debug".to_string()),
+            provider_provenance: None,
         });
     }
     Ok(())

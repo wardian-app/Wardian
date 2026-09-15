@@ -528,7 +528,7 @@ const CLIPS = [
       await typeIntoTerminal(
         page,
         "docs-codex",
-        "\r\n$ wardian ask Docs-Reviewer \"check the capture manifest\"\r\n",
+        "\r\n$ wardian message followup Docs-Reviewer \"check the capture manifest\"\r\n",
       );
       await wait(700);
       await selectAgent(page, "docs-codex");
