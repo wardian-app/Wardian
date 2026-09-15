@@ -8,7 +8,7 @@ const screenshotPath = join(
   "e2e",
   "screenshots",
   "subagent-badge",
-  "2026-09-14",
+  "2026-09-15",
   "subagents-inspector.png",
 );
 
@@ -89,11 +89,11 @@ test("shows truthful subagent categories and attention reasons", async ({ page }
   const badge = panel.getByTestId("agent-child-worker-indicator-agent-alpha");
   await expect(badge).toContainText("Subagents");
   await expect(badge).toContainText("2 active");
-  await expect(badge).toContainText("3 past");
-  await expect(badge).toContainText("1 unknown");
+  await expect(badge).not.toContainText("3 past");
+  await expect(badge).not.toContainText("1 unknown");
   await expect(badge).toHaveAttribute(
     "title",
-    "Subagents for Alpha: 2 active subagents. 3 past subagents. 1 unknown subagent. 3 subagents need attention (1 waiting, 1 failed, 1 unknown).",
+    "Subagents for Alpha: 2 active subagents. 3 past subagents. 1 unknown subagent. 2 subagents need attention (1 waiting, 1 failed). Status unavailable for 1 subagent; the provider final status was not recorded.",
   );
   const watchlistRow = page.locator(
     '[data-testid="agent-watchlist"] .watchlist-row[aria-label="Agent Alpha"]',
@@ -103,7 +103,9 @@ test("shows truthful subagent categories and attention reasons", async ({ page }
     "watchlist-child-worker-indicator-agent-alpha",
   );
   await expect(watchlistBadge).toBeVisible();
-  await expect(watchlistBadge).toContainText("3 attention");
+  await expect(watchlistBadge).toContainText("2");
+  await expect(watchlistBadge).not.toContainText("Subagents");
+  await expect(watchlistBadge).not.toContainText("attention");
   const [rowBox, badgeBox] = await Promise.all([
     watchlistRow.boundingBox(),
     watchlistBadge.boundingBox(),
@@ -117,8 +119,20 @@ test("shows truthful subagent categories and attention reasons", async ({ page }
   const details = page.getByTestId("agent-child-worker-details-agent-alpha");
   await expect(details).toBeVisible();
   await expect(details.getByTestId("agent-child-worker-summary-agent-alpha")).toContainText("2 active subagents");
-  await expect(details.getByTestId("agent-child-worker-attention-agent-alpha")).toContainText("3 subagents need attention (1 waiting, 1 failed, 1 unknown).");
+  await expect(details.getByTestId("agent-child-worker-attention-agent-alpha")).toContainText("2 subagents need attention (1 waiting, 1 failed). Status unavailable for 1 subagent; the provider final status was not recorded.");
+  const current = details.getByTestId("agent-child-worker-current-agent-alpha");
+  await expect(current).toContainText("Running");
+  await expect(current).toContainText("Waiting");
+  const history = details.getByTestId("agent-child-worker-history-agent-alpha");
+  await expect(history).not.toHaveAttribute("open");
+  const unavailable = details.getByTestId("agent-child-worker-unavailable-agent-alpha");
+  await expect(unavailable).not.toHaveAttribute("open");
 
-  mkdirSync(join("e2e", "screenshots", "subagent-badge", "2026-09-14"), { recursive: true });
+  mkdirSync(join("e2e", "screenshots", "subagent-badge", "2026-09-15"), { recursive: true });
   await page.screenshot({ path: screenshotPath, fullPage: true, animations: "disabled" });
+
+  await history.locator("summary").click();
+  await expect(history).toHaveAttribute("open");
+  await expect(history).toContainText("Succeeded");
+  await expect(history).toContainText("Failed");
 });

@@ -75,12 +75,14 @@ expands fluidly on narrow surfaces.
 Use the **Terminal** / **Chat** button in the card header for a temporary per-agent override. The default comes from **Settings > Agents > Agent card display**. Unsent Chat text stays with that agent when you switch modes.
 
 A compact **Subagents** badge appears in the card header when Wardian has verified
-provider-spawned workers through that agent's provider ancestry. It separates active,
-past retained, and unknown subagents. Waiting workers remain active and also appear in
-the attention count. The attention details identify waiting, failed, and unknown
-reasons. Hover the badge for the full summary or select it to inspect each retained
-subagent's outcome, evidence coverage, available capabilities, own usage, and
-descendant combined usage. **Observe only** identifies providers for which no
+provider-spawned workers through that agent's provider ancestry. The visible badge
+shows the current active count; the watchlist uses an icon and that count to keep the
+roster compact. Waiting workers remain active and confirmed waiting or failed workers
+show an attention marker. Hover the badge for the full summary or select it to inspect
+current workers first, terminal workers in collapsed **History**, and workers whose
+provider final status was not recorded under **Status unavailable**. The inspector
+preserves evidence coverage, available capabilities, own usage, and descendant
+combined usage across these groups. **Observe only** identifies providers for which no
 canonical follow-up, resume, or interruption control has been verified. The badge
 reports attention without creating another agent card or watchlist row. Inspect
 automation workers from their Monitor run and Observe node; a headless worker does
