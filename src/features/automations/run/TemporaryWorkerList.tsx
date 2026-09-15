@@ -5,6 +5,10 @@ interface TemporaryWorkerListProps {
   telemetry: Record<string, TemporaryWorkerTelemetry>;
   emptyMessage?: string;
   showAggregate?: boolean;
+  /** Full roster used for aggregate and descendant usage when workers is filtered. */
+  allWorkers?: TemporaryWorker[];
+  /** Root inspector uses a neutral tone when provider status is unavailable. */
+  unknownNeedsAttention?: boolean;
 }
 
 export function TemporaryWorkerList({
@@ -12,15 +16,18 @@ export function TemporaryWorkerList({
   telemetry,
   emptyMessage = "No temporary workers recorded.",
   showAggregate = false,
+  allWorkers,
+  unknownNeedsAttention = true,
 }: TemporaryWorkerListProps) {
+  const usageWorkers = allWorkers ?? workers;
   const aggregate = combineTelemetry(
-    workers.map((worker) => worker.worker_id),
+    usageWorkers.map((worker) => worker.worker_id),
     telemetry,
   );
   const aggregateTokens = tokenSummary(aggregate);
   return (
     <div className="space-y-2" data-testid="temporary-worker-list">
-      {showAggregate && workers.length > 0 ? (
+      {showAggregate && usageWorkers.length > 0 ? (
         <div
           className="rounded border border-wardian-border bg-[var(--color-wardian-card-bg-muted)] p-3 text-[10px] text-[var(--color-wardian-text-muted)]"
           data-testid="temporary-worker-combined-usage"
@@ -29,7 +36,7 @@ export function TemporaryWorkerList({
             Verified descendants total
           </div>
           <div className="mt-1">
-            {workers.length} worker{workers.length === 1 ? "" : "s"} ·{" "}
+            {usageWorkers.length} worker{usageWorkers.length === 1 ? "" : "s"} ·{" "}
             {aggregate?.turns ?? 0} combined turn
             {aggregate?.turns === 1 ? "" : "s"}
             {aggregateTokens
@@ -51,7 +58,7 @@ export function TemporaryWorkerList({
                   : `Attempt ${worker.attempt ?? "-"}`}
               </span>
               <span
-                className={`font-mono ${workerNeedsAttention(worker.state) ? "text-[var(--color-wardian-warning)]" : "text-[var(--color-wardian-text-muted)]"}`}
+                className={`font-mono ${workerNeedsAttention(worker.state, unknownNeedsAttention) ? "text-[var(--color-wardian-warning)]" : "text-[var(--color-wardian-text-muted)]"}`}
               >
                 {formatWorkerState(worker.state)}
               </span>
@@ -78,7 +85,7 @@ export function TemporaryWorkerList({
             ) : null}
             <WorkerUsage
               worker={worker}
-              workers={workers}
+              workers={usageWorkers}
               telemetry={telemetry}
             />
             <div className="mt-1 text-[10px] text-[var(--color-wardian-text-muted)]">
@@ -204,8 +211,13 @@ function tokenSummary(telemetry?: TemporaryWorkerTelemetry | null) {
   return parts.length ? parts.join(", ") : null;
 }
 
-function workerNeedsAttention(state: TemporaryWorker["state"]) {
-  return state === "waiting" || state === "failed" || state === "unknown";
+function workerNeedsAttention(
+  state: TemporaryWorker["state"],
+  unknownNeedsAttention: boolean,
+) {
+  return state === "waiting"
+    || state === "failed"
+    || (unknownNeedsAttention && state === "unknown");
 }
 
 function formatWorkerState(state: TemporaryWorker["state"]) {

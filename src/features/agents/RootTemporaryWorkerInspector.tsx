@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { AlertTriangle, History, Info, UsersRound } from "lucide-react";
 import { TemporaryWorkerList } from "../automations/run/TemporaryWorkerList";
 import type {
   TemporaryWorker,
@@ -77,10 +78,20 @@ export function RootTemporaryWorkerInspector({
     }
   };
 
-  const attention = summary.attention_count !== null && summary.attention_count > 0;
+  const attention = hasActionableAttention(summary);
+  const statusUnavailable = hasStatusUnavailable(summary);
+  const historyOnly = isHistoryOnly(summary);
   const detailsId = `agent-child-worker-details-${summary.root_agent_id}`;
   const categorySummary = formatRootWorkerCategorySummary(summary);
   const accessibleSummary = formatRootWorkerAccessibleSummary(summary);
+  const IndicatorIcon = attention
+    ? UsersRound
+    : statusUnavailable && (summary.active === null || summary.active === 0)
+      ? Info
+      : historyOnly
+        ? History
+        : UsersRound;
+  const showInfoMarker = statusUnavailable && !attention && IndicatorIcon !== Info;
   return (
     <div className={`relative ${compact ? "min-w-0 max-w-full" : "shrink-0"}`}>
       <button
@@ -97,13 +108,38 @@ export function RootTemporaryWorkerInspector({
         title={`Subagents for ${agentName}: ${accessibleSummary}`}
         type="button"
       >
-        <span className="min-w-0 truncate whitespace-nowrap">
-          Subagents · {categorySummary}
-        </span>
-        {attention ? (
-          <span className="shrink-0 whitespace-nowrap">
-            · {summary.attention_count} attention
+        <IndicatorIcon
+          aria-hidden="true"
+          className="shrink-0"
+          data-testid={`agent-child-worker-status-icon-${summary.root_agent_id}`}
+          size={compact ? 12 : 13}
+          strokeWidth={2}
+        />
+        {compact ? (
+          <span className="shrink-0 tabular-nums">
+            {formatCompactActiveCount(summary)}
           </span>
+        ) : (
+          <span className="min-w-0 truncate whitespace-nowrap">
+            Subagents · {formatRootWorkerActiveSummary(summary)}
+          </span>
+        )}
+        {attention ? (
+          <AlertTriangle
+            aria-hidden="true"
+            className="shrink-0"
+            data-testid={`agent-child-worker-attention-marker-${summary.root_agent_id}`}
+            size={compact ? 11 : 12}
+            strokeWidth={2.25}
+          />
+        ) : showInfoMarker ? (
+          <Info
+            aria-hidden="true"
+            className="shrink-0"
+            data-testid={`agent-child-worker-status-unavailable-marker-${summary.root_agent_id}`}
+            size={compact ? 11 : 12}
+            strokeWidth={2}
+          />
         ) : null}
       </button>
       {open ? (
@@ -152,7 +188,7 @@ export function RootTemporaryWorkerInspector({
                 <span className="text-muted-neutral">
                   {formatWorkerCount(summary.past, "past subagent")}
                 </span>
-                <span className="text-wardian-warning">
+                <span className="text-muted-neutral">
                   {formatWorkerCount(summary.unknown, "unknown subagent")}
                 </span>
               </div>
@@ -173,12 +209,7 @@ export function RootTemporaryWorkerInspector({
             </div>
           ) : null}
           {details ? (
-            <TemporaryWorkerList
-              emptyMessage="No retained child-worker details are available."
-              showAggregate
-              telemetry={details.worker_telemetry}
-              workers={details.workers}
-            />
+            <RootWorkerGroups details={details} />
           ) : null}
         </div>
       ) : null}
@@ -203,18 +234,34 @@ export function formatRootWorkerCategorySummary(summary: RootWorkerSummary): str
   ].join(" · ");
 }
 
+export function formatRootWorkerActiveSummary(summary: RootWorkerSummary): string {
+  return summary.active === null
+    ? "active count unavailable"
+    : `${summary.active} active`;
+}
+
 export function formatRootWorkerAttentionSummary(summary: RootWorkerSummary): string {
-  if (summary.attention_count === null) return "Attention count unavailable.";
-  if (summary.attention_count === 0) return "No subagents need attention.";
-  const reasons = [
-    summary.attention_waiting ? `${summary.attention_waiting} waiting` : null,
-    summary.attention_failed ? `${summary.attention_failed} failed` : null,
-    summary.attention_unknown ? `${summary.attention_unknown} unknown` : null,
-  ].filter((reason): reason is string => reason !== null);
-  const detail = reasons.length
-    ? ` (${reasons.join(", ")})`
-    : " (attention reasons unavailable)";
-  return `${formatWorkerCount(summary.attention_count, "subagent")} ${summary.attention_count === 1 ? "needs" : "need"} attention${detail}.`;
+  const confirmedAttention = confirmedAttentionCount(summary);
+  const statusUnavailable = formatStatusUnavailableSummary(summary);
+  let attentionSummary: string;
+
+  if (confirmedAttention === null) {
+    attentionSummary = summary.attention_count === null
+      ? "Attention count unavailable."
+      : summary.attention_count === 0
+        ? "No subagents need attention."
+        : `${formatWorkerCount(summary.attention_count, "subagent")} ${summary.attention_count === 1 ? "needs" : "need"} attention (attention reasons unavailable).`;
+  } else if (confirmedAttention === 0) {
+    attentionSummary = "No subagents need attention.";
+  } else {
+    const reasons = [
+      summary.attention_waiting ? `${summary.attention_waiting} waiting` : null,
+      summary.attention_failed ? `${summary.attention_failed} failed` : null,
+    ].filter((reason): reason is string => reason !== null);
+    attentionSummary = `${formatWorkerCount(confirmedAttention, "subagent")} ${confirmedAttention === 1 ? "needs" : "need"} attention (${reasons.join(", ")}).`;
+  }
+
+  return [attentionSummary, statusUnavailable].filter(Boolean).join(" ");
 }
 
 export function formatRootWorkerAccessibleSummary(summary: RootWorkerSummary): string {
@@ -240,6 +287,125 @@ export function hasRootWorkers(summary: RootWorkerSummary): boolean {
   return knownCategoryCount
     || (summary.reported_records ?? 0) > 0
     || (summary.attention_count ?? 0) > 0;
+}
+
+export function confirmedAttentionCount(summary: RootWorkerSummary): number | null {
+  if (summary.attention_waiting === null || summary.attention_failed === null) {
+    return null;
+  }
+  return summary.attention_waiting + summary.attention_failed;
+}
+
+function hasActionableAttention(summary: RootWorkerSummary): boolean {
+  const confirmedAttention = confirmedAttentionCount(summary);
+  return confirmedAttention === null
+    ? summary.attention_count !== null && summary.attention_count > 0
+    : confirmedAttention > 0;
+}
+
+function hasStatusUnavailable(summary: RootWorkerSummary): boolean {
+  const unavailableCount = statusUnavailableCount(summary);
+  return unavailableCount === null
+    ? summary.active === null || summary.past === null || summary.unknown === null
+    : unavailableCount > 0;
+}
+
+function statusUnavailableCount(summary: RootWorkerSummary): number | null {
+  return summary.unknown ?? summary.attention_unknown;
+}
+
+function formatStatusUnavailableSummary(summary: RootWorkerSummary): string {
+  const count = statusUnavailableCount(summary);
+  return count === null || count === 0
+    ? ""
+    : `Status unavailable for ${formatWorkerCount(count, "subagent")}; the provider final status was not recorded.`;
+}
+
+function isHistoryOnly(summary: RootWorkerSummary): boolean {
+  return !hasActionableAttention(summary)
+    && summary.active === 0
+    && summary.past !== null
+    && summary.past > 0
+    && statusUnavailableCount(summary) === 0;
+}
+
+function formatCompactActiveCount(summary: RootWorkerSummary): string {
+  return summary.active === null ? "?" : String(summary.active);
+}
+
+function isCurrentWorker(worker: TemporaryWorker): boolean {
+  return worker.state === "requested"
+    || worker.state === "running"
+    || worker.state === "waiting";
+}
+
+function isTerminalWorker(worker: TemporaryWorker): boolean {
+  return worker.state === "succeeded"
+    || worker.state === "failed"
+    || worker.state === "cancelled";
+}
+
+function RootWorkerGroups({ details }: { details: RootWorkerDetails }) {
+  const currentWorkers = details.workers.filter(isCurrentWorker);
+  const historyWorkers = details.workers.filter(isTerminalWorker);
+  const unavailableWorkers = details.workers.filter((worker) => worker.state === "unknown");
+  const listProps = {
+    allWorkers: details.workers,
+    telemetry: details.worker_telemetry,
+    unknownNeedsAttention: false,
+  };
+
+  return (
+    <div className="space-y-3" data-testid={`agent-child-worker-groups-${details.root_agent_id}`}>
+      <section data-testid={`agent-child-worker-current-${details.root_agent_id}`}>
+        <h3 className="mb-2 text-[10px] font-bold text-[var(--color-wardian-text-muted)]">
+          Current workers
+        </h3>
+        <TemporaryWorkerList
+          {...listProps}
+          emptyMessage="No current workers are active."
+          showAggregate
+          workers={currentWorkers}
+        />
+      </section>
+
+      {historyWorkers.length > 0 ? (
+        <details data-testid={`agent-child-worker-history-${details.root_agent_id}`}>
+          <summary className="cursor-pointer rounded border border-wardian-border px-2 py-1 text-[10px] font-bold text-[var(--color-wardian-text-muted)]">
+            History · {historyWorkers.length} terminal worker{historyWorkers.length === 1 ? "" : "s"}
+          </summary>
+          <div className="mt-2">
+            <TemporaryWorkerList
+              {...listProps}
+              emptyMessage="No terminal workers are retained."
+              workers={historyWorkers}
+            />
+          </div>
+        </details>
+      ) : null}
+
+      {unavailableWorkers.length > 0 ? (
+        <details data-testid={`agent-child-worker-unavailable-${details.root_agent_id}`}>
+          <summary className="cursor-pointer rounded border border-wardian-border px-2 py-1 text-[10px] font-bold text-[var(--color-wardian-text-muted)]">
+            Status unavailable · {unavailableWorkers.length} worker{unavailableWorkers.length === 1 ? "" : "s"}
+          </summary>
+          <div className="mt-2 space-y-2">
+            <p
+              className="rounded border border-wardian-border bg-[var(--color-wardian-card-bg-muted)] p-2 text-[10px] text-[var(--color-wardian-text-muted)]"
+              data-testid={`agent-child-worker-unavailable-explanation-${details.root_agent_id}`}
+            >
+              The provider final status was not recorded for these workers. Their status remains unavailable and they are not presented as active or completed.
+            </p>
+            <TemporaryWorkerList
+              {...listProps}
+              emptyMessage="No workers have unavailable status."
+              workers={unavailableWorkers}
+            />
+          </div>
+        </details>
+      ) : null}
+    </div>
+  );
 }
 
 function nonNegativeNumber(value: unknown): number | null {
