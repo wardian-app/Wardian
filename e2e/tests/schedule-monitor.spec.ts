@@ -328,7 +328,8 @@ test("schedule a blueprint and prove adaptive Monitor cards", async ({ page }) =
   const analystRow = page.locator('[data-testid="agent-watchlist"] .watchlist-row[aria-label="Agent Analyst Ada"]');
   await analystRow.click();
   await surfaceTab(page, "automations").click();
-  await expect(page.getByTestId("automation-view-agent-scope")).toHaveText("Selected agent");
+  await expect(page.getByTestId("automations-view").getByTestId("automation-view-agent-scope")).toHaveCount(0);
+  await expect(page.getByTestId("automation-agent-scope-toggle")).toHaveText("Selected agents");
   await expect(monitor.getByText("1 automation tracked for selected agents")).toBeVisible();
   await expect(monitor.getByTestId("automation-activity-row-wf")).toBeVisible();
   await expect(monitor.getByTestId("automation-activity-row-script-only")).toHaveCount(0);

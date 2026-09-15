@@ -312,7 +312,8 @@ describe('AutomationsView', () => {
 
     render(<AutomationsView theme="dark" selectedAgentIds={new Set(['agent-1'])} />);
 
-    expect(screen.getByTestId('automation-view-agent-scope')).toHaveTextContent('Selected agent');
+    expect(screen.queryByTestId('automation-view-agent-scope')).not.toBeInTheDocument();
+    expect(screen.getByTestId('automation-agent-scope-toggle')).toHaveTextContent('Selected agents');
     expect(blueprintSelectorMock).toHaveBeenCalledWith(new Set(['wf', 'listener-only']));
     fireEvent.click(screen.getByRole('button', { name: /show runs/i }));
     expect(screen.getByRole('button', { name: 'Open wf run-selected' })).toBeInTheDocument();
