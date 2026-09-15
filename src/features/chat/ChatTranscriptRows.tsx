@@ -83,7 +83,7 @@ export function ChatTranscriptRow({
 }: ChatTranscriptRowProps) {
   if (row.kind === "turn_change_summary") return <TurnChangeCard onOpenFile={onOpenFile} row={row} />;
   if (row.kind === "work_group") return <WorkGroupRow agentIsWorking={agentIsWorking} row={row} />;
-  if (row.event.kind === "memory") return <MemoryRow event={row.event} />;
+  if (row.event.kind === "memory") return <MemoryRow event={row.event} linkHandling={linkHandling} />;
   return row.event.kind === "message" ? (
     <MessageRow event={row.event} linkHandling={linkHandling} />
   ) : (
@@ -98,7 +98,13 @@ export function ChatTranscriptRow({
   );
 }
 
-function MemoryRow({ event }: { event: AgentChatEvent }) {
+function MemoryRow({
+  event,
+  linkHandling,
+}: {
+  event: AgentChatEvent;
+  linkHandling?: ChatMarkdownLinkHandling;
+}) {
   const [expanded, setExpanded] = useState(false);
   const details = event.text?.trim() ?? "";
   return (
@@ -124,7 +130,7 @@ function MemoryRow({ event }: { event: AgentChatEvent }) {
       </button>
       {expanded && details ? (
         <div className="mt-2 border-t border-[var(--color-wardian-border)] pt-2 text-[12px] text-secondary">
-          <ChatMarkdown source={details} />
+          <ChatMarkdown linkHandling={linkHandling} source={details} />
         </div>
       ) : null}
     </article>

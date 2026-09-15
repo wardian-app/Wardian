@@ -318,6 +318,11 @@ not expose ownership labels or a separate control step on the phone. Swipe or
 use the mouse wheel to review terminal history, including alternate-screen
 terminal interfaces. Chat remains one tap away.
 
+HTTP(S) links in remote chat and raw remote-terminal output open through the
+browser, normally in a new tab with a current-tab fallback when a popup is
+blocked. Remote terminal linkification is HTTP-only; host file paths and
+`file:` links stay inert because those files belong to the desktop host.
+
 The agent detail composer sends ordinary chat messages by default. Turn on
 command mode when you need to submit a provider slash command or another input
 that must reach the provider command channel without chat attribution. Command

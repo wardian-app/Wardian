@@ -11,6 +11,7 @@ import type {
 } from "../../types";
 import { formatAgentStatusLabel } from "../../utils/statusUtils";
 import { ChatTranscriptRow } from "../chat/ChatTranscriptRows";
+import type { ChatMarkdownLinkHandling } from "../grid/markdown/ChatMarkdown";
 import {
   isProcessingAgentStatus,
   liveApprovalEventId,
@@ -37,6 +38,7 @@ import { installConservativeTerminalShortcuts } from "../terminal/terminalShortc
 import { calculateTerminalMirrorFit } from "../terminal/terminalRendererBudget";
 import { proposeTerminalRows, renderedTerminalRowHeight } from "../terminal/terminalSizing";
 import { terminalMinimumContrastRatio, terminalThemeForProvider } from "../terminal/terminalThemes";
+import { installTerminalLinkProvider, openHttpUrlInBrowser } from "../terminal/terminalLinks";
 
 function formatProviderName(provider: string | null | undefined): string {
   if (!provider) return "-";
@@ -51,6 +53,11 @@ const modeButtonClass =
 
 const MAX_PENDING_CAPABILITY_RESPONSES = 32;
 const MAX_PENDING_CAPABILITY_RESPONSE_BYTES = 64 * 1024;
+
+const REMOTE_CHAT_LINK_HANDLING: ChatMarkdownLinkHandling = {
+  allowFileLinks: false,
+  openUrl: openHttpUrlInBrowser,
+};
 
 function wardianColorToken(name: string, fallback: string) {
   if (typeof window === "undefined") return fallback;
@@ -632,6 +639,10 @@ function TerminalPane({
     const fitAddon = new FitAddon();
     terminal.loadAddon?.(fitAddon);
     terminal.open?.(host);
+    const terminalLinkProvider = installTerminalLinkProvider(terminal, {
+      httpOnly: true,
+      openUrl: openHttpUrlInBrowser,
+    });
     fitAddon.fit?.();
     applyRemoteTerminalTheme(terminal, host, agent.provider ?? undefined);
     scrollSurface.style.touchAction = "none";
@@ -896,6 +907,7 @@ function TerminalPane({
       terminalTextarea?.removeEventListener("compositionstart", onCompositionStart);
       terminalTextarea?.removeEventListener("compositionend", onCompositionEnd);
       window.removeEventListener("resize", updateTerminalLayout);
+      terminalLinkProvider.dispose();
       terminal.dispose?.();
       host.replaceChildren();
     };
@@ -1030,6 +1042,7 @@ function ChatPane({
             isSubmitting={isSubmitting}
             layout="full_width"
             liveApprovalId={liveApprovalId}
+            linkHandling={REMOTE_CHAT_LINK_HANDLING}
             onApprovalSubmit={onApprovalSubmit}
             row={row}
           />

@@ -37,6 +37,7 @@ uuid = { version = "1.21.0", features = ["v4"] }
 
 [patch.crates-io]
 portable-pty = { path = "vendor/portable-pty" }
+vt100 = { path = "vendor/vt100" }
 
 [profile.dev.package."*"]
 debug = false

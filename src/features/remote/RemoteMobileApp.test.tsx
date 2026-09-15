@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { Terminal } from "@xterm/xterm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentChatEvent } from "../../types";
@@ -263,6 +264,7 @@ describe("RemoteMobileApp", () => {
         attachCustomKeyEventHandler: vi.fn(),
         selectAll: vi.fn(),
         loadAddon: vi.fn(),
+        registerLinkProvider: vi.fn(() => ({ dispose: vi.fn() })),
         scrollLines: vi.fn(),
         scrollToBottom: vi.fn(),
         scrollToTop: vi.fn(),
@@ -1512,6 +1514,41 @@ describe("RemoteMobileApp", () => {
     });
   });
 
+  it("registers an HTTP-only remote terminal link provider", async () => {
+    mockRemoteAgentDetailFetch("codex");
+    const openWindow = vi.spyOn(window, "open").mockReturnValue({} as Window);
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+
+    const terminal = [...vi.mocked(Terminal).mock.results]
+      .reverse()
+      .map((result) => result.value)
+      .find(Boolean) as unknown as {
+        buffer: { active: { getLine: (line: number) => unknown } };
+        options: { linkHandler?: { allowNonHttpProtocols?: boolean } };
+        registerLinkProvider: ReturnType<typeof vi.fn>;
+      };
+    const line = "See https://wardian.org/docs and file:///C:/host/report.md";
+    terminal.buffer.active.getLine = () => ({ translateToString: () => line });
+    const provider = terminal.registerLinkProvider.mock.calls[0]?.[0] as {
+      provideLinks: (line: number, callback: (links: Array<{ text: string; activate: () => void }> | undefined) => void) => void;
+    };
+
+    const links = await new Promise<Array<{ text: string; activate: () => void }> | undefined>((resolve) => {
+      provider.provideLinks(1, resolve);
+    });
+    links?.[0]?.activate();
+
+    expect(terminal.registerLinkProvider).toHaveBeenCalledTimes(1);
+    expect(terminal.options.linkHandler?.allowNonHttpProtocols).toBe(false);
+    expect(links?.map((link) => link.text)).toEqual(["https://wardian.org/docs"]);
+    expect(openWindow).toHaveBeenCalledWith("https://wardian.org/docs", "_blank", "noopener,noreferrer");
+    expect(openUrl).not.toHaveBeenCalled();
+  });
+
   it("renders remote chat messages with the shared desktop bubble, markdown, and copy behavior", async () => {
     mockRemoteAgentDetailFetch("codex", {
       chatEvents: [
@@ -1580,6 +1617,53 @@ describe("RemoteMobileApp", () => {
 
     await userEvent.click(within(agentMessage).getByRole("button", { name: "Message actions" }));
     expect(await within(agentMessage).findByRole("menuitem", { name: "Copy message" })).toBeVisible();
+  });
+
+  it("opens labelled HTTP links from remote chat in a browser tab", async () => {
+    mockRemoteAgentDetailFetch("codex", {
+      chatEvents: [
+        {
+          id: "assistant-link",
+          session_id: "agent-1",
+          provider: "codex",
+          kind: "message",
+          role: "assistant",
+          text: "Review [PR #1324](https://github.com/wardian-app/Wardian/pull/1324), [host file](file:///C:/host/report.md), and ![host image](file:///C:/host/image.png).",
+          title: null,
+          status: null,
+          turn_id: "turn-link",
+          source: "provider_log",
+          command: null,
+          exit_code: null,
+          path: null,
+          language: null,
+          created_at: "2026-05-21T08:00:00.000Z",
+          sequence: 1,
+          metadata: {},
+        },
+      ],
+    });
+    vi.mocked(openUrl).mockRejectedValueOnce(new Error("Tauri runtime unavailable"));
+    const openWindow = vi.spyOn(window, "open").mockReturnValue({} as Window);
+
+    render(<RemoteMobileApp />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+
+    const link = await screen.findByRole("link", { name: "PR #1324" });
+    expect(link).toHaveAttribute("href", "https://github.com/wardian-app/Wardian/pull/1324");
+    expect(screen.queryByRole("link", { name: "host file" })).not.toBeInTheDocument();
+    expect(screen.getByText("host image")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "file:///C:/host/image.png" })).not.toBeInTheDocument();
+    fireEvent.click(link);
+
+    expect(openWindow).toHaveBeenCalledWith(
+      "https://github.com/wardian-app/Wardian/pull/1324",
+      "_blank",
+      "noopener,noreferrer",
+    );
+    expect(openUrl).not.toHaveBeenCalled();
   });
 
   it("submits remote approval choices through the PWA prompt action", async () => {

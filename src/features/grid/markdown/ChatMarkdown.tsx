@@ -5,7 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import remarkGfm from "remark-gfm";
 import { CodePanel } from "../chatCode";
 import { CopyIconButton } from "../chatCopy";
-import { markdownUrlTransform, safeMarkdownUrl } from "./markdownSafety";
+import { isMarkdownFileTarget, markdownUrlTransform, safeMarkdownUrl } from "./markdownSafety";
 import {
   openTerminalDetectedLink,
   resolveTerminalLinkTarget,
@@ -15,7 +15,10 @@ import {
 export type ChatMarkdownLinkHandling = Pick<
   TerminalLinkProviderOptions,
   "getBasePath" | "getExternalEditor" | "onOpenError" | "openFile" | "openUrl" | "validateFile"
->;
+> & {
+  /** Remote browser surfaces cannot resolve host filesystem paths. */
+  allowFileLinks?: boolean;
+};
 
 interface ChatMarkdownProps {
   linkHandling?: ChatMarkdownLinkHandling;
@@ -51,18 +54,19 @@ function openMarkdownUrl(
         });
         return;
       }
-      openMarkdownBrowserUrl(href, linkHandling.openUrl);
+      openMarkdownBrowserUrl(href, linkHandling);
     }).catch((error) => {
       linkHandling.onOpenError?.(`Failed to open markdown link: ${String(error)}`);
-      openMarkdownBrowserUrl(href, linkHandling.openUrl);
+      openMarkdownBrowserUrl(href, linkHandling);
     });
     return;
   }
-  openMarkdownBrowserUrl(href, linkHandling?.openUrl);
+  openMarkdownBrowserUrl(href, linkHandling);
 }
 
-function openMarkdownBrowserUrl(href: string, open?: (url: string) => Promise<void>) {
-  void (open ?? openUrl)(href).catch(() => {
+function openMarkdownBrowserUrl(href: string, linkHandling?: ChatMarkdownProps["linkHandling"]) {
+  void (linkHandling?.openUrl ?? openUrl)(href).catch(() => {
+    if (linkHandling?.allowFileLinks === false && isMarkdownFileTarget(href)) return;
     window.open(href, "_blank", "noopener,noreferrer");
   });
 }
@@ -71,7 +75,9 @@ function createComponents(linkHandling?: ChatMarkdownProps["linkHandling"]): Com
   return {
     a({ href, children }) {
       const safeUrl = safeMarkdownUrl(href);
-      if (!safeUrl) return <span>{children}</span>;
+      if (!safeUrl || (linkHandling?.allowFileLinks === false && isMarkdownFileTarget(href))) {
+        return <span>{children}</span>;
+      }
       return (
         <a
           className="break-all font-medium text-[var(--color-wardian-accent)] underline decoration-[color-mix(in_srgb,var(--color-wardian-accent),transparent_55%)] underline-offset-2"
@@ -128,10 +134,11 @@ function createComponents(linkHandling?: ChatMarkdownProps["linkHandling"]): Com
     },
     img({ alt, src }) {
       const safeUrl = safeMarkdownUrl(src);
+      const fileLinkDisabled = linkHandling?.allowFileLinks === false && isMarkdownFileTarget(src);
       return (
         <span className="inline-flex max-w-full flex-wrap items-center gap-1 rounded border border-wardian-light bg-[var(--color-wardian-card-bg-muted)] px-1.5 py-0.5 text-[12px] leading-5 text-muted-neutral">
           <span>{alt?.trim() || "Image"}</span>
-          {safeUrl ? (
+          {safeUrl && !fileLinkDisabled ? (
             <a
               className="break-all text-[var(--color-wardian-accent)] underline underline-offset-2"
               href={safeUrl}
