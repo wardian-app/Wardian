@@ -1,5 +1,5 @@
 //! Filesystem fixtures for the gated owner's preprojection recovery boundary.
-use super::prepare_owner_habitat;
+use super::{prepare_owner_habitat, OwnerStartTimings};
 use crate::delivery::codex_shared::launch_config::prepare_launch_config;
 use crate::utils::fs::{habitat_codex_home, prepare_habitat_workspace, prepare_provider_habitat};
 use crate::utils::{codex_home::TEST_ROOTS, codex_messaging::TEST_NATIVE_HOME};
@@ -114,7 +114,13 @@ fn owner_recovers_crashed_overlay_before_first_config_and_mcp_projection() {
     assert_eq!(std::fs::read(home.join(JOURNAL)).unwrap(), pending_journal);
     assert!(Fixture::config(&home).get("mcp_servers").is_none());
 
-    let (_, prepared_home) = prepare_owner_habitat(&fixture.workspace, "", "agent").unwrap();
+    let (_, prepared_home) = prepare_owner_habitat(
+        &fixture.workspace,
+        "",
+        "agent",
+        &mut OwnerStartTimings::default(),
+    )
+    .unwrap();
     let restored = Fixture::config(&prepared_home);
     // Reversing recovery/projection would leave model absent instead of importing
     // the current default: reconciliation preserves the old applied local model.
@@ -141,7 +147,13 @@ fn owner_recovers_crashed_overlay_before_first_config_and_mcp_projection() {
 fn generic_refresh_does_not_recover_a_pending_live_overlay() {
     let _lock = crate::utils::wardian_test_env_lock();
     let fixture = Fixture::new();
-    let (_, home) = prepare_owner_habitat(&fixture.workspace, "", "agent").unwrap();
+    let (_, home) = prepare_owner_habitat(
+        &fixture.workspace,
+        "",
+        "agent",
+        &mut OwnerStartTimings::default(),
+    )
+    .unwrap();
     let mut overlay = prepare_launch_config(&home, &overlay_args()).unwrap();
     let pending_journal = std::fs::read(home.join(JOURNAL)).unwrap();
     prepare_provider_habitat("codex", &fixture.workspace, "", Some("agent")).unwrap();
@@ -162,7 +174,13 @@ fn owner_prepares_a_new_home_without_config_or_journal() {
     let fixture = Fixture::new();
     let habitat = fixture.neutral();
     assert!(!habitat_codex_home(&habitat).exists());
-    let (_, home) = prepare_owner_habitat(&fixture.workspace, "", "agent").unwrap();
+    let (_, home) = prepare_owner_habitat(
+        &fixture.workspace,
+        "",
+        "agent",
+        &mut OwnerStartTimings::default(),
+    )
+    .unwrap();
     assert_eq!(
         Fixture::config(&home)["model"].as_str(),
         Some("current-global")
@@ -182,7 +200,13 @@ fn invalid_recovery_input_blocks_config_and_mcp_projection_without_mutation() {
         if let Some(journal) = journal {
             std::fs::write(home.join(JOURNAL), journal).unwrap();
         }
-        assert!(prepare_owner_habitat(&fixture.workspace, "", "agent").is_err());
+        assert!(prepare_owner_habitat(
+            &fixture.workspace,
+            "",
+            "agent",
+            &mut OwnerStartTimings::default()
+        )
+        .is_err());
         assert_eq!(
             std::fs::read_to_string(home.join("config.toml")).unwrap(),
             config
@@ -227,8 +251,13 @@ fn owner_managed_instructions_reach_tui_overlay_independently_of_memory() {
                 serde_json::json!({"schema_version":2,"overrides":{"memory_enabled":memory_enabled}}).to_string(),
             ).unwrap();
             assert_eq!(crate::utils::memory_feature_enabled(), memory_enabled);
-            let (habitat, home) =
-                prepare_owner_habitat(&fixture.workspace, "Builder", "agent").unwrap();
+            let (habitat, home) = prepare_owner_habitat(
+                &fixture.workspace,
+                "Builder",
+                "agent",
+                &mut OwnerStartTimings::default(),
+            )
+            .unwrap();
             std::fs::write(habitat.join("AGENTS.md"), "UNTRUSTED_GENERATED_FILE").unwrap();
             let config_before = std::fs::read(home.join("config.toml")).unwrap();
             let spec = crate::delivery::native_broker::NativeSessionSpec {
@@ -321,7 +350,13 @@ fn owner_memory_failures_block_context_publication_before_launch() {
         )
         .unwrap();
         assert!(crate::utils::memory_feature_enabled());
-        let (habitat, home) = prepare_owner_habitat(&fixture.workspace, "", "agent").unwrap();
+        let (habitat, home) = prepare_owner_habitat(
+            &fixture.workspace,
+            "",
+            "agent",
+            &mut OwnerStartTimings::default(),
+        )
+        .unwrap();
         std::fs::write(habitat.join("AGENTS.md"), "UNCHANGED_CONTEXT").unwrap();
         let config_before = std::fs::read(home.join("config.toml")).unwrap();
         let memory_path = wardian_core::paths::memory_db_path().unwrap();
