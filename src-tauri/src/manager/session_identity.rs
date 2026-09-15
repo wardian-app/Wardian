@@ -154,7 +154,24 @@ fn capture_or_confirm_provider_identity(
         return Ok(ProviderIdentityOutcome::Confirmed);
     }
 
+    if provider == "codex"
+        && config
+            .fresh_provider_session_id
+            .as_deref()
+            .is_some_and(|fresh| fresh.trim().is_empty() || fresh.trim() != candidate)
+    {
+        return Err(format!(
+            "{provider} returned a conflicting fresh session identity"
+        ));
+    }
     config.resume_session = Some(candidate.to_string());
+    // A Codex identity captured with no prior resume is the newly created
+    // owner returned by the current launch bootstrap. Keep that provenance in
+    // runtime state so provider-log capture can trust its owned prefix. Other
+    // providers may discover an existing identity from historical storage.
+    if provider == "codex" {
+        config.fresh_provider_session_id = Some(candidate.to_string());
+    }
     Ok(ProviderIdentityOutcome::Captured)
 }
 
@@ -298,6 +315,7 @@ mod tests {
             Ok(ProviderIdentityOutcome::Captured),
         );
         assert_eq!(config.resume_session.as_deref(), Some(id));
+        assert_eq!(config.fresh_provider_session_id.as_deref(), Some(id));
 
         let mut malformed = test_config("codex", None, None);
         let error = apply_provider_identity_with_environment(
@@ -309,6 +327,31 @@ mod tests {
         .expect_err("malformed Codex ID must fail");
         assert!(!error.contains("not-a-uuid"));
         assert_eq!(malformed.resume_session, None);
+        assert_eq!(malformed.fresh_provider_session_id, None);
+    }
+
+    #[test]
+    fn codex_resume_confirmation_does_not_create_fresh_launch_provenance() {
+        let id = "019db2f3-22de-7861-8bc6-1b86db1686db";
+        let mut config = test_config("codex", Some(id), None);
+        assert_eq!(
+            apply_provider_identity_with_environment("codex", &mut config, id, Vec::new()),
+            Ok(ProviderIdentityOutcome::Confirmed)
+        );
+        assert_eq!(config.fresh_provider_session_id, None);
+    }
+
+    #[test]
+    fn codex_capture_rejects_an_existing_mismatched_or_empty_fresh_marker() {
+        let id = "019db2f3-22de-7861-8bc6-1b86db1686db";
+        for marker in ["different-session", ""] {
+            let mut config = test_config("codex", None, Some(marker));
+            let error =
+                apply_provider_identity_with_environment("codex", &mut config, id, Vec::new())
+                    .expect_err("mismatched fresh marker must fail closed");
+            assert!(error.contains("conflicting fresh session identity"));
+            assert_eq!(config.resume_session, None);
+        }
     }
 
     #[test]

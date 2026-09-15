@@ -52,7 +52,10 @@ diffy = { workspace = true }
 shlex = "1.3.0"
 tauri-plugin-clipboard-manager = "2.3.2"
 regex = "1.12.3"
-reqwest = { version = "=0.13.3", default-features = false, features = ["rustls-no-provider"] }
+# The OpenCode HTTP owner constructs a client during verified owner binding;
+# use reqwest's provider-enabled TLS feature so binding cannot panic when no
+# other process has installed a rustls CryptoProvider.
+reqwest = { version = "=0.13.3", default-features = false, features = ["rustls"] }
 tauri-plugin-notification = "2.3.3"
 notify = "6.1.1"
 rusqlite = { version = "0.33.0", features = ["bundled", "serde_json"] }

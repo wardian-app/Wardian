@@ -2,9 +2,11 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::{Mutex as StdMutex, OnceLock};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -17,6 +19,10 @@ use wardian_core::native_transport::{
 };
 
 use super::native_session::{NativeProtocolEvent, NativeProtocolEventKind, NativeProviderProtocol};
+use super::opencode_http::{
+    OpenCodeHttpError, OpenCodeHttpErrorCode, OpenCodeHttpLaunchPlan, OpenCodeHttpLaunchProof,
+    OpenCodeHttpOwner, OpenCodePrompt, OpenCodePromptOptions, OpenCodeSessionActivity,
+};
 use crate::providers::{CodexProvider, PiProvider, ProviderFactory};
 
 mod codex;
@@ -25,6 +31,202 @@ const SESSION_COMMAND_CAPACITY: usize = 64;
 const BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const PROTOCOL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const STDERR_TAIL_BYTES: usize = 4 * 1024;
+const OPENCODE_DISPATCH_DIAGNOSTIC_CAPACITY: usize = 256;
+
+/// Fixed diagnostic stages keep request delivery observations useful without
+/// admitting provider payloads, credentials, or raw error text into the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenCodeDispatchDiagnosticStage {
+    WorkerEntry,
+    Preclaim,
+    PostclaimPreNativeAdmission,
+    NativeAdmission,
+    ActualDispatch,
+}
+
+impl OpenCodeDispatchDiagnosticStage {
+    fn code(self) -> &'static str {
+        match self {
+            Self::WorkerEntry => "worker_entry",
+            Self::Preclaim => "preclaim",
+            Self::PostclaimPreNativeAdmission => "postclaim_pre_native_admission",
+            Self::NativeAdmission => "native_admission",
+            Self::ActualDispatch => "actual_dispatch",
+        }
+    }
+}
+
+/// Fixed reason codes make the diagnostic path non-throwing and prevent raw
+/// provider state from becoming an accidental observability channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenCodeDispatchDiagnosticReason {
+    WorkerStarted,
+    WorkerProviderUnknown,
+    QueueHeadMatches,
+    QueueHeadOther,
+    QueueHeadEmpty,
+    QueueHeadUnchanged,
+    QueueHeadAdvanced,
+    RouteNative,
+    RouteBackground,
+    RouteSurface,
+    LifecycleBusy,
+    StaleIncarnation,
+    ConversationLease,
+    AgentOff,
+    ProviderNotReady,
+    ProviderInputBusy,
+    BrokerUnavailable,
+    NativeAdmissionReady,
+    NativeAdmissionRejected,
+    NativeAdmissionStaleGeneration,
+    NativeAdmissionCapabilityUnavailable,
+    NoClaim,
+    ClaimAcquired,
+    NativeAdmit,
+    NativeRecordQueued,
+    NativeRecordTerminal,
+    NativeRecordRejected,
+    HttpSubmit,
+    SurfaceSubmit,
+    ProviderAccepted,
+    SubmitFailed,
+}
+
+impl OpenCodeDispatchDiagnosticReason {
+    fn code(self) -> &'static str {
+        match self {
+            Self::WorkerStarted => "worker_started",
+            Self::WorkerProviderUnknown => "worker_provider_unknown",
+            Self::QueueHeadMatches => "queue_head_matches",
+            Self::QueueHeadOther => "queue_head_other",
+            Self::QueueHeadEmpty => "queue_head_empty",
+            Self::QueueHeadUnchanged => "queue_head_unchanged",
+            Self::QueueHeadAdvanced => "queue_head_advanced",
+            Self::RouteNative => "route_native",
+            Self::RouteBackground => "route_background",
+            Self::RouteSurface => "route_surface",
+            Self::LifecycleBusy => "lifecycle_busy",
+            Self::StaleIncarnation => "stale_incarnation",
+            Self::ConversationLease => "conversation_lease",
+            Self::AgentOff => "agent_off",
+            Self::ProviderNotReady => "provider_not_ready",
+            Self::ProviderInputBusy => "provider_input_busy",
+            Self::BrokerUnavailable => "broker_unavailable",
+            Self::NativeAdmissionReady => "native_admission_ready",
+            Self::NativeAdmissionRejected => "native_admission_rejected",
+            Self::NativeAdmissionStaleGeneration => "native_admission_stale_generation",
+            Self::NativeAdmissionCapabilityUnavailable => "native_admission_capability_unavailable",
+            Self::NoClaim => "no_claim",
+            Self::ClaimAcquired => "claim_acquired",
+            Self::NativeAdmit => "native_admit",
+            Self::NativeRecordQueued => "native_record_queued",
+            Self::NativeRecordTerminal => "native_record_terminal",
+            Self::NativeRecordRejected => "native_record_rejected",
+            Self::HttpSubmit => "http_submit",
+            Self::SurfaceSubmit => "surface_submit",
+            Self::ProviderAccepted => "provider_accepted",
+            Self::SubmitFailed => "submit_failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpenCodeDispatchDiagnosticKey {
+    stage: OpenCodeDispatchDiagnosticStage,
+    reason: OpenCodeDispatchDiagnosticReason,
+}
+
+#[derive(Debug, Default)]
+struct OpenCodeDispatchDiagnosticGuard {
+    order: VecDeque<(String, u64)>,
+    last: HashMap<(String, u64), OpenCodeDispatchDiagnosticKey>,
+}
+
+impl OpenCodeDispatchDiagnosticGuard {
+    fn record(
+        &mut self,
+        request_id: &str,
+        generation: u64,
+        key: OpenCodeDispatchDiagnosticKey,
+    ) -> bool {
+        let request = (request_id.to_string(), generation);
+        if self.last.get(&request).copied() == Some(key) {
+            return false;
+        }
+        if !self.last.contains_key(&request) {
+            if self.order.len() >= OPENCODE_DISPATCH_DIAGNOSTIC_CAPACITY {
+                if let Some(evicted) = self.order.pop_front() {
+                    self.last.remove(&evicted);
+                }
+            }
+            self.order.push_back(request.clone());
+        }
+        self.last.insert(request, key);
+        true
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.last.len()
+    }
+
+    #[cfg(test)]
+    fn contains(&self, request_id: &str, generation: u64) -> bool {
+        self.last
+            .contains_key(&(request_id.to_string(), generation))
+    }
+}
+
+static OPENCODE_DISPATCH_DIAGNOSTIC_GUARD: OnceLock<StdMutex<OpenCodeDispatchDiagnosticGuard>> =
+    OnceLock::new();
+
+fn opencode_dispatch_diagnostic_guard() -> &'static StdMutex<OpenCodeDispatchDiagnosticGuard> {
+    OPENCODE_DISPATCH_DIAGNOSTIC_GUARD.get_or_init(|| StdMutex::new(Default::default()))
+}
+
+fn sanitized_opencode_request_id(request_id: &str) -> Option<String> {
+    if request_id.is_empty() || request_id.len() > 96 {
+        return None;
+    }
+    if !request_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':'))
+    {
+        return None;
+    }
+    Some(request_id.to_string())
+}
+
+/// Record one bounded OpenCode request-stage transition. Diagnostic failure is
+/// deliberately swallowed so it cannot alter delivery, claim, or lock paths.
+pub(crate) fn log_opencode_dispatch_diagnostic(
+    request_id: &str,
+    generation: u64,
+    stage: OpenCodeDispatchDiagnosticStage,
+    reason: OpenCodeDispatchDiagnosticReason,
+) {
+    let Some(request_id) = sanitized_opencode_request_id(request_id) else {
+        return;
+    };
+    let key = OpenCodeDispatchDiagnosticKey { stage, reason };
+    let should_log = opencode_dispatch_diagnostic_guard()
+        .lock()
+        .ok()
+        .is_some_and(|mut guard| guard.record(&request_id, generation, key));
+    if !should_log {
+        return;
+    }
+    let line = format!(
+        "[WARDIAN] opencode_dispatch stage={} reason={} request_id={} generation={generation}",
+        stage.code(),
+        reason.code(),
+        request_id,
+    );
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::manager::log_debug(&line);
+    }));
+}
 
 #[derive(Debug, Clone)]
 pub struct NativeDeliveryAdmission {
@@ -80,6 +282,44 @@ struct NativeSessionHandle {
     tx: mpsc::Sender<SessionCommand>,
     shared_codex: Option<Arc<super::codex_shared::CodexSharedOwner>>,
     stopped: Option<tokio::sync::watch::Receiver<bool>>,
+}
+
+#[derive(Clone, Debug)]
+struct PiBridgeRegistration {
+    generation: u64,
+    owner: Arc<super::pi_bridge::PiBridgeOwner>,
+}
+
+#[derive(Debug)]
+struct OpenCodeHttpRegistration {
+    generation: u64,
+    runtime_generation: u64,
+    config_fingerprint: String,
+    owner: Arc<OpenCodeHttpOwner>,
+    binding: NativeSessionBinding,
+    event_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenCodeHttpEligibility {
+    Unsupported,
+    Pending,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenCodeHttpLaunchPhase {
+    Pending,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+struct OpenCodeHttpLaunchState {
+    generation: u64,
+    config_fingerprint: String,
+    phase: OpenCodeHttpLaunchPhase,
 }
 
 #[derive(Debug)]
@@ -168,6 +408,15 @@ impl CodexCreationRegistry {
         })
     }
 
+    fn has_active(&self, agent_id: &str, generation: u64) -> bool {
+        let Ok(revisions) = self.revisions.lock() else {
+            return false;
+        };
+        revisions
+            .get(&(agent_id.to_owned(), generation))
+            .is_some_and(|revision| revision.strong_count() > 0)
+    }
+
     /// Cancel requests already registered at this boundary, before awaiting the
     /// owner gate. An exact-generation stop must not invalidate a newer generation.
     fn cancel(&self, agent_id: &str, generation: Option<u64>) -> Result<(), &'static str> {
@@ -223,6 +472,9 @@ pub struct NativeDeliveryBroker {
     sessions: Mutex<HashMap<String, NativeSessionHandle>>,
     owner_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     owner_changes: tokio::sync::Notify,
+    pi_bridges: Mutex<HashMap<String, PiBridgeRegistration>>,
+    opencode_http: Mutex<HashMap<String, Arc<OpenCodeHttpRegistration>>>,
+    opencode_http_states: Mutex<HashMap<String, OpenCodeHttpLaunchState>>,
     codex_creations: CodexCreationRegistry,
     #[cfg(test)]
     codex_creation_test: CodexCreationTestHooks,
@@ -336,6 +588,17 @@ impl NativeDeliveryBroker {
                 false,
             ));
         }
+        if spec.provider == "opencode" {
+            let mut record = record;
+            if record.transport != "opencode_http" {
+                record.transport = "opencode_http".to_string();
+                wardian_core::db::upsert_native_delivery(&record).map_err(db_error)?;
+            }
+            return self.dispatch_opencode_http(spec, record).await;
+        }
+        if spec.provider == "pi" {
+            return self.dispatch_pi_tui(record, spec.generation).await;
+        }
         let handle = self.ensure_session(spec).await?;
         if let Some(owner) = handle.shared_codex {
             return self
@@ -364,6 +627,155 @@ impl NativeDeliveryBroker {
                 false,
             )
         })?
+    }
+
+    async fn dispatch_opencode_http(
+        self: &Arc<Self>,
+        spec: NativeSessionSpec,
+        record: NativeDeliveryRecord,
+    ) -> Result<NativeDispatchReceipt, NativeBrokerError> {
+        if record.envelope.operation != NativeMessageOperation::StartTurn {
+            return Err(error(
+                NativeDeliveryErrorCode::UnsupportedOperation,
+                "OpenCode HTTP supports canonical start-turn delivery only",
+                false,
+            ));
+        }
+        if let Err(error) = self
+            .opencode_http_admission(
+                &spec.target_agent_id,
+                spec.generation,
+                &spec.config,
+                &spec.workspace,
+            )
+            .await
+        {
+            log_opencode_dispatch_diagnostic(
+                &record.envelope.interaction_id,
+                spec.generation,
+                OpenCodeDispatchDiagnosticStage::NativeAdmission,
+                OpenCodeDispatchDiagnosticReason::NativeAdmissionRejected,
+            );
+            return Err(error);
+        }
+        log_opencode_dispatch_diagnostic(
+            &record.envelope.interaction_id,
+            spec.generation,
+            OpenCodeDispatchDiagnosticStage::NativeAdmission,
+            OpenCodeDispatchDiagnosticReason::NativeAdmissionReady,
+        );
+        let registration = self
+            .opencode_http
+            .lock()
+            .await
+            .get(&spec.target_agent_id)
+            .cloned()
+            .ok_or_else(|| {
+                error(
+                    NativeDeliveryErrorCode::CapabilityUnavailable,
+                    "OpenCode HTTP owner ended before task submission",
+                    false,
+                )
+            })?;
+        let prompt = OpenCodePrompt::from_canonical_message_id(
+            &record.envelope.message_id,
+            record.envelope.body.clone(),
+            OpenCodePromptOptions::default(),
+        )
+        .map_err(|message| {
+            error(
+                NativeDeliveryErrorCode::FailedBeforeSubmit,
+                format!("OpenCode HTTP prompt could not be prepared: {message}"),
+                false,
+            )
+        })?;
+        let dispatching = self
+            .advance(
+                &record.envelope.interaction_id,
+                NativeDeliveryPhase::Dispatching,
+                NativeEvidenceSource::WardianQueue,
+                None,
+                None,
+                None,
+                "opencode_http_dispatching",
+            )
+            .await?;
+        log_opencode_dispatch_diagnostic(
+            &dispatching.envelope.interaction_id,
+            dispatching.envelope.generation,
+            OpenCodeDispatchDiagnosticStage::ActualDispatch,
+            OpenCodeDispatchDiagnosticReason::HttpSubmit,
+        );
+        match registration
+            .owner
+            .submit_once(
+                dispatching.envelope.generation,
+                registration.runtime_generation,
+                &prompt,
+            )
+            .await
+        {
+            Ok(receipt) => {
+                log_opencode_dispatch_diagnostic(
+                    &dispatching.envelope.interaction_id,
+                    dispatching.envelope.generation,
+                    OpenCodeDispatchDiagnosticStage::ActualDispatch,
+                    OpenCodeDispatchDiagnosticReason::ProviderAccepted,
+                );
+                let detail = match registration.owner.reconcile_user_message(&prompt).await {
+                    Ok(Some(_)) => {
+                        "OpenCode HTTP returned 204 and the exact user message was reconciled"
+                    }
+                    Ok(None) => {
+                        "OpenCode HTTP returned 204; user message reconciliation remains pending and replay is forbidden"
+                    }
+                    Err(_) => {
+                        "OpenCode HTTP returned 204; reconciliation read failed and replay is forbidden"
+                    }
+                };
+                let accepted = self
+                    .advance(
+                        &record.envelope.interaction_id,
+                        NativeDeliveryPhase::ProviderAccepted,
+                        NativeEvidenceSource::ProviderEvent,
+                        Some(receipt.provider_message_id),
+                        None,
+                        Some(detail.to_string()),
+                        "opencode_http_acknowledged",
+                    )
+                    .await?;
+                Ok(NativeDispatchReceipt {
+                    record: accepted,
+                    binding: registration.binding.clone(),
+                    capabilities: registration.binding.capabilities.clone(),
+                })
+            }
+            Err(failure) => {
+                log_opencode_dispatch_diagnostic(
+                    &dispatching.envelope.interaction_id,
+                    dispatching.envelope.generation,
+                    OpenCodeDispatchDiagnosticStage::ActualDispatch,
+                    OpenCodeDispatchDiagnosticReason::SubmitFailed,
+                );
+                let phase = if failure.provider_boundary_crossed {
+                    NativeDeliveryPhase::SubmittedUnconfirmed
+                } else {
+                    NativeDeliveryPhase::FailedBeforeSubmit
+                };
+                let _ = self
+                    .advance(
+                        &record.envelope.interaction_id,
+                        phase,
+                        NativeEvidenceSource::WardianQueue,
+                        None,
+                        None,
+                        Some(failure.to_string()),
+                        "opencode_http_submit_failed",
+                    )
+                    .await?;
+                Err(opencode_http_error(failure))
+            }
+        }
     }
 
     pub async fn cancel(
@@ -497,115 +909,6 @@ impl NativeDeliveryBroker {
         .await
     }
 
-    pub async fn replace(
-        &self,
-        interaction_id: &str,
-        body: String,
-        idempotency_key: String,
-        deadline_at: Option<String>,
-    ) -> Result<NativeDeliveryRecord, NativeBrokerError> {
-        let _mutation = self.mutation_lock.lock().await;
-        let mut superseded = self.get(interaction_id)?;
-        if superseded.phase != NativeDeliveryPhase::Queued {
-            return Err(error(
-                NativeDeliveryErrorCode::InvalidTransition,
-                format!(
-                    "native interaction {interaction_id} is {:?}; only queued work can be replaced",
-                    superseded.phase
-                ),
-                superseded.phase != NativeDeliveryPhase::Queued,
-            ));
-        }
-        if idempotency_key.trim().is_empty() {
-            return Err(error(
-                NativeDeliveryErrorCode::IdempotencyConflict,
-                "replacement requires a non-empty caller idempotency key",
-                false,
-            ));
-        }
-        if deadline_has_passed(deadline_at.as_deref()) {
-            return Err(error(
-                NativeDeliveryErrorCode::DeadlineExpired,
-                "replacement deadline already expired",
-                false,
-            ));
-        }
-        let replacement_id = format!("int_native_{}", uuid::Uuid::new_v4().simple());
-        let message_id = format!("msg_native_{}", uuid::Uuid::new_v4().simple());
-        let request = NativeDeliveryAdmission {
-            interaction_id: replacement_id.clone(),
-            message_id,
-            target_agent_id: superseded.envelope.target_agent_id.clone(),
-            sender_agent_id: superseded.envelope.sender_agent_id.clone(),
-            provider: superseded.provider.clone(),
-            generation: superseded.envelope.generation,
-            operation: superseded.envelope.operation,
-            caller_idempotency_key: Some(idempotency_key),
-            parent_interaction_id: Some(superseded.envelope.interaction_id.clone()),
-            deadline_at,
-            body,
-        };
-        let canonical_hash = canonical_hash(&request);
-        if let Some(existing) = wardian_core::db::native_delivery_by_idempotency(
-            request.sender_agent_id.as_deref(),
-            &request.target_agent_id,
-            request.operation,
-            request
-                .caller_idempotency_key
-                .as_deref()
-                .expect("replacement key"),
-        )
-        .map_err(db_error)?
-        {
-            if existing.canonical_hash == canonical_hash {
-                return Ok(existing);
-            }
-            return Err(error(
-                NativeDeliveryErrorCode::IdempotencyConflict,
-                "replacement idempotency key conflicts with an existing request",
-                false,
-            ));
-        }
-        let now = now();
-        let replacement = NativeDeliveryRecord {
-            envelope: NativeMessageEnvelope {
-                interaction_id: replacement_id,
-                message_id: request.message_id,
-                target_agent_id: request.target_agent_id,
-                sender_agent_id: request.sender_agent_id,
-                parent_interaction_id: request.parent_interaction_id,
-                caller_idempotency_key: request.caller_idempotency_key,
-                generation: request.generation,
-                operation: request.operation,
-                deadline_at: request.deadline_at,
-                body: request.body,
-            },
-            canonical_hash,
-            provider: superseded.provider.clone(),
-            transport: superseded.transport.clone(),
-            phase: NativeDeliveryPhase::Queued,
-            provider_request_id: None,
-            provider_turn_id: None,
-            detail: Some(format!("replacement for {interaction_id}")),
-            created_at: now.clone(),
-            updated_at: now.clone(),
-        };
-        superseded.phase = NativeDeliveryPhase::Superseded;
-        superseded.detail = Some(format!(
-            "replaced by {}",
-            replacement.envelope.interaction_id
-        ));
-        superseded.updated_at = now;
-        wardian_core::db::replace_native_delivery(&superseded, &replacement).map_err(db_error)?;
-        self.append_evidence(&superseded, NativeEvidenceSource::Caller, "superseded")?;
-        self.append_evidence(
-            &replacement,
-            NativeEvidenceSource::WardianQueue,
-            "replacement_admitted",
-        )?;
-        Ok(replacement)
-    }
-
     pub fn get(&self, interaction_id: &str) -> Result<NativeDeliveryRecord, NativeBrokerError> {
         wardian_core::db::native_delivery(interaction_id)
             .map_err(db_error)?
@@ -628,53 +931,853 @@ impl NativeDeliveryBroker {
 
     pub async fn dispose_agent(&self, target_agent_id: &str) -> Result<(), NativeBrokerError> {
         let _gate = self.lock_owner_for_stop(target_agent_id, None).await?;
-        self.stop_registered_owner(target_agent_id, None).await
+        self.stop_registered_owner(target_agent_id, None).await?;
+        self.dispose_pi_generation(target_agent_id, None).await?;
+        self.dispose_opencode_http(target_agent_id, None).await
     }
 
-    pub async fn recover_after_restart(
+    /// Register the HTTP writer only after the normal OpenCode TUI has been
+    /// launched and its exact resumed session has been observed. The unique
+    /// child-only credential plus the reserved loopback endpoint ties the
+    /// authenticated listener probe to this child; missing proof fails closed.
+    pub async fn prepare_opencode_http(
         &self,
-        limit: usize,
-    ) -> Result<Vec<NativeDeliveryRecord>, NativeBrokerError> {
-        let records = wardian_core::db::list_native_deliveries(limit).map_err(db_error)?;
-        let mut queued = Vec::new();
-        for record in records {
-            match record.phase {
-                NativeDeliveryPhase::Queued
-                    if deadline_has_passed(record.envelope.deadline_at.as_deref()) =>
-                {
-                    let _ = self
-                        .advance(
-                            &record.envelope.interaction_id,
-                            NativeDeliveryPhase::Expired,
-                            NativeEvidenceSource::Deadline,
-                            None,
-                            None,
-                            Some("deadline expired while Wardian was stopped".to_string()),
-                            "restart_expired",
-                        )
-                        .await?;
-                }
-                NativeDeliveryPhase::Queued => queued.push(record),
-                NativeDeliveryPhase::Dispatching => {
-                    let _ = self
-                        .advance(
-                            &record.envelope.interaction_id,
-                            NativeDeliveryPhase::SubmittedUnconfirmed,
-                            NativeEvidenceSource::Reconciler,
-                            record.provider_request_id.clone(),
-                            record.provider_turn_id.clone(),
-                            Some(
-                                "Wardian restarted across the provider submission boundary; payload was not replayed"
-                                    .to_string(),
-                            ),
-                            "restart_uncertain",
-                        )
-                        .await?;
-                }
-                _ => {}
+        target_agent_id: &str,
+        generation: u64,
+        config_fingerprint: String,
+    ) -> Result<(), NativeBrokerError> {
+        if target_agent_id.trim().is_empty() || generation == 0 {
+            return Err(error(
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+                "OpenCode HTTP eligibility has no valid target or generation",
+                false,
+            ));
+        }
+        if config_fingerprint.trim().is_empty() {
+            return Err(error(
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+                "OpenCode HTTP eligibility has no configuration fingerprint",
+                false,
+            ));
+        }
+        let _gate = self.owner_gate(target_agent_id).await.lock_owned().await;
+        self.opencode_http_states.lock().await.insert(
+            target_agent_id.to_string(),
+            OpenCodeHttpLaunchState {
+                generation,
+                config_fingerprint,
+                phase: OpenCodeHttpLaunchPhase::Pending,
+            },
+        );
+        Ok(())
+    }
+
+    /// Keep an eligible launch on the native route after handoff failure. The
+    /// state is generation-bound so a later replacement can establish a new
+    /// eligibility record without reopening this launch through the composer.
+    pub async fn fail_opencode_http(&self, target_agent_id: &str, generation: u64) {
+        let _gate = self.owner_gate(target_agent_id).await.lock_owned().await;
+        if let Some(state) = self
+            .opencode_http_states
+            .lock()
+            .await
+            .get_mut(target_agent_id)
+        {
+            if state.generation == generation {
+                state.phase = OpenCodeHttpLaunchPhase::Failed;
             }
         }
-        Ok(queued)
+    }
+
+    pub(crate) async fn opencode_http_eligibility(
+        &self,
+        target_agent_id: &str,
+        generation: u64,
+    ) -> OpenCodeHttpEligibility {
+        let phase = self
+            .opencode_http_states
+            .lock()
+            .await
+            .get(target_agent_id)
+            .filter(|state| state.generation == generation)
+            .map(|state| state.phase);
+        match phase {
+            Some(OpenCodeHttpLaunchPhase::Pending) => OpenCodeHttpEligibility::Pending,
+            Some(OpenCodeHttpLaunchPhase::Failed) => OpenCodeHttpEligibility::Failed,
+            Some(OpenCodeHttpLaunchPhase::Ready) => {
+                let registered = self
+                    .opencode_http
+                    .lock()
+                    .await
+                    .get(target_agent_id)
+                    .is_some_and(|entry| entry.generation == generation);
+                if registered {
+                    OpenCodeHttpEligibility::Ready
+                } else {
+                    OpenCodeHttpEligibility::Failed
+                }
+            }
+            None => OpenCodeHttpEligibility::Unsupported,
+        }
+    }
+
+    /// Compatibility predicate for callers that only need to know whether a
+    /// session is on the native boundary. Pending and failed eligible launches
+    /// remain native-owned so they cannot fall through to PTY composition.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn register_opencode_http(
+        &self,
+        target_agent_id: String,
+        plan: OpenCodeHttpLaunchPlan,
+        provider_session_id: String,
+        process_identity: String,
+        listener_identity: String,
+        workspace: PathBuf,
+        config_fingerprint: String,
+    ) -> Result<(), NativeBrokerError> {
+        if target_agent_id.trim().is_empty() {
+            return Err(error(
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+                "OpenCode HTTP registration has no Wardian target",
+                false,
+            ));
+        }
+        if self
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(error(
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+                "native broker is shutting down; OpenCode HTTP owner was not registered",
+                false,
+            ));
+        }
+        let _gate = self.owner_gate(&target_agent_id).await.lock_owned().await;
+        let generation = plan.generation();
+        {
+            let mut states = self.opencode_http_states.lock().await;
+            match states.get(&target_agent_id) {
+                Some(state)
+                    if state.generation == generation
+                        && state.config_fingerprint == config_fingerprint
+                        && state.phase == OpenCodeHttpLaunchPhase::Pending => {}
+                Some(_) => {
+                    return Err(error(
+                        NativeDeliveryErrorCode::StaleGeneration,
+                        "OpenCode HTTP launch no longer matches its eligible generation",
+                        false,
+                    ));
+                }
+                None => {
+                    // Direct broker callers may already possess a verified
+                    // launch proof; normal TUI startup records Pending before
+                    // spawning and therefore takes the checked branch above.
+                    states.insert(
+                        target_agent_id.clone(),
+                        OpenCodeHttpLaunchState {
+                            generation,
+                            config_fingerprint: config_fingerprint.clone(),
+                            phase: OpenCodeHttpLaunchPhase::Pending,
+                        },
+                    );
+                }
+            }
+        }
+        let binding = plan
+            .bind(OpenCodeHttpLaunchProof {
+                agent_id: target_agent_id.clone(),
+                provider_session_id,
+                process_identity,
+                listener_identity,
+                workspace,
+                config_fingerprint: config_fingerprint.clone(),
+                server_version: None,
+            })
+            .map_err(|message| {
+                error(
+                    NativeDeliveryErrorCode::CapabilityUnavailable,
+                    format!("OpenCode HTTP launch proof rejected: {message}"),
+                    false,
+                )
+            })?;
+        let owner = Arc::new(OpenCodeHttpOwner::bind(binding).map_err(opencode_http_error)?);
+        let verification = owner.verify_binding().await.map_err(opencode_http_error)?;
+        owner
+            .verify_unauthenticated_probe()
+            .await
+            .map_err(opencode_http_error)?;
+        let mut events = owner.open_events().await.map_err(opencode_http_error)?;
+        let event_owner = Arc::clone(&owner);
+        let event_task = tokio::spawn(async move {
+            loop {
+                match events.next_event().await {
+                    Ok(Some(event)) if event_owner.event_belongs_to_binding(&event) => {}
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => break,
+                }
+            }
+            // A registered owner without its binding-scoped event stream can
+            // no longer support a safe native claim. Keep the registration
+            // visible until lifecycle disposal so dispatch remains pending
+            // instead of reopening the composer for this existing session.
+            event_owner.close();
+        });
+
+        let capabilities = NativeTransportCapabilities {
+            provider: "opencode".to_string(),
+            transport: "opencode_http".to_string(),
+            protocol_version: verification.server_version,
+            persistent_session: true,
+            positive_turn_start: false,
+            late_reconciliation: true,
+            cancellation: false,
+            invalidate_premise: false,
+            approval_requests: false,
+            max_payload_bytes: None,
+            execution_timeout_ms: None,
+        };
+        let binding = NativeSessionBinding {
+            target_agent_id: target_agent_id.clone(),
+            generation: owner.binding().generation(),
+            provider: "opencode".to_string(),
+            transport: "opencode_http".to_string(),
+            provider_session_id: Some(owner.binding().provider_session_id().to_string()),
+            capabilities,
+            observed_at: now(),
+        };
+        let binding_error = wardian_core::db::upsert_native_session_binding(&binding)
+            .err()
+            .map(|error| error.to_string());
+        if let Some(error) = binding_error {
+            owner.close();
+            event_task.abort();
+            let _ = event_task.await;
+            return Err(db_error(error));
+        }
+        let state_agent_id = target_agent_id.clone();
+        let state_config_fingerprint = config_fingerprint.clone();
+        let registration = Arc::new(OpenCodeHttpRegistration {
+            generation: owner.binding().generation(),
+            runtime_generation: owner.binding().runtime_generation(),
+            config_fingerprint,
+            owner,
+            binding,
+            event_task: Arc::new(Mutex::new(Some(event_task))),
+        });
+        let previous = self
+            .opencode_http
+            .lock()
+            .await
+            .insert(target_agent_id, registration);
+        self.opencode_http_states
+            .lock()
+            .await
+            .entry(state_agent_id)
+            .and_modify(|state| state.phase = OpenCodeHttpLaunchPhase::Ready)
+            .or_insert(OpenCodeHttpLaunchState {
+                generation,
+                config_fingerprint: state_config_fingerprint,
+                phase: OpenCodeHttpLaunchPhase::Ready,
+            });
+        if let Some(previous) = previous {
+            close_opencode_http_registration(previous).await;
+        }
+        Ok(())
+    }
+
+    /// A lifecycle registration is the only condition that routes an attached
+    /// OpenCode task away from the existing composer exception. A closed owner
+    /// stays registered until disposal so a lost transport leaves work pending.
+    pub async fn opencode_http_prepared(&self, target_agent_id: &str, generation: u64) -> bool {
+        !matches!(
+            self.opencode_http_eligibility(target_agent_id, generation)
+                .await,
+            OpenCodeHttpEligibility::Unsupported
+        )
+    }
+
+    /// Revalidate the owner and provider busy state before the canonical claim.
+    /// Busy, unknown, stale, and unprepared states leave work pending.
+    pub async fn opencode_http_admission(
+        &self,
+        target_agent_id: &str,
+        generation: u64,
+        config: &AgentConfig,
+        workspace: &std::path::Path,
+    ) -> Result<(), NativeBrokerError> {
+        match self
+            .opencode_http_eligibility(target_agent_id, generation)
+            .await
+        {
+            OpenCodeHttpEligibility::Ready => {}
+            OpenCodeHttpEligibility::Pending => {
+                return Err(error(
+                    NativeDeliveryErrorCode::CapabilityUnavailable,
+                    "OpenCode HTTP owner is still handshaking; task remains pending",
+                    false,
+                ));
+            }
+            OpenCodeHttpEligibility::Failed => {
+                return Err(error(
+                    NativeDeliveryErrorCode::CapabilityUnavailable,
+                    "OpenCode HTTP owner failed before submission; task remains pending",
+                    false,
+                ));
+            }
+            OpenCodeHttpEligibility::Unsupported => {
+                return Err(error(
+                    NativeDeliveryErrorCode::CapabilityUnavailable,
+                    "OpenCode TUI has no eligible HTTP owner",
+                    false,
+                ));
+            }
+        }
+        let registration = self
+            .opencode_http
+            .lock()
+            .await
+            .get(target_agent_id)
+            .cloned()
+            .ok_or_else(|| {
+                error(
+                    NativeDeliveryErrorCode::CapabilityUnavailable,
+                    "OpenCode TUI has no prepared HTTP owner",
+                    false,
+                )
+            })?;
+        if registration.generation != generation
+            || registration.config_fingerprint
+                != opencode_http_config_fingerprint(config, workspace)
+        {
+            return Err(error(
+                NativeDeliveryErrorCode::StaleGeneration,
+                "OpenCode HTTP owner no longer matches the live generation or configuration",
+                false,
+            ));
+        }
+        match registration
+            .owner
+            .session_activity()
+            .await
+            .map_err(opencode_http_error)?
+        {
+            OpenCodeSessionActivity::Idle => Ok(()),
+            OpenCodeSessionActivity::Busy => Err(error(
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+                "OpenCode provider session is busy; task remains pending",
+                false,
+            )),
+            OpenCodeSessionActivity::Retry | OpenCodeSessionActivity::Unknown => Err(error(
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+                "OpenCode provider session activity is not safely idle",
+                false,
+            )),
+        }
+    }
+
+    pub async fn opencode_http_followup(
+        &self,
+        target_agent_id: &str,
+        generation: u64,
+        message_id: &str,
+        context: &str,
+        config: &AgentConfig,
+        workspace: &std::path::Path,
+    ) -> Result<String, NativeBrokerError> {
+        let context: Value = serde_json::from_str(context).map_err(|parse_error| {
+            error(
+                NativeDeliveryErrorCode::UnsupportedOperation,
+                format!("OpenCode HTTP context was not canonical JSON: {parse_error}"),
+                false,
+            )
+        })?;
+        let body = context["body"].as_str().ok_or_else(|| {
+            error(
+                NativeDeliveryErrorCode::UnsupportedOperation,
+                "OpenCode HTTP context has no canonical body",
+                false,
+            )
+        })?;
+        if context["kind"].as_str() != Some("task") {
+            return Err(error(
+                NativeDeliveryErrorCode::UnsupportedOperation,
+                "OpenCode HTTP accepts task context only; information remains manual",
+                false,
+            ));
+        }
+        let recipient = context["recipient"].as_str().unwrap_or_default();
+        let interaction_id = context["interaction_id"].as_str().unwrap_or_default();
+        if recipient != target_agent_id
+            || interaction_id.is_empty()
+            || message_id.is_empty()
+            || context["request_id"].as_str() != Some(message_id)
+        {
+            return Err(error(
+                NativeDeliveryErrorCode::UnsupportedOperation,
+                "OpenCode HTTP context does not match the claimed target",
+                false,
+            ));
+        }
+        let provenance = if let Some(sender) = context["sender"]
+            .as_str()
+            .map(str::trim)
+            .filter(|sender| !sender.is_empty())
+        {
+            serde_json::json!({"sender": sender})
+        } else if let Some(host) = context["host_automation"].as_object() {
+            let run_id = host
+                .get("run_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let node = host.get("node").and_then(Value::as_str).unwrap_or_default();
+            if run_id.trim().is_empty() || node.trim().is_empty() {
+                return Err(error(
+                    NativeDeliveryErrorCode::UnsupportedOperation,
+                    "OpenCode HTTP task has incomplete host automation provenance",
+                    false,
+                ));
+            }
+            serde_json::json!({
+                "host_automation": {
+                    "run_id": run_id,
+                    "node": node,
+                }
+            })
+        } else {
+            return Err(error(
+                NativeDeliveryErrorCode::UnsupportedOperation,
+                "OpenCode HTTP task has no bounded sender attribution",
+                false,
+            ));
+        };
+        let prompt_text = format!(
+            "Wardian canonical task provenance: {}\n\n{}",
+            serde_json::to_string(&provenance).unwrap_or_else(|_| "{}".to_string()),
+            crate::control::message_with_structured_reply_instruction(body, message_id,)
+        );
+        if let Err(error) = self
+            .opencode_http_admission(target_agent_id, generation, config, workspace)
+            .await
+        {
+            log_opencode_dispatch_diagnostic(
+                interaction_id,
+                generation,
+                OpenCodeDispatchDiagnosticStage::NativeAdmission,
+                OpenCodeDispatchDiagnosticReason::NativeAdmissionRejected,
+            );
+            return Err(error);
+        }
+        log_opencode_dispatch_diagnostic(
+            interaction_id,
+            generation,
+            OpenCodeDispatchDiagnosticStage::NativeAdmission,
+            OpenCodeDispatchDiagnosticReason::NativeAdmissionReady,
+        );
+        let registration = self
+            .opencode_http
+            .lock()
+            .await
+            .get(target_agent_id)
+            .cloned()
+            .ok_or_else(|| {
+                error(
+                    NativeDeliveryErrorCode::CapabilityUnavailable,
+                    "OpenCode TUI HTTP owner ended before task submission",
+                    false,
+                )
+            })?;
+        let prompt = OpenCodePrompt::from_canonical_message_id(
+            message_id,
+            prompt_text,
+            OpenCodePromptOptions::default(),
+        )
+        .map_err(|message| {
+            error(
+                NativeDeliveryErrorCode::FailedBeforeSubmit,
+                format!("OpenCode HTTP prompt could not be prepared: {message}"),
+                false,
+            )
+        })?;
+        let dispatching = self
+            .advance(
+                interaction_id,
+                NativeDeliveryPhase::Dispatching,
+                NativeEvidenceSource::WardianQueue,
+                None,
+                None,
+                None,
+                "opencode_http_dispatching",
+            )
+            .await?;
+        log_opencode_dispatch_diagnostic(
+            &dispatching.envelope.interaction_id,
+            dispatching.envelope.generation,
+            OpenCodeDispatchDiagnosticStage::ActualDispatch,
+            OpenCodeDispatchDiagnosticReason::HttpSubmit,
+        );
+        match registration
+            .owner
+            .submit_once(
+                dispatching.envelope.generation,
+                registration.runtime_generation,
+                &prompt,
+            )
+            .await
+        {
+            Ok(receipt) => {
+                log_opencode_dispatch_diagnostic(
+                    &dispatching.envelope.interaction_id,
+                    dispatching.envelope.generation,
+                    OpenCodeDispatchDiagnosticStage::ActualDispatch,
+                    OpenCodeDispatchDiagnosticReason::ProviderAccepted,
+                );
+                let detail = match registration.owner.reconcile_user_message(&prompt).await {
+                    Ok(Some(_)) => {
+                        "OpenCode HTTP returned 204 and the exact user message was reconciled"
+                    }
+                    Ok(None) => {
+                        "OpenCode HTTP returned 204; user message reconciliation remains pending and replay is forbidden"
+                    }
+                    Err(_) => {
+                        "OpenCode HTTP returned 204; reconciliation read failed and replay is forbidden"
+                    }
+                };
+                self.advance(
+                    interaction_id,
+                    NativeDeliveryPhase::ProviderAccepted,
+                    NativeEvidenceSource::ProviderEvent,
+                    Some(receipt.provider_message_id),
+                    None,
+                    Some(detail.to_string()),
+                    "opencode_http_acknowledged",
+                )
+                .await?;
+                Ok("provider_accepted".to_string())
+            }
+            Err(failure) => {
+                log_opencode_dispatch_diagnostic(
+                    &dispatching.envelope.interaction_id,
+                    dispatching.envelope.generation,
+                    OpenCodeDispatchDiagnosticStage::ActualDispatch,
+                    OpenCodeDispatchDiagnosticReason::SubmitFailed,
+                );
+                let phase = if failure.provider_boundary_crossed {
+                    NativeDeliveryPhase::SubmittedUnconfirmed
+                } else {
+                    NativeDeliveryPhase::FailedBeforeSubmit
+                };
+                let _ = self
+                    .advance(
+                        interaction_id,
+                        phase,
+                        NativeEvidenceSource::WardianQueue,
+                        None,
+                        None,
+                        Some(failure.to_string()),
+                        "opencode_http_submit_failed",
+                    )
+                    .await?;
+                Err(opencode_http_error(failure))
+            }
+        }
+    }
+
+    pub async fn dispose_opencode_http(
+        &self,
+        target_agent_id: &str,
+        generation: Option<u64>,
+    ) -> Result<(), NativeBrokerError> {
+        let registration = {
+            let mut registrations = self.opencode_http.lock().await;
+            if registrations
+                .get(target_agent_id)
+                .is_some_and(|entry| generation.is_none_or(|wanted| wanted == entry.generation))
+            {
+                registrations.remove(target_agent_id)
+            } else {
+                None
+            }
+        };
+        {
+            let mut states = self.opencode_http_states.lock().await;
+            if states
+                .get(target_agent_id)
+                .is_some_and(|state| generation.is_none_or(|wanted| wanted == state.generation))
+            {
+                states.remove(target_agent_id);
+            }
+        }
+        if let Some(registration) = registration {
+            close_opencode_http_registration(registration).await;
+        }
+        Ok(())
+    }
+
+    /// Prepare the Pi extension before its interactive child is spawned. The
+    /// exact resumed session file is supplied by the manager; a fresh session
+    /// has no bridge capability until Pi has established that identity.
+    pub async fn prepare_pi_tui(
+        &self,
+        spec: NativeSessionSpec,
+        session_file: PathBuf,
+        extension_path: PathBuf,
+    ) -> Result<super::pi_bridge::PiBridgeLaunchPlan, String> {
+        if spec.provider != "pi" {
+            return Err("Pi bridge preparation requires the Pi provider".to_string());
+        }
+        self.dispose_pi_generation(&spec.target_agent_id, None)
+            .await
+            .map_err(|error| error.message)?;
+        let plan = super::pi_bridge::PiBridgeLaunchPlan::prepare(
+            spec.target_agent_id.clone(),
+            spec.generation,
+            spec.config
+                .resume_session
+                .as_deref()
+                .ok_or_else(|| "Pi bridge preparation requires a resumed session id".to_string())?
+                .to_string(),
+            session_file,
+            extension_path,
+        )
+        .await?;
+        self.pi_bridges.lock().await.insert(
+            spec.target_agent_id,
+            PiBridgeRegistration {
+                generation: spec.generation,
+                owner: plan.owner(),
+            },
+        );
+        Ok(plan)
+    }
+
+    pub async fn pi_binding(
+        &self,
+        target_agent_id: &str,
+        generation: u64,
+    ) -> Result<NativeSessionBinding, NativeBrokerError> {
+        let registration = self.pi_bridges.lock().await.get(target_agent_id).cloned();
+        let Some(registration) = registration.filter(|entry| entry.generation == generation) else {
+            return Err(error(
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+                "Pi TUI has no prepared bridge for this generation",
+                false,
+            ));
+        };
+        if !registration.owner.is_ready() {
+            return Err(error(
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+                "Pi TUI bridge is not authenticated and ready",
+                false,
+            ));
+        }
+        Ok(registration.owner.session_binding())
+    }
+
+    /// A prepared generation owns the native capability even while its child
+    /// is still completing the authenticated handshake. Callers must wait for
+    /// that owner rather than sending the same task through the surface.
+    pub async fn pi_bridge_prepared(&self, target_agent_id: &str, generation: u64) -> bool {
+        self.pi_bridges
+            .lock()
+            .await
+            .get(target_agent_id)
+            .is_some_and(|entry| entry.generation == generation)
+    }
+
+    pub async fn pi_followup(
+        &self,
+        target_agent_id: &str,
+        generation: u64,
+        message_id: &str,
+        context: &str,
+    ) -> Result<super::pi_bridge::PiBridgeReceipt, NativeBrokerError> {
+        let context: Value = serde_json::from_str(context).map_err(|parse_error| {
+            error(
+                NativeDeliveryErrorCode::UnsupportedOperation,
+                format!("Pi bridge context was not canonical JSON: {parse_error}"),
+                false,
+            )
+        })?;
+        let body = context["body"].as_str().ok_or_else(|| {
+            error(
+                NativeDeliveryErrorCode::UnsupportedOperation,
+                "Pi bridge context has no canonical body",
+                false,
+            )
+        })?;
+        if context["kind"].as_str() != Some("task") {
+            return Err(error(
+                NativeDeliveryErrorCode::UnsupportedOperation,
+                "Pi bridge accepts task context only; information remains manual",
+                false,
+            ));
+        }
+        let sender = pi_sender_id(&context).ok_or_else(|| {
+            error(
+                NativeDeliveryErrorCode::UnsupportedOperation,
+                "Pi bridge context has no bounded sender attribution",
+                false,
+            )
+        })?;
+        let recipient = context["recipient"].as_str().unwrap_or_default();
+        let interaction_id = context["interaction_id"].as_str().unwrap_or_default();
+        if recipient != target_agent_id || interaction_id.is_empty() || message_id.is_empty() {
+            return Err(error(
+                NativeDeliveryErrorCode::UnsupportedOperation,
+                "Pi bridge context does not match the claimed target",
+                false,
+            ));
+        }
+        let registration = self.pi_bridges.lock().await.get(target_agent_id).cloned();
+        let Some(registration) = registration.filter(|entry| entry.generation == generation) else {
+            return Err(error(
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+                "Pi TUI has no prepared bridge for this generation",
+                false,
+            ));
+        };
+        let envelope = NativeMessageEnvelope {
+            interaction_id: interaction_id.to_string(),
+            message_id: message_id.to_string(),
+            target_agent_id: target_agent_id.to_string(),
+            sender_agent_id: Some(sender),
+            parent_interaction_id: context["parent_interaction_id"]
+                .as_str()
+                .map(str::to_string),
+            caller_idempotency_key: None,
+            generation,
+            operation: NativeMessageOperation::StartTurn,
+            deadline_at: None,
+            body: body.to_string(),
+        };
+        registration
+            .owner
+            .deliver(envelope)
+            .await
+            .map_err(|failure| {
+                error(
+                    if failure.provider_boundary_crossed {
+                        NativeDeliveryErrorCode::SubmittedUnconfirmed
+                    } else {
+                        NativeDeliveryErrorCode::CapabilityUnavailable
+                    },
+                    failure.message,
+                    failure.provider_boundary_crossed,
+                )
+            })
+    }
+
+    pub async fn dispose_pi_generation(
+        &self,
+        target_agent_id: &str,
+        generation: Option<u64>,
+    ) -> Result<(), NativeBrokerError> {
+        let owner = {
+            let mut bridges = self.pi_bridges.lock().await;
+            if bridges
+                .get(target_agent_id)
+                .is_some_and(|entry| generation.is_none_or(|wanted| wanted == entry.generation))
+            {
+                bridges.remove(target_agent_id).map(|entry| entry.owner)
+            } else {
+                None
+            }
+        };
+        if let Some(owner) = owner {
+            owner.close();
+        }
+        Ok(())
+    }
+
+    async fn dispatch_pi_tui(
+        self: &Arc<Self>,
+        record: NativeDeliveryRecord,
+        generation: u64,
+    ) -> Result<NativeDispatchReceipt, NativeBrokerError> {
+        let registration = self
+            .pi_bridges
+            .lock()
+            .await
+            .get(&record.envelope.target_agent_id)
+            .cloned();
+        let Some(registration) = registration.filter(|entry| entry.generation == generation) else {
+            return Err(error(
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+                "Pi native dispatch requires a prepared TUI bridge; RPC fallback is disabled",
+                false,
+            ));
+        };
+        if !registration.owner.is_ready() {
+            return Err(error(
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+                "Pi TUI bridge is not authenticated and ready",
+                false,
+            ));
+        }
+        let dispatching = self
+            .advance(
+                &record.envelope.interaction_id,
+                NativeDeliveryPhase::Dispatching,
+                NativeEvidenceSource::WardianQueue,
+                None,
+                None,
+                None,
+                "pi_dispatching",
+            )
+            .await?;
+        match registration
+            .owner
+            .deliver(dispatching.envelope.clone())
+            .await
+        {
+            Ok(receipt) => {
+                let accepted = self
+                    .advance(
+                        &dispatching.envelope.interaction_id,
+                        NativeDeliveryPhase::ProviderAccepted,
+                        NativeEvidenceSource::ProviderEvent,
+                        None,
+                        None,
+                        Some(
+                            "Pi observed the canonical custom message in its TUI loop".to_string(),
+                        ),
+                        "pi_observed_consumption",
+                    )
+                    .await?;
+                Ok(NativeDispatchReceipt {
+                    record: accepted,
+                    binding: receipt.binding,
+                    capabilities: registration.owner.session_binding().capabilities,
+                })
+            }
+            Err(failure) => {
+                let phase = if failure.provider_boundary_crossed {
+                    NativeDeliveryPhase::SubmittedUnconfirmed
+                } else {
+                    NativeDeliveryPhase::FailedBeforeSubmit
+                };
+                let _ = self
+                    .advance(
+                        &dispatching.envelope.interaction_id,
+                        phase,
+                        NativeEvidenceSource::WardianQueue,
+                        None,
+                        None,
+                        Some(failure.message.clone()),
+                        "pi_dispatch_failed",
+                    )
+                    .await?;
+                Err(error(
+                    if failure.provider_boundary_crossed {
+                        NativeDeliveryErrorCode::SubmittedUnconfirmed
+                    } else {
+                        NativeDeliveryErrorCode::CapabilityUnavailable
+                    },
+                    failure.message,
+                    failure.provider_boundary_crossed,
+                ))
+            }
+        }
     }
 
     async fn ensure_session(
@@ -686,6 +1789,13 @@ impl NativeDeliveryBroker {
             .await
             .lock_owned()
             .await;
+        if spec.provider == "opencode" {
+            return Err(error(
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+                "OpenCode requires a lifecycle-prepared HTTP owner; ACP fallback is disabled",
+                false,
+            ));
+        }
         let protocol = NativeProviderProtocol::for_provider(&spec.provider).ok_or_else(|| {
             error(
                 NativeDeliveryErrorCode::UnsupportedProvider,
@@ -704,6 +1814,13 @@ impl NativeDeliveryBroker {
         if spec.provider == "codex" {
             return Err(error(NativeDeliveryErrorCode::CapabilityUnavailable,
                 "Codex requires a lifecycle-prepared shared owner; embedded sessions require explicit restart", false));
+        }
+        if spec.provider == "pi" {
+            return Err(error(
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+                "Pi requires a lifecycle-prepared TUI bridge; RPC fallback is disabled",
+                false,
+            ));
         }
         let protocol_version = probe_protocol_version(&spec, protocol).await;
         let sessions = self.sessions.lock().await;
@@ -825,6 +1942,33 @@ impl Clone for NativeSessionHandle {
             stopped: self.stopped.clone(),
         }
     }
+}
+
+fn pi_sender_id(context: &Value) -> Option<String> {
+    let sender = context["sender"]
+        .as_str()
+        .map(str::trim)
+        .unwrap_or_default();
+    if super::pi_bridge::is_valid_identifier(sender) {
+        return Some(sender.to_string());
+    }
+    let host = context["host_automation"].as_object()?;
+    let run_id = host.get("run_id")?.as_str()?.trim();
+    let node = host.get("node")?.as_str()?.trim();
+    if run_id.is_empty() || node.is_empty() {
+        return None;
+    }
+    let normalized = format!("host_automation_{run_id}_{node}")
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    super::pi_bridge::is_valid_identifier(&normalized).then_some(normalized)
 }
 
 async fn run_session_actor(
@@ -2229,6 +3373,55 @@ fn canonical_hash(request: &NativeDeliveryAdmission) -> String {
     )
 }
 
+pub fn opencode_http_config_fingerprint(
+    config: &AgentConfig,
+    workspace: &std::path::Path,
+) -> String {
+    let canonical = serde_json::json!({
+        "config": config,
+        "workspace": workspace.to_string_lossy(),
+    });
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&canonical).unwrap_or_default())
+    )
+}
+
+fn opencode_http_error(failure: OpenCodeHttpError) -> NativeBrokerError {
+    let code = match failure.code {
+        OpenCodeHttpErrorCode::SubmittedUnconfirmed
+        | OpenCodeHttpErrorCode::ProviderRejectedAfterSubmit => {
+            NativeDeliveryErrorCode::SubmittedUnconfirmed
+        }
+        OpenCodeHttpErrorCode::BindingInvalid
+        | OpenCodeHttpErrorCode::Closed
+        | OpenCodeHttpErrorCode::StaleGeneration
+        | OpenCodeHttpErrorCode::ReplayRefused
+        | OpenCodeHttpErrorCode::TransportUnavailable
+        | OpenCodeHttpErrorCode::RedirectRejected
+        | OpenCodeHttpErrorCode::AuthenticationFailed
+        | OpenCodeHttpErrorCode::SessionMismatch
+        | OpenCodeHttpErrorCode::HealthCheckFailed
+        | OpenCodeHttpErrorCode::Busy
+        | OpenCodeHttpErrorCode::MalformedResponse
+        | OpenCodeHttpErrorCode::MalformedEvent => NativeDeliveryErrorCode::CapabilityUnavailable,
+    };
+    let message = match failure.status {
+        Some(status) => format!("{} (status {status})", failure),
+        None => failure.to_string(),
+    };
+    error(code, message, failure.provider_boundary_crossed)
+}
+
+async fn close_opencode_http_registration(registration: Arc<OpenCodeHttpRegistration>) {
+    registration.owner.close();
+    let task = registration.event_task.lock().await.take();
+    if let Some(task) = task {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
 fn append_evidence_with_key(
     evidence: &NativeDeliveryEvidence,
     key: &str,
@@ -2456,6 +3649,48 @@ mod tests {
         assert_eq!(canonical_hash(&request), canonical_hash(&retry));
     }
 
+    #[test]
+    fn opencode_http_error_preserves_numeric_status_without_response_body() {
+        let converted = opencode_http_error(OpenCodeHttpError::new(
+            OpenCodeHttpErrorCode::ProviderRejectedAfterSubmit,
+            true,
+            Some(400),
+            "OpenCode prompt request was not accepted; replay is forbidden",
+        ));
+
+        assert_eq!(
+            converted.code,
+            NativeDeliveryErrorCode::SubmittedUnconfirmed
+        );
+        assert!(converted.message.contains("status 400"));
+        assert!(!converted.message.contains("body"));
+        assert!(converted.provider_boundary_crossed);
+    }
+
+    #[test]
+    fn opencode_dispatch_diagnostics_deduplicate_transitions_and_evict_old_requests() {
+        let mut guard = OpenCodeDispatchDiagnosticGuard::default();
+        let route = OpenCodeDispatchDiagnosticKey {
+            stage: OpenCodeDispatchDiagnosticStage::Preclaim,
+            reason: OpenCodeDispatchDiagnosticReason::RouteNative,
+        };
+        let claim = OpenCodeDispatchDiagnosticKey {
+            stage: OpenCodeDispatchDiagnosticStage::PostclaimPreNativeAdmission,
+            reason: OpenCodeDispatchDiagnosticReason::ClaimAcquired,
+        };
+
+        assert!(guard.record("ask_first", 1, route));
+        assert!(!guard.record("ask_first", 1, route));
+        assert!(guard.record("ask_first", 1, claim));
+
+        for index in 0..OPENCODE_DISPATCH_DIAGNOSTIC_CAPACITY {
+            assert!(guard.record(&format!("ask_{index}"), 1, route));
+        }
+        assert_eq!(guard.len(), OPENCODE_DISPATCH_DIAGNOSTIC_CAPACITY);
+        assert!(!guard.contains("ask_first", 1));
+        assert!(guard.contains("ask_255", 1));
+    }
+
     /// `opencode acp` exits 1 and prints its usage when an interactive flag
     /// such as `--model` precedes it, which is what stopped ACP negotiation
     /// before initialize. The command must carry nothing it does not accept.
@@ -2544,43 +3779,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn opencode_agent_selection_failure_prevents_prompt_submission() {
+    async fn opencode_dispatch_requires_registered_http_owner_without_acp_fallback() {
         let _lock = crate::utils::wardian_test_env_lock_async().await;
         let temp = tempfile::tempdir().expect("native broker tempdir");
         wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
             .expect("initialize native broker db");
-        let script = temp.path().join("opencode-provider.cjs");
-        let log = temp.path().join("opencode-bootstrap.log");
-        std::fs::write(
-            &script,
-            r#"const fs = require('node:fs');
-const readline = require('node:readline');
-const input = readline.createInterface({ input: process.stdin });
-input.on('line', (line) => {
-  fs.appendFileSync(process.env.WARDIAN_NATIVE_TEST_LOG, line + '\n');
-  const request = JSON.parse(line);
-  let response;
-  if (request.method === 'initialize') {
-    response = { jsonrpc: '2.0', id: request.id, result: { protocolVersion: 1 } };
-  } else if (request.method === 'session/new') {
-    response = { jsonrpc: '2.0', id: request.id, result: { sessionId: 'ses-test' } };
-  } else if (request.method === 'session/set_mode') {
-    response = { jsonrpc: '2.0', id: request.id,
-      error: { code: -32000, message: 'configured agent is unavailable' } };
-  } else if (request.method === 'session/prompt') {
-    fs.appendFileSync(process.env.WARDIAN_NATIVE_TEST_LOG, 'PROMPT_SUBMITTED\n');
-    process.exit(17);
-  }
-  if (response) console.log(JSON.stringify(response));
-});
-"#,
-        )
-        .expect("write OpenCode provider fixture");
-        unsafe {
-            std::env::set_var("WARDIAN_NATIVE_TEST_SCRIPT", &script);
-            std::env::set_var("WARDIAN_NATIVE_TEST_LOG", &log);
-        }
-        let _script_guard = NativeTestScriptGuard;
 
         let broker = Arc::new(NativeDeliveryBroker::new());
         let mut admission = test_admission("opencode-agent", "opencode-agent-key", "review");
@@ -2610,31 +3813,15 @@ input.on('line', (line) => {
                 record,
             )
             .await
-            .expect_err("selection failure must stop bootstrap");
+            .expect_err("unprepared OpenCode must not fall back to ACP");
 
-        assert_eq!(failure.code, NativeDeliveryErrorCode::TransportUnavailable);
-        assert_eq!(
-            broker
-                .get("opencode-agent")
-                .expect("failed delivery record")
-                .phase,
-            NativeDeliveryPhase::FailedBeforeSubmit
-        );
-        let requests = std::fs::read_to_string(&log)
-            .expect("bootstrap request log")
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .collect::<Vec<_>>();
-        assert!(requests.iter().any(|request| {
-            request["method"] == "session/set_mode" && request["params"]["modeId"] == "reviewer"
-        }));
-        assert!(!requests
-            .iter()
-            .any(|request| request["method"] == "session/prompt"));
-        broker
-            .dispose_agent("agent-native-test")
-            .await
-            .expect("dispose failed test session");
+        assert_eq!(failure.code, NativeDeliveryErrorCode::CapabilityUnavailable);
+        assert!(!failure.provider_boundary_crossed);
+        let record = broker
+            .get("opencode-agent")
+            .expect("queued delivery record");
+        assert_eq!(record.phase, NativeDeliveryPhase::Queued);
+        assert_eq!(record.transport, "opencode_http");
     }
 
     #[test]
@@ -3038,7 +4225,67 @@ input.on('line', (line) => {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn invalidate_premise_is_acknowledged_inside_the_active_pi_turn() {
+    async fn pi_without_prepared_tui_rejects_dispatch_without_rpc_fallback() {
+        let _lock = crate::utils::wardian_test_env_lock_async().await;
+        let temp = tempfile::tempdir().expect("native broker tempdir");
+        wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
+            .expect("initialize native broker db");
+        let broker = Arc::new(NativeDeliveryBroker::new());
+        let config = AgentConfig {
+            provider: "pi".to_string(),
+            session_id: "agent-native-test".to_string(),
+            folder: temp.path().display().to_string(),
+            ..AgentConfig::default()
+        };
+        let spec = NativeSessionSpec {
+            target_agent_id: "agent-native-test".to_string(),
+            provider: "pi".to_string(),
+            generation: 1,
+            workspace: temp.path().to_path_buf(),
+            config,
+        };
+        let mut first = test_admission("interaction-active", "active-key", "start work");
+        first.provider = "pi".to_string();
+        let first = broker.admit(first).await.expect("admit active turn");
+        let failure = broker
+            .dispatch(spec.clone(), first)
+            .await
+            .expect_err("Pi must not fall back to an RPC subprocess");
+        assert_eq!(failure.code, NativeDeliveryErrorCode::CapabilityUnavailable);
+        assert!(!failure.provider_boundary_crossed);
+        assert_eq!(
+            broker
+                .get("interaction-active")
+                .expect("queued active turn")
+                .phase,
+            NativeDeliveryPhase::Queued
+        );
+
+        let mut correction = test_admission(
+            "interaction-correction",
+            "correction-key",
+            "premise changed",
+        );
+        correction.provider = "pi".to_string();
+        correction.operation = NativeMessageOperation::InvalidatePremise;
+        let correction = broker.admit(correction).await.expect("admit correction");
+        let failure = broker
+            .dispatch(spec, correction)
+            .await
+            .expect_err("Pi correction must use the prepared TUI bridge too");
+        assert_eq!(failure.code, NativeDeliveryErrorCode::CapabilityUnavailable);
+        assert!(!failure.provider_boundary_crossed);
+        assert_eq!(
+            broker
+                .get("interaction-correction")
+                .expect("queued correction")
+                .phase,
+            NativeDeliveryPhase::Queued
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn invalidate_premise_is_acknowledged_inside_the_active_pi_protocol_actor() {
         let _lock = crate::utils::wardian_test_env_lock_async().await;
         let temp = tempfile::tempdir().expect("native broker tempdir");
         wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
@@ -3090,12 +4337,33 @@ input.on('line', (line) => {
             workspace: temp.path().to_path_buf(),
             config,
         };
+        // The public Pi broker route is intentionally TUI-bridge-only above.
+        // Drive the retained Pi protocol actor directly here so its active-turn
+        // invalidation lifecycle remains covered without restoring RPC fallback.
+        let capabilities = NativeProviderProtocol::PiRpc.capabilities("fixture");
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let actor = tokio::spawn(run_session_actor(
+            Arc::clone(&broker),
+            spec,
+            NativeProviderProtocol::PiRpc,
+            capabilities,
+            command_rx,
+        ));
+
         let mut first = test_admission("interaction-active", "active-key", "start work");
         first.provider = "pi".to_string();
         let first = broker.admit(first).await.expect("admit active turn");
-        broker
-            .dispatch(spec.clone(), first)
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::Submit {
+                record: Box::new(first),
+                reply: reply_tx,
+            })
             .await
+            .expect("send active turn to retained actor");
+        reply_rx
+            .await
+            .expect("active turn actor reply")
             .expect("active turn started");
 
         let mut correction = test_admission(
@@ -3106,9 +4374,17 @@ input.on('line', (line) => {
         correction.provider = "pi".to_string();
         correction.operation = NativeMessageOperation::InvalidatePremise;
         let correction = broker.admit(correction).await.expect("admit correction");
-        let receipt = broker
-            .dispatch(spec, correction)
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::Submit {
+                record: Box::new(correction),
+                reply: reply_tx,
+            })
             .await
+            .expect("send correction to retained actor");
+        let receipt = reply_rx
+            .await
+            .expect("correction actor reply")
             .expect("provider accepted correction");
         assert_eq!(receipt.record.phase, NativeDeliveryPhase::ProviderAccepted);
         assert_eq!(
@@ -3137,15 +4413,16 @@ input.on('line', (line) => {
                 .phase,
             NativeDeliveryPhase::Completed
         );
-        broker.dispose_agent("agent-native-test").await.unwrap();
+        command_tx
+            .send(SessionCommand::Shutdown)
+            .await
+            .expect("stop retained actor");
+        actor.await.expect("retained actor exit");
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn restart_recovery_requeues_only_never_submitted_work() {
-        let _lock = crate::utils::wardian_test_env_lock_async().await;
-        let temp = tempfile::tempdir().expect("native broker tempdir");
-        wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
-            .expect("initialize native broker db");
+    async fn retired_native_queue_remains_inspectable_without_runtime_replay() {
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
         let broker = NativeDeliveryBroker::new();
 
         broker
@@ -3173,19 +4450,50 @@ input.on('line', (line) => {
             NativeDeliveryErrorCode::DeadlineExpired
         );
 
-        let recovered = broker
-            .recover_after_restart(100)
+        let before = wardian_core::db::list_native_deliveries(100).unwrap();
+        let state = crate::state::AppState::new();
+        let agent = crate::control::tests::test_agent("agent-native-test", "Native", "Test");
+        *agent.current_status.lock().unwrap() = "Idle".into();
+        agent.config.lock().unwrap().provider = "codex".into();
+        state
+            .agents
+            .lock()
             .await
-            .expect("recover native queue");
-
-        assert_eq!(recovered.len(), 1);
-        assert_eq!(recovered[0].envelope.interaction_id, "interaction-queued");
+            .insert("agent-native-test".into(), agent);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        state
+            .terminal_sessions
+            .start_or_replace_runtime(
+                "agent-native-test",
+                crate::state::terminal_session::TerminalRuntimeHandles::new(tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry { cols: 80, rows: 24 },
+            )
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            state.interactions.hydrate_from_persistence().await;
+            crate::control::dispatch_agent_messaging_from_status_observation(
+                None,
+                &state,
+                "agent-native-test",
+            )
+            .await;
+            assert!(
+                rx.try_recv().is_err(),
+                "retired native records must not reach the composer"
+            );
+            assert_eq!(
+                wardian_core::db::list_native_deliveries(100).unwrap(),
+                before
+            );
+        }
         assert_eq!(
-            broker
-                .get("interaction-dispatching")
-                .expect("interrupted delivery")
-                .phase,
-            NativeDeliveryPhase::SubmittedUnconfirmed
+            broker.get("interaction-queued").unwrap().phase,
+            NativeDeliveryPhase::Queued
+        );
+        assert_eq!(
+            broker.get("interaction-dispatching").unwrap().phase,
+            NativeDeliveryPhase::Dispatching
         );
     }
 

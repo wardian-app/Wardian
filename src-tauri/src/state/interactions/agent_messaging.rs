@@ -173,6 +173,36 @@ impl InteractionState {
         Ok(admitted)
     }
 
+    /// Only the in-process automation runner can select host provenance; control
+    /// requests still pass managed-agent authentication and ordinary admission.
+    pub(crate) async fn admit_host_automation_task(
+        &self,
+        run_id: &str,
+        node: &str,
+        recipient: &str,
+        message: &str,
+    ) -> Result<store::Admitted, AgentMessagingError> {
+        let _mutation = self.mutation_lock.lock().await;
+        if self.deleted_sessions.lock().await.contains(recipient) {
+            return Err(AgentMessagingError::new(
+                "not_found",
+                "Recipient was deleted.",
+            ));
+        }
+        let generation = self
+            .current_provider_input_generation(recipient)
+            .await
+            .unwrap_or(0);
+        let admitted = store::with_db(|conn| {
+            store::admit_host_automation_task(conn, run_id, node, recipient, message, generation)
+        })?;
+        self.records
+            .lock()
+            .await
+            .insert(admitted.record.id.clone(), admitted.record.clone());
+        Ok(admitted)
+    }
+
     /// Authorized v2 completion is atomic in storage and then updates both caches.
     pub async fn reply_agent_message(
         &self,

@@ -8770,6 +8770,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
                 provider: "codex".to_string(),
                 turn_id: Some("turn-before-clear".to_string()),
                 source: Some("transcript".to_string()),
+                provider_provenance: None,
             });
         }
 
@@ -9561,20 +9562,16 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         }
         {
             let mut watch = agent.watch_state.lock().unwrap();
-            watch.push_transcript(wardian_core::control::WatchTranscriptMessage {
-                role: "user".to_string(),
-                text: "Run tests.".to_string(),
-                provider: "codex".to_string(),
-                turn_id: Some("turn-1".to_string()),
-                source: Some("watch_transcript".to_string()),
-            });
-            watch.push_transcript(wardian_core::control::WatchTranscriptMessage {
-                role: "assistant".to_string(),
-                text: "Tests failed.".to_string(),
-                provider: "codex".to_string(),
-                turn_id: Some("turn-1".to_string()),
-                source: Some("watch_transcript".to_string()),
-            });
+            for (role, text) in [("user", "Run tests."), ("assistant", "Tests failed.")] {
+                watch.push_transcript(wardian_core::control::WatchTranscriptMessage {
+                    role: role.to_string(),
+                    text: text.to_string(),
+                    provider: "codex".to_string(),
+                    turn_id: Some("turn-1".to_string()),
+                    source: Some("watch_transcript".to_string()),
+                    provider_provenance: None,
+                });
+            }
         }
         {
             let mut agents = state.agents.lock().await;
@@ -9644,6 +9641,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
                 provider: "unsupported-provider".to_string(),
                 turn_id: Some("turn-before-failed-clear".to_string()),
                 source: Some("watch_transcript".to_string()),
+                provider_provenance: None,
             },
         );
         state
@@ -9838,6 +9836,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
                 provider: original_config.provider.clone(),
                 turn_id: Some("turn-before-fresh-resume".to_string()),
                 source: Some("watch_transcript".to_string()),
+                provider_provenance: None,
             },
         );
         state

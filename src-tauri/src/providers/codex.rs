@@ -680,9 +680,19 @@ impl AgentProvider for CodexProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 match inner_type {
-                    "task_started" | "exec_command_begin" | "exec_command_start" => {
-                        Some(AgentEvent::Generating)
+                    "task_started" => {
+                        let turn_id = parsed
+                            .get("payload")
+                            .and_then(|payload| payload.get("turn_id"))
+                            .and_then(|value| value.as_str())
+                            .filter(|value| !value.trim().is_empty());
+                        turn_id
+                            .map(|turn_id| AgentEvent::TurnStarted {
+                                turn_id: turn_id.to_string(),
+                            })
+                            .or(Some(AgentEvent::Unknown))
                     }
+                    "exec_command_begin" | "exec_command_start" => Some(AgentEvent::Generating),
                     "user_message" => Some(AgentEvent::UserQuery),
                     "agent_message" => Some(AgentEvent::Unknown),
                     "task_complete" | "turn_complete" | "turn_completed" => {

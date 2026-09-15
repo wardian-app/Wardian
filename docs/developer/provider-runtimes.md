@@ -181,6 +181,7 @@ as a successful answer.
 
 - Startup host-context records do not start work or increment the query count. The status parser and Chat share the native content-kind classifier; explicit user content, legacy string prompts, and canonical user events retain their normal activity behavior. See [#1249](https://github.com/wardian-app/Wardian/issues/1249).
 - Codex emits a lightweight `agent_message` and a completed `response_item` for the same visible assistant response. The completed record can append an internal `<oai-mem-citation>` block. Wardian removes that block before storing or rendering the message, and applies the same normalization while replaying older archived rows, so one user-visible answer appears once.
+- For a same-turn final assistant mirror, Wardian coalesces the identityless `event_msg` and identified `response_item` in the chat projection while retaining both raw provider observation IDs.
 - Wardian memory rows are filtered to the active conversation boundary before they are merged into Chat, then receive the same chronological sequence assignment as provider and watch events. Agent-wide memory history must not be replayed into a later conversation.
 
 ### Working-root model
@@ -399,6 +400,8 @@ This is how OpenCode sees Wardian-managed class and agent context without forcin
 ### Session identity
 
 - OpenCode session IDs are discovered from JSON output during `opencode run --format json`. For interactive TUI launches, Wardian binds the provider's `created` log record to the same OpenCode run that loaded this agent's generated `.opencode/opencode.json`; if that ownership evidence is absent or ambiguous, Wardian leaves the session identity unset rather than adopting a global session-list match.
+- Fresh interactive OpenCode launches reserve an authenticated loopback HTTP owner before the TUI starts. After one unique launch-scoped `ses_...` identity is discovered, Wardian rebinds that same listener to the provider session only when the process, runtime generation, workspace, and configuration fingerprint still match. A missing or ambiguous identity fails closed and does not select a global or latest session.
+- Resumed interactive OpenCode launches bind the configured `ses_...` identity during startup. Fresh and resumed launches therefore share the same native owner checks, while a fresh first turn remains the operation that creates the provider session; the listener reservation does not submit a bootstrap prompt.
 - Interactive identity discovery also runs when the title remains idle. It checks log metadata between polls and reads the ownership evidence only when the source changes; a Processing title is not required to resume or link an already completed conversation.
 - Valid IDs match `ses_…`; Wardian never substitutes its own UUIDs into `--session`.
 - Resume uses `--session <session_id>`.

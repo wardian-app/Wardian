@@ -33,6 +33,8 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS agent_message_cursors (
         token TEXT PRIMARY KEY, recipient TEXT NOT NULL, sequence INTEGER NOT NULL,
         UNIQUE(recipient, sequence));
+        CREATE TABLE IF NOT EXISTS agent_message_host_tasks (
+        interaction_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, node TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS agent_message_ack (
         recipient TEXT PRIMARY KEY, sequence INTEGER NOT NULL DEFAULT 0);",
     )
@@ -72,6 +74,64 @@ pub fn validate_message(message: &str) -> Result<()> {
 }
 
 pub fn admit(conn: &Connection, request: Admission<'_>) -> Result<Admitted> {
+    admit_with_host(conn, request, None)
+}
+
+/// Trusted application-only automation admission; never exposed by the wire request.
+/// Host provenance is separate from managed agent identity. Existing records are not converted.
+pub fn admit_host_automation_task(
+    conn: &Connection,
+    run_id: &str,
+    node: &str,
+    recipient: &str,
+    message: &str,
+    generation: u64,
+) -> Result<Admitted> {
+    if run_id.trim().is_empty() || node.trim().is_empty() {
+        return Err(Error::new(
+            "invalid_host_provenance",
+            "Automation run and node are required.",
+        ));
+    }
+    let host = format!("host:automation:{run_id}");
+    admit_with_host(
+        conn,
+        Admission {
+            sender: &host,
+            recipient,
+            message,
+            idempotency_key: None,
+            task: true,
+            generation,
+        },
+        Some((run_id, node)),
+    )
+}
+
+/// Inspect trusted host attribution without manufacturing a registered sender.
+pub fn host_automation_provenance(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<crate::agent_messaging::HostAutomationProvenance>> {
+    Ok(conn
+        .query_row(
+            "SELECT run_id,node FROM agent_message_host_tasks WHERE interaction_id=?1",
+            [id],
+            |row| {
+                Ok(crate::agent_messaging::HostAutomationProvenance {
+                    run_id: row.get(0)?,
+                    node: row.get(1)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+fn admit_with_host(
+    conn: &Connection,
+    request: Admission<'_>,
+    host: Option<(&str, &str)>,
+) -> Result<Admitted> {
     validate_message(request.message)?;
     if request
         .idempotency_key
@@ -121,7 +181,7 @@ pub fn admit(conn: &Connection, request: Admission<'_>) -> Result<Admitted> {
         } else {
             InteractionKind::Message
         },
-        sender_session_id: Some(request.sender.into()),
+        sender_session_id: host.is_none().then(|| request.sender.into()),
         target_session_ids: vec![request.recipient.into()],
         status: if request.task {
             InteractionStatus::AwaitingReply
@@ -144,6 +204,12 @@ pub fn admit(conn: &Connection, request: Admission<'_>) -> Result<Admitted> {
     super::upsert_interaction_record_with_conn(&tx, &record)?;
     tx.execute("INSERT INTO agent_message_delivery(interaction_id,sender,recipient,operation,idempotency_key,fingerprint,owner,generation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
         params![record.id,request.sender,request.recipient,operation,request.idempotency_key,fingerprint,owner,request.generation])?;
+    if let Some((run_id, node)) = host {
+        tx.execute(
+            "INSERT INTO agent_message_host_tasks(interaction_id,run_id,node) VALUES(?1,?2,?3)",
+            params![record.id, run_id, node],
+        )?;
+    }
     make_available(&tx, request.recipient, &record.id)?;
     tx.commit()?;
     Ok(Admitted {
@@ -265,10 +331,13 @@ fn reply_with_claim(
     if task.status != InteractionStatus::AwaitingReply {
         return Err(Error::new("conflicting_reply", "Task is already terminal."));
     }
-    let recipient = task
-        .sender_session_id
-        .clone()
-        .ok_or_else(|| Error::new("invalid_task", "Task has no requester."))?;
+    let recipient = task.sender_session_id.clone();
+    if recipient.is_none() && host_automation_provenance(&tx, request_id)?.is_none() {
+        return Err(Error::new(
+            "invalid_task",
+            "Task has no requester or trusted host provenance.",
+        ));
+    }
     let now = now();
     task.status = InteractionStatus::Completed;
     task.updated_at = now.clone();
@@ -277,7 +346,7 @@ fn reply_with_claim(
         id: new_id("int"),
         kind: InteractionKind::Reply,
         sender_session_id: Some(sender.into()),
-        target_session_ids: vec![recipient.clone()],
+        target_session_ids: recipient.iter().cloned().collect(),
         status: InteractionStatus::Completed,
         trigger_policy: InteractionTriggerPolicy::NotifyOnly,
         body_ref: InteractionBodyRef::Inline {
@@ -299,8 +368,10 @@ fn reply_with_claim(
     super::upsert_interaction_record_with_conn(&tx, &task)?;
     super::upsert_interaction_record_with_conn(&tx, &record)?;
     super::upsert_structured_reply_with_conn(&tx, &reply)?;
-    tx.execute("INSERT INTO agent_message_delivery(interaction_id,sender,recipient,operation,fingerprint,owner,generation) VALUES(?1,?2,?3,'reply','','stored',0)", params![record.id, sender, recipient])?;
-    make_available(&tx, &recipient, &record.id)?;
+    if let Some(recipient) = recipient {
+        tx.execute("INSERT INTO agent_message_delivery(interaction_id,sender,recipient,operation,fingerprint,owner,generation) VALUES(?1,?2,?3,'reply','','stored',0)", params![record.id, sender, recipient])?;
+        make_available(&tx, &recipient, &record.id)?;
+    }
     if let Some(claim) = claim {
         finish_claim(&tx, claim, "failed_before_submit")?;
     }
@@ -337,6 +408,10 @@ pub(super) fn delete_references(
     interaction_ids: &[String],
 ) -> rusqlite::Result<()> {
     for id in interaction_ids {
+        conn.execute(
+            "DELETE FROM agent_message_host_tasks WHERE interaction_id=?1",
+            [id],
+        )?;
         conn.execute(
             "DELETE FROM agent_message_availability WHERE interaction_id=?1",
             [id],
@@ -494,6 +569,7 @@ pub fn receive(
             interaction_id: id.clone(),
             kind: record.kind,
             sender: record.sender_session_id.unwrap_or_default(),
+            host_automation: host_automation_provenance(&tx, &id)?,
             message: body,
             parent_interaction_id: record.parent_interaction_id,
             reply_status,

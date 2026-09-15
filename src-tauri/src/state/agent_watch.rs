@@ -412,6 +412,7 @@ mod tests {
             provider: "mock".to_string(),
             turn_id: Some("turn-1".to_string()),
             source: Some("model".to_string()),
+            provider_provenance: None,
         });
 
         let snapshot = state.snapshot_since(Some(&start), Some(1024)).unwrap();
@@ -429,6 +430,7 @@ mod tests {
             provider: "mock".to_string(),
             turn_id: Some("turn-1".to_string()),
             source: Some("model".to_string()),
+            provider_provenance: None,
         });
 
         let snapshot = state.snapshot_since(None, Some(5)).unwrap();
@@ -448,6 +450,7 @@ mod tests {
             provider: "mock".to_string(),
             turn_id: Some("turn-1".to_string()),
             source: Some("model".to_string()),
+            provider_provenance: None,
         });
 
         let snapshot = state.snapshot_since(None, None).unwrap();
@@ -503,6 +506,7 @@ mod tests {
             provider: "mock".to_string(),
             turn_id: None,
             source: None,
+            provider_provenance: None,
         });
         let delivery = state.push_delivery(serde_json::json!({"delivery_state":"submitted"}));
 

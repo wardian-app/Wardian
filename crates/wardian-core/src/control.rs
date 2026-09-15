@@ -146,27 +146,6 @@ pub enum ControlRequest {
         latest: bool,
     },
     WatchlistsChanged,
-    SendMessage {
-        target: String,
-        message: String,
-        thread: Option<String>,
-        #[serde(default, skip_serializing_if = "MessageInputMode::is_message")]
-        input_mode: MessageInputMode,
-        #[serde(default, skip_serializing_if = "QueuePolicy::is_queue_if_busy")]
-        queue_policy: QueuePolicy,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        approval_action: Option<ApprovalAction>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        origin: Option<MessageOrigin>,
-        /// Target resolution scope: "neighbors" (default) or "all" — for agent senders only
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        target_scope: Option<String>,
-        /// Upper bound for a provider process started for an offline target.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        headless_timeout_ms: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        orchestration: Option<OrchestrationDeliveryOptions>,
-    },
     NotifyCreate {
         notification: InboxNotificationPayload,
         origin: MessageOrigin,
@@ -175,35 +154,6 @@ pub enum ControlRequest {
         notification_id: String,
         timeout_ms: Option<u64>,
         origin: MessageOrigin,
-    },
-    Ask {
-        target: String,
-        message: String,
-        thread: Option<String>,
-        tail_bytes: Option<usize>,
-        timeout_ms: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        origin: Option<MessageOrigin>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        orchestration: Option<OrchestrationDeliveryOptions>,
-    },
-    AskMany {
-        targets: Vec<String>,
-        message: String,
-        thread: Option<String>,
-        tail_bytes: Option<usize>,
-        timeout_ms: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        origin: Option<MessageOrigin>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        orchestration: Option<OrchestrationDeliveryOptions>,
-    },
-    SubmitReply {
-        request_id: String,
-        status: ReplyStatus,
-        body: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        origin: Option<MessageOrigin>,
     },
     DeliveryGet {
         interaction_id: String,
@@ -215,13 +165,6 @@ pub enum ControlRequest {
     },
     DeliveryWithdraw {
         interaction_id: String,
-    },
-    DeliveryReplace {
-        interaction_id: String,
-        message: String,
-        idempotency_key: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        deadline_at: Option<String>,
     },
     DeliveryCapabilities {
         target: String,
@@ -745,13 +688,6 @@ pub struct DeliveryDetail {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SendMessageResponse {
-    pub schema: u8,
-    pub ok: bool,
-    pub delivery: Vec<DeliveryDetail>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplyStatus {
     Done,
@@ -926,72 +862,6 @@ pub struct StructuredReply {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AskResponse {
-    pub schema: u8,
-    pub ok: bool,
-    pub request_id: String,
-    pub target: String,
-    pub delivery: Vec<DeliveryDetail>,
-    pub reply: StructuredReply,
-    pub watch: AgentWatchResponse,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub watch_error: Option<WatchEvidenceError>,
-}
-
-/// One recipient's accountable result from an explicit multi-target ask.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AskTargetResponse {
-    pub target: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_id: Option<String>,
-    pub outcome: AskTargetOutcome,
-    pub delivery: Vec<DeliveryDetail>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reply: Option<StructuredReply>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub watch: Option<AgentWatchResponse>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub watch_error: Option<WatchEvidenceError>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub failure: Option<WatchEvidenceError>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AskTargetOutcome {
-    /// A structured reply was received before the shared deadline.
-    Completed,
-    /// The shared deadline elapsed; the request was closed with a failed reply.
-    TimedOut,
-    /// The target could not receive its request; any created request was closed.
-    DeliveryFailed,
-    /// The control plane stopped waiting; the request was closed with a failed reply.
-    Cancelled,
-}
-
-/// Aggregated response for a scoped, accountable fan-out ask.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AskManyResponse {
-    pub schema: u8,
-    pub ok: bool,
-    pub targets: Vec<AskTargetResponse>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WatchEvidenceError {
-    pub code: String,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReplyResponse {
-    pub schema: u8,
-    pub ok: bool,
-    pub request_id: String,
-    pub reply: StructuredReply,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WatchEvent {
     pub cursor: String,
     pub kind: String,
@@ -1006,6 +876,15 @@ pub struct WatchOutput {
     pub omitted_bytes: usize,
 }
 
+/// Provider session, source, and turn identity binding for a watched message.
+/// Absence of this value leaves the watch observation unbound to native logs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WatchTranscriptProvenance {
+    pub provider_session_id: String,
+    pub source_path: String,
+    pub provider_turn_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WatchTranscriptMessage {
     pub role: String,
@@ -1015,6 +894,8 @@ pub struct WatchTranscriptMessage {
     pub turn_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_provenance: Option<WatchTranscriptProvenance>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1422,126 +1303,29 @@ mod tests {
     }
 
     #[test]
+    fn retired_peer_wire_requests_are_rejected() {
+        for command in [
+            "send_message",
+            "ask",
+            "ask_many",
+            "submit_reply",
+            "delivery_replace",
+        ] {
+            let wire = serde_json::json!({"command": command, "target": "agent", "message": "stale", "request_id": "old", "status": "done", "body": "old"});
+            let error = serde_json::from_value::<ControlRequest>(wire).unwrap_err();
+            assert!(
+                error.to_string().contains("unknown variant"),
+                "{command}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn ok_response_serializes() {
         let resp = OkResponse::new();
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains(r#""ok":true"#));
         assert!(json.contains(r#""schema":1"#));
-    }
-
-    #[test]
-    fn send_message_request_serializes() {
-        let req = ControlRequest::SendMessage {
-            target: "all".to_string(),
-            message: "hello".to_string(),
-            thread: None,
-            input_mode: MessageInputMode::Message,
-            queue_policy: QueuePolicy::QueueIfBusy,
-            approval_action: None,
-            origin: None,
-            target_scope: None,
-            headless_timeout_ms: None,
-            orchestration: None,
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        assert!(json.contains(r#""command":"send_message""#));
-        assert!(json.contains(r#""target":"all""#));
-        assert!(!json.contains(r#""origin""#));
-    }
-
-    #[test]
-    fn send_message_request_serializes_agent_origin() {
-        let req = ControlRequest::SendMessage {
-            target: "CoderOne".to_string(),
-            message: "hello".to_string(),
-            thread: None,
-            input_mode: MessageInputMode::Message,
-            queue_policy: QueuePolicy::QueueIfBusy,
-            approval_action: None,
-            origin: Some(MessageOrigin::WardianAgent {
-                session_id: "source-1".to_string(),
-            }),
-            target_scope: None,
-            headless_timeout_ms: None,
-            orchestration: None,
-        };
-
-        let json = serde_json::to_string(&req).unwrap();
-
-        assert!(json.contains(r#""origin""#));
-        assert!(json.contains(r#""kind":"wardian_agent""#));
-        assert!(json.contains(r#""session_id":"source-1""#));
-    }
-
-    #[test]
-    fn send_message_request_serializes_command_input_mode() {
-        let req = ControlRequest::SendMessage {
-            target: "CoderOne".to_string(),
-            message: "/goal test".to_string(),
-            thread: None,
-            input_mode: MessageInputMode::Command,
-            queue_policy: QueuePolicy::QueueIfBusy,
-            approval_action: None,
-            origin: Some(MessageOrigin::WardianAgent {
-                session_id: "source-1".to_string(),
-            }),
-            target_scope: None,
-            headless_timeout_ms: None,
-            orchestration: None,
-        };
-
-        let json = serde_json::to_string(&req).unwrap();
-
-        assert!(json.contains(r#""input_mode":"command""#));
-    }
-
-    #[test]
-    fn send_message_request_serializes_queue_policy_and_approval_action() {
-        let req = ControlRequest::SendMessage {
-            target: "CoderOne".to_string(),
-            message: "approve".to_string(),
-            thread: None,
-            input_mode: MessageInputMode::ApprovalAction,
-            queue_policy: QueuePolicy::LiveOnly,
-            approval_action: Some(ApprovalAction::Select {
-                option: "allow_once".to_string(),
-            }),
-            origin: None,
-            target_scope: None,
-            headless_timeout_ms: None,
-            orchestration: None,
-        };
-
-        let json = serde_json::to_string(&req).unwrap();
-        let roundtrip: ControlRequest = serde_json::from_str(&json).unwrap();
-
-        assert!(json.contains(r#""input_mode":"approval_action""#));
-        assert!(json.contains(r#""queue_policy":"live_only""#));
-        assert!(json.contains(r#""action":"select""#));
-        assert!(json.contains(r#""option":"allow_once""#));
-        assert_eq!(roundtrip, req);
-    }
-
-    #[test]
-    fn send_message_request_accepts_missing_origin() {
-        let json = r#"{"command":"send_message","target":"all","message":"hello","thread":null}"#;
-        let req: ControlRequest = serde_json::from_str(json).unwrap();
-
-        assert_eq!(
-            req,
-            ControlRequest::SendMessage {
-                target: "all".to_string(),
-                message: "hello".to_string(),
-                thread: None,
-                input_mode: MessageInputMode::Message,
-                queue_policy: QueuePolicy::QueueIfBusy,
-                approval_action: None,
-                origin: None,
-                target_scope: None,
-                headless_timeout_ms: None,
-                orchestration: None,
-            }
-        );
     }
 
     #[test]
@@ -1612,6 +1396,7 @@ mod tests {
                     provider: "codex".to_string(),
                     turn_id: Some("turn-1".to_string()),
                     source: Some("response_item".to_string()),
+                    provider_provenance: None,
                 }],
                 latest_text: "clean answer".to_string(),
                 truncated: false,
@@ -1665,164 +1450,6 @@ mod tests {
 
         assert_eq!(json["output"]["text"], "red");
         assert_eq!(json["raw_output"]["text"], "\u{1b}[31mred\u{1b}[0m");
-    }
-
-    #[test]
-    fn ask_request_serializes_structured_reply_options() {
-        let req = ControlRequest::Ask {
-            target: "Wardian-Codex".to_string(),
-            message: "review this".to_string(),
-            thread: None,
-            tail_bytes: Some(65_536),
-            timeout_ms: Some(30_000),
-            origin: Some(MessageOrigin::WardianAgent {
-                session_id: "source-1".to_string(),
-            }),
-            orchestration: None,
-        };
-
-        let json = serde_json::to_string(&req).unwrap();
-        let roundtrip: ControlRequest = serde_json::from_str(&json).unwrap();
-
-        assert!(json.contains(r#""command":"ask""#));
-        assert!(json.contains(r#""target":"Wardian-Codex""#));
-        assert!(json.contains(r#""message":"review this""#));
-        assert!(json.contains(r#""tail_bytes":65536"#));
-        assert!(json.contains(r#""timeout_ms":30000"#));
-        assert_eq!(roundtrip, req);
-    }
-
-    #[test]
-    fn ask_many_request_and_response_keep_each_target_correlation() {
-        let req = ControlRequest::AskMany {
-            targets: vec!["reviewer-a1".to_string(), "reviewer-a2".to_string()],
-            message: "review this".to_string(),
-            thread: None,
-            tail_bytes: Some(65_536),
-            timeout_ms: Some(30_000),
-            origin: None,
-            orchestration: None,
-        };
-        let request_json = serde_json::to_string(&req).unwrap();
-        assert!(request_json.contains(r#""command":"ask_many""#));
-        assert_eq!(
-            serde_json::from_str::<ControlRequest>(&request_json).unwrap(),
-            req
-        );
-
-        let response = AskManyResponse {
-            schema: CONTROL_SCHEMA,
-            ok: true,
-            targets: vec![
-                AskTargetResponse {
-                    target: "reviewer-a1".to_string(),
-                    request_id: Some("ask_a".to_string()),
-                    outcome: AskTargetOutcome::Completed,
-                    delivery: Vec::new(),
-                    reply: None,
-                    watch: None,
-                    watch_error: None,
-                    failure: None,
-                },
-                AskTargetResponse {
-                    target: "reviewer-a2".to_string(),
-                    request_id: Some("ask_b".to_string()),
-                    outcome: AskTargetOutcome::TimedOut,
-                    delivery: Vec::new(),
-                    reply: None,
-                    watch: None,
-                    watch_error: None,
-                    failure: Some(WatchEvidenceError {
-                        code: "watch_timeout".to_string(),
-                        message: "structured reply timed out".to_string(),
-                    }),
-                },
-            ],
-        };
-        let response_json = serde_json::to_string(&response).unwrap();
-        let roundtrip: AskManyResponse = serde_json::from_str(&response_json).unwrap();
-        assert_eq!(roundtrip.targets[0].request_id.as_deref(), Some("ask_a"));
-        assert_eq!(roundtrip.targets[1].outcome, AskTargetOutcome::TimedOut);
-    }
-
-    #[test]
-    fn ask_response_serializes_additive_watch_error() {
-        let response = AskResponse {
-            schema: CONTROL_SCHEMA,
-            ok: true,
-            request_id: "ask_0123456789abcdef".to_string(),
-            target: "reviewer-a1".to_string(),
-            delivery: Vec::new(),
-            reply: StructuredReply {
-                request_id: "ask_0123456789abcdef".to_string(),
-                status: ReplyStatus::Done,
-                body: "finished".to_string(),
-                target_session_id: "agent-1".to_string(),
-                source_session_id: Some("agent-1".to_string()),
-                replied_at: "2026-05-22T00:00:00.000Z".to_string(),
-            },
-            watch: AgentWatchResponse {
-                schema: CONTROL_SCHEMA,
-                agent: WatchAgentSnapshot {
-                    uuid: "agent-1".to_string(),
-                    name: "reviewer-a1".to_string(),
-                    provider: "codex".to_string(),
-                    status: "idle".to_string(),
-                    last_status_at: None,
-                },
-                cursor: "agent-1:0000000000000001".to_string(),
-                events: Vec::new(),
-                output: WatchOutput {
-                    cursor: "agent-1:0000000000000001".to_string(),
-                    text: String::new(),
-                    truncated: false,
-                    omitted_bytes: 0,
-                },
-                transcript: None,
-                raw_output: None,
-                delivery: WatchDeliverySnapshot {
-                    delivery: Vec::new(),
-                },
-            },
-            watch_error: Some(WatchEvidenceError {
-                code: "cursor_expired".to_string(),
-                message: "watch state error".to_string(),
-            }),
-        };
-
-        let json = serde_json::to_string(&response).unwrap();
-        let roundtrip: AskResponse = serde_json::from_str(&json).unwrap();
-
-        assert!(json.contains(r#""watch_error""#));
-        assert_eq!(
-            roundtrip
-                .watch_error
-                .as_ref()
-                .map(|error| error.code.as_str()),
-            Some("cursor_expired")
-        );
-        assert_eq!(roundtrip.reply.body, "finished");
-    }
-
-    #[test]
-    fn submit_reply_request_serializes_status_and_body() {
-        let req = ControlRequest::SubmitReply {
-            request_id: "ask_0123456789abcdef".to_string(),
-            status: ReplyStatus::Done,
-            body: "finished".to_string(),
-            origin: Some(MessageOrigin::WardianAgent {
-                session_id: "agent-1".to_string(),
-            }),
-        };
-
-        let json = serde_json::to_string(&req).unwrap();
-        let roundtrip: ControlRequest = serde_json::from_str(&json).unwrap();
-
-        assert!(json.contains(r#""command":"submit_reply""#));
-        assert!(json.contains(r#""request_id":"ask_0123456789abcdef""#));
-        assert!(json.contains(r#""status":"done""#));
-        assert!(json.contains(r#""body":"finished""#));
-        assert_eq!(roundtrip, req);
     }
 
     #[test]
@@ -2107,35 +1734,6 @@ mod tests {
         assert!(json.contains(r#""observed_state":"submitted_observed""#));
         assert!(json.contains(r#""reason":"target_processing""#));
         assert!(json.contains(r#""profile":"codex""#));
-    }
-
-    #[test]
-    fn send_message_response_serializes_delivery_details() {
-        let response = SendMessageResponse {
-            schema: CONTROL_SCHEMA,
-            ok: true,
-            delivery: vec![DeliveryDetail {
-                uuid: "agent-1".to_string(),
-                name: "CoderOne".to_string(),
-                provider: "codex".to_string(),
-                runtime_state: "live_pty_available".to_string(),
-                delivery_state: "submitted".to_string(),
-                input_mode: MessageInputMode::Command,
-                queue_policy: QueuePolicy::QueueIfBusy,
-                message_id: None,
-                delivery_phase: None,
-                observed_state: None,
-                reason: None,
-                profile: None,
-                error: None,
-            }],
-        };
-
-        let json = serde_json::to_string(&response).unwrap();
-
-        assert!(json.contains(r#""ok":true"#));
-        assert!(json.contains(r#""delivery_state":"submitted""#));
-        assert!(json.contains(r#""input_mode":"command""#));
     }
 
     #[test]

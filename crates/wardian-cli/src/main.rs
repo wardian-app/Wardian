@@ -13,15 +13,16 @@ mod listener;
 mod live;
 mod mcp;
 mod memory;
+mod messaging;
 mod output;
 mod schema;
 mod telemetry;
 mod watchlist;
 use args::{
-    AgentArgs, AgentCommand, AgentWorktreeCommand, ApprovalArg, AskArgs, AutomationArgs,
-    AutomationCommand, AutomationScheduleCommand, AutomationSessionCloseCommand, Cli, Command,
-    ConversationArgs, ConversationCommand, DeliveryArgs, DeliveryCommand, NotifyArgs,
-    NotifyCommand, QueuePolicyArg, ReplyArgs, ReplyStatusArg, ScheduleDefinitionArgs, SendArgs,
+    AgentArgs, AgentCommand, AgentWorktreeCommand, AutomationArgs, AutomationCommand,
+    AutomationScheduleCommand, AutomationSessionCloseCommand, Cli, Command, ConversationArgs,
+    ConversationCommand, DeliveryArgs, DeliveryCommand, NotifyArgs, NotifyCommand,
+    ScheduleDefinitionArgs,
 };
 use clap::Parser;
 use errors::{handle_parse_error, parse_error, CliError, ExitCode};
@@ -34,14 +35,12 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use wardian_core::control::{
-    ApprovalAction, AutomationRunResponse, InboxNotificationKind, InboxNotificationPayload,
-    MessageInputMode, OrchestrationDeliveryOptions, QueuePolicy,
+    AutomationRunResponse, InboxNotificationKind, InboxNotificationPayload,
 };
 use wardian_core::identity::{self, ListFilters, Scope};
 use wardian_core::models::{
     AutomationAssignments, LibraryEntry, LibraryIndexNode, ScheduleDefinition,
 };
-use wardian_core::native_transport::NativeMessageOperation;
 
 fn main() {
     std::process::exit(run());
@@ -86,6 +85,9 @@ fn run() -> i32 {
     {
         return finish(render_automation_node_types(node.as_deref(), *json));
     }
+    if let Command::Message(args) = &cli.command {
+        return finish(messaging::handle(args));
+    }
     if let Err(error) = wardian_core::automation_migration::migrate_current_home() {
         let error = CliError::generic(format!(
             "could not migrate legacy automation storage: {error}"
@@ -108,11 +110,9 @@ fn run() -> i32 {
         Command::Watchlist(args) => watchlist::handle_watchlist(args),
         Command::Telemetry(args) => telemetry::handle_telemetry(args),
         Command::Graph(args) => graph::handle_graph(args),
-        Command::Send(args) => handle_send(args),
+        Command::Message(_) => unreachable!("messaging runs without local migrations"),
         Command::Delivery(args) => handle_delivery(args),
         Command::Notify(args) => handle_notify(args),
-        Command::Ask(args) => handle_ask(args),
-        Command::Reply(args) => handle_reply(args),
     };
 
     finish(result)
@@ -1616,7 +1616,7 @@ fn render_automation_gen(out: &str, kind: GenKind, check: bool) -> Result<String
 }
 
 // ---------------------------------------------------------------------------
-// wardian send
+// User notifications and native delivery inspection
 // ---------------------------------------------------------------------------
 
 fn handle_notify(args: NotifyArgs) -> Result<String, CliError> {
@@ -1689,88 +1689,6 @@ fn handle_notify(args: NotifyArgs) -> Result<String, CliError> {
         .map_err(|error| CliError::generic(error.to_string()))
 }
 
-fn handle_send(args: SendArgs) -> Result<String, CliError> {
-    let approval_action = args.approval.map(approval_arg_to_control);
-    let message = read_send_message_input(
-        args.message.as_deref(),
-        args.stdin,
-        args.file.as_deref(),
-        args.approval,
-    )?;
-    let queue_policy = queue_policy_arg_to_control(args.queue_policy);
-    let orchestration = orchestration_options(
-        args.idempotency_key.clone(),
-        args.deadline.as_deref(),
-        args.expires_in.as_deref(),
-        args.expected_generation,
-        args.invalidate_premise,
-    )?;
-    let input_mode = if approval_action.is_some() {
-        MessageInputMode::ApprovalAction
-    } else if args.as_command {
-        validate_single_agent_target(&args.to, "send --as-command")?;
-        validate_send_command_thread(args.thread.as_deref())?;
-        MessageInputMode::Command
-    } else {
-        MessageInputMode::Message
-    };
-
-    let response = if let Some(until) = args.wait_until.as_deref() {
-        validate_single_agent_target(&args.to, "send --wait-until")?;
-        let timeout = parse_timeout(&args.timeout)?;
-        let response = live::send_message_and_watch(
-            &args.to,
-            &message,
-            live::SendMessageAndWatchOptions {
-                thread: args.thread.as_deref(),
-                input_mode,
-                queue_policy,
-                approval_action,
-                until,
-                timeout,
-                target_scope: Some(args.scope.as_str()),
-                orchestration: orchestration.clone(),
-            },
-        )
-        .map_err(control_error)?;
-        let watch = response.watch;
-        serde_json::json!({
-            "schema": 1,
-            "ok": true,
-            "target": args.to,
-            "input_mode": input_mode,
-            "status": watch.agent.status,
-            "delivery": response.delivery, "watch_error": response.watch_error,
-            "cursor": watch.cursor,
-        })
-    } else {
-        let timeout = parse_timeout(&args.timeout)?;
-        let sent = live::send_message_with_delivery_and_scope_options(
-            &args.to,
-            &message,
-            live::SendMessageDeliveryOptions {
-                thread: args.thread.as_deref(),
-                input_mode,
-                queue_policy,
-                approval_action,
-                target_scope: Some(args.scope.as_str()),
-                timeout,
-                orchestration,
-            },
-        )
-        .map_err(control_error)?;
-        serde_json::json!({
-            "schema": 1,
-            "ok": true,
-            "target": args.to,
-            "input_mode": input_mode,
-            "delivery": sent.delivery,
-        })
-    };
-
-    Ok(format!("{}\n", serde_json::to_string(&response).unwrap()))
-}
-
 fn handle_delivery(args: DeliveryArgs) -> Result<String, CliError> {
     let value = match args.command {
         DeliveryCommand::Show {
@@ -1782,20 +1700,6 @@ fn handle_delivery(args: DeliveryArgs) -> Result<String, CliError> {
             .and_then(|response| serde_json::to_value(response).map_err(std::io::Error::other)),
         DeliveryCommand::Withdraw { interaction_id } => live::delivery_withdraw(&interaction_id)
             .and_then(|response| serde_json::to_value(response).map_err(std::io::Error::other)),
-        DeliveryCommand::Replace {
-            interaction_id,
-            message,
-            stdin,
-            file,
-            idempotency_key,
-            deadline,
-            expires_in,
-        } => {
-            let message = read_message_input(message.as_deref(), stdin, file.as_deref())?;
-            let deadline_at = delivery_deadline(deadline.as_deref(), expires_in.as_deref())?;
-            live::delivery_replace(&interaction_id, &message, &idempotency_key, deadline_at)
-                .and_then(|response| serde_json::to_value(response).map_err(std::io::Error::other))
-        }
         DeliveryCommand::Capabilities { target } => live::delivery_capabilities(&target)
             .and_then(|response| serde_json::to_value(response).map_err(std::io::Error::other)),
     }
@@ -1803,172 +1707,6 @@ fn handle_delivery(args: DeliveryArgs) -> Result<String, CliError> {
     serde_json::to_string(&value)
         .map(|json| format!("{json}\n"))
         .map_err(|error| CliError::generic(error.to_string()))
-}
-
-fn handle_ask(args: AskArgs) -> Result<String, CliError> {
-    validate_single_agent_target(&args.target, "ask")?;
-    for target in &args.targets {
-        validate_single_agent_target(target, "ask")?;
-    }
-    validate_ask_thread(args.thread.as_deref())?;
-    let message = read_message_input(args.message.as_deref(), args.stdin, args.file.as_deref())?;
-    let timeout = parse_timeout(&args.timeout)?;
-    let condition = normalize_ask_condition(args.until.as_deref().unwrap_or("status:idle"))?;
-    let orchestration = orchestration_options(
-        args.idempotency_key,
-        args.deadline.as_deref(),
-        args.expires_in.as_deref(),
-        args.expected_generation,
-        args.invalidate_premise,
-    )?;
-    let mut targets = vec![args.target.clone()];
-    targets.extend(args.targets);
-    targets.sort();
-    targets.dedup();
-
-    if targets.len() > 1 && condition == "reply" {
-        let response = live::ask_agents(
-            &targets,
-            &message,
-            args.thread.as_deref(),
-            Some(args.tail),
-            timeout,
-            orchestration,
-        )
-        .map_err(control_error)?;
-        return render_ask_many_response(&response);
-    }
-    if targets.len() > 1 {
-        return Err(CliError::backend(
-            ExitCode::Generic,
-            "not_supported",
-            "multi-target wardian ask requires --until reply",
-        ));
-    }
-    let response = live::ask_agent(
-        &targets[0],
-        &message,
-        args.thread.as_deref(),
-        &condition,
-        Some(args.tail),
-        timeout,
-        orchestration,
-    )
-    .map_err(control_error)?;
-    render_ask_response(&targets[0], &condition, response)
-}
-
-fn orchestration_options(
-    idempotency_key: Option<String>,
-    deadline: Option<&str>,
-    expires_in: Option<&str>,
-    expected_generation: Option<u64>,
-    invalidate_premise: bool,
-) -> Result<Option<OrchestrationDeliveryOptions>, CliError> {
-    let deadline_at = delivery_deadline(deadline, expires_in)?;
-    if idempotency_key.is_none()
-        && deadline_at.is_none()
-        && expected_generation.is_none()
-        && !invalidate_premise
-    {
-        return Ok(None);
-    }
-    Ok(Some(OrchestrationDeliveryOptions {
-        idempotency_key,
-        deadline_at,
-        expected_generation,
-        operation: if invalidate_premise {
-            NativeMessageOperation::InvalidatePremise
-        } else {
-            NativeMessageOperation::StartTurn
-        },
-    }))
-}
-
-fn delivery_deadline(
-    deadline: Option<&str>,
-    expires_in: Option<&str>,
-) -> Result<Option<String>, CliError> {
-    if let Some(deadline) = deadline {
-        let parsed = chrono::DateTime::parse_from_rfc3339(deadline).map_err(|error| {
-            CliError::generic(format!("invalid --deadline RFC3339 value: {error}"))
-        })?;
-        return Ok(Some(
-            parsed
-                .with_timezone(&chrono::Utc)
-                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        ));
-    }
-    expires_in.map(parse_timeout).transpose().map(|duration| {
-        duration.map(|duration| {
-            (chrono::Utc::now()
-                + chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::MAX))
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-        })
-    })
-}
-
-fn handle_reply(args: ReplyArgs) -> Result<String, CliError> {
-    let body = read_message_input(args.message.as_deref(), args.stdin, args.file.as_deref())?;
-    let response = live::submit_reply(
-        &args.request_id,
-        reply_status_arg_to_control(args.status),
-        &body,
-    )
-    .map_err(control_error)?;
-    serde_json::to_string(&serde_json::json!({
-        "schema": 1,
-        "ok": true,
-        "request_id": response.request_id,
-        "reply": response.reply,
-    }))
-    .map(|json| format!("{json}\n"))
-    .map_err(|e| CliError::generic(e.to_string()))
-}
-
-fn reply_status_arg_to_control(status: ReplyStatusArg) -> wardian_core::control::ReplyStatus {
-    match status {
-        ReplyStatusArg::Done => wardian_core::control::ReplyStatus::Done,
-        ReplyStatusArg::Blocked => wardian_core::control::ReplyStatus::Blocked,
-        ReplyStatusArg::Failed => wardian_core::control::ReplyStatus::Failed,
-    }
-}
-
-fn queue_policy_arg_to_control(policy: QueuePolicyArg) -> QueuePolicy {
-    match policy {
-        QueuePolicyArg::QueueIfBusy => QueuePolicy::QueueIfBusy,
-        QueuePolicyArg::LiveOnly => QueuePolicy::LiveOnly,
-        QueuePolicyArg::MailboxOnly => QueuePolicy::MailboxOnly,
-    }
-}
-
-fn approval_arg_to_control(approval: ApprovalArg) -> ApprovalAction {
-    match approval {
-        ApprovalArg::Accept => ApprovalAction::Accept,
-        ApprovalArg::Reject => ApprovalAction::Reject,
-    }
-}
-
-fn approval_arg_default_message(approval: ApprovalArg) -> &'static str {
-    match approval {
-        ApprovalArg::Accept => "accept",
-        ApprovalArg::Reject => "reject",
-    }
-}
-
-fn read_send_message_input(
-    message: Option<&str>,
-    stdin: bool,
-    file: Option<&str>,
-    approval: Option<ApprovalArg>,
-) -> Result<String, CliError> {
-    match read_message_input(message, stdin, file) {
-        Ok(message) => Ok(message),
-        Err(_) if approval.is_some() && message.is_none() && !stdin && file.is_none() => {
-            Ok(approval_arg_default_message(approval.unwrap()).to_string())
-        }
-        Err(error) => Err(error),
-    }
 }
 
 fn read_message_input(
@@ -1989,92 +1727,6 @@ fn read_message_input(
             .map(ToOwned::to_owned)
             .ok_or_else(|| CliError::generic("Provide a message, --stdin, or --file".to_string()))
     }
-}
-
-fn validate_single_agent_target(target: &str, command_name: &str) -> Result<(), CliError> {
-    if target == "all" || target.starts_with("class:") {
-        return Err(CliError::backend(
-            ExitCode::Generic,
-            "not_supported",
-            format!("{command_name} requires a single agent name or uuid"),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_ask_thread(thread: Option<&str>) -> Result<(), CliError> {
-    if thread.is_some() {
-        return Err(CliError::backend(
-            ExitCode::Generic,
-            "not_supported",
-            "--thread is not supported by wardian ask yet",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_send_command_thread(thread: Option<&str>) -> Result<(), CliError> {
-    if thread.is_some() {
-        return Err(CliError::backend(
-            ExitCode::Generic,
-            "not_supported",
-            "--as-command cannot be combined with --thread",
-        ));
-    }
-    Ok(())
-}
-
-fn normalize_ask_condition(until: &str) -> Result<String, CliError> {
-    if until == "reply"
-        || until.starts_with("status:")
-        || until.starts_with("output:")
-        || until.starts_with("event:")
-        || until.starts_with("delivery:")
-    {
-        Ok(until.to_string())
-    } else if until.contains(':') {
-        Err(CliError::backend(
-            ExitCode::Generic,
-            "not_supported",
-            format!("unsupported watch condition: {until}"),
-        ))
-    } else {
-        Ok(format!("status:{until}"))
-    }
-}
-
-fn render_ask_response(
-    target: &str,
-    condition: &str,
-    ask: live::AskAgentResponse,
-) -> Result<String, CliError> {
-    let watch = ask.watch;
-    let response = serde_json::json!({
-        "schema": 1,
-        "ok": true,
-        "target": target,
-        "condition": condition,
-        "request_id": ask.request_id,
-        "reply": ask.reply,
-        "watch_error": ask.watch_error,
-        "agent": watch.agent,
-        "cursor": watch.cursor,
-        "delivery": ask.delivery,
-        "output": watch.output,
-        "transcript": watch.transcript,
-        "events": watch.events,
-    });
-    serde_json::to_string(&response)
-        .map(|json| format!("{json}\n"))
-        .map_err(|e| CliError::generic(e.to_string()))
-}
-
-fn render_ask_many_response(
-    ask: &wardian_core::control::AskManyResponse,
-) -> Result<String, CliError> {
-    serde_json::to_string(ask)
-        .map(|json| format!("{json}\n"))
-        .map_err(|error| CliError::generic(error.to_string()))
 }
 
 fn parse_include(include: Option<&str>) -> Vec<String> {
@@ -2775,202 +2427,6 @@ mod tests {
     }
 
     #[test]
-    fn render_ask_response_uses_send_delivery() {
-        let ask = live::AskAgentResponse {
-            request_id: None,
-            reply: None,
-            delivery: vec![wardian_core::control::DeliveryDetail {
-                uuid: "agent-1".to_string(),
-                name: "reviewer-a1".to_string(),
-                provider: "mock".to_string(),
-                runtime_state: "live_pty_available".to_string(),
-                delivery_state: "submitted".to_string(),
-                input_mode: MessageInputMode::Message,
-                queue_policy: wardian_core::control::QueuePolicy::QueueIfBusy,
-                message_id: None,
-                delivery_phase: None,
-                observed_state: None,
-                reason: None,
-                profile: None,
-                error: None,
-            }],
-            watch_error: None,
-            watch: wardian_core::control::AgentWatchResponse {
-                schema: 1,
-                agent: wardian_core::control::WatchAgentSnapshot {
-                    uuid: "agent-1".to_string(),
-                    name: "reviewer-a1".to_string(),
-                    provider: "mock".to_string(),
-                    status: "idle".to_string(),
-                    last_status_at: None,
-                },
-                cursor: "agent-1:2".to_string(),
-                events: Vec::new(),
-                output: wardian_core::control::WatchOutput {
-                    cursor: "agent-1:2".to_string(),
-                    text: "done".to_string(),
-                    truncated: false,
-                    omitted_bytes: 0,
-                },
-                transcript: None,
-                raw_output: None,
-                delivery: wardian_core::control::WatchDeliverySnapshot {
-                    delivery: Vec::new(),
-                },
-            },
-        };
-
-        let rendered = render_ask_response("reviewer-a1", "status:idle", ask).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
-        assert_eq!(json["delivery"][0]["delivery_state"], "submitted");
-        assert_eq!(json["output"]["text"], "done");
-    }
-
-    #[test]
-    fn render_ask_response_includes_structured_reply() {
-        let ask = live::AskAgentResponse {
-            request_id: Some("ask_0123456789abcdef".to_string()),
-            reply: Some(wardian_core::control::StructuredReply {
-                request_id: "ask_0123456789abcdef".to_string(),
-                status: wardian_core::control::ReplyStatus::Done,
-                body: "finished".to_string(),
-                target_session_id: "agent-1".to_string(),
-                source_session_id: Some("agent-1".to_string()),
-                replied_at: "2026-05-13T00:00:00.000Z".to_string(),
-            }),
-            delivery: Vec::new(),
-            watch_error: None,
-            watch: wardian_core::control::AgentWatchResponse {
-                schema: 1,
-                agent: wardian_core::control::WatchAgentSnapshot {
-                    uuid: "agent-1".to_string(),
-                    name: "reviewer-a1".to_string(),
-                    provider: "mock".to_string(),
-                    status: "idle".to_string(),
-                    last_status_at: None,
-                },
-                cursor: "agent-1:2".to_string(),
-                events: Vec::new(),
-                output: wardian_core::control::WatchOutput {
-                    cursor: "agent-1:2".to_string(),
-                    text: String::new(),
-                    truncated: false,
-                    omitted_bytes: 0,
-                },
-                transcript: None,
-                raw_output: None,
-                delivery: wardian_core::control::WatchDeliverySnapshot {
-                    delivery: Vec::new(),
-                },
-            },
-        };
-
-        let rendered = render_ask_response("reviewer-a1", "reply", ask).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
-        assert_eq!(json["request_id"], "ask_0123456789abcdef");
-        assert_eq!(json["reply"]["status"], "done");
-        assert_eq!(json["reply"]["body"], "finished");
-    }
-
-    #[test]
-    fn render_ask_response_includes_watch_error_when_present() {
-        let ask = live::AskAgentResponse {
-            request_id: None,
-            reply: None,
-            delivery: Vec::new(),
-            watch_error: Some(wardian_core::control::WatchEvidenceError {
-                code: "gap_detected".to_string(),
-                message: "watch cursor expired while waiting".to_string(),
-            }),
-            watch: wardian_core::control::AgentWatchResponse {
-                schema: 1,
-                agent: wardian_core::control::WatchAgentSnapshot {
-                    uuid: "agent-1".to_string(),
-                    name: "reviewer-a1".to_string(),
-                    provider: "mock".to_string(),
-                    status: "idle".to_string(),
-                    last_status_at: None,
-                },
-                cursor: "agent-1:2".to_string(),
-                events: Vec::new(),
-                output: wardian_core::control::WatchOutput {
-                    cursor: "agent-1:2".to_string(),
-                    text: String::new(),
-                    truncated: false,
-                    omitted_bytes: 0,
-                },
-                transcript: None,
-                raw_output: None,
-                delivery: wardian_core::control::WatchDeliverySnapshot {
-                    delivery: Vec::new(),
-                },
-            },
-        };
-
-        let rendered = render_ask_response("reviewer-a1", "reply", ask).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
-        assert_eq!(json["watch_error"]["code"], "gap_detected");
-        assert_eq!(
-            json["watch_error"]["message"],
-            "watch cursor expired while waiting"
-        );
-    }
-
-    #[test]
-    fn render_ask_response_includes_transcript_when_watch_has_it() {
-        let ask = live::AskAgentResponse {
-            request_id: None,
-            reply: None,
-            delivery: Vec::new(),
-            watch_error: None,
-            watch: wardian_core::control::AgentWatchResponse {
-                schema: 1,
-                agent: wardian_core::control::WatchAgentSnapshot {
-                    uuid: "agent-1".to_string(),
-                    name: "reviewer-a1".to_string(),
-                    provider: "gemini".to_string(),
-                    status: "idle".to_string(),
-                    last_status_at: None,
-                },
-                cursor: "agent-1:2".to_string(),
-                events: Vec::new(),
-                output: wardian_core::control::WatchOutput {
-                    cursor: "agent-1:2".to_string(),
-                    text: String::new(),
-                    truncated: false,
-                    omitted_bytes: 0,
-                },
-                transcript: Some(wardian_core::control::WatchTranscript {
-                    cursor: "agent-1:2".to_string(),
-                    messages: vec![wardian_core::control::WatchTranscriptMessage {
-                        role: "assistant".to_string(),
-                        text: "Gemini answer".to_string(),
-                        provider: "gemini".to_string(),
-                        turn_id: Some("m2".to_string()),
-                        source: Some("gemini_log".to_string()),
-                    }],
-                    latest_text: "Gemini answer".to_string(),
-                    truncated: false,
-                    omitted_bytes: 0,
-                }),
-                raw_output: None,
-                delivery: wardian_core::control::WatchDeliverySnapshot {
-                    delivery: Vec::new(),
-                },
-            },
-        };
-
-        let rendered = render_ask_response("reviewer-a1", "output:Gemini answer", ask).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
-        assert_eq!(json["transcript"]["latest_text"], "Gemini answer");
-    }
-
-    #[test]
-    fn normalize_ask_condition_keeps_structured_reply_mode() {
-        assert_eq!(normalize_ask_condition("reply").unwrap(), "reply");
-    }
-
-    #[test]
     fn parse_include_defaults_to_readable_watch_surfaces() {
         assert_eq!(
             parse_include(None),
@@ -3055,28 +2511,6 @@ mod tests {
         assert_eq!(json["schema"], 1);
         assert_eq!(json["worktrees"][0]["name"], "review");
         assert_eq!(json["worktrees"][0]["can_delete"], true);
-    }
-
-    #[test]
-    fn normalize_ask_condition_accepts_known_kinds_and_bare_status() {
-        assert_eq!(normalize_ask_condition("idle").unwrap(), "status:idle");
-        assert_eq!(
-            normalize_ask_condition("output:REVIEW_DONE").unwrap(),
-            "output:REVIEW_DONE"
-        );
-        assert_eq!(
-            normalize_ask_condition("delivery:submitted").unwrap(),
-            "delivery:submitted"
-        );
-    }
-
-    #[test]
-    fn normalize_ask_condition_rejects_unknown_colon_kind() {
-        let error = normalize_ask_condition("ouptut:REVIEW_DONE").unwrap_err();
-
-        assert_eq!(error.code, "not_supported");
-        assert!(error.message.contains("unsupported watch condition"));
-        assert!(error.message.contains("ouptut:REVIEW_DONE"));
     }
 
     #[test]

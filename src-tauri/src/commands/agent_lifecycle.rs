@@ -5,17 +5,31 @@ use crate::state::AppState;
 #[path = "agent/lifecycle_tests.rs"]
 mod tests;
 
-pub(super) fn fresh_pi_session_for_initial_capture(
+pub(super) fn fresh_provider_session_for_initial_capture(
     config: &wardian_core::models::AgentConfig,
     actual_resume: Option<&str>,
 ) -> Option<String> {
-    if config.provider != "pi" || config.resume_session.is_some() {
+    if !matches!(config.provider.as_str(), "claude" | "codex" | "pi") {
         return None;
     }
-    let fresh_provider_session_id = config.fresh_provider_session_id.as_deref()?.trim();
-    let actual_resume = actual_resume?.trim();
-    (!fresh_provider_session_id.is_empty() && fresh_provider_session_id == actual_resume)
-        .then(|| actual_resume.to_string())
+    let fresh_provider_session_id = config
+        .fresh_provider_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let actual_resume = actual_resume
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if fresh_provider_session_id != actual_resume {
+        return None;
+    }
+    match config.resume_session.as_deref() {
+        None => Some(actual_resume.to_string()),
+        Some(resume) if !resume.trim().is_empty() && resume.trim() == actual_resume => {
+            Some(actual_resume.to_string())
+        }
+        Some(_) => None,
+    }
 }
 
 pub(super) fn sync_registered_provider_session(
@@ -24,28 +38,43 @@ pub(super) fn sync_registered_provider_session(
     actual_resume: Option<String>,
 ) {
     let persisted_resume = super::persisted_resume_session_for_provider(actual_resume);
-    let fresh_pi_session =
-        fresh_pi_session_for_initial_capture(config, persisted_resume.as_deref());
+    let fresh_provider_session =
+        fresh_provider_session_for_initial_capture(config, persisted_resume.as_deref());
     config.resume_session = persisted_resume.clone();
-    config.fresh_provider_session_id = fresh_pi_session.clone();
+    config.fresh_provider_session_id = fresh_provider_session.clone();
     active_config.resume_session = persisted_resume;
-    active_config.fresh_provider_session_id = fresh_pi_session;
+    active_config.fresh_provider_session_id = fresh_provider_session;
 }
 
 pub(super) fn promote_fresh_provider_session_fields(
     provider: &str,
     config: &mut wardian_core::models::AgentConfig,
 ) -> bool {
-    if let Some(fresh_provider_session_id) = config.fresh_provider_session_id.take() {
-        config.resume_session = Some(fresh_provider_session_id.clone());
-        if provider == "pi" {
-            // Pair the runtime-only fresh identity with its promoted resume ID.
-            config.fresh_provider_session_id = Some(fresh_provider_session_id);
-        }
-        true
-    } else {
-        false
+    let Some(fresh_provider_session_id) = config
+        .fresh_provider_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    else {
+        return false;
+    };
+    if !matches!(provider, "claude" | "codex" | "pi") {
+        config.resume_session = Some(fresh_provider_session_id);
+        config.fresh_provider_session_id = None;
+        return true;
     }
+    if config.resume_session.as_deref().is_some_and(|resume| {
+        let resume = resume.trim();
+        resume.is_empty() || resume != fresh_provider_session_id
+    }) {
+        return false;
+    }
+    config.resume_session = Some(fresh_provider_session_id.clone());
+    // Keep the exact launch-owned identity paired with its promoted resume
+    // identity. Serialization omits this runtime-only field.
+    config.fresh_provider_session_id = Some(fresh_provider_session_id);
+    true
 }
 
 pub(super) async fn lock_agent_lifecycle(

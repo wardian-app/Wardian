@@ -692,6 +692,26 @@ impl TerminalSessionBroker {
         self.lifecycle_tx.subscribe()
     }
 
+    /// Return the generation that the next real runtime for this session will
+    /// receive. Spawn callers use this while holding the session lifecycle
+    /// boundary so launch proofs can be created before the PTY exists.
+    pub async fn next_runtime_generation(
+        &self,
+        session_id: &str,
+    ) -> Result<u64, TerminalBrokerError> {
+        validate_id(session_id, "session_id")?;
+        self.runtime_generation_tombstones
+            .read()
+            .await
+            .get(session_id)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| {
+                TerminalBrokerError::RuntimeIo("terminal runtime generation exhausted".to_string())
+            })
+    }
+
     pub async fn start_or_replace_runtime(
         &self,
         session_id: &str,
@@ -1103,6 +1123,26 @@ impl TerminalSessionBroker {
         .await
     }
 
+    /// Sends task-composer input only to the runtime generation that supplied
+    /// the delivery boundary, while honoring the debug input-only pause.
+    pub async fn send_composer_input(
+        &self,
+        session_id: &str,
+        runtime_generation: u64,
+        bytes: Vec<u8>,
+    ) -> Result<(), TerminalBrokerError> {
+        let owned_session = session_id.to_string();
+        self.request(session_id, move |reply| {
+            TerminalSessionMessage::ComposerInput {
+                session_id: owned_session,
+                runtime_generation,
+                bytes,
+                reply,
+            }
+        })
+        .await
+    }
+
     pub async fn read_legacy_output(
         &self,
         session_id: &str,
@@ -1268,6 +1308,27 @@ impl TerminalSessionBroker {
             session_id: owned_session,
             runtime_generation,
             reply,
+        })
+        .await
+    }
+
+    /// Reject ordinary terminal input while retaining the live PTY runtime.
+    ///
+    /// The native-delivery harness uses this to remove the composer input path
+    /// without dropping the PTY writer that keeps an attached provider session
+    /// alive.
+    pub async fn pause_input_sender(
+        &self,
+        session_id: &str,
+        runtime_generation: u64,
+    ) -> Result<TerminalBrokerState, TerminalBrokerError> {
+        let owned_session = session_id.to_string();
+        self.request(session_id, move |reply| {
+            TerminalSessionMessage::PauseInputSender {
+                session_id: owned_session,
+                runtime_generation,
+                reply,
+            }
         })
         .await
     }
@@ -1658,6 +1719,12 @@ enum TerminalSessionMessage {
         bytes: Vec<u8>,
         reply: BrokerReply<()>,
     },
+    ComposerInput {
+        session_id: String,
+        runtime_generation: u64,
+        bytes: Vec<u8>,
+        reply: BrokerReply<()>,
+    },
     ReadCompatibilityOutput {
         max_bytes: Option<usize>,
         peek: bool,
@@ -1684,6 +1751,11 @@ enum TerminalSessionMessage {
     NativeWriteReceiptsEnabled(BrokerReply<bool>),
     Snapshot(BrokerReply<TerminalSnapshot>),
     Pause {
+        session_id: String,
+        runtime_generation: u64,
+        reply: BrokerReply<TerminalBrokerState>,
+    },
+    PauseInputSender {
         session_id: String,
         runtime_generation: u64,
         reply: BrokerReply<TerminalBrokerState>,
@@ -1745,6 +1817,7 @@ struct TerminalSessionActor {
     terminated: Arc<AtomicBool>,
     runtime: Option<TerminalRuntimeHandles>,
     runtime_state: TerminalRuntimeState,
+    input_sender_paused: bool,
     parser: vt100::Parser,
     output_filter: TerminalOutputFilter,
     replay: ReplayRing,
@@ -1810,6 +1883,7 @@ impl TerminalSessionActor {
             terminated,
             runtime,
             runtime_state,
+            input_sender_paused: false,
             parser: vt100::Parser::new(geometry.rows, geometry.cols, 1_000),
             output_filter,
             replay: ReplayRing::new(),
@@ -1963,6 +2037,17 @@ impl TerminalSessionActor {
                 let result = self.send_privileged_input(bytes).await;
                 let _ = reply.send(result);
             }
+            TerminalSessionMessage::ComposerInput {
+                session_id,
+                runtime_generation,
+                bytes,
+                reply,
+            } => {
+                let result = self
+                    .send_composer_input(&session_id, runtime_generation, bytes)
+                    .await;
+                let _ = reply.send(result);
+            }
             TerminalSessionMessage::ReadCompatibilityOutput {
                 max_bytes,
                 peek,
@@ -2015,6 +2100,14 @@ impl TerminalSessionActor {
                 reply,
             } => {
                 let result = self.pause(&session_id, runtime_generation);
+                let _ = reply.send(result);
+            }
+            TerminalSessionMessage::PauseInputSender {
+                session_id,
+                runtime_generation,
+                reply,
+            } => {
+                let result = self.pause_input_sender(&session_id, runtime_generation);
                 let _ = reply.send(result);
             }
             TerminalSessionMessage::BeginOwnerResync { request, reply } => {
@@ -2565,6 +2658,9 @@ impl TerminalSessionActor {
         if let Some(reason) = self.validate_active_lease(&request.lease) {
             return Ok(self.rejected_decision(reason));
         }
+        if self.input_sender_paused {
+            return Ok(self.rejected_decision(TerminalLeaseRejectionReason::RuntimeUnavailable));
+        }
         if !request.bytes.is_empty() {
             self.send_runtime_input(request.bytes).await?;
         }
@@ -2618,6 +2714,9 @@ impl TerminalSessionActor {
         if self.runtime_state != TerminalRuntimeState::Live {
             return Some(TerminalLeaseRejectionReason::RuntimeUnavailable);
         }
+        if self.input_sender_paused {
+            return Some(TerminalLeaseRejectionReason::RuntimeUnavailable);
+        }
         if self.pending_activation.is_some() {
             return Some(TerminalLeaseRejectionReason::PendingActivation);
         }
@@ -2642,6 +2741,26 @@ impl TerminalSessionActor {
 
     async fn send_privileged_input(&mut self, bytes: Vec<u8>) -> Result<(), TerminalBrokerError> {
         if self.runtime_state != TerminalRuntimeState::Live {
+            return Err(TerminalBrokerError::RuntimeUnavailable);
+        }
+        if !bytes.is_empty() {
+            self.send_runtime_input(bytes).await?;
+        }
+        Ok(())
+    }
+
+    async fn send_composer_input(
+        &mut self,
+        session_id: &str,
+        runtime_generation: u64,
+        bytes: Vec<u8>,
+    ) -> Result<(), TerminalBrokerError> {
+        self.ensure_session(session_id)?;
+        self.ensure_generation(runtime_generation)?;
+        if self.runtime_state != TerminalRuntimeState::Live
+            || self.runtime.is_none()
+            || self.input_sender_paused
+        {
             return Err(TerminalBrokerError::RuntimeUnavailable);
         }
         if !bytes.is_empty() {
@@ -2882,6 +3001,17 @@ impl TerminalSessionActor {
                     lifecycle: TerminalSessionLifecycleEvent::RuntimePaused,
                 });
         }
+        Ok(self.broker_state())
+    }
+
+    fn pause_input_sender(
+        &mut self,
+        session_id: &str,
+        runtime_generation: u64,
+    ) -> Result<TerminalBrokerState, TerminalBrokerError> {
+        self.ensure_session(session_id)?;
+        self.ensure_generation(runtime_generation)?;
+        self.input_sender_paused = true;
         Ok(self.broker_state())
     }
 

@@ -43,40 +43,33 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 emit({ type: "init", session_id: providerSessionId, timestamp: new Date().toISOString() });
 
-let buffer = "";
-let completed = false;
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", async (chunk) => {
-  if (completed) return;
-  buffer += chunk;
-  if (buffer.includes("\\r") || buffer.includes("\\n")) {
-    completed = true;
-    const requestId = buffer.match(/wardian reply\\s+([^\\s]+)/)?.[1] || null;
+// The mock consumes the canonical task directly; no prompt parsing or PTY wake.
+(async () => {
+  let cursor;
+  while (true) {
+    const args = ["message", "receive", "--timeout-ms", "1000"];
+    if (cursor) args.push("--cursor", cursor);
+    const received = spawnSync(cli, args, { encoding: "utf8", env: process.env });
+    if (received.status !== 0) throw new Error("canonical receive failed");
+    const page = JSON.parse(received.stdout);
+    cursor = page.next_cursor;
+    const task = page.messages.find((row) => row.kind === "task");
+    if (!task) { await sleep(100); continue; }
     emit({ type: "model", content: "partial model response, not a turn completion" });
     await sleep(1200);
     emit({ type: "result", status: "success" });
-    const reply = requestId
-      ? spawnSync(cli, ["reply", requestId, "--status", "done", "--stdin"], {
-          input: "automation output complete",
-          encoding: "utf8",
-          env: { ...process.env, WARDIAN_SESSION_ID: wardianSessionId },
-        })
-      : { status: 1, stdout: "", stderr: "request id not found" };
-    if (markerPath) {
-      fs.writeFileSync(markerPath, JSON.stringify({
-        completed: true,
-        input: buffer,
-        requestId,
-        replyStatus: reply.status,
-        replyStdout: reply.stdout,
-        replyStderr: reply.stderr,
-        at: new Date().toISOString(),
-      }));
-    }
+    const reply = spawnSync(cli, ["message", "reply", task.interaction_id, "--status", "done", "--stdin"], {
+      input: "automation output complete", encoding: "utf8", env: process.env,
+    });
+    if (markerPath) fs.writeFileSync(markerPath, JSON.stringify({
+      completed: true, requestId: task.interaction_id, replyStatus: reply.status,
+      replyStdout: reply.stdout, replyStderr: reply.stderr, at: new Date().toISOString(),
+    }));
+    if (reply.status !== 0) throw new Error("canonical reply failed; no replay");
     setInterval(() => {}, 1000);
+    return;
   }
-});
-process.stdin.resume();
+})().catch((error) => { console.error(error.message); process.exitCode = 1; });
 `,
     "utf8",
   );
@@ -318,6 +311,10 @@ test("automation detects live agent turn completion instead of timing out", { ti
   const metric = await readAgentMetric(session.driver, sessionId);
 
   assert.equal(marker?.completed, true, "mock provider did not complete its turn");
+  assert.equal(marker.replyStatus, 0, marker.replyStderr);
+  const reply = JSON.parse(marker.replyStdout);
+  assert.equal(reply.operation, "reply");
+  assert.equal(reply.request_id, marker.requestId);
   assert.equal(metric?.current_status, "Idle");
   assert.equal(trace.state.status, "completed");
   assert.equal(trace.state.nodes?.["agent-node-1"], "completed");

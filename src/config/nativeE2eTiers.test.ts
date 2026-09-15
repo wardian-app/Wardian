@@ -7,7 +7,7 @@ import path from "node:path";
  * run it. CI selects `ci`, the nightly automation selects `nightly`, and nothing
  * runs `manual`.
  *
- * `ciAutomation.test.ts` used to assert the four file names the automation listed
+ * `ciAutomation.test.ts` used to assert the file names the automation listed
  * by hand. That assertion lives here now, against the declarations themselves,
  * so a test that changes tier is caught by the same check that proves the tier
  * exists at all.
@@ -38,6 +38,7 @@ describe("native E2E tiers", () => {
   it("keeps the per-PR tier to the suite CI can afford", () => {
     const ci = nativeTests().filter((test) => test.tier === "ci").map((test) => test.file);
     expect(ci).toEqual([
+      "canonical-messaging.test.mjs",
       "remote-gateway-native.test.mjs",
       "terminal-presentation-broker-native.test.mjs",
       "workbench-persistence-native.test.mjs",

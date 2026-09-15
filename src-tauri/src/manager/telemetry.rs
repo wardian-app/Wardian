@@ -2,8 +2,7 @@ use crate::providers::transcript::extract_transcript_message;
 use crate::state::AppState;
 use crate::utils::fs::{get_wardian_home, observe_codex_indexes};
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::OnceLock;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use wardian_core::models::{AgentTelemetry, AppTelemetry};
 
 use super::claude::{claude_is_real_user_query, claude_project_dir_name, claude_status_from_log};
@@ -1163,6 +1162,7 @@ fn record_opencode_assistant_text(snap: &AgentSnapshot, session_id: &str, text: 
             provider: "opencode".to_string(),
             turn_id: Some(session_id.to_string()),
             source: Some("opencode_db".to_string()),
+            provider_provenance: None,
         });
     }
 
@@ -2020,7 +2020,7 @@ async fn apply_provider_status_observations(
             )
             .await;
         if became_ready {
-            crate::control::drain_mailbox_for_idle_agent_from_status_observation(
+            crate::control::dispatch_agent_messaging_from_status_observation(
                 None,
                 state,
                 &observation.session_id,

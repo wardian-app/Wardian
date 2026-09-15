@@ -1,5 +1,6 @@
 // @tier nightly — Paired MCP clients exercise the native store without provider turns.
 import test from "node:test";
+import { messageCli } from "../lib/canonical-messaging.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -104,7 +105,8 @@ test("v2 information has consistent sender and receiver semantics without starti
     const initial = await receiverClient.call("receive_messages", { timeout_ms: 0 });
     assert.deepEqual(initial.messages, []);
     const literal = "Information only. Do not start work.\ncafé ✓; `x`; $(literal).\n";
-    const sent = await senderClient.call("send_message", { target: receiver.session_id, message: literal });
+    const sent = await messageCli(cli, harness.isolatedHome, harness.repoRoot, sender.session_id, ["send", receiver.session_id, literal]);
+    assert.equal(sent.operation, "send_message");
     assert.equal(typeof sent.interaction_id, "string");
     const page = await receiverClient.call("receive_messages", { cursor: initial.next_cursor, timeout_ms: 0, limit: 1 });
     assert.equal(page.messages.length, 1);
@@ -121,7 +123,7 @@ test("v2 information has consistent sender and receiver semantics without starti
     const lateBody = "Later information remains available after a bounded empty wait.";
     const empty = await receiverClient.call("receive_messages", { timeout_ms: 100 });
     assert.equal(empty.timed_out, true);
-    const lateSent = await senderClient.call("send_message", { target: receiver.session_id, message: lateBody });
+    const lateSent = await messageCli(cli, harness.isolatedHome, harness.repoRoot, sender.session_id, ["send", receiver.session_id, lateBody]);
     const late = await receiverClient.call("receive_messages", { cursor: empty.next_cursor, timeout_ms: 0 });
     assert.equal(late.messages[0].interaction_id, lateSent.interaction_id);
     assert.equal(late.messages[0].message, lateBody);

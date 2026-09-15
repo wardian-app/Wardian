@@ -289,7 +289,7 @@ pub(crate) fn refresh_events(
     Ok(changed)
 }
 
-/// Merge a live capture with durable history without text-based deduplication.
+/// Merge a live capture with durable history without text-only deduplication.
 /// Logging-disabled callers use this projection without writing an archive.
 pub fn merge_current_capture(
     current: Vec<AgentChatEvent>,
@@ -338,6 +338,9 @@ pub fn merge_current_capture(
             archived.push(event);
         }
     }
+    collapse_codex_stream_completion_pairs(&mut archived);
+    collapse_claude_stream_watch_mirrors(&mut archived);
+    collapse_pi_stream_watch_mirrors(&mut archived);
     for (index, event) in archived.iter_mut().enumerate() {
         canonicalize_role(event);
         // Preserve archive-first replay order when a bounded live tail has
@@ -345,6 +348,272 @@ pub fn merge_current_capture(
         event.sequence = Some(index as u64 + 1);
     }
     Ok(archived)
+}
+
+/// Collapse Claude's uniquely identified provider/watch mirror while
+/// keeping both observation IDs. A missing or ambiguous native match remains
+/// visible.
+fn collapse_claude_stream_watch_mirrors(events: &mut Vec<AgentChatEvent>) {
+    let mut removed = BTreeSet::new();
+
+    for mirror_index in 0..events.len() {
+        if removed.contains(&mirror_index) || !is_claude_watch_mirror(&events[mirror_index]) {
+            continue;
+        }
+        let native_matches: Vec<usize> = (0..events.len())
+            .filter(|&native_index| {
+                native_index != mirror_index
+                    && !removed.contains(&native_index)
+                    && is_claude_stream_watch_pair(&events[mirror_index], &events[native_index])
+            })
+            .collect();
+        if native_matches.len() != 1 {
+            continue;
+        }
+        let native_index = native_matches[0];
+        let mirror_matches: Vec<usize> = (0..events.len())
+            .filter(|&candidate_index| {
+                candidate_index != native_index
+                    && !removed.contains(&candidate_index)
+                    && is_claude_stream_watch_pair(&events[candidate_index], &events[native_index])
+            })
+            .collect();
+        if mirror_matches.len() != 1 {
+            continue;
+        }
+
+        let mut canonical = events[native_index].clone();
+        retain_provider_observation_ids(&mut canonical, &events[mirror_index]);
+        events[native_index] = canonical;
+        removed.insert(mirror_index);
+    }
+
+    if !removed.is_empty() {
+        *events = events
+            .drain(..)
+            .enumerate()
+            .filter_map(|(index, event)| (!removed.contains(&index)).then_some(event))
+            .collect();
+    }
+}
+
+fn is_claude_watch_mirror(event: &AgentChatEvent) -> bool {
+    event.provider == "claude"
+        && event.kind == AgentChatEventKind::Message
+        && event.role == Some(AgentChatRole::Assistant)
+        && event.source.as_deref() == Some("stream_json")
+        && event.metadata["provider_log"] != true
+        && event.metadata["provider_source"] == "event"
+        && event
+            .turn_id
+            .as_deref()
+            .is_some_and(|turn_id| !turn_id.trim().is_empty())
+}
+
+fn is_claude_stream_watch_pair(mirror: &AgentChatEvent, native: &AgentChatEvent) -> bool {
+    is_claude_watch_mirror(mirror)
+        && native.provider == "claude"
+        && native.kind == AgentChatEventKind::Message
+        && native.role == Some(AgentChatRole::Assistant)
+        && native.source.as_deref() == Some("stream_json")
+        && native.metadata["provider_log"] == true
+        && string(native, "log_path").is_some()
+        && mirror.session_id == native.session_id
+        && mirror.turn_id == native.turn_id
+        && mirror.text.as_deref().is_some_and(|text| !text.is_empty())
+        && mirror.text.as_deref() == native.text.as_deref()
+}
+
+/// Collapse only Codex's identityless assistant stream mirror when the
+/// identified final response proves it is the same native turn and source.
+/// Older rows without these bindings remain untouched.
+fn collapse_codex_stream_completion_pairs(events: &mut Vec<AgentChatEvent>) {
+    let mut removed = BTreeSet::new();
+
+    for mirror_index in 0..events.len() {
+        if removed.contains(&mirror_index) || !is_codex_assistant_mirror(&events[mirror_index]) {
+            continue;
+        }
+        let completions: Vec<usize> = (0..events.len())
+            .filter(|&completion_index| {
+                completion_index != mirror_index
+                    && !removed.contains(&completion_index)
+                    && is_codex_stream_completion_pair(
+                        &events[mirror_index],
+                        &events[completion_index],
+                    )
+            })
+            .collect();
+        if completions.len() != 1 {
+            continue;
+        }
+        let completion_index = completions[0];
+        let mirrors: Vec<usize> = (0..events.len())
+            .filter(|&candidate_index| {
+                candidate_index != completion_index
+                    && !removed.contains(&candidate_index)
+                    && is_codex_stream_completion_pair(
+                        &events[candidate_index],
+                        &events[completion_index],
+                    )
+            })
+            .collect();
+        if mirrors.len() != 1 {
+            continue;
+        }
+
+        let mut canonical = events[completion_index].clone();
+        retain_provider_observation_ids(&mut canonical, &events[mirror_index]);
+        events[completion_index] = canonical;
+        removed.insert(mirror_index);
+    }
+
+    if !removed.is_empty() {
+        *events = events
+            .drain(..)
+            .enumerate()
+            .filter_map(|(index, event)| (!removed.contains(&index)).then_some(event))
+            .collect();
+    }
+}
+
+fn is_codex_assistant_mirror(event: &AgentChatEvent) -> bool {
+    event.provider == "codex"
+        && event.kind == AgentChatEventKind::Message
+        && event.role == Some(AgentChatRole::Assistant)
+        && event.source.as_deref() == Some("event_msg")
+        && event.turn_id.is_none()
+}
+
+fn is_codex_stream_completion_pair(mirror: &AgentChatEvent, completion: &AgentChatEvent) -> bool {
+    if !is_codex_assistant_mirror(mirror)
+        || completion.provider != "codex"
+        || completion.kind != AgentChatEventKind::Message
+        || completion.role != Some(AgentChatRole::Assistant)
+        || completion.source.as_deref() != Some("response_item")
+        || completion.turn_id.as_deref().is_none_or(str::is_empty)
+        || mirror.session_id != completion.session_id
+        || mirror.metadata["provider_log"] != true
+        || completion.metadata["provider_log"] != true
+        || mirror.text.as_deref() != completion.text.as_deref()
+    {
+        return false;
+    }
+    let same_log_path = string(mirror, "log_path")
+        .zip(string(completion, "log_path"))
+        .is_some_and(|(mirror_path, completion_path)| mirror_path == completion_path);
+    let same_provider_turn = string(mirror, "provider_turn_id")
+        .zip(string(completion, "provider_turn_id"))
+        .is_some_and(|(mirror_turn, completion_turn)| mirror_turn == completion_turn);
+    same_log_path
+        && same_provider_turn
+        && string(completion, "provider_phase") == Some("final_answer")
+}
+
+/// Collapse Pi's uniquely bound session JSONL watcher mirror while retaining
+/// both observation IDs. Unbound or ambiguous observations remain visible.
+fn collapse_pi_stream_watch_mirrors(events: &mut Vec<AgentChatEvent>) {
+    let mut removed = BTreeSet::new();
+
+    for mirror_index in 0..events.len() {
+        if removed.contains(&mirror_index) || !is_pi_watch_mirror(&events[mirror_index]) {
+            continue;
+        }
+        let native_matches: Vec<usize> = (0..events.len())
+            .filter(|&native_index| {
+                native_index != mirror_index
+                    && !removed.contains(&native_index)
+                    && is_pi_stream_watch_pair(&events[mirror_index], &events[native_index])
+            })
+            .collect();
+        if native_matches.len() != 1 {
+            continue;
+        }
+        let native_index = native_matches[0];
+        let mirror_matches: Vec<usize> = (0..events.len())
+            .filter(|&candidate_index| {
+                candidate_index != native_index
+                    && !removed.contains(&candidate_index)
+                    && is_pi_stream_watch_pair(&events[candidate_index], &events[native_index])
+            })
+            .collect();
+        if mirror_matches.len() != 1 {
+            continue;
+        }
+
+        let mut canonical = events[native_index].clone();
+        retain_provider_observation_ids(&mut canonical, &events[mirror_index]);
+        events[native_index] = canonical;
+        removed.insert(mirror_index);
+    }
+
+    if !removed.is_empty() {
+        *events = events
+            .drain(..)
+            .enumerate()
+            .filter_map(|(index, event)| (!removed.contains(&index)).then_some(event))
+            .collect();
+    }
+}
+
+fn is_pi_watch_mirror(event: &AgentChatEvent) -> bool {
+    event.provider == "pi"
+        && event.kind == AgentChatEventKind::Message
+        && event.role == Some(AgentChatRole::Assistant)
+        && event.source.as_deref() == Some("session_jsonl")
+        && event.metadata["provider_log"] == true
+        && string(event, "provider_session_id").is_some()
+        && string(event, "log_path").is_some()
+        && event
+            .turn_id
+            .as_deref()
+            .is_some_and(|turn_id| !turn_id.trim().is_empty())
+}
+
+fn is_pi_stream_watch_pair(mirror: &AgentChatEvent, native: &AgentChatEvent) -> bool {
+    is_pi_watch_mirror(mirror)
+        && native.provider == "pi"
+        && native.kind == AgentChatEventKind::Message
+        && native.role == Some(AgentChatRole::Assistant)
+        && native.source.as_deref() == Some("message")
+        && native.metadata["provider_log"] == true
+        && native
+            .turn_id
+            .as_deref()
+            .is_some_and(|turn_id| !turn_id.trim().is_empty())
+        && mirror.session_id == native.session_id
+        && mirror.turn_id == native.turn_id
+        && string(mirror, "log_path")
+            .zip(string(native, "log_path"))
+            .is_some_and(|(mirror_path, native_path)| mirror_path == native_path)
+        && mirror.text.as_deref().is_some_and(|text| !text.is_empty())
+        && mirror.text.as_deref() == native.text.as_deref()
+}
+
+fn retain_provider_observation_ids(canonical: &mut AgentChatEvent, duplicate: &AgentChatEvent) {
+    let mut ids = provider_observation_ids(canonical);
+    for id in provider_observation_ids(duplicate) {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    canonical.metadata["provider_observation_ids"] = serde_json::json!(ids);
+}
+
+fn provider_observation_ids(event: &AgentChatEvent) -> Vec<String> {
+    let mut ids = event
+        .metadata
+        .get("provider_observation_ids")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if !ids.iter().any(|id| id == &event.id) {
+        ids.push(event.id.clone());
+    }
+    ids
 }
 
 /// Reconcile the live OpenCode database projection with its already archived

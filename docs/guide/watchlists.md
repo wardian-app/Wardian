@@ -88,7 +88,7 @@ wardian watchlist remove-agent <watchlist-name-or-id> <agent-name-or-uuid>
 wardian watchlist delete <watchlist-name-or-id>
 ```
 
-These commands use the same `<wardian-home>/watchlists/index.json` file as the GUI. Reads accept both the current v2 state shape with global teams and legacy flat watchlist arrays. Writes normalize the file to canonical v2 JSON, seed team communication edges into `topology.json` when team membership creates new pairs, and notify a running desktop app for the same `WARDIAN_HOME` so the roster reloads. Team send targeting remains separate; use explicit agent names, UUIDs, class selectors, or `all` for `wardian send`.
+These commands use the same `<wardian-home>/watchlists/index.json` file as the GUI. Reads accept both the current v2 state shape with global teams and legacy flat watchlist arrays. Writes normalize the file to canonical v2 JSON, seed team communication edges into `topology.json` when team membership creates new pairs, and notify a running desktop app for the same `WARDIAN_HOME` so the roster reloads. Messaging targets one exact agent separately through `wardian message send` or `wardian message followup`; watchlist membership does not broadcast messages.
 
 ## Organizing with Watchlists
 As your swarm grows, a single list becomes difficult to manage. Wardian allows you to group agents into custom **Watchlists**.

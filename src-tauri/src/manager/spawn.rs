@@ -1,4 +1,4 @@
-use super::codex_terminal_theme::CodexTerminalThemeProbeResponder;
+use crate::delivery::opencode_http::OpenCodeHttpLaunchPlan;
 use crate::providers::antigravity::{
     changed_workspace_conversation, AntigravityConversationMessage, AntigravityProvider,
 };
@@ -8,12 +8,13 @@ use crate::providers::claude::{
 };
 use crate::providers::codex::CodexProvider;
 use crate::providers::pi::PiProvider;
-use crate::providers::transcript::extract_transcript_message;
+use crate::providers::transcript::{
+    bind_pi_watch_message, extract_transcript_message, CodexWatchBindingState,
+};
 use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AgentWatchState, AppState};
 use crate::utils::fs::*;
 use crate::utils::logging::{log_debug, log_terminal_trace_bytes, log_terminal_trace_note};
-use crate::utils::strip_ansi_controls;
 use crate::utils::PtyUtf8Decoder;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::collections::HashMap;
@@ -21,6 +22,8 @@ use std::io::{BufRead, Read, Seek, Write};
 use tauri::{AppHandle, Emitter, Manager};
 use wardian_core::control::{ProviderInputReadiness, WatchTranscriptMessage};
 use wardian_core::models::{AgentChatRole, AgentConfig, AgentEvent, ProviderConfig};
+
+use super::codex_terminal_theme::CodexTerminalThemeProbeResponder;
 
 use super::claude::{
     claude_log_paths, claude_permission_hook_matches_session, claude_project_dir_name,
@@ -52,6 +55,65 @@ type PendingMemoryInjection = (
     String,
 );
 
+/// Retain Pi generation cleanup across fallible PTY setup after the bridge
+/// plan has transferred ownership to the broker. The reader thread disarms
+/// this guard once it can dispose the generation on process exit.
+struct PiBridgeSpawnGuard {
+    broker: std::sync::Arc<crate::delivery::native_broker::NativeDeliveryBroker>,
+    agent_id: String,
+    generation: u64,
+    armed: bool,
+}
+
+fn pi_bridge_child_handoff_code(process_id: Option<u32>) -> &'static str {
+    match process_id {
+        Some(process_id) if process_id != 0 => "process_registered",
+        Some(_) => "process_id_zero",
+        None => "process_id_unavailable",
+    }
+}
+
+fn retain_pi_fresh_provider_session(config: &mut AgentConfig) {
+    if let Some(fresh) = config.fresh_provider_session_id.clone() {
+        config.resume_session = Some(fresh);
+    }
+}
+
+impl PiBridgeSpawnGuard {
+    fn new(
+        broker: std::sync::Arc<crate::delivery::native_broker::NativeDeliveryBroker>,
+        agent_id: String,
+        generation: u64,
+    ) -> Self {
+        Self {
+            broker,
+            agent_id,
+            generation,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PiBridgeSpawnGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let broker = self.broker.clone();
+        let agent_id = self.agent_id.clone();
+        let generation = self.generation;
+        tauri::async_runtime::spawn(async move {
+            let _ = broker
+                .dispose_pi_generation(&agent_id, Some(generation))
+                .await;
+        });
+    }
+}
+
 fn record_pending_memory_injection(
     pending: &mut Option<PendingMemoryInjection>,
     agent_id: &str,
@@ -73,6 +135,179 @@ fn record_pending_memory_injection(
         ));
     }
     true
+}
+
+fn opencode_http_conflicting_custom_arg(argument: &str) -> bool {
+    let argument = argument.trim().to_ascii_lowercase();
+    matches!(
+        argument.as_str(),
+        "serve"
+            | "attach"
+            | "run"
+            | "acp"
+            | "--hostname"
+            | "--port"
+            | "--session"
+            | "--continue"
+            | "--fork"
+            | "--dir"
+            | "--config"
+    ) || argument.starts_with("--hostname=")
+        || argument.starts_with("--port=")
+        || argument.starts_with("--session=")
+        || argument.starts_with("--dir=")
+        || argument.starts_with("--config=")
+}
+
+fn opencode_http_launch_identity_is_valid(session: Option<&str>) -> bool {
+    session.is_none_or(|session| {
+        session.starts_with("ses_")
+            && session.len() <= 256
+            && session
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    })
+}
+
+/// Reserve the per-generation listener before every ordinary OpenCode TUI
+/// spawn. A fresh TUI has no provider identity yet, so its pending owner is
+/// rebound only after the launch-scoped discovery returns one exact session.
+async fn prepare_opencode_http_launch(
+    app_state: &AppState,
+    config: &AgentConfig,
+    provider_generation: u64,
+) -> Option<OpenCodeHttpLaunchPlan> {
+    if config.provider != "opencode"
+        || !opencode_http_launch_identity_is_valid(config.resume_session.as_deref())
+    {
+        return None;
+    }
+    let custom_args = match config.custom_args.as_deref().map(str::trim) {
+        Some(custom) if !custom.is_empty() => shlex::split(custom)?,
+        _ => Vec::new(),
+    };
+    if custom_args
+        .iter()
+        .any(|argument| opencode_http_conflicting_custom_arg(argument))
+    {
+        return None;
+    }
+    let runtime_generation = app_state
+        .terminal_sessions
+        .next_runtime_generation(&config.session_id)
+        .await
+        .ok()?;
+    let requested_port = config
+        .opencode_config()
+        .port
+        .or(config.opencode_port)
+        .filter(|port| *port != 0);
+    let listener = std::net::TcpListener::bind(("127.0.0.1", requested_port.unwrap_or(0))).ok()?;
+    let port = listener.local_addr().ok()?.port();
+    drop(listener);
+    let plan = OpenCodeHttpLaunchPlan::new(provider_generation, runtime_generation, port).ok()?;
+    Some(plan)
+}
+
+async fn wait_for_opencode_http_listener(
+    app: &AppHandle,
+    agent_id: &str,
+    runtime_generation: u64,
+    endpoint: &reqwest::Url,
+) -> bool {
+    let Some(port) = endpoint.port() else {
+        return false;
+    };
+    let address = format!("127.0.0.1:{port}");
+    for _ in 0..120 {
+        let runtime_matches = app
+            .state::<AppState>()
+            .terminal_sessions
+            .broker_state(agent_id)
+            .await
+            .is_ok_and(|state| state.runtime_generation == runtime_generation);
+        if !runtime_matches {
+            return false;
+        }
+        if tokio::net::TcpStream::connect(&address).await.is_ok() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    false
+}
+
+struct OpenCodeHttpLaunchContext {
+    app: AppHandle,
+    broker: std::sync::Arc<crate::delivery::native_broker::NativeDeliveryBroker>,
+    agent_id: String,
+    plan: OpenCodeHttpLaunchPlan,
+    provider_session_id: String,
+    process_id: u32,
+    workspace: std::path::PathBuf,
+    config_fingerprint: String,
+    runtime_generation: u64,
+    provider_generation: u64,
+}
+
+async fn register_opencode_http_after_launch(context: OpenCodeHttpLaunchContext) {
+    let OpenCodeHttpLaunchContext {
+        app,
+        broker,
+        agent_id,
+        plan,
+        provider_session_id,
+        process_id,
+        workspace,
+        config_fingerprint,
+        runtime_generation,
+        provider_generation,
+    } = context;
+    let endpoint = plan.endpoint().clone();
+    if !wait_for_opencode_http_listener(&app, &agent_id, runtime_generation, &endpoint).await {
+        broker
+            .fail_opencode_http(&agent_id, provider_generation)
+            .await;
+        return;
+    }
+
+    let process_identity = format!("pid:{process_id}:runtime:{runtime_generation}");
+    let listener_identity = format!(
+        "loopback:127.0.0.1:{}:pid:{process_id}:runtime:{runtime_generation}",
+        endpoint.port().unwrap_or_default()
+    );
+    if let Err(error) = broker
+        .register_opencode_http(
+            agent_id.clone(),
+            plan,
+            provider_session_id,
+            process_identity,
+            listener_identity,
+            workspace,
+            config_fingerprint,
+        )
+        .await
+    {
+        broker
+            .fail_opencode_http(&agent_id, provider_generation)
+            .await;
+        log_debug(&format!(
+            "[Wardian] OpenCode HTTP owner unavailable after launch: {error}"
+        ));
+        return;
+    }
+
+    // Owner registration can complete after the provider's one startup/idle
+    // observation. Reuse the canonical status trigger so a task that remained
+    // pending during the handshake gets one dispatch opportunity without
+    // bypassing the normal busy, generation, or claim checks.
+    let state = app.state::<crate::state::AppState>();
+    crate::control::dispatch_agent_messaging_from_status_observation(
+        Some(&app),
+        state.inner(),
+        &agent_id,
+    )
+    .await;
 }
 
 /// Selects the verified Antigravity conversation created by this launch for
@@ -366,37 +601,16 @@ fn antigravity_database_watermark(path: &std::path::Path) -> Option<AntigravityD
     Some(AntigravityDatabaseWatermark { database, wal })
 }
 
-#[derive(Default)]
-struct ClaudeStartupReadiness {
-    compose_prompt_seen: bool,
-    remote_connection_pending: bool,
-}
-
-impl ClaudeStartupReadiness {
-    fn observe(&mut self, output: &str) -> bool {
-        let compact = strip_ansi_controls(output)
-            .chars()
-            .filter(|character| character.is_ascii_alphanumeric())
-            .flat_map(char::to_lowercase)
-            .collect::<String>();
-        if crate::control::provider_output_has_startup_ready_prompt("claude", output) {
-            self.compose_prompt_seen = true;
-            self.remote_connection_pending = compact.contains("rcconnecting");
-            if !self.remote_connection_pending {
-                return true;
-            }
-        }
-
-        if self.remote_connection_pending
-            && compact.contains("httpsclaudeaicodesession")
-            && self.compose_prompt_seen
-        {
-            self.remote_connection_pending = false;
-            return true;
-        }
-
-        false
-    }
+fn startup_prompt_is_ready(
+    provider: &str,
+    startup_prompt_pending: bool,
+    startup_screen: Option<&str>,
+) -> bool {
+    provider != "codex"
+        && startup_prompt_pending
+        && startup_screen.is_some_and(|output| {
+            crate::control::provider_output_has_startup_ready_prompt(provider, output)
+        })
 }
 
 impl AntigravityTranscriptTracker {
@@ -439,6 +653,7 @@ impl AntigravityTranscriptTracker {
                     provider: "antigravity".to_string(),
                     turn_id: None,
                     source: Some("antigravity_sqlite".to_string()),
+                    provider_provenance: None,
                 });
             }
         }
@@ -928,6 +1143,34 @@ pub async fn spawn_agent(
     }
     provider_args = interactive_provider_args(&config.provider, &provider_cwd, &cwd, provider_args);
 
+    let mut opencode_http_plan = if config.provider == "opencode" {
+        prepare_opencode_http_launch(&app_state, &config, provider_generation).await
+    } else {
+        None
+    };
+    if let Some(plan) = opencode_http_plan.as_ref() {
+        provider_args.extend(plan.network_args());
+    }
+    let opencode_http_config_fingerprint = opencode_http_plan.as_ref().map(|_| {
+        let mut binding_config = config.clone();
+        binding_config.folder = expected_folder.clone();
+        crate::delivery::native_broker::opencode_http_config_fingerprint(&binding_config, &cwd)
+    });
+    if let (Some(_plan), Some(config_fingerprint)) = (
+        opencode_http_plan.as_ref(),
+        opencode_http_config_fingerprint.as_ref(),
+    ) {
+        app_state
+            .native_delivery
+            .prepare_opencode_http(
+                &config.session_id,
+                provider_generation,
+                config_fingerprint.clone(),
+            )
+            .await
+            .map_err(|error| format!("Failed to reserve OpenCode native ownership: {error}"))?;
+    }
+
     let mut codex_attach_guard = None;
     let codex_attachment = if config.provider == "codex" {
         let attachment = app_state
@@ -965,6 +1208,70 @@ pub async fn spawn_agent(
     } else {
         None
     };
+    let mut pi_attachment = if config.provider == "pi" && is_restored {
+        let session_file = config
+            .resume_session
+            .as_deref()
+            .map(str::trim)
+            .filter(|session_id| !session_id.is_empty())
+            .and_then(|provider_session_id| {
+                PiProvider::session_dir(&config.session_id).and_then(|session_dir| {
+                    PiProvider::session_file(&session_dir, provider_session_id)
+                })
+            });
+        if let Some(session_file) = session_file {
+            let extension_path =
+                match crate::delivery::pi_bridge::PiBridgeLaunchPlan::materialize_extension(
+                    &session_file,
+                    provider_generation,
+                ) {
+                    Ok(path) => Some(path),
+                    Err(error) => {
+                        log_debug(&format!(
+                            "[Wardian] Pi bridge unavailable for {}: {}",
+                            config.session_id, error
+                        ));
+                        None
+                    }
+                };
+            if let Some(extension_path) = extension_path {
+                match app_state
+                    .native_delivery
+                    .prepare_pi_tui(
+                        crate::delivery::native_broker::NativeSessionSpec {
+                            target_agent_id: config.session_id.clone(),
+                            provider: "pi".into(),
+                            generation: provider_generation,
+                            workspace: provider_cwd.clone(),
+                            config: config.clone(),
+                        },
+                        session_file,
+                        extension_path,
+                    )
+                    .await
+                {
+                    Ok(plan) => Some(plan),
+                    Err(error) => {
+                        log_debug(&format!(
+                            "[Wardian] Pi bridge unavailable for {}: {}",
+                            config.session_id, error
+                        ));
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(attachment) = pi_attachment.as_ref() {
+        provider_args.push("-e".into());
+        provider_args.push(attachment.extension_path().to_string_lossy().into_owned());
+    }
     let launch_spec = interactive_provider_launch(&config.provider, &bin, &provider_args)?;
     log_debug(&format!(
         "[Wardian] PTY spawn: provider={} exe={} arg_count={} cwd={}",
@@ -997,9 +1304,16 @@ pub async fn spawn_agent(
 
     if let Some(attachment) = &codex_attachment {
         cmd.env("CODEX_HOME", &attachment.codex_home);
+    } else if let Some(attachment) = pi_attachment.as_ref() {
+        cmd.env(crate::delivery::pi_bridge::ENV_CONFIG, attachment.config());
     } else if config.provider == "opencode" {
         for (key, value) in opencode_interactive_env(&provider_cwd, &config)? {
             cmd.env(key, value);
+        }
+        if let Some(plan) = opencode_http_plan.as_ref() {
+            for (key, value) in plan.environment() {
+                cmd.env(key, value);
+            }
         }
     } else if config.provider == "mock" {
         let provider_session_id = expected_caller_owned_identity(&config).ok_or_else(|| {
@@ -1063,10 +1377,21 @@ pub async fn spawn_agent(
     // unable to write, then start the watcher from that exact byte offset.
     let pi_log_baseline = restored_pi_log_baseline(&config, is_restored);
 
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| format!("Failed to spawn command: {}", e))?;
+    let child = match pair.slave.spawn_command(cmd) {
+        Ok(child) => child,
+        Err(error) => {
+            if opencode_http_plan.is_some() {
+                app_state
+                    .native_delivery
+                    .fail_opencode_http(&config.session_id, provider_generation)
+                    .await;
+            }
+            if let Some(attachment) = pi_attachment.as_ref() {
+                attachment.owner().close();
+            }
+            return Err(format!("Failed to spawn command: {}", error));
+        }
+    };
 
     let child = if let Some(receipt) = &pi_receipt {
         receipt.own_child(child)
@@ -1088,6 +1413,33 @@ pub async fn spawn_agent(
         guard.attached();
     }
     let process_id = child.process_id();
+    if pi_attachment.is_some() {
+        log_debug(&format!(
+            "[Wardian] Pi bridge stage=listener_child_handoff code={}",
+            pi_bridge_child_handoff_code(process_id)
+        ));
+    }
+    if let Some(attachment) = pi_attachment.as_mut() {
+        if let Some(process_id) = process_id {
+            attachment.register_process(process_id);
+            attachment.attached();
+        } else {
+            attachment.owner().close();
+            let _ = app_state
+                .native_delivery
+                .dispose_pi_generation(&config.session_id, Some(provider_generation))
+                .await;
+        }
+    }
+    let mut pi_spawn_guard = pi_attachment.as_ref().and_then(|_| {
+        process_id.map(|_| {
+            PiBridgeSpawnGuard::new(
+                app_state.native_delivery.clone(),
+                config.session_id.clone(),
+                provider_generation,
+            )
+        })
+    });
 
     // Phase 2: Record/Update status in SQLite with the real PID
     let _ = wardian_core::db::update_agent_status(
@@ -1147,6 +1499,30 @@ pub async fn spawn_agent(
         .await
         .map_err(|error| format!("Failed to start terminal session broker: {error}"))?;
     child.runtime(app_state.terminal_sessions.clone(), runtime_generation);
+
+    if config.resume_session.is_some() {
+        if let (Some(plan), Some(process_id), Some(provider_session_id), Some(config_fingerprint)) = (
+            opencode_http_plan.take(),
+            process_id,
+            config.resume_session.clone(),
+            opencode_http_config_fingerprint,
+        ) {
+            tauri::async_runtime::spawn(register_opencode_http_after_launch(
+                OpenCodeHttpLaunchContext {
+                    app: app.clone(),
+                    broker: app_state.native_delivery.clone(),
+                    agent_id: config.session_id.clone(),
+                    plan,
+                    provider_session_id,
+                    process_id,
+                    workspace: cwd.clone(),
+                    config_fingerprint,
+                    runtime_generation,
+                    provider_generation,
+                },
+            ));
+        }
+    }
     if let Some(receipt) = &pi_receipt {
         receipt.bind(runtime_generation);
     }
@@ -1257,6 +1633,10 @@ pub async fn spawn_agent(
             == "bypassPermissions";
     let mut pending_memory_injection = memory_setup
         .map(|(store, brief)| (store, brief, expected_folder.clone(), memory_process_key));
+    let pi_exit_broker = pi_attachment
+        .as_ref()
+        .map(|_| app_state.native_delivery.clone());
+    let pi_exit_generation = provider_generation;
     std::thread::spawn(move || {
         let mut buf = [0; 4096];
         let mut current_line = String::new();
@@ -1264,7 +1644,6 @@ pub async fn spawn_agent(
         let mut opencode_chunks_logged = 0usize;
         let mut codex_terminal_theme_responder = CodexTerminalThemeProbeResponder::default();
         let mut antigravity_turn_completion_gate = AntigravityTurnCompletionGate::default();
-        let mut claude_startup_readiness = ClaudeStartupReadiness::default();
         let mut startup_prompt_pending = true;
         let mut codex_choice_pending = false;
         let mut antigravity_workspace_trust_confirmed = false;
@@ -1388,19 +1767,11 @@ pub async fn spawn_agent(
                     } else {
                         startup_output.clone()
                     };
-                    let startup_ready = if provider_name_for_pty == "codex" {
-                        false // Only the owner attachment gate publishes Codex readiness.
-                    } else if provider_name_for_pty == "claude" {
-                        claude_startup_readiness.observe(&text)
-                    } else {
-                        startup_prompt_pending
-                            && startup_screen.as_deref().is_some_and(|output| {
-                                crate::control::provider_output_has_startup_ready_prompt(
-                                    &provider_name_for_pty,
-                                    output,
-                                )
-                            })
-                    };
+                    let startup_ready = startup_prompt_is_ready(
+                        &provider_name_for_pty,
+                        startup_prompt_pending,
+                        startup_screen.as_deref(),
+                    );
                     if startup_ready {
                         startup_prompt_pending = false;
                         record_pending_memory_injection(
@@ -1422,6 +1793,11 @@ pub async fn spawn_agent(
                                 wardian_core::control::ProviderReadyEvidence::PromptDetected,
                             )
                             .await;
+                            crate::control::spawn_agent_messaging_if_idle(
+                                &readiness_app,
+                                &readiness_session_id,
+                                "Idle",
+                            );
                         });
                     } else if startup_output.as_deref().is_some_and(|output| {
                         should_auto_confirm_claude_bypass_permissions(
@@ -1721,7 +2097,20 @@ pub async fn spawn_agent(
         }
         // Process terminated (EOF or error) — mark status as Off
         set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, "Off");
+        if provider_name_for_pty == "pi" {
+            if let Some(broker) = pi_exit_broker {
+                let agent_id = sid_for_pty.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = broker
+                        .dispose_pi_generation(&agent_id, Some(pi_exit_generation))
+                        .await;
+                });
+            }
+        }
     });
+    if let Some(guard) = pi_spawn_guard.as_mut() {
+        guard.disarm();
+    }
 
     if let Some(attachment) = &codex_attachment {
         let finalized = app_state
@@ -1824,6 +2213,8 @@ pub async fn spawn_agent(
         std::thread::spawn(move || {
             let mut offset: u64 = 0;
             let mut last_lookup_session = String::new();
+            let mut last_log_path: Option<std::path::PathBuf> = None;
+            let mut codex_watch_binding = CodexWatchBindingState::default();
             let mut positioned_initial_log = !watcher_skip_existing_log;
             loop {
                 let current = watcher_current_status
@@ -1847,6 +2238,8 @@ pub async fn spawn_agent(
                         if last_lookup_session != lookup_session {
                             *lock = None;
                             offset = 0;
+                            last_log_path = None;
+                            codex_watch_binding.reset();
                             positioned_initial_log = !watcher_skip_existing_log;
                             last_lookup_session = lookup_session.clone();
                         }
@@ -1861,11 +2254,19 @@ pub async fn spawn_agent(
                         *lock = None;
                         offset = 0;
                         last_lookup_session.clear();
+                        last_log_path = None;
+                        codex_watch_binding.reset();
                         None
                     }
                 };
 
                 if let Some(path) = path {
+                    if last_log_path.as_ref() != Some(&path) {
+                        codex_watch_binding.reset();
+                        last_log_path = Some(path.clone());
+                    }
+                    codex_watch_binding
+                        .set_source(&last_lookup_session, path.to_string_lossy().as_ref());
                     if let Ok(mut out) = watcher_log_path.lock() {
                         *out = Some(path.clone());
                     }
@@ -1873,6 +2274,11 @@ pub async fn spawn_agent(
                         if let Ok(metadata) = file.metadata() {
                             if metadata.len() < offset {
                                 offset = 0;
+                                codex_watch_binding.reset();
+                                codex_watch_binding.set_source(
+                                    &last_lookup_session,
+                                    path.to_string_lossy().as_ref(),
+                                );
                             }
                             if !positioned_initial_log {
                                 offset = metadata.len();
@@ -1897,14 +2303,16 @@ pub async fn spawn_agent(
                                     serde_json::from_str::<serde_json::Value>(line.trim())
                                 {
                                     let raw_line = parsed.to_string();
+                                    let event = watcher_provider.parse_output(&raw_line);
+                                    codex_watch_binding.observe_record(&raw_line, event.as_ref());
                                     if let Some(message) =
-                                        extract_transcript_message("codex", &raw_line)
+                                        codex_watch_binding.extract_message(&raw_line)
                                     {
                                         if let Ok(mut watch_state) = watcher_watch_state.lock() {
                                             watch_state.push_transcript(message);
                                         }
                                     }
-                                    if let Some(event) = watcher_provider.parse_output(&raw_line) {
+                                    if let Some(event) = event {
                                         apply_agent_event_with_policy(
                                             &watcher_app,
                                             &watcher_session,
@@ -1919,10 +2327,14 @@ pub async fn spawn_agent(
                                         "agent-json-event",
                                         serde_json::json!({ "session_id": watcher_session, "data": parsed }),
                                     );
+                                } else {
+                                    codex_watch_binding.reset();
                                 }
                             }
                         }
                     }
+                } else if last_log_path.take().is_some() {
+                    codex_watch_binding.reset();
                 }
 
                 watcher_profile.finish(0);
@@ -2017,7 +2429,14 @@ pub async fn spawn_agent(
                                 continue;
                             };
                             let raw_line = parsed.to_string();
-                            if let Some(message) = extract_transcript_message("pi", &raw_line) {
+                            if let Some(mut message) = extract_transcript_message("pi", &raw_line) {
+                                if let Some(provider_session_id) = provider_session_id.as_deref() {
+                                    bind_pi_watch_message(
+                                        &mut message,
+                                        provider_session_id,
+                                        path.to_string_lossy().as_ref(),
+                                    );
+                                }
                                 if let Ok(mut watch_state) = watcher_watch_state.lock() {
                                     watch_state.push_transcript(message);
                                 }
@@ -2032,11 +2451,7 @@ pub async fn spawn_agent(
                                     ) {
                                         Ok(_) => {
                                             if let Ok(mut config) = watcher_config.lock() {
-                                                if let Some(fresh) =
-                                                    config.fresh_provider_session_id.take()
-                                                {
-                                                    config.resume_session = Some(fresh);
-                                                }
+                                                retain_pi_fresh_provider_session(&mut config);
                                             }
                                             persist_runtime_agent_configs(&watcher_app);
                                         }
@@ -2256,7 +2671,9 @@ pub async fn spawn_agent(
                                                     pty_status_event_policy_for_provider("claude"),
                                                 );
                                             }
-                                            AgentEvent::Init { .. } | AgentEvent::Unknown => {}
+                                            AgentEvent::Init { .. }
+                                            | AgentEvent::TurnStarted { .. }
+                                            | AgentEvent::Unknown => {}
                                         }
                                     } else {
                                         apply_agent_event_with_policy(
@@ -2636,8 +3053,17 @@ pub async fn spawn_agent(
 
     // OpenCode creates a provider-owned session only once its interactive TUI
     // begins a turn. Capture that local identity instead of bootstrapping it
-    // with an extra `opencode run` model request.
+    // with an extra `opencode run` model request, then bind the listener that
+    // was reserved before this same child was spawned.
     if config.provider == "opencode" && config.resume_session.is_none() {
+        let mut fresh_opencode_http_plan = opencode_http_plan.take();
+        let fresh_process_id = process_id;
+        let fresh_runtime_generation = runtime_generation;
+        let fresh_provider_generation = provider_generation;
+        let fresh_broker = app_state.native_delivery.clone();
+        let fresh_app = app.clone();
+        let fresh_expected_folder = expected_folder.clone();
+        let fresh_workspace = cwd.clone();
         let watcher_app = app.clone();
         let watcher_config = config_lock.clone();
         let watcher_current_status = current_status.clone();
@@ -2659,11 +3085,74 @@ pub async fn spawn_agent(
                 started_after_ms,
                 &watcher_session,
             ) {
-                if let Ok(mut cfg) = watcher_config.lock() {
+                let binding_config = if let Ok(mut cfg) = watcher_config.lock() {
                     cfg.resume_session = Some(provider_session_id);
                     cfg.fresh_provider_session_id = None;
-                }
+                    cfg.folder = fresh_expected_folder.clone();
+                    Some(cfg.clone())
+                } else {
+                    None
+                };
                 persist_runtime_agent_configs(&watcher_app);
+                let Some(mut binding_config) = binding_config else {
+                    tauri::async_runtime::block_on(
+                        fresh_broker
+                            .fail_opencode_http(&watcher_session, fresh_provider_generation),
+                    );
+                    break;
+                };
+                let Some(plan) = fresh_opencode_http_plan.take() else {
+                    break;
+                };
+                let Some(process_id) = fresh_process_id else {
+                    tauri::async_runtime::block_on(
+                        fresh_broker
+                            .fail_opencode_http(&watcher_session, fresh_provider_generation),
+                    );
+                    break;
+                };
+                let provider_session_id = binding_config
+                    .resume_session
+                    .clone()
+                    .expect("fresh OpenCode discovery set resume_session");
+                let config_fingerprint = {
+                    binding_config.folder = fresh_expected_folder.clone();
+                    crate::delivery::native_broker::opencode_http_config_fingerprint(
+                        &binding_config,
+                        &fresh_workspace,
+                    )
+                };
+                tauri::async_runtime::block_on(async move {
+                    if let Err(error) = fresh_broker
+                        .prepare_opencode_http(
+                            &watcher_session,
+                            fresh_provider_generation,
+                            config_fingerprint.clone(),
+                        )
+                        .await
+                    {
+                        log_debug(&format!(
+                            "[Wardian] OpenCode HTTP fresh owner preparation failed: {error}"
+                        ));
+                        fresh_broker
+                            .fail_opencode_http(&watcher_session, fresh_provider_generation)
+                            .await;
+                        return;
+                    }
+                    register_opencode_http_after_launch(OpenCodeHttpLaunchContext {
+                        app: fresh_app,
+                        broker: fresh_broker,
+                        agent_id: watcher_session,
+                        plan,
+                        provider_session_id,
+                        process_id,
+                        workspace: fresh_workspace,
+                        config_fingerprint,
+                        runtime_generation: fresh_runtime_generation,
+                        provider_generation: fresh_provider_generation,
+                    })
+                    .await;
+                });
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -2800,6 +3289,41 @@ mod tests {
     fn restored_spawns_skip_stale_process_scan() {
         assert!(!should_cleanup_stale_session_processes_before_spawn(true));
         assert!(should_cleanup_stale_session_processes_before_spawn(false));
+    }
+
+    #[test]
+    fn pi_bridge_child_handoff_diagnostic_distinguishes_pid_states() {
+        assert_eq!(pi_bridge_child_handoff_code(Some(42)), "process_registered");
+        assert_eq!(pi_bridge_child_handoff_code(Some(0)), "process_id_zero");
+        assert_eq!(pi_bridge_child_handoff_code(None), "process_id_unavailable");
+    }
+
+    #[test]
+    fn pi_fresh_provider_session_promotion_retains_fresh_marker() {
+        let mut config = AgentConfig {
+            provider: "pi".to_string(),
+            session_id: "wardian-session".to_string(),
+            fresh_provider_session_id: Some("pi-fresh-session".to_string()),
+            ..Default::default()
+        };
+
+        retain_pi_fresh_provider_session(&mut config);
+
+        assert_eq!(config.resume_session.as_deref(), Some("pi-fresh-session"));
+        assert_eq!(
+            config.fresh_provider_session_id.as_deref(),
+            Some("pi-fresh-session")
+        );
+    }
+
+    #[test]
+    fn opencode_http_launch_accepts_fresh_identity_then_rejects_invalid_identity() {
+        assert!(opencode_http_launch_identity_is_valid(None));
+        assert!(opencode_http_launch_identity_is_valid(Some("ses_exact")));
+        assert!(!opencode_http_launch_identity_is_valid(Some("ses/other")));
+        assert!(!opencode_http_launch_identity_is_valid(Some(
+            "wardian-agent"
+        )));
     }
 
     #[test]
@@ -3129,7 +3653,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_startup_readiness_waits_for_pending_remote_connection() {
+    fn claude_startup_prompt_rejects_pending_remote_connection() {
         use crate::control::provider_output_has_startup_ready_prompt as ready;
         assert!(!ready(
             "claude",
@@ -3142,6 +3666,28 @@ mod tests {
         assert!(ready(
             "claude",
             "Claude Code v2.1.263\n❯ Try ask Claude\nshift+tab to cycle · /rc",
+        ));
+    }
+
+    #[test]
+    fn claude_startup_readiness_uses_canonical_screen_after_partial_repaint() {
+        let partial_repaint = "\x1b[4;1H\x1b[2KHaiku 4.5 | workspace | /rc";
+        let canonical_screen = "Claude Code v2.1.270\n❯ Try fix typecheck errors\n────────\nHaiku 4.5 | workspace | /rc\n⏵⏵ bypass permissions on (shift+tab to cycle)";
+
+        assert!(!startup_prompt_is_ready(
+            "claude",
+            true,
+            Some(partial_repaint),
+        ));
+        assert!(startup_prompt_is_ready(
+            "claude",
+            true,
+            Some(canonical_screen),
+        ));
+        assert!(!startup_prompt_is_ready(
+            "claude",
+            false,
+            Some(canonical_screen),
         ));
     }
 
