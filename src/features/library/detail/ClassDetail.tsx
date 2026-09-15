@@ -122,6 +122,17 @@ export const ClassDetail: React.FC<ClassDetailProps> = ({
     return (
         <div data-testid="class-detail" className="flex flex-col h-full min-h-0">
             {header}
+            <div className="flex-1 min-h-[240px]">
+                <MarkdownEditor
+                    value={draft}
+                    onChange={onChange}
+                    onSave={onSave}
+                    dirty={dirty}
+                    stale={stale}
+                    onReloadExternal={onReloadExternal}
+                    onKeepMine={onKeepMine}
+                />
+            </div>
             <section aria-label="Class contents" className="library-class-contents flex flex-col gap-3">
                 {classDef && (
                     <div data-testid="class-provider-defaults" className="text-xs text-muted">
@@ -177,17 +188,6 @@ export const ClassDetail: React.FC<ClassDetailProps> = ({
                     {sharedSkills.length ? <ul className="mt-2 flex flex-wrap gap-2">{sharedSkills.map((path) => <li key={path} className="rounded border border-wardian-border px-2 py-1 break-all">{path}</li>)}</ul> : <p className="mt-2">No globally deployed skills.</p>}
                 </details>
             </section>
-            <div className="flex-1 min-h-[240px]">
-                <MarkdownEditor
-                    value={draft}
-                    onChange={onChange}
-                    onSave={onSave}
-                    dirty={dirty}
-                    stale={stale}
-                    onReloadExternal={onReloadExternal}
-                    onKeepMine={onKeepMine}
-                />
-            </div>
             <div className="flex flex-col gap-3 border-t border-wardian-border p-3 shrink-0">
                 {actionError && (
                     <p data-testid="class-action-error" className="text-xs text-wardian-error">
