@@ -17,7 +17,9 @@ export type TerminalDetectedLink = {
 
 export type TerminalLinkProviderOptions = {
   getBasePath?: () => string | null | undefined;
-  getExternalEditor: () => ExternalEditorLaunchSettings;
+  getExternalEditor?: () => ExternalEditorLaunchSettings;
+  /** Restrict a renderer to browser-safe HTTP(S) links and omit file links. */
+  httpOnly?: boolean;
   onOpenError?: (message: string) => void;
   openFile?: (path: string, editor: ExternalEditorLaunchSettings) => Promise<void>;
   openUrl?: (url: string) => Promise<void>;
@@ -114,6 +116,39 @@ function defaultValidateFile(path: string) {
   return invoke<boolean>("terminal_link_target_exists", { path });
 }
 
+function urlProtocol(value: string) {
+  try {
+    return new URL(value).protocol.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function isHttpUrl(value: string) {
+  const protocol = urlProtocol(value);
+  return protocol === "http:" || protocol === "https:";
+}
+
+function isFileUrl(value: string) {
+  return urlProtocol(value) === "file:";
+}
+
+/** Opens a validated HTTP(S) URL in a browser without crossing the Tauri boundary. */
+export function openHttpUrlInBrowser(value: string) {
+  if (!isHttpUrl(value)) {
+    return Promise.reject(new Error("Only HTTP(S) URLs can open in a browser"));
+  }
+
+  const url = new URL(value).href;
+  const opened = typeof window !== "undefined"
+    ? window.open(url, "_blank", "noopener,noreferrer")
+    : null;
+  if (!opened && typeof window !== "undefined") {
+    window.location.assign(url);
+  }
+  return Promise.resolve();
+}
+
 function openBrowserLink(url: string, options: TerminalLinkProviderOptions) {
   const open = options.openUrl ?? defaultOpenUrl;
   open(url).catch((error) => {
@@ -169,14 +204,26 @@ function pathWithoutFileScheme(path: string) {
   if (!path.toLowerCase().startsWith("file://")) {
     return path;
   }
-  const withoutScheme = path.replace(/^file:\/\//i, "");
-  const normalized = withoutScheme.startsWith("/") && /^[A-Za-z]:/.test(withoutScheme.slice(1))
-    ? withoutScheme.slice(1)
-    : withoutScheme;
   try {
-    return decodeURIComponent(normalized);
+    const uri = new URL(path);
+    const decodedPath = decodeURIComponent(uri.pathname);
+    const host = uri.hostname;
+    if (host && host.toLowerCase() !== "localhost") {
+      return `\\\\${host}${decodedPath.replace(/\//g, "\\")}`;
+    }
+    return decodedPath.startsWith("/") && /^[A-Za-z]:/.test(decodedPath.slice(1))
+      ? decodedPath.slice(1)
+      : decodedPath;
   } catch {
-    return normalized;
+    const withoutScheme = path.replace(/^file:\/\//i, "");
+    const normalized = withoutScheme.startsWith("/") && /^[A-Za-z]:/.test(withoutScheme.slice(1))
+      ? withoutScheme.slice(1)
+      : withoutScheme;
+    try {
+      return decodeURIComponent(normalized);
+    } catch {
+      return normalized;
+    }
   }
 }
 
@@ -516,9 +563,11 @@ export async function resolveTerminalLinkTarget(
 ): Promise<TerminalDetectedLink | null> {
   const basePath = options.getBasePath?.();
   const parsedLink = exactLinkForTarget(findTerminalLinks(target, basePath), target);
-  if (parsedLink) return parsedLink;
-
   const validateFile = options.validateFile ?? defaultValidateFile;
+  if (parsedLink?.kind === "url") return parsedLink;
+  if (parsedLink?.kind === "file") {
+    return await validateFile(parsedLink.target) ? parsedLink : null;
+  }
   const validatedLink = exactLinkForTarget(await findValidatedTerminalLinks(target, basePath, validateFile), target);
   return validatedLink;
 }
@@ -536,16 +585,50 @@ export function openTerminalDetectedLink(
     });
     return;
   }
-  (options.openFile ?? defaultOpenFile)(link.target, options.getExternalEditor()).catch((error) => {
+  const editor = options.getExternalEditor?.();
+  if (!editor) {
+    options.onOpenError?.("Failed to open terminal link: no file opener is configured");
+    return;
+  }
+  (options.openFile ?? defaultOpenFile)(link.target, editor).catch((error) => {
     options.onOpenError?.(`Failed to open terminal link: ${String(error)}`);
   });
+}
+
+function activateTerminalHyperlink(target: string, options: TerminalLinkProviderOptions) {
+  if (isHttpUrl(target)) {
+    openBrowserLink(target, options);
+    return;
+  }
+  if (!isFileUrl(target)) {
+    options.onOpenError?.(`Failed to open terminal link: unsupported URL scheme`);
+    return;
+  }
+
+  void resolveTerminalLinkTarget(target, options)
+    .then((link) => {
+      if (!link || link.kind !== "file") {
+        options.onOpenError?.("Failed to open terminal link: file target was not validated");
+        return;
+      }
+      openTerminalDetectedLink(link, options);
+    })
+    .catch((error) => {
+      options.onOpenError?.(`Failed to resolve terminal link: ${String(error)}`);
+    });
 }
 
 export function installTerminalLinkProvider(term: Terminal, options: TerminalLinkProviderOptions) {
   if (term.options) {
     term.options.linkHandler = {
-      allowNonHttpProtocols: false,
-      activate: (_event, text) => openBrowserLink(text, options),
+      allowNonHttpProtocols: !options.httpOnly,
+      activate: (_event, text) => {
+        if (options.httpOnly) {
+          if (isHttpUrl(text)) openBrowserLink(text, options);
+          return;
+        }
+        activateTerminalHyperlink(text, options);
+      },
     };
   }
 
@@ -574,35 +657,37 @@ export function installTerminalLinkProvider(term: Terminal, options: TerminalLin
     },
   });
 
-  const fileProvider = term.registerLinkProvider({
-    provideLinks(bufferLineNumber, callback) {
-      getTerminalLinksForBufferLine(term, bufferLineNumber, options)
-        .then((links) => links.filter((link) => link.kind === "file"))
-        .then((links) => links.map<ILink>((link) => ({
-          range: link.range,
-          text: link.text,
-          decorations: {
-            pointerCursor: true,
-            underline: true,
-          },
-          activate: () => {
-            openTerminalDetectedLink(link, options);
-          },
-        })))
-        .then((links) => {
-          callback(links.length > 0 ? links : undefined);
-        })
-        .catch((error) => {
-          options.onOpenError?.(`Failed to resolve terminal links: ${String(error)}`);
-          callback(undefined);
-        });
-    },
-  });
+  const fileProvider = options.httpOnly
+    ? null
+    : term.registerLinkProvider({
+        provideLinks(bufferLineNumber, callback) {
+          getTerminalLinksForBufferLine(term, bufferLineNumber, options)
+            .then((links) => links.filter((link) => link.kind === "file"))
+            .then((links) => links.map<ILink>((link) => ({
+              range: link.range,
+              text: link.text,
+              decorations: {
+                pointerCursor: true,
+                underline: true,
+              },
+              activate: () => {
+                openTerminalDetectedLink(link, options);
+              },
+            })))
+            .then((links) => {
+              callback(links.length > 0 ? links : undefined);
+            })
+            .catch((error) => {
+              options.onOpenError?.(`Failed to resolve terminal links: ${String(error)}`);
+              callback(undefined);
+            });
+        },
+      });
 
   return {
     dispose() {
       urlProvider.dispose();
-      fileProvider.dispose();
+      fileProvider?.dispose();
     },
   };
 }

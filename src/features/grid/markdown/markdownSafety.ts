@@ -20,6 +20,11 @@ function isPathLikeMarkdownTarget(rawUrl: string) {
   return false;
 }
 
+export function isMarkdownFileTarget(rawUrl: string | undefined) {
+  if (!rawUrl) return false;
+  return rawUrl.toLowerCase().startsWith("file:") || isPathLikeMarkdownTarget(rawUrl);
+}
+
 export function safeMarkdownUrl(rawUrl: string | undefined): string | null {
   if (!rawUrl) return null;
   if (isPathLikeMarkdownTarget(rawUrl)) return rawUrl;

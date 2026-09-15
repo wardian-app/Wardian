@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { findTerminalLinks, findValidatedTerminalLinks, installTerminalLinkProvider } from "./terminalLinks";
+import {
+  findTerminalLinks,
+  findValidatedTerminalLinks,
+  installTerminalLinkProvider,
+  openHttpUrlInBrowser,
+} from "./terminalLinks";
 
 describe("findTerminalLinks", () => {
   it("detects URLs and file paths with line suffixes", () => {
@@ -41,6 +46,21 @@ describe("findTerminalLinks", () => {
       text: "/home/me/repo/src/App.tsx:12:3",
       target: "/home/me/repo/src/App.tsx",
     });
+  });
+
+  it("maps file URI authorities to UNC paths without rebasing them to the workspace", () => {
+    const [unc] = findTerminalLinks("file://server/share/report.md", "C:\\repo");
+    const [localhost] = findTerminalLinks("file://localhost/C:/repo/report.md", "D:\\other");
+    const [drive] = findTerminalLinks("file:///C:/repo/report.md", "D:\\other");
+
+    expect(unc).toMatchObject({
+      kind: "file",
+      text: "file://server/share/report.md",
+      target: "\\\\server\\share\\report.md",
+    });
+    expect(unc.target).not.toBe("C:\\repo\\server\\share\\report.md");
+    expect(localhost.target).toBe("C:/repo/report.md");
+    expect(drive.target).toBe("C:/repo/report.md");
   });
 
   it("trims trailing sentence punctuation from detected links", () => {
@@ -281,8 +301,201 @@ describe("installTerminalLinkProvider", () => {
       { start: { x: 1, y: 1 }, end: { x: 24, y: 1 } },
     );
 
-    expect(term.options.linkHandler.allowNonHttpProtocols).toBe(false);
+    expect(term.options.linkHandler.allowNonHttpProtocols).toBe(true);
     expect(openUrl).toHaveBeenCalledWith("https://wardian.org/from-osc");
+  });
+
+  it("routes only validated OSC 8 file hyperlinks through the external editor", async () => {
+    const openFile = vi.fn(async () => {});
+    const validateFile = vi.fn(async (path: string) => path === "C:/repo/src/App.tsx");
+    const onOpenError = vi.fn();
+    const term = {
+      options: {},
+      registerLinkProvider: vi.fn(() => ({ dispose: vi.fn() })),
+      buffer: {
+        active: {
+          getLine: () => undefined,
+        },
+      },
+    } as any;
+
+    installTerminalLinkProvider(term, {
+      getBasePath: () => "C:\\repo",
+      getExternalEditor: () => ({
+        external_editor: "vscode",
+        external_editor_custom_executable: null,
+      }),
+      openFile,
+      onOpenError,
+      validateFile,
+    });
+
+    term.options.linkHandler.activate(
+      new MouseEvent("click"),
+      "file:///C:/repo/src/App.tsx",
+      { start: { x: 1, y: 1 }, end: { x: 28, y: 1 } },
+    );
+
+    await vi.waitFor(() => expect(openFile).toHaveBeenCalled());
+
+    expect(term.options.linkHandler.allowNonHttpProtocols).toBe(true);
+    expect(validateFile).toHaveBeenCalledWith("C:/repo/src/App.tsx");
+    expect(openFile).toHaveBeenCalledWith("C:/repo/src/App.tsx", {
+      external_editor: "vscode",
+      external_editor_custom_executable: null,
+    });
+    expect(onOpenError).not.toHaveBeenCalled();
+  });
+
+  it("refuses OSC 8 file hyperlinks when target validation fails", async () => {
+    const openFile = vi.fn(async () => {});
+    const validateFile = vi.fn(async () => false);
+    const onOpenError = vi.fn();
+    const term = {
+      options: {},
+      registerLinkProvider: vi.fn(() => ({ dispose: vi.fn() })),
+      buffer: {
+        active: {
+          getLine: () => undefined,
+        },
+      },
+    } as any;
+
+    installTerminalLinkProvider(term, {
+      getBasePath: () => "C:\\repo",
+      getExternalEditor: () => ({
+        external_editor: "vscode",
+        external_editor_custom_executable: null,
+      }),
+      openFile,
+      onOpenError,
+      validateFile,
+    });
+
+    term.options.linkHandler.activate(
+      new MouseEvent("click"),
+      "file:///C:/repo/src/secret.tsx",
+      { start: { x: 1, y: 1 }, end: { x: 31, y: 1 } },
+    );
+
+    await vi.waitFor(() => expect(onOpenError).toHaveBeenCalledWith(
+      "Failed to open terminal link: file target was not validated",
+    ));
+
+    expect(validateFile).toHaveBeenCalledWith("C:/repo/src/secret.tsx");
+    expect(openFile).not.toHaveBeenCalled();
+  });
+
+  it("opens a validated OSC 8 UNC file hyperlink without workspace rebasing", async () => {
+    const openFile = vi.fn(async () => {});
+    const validateFile = vi.fn(async (path: string) => path === "\\\\server\\share\\report.md");
+    const onOpenError = vi.fn();
+    const term = {
+      options: {},
+      registerLinkProvider: vi.fn(() => ({ dispose: vi.fn() })),
+      buffer: {
+        active: {
+          getLine: () => undefined,
+        },
+      },
+    } as any;
+
+    installTerminalLinkProvider(term, {
+      getBasePath: () => "C:\\repo",
+      getExternalEditor: () => ({
+        external_editor: "vscode",
+        external_editor_custom_executable: null,
+      }),
+      openFile,
+      onOpenError,
+      validateFile,
+    });
+
+    term.options.linkHandler.activate(
+      new MouseEvent("click"),
+      "file://server/share/report.md",
+      { start: { x: 1, y: 1 }, end: { x: 28, y: 1 } },
+    );
+
+    await vi.waitFor(() => expect(openFile).toHaveBeenCalled());
+
+    expect(validateFile).toHaveBeenCalledWith("\\\\server\\share\\report.md");
+    expect(openFile).toHaveBeenCalledWith("\\\\server\\share\\report.md", {
+      external_editor: "vscode",
+      external_editor_custom_executable: null,
+    });
+    expect(openFile).not.toHaveBeenCalledWith("C:\\repo\\server\\share\\report.md", expect.anything());
+    expect(onOpenError).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsupported OSC 8 schemes without invoking a URL or file opener", () => {
+    const openUrl = vi.fn(async () => {});
+    const openFile = vi.fn(async () => {});
+    const onOpenError = vi.fn();
+    const term = {
+      options: {},
+      registerLinkProvider: vi.fn(() => ({ dispose: vi.fn() })),
+      buffer: {
+        active: {
+          getLine: () => undefined,
+        },
+      },
+    } as any;
+
+    installTerminalLinkProvider(term, {
+      getExternalEditor: () => ({
+        external_editor: "system",
+        external_editor_custom_executable: null,
+      }),
+      onOpenError,
+      openFile,
+      openUrl,
+    });
+
+    term.options.linkHandler.activate(
+      new MouseEvent("click"),
+      "javascript:alert(1)",
+      { start: { x: 1, y: 1 }, end: { x: 22, y: 1 } },
+    );
+
+    expect(openUrl).not.toHaveBeenCalled();
+    expect(openFile).not.toHaveBeenCalled();
+    expect(onOpenError).toHaveBeenCalledWith("Failed to open terminal link: unsupported URL scheme");
+  });
+
+  it("limits remote terminal linkification to HTTP URLs", async () => {
+    const openUrl = vi.fn(async () => {});
+    const providers: Array<{ provideLinks: (line: number, callback: (links: any[] | undefined) => void) => void }> = [];
+    const term = {
+      options: {},
+      registerLinkProvider: vi.fn((provider) => {
+        providers.push(provider);
+        return { dispose: vi.fn() };
+      }),
+      buffer: {
+        active: {
+          getLine: () => ({ translateToString: () => "file:///C:/host/report.md https://wardian.org/docs" }),
+        },
+      },
+    } as any;
+
+    installTerminalLinkProvider(term, { httpOnly: true, openUrl });
+
+    expect(term.options.linkHandler.allowNonHttpProtocols).toBe(false);
+    expect(providers).toHaveLength(1);
+    const links = await new Promise<any[] | undefined>((resolve) => providers[0].provideLinks(1, resolve));
+    links?.[0].activate(new MouseEvent("click"), links[0].text);
+
+    expect(links?.map((link) => link.text)).toEqual(["https://wardian.org/docs"]);
+    expect(openUrl).toHaveBeenCalledWith("https://wardian.org/docs");
+  });
+
+  it("opens a safe HTTP URL synchronously through the browser path", async () => {
+    const openWindow = vi.spyOn(window, "open").mockReturnValue({} as Window);
+
+    await openHttpUrlInBrowser("https://wardian.org/docs");
+
+    expect(openWindow).toHaveBeenCalledWith("https://wardian.org/docs", "_blank", "noopener,noreferrer");
   });
 
   it("opens URLs that wrap across physical terminal rows", async () => {

@@ -383,6 +383,18 @@ describe("terminal capability broker", () => {
     expect(normalizeOpenCodeOutput(data, "codex")).toBe(data);
   });
 
+  it.each(["claude", "codex", "antigravity", "opencode", "pi", "gemini"] as const)(
+    "preserves labelled HTTP OSC 8 hyperlinks for %s",
+    (provider) => {
+      const target = `https://wardian.org/issues/1336/${provider}`;
+      const open = `\u001b]8;;${target}\u001b\\`;
+      const close = "\u001b]8;;\u001b\\";
+      const chunks = [`before ${open}`, `Issue 1336${close} after`];
+
+      expect(normalizeTerminalOutputBatch(chunks, provider)).toBe(chunks.join(""));
+    },
+  );
+
   it("replies to palette and OSC 10/11 foreground/background queries", () => {
     const data = "\u001b]4;0;?\u0007\u001b]10;?\u0007\u001b]11;?\u001b\\";
     const plan = planTerminalCapabilityResponses("opencode", data, baseContext);

@@ -205,6 +205,25 @@ describe("ChatMarkdown", () => {
     expect(screen.getByRole("link", { name: "https://example.test/diagram.png" })).toHaveAttribute("href", "https://example.test/diagram.png");
   });
 
+  it("keeps remote file images inert and does not browser-fallback a rejected file opener", () => {
+    const openUrlMock = vi.fn().mockRejectedValue(new Error("browser-only opener rejected file URL"));
+    const openWindow = vi.spyOn(window, "open").mockReturnValue({} as Window);
+
+    render(
+      <ChatMarkdown
+        linkHandling={{ allowFileLinks: false, openUrl: openUrlMock }}
+        source="![host image](file:///C:/host/image.png)"
+      />,
+    );
+
+    expect(screen.getByText("host image")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "file:///C:/host/image.png" })).not.toBeInTheDocument();
+    expect(openUrlMock).not.toHaveBeenCalled();
+    expect(openWindow).not.toHaveBeenCalled();
+
+    openWindow.mockRestore();
+  });
+
   it("keeps code block copy and highlighting behavior", async () => {
     const writeTextMock = vi.mocked(writeText);
     writeTextMock.mockResolvedValue(undefined);
