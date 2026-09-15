@@ -2051,9 +2051,11 @@ fn message_event_from_transcript(
         .source
         .clone()
         .or_else(|| Some("transcript".to_string()));
-    if message.provider.eq_ignore_ascii_case("codex")
-        && matches!(source.as_deref(), Some("event_msg" | "response_item"))
-    {
+    let is_bound_native_watch = (message.provider.eq_ignore_ascii_case("codex")
+        && matches!(source.as_deref(), Some("event_msg" | "response_item")))
+        || (message.provider.eq_ignore_ascii_case("pi")
+            && source.as_deref() == Some("session_jsonl"));
+    if is_bound_native_watch {
         if let Some(provenance) = message.provider_provenance.as_ref().filter(|provenance| {
             !provenance.provider_session_id.trim().is_empty()
                 && !provenance.source_path.trim().is_empty()
@@ -2360,6 +2362,51 @@ mod tests {
         );
         assert_ne!(unbound_event.metadata["provider_log"], true);
         assert!(unbound_event.metadata.get("provider_turn_id").is_none());
+    }
+
+    #[test]
+    fn projects_bound_pi_watch_messages_as_provider_observations() {
+        let bound = WatchTranscriptMessage {
+            role: "assistant".to_string(),
+            text: "Pi answer".to_string(),
+            provider: "pi".to_string(),
+            turn_id: Some("118bf261".to_string()),
+            source: Some("session_jsonl".to_string()),
+            provider_provenance: Some(wardian_core::control::WatchTranscriptProvenance {
+                provider_session_id: "1f2a5d81-5ca6-46bf-b15a-78c6295d64b7".to_string(),
+                source_path: "pi-session.jsonl".to_string(),
+                provider_turn_id: "118bf261".to_string(),
+            }),
+        };
+        let bound_event = message_event_from_transcript(
+            "dac9e431-f775-4c77-8b8e-0a61c6dba9e4",
+            "pi",
+            3,
+            &bound,
+            &transcript(vec![bound.clone()]),
+        );
+
+        assert_eq!(bound_event.metadata["provider_log"], true);
+        assert_eq!(
+            bound_event.metadata["provider_session_id"],
+            "1f2a5d81-5ca6-46bf-b15a-78c6295d64b7"
+        );
+        assert_eq!(bound_event.metadata["log_path"], "pi-session.jsonl");
+        assert_eq!(bound_event.metadata["provider_turn_id"], "118bf261");
+
+        let unbound = WatchTranscriptMessage {
+            provider_provenance: None,
+            ..bound
+        };
+        let unbound_event = message_event_from_transcript(
+            "dac9e431-f775-4c77-8b8e-0a61c6dba9e4",
+            "pi",
+            3,
+            &unbound,
+            &transcript(vec![unbound.clone()]),
+        );
+        assert_ne!(unbound_event.metadata["provider_log"], true);
+        assert!(unbound_event.metadata.get("provider_session_id").is_none());
     }
 
     #[test]

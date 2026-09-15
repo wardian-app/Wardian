@@ -196,6 +196,29 @@ pub fn extract_transcript_message(
     }
 }
 
+pub(crate) fn bind_pi_watch_message(
+    message: &mut WatchTranscriptMessage,
+    provider_session_id: &str,
+    source_path: &str,
+) {
+    let provider_session_id = provider_session_id.trim();
+    let source_path = source_path.trim();
+    let provider_turn_id = message.turn_id.as_deref().map(str::trim).unwrap_or("");
+    if !message.provider.eq_ignore_ascii_case("pi")
+        || message.source.as_deref() != Some("session_jsonl")
+        || provider_session_id.is_empty()
+        || source_path.is_empty()
+        || provider_turn_id.is_empty()
+    {
+        return;
+    }
+    message.provider_provenance = Some(WatchTranscriptProvenance {
+        provider_session_id: provider_session_id.to_string(),
+        source_path: source_path.to_string(),
+        provider_turn_id: provider_turn_id.to_string(),
+    });
+}
+
 fn extract_pi(raw_line: &str) -> Option<WatchTranscriptMessage> {
     let parsed: serde_json::Value = serde_json::from_str(raw_line).ok()?;
     let kind = parsed.get("type").and_then(|value| value.as_str())?;
@@ -213,14 +236,18 @@ fn extract_pi(raw_line: &str) -> Option<WatchTranscriptMessage> {
         }
     }
     let text = extract_text(message)?;
+    let turn_id = if kind == "message" {
+        parsed.get("id").or_else(|| message.get("id"))
+    } else {
+        message.get("id")
+    }
+    .and_then(|value| value.as_str())
+    .map(str::to_string);
     Some(WatchTranscriptMessage {
         role: "assistant".into(),
         text,
         provider: "pi".into(),
-        turn_id: message
-            .get("id")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
+        turn_id,
         source: Some(
             if kind == "message" {
                 "session_jsonl"
@@ -722,12 +749,41 @@ mod tests {
 
     #[test]
     fn pi_completed_session_message_extracts_assistant_text() {
-        let line = r#"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Pi answer"}],"stopReason":"stop"}}"#;
+        let line = r#"{"type":"message","id":"pi-entry","message":{"role":"assistant","content":[{"type":"text","text":"Pi answer"}],"stopReason":"stop"}}"#;
 
         let message = extract_transcript_message("pi", line).unwrap();
         assert_eq!(message.text, "Pi answer");
         assert_eq!(message.provider, "pi");
+        assert_eq!(message.turn_id.as_deref(), Some("pi-entry"));
         assert_eq!(message.source.as_deref(), Some("session_jsonl"));
+    }
+
+    #[test]
+    fn pi_watch_message_preserves_launch_owned_source_binding() {
+        let mut message = extract_transcript_message(
+            "pi",
+            r#"{"type":"message","id":"pi-entry","message":{"role":"assistant","content":[{"type":"text","text":"Pi answer"}],"stopReason":"stop"}}"#,
+        )
+        .unwrap();
+
+        bind_pi_watch_message(&mut message, "pi-session", "pi-session.jsonl");
+
+        assert_eq!(
+            message.provider_provenance,
+            Some(WatchTranscriptProvenance {
+                provider_session_id: "pi-session".to_string(),
+                source_path: "pi-session.jsonl".to_string(),
+                provider_turn_id: "pi-entry".to_string(),
+            })
+        );
+
+        let message_end = extract_transcript_message(
+            "pi",
+            r#"{"type":"message_end","id":"outer-end","message":{"role":"assistant","id":"nested-end","content":"Pi answer","stopReason":"stop"}}"#,
+        )
+        .unwrap();
+        assert_eq!(message_end.turn_id.as_deref(), Some("nested-end"));
+        assert_eq!(message_end.source.as_deref(), Some("json_mode"));
     }
 
     #[test]

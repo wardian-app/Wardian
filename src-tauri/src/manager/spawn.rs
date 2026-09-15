@@ -8,7 +8,9 @@ use crate::providers::claude::{
 };
 use crate::providers::codex::CodexProvider;
 use crate::providers::pi::PiProvider;
-use crate::providers::transcript::{extract_transcript_message, CodexWatchBindingState};
+use crate::providers::transcript::{
+    bind_pi_watch_message, extract_transcript_message, CodexWatchBindingState,
+};
 use crate::providers::ProviderFactory;
 use crate::state::{ActiveAgent, AgentWatchState, AppState};
 use crate::utils::fs::*;
@@ -2427,7 +2429,14 @@ pub async fn spawn_agent(
                                 continue;
                             };
                             let raw_line = parsed.to_string();
-                            if let Some(message) = extract_transcript_message("pi", &raw_line) {
+                            if let Some(mut message) = extract_transcript_message("pi", &raw_line) {
+                                if let Some(provider_session_id) = provider_session_id.as_deref() {
+                                    bind_pi_watch_message(
+                                        &mut message,
+                                        provider_session_id,
+                                        path.to_string_lossy().as_ref(),
+                                    );
+                                }
                                 if let Ok(mut watch_state) = watcher_watch_state.lock() {
                                     watch_state.push_transcript(message);
                                 }

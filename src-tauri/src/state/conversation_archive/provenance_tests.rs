@@ -134,6 +134,156 @@ fn codex_assistant_mirror_projection_requires_one_final_native_turn() {
 }
 
 #[test]
+fn pi_assistant_mirror_projection_requires_unique_launch_bound_entry() {
+    let observation = |id: &str,
+                       source: &str,
+                       turn_id: &str,
+                       provider_log: bool,
+                       provider_session_id: Option<&str>,
+                       log_path: Option<&str>,
+                       text: &str| {
+        let mut metadata = serde_json::json!({
+            "provider_log": provider_log,
+            "log_source": "active_agent_log_path",
+            "raw_type": "message",
+        });
+        if let Some(provider_session_id) = provider_session_id {
+            metadata["provider_session_id"] = serde_json::json!(provider_session_id);
+            metadata["provider_turn_id"] = serde_json::json!(turn_id);
+        }
+        if let Some(log_path) = log_path {
+            metadata["log_path"] = serde_json::json!(log_path);
+        }
+        if source == "session_jsonl" {
+            metadata["transcript_cursor"] = serde_json::json!(format!("watch:{id}"));
+        }
+        AgentChatEvent {
+            id: id.into(),
+            session_id: "dac9e431-f775-4c77-8b8e-0a61c6dba9e4".into(),
+            provider: "pi".into(),
+            kind: AgentChatEventKind::Message,
+            role: Some(AgentChatRole::Assistant),
+            text: Some(text.into()),
+            title: None,
+            status: None,
+            turn_id: Some(turn_id.into()),
+            source: Some(source.into()),
+            command: None,
+            exit_code: None,
+            path: None,
+            language: None,
+            created_at: None,
+            sequence: None,
+            metadata,
+        }
+    };
+
+    let watch_id = "dac9e431-f775-4c77-8b8e-0a61c6dba9e4:0000000000000004:session_jsonl";
+    let native_id =
+        "dac9e431-f775-4c77-8b8e-0a61c6dba9e4:provider_log:0f806b9055af218c1f630ec6537aabec";
+    let watch = observation(
+        watch_id,
+        "session_jsonl",
+        "118bf261",
+        true,
+        Some("1f2a5d81-5ca6-46bf-b15a-78c6295d64b7"),
+        Some("pi-session.jsonl"),
+        "WARDIAN_REAL_DELIVERY_PI_PROMPT_SHORT_setup-94060_1789456156488",
+    );
+    let native = observation(
+        native_id,
+        "message",
+        "118bf261",
+        true,
+        None,
+        Some("pi-session.jsonl"),
+        "WARDIAN_REAL_DELIVERY_PI_PROMPT_SHORT_setup-94060_1789456156488",
+    );
+
+    let projected =
+        provenance::merge_current_capture(vec![watch.clone(), native.clone()], Vec::new()).unwrap();
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].id, native_id);
+    let observation_ids = projected[0].metadata["provider_observation_ids"]
+        .as_array()
+        .unwrap();
+    assert_eq!(observation_ids.len(), 2);
+    assert!(observation_ids.iter().any(|id| id == watch_id));
+    assert!(observation_ids.iter().any(|id| id == native_id));
+
+    let distinct_turns = provenance::merge_current_capture(
+        vec![
+            watch.clone(),
+            native.clone(),
+            observation(
+                "pi-watch-second-turn",
+                "session_jsonl",
+                "118bf262",
+                true,
+                Some("1f2a5d81-5ca6-46bf-b15a-78c6295d64b7"),
+                Some("pi-session.jsonl"),
+                "WARDIAN_REAL_DELIVERY_PI_PROMPT_SHORT_setup-94060_1789456156488",
+            ),
+            observation(
+                "pi-native-second-turn",
+                "message",
+                "118bf262",
+                true,
+                None,
+                Some("pi-session.jsonl"),
+                "WARDIAN_REAL_DELIVERY_PI_PROMPT_SHORT_setup-94060_1789456156488",
+            ),
+        ],
+        Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(distinct_turns.len(), 2);
+
+    let missing_binding = provenance::merge_current_capture(
+        vec![
+            observation(
+                "pi-unbound-watch",
+                "session_jsonl",
+                "118bf261",
+                false,
+                None,
+                None,
+                "WARDIAN_REAL_DELIVERY_PI_PROMPT_SHORT_setup-94060_1789456156488",
+            ),
+            native.clone(),
+        ],
+        Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(missing_binding.len(), 2);
+
+    let mut foreign_watch = watch.clone();
+    foreign_watch.metadata["log_path"] = serde_json::json!("other-session.jsonl");
+    let foreign_binding =
+        provenance::merge_current_capture(vec![foreign_watch, native.clone()], Vec::new()).unwrap();
+    assert_eq!(foreign_binding.len(), 2);
+
+    let ambiguous_native = provenance::merge_current_capture(
+        vec![
+            watch,
+            native.clone(),
+            observation(
+                "pi-native-ambiguous",
+                "message",
+                "118bf261",
+                true,
+                None,
+                Some("pi-session.jsonl"),
+                "WARDIAN_REAL_DELIVERY_PI_PROMPT_SHORT_setup-94060_1789456156488",
+            ),
+        ],
+        Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(ambiguous_native.len(), 3);
+}
+
+#[test]
 fn retained_codex_delivery_fixture_collapses_only_the_bound_provider_pair() {
     let (_guard, _temp) = isolate();
     let mut current = crate::providers::chat_transcript::normalize_chat_lines(

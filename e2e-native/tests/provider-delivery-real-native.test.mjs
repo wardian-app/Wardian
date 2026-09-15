@@ -103,7 +103,8 @@ const CANONICAL_REPLY_EXACT_BYTES_INSTRUCTION =
 const CANONICAL_REPLY_TOOL_ALLOWANCE =
   "You may use the canonical reply MCP tool, or use Bash solely to invoke Wardian's " +
   "canonical message reply command (`wardian message reply <request_id> --status done --stdin`) " +
-  "with the exact requested text on stdin. " +
+  "with the exact requested text on stdin. Bash's `printf` builtin is allowed solely " +
+  "to supply those exact stdin bytes. A text-only response does not complete the task. " +
   "Use no other tools, shell commands, or file access.";
 
 function buildCanonicalReplyTaskPrompt(inputCase, marker) {
@@ -2089,6 +2090,15 @@ test("native and composer task routes share the canonical reply allowance", () =
     assert.match(prompt, /Use no other tools, shell commands, or file access/);
     assert.doesNotMatch(prompt, /Do not access files or run tools\.|No tools\./);
   }
+});
+
+test("canonical reply prompt permits printf only for the canonical stdin route", () => {
+  const prompt = buildCanonicalReplyTaskPrompt(INPUT_CASES[0], "PRINTF_ROUTE_MARKER");
+  assert.match(prompt, /Bash's `printf` builtin is allowed solely/);
+  assert.match(prompt, /wardian message reply <request_id> --status done --stdin/);
+  assert.match(prompt, /exact requested text on stdin/);
+  assert.match(prompt, /text-only response does not complete the task/);
+  assert.match(prompt, /Use no other tools, shell commands, or file access/);
 });
 
 test("OpenCode native mode defaults to resume and exposes fresh explicitly", () => {
