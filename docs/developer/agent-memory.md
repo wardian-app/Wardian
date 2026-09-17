@@ -60,7 +60,9 @@ quota.
 
 Mutate session-close invokers only through
 `wardian_core::session_close::mutate_invokers`; it holds the adjacent `.lock`
-file across reload, mutation, and atomic replacement. A session-close context
+file across reload, mutation, and atomic replacement. Mutations report an error
+for malformed or unreadable existing bytes and leave the file untouched; a
+missing file remains an empty fresh-install state. A session-close context
 owns a unique `boundary_id`. Lifecycle code may capture the closing transcript
 before replacement. It then starts the replacement as pending, persists the
 proposed roster, commits the archive boundary, and only then installs the new

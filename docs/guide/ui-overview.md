@@ -73,6 +73,8 @@ Wardian brokers terminal output, input ownership, and canonical geometry across 
 
 If several presentations show the same terminal, the active one is labeled **Owner** and the others are **Mirror** / **Read only**. Wardian can reclaim hidden renderers while retaining terminal state; a visible presentation restores and fits its renderer automatically.
 
+Provider agent terminals use one consistent blinking bar caret across desktop and remote views. Provider-authored effects and animations remain visible; generic user terminals keep their application-controlled cursor modes.
+
 ## Common Keyboard Shortcuts
 
 `Ctrl` below means `Cmd` on macOS.

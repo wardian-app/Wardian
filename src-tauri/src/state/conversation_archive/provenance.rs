@@ -2,7 +2,7 @@
 //!
 //! IDs and verified aliases identify observations. Text, timestamps and tail
 //! sequence numbers are deliberately not identity evidence.
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io;
 
 use serde_json::Value;
@@ -287,6 +287,43 @@ pub(crate) fn refresh_events(
     let changed = result != *archived;
     *archived = result;
     Ok(changed)
+}
+
+pub(crate) fn changed_observation_ids(
+    before_events: &[AgentChatEvent],
+    before_records: &[ConversationNarrativeRecord],
+    after_events: &[AgentChatEvent],
+    after_records: &[ConversationNarrativeRecord],
+    observations: &[AgentChatEvent],
+) -> HashSet<String> {
+    observations
+        .iter()
+        .filter(|observation| {
+            let before_event = before_events
+                .iter()
+                .find(|event| same_observation(event, observation));
+            let after_event = after_events
+                .iter()
+                .find(|event| same_observation(event, observation));
+            let identity_ids = super::event_identity_ids(observation);
+            let before_record = record_for_observation(before_records, &identity_ids);
+            let after_record = record_for_observation(after_records, &identity_ids);
+            before_event != after_event || before_record != after_record
+        })
+        .map(|observation| observation.id.clone())
+        .collect()
+}
+
+fn record_for_observation<'a>(
+    records: &'a [ConversationNarrativeRecord],
+    identity_ids: &[&str],
+) -> Option<&'a ConversationNarrativeRecord> {
+    records.iter().find(|record| {
+        record
+            .event_refs
+            .iter()
+            .any(|event_ref| identity_ids.contains(&event_ref.as_str()))
+    })
 }
 
 /// Merge a live capture with durable history without text-only deduplication.

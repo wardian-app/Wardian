@@ -1,5 +1,10 @@
+import { vi } from "vitest";
+vi.unmock("@xterm/headless");
+
 import {
+  CANONICAL_TERMINAL_CURSOR_OPTIONS,
   createProviderTerminalOutputFilter,
+  installCanonicalTerminalCursor,
   normalizeTerminalOutputBatch,
   normalizeOpenCodeOutput,
   normalizeRemoteTerminalLiveOutput,
@@ -10,6 +15,7 @@ import {
   filterProviderTerminalInput,
   type TerminalCapabilityContext,
 } from "./terminalCapabilities";
+import { Terminal as HeadlessTerminal } from "@xterm/headless";
 
 const baseContext: TerminalCapabilityContext = {
   cursorRow: 1,
@@ -22,7 +28,95 @@ const baseContext: TerminalCapabilityContext = {
   focusReported: false,
 };
 
+type HeadlessCursorState = {
+  coreService?: {
+    decPrivateModes?: {
+      cursorStyle?: string;
+    };
+  };
+};
+
+function effectiveCursorStyle(terminal: HeadlessTerminal) {
+  return (terminal as unknown as { _core?: HeadlessCursorState })._core?.coreService?.decPrivateModes?.cursorStyle;
+}
+
+function writeHeadless(terminal: HeadlessTerminal, data: string) {
+  return new Promise<void>((resolve) => terminal.write(data, resolve));
+}
+
+function normalizeLiveCodexChunks(chunks: readonly string[]) {
+  const filter = createProviderTerminalOutputFilter("codex");
+  const context = {
+    ...baseContext,
+    prefersLight: true,
+    backgroundRgb: "fc/fa/f5",
+  };
+  return chunks
+    .map((chunk) => planTerminalCapabilityResponses("codex", filter.filter(chunk), context).normalizedOutput)
+    .join("");
+}
+
 describe("terminal capability broker", () => {
+  it("reproduces a live DECSCUSR override and blocks every split provider shape", async () => {
+    const ESC = String.fromCharCode(27);
+    const unguarded = new HeadlessTerminal({
+      ...CANONICAL_TERMINAL_CURSOR_OPTIONS,
+      allowProposedApi: true,
+      cols: 120,
+      rows: 60,
+    });
+    await writeHeadless(unguarded, ESC + "[1 q");
+    expect(effectiveCursorStyle(unguarded)).toBe("block");
+    unguarded.dispose();
+
+    for (const shape of ["0", "1", "2", "3", "4", "5", "6"]) {
+      const terminal = new HeadlessTerminal({
+        ...CANONICAL_TERMINAL_CURSOR_OPTIONS,
+        allowProposedApi: true,
+        cols: 120,
+        rows: 60,
+      });
+      const registration = installCanonicalTerminalCursor(terminal);
+
+      await writeHeadless(
+        terminal,
+        ESC + "[?2026h" + ESC + "[60;85H" + ESC + "[48;2;41;41;41m⠁" + ESC + `[${shape}`,
+      );
+      expect(terminal.modes.synchronizedOutputMode).toBe(true);
+      await writeHeadless(terminal, " q" + ESC + "[60;3H" + ESC + "[?25h" + ESC + "[?2026l");
+
+      expect(effectiveCursorStyle(terminal)).toBeUndefined();
+      expect(terminal.options.cursorStyle).toBe("bar");
+      expect(terminal.buffer.active.cursorX).toBe(2);
+      expect(terminal.buffer.active.cursorY).toBe(59);
+      expect(terminal.modes.synchronizedOutputMode).toBe(false);
+      expect(terminal.buffer.active.getLine(59)?.getCell(84)?.getChars()).toBe("⠁");
+
+      registration.dispose();
+      terminal.dispose();
+    }
+  });
+
+  it("keeps the public cursor handler through reset and removes it on disposal", async () => {
+    const ESC = String.fromCharCode(27);
+    const terminal = new HeadlessTerminal({
+      ...CANONICAL_TERMINAL_CURSOR_OPTIONS,
+      allowProposedApi: true,
+    });
+    const registration = installCanonicalTerminalCursor(terminal);
+
+    await writeHeadless(terminal, ESC + "[1 q");
+    terminal.reset();
+    await writeHeadless(terminal, ESC + "[2");
+    await writeHeadless(terminal, " q");
+    expect(effectiveCursorStyle(terminal)).toBeUndefined();
+
+    registration.dispose();
+    await writeHeadless(terminal, ESC + "[3 q");
+    expect(effectiveCursorStyle(terminal)).toBe("underline");
+    terminal.dispose();
+  });
+
   it("ignores providers without frontend terminal capability responses", () => {
     const plan = planTerminalCapabilityResponses("gemini", "\u001b[6n", baseContext);
     expect(plan.outgoingInputs).toEqual([]);
@@ -233,6 +327,54 @@ describe("terminal capability broker", () => {
 
     expect(filter.filter("before" + ESC + "]10;?")).toBe("before");
     expect(filter.filter(BEL + ESC + "]11;?" + BEL + "after")).toBe("after");
+  });
+
+  it("carries every split point of a combined Codex SGR before light-theme normalization", () => {
+    const ESC = String.fromCharCode(27);
+    const sgr = ESC + "[38;2;100;100;100;48;2;41;41;41m⠁";
+    const expected = ESC + "[38;2;100;100;100;48;2;242;240;235m⠁";
+
+    for (let split = 0; split <= sgr.length; split += 1) {
+      expect(normalizeLiveCodexChunks([sgr.slice(0, split), sgr.slice(split)])).toBe(expected);
+    }
+  });
+
+  it("keeps adjacent animation frames and their non-SGR controls intact while carrying SGR", () => {
+    const ESC = String.fromCharCode(27);
+    const frame = (glyph: string) =>
+      ESC + "[?2026h" + ESC + "[60;85H" + ESC + "[38;2;100;100;100;48;2;41;41;41m" + glyph + ESC + "[?25h" + ESC + "[?2026l";
+    const stream = frame("⠁") + frame("⠂");
+    const expected =
+      ESC + "[?2026h" + ESC + "[60;85H" + ESC + "[38;2;100;100;100;48;2;242;240;235m⠁" + ESC + "[?25h" + ESC + "[?2026l" +
+      ESC + "[?2026h" + ESC + "[60;85H" + ESC + "[38;2;100;100;100;48;2;242;240;235m⠂" + ESC + "[?25h" + ESC + "[?2026l";
+    const split = stream.indexOf("41;41;41m") + 2;
+
+    expect(normalizeLiveCodexChunks([stream.slice(0, split), stream.slice(split)])).toBe(expected);
+  });
+
+  it("isolates provider generations and bounds malformed or oversized SGR pending data", () => {
+    const ESC = String.fromCharCode(27);
+    const partial = ESC + "[48;2;41";
+    const filter = createProviderTerminalOutputFilter("codex");
+
+    expect(filter.filter(partial)).toBe("");
+    filter.reset();
+    expect(filter.filter(";41;41m⠁")).toBe(";41;41m⠁");
+    expect(createProviderTerminalOutputFilter("opencode").filter(partial)).toBe(partial);
+
+    const malformed = createProviderTerminalOutputFilter("codex");
+    expect(malformed.filter(partial)).toBe("");
+    expect(malformed.filter("x⠁")).toBe(partial + "x⠁");
+
+    const oversized = ESC + "[" + "1".repeat(128);
+    expect(createProviderTerminalOutputFilter("codex").filter(oversized)).toBe(oversized);
+  });
+
+  it("preserves synchronized output, cursor controls, and animation cells without SGR", () => {
+    const ESC = String.fromCharCode(27);
+    const stream = ESC + "[?2026h" + ESC + "[60;85H" + ESC + "[0 q⠁" + ESC + "[?25h" + ESC + "[?2026l";
+
+    expect(normalizeLiveCodexChunks([stream.slice(0, 9), stream.slice(9)])).toBe(stream);
   });
 
   it("does not buffer ordinary output for other providers", () => {
