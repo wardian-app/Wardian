@@ -69,13 +69,34 @@ pub fn mutate_invokers<T>(
         .truncate(false)
         .open(lock_path)?;
     FileExt::lock_exclusive(&lock)?;
-    let mut invokers = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|body| serde_json::from_str(&body).ok())
-        .unwrap_or_default();
+    let mut invokers = read_for_mutation(&path)?;
     let result = mutate(&mut invokers)?;
     crate::atomic_file::write_json_atomic(&path, &invokers)?;
     Ok(result)
+}
+
+/// Read the current invoker set for a read-modify-write, failing closed on a
+/// file that exists but cannot be parsed or decoded.
+///
+/// A missing file is an empty set because that is the fresh-install state.
+/// Treating damaged bytes as an empty set would let the next mutation
+/// overwrite every configured session-close invoker.
+fn read_for_mutation(
+    path: &std::path::Path,
+) -> std::io::Result<Vec<AutomationSessionCloseInvoker>> {
+    match std::fs::read_to_string(path) {
+        Ok(body) => serde_json::from_str(&body).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "refusing to overwrite malformed {}: {error}",
+                    path.display()
+                ),
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
 }
 
 pub fn matching_invokers(
@@ -203,5 +224,52 @@ mod tests {
                 .iter()
                 .any(|item| item.id == format!("invoker-{index}")));
         }
+    }
+
+    #[test]
+    fn a_missing_config_is_still_an_empty_set() {
+        let _home = TestHome::new();
+        mutate_invokers(|stored| {
+            stored.push(invoker("fresh"));
+            Ok(())
+        })
+        .expect("a fresh install writes its first invoker");
+
+        assert_eq!(load_invokers(), vec![invoker("fresh")]);
+    }
+
+    #[test]
+    fn a_malformed_config_is_never_overwritten() {
+        let _home = TestHome::new();
+        let path = crate::paths::session_close_invokers_path().expect("path");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("library dir");
+        let original = b"{ not json";
+        std::fs::write(&path, original).expect("seed damage");
+
+        let error = mutate_invokers(|stored| {
+            stored.clear();
+            Ok(())
+        })
+        .expect_err("a malformed config must fail closed");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("refusing to overwrite"));
+        assert_eq!(std::fs::read(&path).expect("read back"), original);
+    }
+
+    #[test]
+    fn undecodable_config_bytes_are_never_overwritten() {
+        let _home = TestHome::new();
+        let path = crate::paths::session_close_invokers_path().expect("path");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("library dir");
+        let original = [0xff, 0xfe, 0x00];
+        std::fs::write(&path, original).expect("seed undecodable bytes");
+
+        let error = mutate_invokers(|stored| {
+            stored.clear();
+            Ok(())
+        })
+        .expect_err("undecodable config bytes must fail closed");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read(&path).expect("read back"), original);
     }
 }
