@@ -9,7 +9,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-use wardian_core::models::AgentConfig;
+use wardian_core::models::{AgentConfig, ProviderConfig};
 
 fn roster_without_session(configs: &[AgentConfig], session_id: &str) -> Vec<AgentConfig> {
     configs
@@ -63,6 +63,7 @@ fn test_active_agent(session_id: &str) -> ActiveAgent {
             session_id: session_id.into(),
             session_name: session_id.into(),
             provider: "codex".into(),
+            provider_config: ProviderConfig::Codex(Default::default()),
             ..Default::default()
         })),
         child_process: None,
@@ -211,6 +212,7 @@ async fn provisional_install_rejects_an_undurable_roster() {
         session_id: "codex-provisional".into(),
         session_name: "codex-provisional".into(),
         provider: "codex".into(),
+        provider_config: ProviderConfig::Codex(Default::default()),
         ..Default::default()
     };
     let pending = super::PendingRuntime::prepare(&config, &state.terminal_sessions)
@@ -260,25 +262,32 @@ async fn provisional_commit_releases_roster_maps_while_barrier_is_busy() {
         .expect("test roster barrier");
     let (barrier_ready, barrier_ready_rx) = tokio::sync::oneshot::channel();
     let (start_update, start_update_rx) = tokio::sync::oneshot::channel();
+    let (update_entered, update_entered_rx) = tokio::sync::oneshot::channel();
+    let (release_barrier, release_barrier_rx) = tokio::sync::oneshot::channel();
     let state_for_update = state.clone();
     let mut same_session_update = tokio::spawn(async move {
         barrier_ready.send(()).expect("barrier owner signal");
         start_update_rx.await.expect("start same-session update");
-        let result = super::super::update_agent_fields_in_state(
+        update_entered
+            .send(())
+            .expect("same-session update entered");
+        release_barrier_rx
+            .await
+            .expect("release roster barrier before update");
+        let result = super::super::update_agent_from_control(
             &state_for_update,
             "codex-provisional",
-            super::super::AgentUpdateFields {
+            super::super::AgentControlUpdate {
                 class: None,
                 workspace: None,
                 description: Some("same-session update while publishing"),
                 model: None,
                 reasoning_effort: None,
+                classes: &[],
             },
-            &[],
         )
         .await;
-        drop(barrier);
-        result.map(|outcome| outcome.config)
+        result.map(|(outcome, _)| outcome.config)
     });
     barrier_ready_rx.await.expect("same-session barrier owner");
     let mut completion = None;
@@ -305,7 +314,11 @@ async fn provisional_commit_releases_roster_maps_while_barrier_is_busy() {
     );
 
     let other = test_active_agent("claude-live");
-    other.config.lock().expect("other config lock").provider = "claude".into();
+    {
+        let mut other_config = other.config.lock().expect("other config lock");
+        other_config.provider = "claude".into();
+        other_config.provider_config = ProviderConfig::Claude(Default::default());
+    }
     state
         .agents
         .lock()
@@ -313,6 +326,13 @@ async fn provisional_commit_releases_roster_maps_while_barrier_is_busy() {
         .insert("claude-live".into(), other);
     state.agent_order.lock().await.push("claude-live".into());
     start_update.send(()).expect("start same-session update");
+    update_entered_rx
+        .await
+        .expect("same-session update reached roster wait");
+    drop(barrier);
+    release_barrier
+        .send(())
+        .expect("release roster barrier before update");
     let (updated_config, committed) =
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             let updated_config = (&mut same_session_update)

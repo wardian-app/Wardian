@@ -1,6 +1,5 @@
 use crate::manager;
 use crate::providers::antigravity::AntigravityProvider;
-use crate::providers::codex_model_selection::{apply_live_selection, resolve_live_selection};
 use crate::providers::ProviderFactory;
 use crate::state::conversation_archive::effective_conversation_logging;
 use crate::state::{ActiveAgent, AppState};
@@ -25,6 +24,15 @@ mod agent_naming;
 mod codex_onboarding;
 #[path = "agent/config_persistence.rs"]
 mod config_persistence;
+#[path = "agent/settings.rs"]
+mod settings;
+pub(crate) use settings::{
+    normalized_optional_agent_setting, update_agent_from_control, AgentControlUpdate,
+};
+pub use settings::{
+    AgentModelLiveApplication, AgentModelSelectionUpdateResult, AgentRuntimeBinding,
+    AgentSettingIntent, AgentSettingLiveStatus, AgentSettingUpdateResult,
+};
 #[cfg(test)]
 #[path = "agent/provider_log_tests.rs"]
 mod provider_log_tests;
@@ -38,26 +46,7 @@ use agent_naming::{
 };
 use codex_onboarding::register_new_agent;
 pub(crate) use codex_onboarding::rollback_provisional_codex;
-use config_persistence::persist_agent_config_while_lifecycle_locked;
 use removal::{cleanup_removed_agent_directory, join_agent_processes_for_removal};
-
-/// Outcome of applying a persisted agent model selection to its live provider.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentModelLiveApplication {
-    Applied,
-    Deferred,
-    Failed,
-}
-
-/// Persisted agent configuration together with the independent live outcome.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct AgentModelSelectionUpdateResult {
-    pub config: AgentConfig,
-    pub live_application: AgentModelLiveApplication,
-    pub live_error: Option<String>,
-}
 
 const MAX_AGENT_DESCRIPTION_CHARS: usize = 280;
 
@@ -2119,88 +2108,6 @@ fn set_agent_reasoning_effort(
     Ok(true)
 }
 
-pub(crate) struct AgentUpdateOutcome {
-    pub config: AgentConfig,
-    pub previous_config: AgentConfig,
-    pub updated_fields: Vec<String>,
-    pub state_snapshot: Vec<AgentConfig>,
-    _lifecycle_guard: tokio::sync::OwnedMutexGuard<()>,
-}
-
-pub(crate) struct AgentUpdateFields<'a> {
-    pub class: Option<&'a str>,
-    pub workspace: Option<&'a str>,
-    pub description: Option<&'a str>,
-    pub model: Option<&'a str>,
-    pub reasoning_effort: Option<&'a str>,
-}
-
-pub(crate) async fn update_agent_fields_in_state(
-    state: &AppState,
-    session_id: &str,
-    update: AgentUpdateFields<'_>,
-    classes: &[wardian_core::models::AgentClassDefinition],
-) -> Result<AgentUpdateOutcome, String> {
-    if update.class.is_none()
-        && update.workspace.is_none()
-        && update.description.is_none()
-        && update.model.is_none()
-        && update.reasoning_effort.is_none()
-    {
-        return Err("At least one agent update field is required".to_string());
-    }
-
-    let lifecycle_guard = lock_agent_lifecycle(state, session_id).await;
-    let mut agents = state.agents.lock().await;
-    let order = state.agent_order.lock().await;
-    let agent = agents
-        .get_mut(session_id)
-        .ok_or_else(|| format!("Agent {session_id} not found"))?;
-    let previous_config = agent.config.lock().unwrap().clone();
-    let mut config = previous_config.clone();
-    let updated_fields = apply_agent_update_fields(
-        &mut config,
-        update.class,
-        update.workspace,
-        update.description,
-        update.model,
-        update.reasoning_effort,
-        classes,
-    )?;
-
-    if updated_fields.iter().any(|field| field == "class") {
-        config.system_include_directories =
-            Some(crate::utils::fs::resolve_system_include_directories(
-                &config.agent_class,
-                &config.session_id,
-            ));
-    }
-
-    *agent.config.lock().unwrap() = config.clone();
-    let state_snapshot = manager::state_configs_snapshot(&agents, &order);
-    Ok(AgentUpdateOutcome {
-        config,
-        previous_config,
-        updated_fields,
-        state_snapshot,
-        _lifecycle_guard: lifecycle_guard,
-    })
-}
-
-pub(crate) async fn restore_agent_config_in_state(
-    state: &AppState,
-    session_id: &str,
-    config: AgentConfig,
-) -> Result<Vec<AgentConfig>, String> {
-    let mut agents = state.agents.lock().await;
-    let order = state.agent_order.lock().await;
-    let agent = agents
-        .get_mut(session_id)
-        .ok_or_else(|| format!("Agent {session_id} not found"))?;
-    *agent.config.lock().unwrap() = config;
-    Ok(manager::state_configs_snapshot(&agents, &order))
-}
-
 fn normalize_clone_folder_override(folder: Option<String>) -> Result<Option<String>, String> {
     folder.as_deref().map(normalize_spawn_folder).transpose()
 }
@@ -4253,34 +4160,9 @@ pub async fn rename_agent(
 pub async fn update_agent_config<R: tauri::Runtime>(
     new_config: AgentConfig,
     state: State<'_, AppState>,
-    _app: AppHandle<R>,
-) -> Result<(), String> {
-    manager::log_debug(&format!(
-        "[WARDIAN] update_agent_config called for session: {}",
-        new_config.session_id
-    ));
-    let _lifecycle_guard = lock_agent_lifecycle(&state, &new_config.session_id).await;
-    persist_agent_config_while_lifecycle_locked(new_config, state.inner()).await
-}
-
-struct AgentModelSelectionMutationGuards {
-    _lifecycle: tokio::sync::OwnedMutexGuard<()>,
-    _delivery: tokio::sync::OwnedMutexGuard<()>,
-}
-
-async fn lock_agent_model_selection_mutation(
-    state: &AppState,
-    session_id: &str,
-) -> AgentModelSelectionMutationGuards {
-    // Keep the global per-agent order aligned with control delivery:
-    // lifecycle first, then delivery. Reversing these can deadlock a model
-    // change against a control message that already owns the lifecycle gate.
-    let lifecycle = lock_agent_lifecycle(state, session_id).await;
-    let delivery = state.lock_agent_delivery(session_id).await;
-    AgentModelSelectionMutationGuards {
-        _lifecycle: lifecycle,
-        _delivery: delivery,
-    }
+    app: AppHandle<R>,
+) -> Result<AgentModelSelectionUpdateResult, String> {
+    settings::update_agent_config_inner(new_config, state, app).await
 }
 
 #[tauri::command]
@@ -4289,130 +4171,10 @@ pub async fn update_agent_model_selection(
     model: Option<String>,
     reasoning_effort: Option<String>,
     state: State<'_, AppState>,
-    _app: AppHandle,
+    app: AppHandle,
 ) -> Result<AgentModelSelectionUpdateResult, String> {
-    let state_ref = state.inner();
-    let live_session_id = session_id.clone();
-    update_agent_model_selection_transaction(
-        state_ref,
-        &session_id,
-        model,
-        reasoning_effort,
-        move |config| apply_agent_model_selection_live(state_ref, live_session_id, config),
-    )
-    .await
-}
-
-async fn update_agent_model_selection_transaction<F, Fut>(
-    state: &AppState,
-    session_id: &str,
-    model: Option<String>,
-    reasoning_effort: Option<String>,
-    apply_live: F,
-) -> Result<AgentModelSelectionUpdateResult, String>
-where
-    F: FnOnce(AgentConfig) -> Fut,
-    Fut: std::future::Future<Output = AgentModelSelectionUpdateResult>,
-{
-    // Persisting and live-applying are one mutation. The lifecycle guard keeps
-    // every configuration surface out until the live result is known, while
-    // the delivery guard prevents input from interleaving between picker steps.
-    let _mutation_guards = lock_agent_model_selection_mutation(state, session_id).await;
-    let mut config = {
-        let agents = state.agents.lock().await;
-        let agent = agents
-            .get(session_id)
-            .ok_or_else(|| format!("Agent {session_id} not found"))?;
-        let agent_config = agent.config.lock().unwrap();
-        agent_config.clone()
-    };
-
-    config.model = normalized_optional_agent_setting(model);
-    set_agent_reasoning_effort(
-        &mut config,
-        normalized_optional_agent_setting(reasoning_effort),
-    )?;
-
-    persist_agent_config_while_lifecycle_locked(config.clone(), state).await?;
-
-    Ok(apply_live(config).await)
-}
-
-async fn apply_agent_model_selection_live(
-    state: &AppState,
-    session_id: String,
-    config: AgentConfig,
-) -> AgentModelSelectionUpdateResult {
-    if config.is_off {
-        return AgentModelSelectionUpdateResult {
-            config,
-            live_application: AgentModelLiveApplication::Deferred,
-            live_error: None,
-        };
-    }
-
-    if !config.provider.eq_ignore_ascii_case("codex") {
-        return AgentModelSelectionUpdateResult {
-            config,
-            live_application: AgentModelLiveApplication::Deferred,
-            live_error: None,
-        };
-    }
-
-    use crate::state::terminal_session::TerminalBrokerError;
-    match state.terminal_sessions.snapshot(&session_id).await {
-        Err(
-            TerminalBrokerError::SessionNotFound
-            | TerminalBrokerError::RuntimeTerminated
-            | TerminalBrokerError::RuntimeUnavailable,
-        ) => {
-            return AgentModelSelectionUpdateResult {
-                config,
-                live_application: AgentModelLiveApplication::Deferred,
-                live_error: None,
-            };
-        }
-        Err(error) => {
-            return AgentModelSelectionUpdateResult {
-                config,
-                live_application: AgentModelLiveApplication::Failed,
-                live_error: Some(format!("Unable to inspect the Codex terminal: {error}")),
-            };
-        }
-        Ok(_) => {}
-    }
-
-    let live_result = async {
-        crate::control::wait_for_terminal_ready_for_delivery_service(state, &session_id).await?;
-        let catalog = crate::providers::models::model_catalog("codex", false).await;
-        let selection = resolve_live_selection(
-            &catalog,
-            config.model.as_deref(),
-            config.codex_config().reasoning_effort.as_deref(),
-        )?;
-        apply_live_selection(&state.terminal_sessions, &session_id, &selection).await
-    }
-    .await;
-
-    match live_result {
-        Ok(()) => AgentModelSelectionUpdateResult {
-            config,
-            live_application: AgentModelLiveApplication::Applied,
-            live_error: None,
-        },
-        Err(error) => AgentModelSelectionUpdateResult {
-            config,
-            live_application: AgentModelLiveApplication::Failed,
-            live_error: Some(error),
-        },
-    }
-}
-
-fn normalized_optional_agent_setting(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        let value = value.trim();
-        (!value.is_empty()).then(|| value.to_string())
-    })
+    settings::update_agent_model_selection_inner(session_id, model, reasoning_effort, state, app)
+        .await
 }
 
 #[tauri::command]
@@ -5013,8 +4775,7 @@ mod tests {
     use super::{
         acquire_agent_lifecycle_guard, acquire_agent_lifecycle_transition_lease,
         acquire_agent_lifecycle_transition_lease_for_session, agent_has_running_process,
-        agent_status_update_payload, apply_agent_model_selection_live,
-        apply_agent_model_selection_update, apply_agent_update_fields,
+        agent_status_update_payload, apply_agent_model_selection_update, apply_agent_update_fields,
         archive_agent_lifecycle_boundary, archive_agent_lifecycle_boundary_from_snapshot,
         assign_worktree_config, build_agent_cli_command_for_session_id_with_shells,
         build_agent_cli_command_with_shells, build_agent_clone_preview,
@@ -5045,22 +4806,17 @@ mod tests {
         renew_agent_lifecycle_transition_lease, replace_agent_status_incarnation,
         reserve_rename_session_name, reserve_spawn_session_name,
         resolve_agent_worktree_branch_name, resolve_agent_worktree_path,
-        resolve_external_resume_session, restore_agent_config_in_state,
-        restore_agent_runtime_after_aborted_clear,
+        resolve_external_resume_session, restore_agent_runtime_after_aborted_clear,
         restore_antigravity_workspace_conversation_from_home, restore_runtime_state_after_resume,
         restore_runtime_state_snapshot_after_resume, stage_conversation_boundary,
         strip_claude_embedded_stream_flags, take_agent_runtime_for_termination,
-        terminal_cleared_payload, update_agent_fields_in_state,
-        update_agent_model_selection_transaction, validate_agent_removal,
+        terminal_cleared_payload, update_agent_from_control, validate_agent_removal,
         validate_assignable_worktree_for_agent, validate_deletable_agent_worktree,
-        workspace_paths_match, worktree_deletion_is_already_complete, AgentModelLiveApplication,
-        AgentModelSelectionUpdateResult, AgentOrderPlacement, AgentUpdateFields,
+        workspace_paths_match, worktree_deletion_is_already_complete, AgentControlUpdate,
+        AgentModelLiveApplication, AgentOrderPlacement, AgentSettingLiveStatus,
         AgentWorktreeSummary, CloneProfileCopyPlan, CloneProfileSelection,
         DeletedAgentReferenceCleanup, DiscoveredGitWorktree, ResumeRuntimeSnapshot,
         GIT_WORKTREE_DISCOVERY_CONCURRENCY, MAX_AGENT_DESCRIPTION_CHARS,
-    };
-    use crate::commands::terminal_session::{
-        send_terminal_presentation_input_for_state, TerminalPresentationTextInputRequest,
     };
     use crate::providers::antigravity::AntigravityProvider;
     use crate::providers::GeminiProvider;
@@ -6933,6 +6689,8 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         std::fs::create_dir_all(temp.path().join("classes/Reviewer"))
             .expect("create class directory");
         unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
+            .expect("init test database");
 
         let classes = vec![AgentClassDefinition {
             name: "Reviewer".to_string(),
@@ -6957,34 +6715,37 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             .insert("agent-1".to_string(), agent);
         state.agent_order.lock().await.push("agent-1".to_string());
 
-        let outcome = update_agent_fields_in_state(
+        let (result, updated_fields) = update_agent_from_control(
             &state,
             "agent-1",
-            AgentUpdateFields {
+            AgentControlUpdate {
                 class: Some("Reviewer"),
                 workspace: Some(&workspace.to_string_lossy()),
                 description: Some("Reviews release changes"),
                 model: None,
                 reasoning_effort: None,
+                classes: &classes,
             },
-            &classes,
         )
         .await
-        .expect("update live state");
+        .expect("update and persist agent state");
 
-        assert_eq!(
-            outcome.updated_fields,
-            vec!["class", "workspace", "description"]
-        );
-        assert_eq!(outcome.config.agent_class, "Reviewer");
-        assert_eq!(outcome.config.description, "Reviews release changes");
-        assert_eq!(outcome.state_snapshot.len(), 1);
-        assert_eq!(
-            outcome.state_snapshot[0].agent_class,
-            outcome.config.agent_class
-        );
-        assert_eq!(outcome.state_snapshot[0].folder, outcome.config.folder);
-        assert!(outcome
+        assert_eq!(updated_fields, vec!["class", "workspace", "description"]);
+        assert_eq!(result.config.agent_class, "Reviewer");
+        assert_eq!(result.config.description, "Reviews release changes");
+        let live_config = state
+            .agents
+            .lock()
+            .await
+            .get("agent-1")
+            .expect("updated agent")
+            .config
+            .lock()
+            .unwrap()
+            .clone();
+        assert_eq!(live_config.agent_class, result.config.agent_class);
+        assert_eq!(live_config.folder, result.config.folder);
+        assert!(result
             .config
             .system_include_directories
             .as_ref()
@@ -6992,24 +6753,18 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             .iter()
             .any(|path| path.replace('\\', "/").ends_with("/classes/Reviewer")));
 
-        let rollback_snapshot =
-            restore_agent_config_in_state(&state, "agent-1", outcome.previous_config.clone())
-                .await
-                .expect("restore previous config");
-        assert_eq!(rollback_snapshot[0].agent_class, "Coder");
-        assert_eq!(
-            rollback_snapshot[0].folder,
-            temp.path().to_string_lossy().replace('\\', "/")
-        );
-
         unsafe { std::env::remove_var("WARDIAN_HOME") };
     }
 
     #[tokio::test]
     async fn agent_update_fields_wait_for_the_agent_lifecycle_lock() {
+        let _guard = crate::utils::wardian_test_env_lock_async().await;
         let temp = tempfile::tempdir().expect("temp dir");
         let workspace = temp.path().join("renamed-workspace");
         std::fs::create_dir_all(&workspace).expect("create workspace");
+        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
+            .expect("init test database");
         let state = Arc::new(AppState::new());
         let agent = make_test_agent();
         {
@@ -7028,17 +6783,17 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         let state_for_update = Arc::clone(&state);
         let workspace_for_update = workspace.to_string_lossy().to_string();
         let update = tokio::spawn(async move {
-            update_agent_fields_in_state(
+            update_agent_from_control(
                 &state_for_update,
                 "agent-1",
-                AgentUpdateFields {
+                AgentControlUpdate {
                     class: None,
                     workspace: Some(&workspace_for_update),
                     description: None,
                     model: None,
                     reasoning_effort: None,
+                    classes: &[],
                 },
-                &[],
             )
             .await
         });
@@ -7047,25 +6802,31 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         assert!(!update.is_finished());
         drop(first_guard);
 
-        let outcome = update.await.unwrap().expect("update after lifecycle lock");
-        assert_eq!(outcome.updated_fields, vec!["workspace"]);
+        let (result, updated_fields) = update.await.unwrap().expect("update after lifecycle lock");
+        assert_eq!(updated_fields, vec!["workspace"]);
+        assert_eq!(
+            result.config.folder,
+            workspace.to_string_lossy().replace('\\', "/")
+        );
+        unsafe { std::env::remove_var("WARDIAN_HOME") };
     }
 
     #[tokio::test]
-    async fn model_selection_mutation_blocks_control_model_updates_until_live_apply_finishes() {
-        let _lock = crate::utils::wardian_test_env_lock_async().await;
+    async fn control_model_update_uses_shared_settings_path() {
+        let _guard = crate::utils::wardian_test_env_lock_async().await;
         let temp = tempfile::tempdir().expect("temp dir");
         unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
         let _home = WardianHomeGuard;
         wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
             .expect("init test database");
-        let state = Arc::new(AppState::new());
+        let state = AppState::new();
         let agent = make_test_agent();
         {
             let mut config = agent.config.lock().unwrap();
             config.session_id = "agent-1".to_string();
-            config.session_name = "PickerAgent".to_string();
+            config.session_name = "ControlAgent".to_string();
             config.provider = "codex".to_string();
+            config.is_off = true;
             config.folder = temp.path().to_string_lossy().replace('\\', "/");
             config.reset_provider_config_for_provider();
         }
@@ -7076,136 +6837,38 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             .insert("agent-1".to_string(), agent);
         state.agent_order.lock().await.push("agent-1".to_string());
 
-        let (picker_started_tx, picker_started_rx) = tokio::sync::oneshot::channel();
-        let (release_picker_tx, release_picker_rx) = tokio::sync::oneshot::channel();
-        let state_for_selection = Arc::clone(&state);
-        let mut selection = tokio::spawn(async move {
-            let picker_state = Arc::clone(&state_for_selection);
-            update_agent_model_selection_transaction(
-                &state_for_selection,
-                "agent-1",
-                Some("gpt-picker".to_string()),
-                Some("low".to_string()),
-                move |config| async move {
-                    let persisted_model = {
-                        let agents = picker_state.agents.lock().await;
-                        let agent = agents.get("agent-1").expect("agent during picker");
-                        let model = agent.config.lock().unwrap().model.clone();
-                        model
-                    };
-                    assert_eq!(persisted_model.as_deref(), Some("gpt-picker"));
-                    picker_started_tx.send(()).expect("signal picker start");
-                    release_picker_rx.await.expect("release simulated picker");
-                    AgentModelSelectionUpdateResult {
-                        config,
-                        live_application: AgentModelLiveApplication::Applied,
-                        live_error: None,
-                    }
-                },
-            )
-            .await
-        });
-
-        tokio::select! {
-            started = picker_started_rx => {
-                if started.is_err() {
-                    let result = selection.await;
-                    panic!("selection ended before picker seam: {result:?}");
-                }
+        let (result, updated_fields) = update_agent_from_control(
+            &state,
+            "agent-1",
+            AgentControlUpdate {
+                class: None,
+                workspace: None,
+                description: None,
+                model: Some(Some("gpt-control".to_string())),
+                reasoning_effort: Some(Some("high".to_string())),
+                classes: &[],
             },
-            result = &mut selection => panic!("selection ended before picker seam: {result:?}"),
-        }
-        let state_for_update = Arc::clone(&state);
-        let control_update = tokio::spawn(async move {
-            update_agent_fields_in_state(
-                &state_for_update,
-                "agent-1",
-                AgentUpdateFields {
-                    class: None,
-                    workspace: None,
-                    description: None,
-                    model: Some("gpt-control"),
-                    reasoning_effort: Some("high"),
-                },
-                &[],
-            )
-            .await
-        });
+        )
+        .await
+        .expect("control settings update");
 
-        let state_for_terminal = Arc::clone(&state);
-        let terminal_input = tokio::spawn(async move {
-            send_terminal_presentation_input_for_state(
-                &state_for_terminal,
-                TerminalPresentationTextInputRequest {
-                    session_id: "agent-1".to_string(),
-                    presentation_id: "desktop".to_string(),
-                    runtime_generation: 1,
-                    lease_epoch: 1,
-                    input: "do not interleave".to_string(),
-                },
-            )
-            .await
-        });
-
-        // The real transaction is paused after persistence at the live-picker
-        // seam. Neither config mutation nor user terminal input may overtake it.
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        assert!(!control_update.is_finished());
-        assert!(!terminal_input.is_finished());
-        release_picker_tx.send(()).expect("finish simulated picker");
-
-        let selection_result = selection
-            .await
-            .unwrap()
-            .expect("model-selection transaction");
+        assert_eq!(updated_fields, vec!["model", "reasoning_effort"]);
+        assert_eq!(result.config.model.as_deref(), Some("gpt-control"));
         assert_eq!(
-            selection_result.live_application,
-            AgentModelLiveApplication::Applied
-        );
-        assert_eq!(selection_result.config.model.as_deref(), Some("gpt-picker"));
-
-        let terminal_error = terminal_input
-            .await
-            .unwrap()
-            .expect_err("missing broker runtime after delivery guard releases");
-        assert!(matches!(
-            terminal_error,
-            crate::state::terminal_session::TerminalBrokerError::SessionNotFound
-        ));
-
-        let outcome = control_update
-            .await
-            .unwrap()
-            .expect("control update after live model application");
-        assert_eq!(outcome.config.model.as_deref(), Some("gpt-control"));
-        assert_eq!(
-            outcome.config.codex_config().reasoning_effort.as_deref(),
+            result.config.codex_config().reasoning_effort.as_deref(),
             Some("high")
         );
+        assert_eq!(result.live_application, AgentModelLiveApplication::Deferred);
+        assert_eq!(result.model.live_status, AgentSettingLiveStatus::Deferred);
+        assert_eq!(
+            result.reasoning_effort.live_status,
+            AgentSettingLiveStatus::Deferred
+        );
+        assert_eq!(result.model.reason.as_str(), "agent_off");
+        assert!(!result.restart_required);
+
+        unsafe { std::env::remove_var("WARDIAN_HOME") };
     }
-
-    #[tokio::test]
-    async fn non_codex_model_selection_is_deferred_until_restart() {
-        for is_off in [false, true] {
-            let mut config = AgentConfig {
-                session_id: "agent-1".to_string(),
-                provider: "claude".to_string(),
-                is_off,
-                model: Some("claude-target".to_string()),
-                ..Default::default()
-            };
-            config.reset_provider_config_for_provider();
-
-            let result =
-                apply_agent_model_selection_live(&AppState::new(), "agent-1".to_string(), config)
-                    .await;
-
-            assert_eq!(result.live_application, AgentModelLiveApplication::Deferred);
-            assert_eq!(result.config.model.as_deref(), Some("claude-target"));
-            assert!(result.live_error.is_none());
-        }
-    }
-
     #[test]
     fn resolve_agent_worktree_branch_name_slugifies_session_name() {
         assert_eq!(

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { AgentConfig, AgentClassDefinition, AgentTelemetry, ProviderReadiness, UserFacingProviderName } from "../../types";
+import { AgentConfig, AgentClassDefinition, AgentModelSelectionUpdateResult, AgentTelemetry, ProviderReadiness, UserFacingProviderName } from "../../types";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { normalizeAgentConfig, reasoningEffortForConfig, requiresRestart, toPersistedAgentConfig, withProvider, withReasoningEffort } from "./configUtils";
 import { ProviderModelSelector } from "./ProviderModelSelector";
@@ -89,8 +89,24 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
 
     setIsSaving(true);
     try {
-      await invoke("update_agent_config", { newConfig: persistedConfig });
-      if (needsRestart) {
+      const result = await invoke<AgentModelSelectionUpdateResult>("update_agent_config", { newConfig: persistedConfig });
+      if (result?.live_application === "unknown") {
+        alert(`Configuration saved, but the live model change is unconfirmed: ${result.live_error ?? "the provider runtime changed before acknowledgement"}`);
+      } else if (result?.live_application === "failed") {
+        alert(`Configuration saved, but the live model change failed: ${result.live_error ?? "the provider rejected the change"}`);
+      } else if (result?.live_application === "deferred") {
+        const deferredReasons = [result.model?.reason, result.reasoning_effort?.reason]
+          .filter((reason): reason is string => Boolean(reason && reason !== "unchanged"));
+        const reason = deferredReasons[0] ?? "no_live_change";
+        const savedModel = result.model?.desired_value ?? result.config.model ?? "provider default";
+        const savedEffort = result.reasoning_effort?.desired_value
+          ?? reasoningEffortForConfig(result.config)
+          ?? "provider default";
+        alert(
+          `Configuration saved. Live settings deferred (${reason}). `
+          + `Saved model: ${savedModel}; saved reasoning effort: ${savedEffort}.`,
+        );
+      } else if (result?.restart_required ?? needsRestart) {
         alert("Configuration updated! Please restart the agent for all changes (CLI parameters/arguments) to take effect.");
       }
       onSaved();

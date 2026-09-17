@@ -4,14 +4,17 @@
 //! retries a written request, or answers an interactive approval request.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex as StdMutex,
+};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{oneshot, watch, Mutex};
+use tokio::sync::{broadcast, oneshot, watch, Mutex};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
@@ -95,6 +98,58 @@ pub struct CodexSharedReceipt {
 
 pub type CodexPushReceipt = CodexSharedReceipt;
 pub type CodexInterruptReceipt = CodexSharedReceipt;
+
+const SETTINGS_NOTIFICATION_CAPACITY: usize = 32;
+
+/// The exact provider/thread/client identity captured before a settings write.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodexSettingsBinding {
+    pub agent_id: String,
+    pub generation: u64,
+    pub thread_id: String,
+}
+
+/// A canonical settings notification observed after the operation's send fence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CodexSettingsNotification {
+    sequence: u64,
+    thread_id: String,
+    model: String,
+    effort: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodexSettingsUpdate {
+    pub binding: CodexSettingsBinding,
+    pub model: String,
+    pub effort: String,
+    pub notification_sequence: u64,
+}
+
+impl CodexSettingsNotification {
+    fn from_value(value: &Value, sequence: u64) -> Option<Self> {
+        if value["method"] != "thread/settings/updated" {
+            return None;
+        }
+        let params = &value["params"];
+        let thread_id = params["threadId"].as_str()?.trim();
+        let settings = &params["threadSettings"];
+        let model = settings["model"].as_str()?.trim();
+        let effort = settings["effort"]
+            .as_str()
+            .or_else(|| settings["reasoningEffort"].as_str())?
+            .trim();
+        if thread_id.is_empty() || model.is_empty() || effort.is_empty() {
+            return None;
+        }
+        Some(Self {
+            sequence,
+            thread_id: thread_id.to_owned(),
+            model: model.to_owned(),
+            effort: effort.to_owned(),
+        })
+    }
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct Observation {
@@ -191,6 +246,8 @@ pub struct CodexSharedClient {
     writer: Mutex<SocketWriter>,
     pending: Arc<StdMutex<HashMap<String, PendingReply>>>,
     observation: watch::Sender<Observation>,
+    settings_sequence: Arc<AtomicU64>,
+    settings_notifications: broadcast::Sender<CodexSettingsNotification>,
     reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
     proxy: Option<proxy::OwnedProxy>,
 }
@@ -271,8 +328,12 @@ impl CodexSharedClient {
         let pending: Arc<StdMutex<HashMap<String, PendingReply>>> =
             Arc::new(StdMutex::new(HashMap::new()));
         let (observation, _) = watch::channel(Observation::default());
+        let (settings_notifications, _) = broadcast::channel(SETTINGS_NOTIFICATION_CAPACITY);
+        let settings_sequence = Arc::new(AtomicU64::new(0));
         let replies = pending.clone();
         let observations = observation.clone();
+        let notification_sender = settings_notifications.clone();
+        let notification_sequence = settings_sequence.clone();
         let proxy_stop = proxy.as_ref().map(proxy::OwnedProxy::stop_signal);
         let task = tokio::spawn(async move {
             let mut close_reason = "provider connection ended".to_owned();
@@ -303,6 +364,12 @@ impl CodexSharedClient {
                                 }
                             }
                         } else {
+                            if let Some(notification) = CodexSettingsNotification::from_value(
+                                &value,
+                                notification_sequence.fetch_add(1, Ordering::AcqRel) + 1,
+                            ) {
+                                let _ = notification_sender.send(notification);
+                            }
                             observations.send_modify(|current| current.observe(&value));
                         }
                     }
@@ -324,6 +391,8 @@ impl CodexSharedClient {
             writer: Mutex::new(Box::new(writer)),
             pending,
             observation,
+            settings_sequence,
+            settings_notifications,
             reader: Mutex::new(Some(task)),
             proxy,
         })
@@ -459,6 +528,127 @@ impl CodexSharedClient {
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, CodexSharedError> {
         self.request_with_timeout(method, params, Duration::from_secs(30))
             .await
+    }
+
+    pub fn settings_binding(&self) -> Result<CodexSettingsBinding, CodexSharedError> {
+        let thread_id = self
+            .observation
+            .borrow()
+            .thread_id
+            .clone()
+            .ok_or_else(|| CodexSharedError::unsupported("owner thread unbound"))?;
+        if self.observation.borrow().closed {
+            return Err(CodexSharedError::unsupported("owner connection closed"));
+        }
+        Ok(CodexSettingsBinding {
+            agent_id: self.agent_id.clone(),
+            generation: self.generation,
+            thread_id,
+        })
+    }
+
+    fn settings_binding_is_current(&self, binding: &CodexSettingsBinding) -> bool {
+        binding.agent_id == self.agent_id
+            && binding.generation == self.generation
+            && !self.observation.borrow().closed
+            && self.observation.borrow().thread_id.as_deref() == Some(binding.thread_id.as_str())
+    }
+
+    /// Update the bound thread's future-turn model and reasoning effort.
+    ///
+    /// The waiter is subscribed before the request is written. A matching
+    /// post-fence notification and the request acknowledgement are both
+    /// required before this operation reports Applied. Notification lag,
+    /// disconnect, timeout, or a conflicting update remains uncertain and is
+    /// never replayed.
+    pub async fn update_thread_settings(
+        &self,
+        binding: &CodexSettingsBinding,
+        model: &str,
+        effort: &str,
+    ) -> Result<CodexSettingsUpdate, CodexSharedError> {
+        if binding.agent_id != self.agent_id || binding.generation != self.generation {
+            return Err(CodexSharedError::unsupported(
+                "settings binding does not match this Codex client",
+            ));
+        }
+        if self.observation.borrow().thread_id.as_deref() != Some(binding.thread_id.as_str()) {
+            return Err(CodexSharedError::unsupported(
+                "settings binding thread is stale",
+            ));
+        }
+        let mut notifications = self.settings_notifications.subscribe();
+        let send_fence = self.settings_sequence.load(Ordering::Acquire);
+        let request = self.request_with_timeout(
+            "thread/settings/update",
+            json!({
+                "threadId": binding.thread_id,
+                "model": model,
+                "effort": effort,
+            }),
+            Duration::from_secs(30),
+        );
+        tokio::pin!(request);
+        let mut acknowledged = false;
+        let mut matching: Option<CodexSettingsNotification> = None;
+        loop {
+            if !self.settings_binding_is_current(binding) {
+                return Err(CodexSharedError::uncertain(
+                    "settings binding changed during submission",
+                ));
+            }
+            if acknowledged {
+                if let Some(notification) = matching.take() {
+                    return Ok(CodexSettingsUpdate {
+                        binding: binding.clone(),
+                        model: notification.model,
+                        effort: notification.effort,
+                        notification_sequence: notification.sequence,
+                    });
+                }
+            }
+            tokio::select! {
+                result = &mut request, if !acknowledged => {
+                    result?;
+                    if !self.settings_binding_is_current(binding) {
+                        return Err(CodexSharedError::uncertain(
+                            "settings binding changed after acknowledgement",
+                        ));
+                    }
+                    acknowledged = true;
+                }
+                event = notifications.recv() => {
+                    let event = match event {
+                        Ok(event) => event,
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            return Err(CodexSharedError::uncertain(
+                                "settings notification stream lagged; acknowledgement is unconfirmed",
+                            ));
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            return Err(CodexSharedError::uncertain(
+                                "settings notification stream closed",
+                            ));
+                        }
+                    };
+                    if event.sequence <= send_fence || event.thread_id != binding.thread_id {
+                        continue;
+                    }
+                    if !self.settings_binding_is_current(binding) {
+                        return Err(CodexSharedError::uncertain(
+                            "settings binding changed while observing notification",
+                        ));
+                    }
+                    if event.model == model && event.effort == effort {
+                        matching = Some(event);
+                    } else {
+                        return Err(CodexSharedError::uncertain(
+                            "a conflicting settings notification was observed",
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     pub(super) async fn request_with_timeout(
@@ -973,5 +1163,126 @@ mod tests {
             state.completed_turn,
             Some(("current".into(), "interrupted".into()))
         );
+    }
+
+    #[tokio::test]
+    async fn settings_update_requires_ack_and_post_send_matching_notification() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let request: Value =
+                serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap())
+                    .unwrap();
+            assert_eq!(request["method"], "thread/settings/update");
+            assert_eq!(
+                request["params"],
+                json!({"threadId":"owned","model":"target","effort":"high"})
+            );
+            socket
+                .send(Message::Text(
+                    json!({"method":"thread/settings/updated","params":{
+                        "threadId":"owned",
+                        "threadSettings":{"model":"target","effort":"high"}
+                    }})
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            socket
+                .send(Message::Text(
+                    json!({"id":request["id"],"result":{}}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            let _ = socket.next().await;
+        });
+        let client =
+            CodexSharedClient::connect("wardian-id".into(), 7, &endpoint, "test-owned-token")
+                .await
+                .unwrap();
+        client
+            .bind(&json!({"thread":{"id":"owned","canAcceptDirectInput":true,"turns":[]}}))
+            .unwrap();
+        let binding = client.settings_binding().unwrap();
+        let update = client
+            .update_thread_settings(&binding, "target", "high")
+            .await
+            .unwrap();
+        assert_eq!(update.binding, binding);
+        assert_eq!(update.model, "target");
+        assert_eq!(update.effort, "high");
+        assert!(update.notification_sequence > 0);
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn settings_update_reports_provider_rejection_from_rpc_json() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let request: Value =
+                serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap())
+                    .unwrap();
+            assert_eq!(request["method"], "thread/settings/update");
+            socket
+                .send(Message::Text(
+                    json!({"id":request["id"],"error":{"message":"settings rejected"}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let client =
+            CodexSharedClient::connect("wardian-id".into(), 8, &endpoint, "test-owned-token")
+                .await
+                .unwrap();
+        client
+            .bind(&json!({"thread":{"id":"owned","canAcceptDirectInput":true,"turns":[]}}))
+            .unwrap();
+        let binding = client.settings_binding().unwrap();
+        let error = client
+            .update_thread_settings(&binding, "target", "high")
+            .await
+            .expect_err("provider rejection must remain a failed result");
+        assert_eq!(error.code, "provider_rejected");
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn settings_update_reports_unknown_when_rpc_closes_before_ack() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let request: Value =
+                serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap())
+                    .unwrap();
+            assert_eq!(request["method"], "thread/settings/update");
+            socket.send(Message::Close(None)).await.unwrap();
+        });
+        let client =
+            CodexSharedClient::connect("wardian-id".into(), 9, &endpoint, "test-owned-token")
+                .await
+                .unwrap();
+        client
+            .bind(&json!({"thread":{"id":"owned","canAcceptDirectInput":true,"turns":[]}}))
+            .unwrap();
+        let binding = client.settings_binding().unwrap();
+        let error = client
+            .update_thread_settings(&binding, "target", "high")
+            .await
+            .expect_err("lost acknowledgement must remain unknown");
+        assert_eq!(error.code, "submitted_unconfirmed");
+        client.close().await;
+        server.await.unwrap();
     }
 }

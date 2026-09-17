@@ -230,6 +230,7 @@ pub struct CodexSharedOwner {
     policy: attachment::ExpectedPolicy,
     socket: attachment::OwnedSocket,
     launch_config: Mutex<Option<super::launch_config::LaunchConfigGuard>>,
+    settings_operation: Mutex<()>,
     _memory: Option<wardian_core::memory::MemoryCapabilityLease>,
     #[cfg(windows)]
     job: Mutex<Option<win32job::Job>>,
@@ -493,6 +494,7 @@ impl CodexSharedOwner {
                 policy,
                 socket: owned_socket.expect("initialized owner captured its socket"),
                 launch_config: Mutex::new(launch_config),
+                settings_operation: Mutex::new(()),
                 _memory: memory,
                 #[cfg(windows)]
                 job: Mutex::new(Some(job)),
@@ -517,6 +519,21 @@ impl CodexSharedOwner {
                 Err(error)
             }
         }
+    }
+
+    /// Serialize Wardian settings writes on the shared owner. The caller owns
+    /// the per-agent lifecycle and delivery fences; this mutex prevents two
+    /// settings operations from consuming the same notification evidence.
+    pub async fn update_thread_settings(
+        &self,
+        binding: &CodexSettingsBinding,
+        model: &str,
+        effort: &str,
+    ) -> Result<CodexSettingsUpdate, CodexSharedError> {
+        let _operation = self.settings_operation.lock().await;
+        self.client
+            .update_thread_settings(binding, model, effort)
+            .await
     }
 
     /// Exclusive-startup evidence only, never continuous subscriber attestation.

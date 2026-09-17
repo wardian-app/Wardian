@@ -8,6 +8,13 @@ pub const CONTROL_SCHEMA: u8 = 1;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 
+fn deserialize_optional_setting<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<String>::deserialize(deserializer)?))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum ControlRequest {
@@ -55,10 +62,20 @@ pub enum ControlRequest {
         class: Option<String>,
         workspace: Option<String>,
         description: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        model: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reasoning_effort: Option<String>,
+        /// Outer None is omitted/Unchanged; Some(None) is explicit Default.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_setting",
+            skip_serializing_if = "Option::is_none"
+        )]
+        model: Option<Option<String>>,
+        /// Outer None is omitted/Unchanged; Some(None) is explicit Default.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_setting",
+            skip_serializing_if = "Option::is_none"
+        )]
+        reasoning_effort: Option<Option<String>>,
     },
     AgentDoctor {
         target: String,
@@ -458,13 +475,15 @@ pub struct AgentListResponse {
     pub agents: Vec<AgentIdentity>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentUpdateResponse {
     pub schema: u8,
     pub ok: bool,
     pub agent: AgentIdentity,
     pub updated_fields: Vec<String>,
     pub restart_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1211,8 +1230,8 @@ mod tests {
             class: Some("Reviewer".to_string()),
             workspace: Some("D:/Development/Wardian".to_string()),
             description: Some("Reviews release changes".to_string()),
-            model: Some("gpt-5.6-sol".to_string()),
-            reasoning_effort: Some("high".to_string()),
+            model: Some(Some("gpt-5.6-sol".to_string())),
+            reasoning_effort: Some(Some("high".to_string())),
         };
         let request_json = serde_json::to_string(&req).unwrap();
 
@@ -1249,6 +1268,7 @@ mod tests {
                 "reasoning_effort".to_string(),
             ],
             restart_required: true,
+            settings: None,
         };
         let response_json = serde_json::to_string(&response).unwrap();
 
@@ -1256,6 +1276,48 @@ mod tests {
             r#""updated_fields":["class","workspace","description","model","reasoning_effort"]"#
         ));
         assert!(response_json.contains(r#""restart_required":true"#));
+    }
+
+    #[test]
+    fn agent_update_patch_distinguishes_omitted_from_explicit_default() {
+        let omitted: ControlRequest = serde_json::from_str(
+            r#"{"command":"agent_update","target":"agent-1","class":null,"workspace":null,"description":null}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            omitted,
+            ControlRequest::AgentUpdate {
+                model: None,
+                reasoning_effort: None,
+                ..
+            }
+        ));
+
+        let explicit_default: ControlRequest = serde_json::from_str(
+            r#"{"command":"agent_update","target":"agent-1","model":null,"reasoning_effort":null}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            explicit_default,
+            ControlRequest::AgentUpdate {
+                model: Some(None),
+                reasoning_effort: Some(None),
+                ..
+            }
+        ));
+
+        let empty_flags: ControlRequest = serde_json::from_str(
+            r#"{"command":"agent_update","target":"agent-1","model":"","reasoning_effort":""}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            empty_flags,
+            ControlRequest::AgentUpdate {
+                model: Some(Some(model)),
+                reasoning_effort: Some(Some(reasoning_effort)),
+                ..
+            } if model.is_empty() && reasoning_effort.is_empty()
+        ));
     }
 
     #[test]

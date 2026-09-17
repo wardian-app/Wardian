@@ -16,6 +16,20 @@ pub struct CodexLiveModelSelection {
     pub effort: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexLiveSelectionError {
+    DefaultUnavailable(String),
+    Invalid(String),
+}
+
+impl std::fmt::Display for CodexLiveSelectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DefaultUnavailable(message) | Self::Invalid(message) => f.write_str(message),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct PickerTiming {
     screen_timeout: Duration,
@@ -43,22 +57,36 @@ pub fn resolve_live_selection(
     model: Option<&str>,
     effort: Option<&str>,
 ) -> Result<CodexLiveModelSelection, String> {
+    resolve_live_selection_for_settings(catalog, model, effort).map_err(|error| error.to_string())
+}
+
+/// Resolve the complete concrete pair while retaining whether an unavailable
+/// provider default should defer application after persistence.
+pub fn resolve_live_selection_for_settings(
+    catalog: &ProviderModelCatalog,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<CodexLiveModelSelection, CodexLiveSelectionError> {
     let selected_model = match model.map(str::trim).filter(|value| !value.is_empty()) {
         Some(model) => catalog
             .models
             .iter()
             .find(|option| option.id == model)
-            .ok_or_else(|| format!("Codex model {model} is not present in the live catalog"))?,
+            .ok_or_else(|| {
+                CodexLiveSelectionError::Invalid(format!(
+                    "Codex model {model} is not present in the live catalog"
+                ))
+            })?,
         None => catalog
             .models
             .iter()
             .find(|option| option.is_default)
-            .or_else(|| catalog.models.first())
             .ok_or_else(|| {
-                catalog
-                    .refresh_error
-                    .clone()
-                    .unwrap_or_else(|| "Codex returned no selectable models".to_string())
+                CodexLiveSelectionError::DefaultUnavailable(
+                    catalog.refresh_error.clone().unwrap_or_else(|| {
+                        "Codex catalog has no authoritative default model".to_string()
+                    }),
+                )
             })?,
     };
 
@@ -68,17 +96,17 @@ pub fn resolve_live_selection(
         .map(str::to_string)
         .or_else(|| selected_model.default_effort.clone())
         .ok_or_else(|| {
-            format!(
+            CodexLiveSelectionError::DefaultUnavailable(format!(
                 "Codex model {} did not report a default reasoning effort",
                 selected_model.id
-            )
+            ))
         })?;
 
     if !selected_model.effort_options.contains(&selected_effort) {
-        return Err(format!(
+        return Err(CodexLiveSelectionError::Invalid(format!(
             "Codex model {} does not support reasoning effort {}",
             selected_model.id, selected_effort
-        ));
+        )));
     }
 
     Ok(CodexLiveModelSelection {
@@ -383,6 +411,18 @@ mod tests {
                 effort: "medium".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn missing_authoritative_default_is_deferred_by_settings_resolution() {
+        let mut catalog = catalog();
+        catalog.models[0].is_default = false;
+        let error = resolve_live_selection_for_settings(&catalog, None, None)
+            .expect_err("missing provider default must remain unresolved");
+        assert!(matches!(
+            error,
+            CodexLiveSelectionError::DefaultUnavailable(_)
+        ));
     }
 
     #[test]
