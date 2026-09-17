@@ -114,6 +114,16 @@ desktop or remote xterm. The filter carries partial control-sequence prefixes
 across PTY reads. Clients do not repeat this policy, and every snapshot remains
 an authoritative replacement of local state.
 
+Provider agent terminals install one xterm parser handler for `CSI ... SP q`
+(DECSCUSR). The handler consumes provider cursor-shape and blink changes while
+the terminal keeps a blinking bar caret. It is installed on the desktop
+headless parser, the desktop renderer, and the remote renderer, and is disposed
+with each terminal instance. Because the handler belongs to xterm's parser,
+split controls and controls embedded in other parser contexts follow xterm's
+normal parsing rules. Cursor visibility, cursor movement, synchronized output,
+SGR, provider-authored glyphs, and animation frames remain in the stream. The
+generic user shell terminal keeps its application-controlled cursor semantics.
+
 An expired replay cursor, missing sequence, generation change, or terminated
 runtime is a structured batch result. Gap and generation-change results include
 a recovery snapshot and new barrier. Slow clients resynchronize instead of
