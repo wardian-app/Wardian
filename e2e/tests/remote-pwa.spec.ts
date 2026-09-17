@@ -17,6 +17,86 @@ function remoteActionBody(body: unknown): {
   return typeof body === "object" && body !== null ? body : {};
 }
 
+type ChatRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type ChatGeometry = {
+  row: ChatRect;
+  content: ChatRect;
+  textRects: ChatRect[];
+  clientWidth: number;
+  scrollWidth: number;
+};
+
+async function chatGeometry(row: Locator): Promise<ChatGeometry> {
+  return row.evaluate((element) => {
+    const content = element.querySelector<HTMLElement>(".chat-message-content");
+    if (!content) throw new Error("Message content is missing from the chat row");
+
+    const rect = (value: DOMRect): ChatRect => ({
+      x: value.x,
+      y: value.y,
+      width: value.width,
+      height: value.height,
+    });
+    const textRects: ChatRect[] = [];
+    const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    while (node) {
+      if (node.textContent?.trim()) {
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        for (const textRect of Array.from(range.getClientRects())) textRects.push(rect(textRect));
+      }
+      node = walker.nextNode();
+    }
+
+    return {
+      row: rect(element.getBoundingClientRect()),
+      content: rect(content.getBoundingClientRect()),
+      textRects,
+      clientWidth: content.clientWidth,
+      scrollWidth: content.scrollWidth,
+    };
+  });
+}
+
+function expectChatGeometryUnchanged(before: ChatGeometry, after: ChatGeometry) {
+  for (const key of ["x", "y", "width", "height"] as const) {
+    expect(after.row[key]).toBeCloseTo(before.row[key], 1);
+    expect(after.content[key]).toBeCloseTo(before.content[key], 1);
+  }
+  expect(after.clientWidth).toBe(before.clientWidth);
+  expect(after.scrollWidth).toBe(before.scrollWidth);
+}
+
+async function expectChatTextUnobscured(geometry: ChatGeometry, action?: Locator) {
+  expect(geometry.textRects.length).toBeGreaterThan(0);
+  expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
+  expect(geometry.textRects.every((textRect) => (
+    textRect.x >= geometry.content.x - 1
+    && textRect.y >= geometry.content.y - 1
+    && textRect.x + textRect.width <= geometry.content.x + geometry.content.width + 1
+    && textRect.y + textRect.height <= geometry.content.y + geometry.content.height + 1
+  ))).toBe(true);
+
+  if (action) {
+    const actionBox = await action.boundingBox();
+    expect(actionBox).not.toBeNull();
+    if (!actionBox) throw new Error("Message action is not laid out");
+    expect(geometry.textRects.some((textRect) => (
+      textRect.x < actionBox.x + actionBox.width
+      && textRect.x + textRect.width > actionBox.x
+      && textRect.y < actionBox.y + actionBox.height
+      && textRect.y + textRect.height > actionBox.y
+    ))).toBe(false);
+  }
+}
+
 test("remote mobile shell renders team-ordered watchlist and opens agent detail", async ({
   page,
 }) => {
@@ -24,11 +104,17 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
 
   const screenshotDir = process.env.WARDIAN_MOBILE_PWA_PARITY_SCREENSHOT_DIR;
   if (screenshotDir) fs.mkdirSync(screenshotDir, { recursive: true });
+  const chatCopyLayoutScreenshotDir = process.env.WARDIAN_CHAT_COPY_LAYOUT_SCREENSHOT_DIR;
+  if (chatCopyLayoutScreenshotDir) fs.mkdirSync(chatCopyLayoutScreenshotDir, { recursive: true });
   const automationScreenshotDir = process.env.WARDIAN_AUTOMATION_MONITOR_SCREENSHOT_DIR;
   if (automationScreenshotDir) fs.mkdirSync(automationScreenshotDir, { recursive: true });
   const captureFeatureScreenshot = async (name: string, locator: Locator) => {
     if (!screenshotDir) return;
     await locator.screenshot({ path: path.join(screenshotDir, name), animations: "disabled" });
+  };
+  const captureChatCopyLayoutScreenshot = async (name: string, locator: Locator) => {
+    if (!chatCopyLayoutScreenshotDir) return;
+    await locator.screenshot({ path: path.join(chatCopyLayoutScreenshotDir, name), animations: "disabled" });
   };
 
   const actionRequests: Array<{ headers: Record<string, string>; body: unknown }> = [];
@@ -736,9 +822,6 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
     scrollWidth: element.scrollWidth,
   }));
   expect(narrowTranscript.scrollWidth).toBeLessThanOrEqual(narrowTranscript.clientWidth);
-  await expect
-    .poll(() => page.getByLabel("user message").locator(".chat-row-actions--inline").evaluate((element) => getComputedStyle(element).top))
-    .toBe("-4px");
   const workGroup = page.getByTestId("chat-work-group");
   const workActions = workGroup.locator(".chat-row-actions--rail");
   const workToggle = workGroup.getByRole("button", { name: "Show all" });
@@ -750,16 +833,45 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
   expect(workActionsBox!.y + workActionsBox!.height / 2).toBeCloseTo(workToggleBox!.y + workToggleBox!.height / 2, 0);
   expect(workActionsBox!.x + workActionsBox!.width).toBeLessThanOrEqual(workToggleBox!.x);
   await captureFeatureScreenshot("chat-collapsed-work.png", page.locator('[data-testid="remote-agent-detail"]'));
-  await page.getByRole("button", { name: "Message actions" }).last().click();
-  await expect(page.getByRole("menuitem", { name: "Copy message" }).last()).toBeVisible();
-  await expect
-    .poll(() => page.locator(".chat-row-actions--inline > .chat-row-actions").last().evaluate((element) => getComputedStyle(element).overflow))
-    .toBe("visible");
-  await expect
-    .poll(() => page.locator(".chat-row-actions--inline.chat-row-actions--start").last().evaluate((element) => getComputedStyle(element).top))
-    .toBe("-12px");
-  await captureFeatureScreenshot("chat-message-actions-menu.png", page.locator('[data-testid="remote-agent-detail"]'));
-  await page.keyboard.press("Escape");
+  const messageRows = [
+    page.getByLabel("user message"),
+    page.getByLabel("assistant message"),
+  ];
+  for (const row of messageRows) {
+    const beforeActions = await chatGeometry(row);
+    const action = row.getByRole("button", { name: "Message actions", exact: true });
+    await expect(action).toBeVisible();
+    await expect(action).toHaveAttribute("aria-haspopup", "menu");
+    const actionBox = await action.boundingBox();
+    expect(actionBox).not.toBeNull();
+    if (!actionBox) throw new Error("Message action hit area is missing");
+    expect(actionBox.width).toBeGreaterThanOrEqual(44);
+    expect(actionBox.height).toBeGreaterThanOrEqual(44);
+    await expectChatTextUnobscured(beforeActions, action);
+
+    await action.click();
+    const menu = row.getByRole("menu");
+    await expect(menu).toBeVisible();
+    const menuBox = await menu.boundingBox();
+    expect(menuBox).not.toBeNull();
+    if (!menuBox) throw new Error("Message actions menu is missing");
+    const viewport = page.viewportSize();
+    expect(viewport).not.toBeNull();
+    if (!viewport) throw new Error("Viewport size is unavailable");
+    expect(menuBox.x).toBeGreaterThanOrEqual(0);
+    expect(menuBox.x + menuBox.width).toBeLessThanOrEqual(viewport.width);
+    expect(menuBox.y).toBeGreaterThanOrEqual(0);
+    expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(viewport.height);
+    expectChatGeometryUnchanged(beforeActions, await chatGeometry(row));
+
+    const copyItem = row.getByRole("menuitem", { name: "Copy message" });
+    await expect(copyItem).toBeVisible();
+    if (row === messageRows[1]) {
+      await captureFeatureScreenshot("chat-message-actions-menu.png", page.locator('[data-testid="remote-agent-detail"]'));
+      await captureChatCopyLayoutScreenshot("mobile-copy-layout.png", page.locator('[data-testid="remote-agent-detail"]'));
+    }
+    await page.keyboard.press("Escape");
+  }
   await page.getByRole("button", { name: "Show all" }).click();
   await expect(page.getByTestId("chat-work-group")).toHaveAttribute("data-expanded", "true");
   await expect(page.getByText("rg AgentChatView src/features/grid", { exact: true })).toBeVisible();

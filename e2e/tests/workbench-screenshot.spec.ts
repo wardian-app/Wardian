@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 
@@ -28,6 +28,88 @@ const agents: WorkbenchAgentFixture[] = [
     is_off: false,
   },
 ];
+
+type ChatRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type ChatGeometry = {
+  row: ChatRect;
+  content: ChatRect;
+  textRects: ChatRect[];
+  clientWidth: number;
+  scrollWidth: number;
+};
+
+async function chatGeometry(row: Locator): Promise<ChatGeometry> {
+  return row.evaluate((element) => {
+    const content = element.querySelector<HTMLElement>(".chat-message-content");
+    if (!content) throw new Error("Message content is missing from the chat row");
+
+    const rect = (value: DOMRect): ChatRect => ({
+      x: value.x,
+      y: value.y,
+      width: value.width,
+      height: value.height,
+    });
+    const textRects: ChatRect[] = [];
+    const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    while (node) {
+      if (node.textContent?.trim()) {
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        for (const textRect of Array.from(range.getClientRects())) textRects.push(rect(textRect));
+      }
+      node = walker.nextNode();
+    }
+
+    return {
+      row: rect(element.getBoundingClientRect()),
+      content: rect(content.getBoundingClientRect()),
+      textRects,
+      clientWidth: content.clientWidth,
+      scrollWidth: content.scrollWidth,
+    };
+  });
+}
+
+function expectChatGeometryUnchanged(before: ChatGeometry, after: ChatGeometry) {
+  for (const key of ["x", "y", "width", "height"] as const) {
+    expect(after.row[key]).toBeCloseTo(before.row[key], 1);
+    expect(after.content[key]).toBeCloseTo(before.content[key], 1);
+  }
+  expect(after.clientWidth).toBe(before.clientWidth);
+  expect(after.scrollWidth).toBe(before.scrollWidth);
+}
+
+async function expectChatTextUnobscured(row: Locator, geometry: ChatGeometry, action?: Locator) {
+  expect(geometry.textRects.length).toBeGreaterThan(0);
+  expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
+  expect(geometry.textRects.every((textRect) => (
+    textRect.x >= geometry.content.x - 1
+    && textRect.y >= geometry.content.y - 1
+    && textRect.x + textRect.width <= geometry.content.x + geometry.content.width + 1
+    && textRect.y + textRect.height <= geometry.content.y + geometry.content.height + 1
+  ))).toBe(true);
+
+  if (action) {
+    const actionBox = await action.boundingBox();
+    expect(actionBox).not.toBeNull();
+    if (!actionBox) throw new Error("Copy action is not laid out");
+    const actionRect: ChatRect = actionBox;
+    expect(geometry.textRects.some((textRect) => (
+      textRect.x < actionRect.x + actionRect.width
+      && textRect.x + textRect.width > actionRect.x
+      && textRect.y < actionRect.y + actionRect.height
+      && textRect.y + textRect.height > actionRect.y
+    ))).toBe(false);
+  }
+  await expect(row).toBeVisible();
+}
 
 test("renders a capture-ready tabs-and-splits workbench", async ({ page }, testInfo) => {
   const overview = makeWorkbenchSurface("overview-evidence", "agents-overview", {
@@ -506,7 +588,7 @@ test("serializes chat model selection while persistence and live application are
   });
 });
 
-test("renders copied feedback in an agent chat", async ({ page }, testInfo) => {
+test("keeps assistant and user message geometry stable while copying", async ({ page }, testInfo) => {
   const overview = makeWorkbenchSurface("copy-feedback-evidence", "agents-overview", {
     state: {
       mode: "single",
@@ -539,12 +621,12 @@ test("renders copied feedback in an agent chat", async ({ page }, testInfo) => {
     },
     responses: {
       load_agent_chat_transcript: [{
-        id: "copy-feedback-message",
+        id: "copy-feedback-user-message",
         session_id: "agent-alpha",
         provider: "mock",
         kind: "message",
-        role: "assistant",
-        text: "Fresh chat state is ready for the next prompt.",
+        role: "user",
+        text: "User request with enough text to wrap across several lines while the copy control appears and reports success.",
         title: null,
         status: null,
         turn_id: null,
@@ -555,6 +637,24 @@ test("renders copied feedback in an agent chat", async ({ page }, testInfo) => {
         language: null,
         created_at: null,
         sequence: 1,
+        metadata: {},
+      }, {
+        id: "copy-feedback-assistant-message",
+        session_id: "agent-alpha",
+        provider: "mock",
+        kind: "message",
+        role: "assistant",
+        text: "Assistant response with enough text to wrap across several lines while the copy control appears and reports success.",
+        title: null,
+        status: null,
+        turn_id: null,
+        source: null,
+        command: null,
+        exit_code: null,
+        path: null,
+        language: null,
+        created_at: null,
+        sequence: 2,
         metadata: {},
       }],
       "plugin:clipboard-manager|write_text": null,
@@ -576,10 +676,7 @@ test("renders copied feedback in an agent chat", async ({ page }, testInfo) => {
 
   await page.goto("/");
   const card = page.getByTestId("agent-card");
-  const messageRow = card.locator('[aria-label="assistant message"]');
   const transcript = card.getByTestId("agent-chat-transcript");
-  const transcriptBox = await transcript.boundingBox();
-  const messageRowBox = await messageRow.boundingBox();
   const transcriptWidthMetrics = await transcript.evaluate((element) => {
     const probe = document.createElement("span");
     probe.style.cssText = "position:absolute; width:1ch; height:0; overflow:hidden;";
@@ -589,20 +686,44 @@ test("renders copied feedback in an agent chat", async ({ page }, testInfo) => {
     return { chWidth, maxWidth: Number.parseFloat(getComputedStyle(element).maxWidth) };
   });
   expect(transcriptWidthMetrics.maxWidth).toBeCloseTo(transcriptWidthMetrics.chWidth * 76, 0);
-  expect(transcriptBox).not.toBeNull();
-  expect(messageRowBox).not.toBeNull();
-  expect(messageRowBox!.width).toBeCloseTo(transcriptBox!.width, 0);
-  expect(messageRowBox!.x).toBeCloseTo(transcriptBox!.x, 0);
-  const copyButton = card.getByRole("button", { name: "Copy message" });
-  await messageRow.hover();
-  await expect(copyButton).toBeVisible();
-  await copyButton.click();
-  await expect(card.getByRole("button", { name: "Copy message copied" })).toBeVisible();
+  const rows = [
+    card.getByLabel("assistant message"),
+    card.getByLabel("user message"),
+  ];
+  await expect(rows[0]).toBeVisible();
+  await expect(rows[1]).toBeVisible();
 
-  const path = process.env.WARDIAN_COPY_FEEDBACK_SCREENSHOT
-    ?? testInfo.outputPath("copy-feedback.png");
-  await card.screenshot({ path, animations: "disabled" });
-  await testInfo.attach("copy-feedback", { path, contentType: "image/png" });
+  for (const row of rows) {
+    const baseline = await chatGeometry(row);
+    await expectChatTextUnobscured(row, baseline);
+
+    await row.hover();
+    const copyButton = row.getByRole("button", { name: /^Copy message(?: copied)?$/ });
+    await expect(copyButton).toBeVisible();
+    const afterHover = await chatGeometry(row);
+    expectChatGeometryUnchanged(baseline, afterHover);
+    await expectChatTextUnobscured(row, afterHover, copyButton);
+
+    await copyButton.focus();
+    await expect(copyButton).toBeFocused();
+    const afterFocus = await chatGeometry(row);
+    expectChatGeometryUnchanged(baseline, afterFocus);
+    await expectChatTextUnobscured(row, afterFocus, copyButton);
+
+    await copyButton.click();
+    await expect(row.getByRole("button", { name: "Copy message copied" })).toBeVisible();
+    const afterCopy = await chatGeometry(row);
+    expectChatGeometryUnchanged(baseline, afterCopy);
+    await expectChatTextUnobscured(row, afterCopy, row.getByRole("button", { name: "Copy message copied" }));
+  }
+
+  const screenshotDir = process.env.WARDIAN_CHAT_COPY_LAYOUT_SCREENSHOT_DIR;
+  if (screenshotDir) mkdirSync(screenshotDir, { recursive: true });
+  const screenshotPath = process.env.WARDIAN_CHAT_COPY_LAYOUT_SCREENSHOT
+    ?? process.env.WARDIAN_COPY_FEEDBACK_SCREENSHOT
+    ?? (screenshotDir ? path.join(screenshotDir, "desktop-copy-layout.png") : testInfo.outputPath("copy-layout-desktop.png"));
+  await card.screenshot({ path: screenshotPath, animations: "disabled" });
+  await testInfo.attach("chat-copy-layout-desktop", { path: screenshotPath, contentType: "image/png" });
 });
 
 test("renders a capture-ready new-tab surface launcher", async ({ page }, testInfo) => {
