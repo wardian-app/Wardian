@@ -51,6 +51,24 @@ Located in `src-tauri/src/state/active_agent.rs`, this struct represents a singl
 5. **Events**: JSON logs emitted by agents (e.g., via the Gemini CLI's `--output-format stream-json`) are intercepted in the PTY reader thread and emitted as `agent-json-event` for the UI to process.
 6. **Startup Replay Boundary**: During app startup, provider log parsing may recover metadata such as query count, log path, resume session, and timestamps, but initial log replay must not create fresh status transitions. Inbox completions come only from live explicit provider turn-completed events with a canonical final assistant response; CLI `watch --until status:*` evidence comes from live transitions after hydration.
 
+### Conversation archive recovery
+
+Conversation archive publication is layered across raw provider observations,
+`events.jsonl`, `sources.jsonl`, `conversation.jsonl`, and derived projections.
+Recovery first replays durable raw observations in their stored order, restores
+their exact artifact references and excerpts, and then admits new observations.
+An exact provider observation can be retried idempotently; an ordinary
+generated archive call has no stable request ID in the current API, so each
+call is a new invocation after any recoverable older observation is restored.
+The archive never binds an orphan to a later call by sequence number or matching
+text.
+
+If legacy data has ambiguous ownership, a missing generated identity or body,
+or a truncated reconstruction payload, recovery fails closed for that archive
+with a recoverable error. The failure must not consume unrelated future input.
+Recovery repairs durable archive observations and their artifacts; it does not
+repair historical user data or invent missing source identity.
+
 ## Startup restoration and configuration ownership
 
 Startup restoration uses the same per-agent lifecycle gate as configuration
