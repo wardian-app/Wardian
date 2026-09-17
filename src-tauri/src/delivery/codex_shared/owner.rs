@@ -521,10 +521,14 @@ impl CodexSharedOwner {
 
     /// Exclusive-startup evidence only, never continuous subscriber attestation.
     /// Caller holds the owner gate and verifies the captured PTY is still alive.
-    pub(crate) async fn finalize_interactive(
+    pub(crate) async fn finalize_interactive<F, Fut>(
         &self,
-        mut tui_alive: impl FnMut() -> Result<(), CodexSharedError>,
-    ) -> Result<Value, CodexSharedError> {
+        mut tui_alive: F,
+    ) -> Result<Value, CodexSharedError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<(), CodexSharedError>>,
+    {
         if !self.interactive || self.client.receipt("already_bound").is_ok() {
             return Err(CodexSharedError::unsupported(
                 "interactive attachment requires an unbound fresh owner",
@@ -534,20 +538,19 @@ impl CodexSharedOwner {
         let child = child
             .as_mut()
             .ok_or_else(|| CodexSharedError::unsupported("Codex owner already stopped"))?;
-        let mut alive = || {
-            attachment::child_alive(child)?;
-            tui_alive()
-        };
         let result = tokio::time::timeout(STARTUP_TIMEOUT, async {
             let id = attachment::wait_for_tui_thread(
                 &self.client,
                 self.attachment.expected_resume_id.as_deref(),
-                &mut alive,
+                child,
+                &mut tui_alive,
             )
             .await?;
-            alive()?;
+            attachment::child_alive(child)?;
+            tui_alive().await?;
             attachment::inject_initial_context(&self.client, &id, &self.initial_context).await?;
-            alive()?;
+            attachment::child_alive(child)?;
+            tui_alive().await?;
             let response = self.client.resume_metadata(json!({"threadId":id})).await?;
             if response["thread"]["id"].as_str() != Some(id.as_str()) {
                 return Err(CodexSharedError::unsupported(
@@ -561,12 +564,14 @@ impl CodexSharedOwner {
                     "TUI thread lacks direct-input capability",
                 ));
             }
-            alive()?;
+            attachment::child_alive(child)?;
+            tui_alive().await?;
             // Both clients have loaded the selected policy. Restore file leaves
             // before the broker may publish any capable native binding.
             let mut overlay = self.launch_config.lock().await;
             restore_launch_overlay(&mut overlay)?;
-            alive()?;
+            attachment::child_alive(child)?;
+            tui_alive().await?;
             Ok(response)
         })
         .await

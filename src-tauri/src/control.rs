@@ -2733,6 +2733,7 @@ async fn wait_for_terminal_ready_for_control_send(
     state: &AppState,
     info: &DeliveryTargetInfo,
 ) -> Result<(), String> {
+    startup_readiness::ensure_codex_attachment_ready(state, &info.provider, &info.uuid).await?;
     // A provider status event can report idle while Codex still has an
     // unsubmitted bracketed paste in its composer. Inspect that provider-owned
     // surface before trusting the durable Ready observation; otherwise every
@@ -3099,18 +3100,15 @@ pub(crate) async fn mark_delivered_agents_prompt_started(
             .interactions
             .start_provider_input_generation(session_id, ProviderInputReadiness::Busy, None)
             .await;
-        let agents = state.agents.lock().await;
-        if let Some(agent) = agents.get(session_id) {
-            if crate::manager::mark_agent_prompt_started(agent) {
-                if let Some(app) = app {
-                    crate::manager::set_agent_status(
-                        app,
-                        session_id,
-                        &agent.current_status,
-                        "Processing...",
-                    );
-                }
-            }
+        let current_status = {
+            let agents = state.agents.lock().await;
+            agents.get(session_id).and_then(|agent| {
+                crate::manager::mark_agent_prompt_started(agent)
+                    .then(|| agent.current_status.clone())
+            })
+        };
+        if let (Some(app), Some(current_status)) = (app, current_status) {
+            crate::manager::set_agent_status(app, session_id, &current_status, "Processing...");
         }
     }
 }
@@ -3914,13 +3912,15 @@ pub(crate) async fn mark_delivered_agents_prompt_started_for_delivery_service(
 
 /// Only canonical v2 work is eligible at status and restore opportunities.
 pub(crate) fn spawn_agent_messaging_if_idle(app: &AppHandle, session_id: &str, status: &str) {
-    if matches!(normalize_status(status).as_str(), "idle" | "off") {
+    if startup_readiness::codex_status_allows_messaging(app, session_id, status) {
         agent_messaging::spawn_pending_tasks(app, session_id);
     }
 }
 
 pub(crate) fn spawn_agent_messaging_after_restore(app: &AppHandle, session_id: &str) {
-    agent_messaging::spawn_pending_tasks(app, session_id);
+    if startup_readiness::codex_attachment_allows_messaging(app, session_id) {
+        agent_messaging::spawn_pending_tasks(app, session_id);
+    }
 }
 
 pub(crate) async fn dispatch_agent_messaging_from_status_observation(

@@ -17,6 +17,9 @@ use crate::providers::antigravity::AntigravityProvider;
 use crate::providers::pi::PiProvider;
 use wardian_core::control::{ProviderInputReadiness, ProviderReadyEvidence};
 
+mod status;
+use status::set_snapshot_status;
+
 const TELEMETRY_SLOW_PASS_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// A full process inventory is needed to discover newly spawned descendants,
@@ -1083,30 +1086,6 @@ impl TelemetryPassTimings {
             self.agent_count,
             slow_agents
         ))
-    }
-}
-
-fn set_snapshot_status(snap: &AgentSnapshot, next_status: &str) {
-    let mut status = snap.current_status.lock().unwrap();
-    if *status == next_status {
-        return;
-    }
-    *status = next_status.to_string();
-    drop(status);
-
-    let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let _ = wardian_core::db::update_agent_status(&snap.session_id, next_status, None);
-    if let Ok(mut last_status_at) = snap.last_status_at.lock() {
-        *last_status_at = Some(observed_at.clone());
-    }
-    if let Ok(mut watch_state) = snap.watch_state.lock() {
-        watch_state.push_event(
-            "status",
-            serde_json::json!({
-                "status": wardian_core::identity::normalize_status(next_status),
-                "observed_at": observed_at,
-            }),
-        );
     }
 }
 
