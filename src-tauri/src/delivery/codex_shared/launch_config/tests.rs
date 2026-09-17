@@ -4,6 +4,8 @@ use std::fs;
 mod recovery;
 #[cfg(windows)]
 mod sharing;
+#[cfg(windows)]
+mod windows_long_paths;
 
 fn args(assignments: &[&str]) -> Vec<String> {
     let mut args = vec!["app-server".into()];

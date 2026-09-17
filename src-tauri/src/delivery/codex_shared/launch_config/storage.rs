@@ -113,9 +113,18 @@ pub(super) fn publish(
     // NamedTempFile uses create_new and an adjacent random name. Like managed
     // MCP registration, persist atomically replaces the destination on Unix and
     // Windows; its RAII guard removes the temporary on a pre-publish failure.
+    // Windows needs the existing parent's verbatim path for both siblings. Keep
+    // compare-before-publish on the caller's unresolved logical paths below.
+    let parent = path.parent().expect("config has an owned parent");
+    #[cfg(windows)]
+    let parent = parent.canonicalize().map_err(io_failure)?;
+    #[cfg(windows)]
+    let destination = parent.join(path.file_name().expect("config has a file name"));
+    #[cfg(not(windows))]
+    let destination = path.to_path_buf();
     let mut temporary = tempfile::Builder::new()
         .prefix(".wardian-launch-")
-        .tempfile_in(path.parent().expect("config has an owned parent"))
+        .tempfile_in(parent)
         .map_err(io_failure)?;
     temporary.write_all(bytes).map_err(io_failure)?;
     temporary.as_file().sync_all().map_err(io_failure)?;
@@ -128,7 +137,7 @@ pub(super) fn publish(
             compare_before_publish(peer_path, snapshot)?;
         }
         compare_before_publish(path, before)?;
-        match temporary.persist(path) {
+        match temporary.persist(&destination) {
             Ok(_) => return Ok(()),
             Err(error) => {
                 if !retry_sharing_conflict(&error.error, &mut retries) {
