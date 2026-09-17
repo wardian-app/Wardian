@@ -18,6 +18,7 @@ use wardian_core::models::chat::AgentChatEvent;
 
 pub(crate) mod provenance;
 mod records;
+mod repair;
 mod storage;
 #[cfg(test)]
 mod tests;
@@ -29,6 +30,11 @@ use records::{
     source_record_from_chat_event,
 };
 pub use records::{lifecycle_record, narrative_from_chat_event, narrative_from_delivered_input};
+use repair::{
+    append_source_if_needed, coalesce_batch_observations, is_bound_native_delivery,
+    matching_event_index, matching_record_index, publish_recovered_observations,
+    rebuild_derived_projections, recover_unlinked_observations, PendingChatPublication,
+};
 #[cfg(test)]
 use storage::new_conversation_id;
 use storage::{
@@ -505,6 +511,13 @@ impl ConversationArchiveState {
         if context.provider_session_ids.is_empty() {
             context.provider_session_ids = provider_session_ids_from_events(events);
         }
+        let capture_state = read_capture_state(&context.agent_id)?;
+        let active_events = events
+            .iter()
+            .filter(|event| !capture_state.should_skip_event(event, provider_source_key.as_deref()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let batch_events = coalesce_batch_observations(&active_events)?;
         let mut handle =
             active_handle_for_context(&self.active, &context, provider_source_key.clone())?;
         let conversation_dir = conversation_dir(&context.agent_id, &handle.conversation_id)?;
@@ -512,17 +525,22 @@ impl ConversationArchiveState {
         let conversation_path = conversation_dir.join("conversation.jsonl");
         let events_path = conversation_dir.join("events.jsonl");
         let sources_path = conversation_dir.join("sources.jsonl");
-        let capture_state = read_capture_state(&context.agent_id)?;
         let mut existing_records: Vec<ConversationNarrativeRecord> =
             read_jsonl_records(&conversation_path)?;
         let mut existing_events: Vec<AgentChatEvent> = read_jsonl_records(&events_path)?;
+        let before_refresh_events = existing_events.clone();
+        let before_refresh_records = existing_records.clone();
+        let durable_event_ids = existing_events
+            .iter()
+            .flat_map(|event| event_identity_ids(event))
+            .map(ToString::to_string)
+            .collect::<HashSet<_>>();
         // Cutoffs suppress new capture, not enrichment of an observation
         // already archived while logging was enabled. This never adds a row.
         let events_refreshed = provenance::refresh_events(&mut existing_events, events)?;
         let delivered_refreshed =
             provenance::bind_delivered_inputs(&mut existing_events, &existing_records)?;
         let events_refreshed = events_refreshed || delivered_refreshed;
-        let old_records = existing_records.clone();
         let observed = existing_events
             .iter()
             .filter(|event| {
@@ -534,7 +552,7 @@ impl ConversationArchiveState {
             .collect::<Vec<_>>();
         provenance::refresh_records(&mut existing_records, &observed);
         for record in &mut existing_records {
-            if !old_records.contains(record) {
+            if !before_refresh_records.contains(record) {
                 materialize_record_text(&conversation_dir, record)?;
             }
         }
@@ -548,20 +566,17 @@ impl ConversationArchiveState {
                 }
             }
         }
-        let records_refreshed = old_records != existing_records;
+        let records_refreshed = before_refresh_records != existing_records;
         let refreshed = events_refreshed || records_refreshed;
+        let mut changed_observation_ids = provenance::changed_observation_ids(
+            &before_refresh_events,
+            &before_refresh_records,
+            &existing_events,
+            &existing_records,
+            events,
+        );
         // Each file keeps its previous snapshot on failed publication. Retry
         // also repairs a narrative left behind after events were published.
-        if events_refreshed {
-            write_jsonl_atomic(&events_path, &existing_events)?;
-        }
-        if records_refreshed {
-            write_jsonl_atomic(&conversation_path, &existing_records)?;
-        }
-        let mut seen_event_ids = existing_records
-            .iter()
-            .flat_map(|record| record.event_refs.iter().cloned())
-            .collect::<HashSet<_>>();
         let mut next_seq = handle.next_seq.max(
             existing_records
                 .iter()
@@ -570,29 +585,121 @@ impl ConversationArchiveState {
                 .unwrap_or(0)
                 .saturating_add(1),
         );
+        let recovered_observations = recover_unlinked_observations(
+            &handle.conversation_id,
+            &conversation_dir,
+            &effective_context,
+            &existing_records,
+            &existing_events,
+            Some(&durable_event_ids),
+            &mut next_seq,
+        )?;
+        if events_refreshed {
+            write_jsonl_atomic(&events_path, &existing_events)?;
+        }
+        let recovered_count = publish_recovered_observations(
+            &conversation_path,
+            &sources_path,
+            &mut existing_records,
+            recovered_observations,
+        )?;
+        if records_refreshed && recovered_count == 0 {
+            write_jsonl_atomic(&conversation_path, &existing_records)?;
+        }
         let mut appended = Vec::new();
-        let mut event_records = Vec::new();
-        let mut source_records = Vec::new();
+        let mut pending_publications = Vec::new();
+        let mut cached_sources = None;
         let mut merged_existing_count = 0_usize;
 
-        for event in events {
-            if capture_state.should_skip_event(event, provider_source_key.as_deref()) {
-                continue;
-            }
-            let event_ids = event_identity_ids(event);
-            if event_ids
-                .iter()
-                .any(|event_id| seen_event_ids.contains(*event_id))
+        for event in &batch_events {
+            let existing_event_index = matching_event_index(&existing_events, event)?;
+            let matching_record = matching_record_index(&existing_records, event)?;
+            if existing_event_index.is_none()
+                && matching_record
+                    .is_some_and(|index| !is_bound_native_delivery(&existing_records[index], event))
             {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "event identity is referenced without its durable observation: {}",
+                        event.id
+                    ),
+                ));
+            }
+            if let Some(record_index) = matching_record {
+                let record_seq = existing_records[record_index].seq;
+                let source_record = source_record_from_chat_event(event, record_seq);
+                let mut record_changed = false;
+                if let Some(source_record) = source_record {
+                    let source_repaired = append_source_if_needed(
+                        &sources_path,
+                        &mut cached_sources,
+                        &source_record,
+                        true,
+                    )?;
+                    record_changed |= source_repaired;
+                    if !existing_records[record_index]
+                        .source_refs
+                        .iter()
+                        .any(|source_ref| source_ref == &source_record.source_id)
+                    {
+                        existing_records[record_index]
+                            .source_refs
+                            .push(source_record.source_id.clone());
+                        record_changed = true;
+                    }
+                }
+                let durable_event_id = existing_event_index
+                    .and_then(|index| existing_events.get(index))
+                    .map(|event| event.id.clone())
+                    .unwrap_or_else(|| event.id.clone());
+                if !existing_records[record_index]
+                    .event_refs
+                    .iter()
+                    .any(|event_ref| event_ref == &durable_event_id)
+                {
+                    existing_records[record_index]
+                        .event_refs
+                        .push(durable_event_id.clone());
+                    record_changed = true;
+                }
+                if existing_records[record_index].turn_id.is_none() && event.turn_id.is_some() {
+                    existing_records[record_index].turn_id = event.turn_id.clone();
+                    record_changed = true;
+                }
+                if existing_records[record_index].speaker_type
+                    == Some(ConversationSpeakerType::Unknown)
+                {
+                    existing_records[record_index].speaker_type =
+                        Some(ConversationSpeakerType::User);
+                    record_changed = true;
+                }
+                let bound_native_delivery =
+                    is_bound_native_delivery(&existing_records[record_index], event);
+                if existing_event_index.is_none() && !bound_native_delivery {
+                    let event_record =
+                        event_record_for_jsonl(event, &existing_records[record_index]);
+                    append_jsonl_record(&events_path, &event_record)?;
+                    record_changed = true;
+                }
+                if record_changed {
+                    merged_existing_count = merged_existing_count.saturating_add(1);
+                    changed_observation_ids.insert(event.id.clone());
+                }
                 continue;
             }
-            seen_event_ids.extend(event_ids.into_iter().map(ToString::to_string));
             if let Some(record_index) =
-                matching_delivered_input_record_index(&existing_records, event)
+                matching_delivered_input_record_index(&existing_records, event)?
             {
                 let record_seq = existing_records[record_index].seq;
                 let source_record = source_record_from_chat_event(event, record_seq);
                 if let Some(source_record) = source_record {
+                    append_source_if_needed(
+                        &sources_path,
+                        &mut cached_sources,
+                        &source_record,
+                        true,
+                    )?;
                     if !existing_records[record_index]
                         .source_refs
                         .iter()
@@ -602,7 +709,6 @@ impl ConversationArchiveState {
                             .source_refs
                             .push(source_record.source_id.clone());
                     }
-                    append_jsonl_record(&sources_path, &source_record)?;
                 }
                 existing_records[record_index]
                     .event_refs
@@ -616,28 +722,42 @@ impl ConversationArchiveState {
                     existing_records[record_index].speaker_type =
                         Some(ConversationSpeakerType::User);
                 }
-                let event_record = event_record_for_jsonl(event, &existing_records[record_index]);
-                append_jsonl_record(&events_path, &event_record)?;
+                if existing_event_index.is_none() {
+                    let event_record =
+                        event_record_for_jsonl(event, &existing_records[record_index]);
+                    append_jsonl_record(&events_path, &event_record)?;
+                }
                 merged_existing_count = merged_existing_count.saturating_add(1);
+                changed_observation_ids.insert(event.id.clone());
                 continue;
             }
             let Some(mut record) = narrative_from_chat_event(event, next_seq) else {
                 continue;
             };
             materialize_record_text(&conversation_dir, &mut record)?;
-            if let Some(source_record) = source_record_from_chat_event(event, next_seq) {
+            let durable_event_id = existing_event_index
+                .and_then(|index| existing_events.get(index))
+                .map(|event| event.id.clone())
+                .unwrap_or_else(|| event.id.clone());
+            record.event_refs = vec![durable_event_id];
+            let source_record = source_record_from_chat_event(event, next_seq);
+            if let Some(source_record) = &source_record {
                 record.source_refs = vec![source_record.source_id.clone()];
-                source_records.push(Some(source_record));
-            } else {
-                source_records.push(None);
             }
-            event_records.push(event_record_for_jsonl(event, &record));
+            pending_publications.push(PendingChatPublication {
+                event: existing_event_index
+                    .is_none()
+                    .then(|| event_record_for_jsonl(event, &record)),
+                source: source_record,
+                record: record.clone(),
+            });
             next_seq = next_seq.saturating_add(1);
             appended.push(record);
         }
 
         if appended.is_empty()
             && merged_existing_count == 0
+            && recovered_count == 0
             && !refreshed
             && (observed.is_empty()
                 || projection_is_current(
@@ -657,14 +777,19 @@ impl ConversationArchiveState {
             write_jsonl_atomic(&conversation_path, &existing_records)?;
         }
 
-        for (index, record) in appended.iter().enumerate() {
-            if let Some(event_record) = event_records.get(index) {
+        for publication in &pending_publications {
+            if let Some(event_record) = &publication.event {
                 append_jsonl_record(&events_path, event_record)?;
             }
-            if let Some(Some(source_record)) = source_records.get(index) {
-                append_jsonl_record(&sources_path, source_record)?;
+            if let Some(source_record) = &publication.source {
+                append_source_if_needed(
+                    &sources_path,
+                    &mut cached_sources,
+                    source_record,
+                    publication.event.is_none(),
+                )?;
             }
-            append_jsonl_record(&conversation_path, record)?;
+            append_jsonl_record(&conversation_path, &publication.record)?;
         }
 
         let first_record = existing_records
@@ -721,8 +846,8 @@ impl ConversationArchiveState {
         lock_active(&self.active)?.insert(context.agent_id.clone(), handle);
         Ok(appended
             .len()
-            .saturating_add(merged_existing_count)
-            .saturating_add(usize::from(refreshed)))
+            .saturating_add(changed_observation_ids.len())
+            .saturating_add(recovered_count))
     }
 
     pub(crate) fn provider_log_capture_state(
@@ -880,9 +1005,10 @@ impl ConversationArchiveState {
         let conversation_path = conversation_dir.join("conversation.jsonl");
         let events_path = conversation_dir.join("events.jsonl");
         let sources_path = conversation_dir.join("sources.jsonl");
-        let existing_records: Vec<ConversationNarrativeRecord> =
+        let mut existing_records: Vec<ConversationNarrativeRecord> =
             read_jsonl_records(&conversation_path)?;
-        let next_seq = handle.next_seq.max(
+        let existing_events: Vec<AgentChatEvent> = read_jsonl_records(&events_path)?;
+        let mut next_seq = handle.next_seq.max(
             existing_records
                 .iter()
                 .map(|record| record.seq)
@@ -890,63 +1016,101 @@ impl ConversationArchiveState {
                 .unwrap_or(0)
                 .saturating_add(1),
         );
-        let mut record = make_record(next_seq);
-        materialize_record_text(&conversation_dir, &mut record)?;
-        let generated_event =
-            generated_event_from_record(&effective_context, &handle.conversation_id, &mut record);
-        let generated_sources = generated_sources_from_record(&effective_context, &mut record);
-        append_jsonl_record(&events_path, &generated_event)?;
-        for source in &generated_sources {
-            append_jsonl_record(&sources_path, source)?;
+        let recovered_observations = recover_unlinked_observations(
+            &handle.conversation_id,
+            &conversation_dir,
+            &effective_context,
+            &existing_records,
+            &existing_events,
+            None,
+            &mut next_seq,
+        )?;
+        publish_recovered_observations(
+            &conversation_path,
+            &sources_path,
+            &mut existing_records,
+            recovered_observations,
+        )?;
+        if !existing_records.is_empty()
+            && !projection_is_current(
+                &conversation_dir,
+                &effective_context,
+                &handle,
+                &existing_records,
+                &existing_events,
+            )?
+        {
+            rebuild_derived_projections(
+                &context.agent_id,
+                &conversation_dir,
+                &effective_context,
+                &handle,
+                &existing_records,
+                &existing_events,
+            )?;
         }
-        append_jsonl_record(&conversation_path, &record)?;
 
-        let first_record = existing_records.first().unwrap_or(&record);
-        let all_records = existing_records
+        let mut candidate = make_record(next_seq);
+        materialize_record_text(&conversation_dir, &mut candidate)?;
+        let candidate_sources = generated_sources_from_record(&effective_context, &mut candidate);
+        let candidate_event = generated_event_from_record(
+            &effective_context,
+            &handle.conversation_id,
+            &mut candidate,
+        );
+        let existing_record_index = existing_records
             .iter()
-            .chain(std::iter::once(&record))
-            .cloned()
-            .collect::<Vec<_>>();
+            .position(|record| record.event_refs.contains(&candidate_event.id));
+        let record_is_new = existing_record_index.is_none();
+        let mut record = existing_record_index
+            .and_then(|index| existing_records.get(index).cloned())
+            .unwrap_or(candidate);
+        let generated_sources = if record_is_new {
+            candidate_sources
+        } else {
+            generated_sources_from_record(&effective_context, &mut record)
+        };
+        let generated_event = candidate_event;
+        let mut cached_sources = None;
+        if record_is_new {
+            append_jsonl_record(&events_path, &generated_event)?;
+        }
+        for source in &generated_sources {
+            append_source_if_needed(&sources_path, &mut cached_sources, source, !record_is_new)?;
+        }
+        if record_is_new {
+            append_jsonl_record(&conversation_path, &record)?;
+        }
+
+        let all_records = if record_is_new {
+            existing_records
+                .iter()
+                .chain(std::iter::once(&record))
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            existing_records.clone()
+        };
         let mut all_events: Vec<AgentChatEvent> = read_jsonl_records(&events_path)?;
         if provenance::bind_delivered_inputs(&mut all_events, &all_records)? {
             write_jsonl_atomic(&events_path, &all_events)?;
         }
-        let all_sources: Vec<ConversationSourceRecord> = read_jsonl_records(&sources_path)?;
-        let turns = derive_turn_records_with_context(
-            &handle.conversation_id,
+        rebuild_derived_projections(
+            &context.agent_id,
+            &conversation_dir,
+            &effective_context,
+            &handle,
             &all_records,
             &all_events,
-            &all_sources,
-            true,
-            Some(&effective_context.provider),
-            &effective_context.provider_session_ids,
-        );
-        write_jsonl_atomic(&conversation_dir.join("turns.jsonl"), &turns)?;
-        let summary = archive_summary(&all_records, &turns, &all_sources);
-        let record_count = all_records.len() as u64;
-        let mut manifest = open_manifest(
-            &effective_context,
-            &handle.conversation_id,
-            first_record.at.clone(),
-            record.at.clone(),
-        );
-        apply_archive_summary_to_manifest(&mut manifest, &summary);
-        write_json_atomic(&conversation_dir.join("manifest.json"), &manifest)?;
-        append_index_upsert(
-            &index_path(&context.agent_id)?,
-            &index_entry_from_manifest(
-                &manifest,
-                None,
-                excerpt_from_record(first_record),
-                excerpt_from_record(&record),
-                record_count,
-                artifact_count_for_records(all_records.iter()),
-            ),
         )?;
 
-        handle.next_seq = next_seq.saturating_add(1);
+        handle.next_seq = if record_is_new {
+            next_seq.saturating_add(1)
+        } else {
+            handle.next_seq.max(next_seq)
+        };
         lock_active(&self.active)?.insert(context.agent_id.clone(), handle);
-        Ok(1)
+        Ok(usize::from(record_is_new))
     }
 
     pub fn rollover_agent(
@@ -1132,6 +1296,8 @@ fn event_identity_ids(event: &AgentChatEvent) -> Vec<&str> {
 mod completion_tests;
 #[cfg(test)]
 mod provenance_tests;
+#[cfg(test)]
+mod repair_tests;
 
 fn read_chat_events(directory: &std::path::Path) -> io::Result<Vec<AgentChatEvent>> {
     let mut events = read_jsonl_records(&directory.join("events.jsonl"))?;

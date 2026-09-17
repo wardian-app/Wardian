@@ -27,7 +27,9 @@ import { isUserFacingProviderName, providerDisplayName } from "../agents/provide
 import { remoteClient } from "./remoteClient";
 import { RemoteTerminalSessionClient } from "./remoteTerminalSessionClient";
 import {
+  CANONICAL_BROWSER_TERMINAL_CURSOR_OPTIONS,
   createProviderTerminalOutputFilter,
+  installCanonicalTerminalCursor,
   normalizeRemoteTerminalLiveOutput,
   normalizeRemoteTerminalOutput,
   planTerminalCapabilityResponses,
@@ -622,12 +624,10 @@ function TerminalPane({
     setStreamError("");
 
     const terminal = new Terminal({
-      allowProposedApi: false,
+      ...CANONICAL_BROWSER_TERMINAL_CURSOR_OPTIONS,
+      allowProposedApi: true,
       cols: 80,
       convertEol: false,
-      cursorBlink: true,
-      cursorInactiveStyle: "bar",
-      cursorStyle: "bar",
       disableStdin: true,
       fontSize: remoteTerminalFontSize,
       minimumContrastRatio: terminalMinimumContrastRatio(agent.provider ?? undefined),
@@ -635,6 +635,7 @@ function TerminalPane({
       scrollback: 1_000,
       theme: remoteTerminalTheme(agent.provider ?? undefined),
     });
+    const cursorRegistration = installCanonicalTerminalCursor(terminal);
     installConservativeTerminalShortcuts(terminal);
     const fitAddon = new FitAddon();
     terminal.loadAddon?.(fitAddon);
@@ -786,6 +787,7 @@ function TerminalPane({
       return { context, output: plan.normalizedOutput };
     };
     const writeTerminalSnapshot = async (snapshot: TerminalSnapshot) => {
+      terminalOutputFilter.reset();
       liveDecoder = new TextDecoder();
       terminal.reset?.();
       terminal.resize?.(snapshot.geometry.cols, snapshot.geometry.rows);
@@ -908,6 +910,7 @@ function TerminalPane({
       terminalTextarea?.removeEventListener("compositionend", onCompositionEnd);
       window.removeEventListener("resize", updateTerminalLayout);
       terminalLinkProvider.dispose();
+      cursorRegistration.dispose();
       terminal.dispose?.();
       host.replaceChildren();
     };

@@ -229,6 +229,7 @@ describe("AgentTerminal scrollback", () => {
         focus: vi.fn(),
         attachCustomKeyEventHandler: vi.fn(),
         registerLinkProvider: vi.fn(() => ({ dispose: vi.fn() })),
+        parser: { registerCsiHandler: vi.fn(() => ({ dispose: vi.fn() })) },
         selectAll: vi.fn(),
         scrollToBottom: vi.fn(),
         scrollToLine: vi.fn((line: number) => {
@@ -281,6 +282,7 @@ describe("AgentTerminal scrollback", () => {
         onTitleChange: vi.fn(),
         onResize: vi.fn(),
         onScroll: vi.fn(),
+        parser: { registerCsiHandler: vi.fn(() => ({ dispose: vi.fn() })) },
         scrollToTop: vi.fn(),
         scrollToLine: vi.fn((line: number) => {
           terminal.buffer.active.viewportY = line;
@@ -338,6 +340,48 @@ describe("AgentTerminal scrollback", () => {
     expect(shouldExposeTerminalDebug({ DEV: false, VITE_WARDIAN_TERMINAL_DEBUG: undefined })).toBe(false);
     expect(shouldExposeTerminalDebug({ DEV: true, VITE_WARDIAN_TERMINAL_DEBUG: undefined })).toBe(true);
     expect(shouldExposeTerminalDebug({ DEV: false, VITE_WARDIAN_TERMINAL_DEBUG: "1" })).toBe(true);
+  });
+
+  it("installs the canonical cursor handler on the headless and desktop parsers", async () => {
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      if (command === "register_terminal_presentation") {
+        return modernRegistrationResult(request?.presentation_id ?? "cursor-contract");
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: modernSnapshot() };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult(request?.presentation_id ?? "cursor-contract").presentation;
+      }
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    render(<AgentTerminal sessionId="cursor-contract" provider="codex" theme="dark" />);
+
+    await waitFor(() => expect(mockTerminal).toHaveBeenCalled());
+    const renderer = getLatestTerminalInstance();
+    const parser = getLatestHeadlessTerminalInstance();
+    expect(renderer.options).toEqual(expect.objectContaining({
+      cursorBlink: true,
+      cursorStyle: "bar",
+      cursorInactiveStyle: "bar",
+    }));
+    expect(parser.options).toEqual(expect.objectContaining({
+      cursorBlink: true,
+      cursorStyle: "bar",
+    }));
+    expect(parser.options).not.toHaveProperty("cursorInactiveStyle");
+    expect(renderer.parser.registerCsiHandler).toHaveBeenCalledWith(
+      { intermediates: " ", final: "q" },
+      expect.any(Function),
+    );
+    expect(parser.parser.registerCsiHandler).toHaveBeenCalledWith(
+      { intermediates: " ", final: "q" },
+      expect.any(Function),
+    );
   });
 
   it("renders two independent broker presentations with one desktop feed consumer", async () => {
@@ -929,6 +973,112 @@ describe("AgentTerminal scrollback", () => {
     await waitFor(() => expect(renderer.write).toHaveBeenCalledWith("A", expect.any(Function)));
     expect(renderer.reset).not.toHaveBeenCalled();
     expect(mockInvoke).not.toHaveBeenCalledWith("resize_terminal_presentation", expect.anything());
+  });
+
+  it("resets pending Codex SGR before a modern desktop snapshot replaces the buffer", async () => {
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    const partialSgr = "\u001b[48;2;41";
+    const restoredText = "fresh generation snapshot";
+    const restoredSnapshot = {
+      ...modernSnapshot(),
+      snapshot_id: "modern-snapshot-generation-2",
+      runtime_generation: 2,
+      sequence_barrier: 2,
+      terminal_state_base64: btoa(restoredText),
+      visible_grid: restoredText,
+    };
+    let readCount = 0;
+    let registrationCount = 0;
+    let subscriptionCount = 0;
+    mockListen.mockImplementation(async (eventName, handler) => {
+      listeners.set(eventName, handler as (event: { payload: unknown }) => void);
+      return () => listeners.delete(eventName);
+    });
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      const presentationId = request?.presentation_id ?? "pane-snapshot-filter-reset";
+      if (command === "register_terminal_presentation") {
+        registrationCount += 1;
+        const result = modernRegistrationResult(presentationId);
+        return registrationCount === 1 ? result : {
+          ...result,
+          broker_state: { ...result.broker_state, runtime_generation: 2 },
+          initial_snapshot: restoredSnapshot,
+        };
+      }
+      if (command === "subscribe_terminal_events") {
+        subscriptionCount += 1;
+        return subscriptionCount === 1
+          ? { broker_state: modernBrokerState(), initial_snapshot: modernSnapshot() }
+          : {
+            broker_state: { ...modernBrokerState(), runtime_generation: 2 },
+            initial_snapshot: restoredSnapshot,
+          };
+      }
+      if (command === "read_terminal_events") {
+        readCount += 1;
+        return readCount === 1 ? {
+          status: "events",
+          runtime_generation: 1,
+          events: [{
+            sequence: 1,
+            runtime_generation: 1,
+            type: "output",
+            bytes: Array.from(new TextEncoder().encode(partialSgr)),
+          }],
+          next_sequence: 1,
+          latest_sequence: 1,
+          recovery_snapshot: null,
+        } : modernCaughtUpBatch();
+      }
+      if (command === "ack_terminal_events") return undefined;
+      if (command === "request_terminal_snapshot") return restoredSnapshot;
+      if (command === "update_terminal_presentation") return modernRegistrationResult(presentationId);
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult(presentationId).presentation;
+      }
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    render(
+      <AgentTerminal
+        sessionId="modern-agent"
+        presentationId="pane-snapshot-filter-reset"
+        provider="codex"
+        theme="dark"
+      />,
+    );
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+      "register_terminal_presentation",
+      expect.anything(),
+    ));
+    const eventsReady = listeners.get("terminal-session-events-ready");
+    if (!eventsReady) throw new Error("expected broker event listener");
+    act(() => eventsReady({
+      payload: { session_id: "modern-agent", runtime_generation: 1, latest_sequence: 1 },
+    }));
+
+    const initialRenderer = getLatestTerminalInstance();
+    await waitFor(() => expect(initialRenderer.write).toHaveBeenCalledWith("", expect.any(Function)));
+    initialRenderer.write.mockClear();
+
+    const lifecycle = listeners.get("terminal-session-lifecycle");
+    if (!lifecycle) throw new Error("expected lifecycle listener");
+    act(() => lifecycle({
+      payload: {
+        session_id: "modern-agent",
+        runtime_generation: 2,
+        lifecycle: "runtime_replaced",
+      },
+    }));
+
+    await waitFor(() => expect(registrationCount).toBe(2));
+    await waitFor(() => {
+      const renderer = getLatestTerminalInstance();
+      expect(renderer.write).toHaveBeenLastCalledWith(restoredText, expect.any(Function));
+    });
   });
 
   it("compensates an unmount while broker registration is still in flight", async () => {
