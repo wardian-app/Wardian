@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createInterface } from "node:readline";
 
 export const WINDOWS_CWD_LIMIT = 258;
 const ALIAS_RECORD = ".wardian-habitat-alias.json";
@@ -168,11 +170,13 @@ function tomlSection(text, sectionName = null) {
 
 function generatedTomlValue(section, key) {
   const line = section.split("\n").find((candidate) => candidate.trimStart().startsWith(`${key} =`));
-  assert.ok(line, `missing generated TOML field ${key}`);
+  if (!line) return { present: false };
   const value = line.slice(line.indexOf("=") + 1).trim();
-  if (/^'[^'\r\n]*'$/u.test(value) || /^"[^"\r\n]*"$/u.test(value)) return value.slice(1, -1);
+  if (/^'[^'\r\n]*'$/u.test(value) || /^"[^"\r\n]*"$/u.test(value)) {
+    return { present: true, value: value.slice(1, -1) };
+  }
   try {
-    return JSON.parse(value);
+    return { present: true, value: JSON.parse(value) };
   } catch (error) {
     throw new Error(`unsupported generated TOML representation for ${key}`, { cause: error });
   }
@@ -195,26 +199,40 @@ function assertExpectedSemanticValues(expectedValues) {
   }
 }
 
-/** Assert the semantic launch values owned by the long-habitat acceptance gate. */
+function captureTomlValues(config, expectedValues) {
+  return expectedValues.map((expected) => {
+    const captured = generatedTomlValue(tomlSection(config, expected.section ?? null), expected.key);
+    if (!captured.present) {
+      return {
+        section: expected.section ?? null,
+        key: expected.key,
+        present: false,
+      };
+    }
+    return {
+      section: expected.section ?? null,
+      key: expected.key,
+      present: true,
+      value_type: typeof captured.value,
+      value_sha256: hashValue(captured.value),
+    };
+  });
+}
+
+/** Capture restored baseline leaves and the separate runtime request contract. */
 export async function assertCodexLaunchArtifacts({ home, agentId, expectedValues }) {
   assertExpectedSemanticValues(expectedValues);
   const habitat = path.join(home, "agents", agentId, "habitat");
   const configPath = path.join(habitat, ".codex", "config.toml");
   const journalPath = path.join(habitat, ".codex", LAUNCH_JOURNAL);
   const config = await fs.readFile(configPath, "utf8");
-  for (const expected of expectedValues) {
-    assert.deepEqual(
-      generatedTomlValue(tomlSection(config, expected.section ?? null), expected.key),
-      expected.value,
-      `generated TOML value changed for ${expected.section ? `${expected.section}.` : ""}${expected.key}`,
-    );
-  }
   assert.equal(await exists(journalPath), false, "Codex launch journal remained after semantic restore");
   return {
     config_path_relative: safeRelativePath(home, configPath),
     journal_path_relative: safeRelativePath(home, journalPath),
     journal_present: false,
-    expected_values: expectedValues.map((expected) => ({
+    persistent_baseline_values: captureTomlValues(config, expectedValues),
+    runtime_requested_values: expectedValues.map((expected) => ({
       section: expected.section ?? null,
       key: expected.key,
       source: expected.source,
@@ -258,7 +276,14 @@ export async function assertLongHabitatPrerequisites({
   const config = provider === "codex"
     ? await assertCodexLaunchArtifacts({ home, agentId: agent.session_id, expectedValues: expectedCodexValues })
     : null;
-  return { provider, agent_id: agent.session_id, alias, config, cwd_evidence: cwdEvidence };
+  return {
+    provider,
+    agent_id: agent.session_id,
+    alias,
+    config,
+    expected_codex_values: provider === "codex" ? expectedCodexValues : null,
+    cwd_evidence: cwdEvidence,
+  };
 }
 
 async function currentAgent(invokeTauri, driver, sessionId) {
@@ -327,6 +352,111 @@ function safeTranscriptEvent(event, provider, marker) {
       : typeof event?.turn_id === "string" ? hashValue(event.turn_id) : null,
     text_sha256: hashValue(text),
     text_byte_count: Buffer.byteLength(text, "utf8"),
+  };
+}
+
+async function listOwnedCodexRolloutFiles(codexHome, threadId) {
+  const files = [];
+  async function visit(directory) {
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      const file = path.join(directory, entry.name);
+      if (entry.isDirectory() && !entry.isSymbolicLink()) await visit(file);
+      else if (entry.isFile() && entry.name.endsWith(".jsonl") && entry.name.includes(threadId)) files.push(file);
+    }
+  }
+  await visit(path.join(codexHome, "sessions"));
+  return files;
+}
+
+async function readOwnedCodexTrace(codexHome, threadId, workspacePath) {
+  const files = await listOwnedCodexRolloutFiles(codexHome, threadId);
+  assert.equal(files.length, 1, "expected exactly one owned Codex rollout for the provider thread");
+  const lines = createInterface({ input: createReadStream(files[0]), crlfDelay: Infinity });
+  let meta;
+  let currentTurn;
+  const contexts = [];
+  const turns = new Map();
+  const messages = [];
+  for await (const line of lines) {
+    let row;
+    try { row = JSON.parse(line); } catch { continue; }
+    const payload = row.payload ?? {};
+    if (row.type === "session_meta") {
+      meta = { id: payload.id, cwd: payload.cwd };
+    }
+    if (row.type === "turn_context") {
+      currentTurn = payload.turn_id;
+      contexts.push({
+        turn_id: currentTurn,
+        model: payload.model,
+        effort: payload.effort ?? payload.collaboration_mode?.settings?.reasoning_effort ?? null,
+      });
+    }
+    if (row.type === "event_msg" && ["task_started", "task_complete", "turn_aborted"].includes(payload.type)) {
+      currentTurn = payload.turn_id ?? currentTurn;
+      turns.set(currentTurn, {
+        turn_id: currentTurn,
+        status: payload.type === "task_started"
+          ? "inProgress"
+          : payload.type === "task_complete" ? "completed" : "interrupted",
+      });
+    }
+    if (row.type === "response_item" && payload.type === "message"
+      && ["user", "assistant"].includes(payload.role)) {
+      const text = (payload.content ?? [])
+        .filter((item) => ["input_text", "output_text"].includes(item.type))
+        .map((item) => item.text).join("");
+      messages.push({
+        role: payload.role,
+        turn_id: payload.internal_chat_message_metadata_passthrough?.turn_id ?? currentTurn,
+        text,
+      });
+    }
+  }
+  assert.equal(meta?.id, threadId, "Codex rollout metadata belongs to a different provider thread");
+  assert.equal(typeof meta?.cwd, "string", "Codex rollout metadata omitted its provider cwd");
+  assertSamePath(meta.cwd, workspacePath, "Codex rollout cwd differs from the provider workspace");
+  return { rollout_path: files[0], contexts, turns: [...turns.values()], messages };
+}
+
+/** Require selected model/effort from the same owned, completed provider turn. */
+export async function captureCodexRuntimeProof({
+  home, agentId, threadId, workspacePath, marker, expectedValues,
+}) {
+  assertExpectedSemanticValues(expectedValues);
+  assert.ok(typeof threadId === "string" && threadId.trim(),
+    "Codex runtime proof requires the owned provider session ID");
+  assert.ok(typeof marker === "string" && marker.length > 0,
+    "Codex runtime proof requires the maintained delivery marker");
+  const expectedModel = expectedValues.find((expected) => expected.key === "model")?.value;
+  const expectedEffort = expectedValues.find((expected) => expected.key === "model_reasoning_effort")?.value;
+  assert.ok(typeof expectedModel === "string" && expectedModel.trim(),
+    "Codex runtime proof requires the requested model");
+  assert.ok(typeof expectedEffort === "string" && expectedEffort.trim(),
+    "Codex runtime proof requires the requested effort");
+  const habitat = path.join(home, "agents", agentId, "habitat");
+  const trace = await readOwnedCodexTrace(path.join(habitat, ".codex"), threadId, workspacePath);
+  const proofContext = trace.contexts.find((context) => {
+    if (context.model !== expectedModel || context.effort !== expectedEffort) return false;
+    const turn = trace.turns.find((candidate) => candidate.turn_id === context.turn_id);
+    const userMessage = trace.messages.find((message) => message.turn_id === context.turn_id
+      && message.role === "user" && message.text.includes(marker));
+    const assistantMessage = trace.messages.find((message) => message.turn_id === context.turn_id
+      && message.role === "assistant" && message.text.trim() === marker);
+    return turn?.status === "completed" && userMessage && assistantMessage;
+  });
+  assert.ok(proofContext, "no completed provider-authored Codex turn matched the requested model, effort, and marker");
+  return {
+    evidence_source: "owned_codex_rollout_turn_context",
+    provider: "codex",
+    provider_authored: true,
+    completed: true,
+    selected_model: proofContext.model,
+    selected_effort: proofContext.effort,
+    provider_session_id_sha256: hashValue(threadId),
+    turn_id_sha256: hashValue(proofContext.turn_id),
+    marker_sha256: hashValue(marker),
+    rollout_path_relative: safeRelativePath(home, trace.rollout_path),
   };
 }
 
@@ -473,6 +603,20 @@ export async function afterMaintainedProviderPause({
     assert.deepEqual(aliasAfterResume.evidence, preflight.alias.evidence,
       "pause/resume replaced the owned habitat alias");
   }
+  const codexConfigAfterResume = provider === "codex"
+    ? await assertCodexLaunchArtifacts({
+      home: harness.isolatedHome,
+      agentId: agent.session_id,
+      expectedValues: preflight.expected_codex_values,
+    })
+    : null;
+  if (codexConfigAfterResume) {
+    assert.deepEqual(
+      codexConfigAfterResume.persistent_baseline_values,
+      preflight.config.persistent_baseline_values,
+      "Codex persistent baseline leaves changed across pause/resume",
+    );
+  }
   const turnEvidence = await captureBoundedTurnEvidence({
     invokeTauri,
     driver,
@@ -481,6 +625,16 @@ export async function afterMaintainedProviderPause({
     marker: deliveryMarker,
     maintainedReport,
   });
+  const codexRuntimeProof = provider === "codex"
+    ? await captureCodexRuntimeProof({
+      home: harness.isolatedHome,
+      agentId: agent.session_id,
+      threadId: resumed.resume_session ?? agent.resume_session,
+      workspacePath,
+      marker: deliveryMarker,
+      expectedValues: preflight.expected_codex_values,
+    })
+    : null;
   const archiveEvidence = await captureBoundedArchiveEvidence({
     invokeTauri,
     driver,
@@ -504,6 +658,7 @@ export async function afterMaintainedProviderPause({
         : "long managed habitat publication, short external provider cwd, and inspected Codex spawn builder cwd wiring; actual process cwd was not directly observed",
     },
     turn: turnEvidence,
+    runtime_selection: codexRuntimeProof,
     archive: archiveEvidence,
     alias_before_delete: preflight.alias
       ? safeAliasEvidence(preflight.alias, harness.isolatedHome)
@@ -515,7 +670,9 @@ export async function afterMaintainedProviderPause({
       ? safeAliasEvidence(aliasAfterResume, harness.isolatedHome)
       : null,
     cwd_evidence: preflight.cwd_evidence,
-    config: preflight.config,
+    config: preflight.config
+      ? { ...preflight.config, post_resume: codexConfigAfterResume }
+      : null,
     credentials_or_auth_material_copied: false,
     raw_config_or_transcript_copied: false,
   });
@@ -556,7 +713,13 @@ export async function afterMaintainedProviderPause({
         : "managed habitat path exceeds the Windows limit; short external workspace is the Codex provider cwd; actual process cwd was not directly observed",
       direct_child_get_current_directory_observed: false,
     },
-    codex_launch_artifacts: preflight.config,
+    codex_launch_artifacts: preflight.config
+      ? {
+        ...preflight.config,
+        post_resume: codexConfigAfterResume,
+        runtime_selection_proof: codexRuntimeProof,
+      }
+      : null,
     removed_agent_local_habitat_or_archive_asserted: false,
   };
 }

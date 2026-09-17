@@ -414,12 +414,19 @@ the first paid provider prompt. Claude uses the managed habitat path through the
 owned short alias and therefore requires the alias record, alias workspace target,
 pause/resume reuse, and exact cleanup after owned agent deletion. Codex uses the
 short external project folder as its actual provider CWD and requires no habitat
-alias; it verifies long-home publication, nonempty semantic configuration values,
-launch-journal cleanup, and the normal provider turn.
+alias; it verifies long-home publication, captures the nonempty runtime request
+values separately from the restored persistent baseline leaves, including explicit
+absence for leaves that were not persisted. It checks launch-journal cleanup and
+baseline preservation across pause/resume. For Codex, runtime proof requires one
+owned rollout whose completed turn has a matching `turn_context` model and effort,
+plus the user and provider-authored marker on that same turn. A request hash or
+terminal footer does not qualify model selection.
 
 Before explicit owned-agent deletion, the helper writes a bounded private
 report containing hashed transcript fields, provider/archive identity counts,
-relative habitat paths, cwd-length evidence, and config value hashes. Claude's
+relative habitat paths, cwd-length evidence, and separate baseline presence/value
+hashes and request value hashes. Codex also retains the bounded selected
+model/effort and hashed thread/turn identities before deletion. Claude's
 report includes alias ownership identities and exact cleanup; Codex's report
 records that no alias was expected and retains the short provider CWD alongside
 the long managed-habitat path evidence. Reports include the CWD mode, measured
