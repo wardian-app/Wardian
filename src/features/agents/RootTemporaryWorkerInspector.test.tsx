@@ -145,7 +145,7 @@ describe("RootTemporaryWorkerInspector", () => {
     const details = await screen.findByTestId(
       "agent-child-worker-details-root-1",
     );
-    const current = within(details).getByTestId(
+    const current = await within(details).findByTestId(
       "agent-child-worker-current-root-1",
     );
     expect(within(current).getByText("Waiting")).toBeInTheDocument();
@@ -362,25 +362,40 @@ describe("RootTemporaryWorkerInspector", () => {
   });
 
   it("refreshes current rows when the parent summary changes and hides at zero", async () => {
+    type WorkerDetails = {
+      root_agent_id: string;
+      workers: TemporaryWorker[];
+      worker_telemetry: Record<string, TemporaryWorkerTelemetry>;
+    };
+    const initialDetails: WorkerDetails = {
+      root_agent_id: "root-1",
+      workers: [
+        makeWorker("active-1", "running"),
+        makeWorker("active-2", "waiting"),
+        makeWorker("finished", "succeeded"),
+      ],
+      worker_telemetry: {},
+    };
+    const refreshedDetails: WorkerDetails = {
+      root_agent_id: "root-1",
+      workers: [
+        makeWorker("active-1", "running"),
+        makeWorker("active-2", "succeeded"),
+        makeWorker("finished", "succeeded"),
+      ],
+      worker_telemetry: {},
+    };
+    let resolveInitial!: (details: WorkerDetails) => void;
+    let resolveRefresh!: (details: WorkerDetails) => void;
+    const initialResponse = new Promise<WorkerDetails>((resolve) => {
+      resolveInitial = resolve;
+    });
+    const refreshResponse = new Promise<WorkerDetails>((resolve) => {
+      resolveRefresh = resolve;
+    });
     invokeMock
-      .mockResolvedValueOnce({
-        root_agent_id: "root-1",
-        workers: [
-          makeWorker("active-1", "running"),
-          makeWorker("active-2", "waiting"),
-          makeWorker("finished", "succeeded"),
-        ],
-        worker_telemetry: {},
-      })
-      .mockResolvedValueOnce({
-        root_agent_id: "root-1",
-        workers: [
-          makeWorker("active-1", "running"),
-          makeWorker("active-2", "succeeded"),
-          makeWorker("finished", "succeeded"),
-        ],
-        worker_telemetry: {},
-      });
+      .mockReturnValueOnce(initialResponse)
+      .mockReturnValueOnce(refreshResponse);
 
     const view = render(
       <RootTemporaryWorkerInspector
@@ -400,7 +415,12 @@ describe("RootTemporaryWorkerInspector", () => {
     fireEvent.click(screen.getByRole("button", { name: /Inspect subagents for Lifecycle root/ }));
 
     const details = await screen.findByTestId("agent-child-worker-details-root-1");
-    const current = within(details).getByTestId("agent-child-worker-current-root-1");
+    expect(within(details).getByText("Loading worker evidence…")).toBeInTheDocument();
+    await act(async () => {
+      resolveInitial(initialDetails);
+      await initialResponse;
+    });
+    const current = await within(details).findByTestId("agent-child-worker-current-root-1");
     expect(within(current).getByText("Waiting")).toBeInTheDocument();
 
     view.rerender(
@@ -419,6 +439,11 @@ describe("RootTemporaryWorkerInspector", () => {
       />,
     );
 
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      resolveRefresh(refreshedDetails);
+      await refreshResponse;
+    });
     await waitFor(() => {
       const updatedCurrent = within(screen.getByTestId("agent-child-worker-current-root-1"));
       expect(updatedCurrent.getByText("Running")).toBeInTheDocument();
