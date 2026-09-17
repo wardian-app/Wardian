@@ -1,3 +1,5 @@
+use std::io;
+
 use wardian_core::conversations::{
     ConversationBoundaryReason, ConversationInputOrigin, ConversationNarrativeRecord,
     ConversationRecordKind, ConversationSourceRecord, ConversationSpeakerType, CONVERSATION_SCHEMA,
@@ -118,21 +120,23 @@ pub(super) fn source_record_from_chat_event(
 pub(super) fn matching_delivered_input_record_index(
     records: &[ConversationNarrativeRecord],
     event: &AgentChatEvent,
-) -> Option<usize> {
+) -> io::Result<Option<usize>> {
     if event.kind != AgentChatEventKind::Message
         || event.role.as_ref() != Some(&AgentChatRole::User)
     {
-        return None;
+        return Ok(None);
     }
     if matches!(
         metadata_string(&event.metadata, "input_origin").as_deref(),
         Some("provider_internal" | "context_injection")
     ) {
-        return None;
+        return Ok(None);
     }
-    let event_text = event.text.as_deref()?.trim();
+    let Some(event_text) = event.text.as_deref().map(str::trim) else {
+        return Ok(None);
+    };
     if event_text.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let mut matches = records.iter().enumerate().filter_map(|(index, record)| {
@@ -149,8 +153,13 @@ pub(super) fn matching_delivered_input_record_index(
                 .is_some_and(|text| text.trim() == event_text))
         .then_some(index)
     });
-    let index = matches.next()?;
-    matches.next().is_none().then_some(index)
+    let Some(index) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        return Ok(None);
+    }
+    Ok(Some(index))
 }
 
 fn tool_name_from_chat_event(event: &AgentChatEvent) -> Option<String> {
@@ -203,6 +212,7 @@ pub(super) fn generated_event_from_record(
             "input_purpose": record.input_purpose.clone(),
             "request_root_id": record.request_root_id.clone(),
             "causal_ref": record.causal_ref.clone(),
+            "archive_record": record,
         }),
     }
 }
