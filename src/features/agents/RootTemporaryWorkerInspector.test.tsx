@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -58,7 +59,9 @@ function makeWorker(
 }
 
 describe("RootTemporaryWorkerInspector", () => {
-  beforeEach(() => invokeMock.mockReset());
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
 
   it("opens retained standalone children with evidence and combined usage", async () => {
     const workers = Array.from({ length: 4 }, (_, index) => ({
@@ -206,11 +209,17 @@ describe("RootTemporaryWorkerInspector", () => {
   });
 
   it("keeps terminal-only history reachable behind a quiet compact control", async () => {
-    invokeMock.mockResolvedValue({
+    const workerDetails = {
       root_agent_id: "history-root",
       workers: [makeWorker("history-child", "succeeded")],
       worker_telemetry: {},
-    });
+    };
+    let resolveDetails!: (details: typeof workerDetails) => void;
+    invokeMock.mockImplementation(
+      () => new Promise<typeof workerDetails>((resolve) => {
+        resolveDetails = resolve;
+      }),
+    );
 
     render(
       <RootTemporaryWorkerInspector
@@ -236,7 +245,11 @@ describe("RootTemporaryWorkerInspector", () => {
     fireEvent.click(badge);
 
     const details = await screen.findByTestId("agent-child-worker-details-history-root");
-    expect(within(details).getByTestId("agent-child-worker-current-history-root")).toHaveTextContent("No current workers are active.");
+    expect(within(details).getByText("Loading worker evidence…")).toBeInTheDocument();
+    await act(async () => {
+      resolveDetails(workerDetails);
+    });
+    expect(await within(details).findByTestId("agent-child-worker-current-history-root")).toHaveTextContent("No current workers are active.");
     const history = within(details).getByTestId("agent-child-worker-history-history-root");
     expect(history).not.toHaveAttribute("open");
     fireEvent.click(within(history).getByText(/History/));
