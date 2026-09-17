@@ -14,6 +14,7 @@ import {
 
 const AGENT_ID = "11111111-1111-4111-8111-111111111111";
 const PROVIDER_SESSION = "provider-session-11111111";
+const PROVIDER_TURN = "provider-turn-11111111";
 const DELIVERY_MARKER = "WARDIAN_LONG_HABITAT_OFFLINE";
 
 async function removeIfPresent(target) {
@@ -46,7 +47,26 @@ async function makeFixture({ withAlias = true } = {}) {
   await fs.writeFile(workspaceMarker, markerBytes);
   await fs.writeFile(
     path.join(habitat, ".codex", "config.toml"),
-    'model = "fixture-model"\nmodel_reasoning_effort = "low"\n',
+    'approval_policy = "on-request"\n',
+  );
+  await fs.mkdir(path.join(habitat, ".codex", "sessions"), { recursive: true });
+  const rollout = [
+    { type: "session_meta", payload: { id: PROVIDER_SESSION, cwd: workspacePath, cli_version: "0.154.0" } },
+    { type: "turn_context", payload: { turn_id: PROVIDER_TURN, model: "fixture-model", effort: "low" } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: PROVIDER_TURN } },
+    { type: "response_item", payload: {
+      type: "message", role: "user", internal_chat_message_metadata_passthrough: { turn_id: PROVIDER_TURN },
+      content: [{ type: "input_text", text: `Reply with exactly ${DELIVERY_MARKER}` }],
+    } },
+    { type: "response_item", payload: {
+      type: "message", role: "assistant", internal_chat_message_metadata_passthrough: { turn_id: PROVIDER_TURN },
+      content: [{ type: "output_text", text: DELIVERY_MARKER }],
+    } },
+    { type: "event_msg", payload: { type: "task_complete", turn_id: PROVIDER_TURN } },
+  ].map((row) => JSON.stringify(row)).join("\n") + "\n";
+  await fs.writeFile(
+    path.join(habitat, ".codex", "sessions", `${PROVIDER_SESSION}.jsonl`),
+    rollout,
   );
   await fs.symlink(workspacePath, path.join(habitat, "workspace"), "junction");
   if (withAlias) {
@@ -209,6 +229,22 @@ test("long-habitat Codex lifecycle retains bounded proof without a habitat alias
     assert.equal(preflight.cwd_evidence.provider_cwd_mode, "external_workspace");
     assert.ok(preflight.cwd_evidence.managed_habitat_path_utf16_units > WINDOWS_CWD_LIMIT);
     assert.ok(preflight.cwd_evidence.provider_cwd_utf16_units <= WINDOWS_CWD_LIMIT);
+    assert.deepEqual(preflight.config.persistent_baseline_values, [
+      { section: null, key: "model", present: false },
+      { section: null, key: "model_reasoning_effort", present: false },
+    ]);
+    for (const expected of expectedCodexValues()) {
+      const baseline = preflight.config.persistent_baseline_values.find((value) =>
+        value.section === (expected.section ?? null) && value.key === expected.key);
+      const runtime = preflight.config.runtime_requested_values.find((value) =>
+        value.section === (expected.section ?? null) && value.key === expected.key);
+      assert.ok(baseline, `missing captured baseline for ${expected.key}`);
+      assert.ok(runtime, `missing captured runtime request for ${expected.key}`);
+      assert.equal(baseline.present, false, `offline fixture baseline unexpectedly contains ${expected.key}`);
+      assert.equal(Object.hasOwn(baseline, "value_sha256"), false,
+        `absent baseline must not contain a hash for ${expected.key}`);
+      assert.equal(typeof runtime.value_sha256, "string");
+    }
     const result = await afterMaintainedProviderPause({
       driver: {},
       harness: { isolatedHome: fixture.home },
@@ -245,7 +281,26 @@ test("long-habitat Codex lifecycle retains bounded proof without a habitat alias
     assert.equal(report.credentials_or_auth_material_copied, false);
     assert.equal(report.raw_config_or_transcript_copied, false);
     assert.equal(report.archive.record_count, 2);
-    assert.equal(report.config.expected_values.length, 2);
+    assert.deepEqual(report.config.persistent_baseline_values, [
+      { section: null, key: "model", present: false },
+      { section: null, key: "model_reasoning_effort", present: false },
+    ]);
+    assert.equal(report.config.runtime_requested_values.length, 2);
+    assert.deepEqual(report.config.post_resume.persistent_baseline_values, report.config.persistent_baseline_values);
+    assert.equal(report.config.post_resume.journal_present, false);
+    assert.equal(report.runtime_selection.evidence_source, "owned_codex_rollout_turn_context");
+    assert.equal(report.runtime_selection.provider, "codex");
+    assert.equal(report.runtime_selection.provider_authored, true);
+    assert.equal(report.runtime_selection.completed, true);
+    assert.equal(report.runtime_selection.selected_model, "fixture-model");
+    assert.equal(report.runtime_selection.selected_effort, "low");
+    assert.match(report.runtime_selection.provider_session_id_sha256, /^[a-f0-9]{64}$/u);
+    assert.match(report.runtime_selection.turn_id_sha256, /^[a-f0-9]{64}$/u);
+    assert.match(report.runtime_selection.marker_sha256, /^[a-f0-9]{64}$/u);
+    assert.equal(
+      report.runtime_selection.rollout_path_relative,
+      `agents/${AGENT_ID}/habitat/.codex/sessions/${PROVIDER_SESSION}.jsonl`,
+    );
     assert.equal(report.alias_before_delete, null);
     assert.equal(report.cwd_evidence.habitat_alias_expected, false);
     assert.equal(report.cwd_evidence.provider_cwd_mode, "external_workspace");

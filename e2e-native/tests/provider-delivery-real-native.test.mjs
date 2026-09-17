@@ -2366,7 +2366,7 @@ test("human composer delivery uses actual providers; not peer messaging", { time
             provider_cwd_mode: longHabitatPreflight.cwd_evidence.provider_cwd_mode,
             habitat_alias_expected: provider === "claude",
             alias_owned: provider === "claude",
-            codex_semantic_config_verified: provider === "codex",
+            codex_launch_config_contract_captured: provider === "codex",
           },
         };
         await save();
