@@ -1,5 +1,5 @@
 use super::*;
-use wardian_core::models::chat::AgentChatStatus;
+use wardian_core::models::chat::{AgentChatEventKind, AgentChatRole, AgentChatStatus};
 
 fn fixture() -> (AgentChatEvent, AgentChatEvent, ConversationNarrativeRecord) {
     let fixture: serde_json::Value =
@@ -81,6 +81,59 @@ fn retained_agy_completion_repairs_live_and_persisted_original_row() {
         persisted
     );
     assert_eq!(restarted.show(&id).unwrap().1, records);
+}
+
+#[test]
+fn mixed_refresh_and_merge_batch_counts_each_changed_observation() {
+    let _guard = crate::utils::wardian_test_env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    std::env::set_var("WARDIAN_HOME", temp.path());
+    let (running, completed, _) = fixture();
+    let mut merge_seed = running.clone();
+    merge_seed.id = "independent-merge-observation".to_string();
+    merge_seed.kind = AgentChatEventKind::Message;
+    merge_seed.role = Some(AgentChatRole::Assistant);
+    merge_seed.text = Some("Independent merge observation".to_string());
+    merge_seed.turn_id = None;
+    merge_seed.source = None;
+    merge_seed.metadata = serde_json::json!({});
+
+    let archive = ConversationArchiveState::default();
+    let agent_id = running.session_id.clone();
+    archive
+        .append_chat_events(&agent_id, &[running, merge_seed.clone()])
+        .unwrap();
+
+    let mut merge_update = merge_seed;
+    merge_update.turn_id = Some("independent-merge-turn".to_string());
+    let completed_agent_id = completed.session_id.clone();
+    assert_eq!(
+        archive
+            .append_chat_events(&completed_agent_id, &[completed, merge_update])
+            .unwrap(),
+        2,
+        "independent refresh and merge changes each count once"
+    );
+}
+
+#[test]
+fn one_observation_refresh_and_merge_counts_once() {
+    let _guard = crate::utils::wardian_test_env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    std::env::set_var("WARDIAN_HOME", temp.path());
+    let (running, completed, _) = fixture();
+    let archive = ConversationArchiveState::default();
+    archive
+        .append_chat_events(&running.session_id, std::slice::from_ref(&running))
+        .unwrap();
+
+    assert_eq!(
+        archive
+            .append_chat_events(&completed.session_id, std::slice::from_ref(&completed))
+            .unwrap(),
+        1,
+        "one observation crossing refresh and merge counts once"
+    );
 }
 
 #[test]

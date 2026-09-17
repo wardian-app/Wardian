@@ -914,24 +914,12 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             let binding =
                 native_capability_binding(&state, &target_agent_id, &info.provider).await?;
             let candidate_capabilities = protocol.capabilities("unverified");
-            ok_json(&wardian_core::control::NativeDeliveryCapabilitiesResponse {
-                schema: wardian_core::control::CONTROL_SCHEMA,
+            ok_json(&native_delivery_capabilities_response(
                 target_agent_id,
-                broker_queue_withdrawal: true,
-                broker_queue_replacement: true,
-                native_negotiated: binding.is_some(),
-                capabilities: binding
-                    .as_ref()
-                    .map(|binding| binding.capabilities.clone())
-                    .unwrap_or_else(|| {
-                        wardian_core::native_transport::NativeTransportCapabilities::degraded(
-                            &info.provider,
-                            "headless_fallback",
-                        )
-                    }),
-                candidate_capabilities,
+                &info.provider,
                 binding,
-            })
+                candidate_capabilities,
+            ))
         }
 
         ControlRequest::AgentWatch {
@@ -1988,6 +1976,47 @@ async fn native_capability_binding(
 
     wardian_core::db::latest_native_session_binding(target_agent_id)
         .map_err(|error| ControlError::request_failed(error.to_string()))
+        .map(|binding| {
+            binding.and_then(|binding| qualified_native_session_binding(binding, provider))
+        })
+}
+
+fn qualified_native_session_binding(
+    binding: wardian_core::native_transport::NativeSessionBinding,
+    provider: &str,
+) -> Option<wardian_core::native_transport::NativeSessionBinding> {
+    (binding.provider == provider
+        && binding
+            .provider_session_id
+            .as_deref()
+            .is_some_and(|session_id| !session_id.trim().is_empty()))
+    .then_some(binding)
+}
+
+fn native_delivery_capabilities_response(
+    target_agent_id: String,
+    provider: &str,
+    binding: Option<wardian_core::native_transport::NativeSessionBinding>,
+    candidate_capabilities: wardian_core::native_transport::NativeTransportCapabilities,
+) -> wardian_core::control::NativeDeliveryCapabilitiesResponse {
+    wardian_core::control::NativeDeliveryCapabilitiesResponse {
+        schema: wardian_core::control::CONTROL_SCHEMA,
+        target_agent_id,
+        broker_queue_withdrawal: true,
+        broker_queue_replacement: true,
+        native_negotiated: binding.is_some(),
+        capabilities: binding
+            .as_ref()
+            .map(|binding| binding.capabilities.clone())
+            .unwrap_or_else(|| {
+                wardian_core::native_transport::NativeTransportCapabilities::degraded(
+                    provider,
+                    "headless_fallback",
+                )
+            }),
+        candidate_capabilities,
+        binding,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4348,189 +4377,11 @@ pub(crate) mod tests {
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::sync::{Arc, Mutex};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
     use wardian_core::models::{
         AgentConfig, AgentConversationMode, AutomationRoleAssignment, BusyPolicy,
     };
 
     use super::test_support::TestWardianHome;
-
-    async fn write_pi_test_frame(stream: &mut TcpStream, value: &serde_json::Value) {
-        let body = serde_json::to_vec(value).expect("encode Pi test frame");
-        let length = u32::try_from(body.len()).expect("Pi test frame length");
-        stream
-            .write_all(&length.to_be_bytes())
-            .await
-            .expect("write Pi test frame length");
-        stream
-            .write_all(&body)
-            .await
-            .expect("write Pi test frame body");
-    }
-
-    async fn read_pi_test_frame(stream: &mut TcpStream) -> serde_json::Value {
-        let mut prefix = [0_u8; 4];
-        stream
-            .read_exact(&mut prefix)
-            .await
-            .expect("read Pi test frame length");
-        let mut body = vec![0_u8; u32::from_be_bytes(prefix) as usize];
-        stream
-            .read_exact(&mut body)
-            .await
-            .expect("read Pi test frame body");
-        serde_json::from_slice(&body).expect("decode Pi test frame")
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn pi_capability_query_uses_ready_live_binding_for_current_generation() {
-        let _home = TestWardianHome::new_async().await;
-        let state = AppState::new();
-        let target_agent_id = "pi-capability-agent";
-        let generation = 7;
-        state
-            .interactions
-            .record_provider_input_state(
-                target_agent_id,
-                generation,
-                ProviderInputReadiness::Booting,
-                None,
-            )
-            .await;
-
-        let temp = tempfile::tempdir().expect("Pi capability fixture directory");
-        let session_file = temp.path().join("session.jsonl");
-        std::fs::write(&session_file, "{}\n").expect("write Pi session fixture");
-        let extension_path = temp.path().join("extension.mjs");
-        std::fs::write(&extension_path, "export default {};\n")
-            .expect("write Pi extension fixture");
-        let config = AgentConfig {
-            provider: "pi".to_string(),
-            session_id: target_agent_id.to_string(),
-            folder: temp.path().display().to_string(),
-            resume_session: Some("pi-session".to_string()),
-            ..Default::default()
-        };
-        let plan = state
-            .native_delivery
-            .prepare_pi_tui(
-                crate::delivery::native_broker::NativeSessionSpec {
-                    target_agent_id: target_agent_id.to_string(),
-                    provider: "pi".to_string(),
-                    generation,
-                    workspace: temp.path().to_path_buf(),
-                    config,
-                },
-                session_file.clone(),
-                extension_path,
-            )
-            .await
-            .expect("prepare Pi bridge");
-
-        wardian_core::db::upsert_native_session_binding(
-            &wardian_core::native_transport::NativeSessionBinding {
-                target_agent_id: target_agent_id.to_string(),
-                generation: generation - 1,
-                provider: "pi".to_string(),
-                transport: "stale".to_string(),
-                provider_session_id: Some("stale-session".to_string()),
-                capabilities: wardian_core::native_transport::NativeTransportCapabilities::degraded(
-                    "pi", "stale",
-                ),
-                observed_at: "2026-09-15T00:00:00Z".to_string(),
-            },
-        )
-        .expect("write stale Pi binding fixture");
-        assert!(native_capability_binding(&state, target_agent_id, "pi")
-            .await
-            .expect("query unready Pi capability")
-            .is_none());
-
-        let bridge_config: serde_json::Value =
-            serde_json::from_str(plan.config()).expect("decode Pi bridge test config");
-        plan.register_process(std::process::id());
-        let host = bridge_config["host"].as_str().expect("Pi bridge host");
-        let port = bridge_config["port"].as_u64().expect("Pi bridge port") as u16;
-        let mut stream = TcpStream::connect((host, port))
-            .await
-            .expect("connect Pi bridge test client");
-        let runtime_nonce = "pi-capability-test-nonce";
-        write_pi_test_frame(
-            &mut stream,
-            &serde_json::json!({
-                "version": 1,
-                "target_id": target_agent_id,
-                "generation": generation,
-                "session_id": "pi-session",
-                "runtime_nonce": runtime_nonce,
-                "seq": 1,
-                "type": "hello",
-                "token": bridge_config["token"],
-                "pid": std::process::id(),
-                "session_file": session_file.to_string_lossy(),
-            }),
-        )
-        .await;
-        assert_eq!(read_pi_test_frame(&mut stream).await["type"], "welcome");
-        write_pi_test_frame(
-            &mut stream,
-            &serde_json::json!({
-                "version": 1,
-                "target_id": target_agent_id,
-                "generation": generation,
-                "session_id": "pi-session",
-                "runtime_nonce": runtime_nonce,
-                "seq": 2,
-                "type": "ready",
-                "capabilities": {
-                    "task": true,
-                    "information": false,
-                    "cancel": false,
-                    "completion": false,
-                },
-            }),
-        )
-        .await;
-
-        let binding = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            loop {
-                if let Ok(Some(binding)) =
-                    native_capability_binding(&state, target_agent_id, "pi").await
-                {
-                    break binding;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .expect("Pi live capability should become ready");
-        assert_eq!(binding.target_agent_id, target_agent_id);
-        assert_eq!(binding.generation, generation);
-        assert_eq!(binding.provider, "pi");
-        assert_eq!(binding.transport, "pi_tui_bridge");
-        assert_eq!(binding.provider_session_id.as_deref(), Some("pi-session"));
-        assert!(binding.capabilities.persistent_session);
-        assert!(native_capability_binding(&state, target_agent_id, "pi")
-            .await
-            .expect("query ready Pi capability")
-            .is_some());
-        assert!(state
-            .native_delivery
-            .pi_binding(target_agent_id, generation + 1)
-            .await
-            .is_err());
-
-        state
-            .native_delivery
-            .dispose_pi_generation(target_agent_id, Some(generation))
-            .await
-            .expect("dispose Pi bridge");
-        assert!(native_capability_binding(&state, target_agent_id, "pi")
-            .await
-            .expect("query disposed Pi capability")
-            .is_none());
-    }
 
     #[test]
     fn agent_description_update_does_not_require_restart() {

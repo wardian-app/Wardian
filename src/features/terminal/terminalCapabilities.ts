@@ -48,8 +48,43 @@ const THEME_MODE_NOTIFICATION_TOGGLE = /\u001b\[\?2031[hl]/g;
 // (typing) composer that way, and xterm's serializer re-emits scrollback that way
 // on a theme swap; matching only the standalone form left those black/inverted.
 const CODEX_SGR_SEQUENCE = /\u001b\[([0-9;]*)m/g;
-const CURSOR_STYLE_SEQUENCE = /\u001b\[[0-9;]* q/g;
+const MAX_PENDING_CODEX_SGR_CHARS = 128;
 const REMOTE_HISTORY_FRAME_START = /\u001b\[\?2026h|\u001b\[\?25l\u001b\[H|\u001b\[H/g;
+
+/** Shared provider-terminal caret options supported by desktop and headless xterm. */
+export const CANONICAL_TERMINAL_CURSOR_OPTIONS = {
+  cursorBlink: true,
+  cursorStyle: "bar" as const,
+};
+
+/** Browser xterm adds the inactive-caret option to the shared provider contract. */
+export const CANONICAL_BROWSER_TERMINAL_CURSOR_OPTIONS = {
+  ...CANONICAL_TERMINAL_CURSOR_OPTIONS,
+  cursorInactiveStyle: "bar" as const,
+};
+
+type CanonicalCursorTerminal = {
+  options: {
+    cursorBlink?: boolean;
+    cursorStyle?: "block" | "underline" | "bar";
+  };
+  parser: {
+    registerCsiHandler: (
+      identifier: { intermediates: string; final: string },
+      callback: (params: (number | number[])[]) => boolean,
+    ) => { dispose: () => void };
+  };
+};
+
+/** Installs the parser-owned cross-provider caret contract on an xterm instance. */
+export function installCanonicalTerminalCursor(term: CanonicalCursorTerminal) {
+  term.options.cursorBlink = CANONICAL_TERMINAL_CURSOR_OPTIONS.cursorBlink;
+  term.options.cursorStyle = CANONICAL_TERMINAL_CURSOR_OPTIONS.cursorStyle;
+  return term.parser.registerCsiHandler(
+    { intermediates: " ", final: "q" },
+    () => true,
+  );
+}
 
 export type TerminalCapabilityContext = {
   cursorRow: number;
@@ -101,6 +136,23 @@ function trailingCodexTerminalColorQueryPrefix(data: string) {
   return "";
 }
 
+function trailingCodexSgrPrefix(data: string) {
+  const start = data.lastIndexOf("\u001b[");
+  if (start < 0) {
+    return "";
+  }
+
+  const suffix = data.slice(start);
+  if (suffix.length > MAX_PENDING_CODEX_SGR_CHARS || !/^\u001b\[[0-9;]*$/.test(suffix)) {
+    return "";
+  }
+
+  return suffix;
+}
+
+// Theme normalization runs once per provider chunk. Carry only a bounded,
+// numeric SGR prefix at the end of a Codex chunk so a split background tuple is
+// normalized as one sequence; all other bytes stay on the normal path.
 // Codex 0.145+ can split OSC 10/11 terminal-color probes between PTY reads.
 // xterm answers a completed probe immediately, so batch-level cleanup is too
 // late: the reply has already travelled back to Codex's line editor. Hold a
@@ -115,8 +167,16 @@ export function createProviderTerminalOutputFilter(provider: string | undefined)
         return data;
       }
       const normalized = stripTerminalColorQueries(pending + data);
-      pending = trailingCodexTerminalColorQueryPrefix(normalized);
-      return pending ? normalized.slice(0, -pending.length) : normalized;
+      const colorQueryPrefix = trailingCodexTerminalColorQueryPrefix(normalized);
+      const colorQuerySafe = colorQueryPrefix ? normalized.slice(0, -colorQueryPrefix.length) : normalized;
+      if (colorQueryPrefix) {
+        pending = colorQueryPrefix;
+        return colorQuerySafe;
+      }
+
+      const sgrPrefix = trailingCodexSgrPrefix(colorQuerySafe);
+      pending = sgrPrefix;
+      return sgrPrefix ? colorQuerySafe.slice(0, -sgrPrefix.length) : colorQuerySafe;
     },
     reset() {
       pending = "";
@@ -271,10 +331,6 @@ export function normalizeCodexComposerBackgroundForTheme(data: string, context: 
   return remapCodexChromeBackground(data, isCodexChromeLightGray, "41;41;41");
 }
 
-function stripCursorStyleControls(data: string) {
-  return data.replace(CURSOR_STYLE_SEQUENCE, "");
-}
-
 function supportsTerminalCapabilityResponses(provider: string | undefined) {
   return provider === "opencode" || provider === "antigravity";
 }
@@ -347,9 +403,7 @@ export function normalizeRemoteTerminalOutput(
   if (!data) {
     return data;
   }
-  const normalized = stripCursorStyleControls(
-    normalizeTerminalOutputBatch(splitRemoteTerminalHistoryFrames(data), provider, state),
-  );
+  const normalized = normalizeTerminalOutputBatch(splitRemoteTerminalHistoryFrames(data), provider, state);
   return provider === "codex" && context
     ? normalizeCodexComposerBackgroundForTheme(normalized, context)
     : normalized;
@@ -361,7 +415,7 @@ export function normalizeRemoteTerminalLiveOutput(
   context?: TerminalCapabilityContext,
   _state?: unknown,
 ) {
-  const normalized = stripCursorStyleControls(data);
+  const normalized = data;
   return provider === "codex" && context
     ? normalizeCodexComposerBackgroundForTheme(normalized, context)
     : normalized;

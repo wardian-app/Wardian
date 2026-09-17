@@ -83,6 +83,7 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
         attachCustomKeyEventHandler: vi.fn(),
         loadAddon: vi.fn(),
         registerLinkProvider: vi.fn(() => ({ dispose: vi.fn() })),
+        parser: { registerCsiHandler: vi.fn(() => ({ dispose: vi.fn() })) },
         textarea: document.createElement("textarea"),
         options: { ...(options ?? {}) },
         cols: 80,
@@ -125,6 +126,18 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
       background: "#1a1a1a",
       foreground: "#c9d1d9",
     });
+    expect(terminalOptions).toMatchObject({
+      cursorBlink: true,
+      cursorStyle: "bar",
+      cursorInactiveStyle: "bar",
+    });
+    const terminal = vi.mocked(Terminal).mock.results[vi.mocked(Terminal).mock.results.length - 1]?.value as Terminal & {
+      parser: { registerCsiHandler: ReturnType<typeof vi.fn> };
+    };
+    expect(terminal.parser.registerCsiHandler).toHaveBeenCalledWith(
+      { intermediates: " ", final: "q" },
+      expect.any(Function),
+    );
   });
 
   it("implicitly requests terminal ownership when the terminal view opens", async () => {
@@ -288,6 +301,66 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
     );
   });
 
+  it("resets pending Codex SGR before a remote authoritative snapshot", async () => {
+    const socket = new DetailSocket();
+    let handlers: Parameters<typeof remoteClient.openTerminalStream>[3] | undefined;
+    vi.spyOn(remoteClient, "openTerminalStream").mockImplementation(async (_session, _cols, _rows, nextHandlers) => {
+      handlers = nextHandlers;
+      nextHandlers.onSocket?.(socket as unknown as WebSocket);
+      return socket as unknown as WebSocket;
+    });
+
+    render(<RemoteAgentDetailView agent={agent} />);
+    await waitFor(() => expect(handlers).toBeDefined());
+    await act(async () => {
+      await handlers?.onMessage(registered());
+    });
+
+    const terminal = vi.mocked(Terminal).mock.results[vi.mocked(Terminal).mock.results.length - 1]?.value as Terminal & {
+      write: ReturnType<typeof vi.fn>;
+    };
+    terminal.write.mockClear();
+    const partialSgr = "\u001b[48;2;41";
+    await act(async () => {
+      await handlers?.onMessage({
+        type: "events",
+        batch: {
+          status: "events",
+          runtime_generation: 1,
+          events: [{
+            type: "output",
+            sequence: 5,
+            runtime_generation: 1,
+            bytes_base64: btoa(partialSgr),
+          }],
+          next_sequence: 5,
+          available_from_sequence: 5,
+          latest_sequence: 5,
+          recovery_snapshot: null,
+        },
+      });
+    });
+    expect(terminal.write).toHaveBeenCalledWith("", expect.any(Function));
+    terminal.write.mockClear();
+
+    const restoredText = "fresh remote generation snapshot";
+    await act(async () => {
+      await handlers?.onMessage({
+        type: "snapshot",
+        snapshot: {
+          ...registered().initial_snapshot,
+          snapshot_id: "snapshot-2",
+          runtime_generation: 2,
+          sequence_barrier: 6,
+          terminal_state_base64: btoa(restoredText),
+          visible_grid: restoredText,
+        },
+      });
+    });
+
+    expect(terminal.write).toHaveBeenLastCalledWith(restoredText, expect.any(Function));
+  });
+
   it("keeps mirror xterm geometry canonical while portrait and landscape viewports only report proposals", async () => {
     vi.mocked(Terminal).mockImplementation(function MockTerminal(options) {
       return {
@@ -304,6 +377,7 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
         attachCustomKeyEventHandler: vi.fn(),
         loadAddon: vi.fn(),
         registerLinkProvider: vi.fn(() => ({ dispose: vi.fn() })),
+        parser: { registerCsiHandler: vi.fn(() => ({ dispose: vi.fn() })) },
         textarea: document.createElement("textarea"),
         options: { ...(options ?? {}) },
         cols: 80,
