@@ -24,7 +24,7 @@ async function removeIfPresent(target) {
   }
 }
 
-async function makeFixture() {
+async function makeFixture({ withAlias = true } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "ch"));
   let home = path.join(root, "wardian-home");
   while (path.join(home, "agents", AGENT_ID, "habitat", "workspace").length <= WINDOWS_CWD_LIMIT) {
@@ -41,7 +41,7 @@ async function makeFixture() {
 
   await fs.mkdir(habitat, { recursive: true });
   await fs.mkdir(workspacePath, { recursive: true });
-  await fs.mkdir(aliasSlot, { recursive: true });
+  if (withAlias) await fs.mkdir(aliasSlot, { recursive: true });
   await fs.mkdir(path.join(habitat, ".codex"), { recursive: true });
   await fs.writeFile(workspaceMarker, markerBytes);
   await fs.writeFile(
@@ -49,20 +49,22 @@ async function makeFixture() {
     'model = "fixture-model"\nmodel_reasoning_effort = "low"\n',
   );
   await fs.symlink(workspacePath, path.join(habitat, "workspace"), "junction");
-  await fs.symlink(habitat, aliasTarget, "junction");
+  if (withAlias) {
+    await fs.symlink(habitat, aliasTarget, "junction");
 
-  const record = {
-    version: 1,
-    agent_id: AGENT_ID,
-    wardian_home: home,
-    habitat: await fs.realpath(habitat),
-    target: aliasTarget,
-    token: "11111111-1111-4111-8111-111111111111",
-    habitat_identity: [1, 2],
-    slot_identity: [3, 4],
-  };
-  await fs.writeFile(aliasRecord, JSON.stringify(record, null, 2));
-  await fs.writeFile(slotRecord, JSON.stringify(record, null, 2));
+    const record = {
+      version: 1,
+      agent_id: AGENT_ID,
+      wardian_home: home,
+      habitat: await fs.realpath(habitat),
+      target: aliasTarget,
+      token: "11111111-1111-4111-8111-111111111111",
+      habitat_identity: [1, 2],
+      slot_identity: [3, 4],
+    };
+    await fs.writeFile(aliasRecord, JSON.stringify(record, null, 2));
+    await fs.writeFile(slotRecord, JSON.stringify(record, null, 2));
+  }
 
   return {
     root,
@@ -74,6 +76,7 @@ async function makeFixture() {
     aliasTarget,
     aliasRecord,
     slotRecord,
+    withAlias,
     markerBytes,
   };
 }
@@ -97,7 +100,7 @@ function expectedCodexValues() {
 
 test("long-habitat helper requires explicit nonempty semantic Codex values", async () => {
   if (process.platform !== "win32") return;
-  const fixture = await makeFixture();
+  const fixture = await makeFixture({ withAlias: false });
   try {
     await assert.rejects(
       () => assertCodexLaunchArtifacts({ home: fixture.home, agentId: AGENT_ID, expectedValues: [] }),
@@ -116,12 +119,12 @@ test("long-habitat helper requires explicit nonempty semantic Codex values", asy
   }
 });
 
-test("long-habitat lifecycle retains bounded proof before owned deletion", async (t) => {
+test("long-habitat Codex lifecycle retains bounded proof without a habitat alias", async (t) => {
   if (process.platform !== "win32") {
     t.skip("ConPTY habitat junction evidence is Windows-only");
     return;
   }
-  const fixture = await makeFixture();
+  const fixture = await makeFixture({ withAlias: false });
   const evidenceRoot = path.join(fixture.root, "evidence");
   let deleted = false;
   let isOff = true;
@@ -188,10 +191,7 @@ test("long-habitat lifecycle retains bounded proof before owned deletion", async
   };
   const runCliOk = async (_cliPath, _harness, args) => {
     assert.deepEqual(args, ["agent", "delete", agent.session_name, "--confirm", agent.session_name]);
-    await removeIfPresent(fixture.aliasRecord);
-    await removeIfPresent(fixture.aliasTarget);
-    await removeIfPresent(fixture.slotRecord);
-    await fs.rmdir(fixture.aliasSlot);
+    assert.equal(fixture.withAlias, false);
     deleted = true;
     return { status: 0, stdout: "", stderr: "" };
   };
@@ -204,6 +204,11 @@ test("long-habitat lifecycle retains bounded proof before owned deletion", async
       workspacePath: fixture.workspacePath,
       expectedCodexValues: expectedCodexValues(),
     });
+    assert.equal(preflight.alias, null);
+    assert.equal(preflight.cwd_evidence.habitat_alias_expected, false);
+    assert.equal(preflight.cwd_evidence.provider_cwd_mode, "external_workspace");
+    assert.ok(preflight.cwd_evidence.managed_habitat_path_utf16_units > WINDOWS_CWD_LIMIT);
+    assert.ok(preflight.cwd_evidence.provider_cwd_utf16_units <= WINDOWS_CWD_LIMIT);
     const result = await afterMaintainedProviderPause({
       driver: {},
       harness: { isolatedHome: fixture.home },
@@ -230,8 +235,9 @@ test("long-habitat lifecycle retains bounded proof before owned deletion", async
     });
 
     assert.equal(result.pause_resume_identity_preserved, true);
-    assert.equal(result.alias_reused_across_pause_resume, true);
-    assert.equal(result.alias_removed_after_explicit_agent_delete, true);
+    assert.equal(result.habitat_alias_expected, false);
+    assert.equal(result.alias_reused_across_pause_resume, null);
+    assert.equal(result.alias_removed_after_explicit_agent_delete, null);
     assert.equal(result.external_marker_retained, true);
     assert.equal(result.maintained_report_turn_evidence_reused, true);
     assert.equal(result.removed_agent_local_habitat_or_archive_asserted, false);
@@ -240,6 +246,10 @@ test("long-habitat lifecycle retains bounded proof before owned deletion", async
     assert.equal(report.raw_config_or_transcript_copied, false);
     assert.equal(report.archive.record_count, 2);
     assert.equal(report.config.expected_values.length, 2);
+    assert.equal(report.alias_before_delete, null);
+    assert.equal(report.cwd_evidence.habitat_alias_expected, false);
+    assert.equal(report.cwd_evidence.provider_cwd_mode, "external_workspace");
+    assert.equal(report.path_and_cwd_evidence.managed_habitat_path_over_limit, true);
   } finally {
     await removeFixture(fixture);
   }
@@ -250,7 +260,7 @@ test("long-habitat Claude lifecycle uses the same alias ownership contract", asy
     t.skip("Habitat junction evidence is Windows-only");
     return;
   }
-  const fixture = await makeFixture();
+  const fixture = await makeFixture({ withAlias: true });
   const evidenceRoot = path.join(fixture.root, "claude-evidence");
   let deleted = false;
   let isOff = true;
@@ -316,6 +326,9 @@ test("long-habitat Claude lifecycle uses the same alias ownership contract", asy
       workspacePath: fixture.workspacePath,
     });
     assert.equal(preflight.config, null);
+    assert.equal(preflight.cwd_evidence.habitat_alias_expected, true);
+    assert.equal(preflight.cwd_evidence.provider_cwd_mode, "habitat_alias");
+    assert.ok(preflight.cwd_evidence.managed_habitat_path_utf16_units > WINDOWS_CWD_LIMIT);
     const result = await afterMaintainedProviderPause({
       driver: {},
       harness: { isolatedHome: fixture.home },

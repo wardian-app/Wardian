@@ -60,6 +60,25 @@ async function readDirectoryNames(target) {
   return (await fs.readdir(target)).sort((left, right) => left.localeCompare(right));
 }
 
+async function assertManagedHabitatPath(home, agentId, workspacePath) {
+  const agentHabitat = path.join(home, "agents", agentId, "habitat");
+  const managedHabitatPath = path.join(agentHabitat, "workspace");
+  const managedHabitatPathUnits = utf16Units(managedHabitatPath);
+  const providerCwdUnits = utf16Units(workspacePath);
+  assert.ok(managedHabitatPathUnits > WINDOWS_CWD_LIMIT,
+    "long-habitat gate requires an over-limit managed habitat path");
+  assert.ok(providerCwdUnits <= WINDOWS_CWD_LIMIT,
+    "long-habitat gate requires the external provider cwd to remain within the observed Windows limit");
+  assert.equal(await fs.realpath(managedHabitatPath), await fs.realpath(workspacePath),
+    "managed habitat workspace changed the external project target");
+  return {
+    managed_habitat_path_utf16_units: managedHabitatPathUnits,
+    provider_cwd_utf16_units: providerCwdUnits,
+    provider_cwd: workspacePath,
+    managed_habitat_path: managedHabitatPath,
+  };
+}
+
 async function assertAliasLink(record, home, agentId, workspacePath) {
   const agentHabitat = path.join(home, "agents", agentId, "habitat");
   const habitat = await fs.realpath(agentHabitat);
@@ -79,15 +98,10 @@ async function assertAliasLink(record, home, agentId, workspacePath) {
     "habitat alias target does not resolve to the owning habitat");
 
   const aliasWorkspace = path.join(record.target, "workspace");
-  const logicalHabitatCwd = path.join(agentHabitat, "workspace");
-  const logicalHabitatCwdUnits = utf16Units(logicalHabitatCwd);
+  const cwdEvidence = await assertManagedHabitatPath(home, agentId, workspacePath);
   const aliasWorkspaceUnits = utf16Units(aliasWorkspace);
-  assert.ok(logicalHabitatCwdUnits > WINDOWS_CWD_LIMIT,
-    "long-habitat gate requires an over-limit managed habitat cwd");
   assert.ok(aliasWorkspaceUnits <= WINDOWS_CWD_LIMIT,
     "owned habitat alias workspace still exceeds the observed Windows limit");
-  assert.equal(await fs.realpath(logicalHabitatCwd), await fs.realpath(workspacePath),
-    "managed habitat workspace changed the external project target");
   assert.equal(await fs.realpath(aliasWorkspace), await fs.realpath(workspacePath),
     "alias workspace changed the logical target");
   assert.deepEqual(await readDirectoryNames(slot), [ALIAS_RECORD, "h"].sort(),
@@ -105,7 +119,10 @@ async function assertAliasLink(record, home, agentId, workspacePath) {
     slot_identity: [...record.slot_identity],
     slot,
     alias_workspace: aliasWorkspace,
-    logical_habitat_cwd_utf16_units: logicalHabitatCwdUnits,
+    managed_habitat_path_relative: safeRelativePath(home, cwdEvidence.managed_habitat_path),
+    managed_habitat_path_utf16_units: cwdEvidence.managed_habitat_path_utf16_units,
+    provider_cwd_relative: safeRelativePath(home, cwdEvidence.provider_cwd),
+    provider_cwd_utf16_units: cwdEvidence.provider_cwd_utf16_units,
     alias_workspace_utf16_units: aliasWorkspaceUnits,
   };
 }
@@ -116,6 +133,23 @@ async function captureAlias(home, agentId, workspacePath) {
   const record = await requireJson(recordPath, "agent alias record");
   const evidence = await assertAliasLink(record, home, agentId, workspacePath);
   return { recordPath, record, evidence };
+}
+
+async function captureCodexHabitatEvidence(home, agentId, workspacePath) {
+  const evidence = await assertManagedHabitatPath(home, agentId, workspacePath);
+  const aliasRecordPath = path.join(home, "agents", agentId, ALIAS_RECORD);
+  assert.equal(await exists(aliasRecordPath), false,
+    "Codex must keep its short external cwd without a habitat alias record");
+  return {
+    managed_habitat_path_utf16_units: evidence.managed_habitat_path_utf16_units,
+    provider_cwd_utf16_units: evidence.provider_cwd_utf16_units,
+    habitat_relative: safeRelativePath(home, path.join(home, "agents", agentId, "habitat")),
+    managed_habitat_path_relative: safeRelativePath(home, evidence.managed_habitat_path),
+    provider_cwd_relative: safeRelativePath(home, evidence.provider_cwd),
+    provider_cwd_mode: "external_workspace",
+    habitat_alias_expected: false,
+    inference: "managed habitat path exceeds the Windows limit; Codex uses the short external workspace as provider cwd; no claim that the actual process cwd is over the limit",
+  };
 }
 
 function tomlSection(text, sectionName = null) {
@@ -206,11 +240,25 @@ export async function assertLongHabitatPrerequisites({
   assert.ok(agent?.session_id, "long-habitat gate requires the provider agent session ID");
   assertSamePath(agent.folder, workspacePath, "provider AgentConfig.folder changed before delivery");
 
-  const alias = await captureAlias(home, agent.session_id, workspacePath);
+  const alias = provider === "claude"
+    ? await captureAlias(home, agent.session_id, workspacePath)
+    : null;
+  const cwdEvidence = provider === "codex"
+    ? await captureCodexHabitatEvidence(home, agent.session_id, workspacePath)
+    : {
+        managed_habitat_path_utf16_units: alias.evidence.managed_habitat_path_utf16_units,
+        provider_cwd_utf16_units: alias.evidence.provider_cwd_utf16_units,
+        habitat_relative: safeRelativePath(home, alias.evidence.habitat),
+        managed_habitat_path_relative: alias.evidence.managed_habitat_path_relative,
+        provider_cwd_relative: alias.evidence.provider_cwd_relative,
+        provider_cwd_mode: "habitat_alias",
+        habitat_alias_expected: true,
+        inference: "managed habitat path exceeds the Windows limit; Claude uses the owned short alias as provider cwd",
+      };
   const config = provider === "codex"
     ? await assertCodexLaunchArtifacts({ home, agentId: agent.session_id, expectedValues: expectedCodexValues })
     : null;
-  return { provider, agent_id: agent.session_id, alias, config };
+  return { provider, agent_id: agent.session_id, alias, config, cwd_evidence: cwdEvidence };
 }
 
 async function currentAgent(invokeTauri, driver, sessionId) {
@@ -335,7 +383,7 @@ function safeAliasEvidence(alias, home) {
     slot_name: path.basename(evidence.slot),
     habitat_identity: evidence.habitat_identity,
     slot_identity: evidence.slot_identity,
-    logical_habitat_cwd_utf16_units: evidence.logical_habitat_cwd_utf16_units,
+    managed_habitat_path_utf16_units: evidence.managed_habitat_path_utf16_units,
     alias_workspace_utf16_units: evidence.alias_workspace_utf16_units,
   };
 }
@@ -373,6 +421,7 @@ export async function afterMaintainedProviderPause({
   waitForProviderInputReady,
   runCliOk,
 }) {
+  const habitatAliasExpected = provider === "claude";
   for (const [name, value] of Object.entries({
     invokeTauri,
     pauseRealProviderAgent,
@@ -381,7 +430,11 @@ export async function afterMaintainedProviderPause({
   })) {
     assert.equal(typeof value, "function", `long-habitat hook requires maintained helper ${name}`);
   }
-  assert.ok(preflight?.alias?.recordPath, "long-habitat hook requires pre-prompt alias evidence");
+  if (habitatAliasExpected) {
+    assert.ok(preflight?.alias?.recordPath, "Claude long-habitat hook requires pre-prompt alias evidence");
+  } else {
+    assert.equal(preflight?.alias, null, "Codex long-habitat hook must not require a habitat alias");
+  }
   assert.ok(agent?.session_id, "long-habitat hook requires the returned provider agent");
   assert.equal(preflight.provider, provider, "long-habitat preflight provider changed");
   assertSamePath(agent.folder, workspacePath, "provider AgentConfig.folder changed before pause");
@@ -392,9 +445,13 @@ export async function afterMaintainedProviderPause({
   assert.equal(paused.is_off, true, "maintained pause did not leave the agent off");
   assertSamePath(paused.folder, workspacePath, "paused provider agent changed logical workspace");
 
-  const aliasAfterPause = await captureAlias(harness.isolatedHome, agent.session_id, workspacePath);
-  assert.deepEqual(aliasAfterPause.evidence, preflight.alias.evidence,
-    "maintained pause changed the owned habitat alias");
+  const aliasAfterPause = habitatAliasExpected
+    ? await captureAlias(harness.isolatedHome, agent.session_id, workspacePath)
+    : null;
+  if (habitatAliasExpected) {
+    assert.deepEqual(aliasAfterPause.evidence, preflight.alias.evidence,
+      "maintained pause changed the owned habitat alias");
+  }
 
   await invokeTauri(driver, "resume_agent", { sessionId: agent.session_id });
   await waitForProviderInputReady(driver, provider, agent.session_id);
@@ -409,9 +466,13 @@ export async function afterMaintainedProviderPause({
       "pause/resume changed the provider session identity");
   }
 
-  const aliasAfterResume = await captureAlias(harness.isolatedHome, agent.session_id, workspacePath);
-  assert.deepEqual(aliasAfterResume.evidence, preflight.alias.evidence,
-    "pause/resume replaced the owned habitat alias");
+  const aliasAfterResume = habitatAliasExpected
+    ? await captureAlias(harness.isolatedHome, agent.session_id, workspacePath)
+    : null;
+  if (habitatAliasExpected) {
+    assert.deepEqual(aliasAfterResume.evidence, preflight.alias.evidence,
+      "pause/resume replaced the owned habitat alias");
+  }
   const turnEvidence = await captureBoundedTurnEvidence({
     invokeTauri,
     driver,
@@ -430,16 +491,30 @@ export async function afterMaintainedProviderPause({
     schema: 1,
     provider,
     agent_id: agent.session_id,
-    cwd_inference: {
-      logical_habitat_cwd_over_limit: true,
+    path_and_cwd_evidence: {
+      managed_habitat_path_over_limit: preflight.cwd_evidence.managed_habitat_path_utf16_units > WINDOWS_CWD_LIMIT,
+      managed_habitat_path_utf16_units: preflight.cwd_evidence.managed_habitat_path_utf16_units,
+      provider_cwd_utf16_units: preflight.cwd_evidence.provider_cwd_utf16_units,
+      provider_cwd_short: preflight.cwd_evidence.provider_cwd_utf16_units <= WINDOWS_CWD_LIMIT,
+      provider_cwd_mode: preflight.cwd_evidence.provider_cwd_mode,
+      habitat_alias_expected: habitatAliasExpected,
       direct_child_get_current_directory_observed: false,
-      basis: "over-limit managed habitat cwd, verified owned short alias, and inspected spawn builder cwd wiring",
+      basis: habitatAliasExpected
+        ? "over-limit managed habitat path, verified owned short alias, and inspected spawn builder cwd wiring"
+        : "long managed habitat publication, short external provider cwd, and inspected Codex spawn builder cwd wiring; actual process cwd was not directly observed",
     },
     turn: turnEvidence,
     archive: archiveEvidence,
-    alias_before_delete: safeAliasEvidence(preflight.alias, harness.isolatedHome),
-    alias_after_pause: safeAliasEvidence(aliasAfterPause, harness.isolatedHome),
-    alias_after_resume: safeAliasEvidence(aliasAfterResume, harness.isolatedHome),
+    alias_before_delete: preflight.alias
+      ? safeAliasEvidence(preflight.alias, harness.isolatedHome)
+      : null,
+    alias_after_pause: aliasAfterPause
+      ? safeAliasEvidence(aliasAfterPause, harness.isolatedHome)
+      : null,
+    alias_after_resume: aliasAfterResume
+      ? safeAliasEvidence(aliasAfterResume, harness.isolatedHome)
+      : null,
+    cwd_evidence: preflight.cwd_evidence,
     config: preflight.config,
     credentials_or_auth_material_copied: false,
     raw_config_or_transcript_copied: false,
@@ -455,9 +530,11 @@ export async function afterMaintainedProviderPause({
 
   assert.equal(await currentAgent(invokeTauri, driver, agent.session_id), null,
     "explicit owned agent removal retained the agent");
-  await assertRemoved(preflight.alias.recordPath, "habitat alias record");
-  await assertRemoved(preflight.alias.evidence.target, "habitat alias junction");
-  await assertRemoved(preflight.alias.evidence.slot, "habitat alias slot");
+  if (habitatAliasExpected) {
+    await assertRemoved(preflight.alias.recordPath, "habitat alias record");
+    await assertRemoved(preflight.alias.evidence.target, "habitat alias junction");
+    await assertRemoved(preflight.alias.evidence.slot, "habitat alias slot");
+  }
   await assertMarker(markerPath, markerBefore);
 
   return {
@@ -465,15 +542,18 @@ export async function afterMaintainedProviderPause({
     session_id: agent.session_id,
     maintained_pause_confirmed: true,
     pause_resume_identity_preserved: true,
-    alias_reused_across_pause_resume: true,
-    alias_removed_after_explicit_agent_delete: true,
+    habitat_alias_expected: habitatAliasExpected,
+    alias_reused_across_pause_resume: habitatAliasExpected ? true : null,
+    alias_removed_after_explicit_agent_delete: habitatAliasExpected ? true : null,
     external_marker_retained: true,
     bounded_evidence_path: evidencePath,
     maintained_report_turn_evidence_reused: turnEvidence.maintained_report_reuse.length > 0,
     cwd_evidence: {
-      logical_habitat_cwd_utf16_units: aliasAfterResume.evidence.logical_habitat_cwd_utf16_units,
-      alias_workspace_utf16_units: aliasAfterResume.evidence.alias_workspace_utf16_units,
-      inference: "over-limit managed habitat cwd plus owned short alias and inspected spawn builder cwd wiring",
+      ...preflight.cwd_evidence,
+      alias_workspace_utf16_units: aliasAfterResume?.evidence.alias_workspace_utf16_units ?? null,
+      inference: habitatAliasExpected
+        ? "managed habitat path exceeds the Windows limit; owned short alias is the provider cwd"
+        : "managed habitat path exceeds the Windows limit; short external workspace is the Codex provider cwd; actual process cwd was not directly observed",
       direct_child_get_current_directory_observed: false,
     },
     codex_launch_artifacts: preflight.config,

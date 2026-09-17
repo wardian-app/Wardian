@@ -405,31 +405,40 @@ receipt, or mock-provider output alone does not qualify as native acceptance.
 
 Issue #1285 adds an explicit opt-in gate to the maintained provider-delivery
 suite. Set `WARDIAN_E2E_ASSERT_LONG_HABITAT=1` only when the selected run
-includes both `codex` and `claude`. The managed cwd under test is
+includes both `codex` and `claude`. The managed habitat path under test is
 `<wardian-home>/agents/<agent-id>/habitat/workspace`; its computed UTF-16 path
 must exceed the observed Windows limit. `WARDIAN_E2E_REAL_WORKSPACE` may remain
-a short external project folder. The gate checks the returned `AgentConfig.folder`,
-owned short-alias records, and alias workspace target before the first paid
-provider prompt. Codex also
-requires nonempty semantic expectations derived from the suite's provider
-configuration and verifies the restored values plus launch-journal cleanup.
-Claude shares the alias checks and does not use Codex config assertions.
+a short external project folder. The gate checks the returned `AgentConfig.folder`
+and records the managed path length separately from the actual provider CWD before
+the first paid provider prompt. Claude uses the managed habitat path through the
+owned short alias and therefore requires the alias record, alias workspace target,
+pause/resume reuse, and exact cleanup after owned agent deletion. Codex uses the
+short external project folder as its actual provider CWD and requires no habitat
+alias; it verifies long-home publication, nonempty semantic configuration values,
+launch-journal cleanup, and the normal provider turn.
 
 Before explicit owned-agent deletion, the helper writes a bounded private
 report containing hashed transcript fields, provider/archive identity counts,
-alias ownership identities, relative habitat paths, and config value hashes.
-It then verifies pause/resume identity and alias reuse, deletes the joined
-owned agent through the CLI, checks exact alias cleanup, and confirms that the
-external workspace marker remains. It does not claim that normal agent removal
-preserves the removed agent's local habitat or provider archive. Direct child
-`GetCurrentDirectory` observation is not required; the cwd result is reported
-as an inference from the over-limit managed habitat cwd, owned alias, and
-inspected spawn-builder wiring.
+relative habitat paths, cwd-length evidence, and config value hashes. Claude's
+report includes alias ownership identities and exact cleanup; Codex's report
+records that no alias was expected and retains the short provider CWD alongside
+the long managed-habitat path evidence. Reports include the CWD mode, measured
+managed path length, and measured external/provider CWD length. The long
+managed path is evidence about Wardian habitat publication; it does not claim that
+the provider process CWD was over the Windows limit. Both paths verify pause/resume
+identity, the normal provider turn, joined owned-agent deletion, and retention
+of the external workspace marker. The helper does not claim that normal agent
+removal preserves the removed agent's local habitat or provider archive. Direct
+child `GetCurrentDirectory` observation is not required; the provider CWD mode is
+reported from the inspected provider spawn wiring and provider-specific filesystem
+evidence. A Codex report therefore says explicitly that the managed habitat path
+is long while the actual provider CWD is the short external workspace.
 
 Choose a disposable Wardian home whose own path is commonly about 205–231
 UTF-16 units, then use a short external project folder. The managed
 `agents/<agent-id>/habitat/workspace` suffix supplies the boundary pressure while
-the project path stays short, isolating the managed habitat cwd behavior.
+the project path stays short, isolating the managed habitat path from the actual
+provider CWD.
 
 Run the offline helper exercise without an app or provider:
 

@@ -25,6 +25,7 @@ import {
   waitForAppShell,
 } from "../lib/harness.mjs";
 import {
+  WINDOWS_CWD_LIMIT,
   afterMaintainedProviderPause,
   assertLongHabitatPrerequisites,
 } from "../lib/provider-long-path-evidence.mjs";
@@ -2358,10 +2359,13 @@ test("human composer delivery uses actual providers; not peer messaging", { time
         report.long_habitat ??= {};
         report.long_habitat[provider] = {
           preflight: {
-            logical_habitat_cwd_over_limit: true,
-            logical_habitat_cwd_utf16_units: longHabitatPreflight.alias.evidence.logical_habitat_cwd_utf16_units,
-            alias_workspace_utf16_units: longHabitatPreflight.alias.evidence.alias_workspace_utf16_units,
-            alias_owned: true,
+            managed_habitat_path_over_limit:
+              longHabitatPreflight.cwd_evidence.managed_habitat_path_utf16_units > WINDOWS_CWD_LIMIT,
+            managed_habitat_path_utf16_units: longHabitatPreflight.cwd_evidence.managed_habitat_path_utf16_units,
+            provider_cwd_utf16_units: longHabitatPreflight.cwd_evidence.provider_cwd_utf16_units,
+            provider_cwd_mode: longHabitatPreflight.cwd_evidence.provider_cwd_mode,
+            habitat_alias_expected: provider === "claude",
+            alias_owned: provider === "claude",
             codex_semantic_config_verified: provider === "codex",
           },
         };
