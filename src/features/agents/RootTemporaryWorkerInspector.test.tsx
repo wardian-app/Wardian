@@ -236,6 +236,48 @@ describe("RootTemporaryWorkerInspector", () => {
     ).toBeNull();
   });
 
+  it("waits for active worker evidence before rendering current details", async () => {
+    const workerDetails = {
+      root_agent_id: "active-root",
+      workers: [makeWorker("active-child", "waiting")],
+      worker_telemetry: {},
+    };
+    let resolveDetails!: (details: typeof workerDetails) => void;
+    invokeMock.mockImplementation(
+      () => new Promise<typeof workerDetails>((resolve) => {
+        resolveDetails = resolve;
+      }),
+    );
+
+    render(
+      <RootTemporaryWorkerInspector
+        agentName="Active root"
+        compact
+        summary={{
+          root_agent_id: "active-root",
+          active: 1,
+          past: 0,
+          unknown: 0,
+          attention_count: 1,
+          attention_waiting: 1,
+          attention_failed: 0,
+          attention_unknown: 0,
+        }}
+      />,
+    );
+
+    const badge = screen.getByRole("button", { name: /Inspect subagents for Active root/ });
+    fireEvent.click(badge);
+
+    const details = await screen.findByTestId("agent-child-worker-details-active-root");
+    expect(within(details).getByText("Loading worker evidence…")).toBeInTheDocument();
+    await act(async () => {
+      resolveDetails(workerDetails);
+    });
+    const current = await within(details).findByTestId("agent-child-worker-current-active-root");
+    expect(current).toHaveTextContent("Waiting");
+  });
+
   it("hides unknown-only roots without creating an attention marker", () => {
     render(
       <RootTemporaryWorkerInspector

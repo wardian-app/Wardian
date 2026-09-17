@@ -333,6 +333,116 @@ fn append_chat_events_writes_source_records_for_provider_metadata() {
 }
 
 #[test]
+fn append_chat_events_repairs_sources_directory_obstruction_without_duplicate_event() {
+    let (_guard, temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let make_source_event = |id: &str, text: &str| {
+        let mut event = chat_event(
+            id,
+            AgentChatEventKind::Message,
+            Some(AgentChatRole::Assistant),
+            Some(text),
+        );
+        event.provider = "opencode".to_string();
+        event.turn_id = Some(format!("message-{id}"));
+        event.source = Some("opencode_db".to_string());
+        event.metadata = serde_json::json!({
+            "opencode_session_id": "ses_obstruction",
+            "part_id": format!("part-{id}"),
+            "raw_type": "text",
+            "cursor": format!("opencode:{id}"),
+            "source_path": "<provider-data>/opencode.db"
+        });
+        event
+    };
+
+    let seed = make_source_event("source-seed", "seed source observation");
+    archive
+        .append_chat_events("agent-1", std::slice::from_ref(&seed))
+        .expect("seed source snapshot");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let conversation_path =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation dir");
+    let sources_path = conversation_path.join("sources.jsonl");
+    assert!(sources_path.is_file(), "seed must create a source snapshot");
+    let saved_sources = temp.path().join("sources.jsonl.saved");
+    std::fs::rename(&sources_path, &saved_sources).expect("move legitimate source snapshot");
+    std::fs::create_dir(&sources_path).expect("obstruct exact source destination");
+
+    let event = make_source_event("source-obstruction-event", "obstructed source observation");
+    let first_error = archive
+        .append_chat_events("agent-1", std::slice::from_ref(&event))
+        .expect_err("directory obstruction must fail after raw event publication");
+    assert!(!first_error.to_string().is_empty());
+
+    let events_path = conversation_path.join("events.jsonl");
+    let events_after_failure: Vec<AgentChatEvent> =
+        read_jsonl_records(&events_path).expect("read partial event snapshot");
+    assert_eq!(
+        events_after_failure
+            .iter()
+            .filter(|archived| archived.id == event.id)
+            .count(),
+        1,
+        "the failed publication must leave one durable raw observation",
+    );
+
+    std::fs::remove_dir(&sources_path).expect("remove only test-created obstruction");
+    std::fs::rename(&saved_sources, &sources_path).expect("restore source snapshot");
+    archive
+        .append_chat_events("agent-1", std::slice::from_ref(&event))
+        .expect("retry repairs source and narrative");
+
+    let events: Vec<AgentChatEvent> =
+        read_jsonl_records(&events_path).expect("read repaired events");
+    let records: Vec<ConversationNarrativeRecord> =
+        read_jsonl_records(&conversation_path.join("conversation.jsonl"))
+            .expect("read repaired narrative");
+    let sources: Vec<ConversationSourceRecord> =
+        read_jsonl_records(&sources_path).expect("read repaired sources");
+
+    assert_eq!(
+        events
+            .iter()
+            .filter(|archived| archived.id == event.id)
+            .count(),
+        1,
+        "retry must not duplicate the raw observation",
+    );
+    let repaired = records
+        .iter()
+        .find(|record| {
+            record
+                .event_refs
+                .iter()
+                .any(|event_ref| event_ref == &event.id)
+        })
+        .expect("repaired narrative owner");
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record
+                .event_refs
+                .iter()
+                .any(|event_ref| event_ref == &event.id))
+            .count(),
+        1,
+    );
+    assert_eq!(
+        sources.len(),
+        2,
+        "seed and repaired source rows are retained"
+    );
+    assert_eq!(repaired.source_refs.len(), 1);
+    assert!(sources
+        .iter()
+        .any(|source| repaired.source_refs.contains(&source.source_id)));
+}
+
+#[test]
 fn turn_id_does_not_become_provider_session_or_rollover_key() {
     let (_guard, _temp) = isolated_home();
     let archive = ConversationArchiveState::default();

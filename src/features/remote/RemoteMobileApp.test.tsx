@@ -262,6 +262,7 @@ describe("RemoteMobileApp", () => {
         dispose: vi.fn(),
         focus: vi.fn(),
         attachCustomKeyEventHandler: vi.fn(),
+        parser: { registerCsiHandler: vi.fn(() => ({ dispose: vi.fn() })) },
         selectAll: vi.fn(),
         loadAddon: vi.fn(),
         registerLinkProvider: vi.fn(() => ({ dispose: vi.fn() })),
@@ -3449,7 +3450,7 @@ describe("RemoteMobileApp", () => {
     expect(terminalInstance.write.mock.calls[1]?.[0]).not.toContain("\u001b[999;1H");
   });
 
-  it("strips provider cursor-shape sequences from remote terminal writes", async () => {
+  it("installs the canonical cursor handler for remote provider terminal writes", async () => {
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {
         return Promise.resolve(
@@ -3505,7 +3506,19 @@ describe("RemoteMobileApp", () => {
       .map((result) => result.value)
       .find((value) => value?.write?.mock) as {
       write: ReturnType<typeof vi.fn>;
+      parser: { registerCsiHandler: ReturnType<typeof vi.fn> };
+      options: Record<string, unknown>;
     };
+
+    expect(terminalInstance.options).toEqual(expect.objectContaining({
+      cursorBlink: true,
+      cursorStyle: "bar",
+      cursorInactiveStyle: "bar",
+    }));
+    expect(terminalInstance.parser.registerCsiHandler).toHaveBeenCalledWith(
+      { intermediates: " ", final: "q" },
+      expect.any(Function),
+    );
 
     act(() => {
       MockWebSocket.instances[1]?.emit("open");
@@ -3517,8 +3530,8 @@ describe("RemoteMobileApp", () => {
     await waitFor(() => expect(terminalInstance.write).toHaveBeenCalled());
     const written = String(terminalInstance.write.mock.calls[0]?.[0] ?? "");
     expect(written).toContain("prompt");
-    expect(written).not.toContain("\u001b[0 q");
-    expect(written).not.toContain("\u001b[1 q");
+    expect(written).toContain("\u001b[0 q");
+    expect(written).toContain("\u001b[1 q");
   });
 
   it("strips Codex terminal color-report replies before forwarding remote terminal input", async () => {

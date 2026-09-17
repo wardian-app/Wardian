@@ -10,7 +10,10 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import {
+  CANONICAL_BROWSER_TERMINAL_CURSOR_OPTIONS,
+  CANONICAL_TERMINAL_CURSOR_OPTIONS,
   createProviderTerminalOutputFilter,
+  installCanonicalTerminalCursor,
   normalizeCodexComposerBackgroundForTheme,
   normalizeTerminalOutputBatch,
   planTerminalCapabilityResponses,
@@ -97,6 +100,7 @@ type TerminalRendererEntry = {
   inFlightOperations: number;
   physicallyDisposed: boolean;
   term: Terminal;
+  cursorRegistration: ReturnType<typeof installCanonicalTerminalCursor>;
   fitAddon: FitAddon;
   serializeAddon: SerializeAddon;
   webglAddon: WebglAddon | null;
@@ -141,6 +145,7 @@ type TerminalSessionEntry = {
   renderer: TerminalRendererEntry | null;
   rendererDisposeTimer: ReturnType<typeof setTimeout> | null;
   parser: HeadlessTerminal;
+  cursorRegistration: ReturnType<typeof installCanonicalTerminalCursor>;
   parserSerializeAddon: SerializeAddon;
   latestTitle: string | null;
   titleHandlerRef: TitleHandlerRef;
@@ -159,6 +164,8 @@ let nextTerminalRendererInstanceId = 1;
 
 type TerminalOptionTarget = {
   options: {
+    cursorBlink?: boolean;
+    cursorStyle?: "block" | "underline" | "bar";
     scrollOnUserInput?: boolean;
     scrollOnEraseInDisplay?: boolean;
     minimumContrastRatio?: number;
@@ -167,6 +174,8 @@ type TerminalOptionTarget = {
 };
 
 function applyProviderTerminalOptions(term: TerminalOptionTarget, provider?: string) {
+  term.options.cursorBlink = CANONICAL_TERMINAL_CURSOR_OPTIONS.cursorBlink;
+  term.options.cursorStyle = CANONICAL_TERMINAL_CURSOR_OPTIONS.cursorStyle;
   // scrollOnEraseInDisplay must stay OFF for every provider, codex included.
   // Codex (ratatui inline viewport) already scrolls its conversation history
   // into scrollback the way a real terminal does: it sets a top-anchored scroll
@@ -762,6 +771,7 @@ function disposeTerminalSession(sessionId: string) {
     retireRenderer(entry.renderer, sessionId);
     entry.renderer = null;
   }
+  entry.cursorRegistration.dispose();
   entry.parserSerializeAddon.dispose();
   entry.parser.dispose();
   terminalRendererBudget.releasePresentation(sessionId);
@@ -794,6 +804,7 @@ function finalizeRendererDisposal(renderer: TerminalRendererEntry) {
     return;
   }
   renderer.physicallyDisposed = true;
+  renderer.cursorRegistration.dispose();
   renderer.serializeAddon.dispose();
   renderer.term.dispose();
 }
@@ -1253,6 +1264,7 @@ async function resetTerminalOutputBuffers(
   entry: TerminalSessionEntry,
   rendererIdentity: TerminalRendererEntry | null = entry.renderer,
 ) {
+  entry.terminalOutputFilter.reset();
   const parserWithReset = entry.parser as HeadlessTerminal & { reset?: () => void };
   if (typeof parserWithReset.reset === "function") {
     parserWithReset.reset();
@@ -1807,10 +1819,12 @@ async function getOrCreateTerminalSession(
   }
 
   const parser = new HeadlessTerminal({
+    ...CANONICAL_TERMINAL_CURSOR_OPTIONS,
     scrollback: TERMINAL_SCROLLBACK_LINES,
     allowProposedApi: true,
     scrollOnEraseInDisplay: false,
   });
+  const cursorRegistration = installCanonicalTerminalCursor(parser);
   applyProviderTerminalOptions(parser, resolvedProvider);
   const parserSerializeAddon = new SerializeAddon();
   parser.loadAddon(parserSerializeAddon);
@@ -1853,6 +1867,7 @@ async function getOrCreateTerminalSession(
     generation: 0,
     disposed: false,
     pendingForceResize: false,
+    cursorRegistration,
   };
 
   terminalSessionMap.set(terminalKey, entry);
@@ -1975,14 +1990,12 @@ function applyTerminalAppearance(
 function createRenderer(terminalKey: string, entry: TerminalSessionEntry) {
   const { terminalFontFamily, terminalFontSize } = useSettingsStore.getState();
   const term = new Terminal({
+    ...CANONICAL_BROWSER_TERMINAL_CURSOR_OPTIONS,
     theme: entry.currentTheme,
     minimumContrastRatio: terminalMinimumContrastRatio(entry.provider),
     fontFamily: effectiveTerminalFontFamily(terminalFontFamily),
     fontSize: terminalFontSize,
     customGlyphs: true,
-    cursorBlink: true,
-    cursorStyle: "bar",
-    cursorInactiveStyle: "bar",
     scrollback: TERMINAL_SCROLLBACK_LINES,
     allowProposedApi: true,
     convertEol: false,
@@ -1996,6 +2009,7 @@ function createRenderer(terminalKey: string, entry: TerminalSessionEntry) {
       getWinSizePixels: true,
     },
   });
+  const cursorRegistration = installCanonicalTerminalCursor(term);
   if (term.options) {
     term.options.scrollOnUserInput = false;
     applyProviderTerminalOptions(term, entry.provider);
@@ -2059,6 +2073,7 @@ function createRenderer(terminalKey: string, entry: TerminalSessionEntry) {
     inFlightOperations: 0,
     physicallyDisposed: false,
     term,
+    cursorRegistration,
     fitAddon,
     serializeAddon,
     webglAddon: null,
