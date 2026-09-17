@@ -50,13 +50,20 @@ describe("CustomTitleBar density", () => {
     expect(titlebar.style.getPropertyValue("--titlebar-right-width")).toBe("184px");
   });
 
-  it("reserves macOS traffic lights and the sidebar toggle when the left pane is collapsed", () => {
+  it("reserves macOS traffic lights and the sidebar toggle in both left-pane layouts", () => {
     const userAgent = vi.spyOn(window.navigator, "userAgent", "get")
       .mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
-    const { container } = render(<CustomTitleBar {...titlebarProps} leftCollapsed />);
+    const { container, rerender } = render(<CustomTitleBar {...titlebarProps} />);
     const titlebar = container.firstElementChild as HTMLElement;
+    const leftZone = screen.getByRole("button", { name: "Hide Left Sidebar" }).parentElement;
 
     expect(titlebar).toHaveAttribute("data-platform", "mac");
+    expect(titlebar).toHaveAttribute("data-left-collapsed", "false");
+    expect(titlebar.style.getPropertyValue("--titlebar-left-width")).toBe("288px");
+    expect(leftZone).toHaveStyle({ paddingLeft: "72px" });
+
+    rerender(<CustomTitleBar {...titlebarProps} leftCollapsed />);
+
     expect(titlebar).toHaveAttribute("data-left-collapsed", "true");
     expect(titlebar.style.getPropertyValue("--titlebar-left-width")).toBe("112px");
     expect(screen.getByRole("button", { name: "Show Left Sidebar" }).parentElement)
