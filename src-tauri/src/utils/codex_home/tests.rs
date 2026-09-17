@@ -1,6 +1,9 @@
 //! Owned temporary filesystem fixtures only; no provider or production root use.
 use super::*;
 
+#[cfg(windows)]
+mod windows_long_paths;
+
 struct Fixture {
     _temp: tempfile::TempDir,
     home: PathBuf,

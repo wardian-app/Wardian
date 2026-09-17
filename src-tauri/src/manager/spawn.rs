@@ -1122,6 +1122,15 @@ async fn spawn_agent_inner(
     }
     let provider_cwd =
         interactive_provider_cwd(&config.provider, &cwd, habitat_root.as_deref(), None);
+    // Keep provider_cwd as the logical workspace for arguments, config and
+    // records; only the OS process cwd may use the short habitat alias.
+    let launch_cwd = crate::utils::codex_home::prepare_habitat_cwd_alias(
+        &config.session_id,
+        habitat_root.as_deref(),
+        &cwd,
+        &provider_cwd,
+    )?
+    .unwrap_or_else(|| provider_cwd.clone());
     let antigravity_workspace_before = if config.provider == "antigravity"
         && config
             .resume_session
@@ -1344,7 +1353,7 @@ async fn spawn_agent_inner(
     for arg in &launch_spec.args {
         cmd.arg(arg);
     }
-    cmd.cwd(&provider_cwd);
+    cmd.cwd(&launch_cwd);
     apply_terminal_identity_env(&mut cmd);
     super::apply_managed_cli_path_to_pty(&mut cmd);
     super::apply_interactive_provider_runtime_env(&config.provider, &mut cmd)?;

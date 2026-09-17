@@ -52,6 +52,24 @@ the prompt. An unknown Codex resume identity remains a bootstrap error.
 | Pi | Real target workspace | `AGENTS.md` plus appended Wardian instruction files | Repeated `--skill` paths point at Wardian-managed skill roots | Wardian assigns `--session-id` up front |
 | Gemini *(unmaintained)* | Projected habitat workspace for headless runs | `GEMINI.md` | Patched CLI can discover skills from include directories | Discovered from provider output |
 
+### Windows projected-habitat working directories
+
+Interactive providers that use a projected habitat can receive a short Windows
+working-directory alias when their logical cwd exceeds the Windows path limit.
+The alias is an owned junction to the complete habitat, so the provider starts
+in the same instruction and skill ancestry. A workspace launch uses the
+corresponding `h\workspace` descendant; the provider arguments, configuration,
+archive identity, and Wardian records continue to use the logical habitat and
+workspace paths.
+
+Alias allocation uses a private compact slot with an ownership record and
+identity checks. Preparation is serialized with the existing habitat lock.
+Removal happens after the provider process has been joined and removes only the
+exact owned junction and its slot records. A foreign, retargeted, or ambiguous
+slot is retained and reported as an error. Short paths and non-Windows launches
+keep their existing cwd behavior, and no insecure fallback is attempted when a
+safe alias cannot be published.
+
 ## Antigravity
 
 ### Model discovery
@@ -435,6 +453,12 @@ verbatim path for both the temporary file and destination, including before
 compact-home mapping. It resolves only the parent. Configuration is written
 before ownership; interrupted publication leaves an unowned entry that retries
 preserve as a collision. See [the regression](https://github.com/wardian-app/Wardian/issues/1245).
+
+Codex compact-home ownership records and interactive launch configuration and
+journal files use the same parent-only canonicalization for long paths. Their
+ownership, link, and compare-before-publish checks continue to use the caller's
+logical destination; the destination leaf is never canonicalized. See
+[the regression](https://github.com/wardian-app/Wardian/issues/1284).
 
 ### Known operational edge cases
 

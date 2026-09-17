@@ -133,10 +133,22 @@ pub(super) fn publish_new<T: Serialize>(path: &Path, record: &T) -> Result<(), S
         );
     }
     let parent = path.parent().ok_or("Ownership record has no parent")?;
+    // tempfile persists through Win32 APIs. Keep the existing parent's verbatim
+    // spelling for both paths, including in executables without longPathAware.
+    // Resolve only the parent: the destination may not exist yet.
+    #[cfg(windows)]
+    let parent = parent.canonicalize().map_err(error)?;
+    #[cfg(windows)]
+    let destination = parent.join(
+        path.file_name()
+            .ok_or("Ownership record has no final component")?,
+    );
+    #[cfg(not(windows))]
+    let destination = path.to_path_buf();
     let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(error)?;
     temp.write_all(&bytes).map_err(error)?;
     temp.as_file().sync_all().map_err(error)?;
-    temp.persist_noclobber(path)
+    temp.persist_noclobber(&destination)
         .map_err(|error| error.to_string())?;
     #[cfg(unix)]
     File::open(parent)
