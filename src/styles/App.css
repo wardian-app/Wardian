@@ -823,36 +823,64 @@ summary,
   right: 6px;
 }
 
-/* Message rows keep their actions in flow below the content, hover-revealed,
-   so they can never detach from the text they belong to. Collapsed to zero
-   height when idle: an invisible action strip under every message read as
-   blank lines between turns. */
-.chat-row-actions--inline {
+/* Message rows reserve a small side gutter for their actions. The gutter keeps
+   the copy control beside its message while hover, focus, and copy feedback
+   change only visibility and never the message geometry. */
+.chat-message-layout {
+  --chat-message-action-gutter: 28px;
   display: grid;
-  grid-template-rows: 0fr;
-  margin-top: 0;
+  align-items: start;
+  column-gap: 4px;
+  width: 100%;
+}
+
+.chat-message-layout--assistant {
+  grid-template-columns: var(--chat-message-action-gutter) minmax(0, 1fr);
+}
+
+.chat-message-layout--user {
+  grid-template-columns: minmax(0, 1fr) var(--chat-message-action-gutter);
+}
+
+.chat-message-layout--assistant .chat-message-content {
+  grid-column: 2;
+}
+
+.chat-message-layout--user .chat-message-content {
+  grid-column: 1;
+  justify-self: end;
+  width: fit-content;
+}
+
+.chat-row-actions--inline {
+  display: flex;
+  align-items: flex-start;
+  width: var(--chat-message-action-gutter);
+  min-width: var(--chat-message-action-gutter);
+  min-height: 28px;
+  grid-row: 1;
   opacity: 0;
-  transition: grid-template-rows 140ms ease, opacity 140ms ease;
-}
-
-.chat-row-actions--inline > * {
-  min-height: 0;
-  overflow: hidden;
-}
-
-.chat-row-actions--start {
-  justify-items: start;
-}
-
-.chat-row-actions--end {
-  justify-items: end;
+  transition: opacity 140ms ease;
 }
 
 .chat-row:hover .chat-row-actions--inline,
 .chat-row:focus-within .chat-row-actions--inline {
-  grid-template-rows: 1fr;
-  margin-top: 4px;
   opacity: 1;
+}
+
+.chat-message-layout--assistant .chat-row-actions--inline {
+  grid-column: 1;
+  justify-self: start;
+}
+
+.chat-message-layout--assistant .chat-row-actions-menu {
+  left: 0;
+  right: auto;
+}
+
+.chat-message-layout--user .chat-row-actions--inline {
+  grid-column: 2;
+  justify-self: end;
 }
 
 .chat-row-actions--rail {
@@ -912,33 +940,19 @@ summary,
     min-height: 44px;
   }
 
-  /* Touch has no hover: message actions pin over the content's corner and the
-     content reserves room for them, instead of a collapsed row that could not
-     be revealed. */
-  .chat-row .chat-row-actions--inline {
-    display: block;
-    position: absolute;
-    top: -4px;
-    right: 4px;
-    margin-top: 0;
-    opacity: 1;
+  /* Touch has no hover: keep the action in the reserved side gutter and expose
+     the 44px menu target without covering message text. */
+  .chat-message-layout {
+    --chat-message-action-gutter: 44px;
   }
 
-  /* The desktop collapse wrapper clips its child while it is zero-height.
-     Touch menus are pinned open, so let the popup escape that wrapper. */
+  .chat-row-actions--inline {
+    opacity: 1;
+    min-height: 44px;
+  }
+
   .chat-row-actions--inline > .chat-row-actions {
     overflow: visible;
-  }
-
-  /* A 44px touch target centered at the row top lands beside the second line
-     when assistant text wraps. Keep the hit area, but align its icon with the
-     first text line like the user bubble action. */
-  .chat-row-actions--inline.chat-row-actions--start {
-    top: -12px;
-  }
-
-  .chat-message-content {
-    padding-right: 2.75rem;
   }
 
   .chat-row-actions--overlay {
@@ -975,6 +989,10 @@ summary,
 @container wardian-chat (max-width: 420px) {
   .chat-transcript-scroll {
     padding: 8px;
+  }
+
+  .chat-message-layout {
+    --chat-message-action-gutter: 44px;
   }
 
   .chat-message-user {
