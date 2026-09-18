@@ -74,20 +74,21 @@ expands fluidly on narrow surfaces.
 
 Use the **Terminal** / **Chat** button in the card header for a temporary per-agent override. The default comes from **Settings > Agents > Agent card display**. Unsent Chat text stays with that agent when you switch modes.
 
-A compact **Subagents** badge appears in the card header when Wardian has verified
-provider-spawned workers through that agent's provider ancestry. The visible badge
-shows the current active count; the watchlist uses an icon and that count to keep the
-roster compact. Waiting workers remain active and confirmed waiting or failed workers
-show an attention marker. Hover the badge for the full summary or select it to inspect
-current workers first, terminal workers in collapsed **History**, and workers whose
-provider final status was not recorded under **Status unavailable**. The inspector
-preserves evidence coverage, available capabilities, own usage, and descendant
-combined usage across these groups. **Observe only** identifies providers for which no
-canonical follow-up, resume, or interruption control has been verified. The badge
-reports attention without creating another agent card or watchlist row. Inspect
+A compact **Subagents** badge appears in the card header only when Wardian has verified
+one or more currently active provider-spawned workers through that agent's provider
+ancestry. The visible badge shows the current active count; the watchlist uses an icon
+and that count to keep the roster compact. Requested, running, and waiting workers
+remain active, and waiting workers show an attention marker. Hover the badge for the
+full summary or select it to inspect active workers and their evidence. Terminal and
+unknown records remain available to automation run history and retention, but they do
+not create a root badge, root warning, or root list entry. The inspector preserves
+evidence coverage, available capabilities, own usage, and descendant combined usage
+without presenting retained runs as active. **Observe only** identifies providers for
+which no canonical follow-up, resume, or interruption control has been verified. The
+badge reports attention without creating another agent card or watchlist row. Inspect
 automation workers from their Monitor run and Observe node; a headless worker does
-not receive a fictional terminal. With an older backend, Wardian shows the reported
-record total and says that status counts are unavailable instead of guessing activity.
+not receive a fictional terminal. Older backends without positive active-state
+evidence do not create a root badge.
 
 In Terminal mode, click inside the terminal before typing. When the same agent terminal is visible elsewhere, the clicked presentation explicitly requests ownership; merely tabbing through the UI does not steal it. A **Mirror** remains read-only until ownership transfers. Reclaimed renderers restore and fit automatically when visible.
 
