@@ -161,8 +161,30 @@ export interface ProviderModelCatalog {
 
 export interface AgentModelSelectionUpdateResult {
     config: AgentConfig;
-    live_application: "applied" | "deferred" | "failed";
+    live_application: "applied" | "deferred" | "failed" | "unknown";
     live_error: string | null;
+    model?: AgentSettingUpdateResult;
+    reasoning_effort?: AgentSettingUpdateResult;
+    restart_required?: boolean;
+    runtime_binding?: AgentRuntimeBinding | null;
+}
+
+export type AgentSettingIntent = "unchanged" | "set" | "default";
+export type AgentSettingLiveStatus = "unchanged" | "applied" | "deferred" | "failed" | "unknown";
+
+export interface AgentSettingUpdateResult {
+    intent: AgentSettingIntent;
+    desired_value: string | null;
+    live_status: AgentSettingLiveStatus;
+    effective_value?: string;
+    reason: string;
+}
+
+export interface AgentRuntimeBinding {
+    agent_id: string;
+    generation: number;
+    thread_id: string;
+    provider: string;
 }
 
 export interface UnknownProviderConfig {

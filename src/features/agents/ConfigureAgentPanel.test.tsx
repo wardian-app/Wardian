@@ -122,6 +122,57 @@ describe("ConfigureAgentPanel", () => {
     expect(window.alert).not.toHaveBeenCalled();
   });
 
+  it("reports saved settings separately when live application is deferred", async () => {
+    const onSaved = vi.fn();
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "list_provider_readiness") return allProvidersReady;
+      if (command === "resolve_system_include_directories") return [];
+      if (command === "update_agent_config") {
+        return {
+          config: {
+            ...baseAgent,
+            model: "gpt-target",
+            provider_config: { type: "codex", reasoning_effort: "low" },
+          },
+          live_application: "deferred",
+          live_error: null,
+          model: {
+            intent: "set",
+            desired_value: "gpt-target",
+            live_status: "deferred",
+            reason: "agent_off",
+          },
+          reasoning_effort: {
+            intent: "set",
+            desired_value: "low",
+            live_status: "deferred",
+            reason: "agent_off",
+          },
+          restart_required: false,
+        };
+      }
+      return null;
+    });
+    const user = userEvent.setup();
+
+    render(
+      <ConfigureAgentPanel
+        agentId="agent-1"
+        agents={[baseAgent]}
+        agentClasses={classes}
+        telemetry={{}}
+        onSaved={onSaved}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+    expect(window.alert).toHaveBeenCalledWith(
+      "Configuration saved. Live settings deferred (agent_off). Saved model: gpt-target; saved reasoning effort: low.",
+    );
+  });
+
   it("shows and copies the Wardian agent ID instead of the provider resume ID", async () => {
     const user = userEvent.setup();
     const agent = {

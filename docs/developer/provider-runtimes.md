@@ -30,9 +30,30 @@ Only ACP `agent_message_chunk` text contributes to the assistant answer. Thought
 user echoes, and tool updates remain progress signals. Native answer chunks retain
 their whitespace, including whitespace-only chunks, so streaming preserves words
 and formatting.
-Codex app-server receives the selected model through a repeatable `-c` config
-override, alongside the reasoning-effort override. Its interactive `--model`
-flag does not establish the model used by an app-server thread.
+Codex app-server launch configuration may contain the saved model and
+reasoning-effort overrides. After a shared thread is bound, Wardian applies
+model and effort changes for future turns through the owned
+`thread/settings/update` operation as one pair. It requires both the request
+acknowledgement and a matching `thread/settings/updated` notification from the
+same thread before reporting the live update as applied. Its interactive
+`--model` flag does not establish the model used by an app-server thread.
+
+The saved setting and the live runtime result remain separate. A saved null
+means that Codex should resolve its provider default. An unavailable default
+is persisted as deferred rather than replaced with a guessed catalog entry.
+The runtime result can be `applied`, `deferred`, `failed`, or `unknown`:
+
+- `applied` means the shared runtime reported the requested future-turn pair.
+- `deferred` means the saved pair awaits a usable runtime or authoritative
+  default, or the update made no live change.
+- `failed` means Codex rejected the settings operation.
+- `unknown` means the request crossed the provider boundary without matching
+  acknowledgement, or the bound runtime changed before the result was proven.
+
+These results describe the settings operation and do not prove that a later
+completed provider turn used the pair. A provider replacement or other
+launch-only change still requires restart; Wardian does not interrupt the
+current provider process during a settings update.
 
 Pi RPC streams typed text deltas and publishes the complete assistant message at
 `message_end`. Wardian replaces the accumulated answer for final messages and

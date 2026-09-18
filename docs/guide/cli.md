@@ -680,6 +680,40 @@ and `restart_required`. Wardian does not interrupt a running provider process,
 so restart the agent when `restart_required` is true before relying on the new
 class instructions, working directory, model, or reasoning effort. Pass
 `--model=` or `--reasoning-effort=` to return to the provider default.
+
+Model and reasoning-effort updates report a `settings` object in the JSON
+response. Each setting reports its `intent`, `desired_value`, `live_status`,
+and `reason`; `effective_value` is included when a live runtime reports the
+concrete value it is using. The intents are:
+
+- `unchanged`: the saved value was not changed.
+- `set`: use the requested provider value.
+- `default`: clear the saved override and use the provider default.
+
+Omitting a CLI flag leaves that setting unchanged. An empty flag such as
+`--model=` or an explicit JSON `null` selects the provider default. Wardian
+validates the complete model and effort pair against the current provider
+catalog before saving it. If a provider default is unavailable, Wardian saves
+the default state and reports a deferred live update instead of guessing a
+model or effort.
+
+The aggregate `live_application` describes the current runtime update:
+
+- `applied`: persistence succeeded and the shared runtime reported the matching
+  future-turn setting.
+- `deferred`: the setting was saved but cannot be applied now, such as when the
+  agent is off, the provider runtime is unavailable or mismatched, or the
+  provider default could not be resolved. A no-op update also reports deferred
+  with reason `no_live_change`.
+- `failed`: the provider explicitly rejected the settings update.
+- `unknown`: the update crossed the provider boundary, but Wardian could not
+  prove the matching acknowledgement or the runtime identity changed.
+
+These states describe settings persistence and future-turn runtime state. They
+do not claim that a completed provider turn used the setting. `restart_required`
+remains true when a provider replacement or another launch-only change is still
+needed; the update never restarts or interrupts the running provider itself.
+
 Managed worktree agents must use
 `agent worktree join` or `agent worktree disable` instead.
 
