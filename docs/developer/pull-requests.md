@@ -3,7 +3,10 @@
 ## Scope and authority
 
 For implementation tasks in the Wardian repository, the default deliverable is
-a committed, pushed branch and an open, issue-linked pull request. The
+a committed, pushed branch and an open, issue-linked pull request whose
+applicable hosted CI checks have finished successfully on the latest published
+commit. Publication is an intermediate step; CI follow-through is part of the
+task. The
 repository's AGENTS.md grants standing authorization: do not stop after local
 implementation to ask whether to publish. An explicit local-only request
 overrides this default. Read-only investigation, explanation, or review does
@@ -35,10 +38,22 @@ do not duplicate the policy in those files.
    template, link its issue, and include verification and local-review evidence.
    Use a body file for multiline text. Follow
    [screenshot documentation](./screenshot-documentation.md) for UI changes.
-6. Verify the published head, issue link, rendered body, mergeability, and
-   current CI checks. Return the PR URL and distinguish local validation from
-   pending or failed hosted checks. Do not call the PR ready until the
-   repository's four readiness conditions hold.
+6. Verify the published head, issue link, rendered body, and mergeability.
+   Monitor all applicable hosted CI checks through completion on that exact
+   commit. Investigate failures, make the necessary corrections, repeat affected
+   local verification and review, then push and monitor the new commit. An older
+   commit's green checks do not validate a newer commit.
+7. Finish only after all applicable checks have completed successfully and the
+   repository's four readiness conditions hold. Record intentional skips and
+   their reasons separately; do not count them as passes. Pending, queued,
+   running, cancelled, and failed checks leave the task incomplete. Keep
+   monitoring and fixing without requiring another user prompt. A progress
+   update containing a PR URL is not a completed delivery.
+
+If an external blocker prevents a passing result, report the task as blocked
+with the affected commit, check, observed cause, and next action. Do not describe
+it as done or ready, weaken checks, or infer success from a local pass. Hosted CI
+completion does not grant merge or deployment authority.
 
 ## Review and publication boundaries
 

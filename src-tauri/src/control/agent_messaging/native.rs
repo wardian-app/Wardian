@@ -244,6 +244,16 @@ pub(super) async fn dispatch_attached_task_with_request(
         .unwrap_or(0);
     match info.provider.as_str() {
         "codex" => {
+            if !codex_input_is_ready(state, &info.uuid, generation).await {
+                log_opencode_preclaim_stage(
+                    state,
+                    &current,
+                    request_id,
+                    OpenCodeDispatchDiagnosticReason::ProviderNotReady,
+                )
+                .await;
+                return Ok(());
+            }
             if state
                 .native_delivery
                 .codex_binding(&info.uuid, generation)
@@ -475,6 +485,9 @@ pub(super) async fn selected_native_owner_for_dispatch(
         .unwrap_or(0);
     match info.provider.as_str() {
         "codex" => {
+            if !codex_input_is_ready(state, &info.uuid, generation).await {
+                return false;
+            }
             state
                 .native_delivery
                 .codex_owner_selected(&info.uuid, generation)
@@ -494,6 +507,26 @@ pub(super) async fn selected_native_owner_for_dispatch(
         ),
         _ => false,
     }
+}
+
+async fn codex_input_is_ready(state: &AppState, session_id: &str, generation: u64) -> bool {
+    let attachment_ready = state
+        .agents
+        .lock()
+        .await
+        .get(session_id)
+        .is_some_and(crate::manager::codex_onboarding::codex_attachment_is_ready);
+    if !attachment_ready {
+        return false;
+    }
+    state
+        .interactions
+        .provider_input_state(session_id)
+        .await
+        .is_some_and(|input| {
+            input.generation == generation
+                && input.state == wardian_core::control::ProviderInputReadiness::Ready
+        })
 }
 
 pub(super) fn opencode_native_owner_eligibility(

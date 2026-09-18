@@ -1,6 +1,7 @@
 pub(crate) mod classes;
 pub(crate) mod claude;
 pub(crate) mod codex;
+pub(crate) mod codex_onboarding;
 pub(crate) mod codex_shared;
 pub(crate) mod codex_stop;
 mod codex_terminal_theme;
@@ -20,6 +21,7 @@ pub(crate) mod telemetry;
 pub use classes::{
     get_agent_class_default_instruction, get_all_agent_classes, init_agent_classes, save_classes,
 };
+pub(crate) use codex_onboarding::{should_publish_provisionally, CodexAttachmentCompletion};
 pub use headless::{
     obtain_session_id, run_headless_with_options, HeadlessRunError, HeadlessRunErrorKind,
     HeadlessRunOptions, DEFAULT_HEADLESS_RUN_TIMEOUT,
@@ -28,6 +30,7 @@ pub(crate) use opencode::opencode_last_assistant_text;
 pub(crate) use session_identity::{
     apply_provider_identity, validate_config_for_launch, validate_session_values_for_launch,
 };
+pub(crate) use spawn::spawn_agent_provisionally;
 pub use spawn::{resize_pty, spawn_agent};
 pub use telemetry::{get_all_metrics, get_app_metrics};
 
@@ -263,6 +266,19 @@ pub(crate) fn set_agent_status(
     current_status: &std::sync::Arc<std::sync::Mutex<String>>,
     next_status: &str,
 ) {
+    match codex_onboarding::status_admission(app, session_id, current_status, next_status) {
+        codex_onboarding::CodexStatusAdmission::Blocked => return,
+        codex_onboarding::CodexStatusAdmission::WaitForRoster => {
+            codex_onboarding::defer_status_transition(
+                app,
+                session_id,
+                current_status,
+                next_status.to_string(),
+            );
+            return;
+        }
+        codex_onboarding::CodexStatusAdmission::Allowed => {}
+    }
     if let Ok(mut status) = current_status.lock() {
         if *status != next_status {
             *status = next_status.to_string();
@@ -288,6 +304,14 @@ pub(crate) fn publish_agent_status(
     let Ok(status) = current_status.lock().map(|status| status.clone()) else {
         return;
     };
+    match codex_onboarding::status_admission(app, session_id, current_status, &status) {
+        codex_onboarding::CodexStatusAdmission::Blocked => return,
+        codex_onboarding::CodexStatusAdmission::WaitForRoster => {
+            codex_onboarding::defer_status_publication(app, session_id, current_status);
+            return;
+        }
+        codex_onboarding::CodexStatusAdmission::Allowed => {}
+    }
     schedule_agent_status_observation(app, session_id, current_status, status);
 }
 
@@ -459,6 +483,17 @@ pub(crate) async fn publish_telemetry_status_observation(
     observation: &telemetry::TelemetryProviderStatus,
 ) -> ProviderInputReadiness {
     let agents = state.agents.lock().await;
+    let attachment_ready = agents
+        .get(&observation.session_id)
+        .is_none_or(codex_onboarding::codex_attachment_is_ready);
+    if !attachment_ready
+        && matches!(
+            wardian_core::identity::normalize_status(&observation.status).as_str(),
+            "idle" | "processing"
+        )
+    {
+        return ProviderInputReadiness::Unknown;
+    }
     if let Some(agent) = agents.get(&observation.session_id) {
         // Telemetry runs from a detached snapshot. Do not let an observation
         // from a replaced runtime, or a status that was superseded after the

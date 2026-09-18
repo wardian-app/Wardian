@@ -129,10 +129,7 @@ describe("UserTerminalPanel", () => {
       }));
     });
 
-    expect(screen.getByRole("link", { name: /cli guide/i })).toHaveAttribute(
-      "href",
-      "https://docs.wardian.org/guide/cli",
-    );
+    expect(screen.queryByRole("link", { name: /cli guide/i })).not.toBeInTheDocument();
   });
 
   it("installs conservative terminal shortcuts", async () => {

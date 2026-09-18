@@ -166,6 +166,15 @@ export function MessageRow({
     );
   }
 
+  const messageContent = (
+    <div
+      className={`chat-message-content min-w-0 max-w-full break-words ${isAssistant ? "" : "chat-message-user max-w-[92%] px-3 py-2"}`}
+      data-testid={isAssistant ? undefined : "chat-user-bubble"}
+    >
+      {content}
+    </div>
+  );
+
   return (
     <article
       aria-label={`${role} message`}
@@ -173,21 +182,16 @@ export function MessageRow({
         isAssistant ? "max-w-[76ch] items-start px-1 py-0.5" : "items-end"
       }`}
     >
-      <div
-        className={`chat-message-content min-w-0 max-w-full break-words ${isAssistant ? "" : "chat-message-user max-w-[92%] px-3 py-2"}`}
-        data-testid={isAssistant ? undefined : "chat-user-bubble"}
-      >
-        {content}
-      </div>
       {text ? (
-        <div
-          className={`chat-row-actions--inline ${
-            isAssistant ? "chat-row-actions--start" : "chat-row-actions--end"
-          }`}
-        >
-          <ChatRowActions actions={[{ label: "Copy message", value: text }]} />
+        <div className={`chat-message-layout ${isAssistant ? "chat-message-layout--assistant" : "chat-message-layout--user"}`}>
+          {messageContent}
+          <div className="chat-row-actions--inline">
+            <ChatRowActions actions={[{ label: "Copy message", value: text }]} />
+          </div>
         </div>
-      ) : null}
+      ) : (
+        messageContent
+      )}
     </article>
   );
 }

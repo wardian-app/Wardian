@@ -5,8 +5,10 @@ interface TemporaryWorkerListProps {
   telemetry: Record<string, TemporaryWorkerTelemetry>;
   emptyMessage?: string;
   showAggregate?: boolean;
-  /** Full roster used for aggregate and descendant usage when workers is filtered. */
+  /** Full roster used to resolve descendant lineage when workers is filtered. */
   allWorkers?: TemporaryWorker[];
+  /** Workers represented by the aggregate when the lineage roster is broader. */
+  aggregateWorkers?: TemporaryWorker[];
   /** Root inspector uses a neutral tone when provider status is unavailable. */
   unknownNeedsAttention?: boolean;
 }
@@ -17,17 +19,19 @@ export function TemporaryWorkerList({
   emptyMessage = "No temporary workers recorded.",
   showAggregate = false,
   allWorkers,
+  aggregateWorkers,
   unknownNeedsAttention = true,
 }: TemporaryWorkerListProps) {
   const usageWorkers = allWorkers ?? workers;
+  const aggregateRoster = aggregateWorkers ?? usageWorkers;
   const aggregate = combineTelemetry(
-    usageWorkers.map((worker) => worker.worker_id),
+    aggregateRoster.map((worker) => worker.worker_id),
     telemetry,
   );
   const aggregateTokens = tokenSummary(aggregate);
   return (
     <div className="space-y-2" data-testid="temporary-worker-list">
-      {showAggregate && usageWorkers.length > 0 ? (
+      {showAggregate && aggregateRoster.length > 0 ? (
         <div
           className="rounded border border-wardian-border bg-[var(--color-wardian-card-bg-muted)] p-3 text-[10px] text-[var(--color-wardian-text-muted)]"
           data-testid="temporary-worker-combined-usage"
@@ -36,7 +40,7 @@ export function TemporaryWorkerList({
             Verified descendants total
           </div>
           <div className="mt-1">
-            {usageWorkers.length} worker{usageWorkers.length === 1 ? "" : "s"} ·{" "}
+            {aggregateRoster.length} worker{aggregateRoster.length === 1 ? "" : "s"} ·{" "}
             {aggregate?.turns ?? 0} combined turn
             {aggregate?.turns === 1 ? "" : "s"}
             {aggregateTokens

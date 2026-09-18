@@ -532,17 +532,20 @@ describe("PdfRenderer", () => {
     pageResolvers.get(1)?.(page(200));
     await waitFor(() => expect(screen.getAllByLabelText(/^PDF page /)).toHaveLength(3));
 
-    const figures = [1, 2, 3].map((pageNumber) => (
-      document.querySelector<HTMLElement>(`[data-page-number="${pageNumber}"]`)!
-    ));
-    const tops = figures.map((figure) => Number(figure.style.top.replace("px", "")));
-    expect(tops[1]! - tops[0]!).toBe(248);
-    expect(tops[2]! - tops[1]!).toBe(948);
-    expect(tops[0]).toBeGreaterThanOrEqual(0);
-    expect(tops[2]! + 232).toBeLessThanOrEqual(Number(
-      (document.querySelector(".files-pdf-virtual-spacer") as HTMLElement).style.height
-        .replace("px", ""),
-    ));
+    // Canvases mount before page measurements commit the parent layout state.
+    await waitFor(() => {
+      const figures = [1, 2, 3].map((pageNumber) => (
+        document.querySelector<HTMLElement>(`[data-page-number="${pageNumber}"]`)!
+      ));
+      const tops = figures.map((figure) => Number(figure.style.top.replace("px", "")));
+      expect(tops[1]! - tops[0]!).toBe(248);
+      expect(tops[2]! - tops[1]!).toBe(948);
+      expect(tops[0]).toBeGreaterThanOrEqual(0);
+      expect(tops[2]! + 232).toBeLessThanOrEqual(Number(
+        (document.querySelector(".files-pdf-virtual-spacer") as HTMLElement).style.height
+          .replace("px", ""),
+      ));
+    });
   });
 
   it("tracks pane resize and keeps toolbar controls contained at narrow widths", async () => {

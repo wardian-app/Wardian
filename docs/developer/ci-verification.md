@@ -34,3 +34,8 @@ its executable check and states the limits of the evidence.
 The local sequence covers the frontend, backend, and documentation quality
 steps. PR screenshot/code-claim checks, dependency audits, coverage uploads,
 and browser/native suites remain CI- or environment-specific.
+
+A local pass does not complete PR delivery. Follow [Pull Request
+Delivery](./pull-requests.md) to monitor hosted checks on the latest published
+commit, resolve failures, and verify that all applicable checks have finished
+successfully before declaring the task complete.

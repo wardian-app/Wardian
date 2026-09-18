@@ -22,6 +22,7 @@ use wardian_core::models::{
 mod agent_lifecycle;
 #[path = "agent_naming.rs"]
 mod agent_naming;
+mod codex_onboarding;
 #[path = "agent/config_persistence.rs"]
 mod config_persistence;
 #[cfg(test)]
@@ -35,6 +36,8 @@ use agent_naming::{
     generated_agent_name, persisted_agent_session_names, resolve_requested_spawn_session_name,
     validate_agent_name,
 };
+use codex_onboarding::register_new_agent;
+pub(crate) use codex_onboarding::rollback_provisional_codex;
 use config_persistence::persist_agent_config_while_lifecycle_locked;
 use removal::{cleanup_removed_agent_directory, join_agent_processes_for_removal};
 
@@ -2363,84 +2366,6 @@ fn prepare_clear_config(config: &mut AgentConfig) -> Result<(), String> {
 async fn is_session_id_available(state: &AppState, session_id: &str) -> bool {
     let agents = state.agents.lock().await;
     !agents.contains_key(session_id)
-}
-
-async fn register_new_agent(
-    mut config: AgentConfig,
-    actual_resume: Option<String>,
-    state: &AppState,
-    app: &AppHandle,
-    options: AgentRegistrationOptions<'_>,
-) -> Result<AgentConfig, String> {
-    let session_id = config.session_id.clone();
-    config.system_include_directories = Some(crate::utils::fs::resolve_system_include_directories(
-        &config.agent_class,
-        &session_id,
-    ));
-    let pending = PendingRuntime::prepare(&config, &state.terminal_sessions)?;
-    let active_agent =
-        pending.attach(manager::spawn_agent(app.clone(), config.clone(), false, None).await?);
-    // Propagate any fields that spawn_agent may have auto-assigned (e.g. opencode_port).
-
-    {
-        let mut cfg = active_agent.config.lock().unwrap();
-        if config.provider == "opencode" {
-            let opencode = cfg.opencode_config();
-            config.opencode_port = opencode.port;
-            if let wardian_core::models::ProviderConfig::OpenCode(target) =
-                &mut config.provider_config
-            {
-                target.port = opencode.port;
-            }
-        }
-        agent_lifecycle::sync_registered_provider_session(&mut config, &mut cfg, actual_resume);
-    }
-
-    let mut agents = state.agents.lock().await;
-    let mut order = state.agent_order.lock().await;
-    if agents.contains_key(&session_id) {
-        let stopped = active_agent.begin_stop();
-        drop(order);
-        drop(agents);
-        let error = format!("An agent with session ID '{session_id}' already exists.");
-        return Err(stopped.failure(error).await);
-    }
-    let existing_names = agents
-        .values()
-        .map(|agent| agent.config.lock().unwrap().session_name.clone())
-        .collect::<std::collections::HashSet<_>>();
-    match resolve_registered_session_name(
-        &config.session_name,
-        options.clone_name_base,
-        &existing_names,
-    ) {
-        Ok(session_name) => config.session_name = session_name,
-        Err(error) => {
-            let stopped = active_agent.begin_stop();
-            drop(order);
-            drop(agents);
-            return Err(stopped.failure(error).await);
-        }
-    }
-    if let Some(reserved_session_name) = options.reserved_session_name {
-        let mut reservations = state.agent_name_reservations.lock().await;
-        reservations.remove(reserved_session_name);
-    }
-    {
-        let mut cfg = active_agent.config.lock().unwrap();
-        cfg.session_name = config.session_name.clone();
-    }
-    agents.insert(session_id.clone(), active_agent.installed());
-    insert_new_agent_order(&mut order, &session_id, options.placement);
-    manager::save_state(app, &agents, &order);
-    drop(order);
-    drop(agents);
-    state.interactions.clear_deleted_session(&session_id).await;
-    if options.emit_roster_update {
-        let _ = app.emit("agents-updated", ());
-    }
-
-    Ok(config)
 }
 
 #[tauri::command]

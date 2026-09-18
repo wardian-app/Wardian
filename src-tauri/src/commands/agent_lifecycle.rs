@@ -217,23 +217,27 @@ impl PendingRuntime {
         &mut self.runtime
     }
 
-    pub(super) fn installed(mut self) -> crate::state::ActiveAgent {
+    pub(super) fn take_registration(
+        &mut self,
+    ) -> Option<crate::manager::codex_stop::StopRegistration> {
+        self.registration.take()
+    }
+
+    pub(super) fn take_runtime(&mut self) -> crate::state::ActiveAgent {
         self.runtime.take().expect("pending runtime installed once")
     }
 
     pub(super) fn begin_stop(mut self) -> PendingStop {
-        match self.registration.take() {
-            Some(registration) => PendingStop(Some(
-                registration
-                    .capture(self.runtime.take().expect("pending runtime stopped once"))
-                    .begin_stop(),
-            )),
-            None => {
-                if let Some(mut runtime) = self.runtime.take() {
-                    crate::manager::terminate_active_agent_process(&mut runtime);
-                }
+        match (self.registration.take(), self.runtime.take()) {
+            (Some(registration), Some(runtime)) => {
+                PendingStop(Some(registration.capture(runtime).begin_stop()))
+            }
+            (Some(_registration), None) => PendingStop(None),
+            (None, Some(mut runtime)) => {
+                crate::manager::terminate_active_agent_process(&mut runtime);
                 PendingStop(None)
             }
+            (None, None) => PendingStop(None),
         }
     }
 

@@ -52,6 +52,24 @@ the prompt. An unknown Codex resume identity remains a bootstrap error.
 | Pi | Real target workspace | `AGENTS.md` plus appended Wardian instruction files | Repeated `--skill` paths point at Wardian-managed skill roots | Wardian assigns `--session-id` up front |
 | Gemini *(unmaintained)* | Projected habitat workspace for headless runs | `GEMINI.md` | Patched CLI can discover skills from include directories | Discovered from provider output |
 
+### Windows projected-habitat working directories
+
+Interactive providers that use a projected habitat can receive a short Windows
+working-directory alias when their logical cwd exceeds the Windows path limit.
+The alias is an owned junction to the complete habitat, so the provider starts
+in the same instruction and skill ancestry. A workspace launch uses the
+corresponding `h\workspace` descendant; the provider arguments, configuration,
+archive identity, and Wardian records continue to use the logical habitat and
+workspace paths.
+
+Alias allocation uses a private compact slot with an ownership record and
+identity checks. Preparation is serialized with the existing habitat lock.
+Removal happens after the provider process has been joined and removes only the
+exact owned junction and its slot records. A foreign, retargeted, or ambiguous
+slot is retained and reported as an error. Short paths and non-Windows launches
+keep their existing cwd behavior, and no insecure fallback is attempted when a
+safe alias cannot be published.
+
 ## Antigravity
 
 ### Model discovery
@@ -288,6 +306,17 @@ Current sequence:
 
 Legacy bootstrap migration remains available as a fallback when local rollout materialization is unavailable. It merges a new rollout into an existing projected `sessions/**` tree instead of discarding it.
 
+For a fresh visible Codex launch, Wardian publishes the same PTY-backed runtime
+to the roster provisionally before native app-server attachment finishes. The
+terminal remains available for human input, while provider input readiness stays
+`Booting`, so automatic delivery waits for the attachment finalizer. The
+finalizer checks the exact runtime generation, persists the discovered provider
+identity, then promotes readiness to `Ready`. Attachment cancellation or a
+stale generation disposes the exact native owner and removes only the current
+provisional roster entry; a durable-state failure leaves that entry visible in
+`Error` behind the retained stop fence. Restored agents and other providers
+keep their existing synchronous publication path.
+
 #### Shared thread index
 
 `codex app-server` migrates legacy rollout files into paginated thread history
@@ -424,6 +453,12 @@ verbatim path for both the temporary file and destination, including before
 compact-home mapping. It resolves only the parent. Configuration is written
 before ownership; interrupted publication leaves an unowned entry that retries
 preserve as a collision. See [the regression](https://github.com/wardian-app/Wardian/issues/1245).
+
+Codex compact-home ownership records and interactive launch configuration and
+journal files use the same parent-only canonicalization for long paths. Their
+ownership, link, and compare-before-publish checks continue to use the caller's
+logical destination; the destination leaf is never canonicalized. See
+[the regression](https://github.com/wardian-app/Wardian/issues/1284).
 
 ### Known operational edge cases
 

@@ -76,6 +76,66 @@ describe('memory transcript row', () => {
   });
 });
 
+describe('message transcript row actions', () => {
+  it('keeps assistant copy actions in a leading side gutter', () => {
+    render(
+      <ChatTranscriptRow
+        agentIsWorking={false}
+        isSubmitting={false}
+        onApprovalSubmit={vi.fn()}
+        row={{
+          kind: 'event',
+          event: {
+            ...memoryEvent,
+            id: 'assistant-message-1',
+            kind: 'message',
+            role: 'assistant',
+            text: 'Assistant response',
+            title: null,
+          },
+        }}
+      />,
+    );
+
+    const article = screen.getByRole('article', { name: 'assistant message' });
+    const layout = article.querySelector('.chat-message-layout--assistant');
+
+    expect(layout).toBeInTheDocument();
+    expect(layout?.querySelector('.chat-message-content')).toBeInTheDocument();
+    expect(layout?.querySelector('.chat-row-actions--inline')).toBeInTheDocument();
+    expect(layout?.children).toHaveLength(2);
+  });
+
+  it('keeps user copy actions in a trailing side gutter', () => {
+    render(
+      <ChatTranscriptRow
+        agentIsWorking={false}
+        isSubmitting={false}
+        onApprovalSubmit={vi.fn()}
+        row={{
+          kind: 'event',
+          event: {
+            ...memoryEvent,
+            id: 'user-message-1',
+            kind: 'message',
+            role: 'user',
+            text: 'User prompt',
+            title: null,
+          },
+        }}
+      />,
+    );
+
+    const article = screen.getByRole('article', { name: 'user message' });
+    const layout = article.querySelector('.chat-message-layout--user');
+
+    expect(layout).toBeInTheDocument();
+    expect(layout?.querySelector('.chat-message-content')).toBeInTheDocument();
+    expect(layout?.querySelector('.chat-row-actions--inline')).toBeInTheDocument();
+    expect(layout?.children).toHaveLength(2);
+  });
+});
+
 describe('compact tool-call transcript row', () => {
   it('shows the actual command when the provider title is only an exec lifecycle label', () => {
     const event: AgentChatEvent = {

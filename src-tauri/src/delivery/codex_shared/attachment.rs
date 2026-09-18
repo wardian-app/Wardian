@@ -317,15 +317,22 @@ pub(super) async fn require_observed_thread(
     Ok(())
 }
 
-pub(super) async fn wait_for_tui_thread(
+pub(super) async fn wait_for_tui_thread<F, Fut>(
     client: &CodexSharedClient,
     expected: Option<&str>,
-    alive: &mut impl FnMut() -> Result<(), CodexSharedError>,
-) -> Result<String, CodexSharedError> {
+    child: &mut Child,
+    alive: &mut F,
+) -> Result<String, CodexSharedError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), CodexSharedError>>,
+{
     loop {
-        alive()?;
+        child_alive(child)?;
+        alive().await?;
         let result = loaded(client).await?;
-        alive()?;
+        child_alive(child)?;
+        alive().await?;
         if let Some(id) = loaded_thread(&result, expected)? {
             return Ok(id);
         }
