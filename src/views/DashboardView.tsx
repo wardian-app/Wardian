@@ -1,6 +1,10 @@
 import React, { useCallback, useMemo, useState } from "react";
 import { AlertTriangle, ArrowDown, ArrowUp, BarChart3, RefreshCw, SlidersHorizontal } from "lucide-react";
 
+import {
+  AgentTelemetryDetails,
+  type AgentTelemetryDetailsTarget,
+} from "../features/telemetry/AgentTelemetryDetails";
 import { ProviderStrip } from "../features/telemetry/ProviderStrip";
 import { Sparkline } from "../features/telemetry/Sparkline";
 import { useFleet } from "../features/telemetry/useFleet";
@@ -21,7 +25,7 @@ import {
   GRAIN_LABELS,
   UNREPORTED,
 } from "../features/telemetry/telemetryFormat";
-import type { FleetRow, TelemetryFleetMaxima } from "../features/telemetry/telemetryTypes";
+import type { FleetRow, HorizonWindow, TelemetryFleetMaxima } from "../features/telemetry/telemetryTypes";
 
 /** Live agent state the instant columns read, supplied by the app shell. */
 export interface DashboardLiveAgent {
@@ -74,6 +78,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 }) => {
   const [refreshing, setRefreshing] = useState(false);
   const [picking, setPicking] = useState(false);
+  const [detailsTarget, setDetailsTarget] = useState<AgentTelemetryDetailsTarget | null>(null);
 
   const measure = trendMeasureFor(prefs.sort.column_id);
   const { fleet, loading, error, refresh } = useFleet(prefs.window_minutes, measure, enabled);
@@ -250,7 +255,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
       )}
 
-      {!loading && maxima && rows.length > 0 && (
+      {!loading && fleet && maxima && rows.length > 0 && (
         // The rows scroll, the header does not. A fleet outgrows one screen
         // quickly, and a monitor whose column headings scroll away stops
         // answering what a number means halfway down the list.
@@ -281,7 +286,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               maxima={maxima}
               template={template}
               sortedBy={prefs.sort.column_id}
-              onOpenAgent={onOpenAgent}
+              window={fleet.window}
+              onOpenDetails={setDetailsTarget}
               onOpenAnalytics={onOpenAnalytics}
             />
           ))}
@@ -301,7 +307,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               maxima={maxima}
               template={template}
               sortedBy={prefs.sort.column_id}
-              onOpenAgent={onOpenAgent}
+              window={fleet.window}
+              onOpenDetails={setDetailsTarget}
               onOpenAnalytics={onOpenAnalytics}
             />
           ))}
@@ -314,6 +321,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <p className="text-[11px]">Spawn an agent and its consumption appears here.</p>
         </div>
       )}
+
+      <AgentTelemetryDetails
+        target={detailsTarget}
+        onClose={() => setDetailsTarget(null)}
+        onOpenAgent={onOpenAgent}
+      />
     </div>
   );
 };
@@ -383,7 +396,8 @@ function FleetRowView({
   maxima,
   template,
   sortedBy,
-  onOpenAgent,
+  window,
+  onOpenDetails,
   onOpenAnalytics,
 }: {
   row: FleetRow;
@@ -391,13 +405,29 @@ function FleetRowView({
   maxima: TelemetryFleetMaxima;
   template: string;
   sortedBy: string;
-  onOpenAgent?: (sessionId: string) => void;
+  window: HorizonWindow;
+  onOpenDetails: (target: AgentTelemetryDetailsTarget) => void;
   onOpenAnalytics?: (sessionId?: string) => void;
 }) {
+  const openDetails = () => onOpenDetails({
+    session_id: row.key,
+    label: row.label,
+    window,
+  });
+
   return (
     <div
       role="row"
-      className={`dashboard-view__row grid items-center gap-2 px-3 py-1.5 border-b border-wardian-border/20 last:border-0 hover:bg-wardian-card-bg-muted transition-colors ${
+      tabIndex={0}
+      aria-label={`View telemetry details for ${row.label}`}
+      onClick={openDetails}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          openDetails();
+        }
+      }}
+      className={`dashboard-view__row grid cursor-pointer items-center gap-2 px-3 py-1.5 border-b border-wardian-border/20 hover:bg-wardian-card-bg-muted transition-colors ${
         row.idle ? "opacity-40" : ""
       }`}
       style={{ gridTemplateColumns: template }}
@@ -409,14 +439,17 @@ function FleetRowView({
           row={row}
           maxima={maxima}
           emphasised={sortedBy === column.id}
-          onOpenAgent={onOpenAgent}
         />
       ))}
       <span className="flex justify-end">
         {onOpenAnalytics && !row.idle && (
           <button
             type="button"
-            onClick={() => onOpenAnalytics(row.key)}
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenAnalytics(row.key);
+            }}
+            onKeyDown={(event) => event.stopPropagation()}
             title={`Open ${row.label} in Analytics`}
             aria-label={`Open ${row.label} in Analytics`}
             className="text-muted-neutral hover:text-[var(--color-wardian-accent)] transition-colors"
@@ -434,31 +467,24 @@ function Cell({
   row,
   maxima,
   emphasised,
-  onOpenAgent,
 }: {
   column: DashboardColumn;
   row: FleetRow;
   maxima: TelemetryFleetMaxima;
   emphasised: boolean;
-  onOpenAgent?: (sessionId: string) => void;
 }) {
   if (column.id === "state") return <StatusDot status={row.status} idle={row.idle} />;
 
   if (column.id === "agent") {
     return (
-      <button
-        type="button"
-        disabled={!onOpenAgent}
-        onClick={() => onOpenAgent?.(row.key)}
-        className={`text-left min-w-0 ${onOpenAgent ? "hover:text-[var(--color-wardian-accent)]" : ""}`}
-      >
+      <div className="min-w-0">
         <span className="block text-xs text-primary truncate" title={row.label}>
           {row.label}
         </span>
         {row.sublabel && (
           <span className="block text-[9px] text-muted-neutral truncate">{row.sublabel}</span>
         )}
-      </button>
+      </div>
     );
   }
 

@@ -15,6 +15,7 @@
 //! - **Activity intervals**, because a timeline needs the real spans.
 //! - **Rate limits**, which are account-level gauges rather than measures.
 
+use crate::telemetry::attribution::{agent_root_join, agent_root_key, distinct_turn_expr};
 use crate::telemetry::models::{
     ActiveTime, ActivityMethod, BreakdownRow, IntervalFact, LimitObservation, TelemetrySummary,
     TokenCounts,
@@ -164,23 +165,41 @@ fn distinct_by_dimension(
     dimension: Dimension,
     from: &str,
     to: &str,
+    grouped_agents: bool,
 ) -> rusqlite::Result<(HashMap<String, i64>, HashMap<String, i64>)> {
-    let turn_key = match dimension {
-        Dimension::Provider => "provider",
-        Dimension::Agent => "session_id",
-        Dimension::Model => "COALESCE(model, '')",
+    let turns = if grouped_agents && dimension == Dimension::Agent {
+        let key = agent_root_key("t");
+        let join = agent_root_join("t");
+        let distinct_turns = distinct_turn_expr("t");
+        grouped_counts(
+            conn,
+            &format!(
+                "SELECT {key}, {distinct_turns}
+                 FROM telemetry_turns t {join}
+                 WHERE t.ended_at >= ?1 AND t.ended_at < ?2
+                 GROUP BY {key}"
+            ),
+            from,
+            to,
+        )?
+    } else {
+        let turn_key = match dimension {
+            Dimension::Provider => "provider",
+            Dimension::Agent => "session_id",
+            Dimension::Model => "COALESCE(model, '')",
+        };
+        grouped_counts(
+            conn,
+            &format!(
+                "SELECT {turn_key}, COUNT(DISTINCT COALESCE(turn_id, event_key))
+                 FROM telemetry_turns
+                 WHERE ended_at >= ?1 AND ended_at < ?2
+                 GROUP BY {turn_key}"
+            ),
+            from,
+            to,
+        )?
     };
-    let turns = grouped_counts(
-        conn,
-        &format!(
-            "SELECT {turn_key}, COUNT(DISTINCT COALESCE(turn_id, event_key))
-             FROM telemetry_turns
-             WHERE ended_at >= ?1 AND ended_at < ?2
-             GROUP BY {turn_key}"
-        ),
-        from,
-        to,
-    )?;
 
     // Edits carry no model of their own, so a model breakdown reaches it
     // through the turn the edit belongs to.
@@ -196,6 +215,14 @@ fn distinct_by_dimension(
         Dimension::Provider => "SELECT provider, COUNT(DISTINCT path) FROM telemetry_edits
              WHERE occurred_at >= ?1 AND occurred_at < ?2 GROUP BY provider"
             .to_string(),
+        Dimension::Agent if grouped_agents => {
+            let key = agent_root_key("e");
+            let join = agent_root_join("e");
+            format!(
+                "SELECT {key}, COUNT(DISTINCT e.path) FROM telemetry_edits e {join}
+                 WHERE e.occurred_at >= ?1 AND e.occurred_at < ?2 GROUP BY {key}"
+            )
+        }
         Dimension::Agent => "SELECT session_id, COUNT(DISTINCT path) FROM telemetry_edits
              WHERE occurred_at >= ?1 AND occurred_at < ?2 GROUP BY session_id"
             .to_string(),
@@ -244,11 +271,55 @@ pub fn breakdown(
     to: &str,
     limit: usize,
 ) -> rusqlite::Result<Vec<BreakdownRow>> {
-    let column = dimension.column();
+    breakdown_impl(conn, dimension, from, to, limit, false)
+}
+
+/// Ranked rows with verified provider-child facts grouped under their roster root.
+pub fn grouped_breakdown(
+    conn: &Connection,
+    dimension: Dimension,
+    from: &str,
+    to: &str,
+    limit: usize,
+) -> rusqlite::Result<Vec<BreakdownRow>> {
+    breakdown_impl(conn, dimension, from, to, limit, true)
+}
+
+fn breakdown_impl(
+    conn: &Connection,
+    dimension: Dimension,
+    from: &str,
+    to: &str,
+    limit: usize,
+    grouped_agents: bool,
+) -> rusqlite::Result<Vec<BreakdownRow>> {
+    let grouped_agent_rows = grouped_agents && dimension == Dimension::Agent;
+    let column = if grouped_agent_rows {
+        agent_root_key("r")
+    } else {
+        dimension.column().to_string()
+    };
     // Distinct counts come from the facts; see `distinct_by_dimension`. Reading
     // them off the rollup here while `summary` reads them from the facts would
     // put two figures for the same quantity on one screen.
-    let (turns_by_key, files_by_key) = distinct_by_dimension(conn, dimension, from, to)?;
+    let (turns_by_key, files_by_key) =
+        distinct_by_dimension(conn, dimension, from, to, grouped_agent_rows)?;
+
+    let (table, alias, join, session_count) = if grouped_agent_rows {
+        (
+            "telemetry_rollup_hourly",
+            "r",
+            agent_root_join("r"),
+            format!("COUNT(DISTINCT {column})"),
+        )
+    } else {
+        (
+            "telemetry_rollup_hourly",
+            "",
+            String::new(),
+            "COUNT(DISTINCT session_id)".to_string(),
+        )
+    };
 
     // Ranked by total active time, which is the one place a mixture is
     // unavoidable: rows measured differently still have to be put in some order.
@@ -267,9 +338,9 @@ pub fn breakdown(
                 0,
                 COALESCE(SUM(lines_added), 0),
                 COALESCE(SUM(lines_removed), 0),
-                COUNT(DISTINCT session_id),
+                {session_count},
                 MAX(tokens_reported)
-         FROM telemetry_rollup_hourly
+         FROM {table} {alias} {join}
          WHERE bucket_start >= ?1 AND bucket_start < ?2
          GROUP BY {column}
          ORDER BY SUM(measured_active_ms) + SUM(clustered_active_ms) DESC, {column}
@@ -310,7 +381,32 @@ pub fn series(
     from: &str,
     to: &str,
 ) -> rusqlite::Result<Vec<SeriesPoint>> {
-    let column = dimension.column();
+    series_impl(conn, dimension, from, to, false)
+}
+
+/// Per-bucket series with verified provider-child facts grouped under roots.
+pub fn grouped_series(
+    conn: &Connection,
+    dimension: Dimension,
+    from: &str,
+    to: &str,
+) -> rusqlite::Result<Vec<SeriesPoint>> {
+    series_impl(conn, dimension, from, to, true)
+}
+
+fn series_impl(
+    conn: &Connection,
+    dimension: Dimension,
+    from: &str,
+    to: &str,
+    grouped_agents: bool,
+) -> rusqlite::Result<Vec<SeriesPoint>> {
+    let grouped_agent_rows = grouped_agents && dimension == Dimension::Agent;
+    let (from_alias, column_prefix, join, column) = if grouped_agent_rows {
+        ("r", "r.", agent_root_join("r"), agent_root_key("r"))
+    } else {
+        ("", "", String::new(), dimension.column().to_string())
+    };
     // New content processed: fresh input, cache writes, and output. Adding cache
     // *reads* here would dominate the series — they ran roughly ten times fresh
     // input on real sessions — and turn a token chart into a cache-hit chart.
@@ -323,7 +419,7 @@ pub fn series(
     // instead report zero processed tokens for a provider that reported only
     // cache reads, which is a different claim from reporting none.
     let sql = format!(
-        "SELECT bucket_start, {column},
+        "SELECT {column_prefix}bucket_start, {column},
                 COALESCE(SUM(measured_active_ms), 0),
                 COALESCE(SUM(clustered_active_ms), 0),
                 CASE WHEN SUM(input_tokens) IS NULL AND SUM(cache_write_tokens) IS NULL
@@ -333,10 +429,10 @@ pub fn series(
                           + COALESCE(SUM(cache_write_tokens), 0)
                           + COALESCE(SUM(output_tokens), 0)
                 END
-         FROM telemetry_rollup_hourly
-         WHERE bucket_start >= ?1 AND bucket_start < ?2
-         GROUP BY bucket_start, {column}
-         ORDER BY bucket_start, {column}"
+         FROM telemetry_rollup_hourly {from_alias} {join}
+         WHERE {column_prefix}bucket_start >= ?1 AND {column_prefix}bucket_start < ?2
+         GROUP BY {column_prefix}bucket_start, {column}
+         ORDER BY {column_prefix}bucket_start, {column}"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![from, to], |row| {

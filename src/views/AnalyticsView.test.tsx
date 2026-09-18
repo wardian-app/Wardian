@@ -45,6 +45,17 @@ function matrix(overrides: Partial<TelemetryMatrix> = {}): TelemetryMatrix {
 function respondWith(data: Partial<TelemetryMatrix> = {}, limits: unknown[] = []) {
   invokeMock.mockImplementation((command: string) => {
     if (command === "telemetry_matrix") return Promise.resolve(matrix(data));
+    if (command === "telemetry_agent_breakdown") return Promise.resolve({
+      key: "uuid-1",
+      label: "Wardian-Codex",
+      can_open_agent: true,
+      window: matrix(data).window,
+      measures: [
+        { measure: "active_ms", total: 2_400_000, own: 1_800_000, subagents: 600_000 },
+        { measure: "turns", total: 4, own: 3, subagents: 1 },
+        { measure: "total_tokens", total: null, own: null, subagents: null },
+      ],
+    });
     if (command === "telemetry_overview") return Promise.resolve({ limits });
     if (command === "telemetry_refresh") return Promise.resolve({ advanced: 1 });
     return Promise.reject(new Error(`unexpected command ${command}`));
@@ -200,14 +211,25 @@ describe("AnalyticsView", () => {
     expect(await screen.findByText(/Nothing recorded in this window/)).toBeInTheDocument();
   });
 
-  it("opens an agent from its row, by key rather than by label", async () => {
+  it("opens shared own-versus-subagents details from its row with the matrix window", async () => {
     const onOpenAgent = vi.fn();
     respondWith();
     render(<AnalyticsView onOpenAgent={onOpenAgent} />);
 
     await userEvent.click(await screen.findByText("Wardian-Codex"));
 
-    expect(onOpenAgent).toHaveBeenCalledWith("uuid-1");
+    expect(await screen.findByRole("dialog", { name: "Wardian-Codex" })).toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("telemetry_agent_breakdown", {
+      session_id: "uuid-1",
+      from: "2026-08-13T14:00:00.000Z",
+      to: "2026-08-13T18:00:00.000Z",
+    });
+    expect(screen.getByRole("columnheader", { name: "Combined" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Own work" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Subagents" })).toBeInTheDocument();
+    expect(screen.getByText("Active agent time")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open agent" })).toBeInTheDocument();
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(3);
   });
 
   it("does not offer to open a row that is not an agent", async () => {

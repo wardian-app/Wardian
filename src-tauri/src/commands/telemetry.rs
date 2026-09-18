@@ -15,16 +15,20 @@ use crate::state::AppState;
 use chrono::Utc;
 use serde::Serialize;
 use tauri::State;
+use wardian_core::telemetry::attribution::token_reporting_agents;
 // Horizon resolution lives in the core so the CLI resolves "the last 24 hours"
 // the same way this does. Two independent implementations of the flooring rule
 // would let two surfaces quote different figures for the same question.
 use wardian_core::telemetry::horizon::{resolve_horizon, Horizon, HorizonWindow};
-use wardian_core::telemetry::matrix::{matrix_at, totals_at, Measure};
+use wardian_core::telemetry::matrix::{
+    grouped_matrix_at, grouped_totals_at, matrix_at, totals_at, Measure,
+};
 use wardian_core::telemetry::models::{
     ActiveTime, BreakdownRow, IntervalFact, LimitObservation, TelemetrySummary, TokenCounts,
 };
 use wardian_core::telemetry::query::{
-    activity_intervals, breakdown, latest_limits, series, summary, Dimension, SeriesPoint,
+    activity_intervals, breakdown, grouped_breakdown, grouped_series, latest_limits, series,
+    summary, Dimension, SeriesPoint,
 };
 
 /// A breakdown row with the label a surface should actually print.
@@ -228,7 +232,17 @@ pub fn telemetry_overview(horizon: String) -> Result<TelemetryOverviewDto, Strin
             processed_tokens: summary.tokens.processed_total(),
             active_is_mixed: summary.active.is_mixed(),
             by_provider: to_dtos(rows(Dimension::Provider)?, Dimension::Provider, &labels),
-            by_agent: to_dtos(rows(Dimension::Agent)?, Dimension::Agent, &labels),
+            by_agent: to_dtos(
+                grouped_breakdown(
+                    conn,
+                    Dimension::Agent,
+                    &window.from,
+                    &window.to,
+                    BREAKDOWN_LIMIT,
+                )?,
+                Dimension::Agent,
+                &labels,
+            ),
             by_model: to_dtos(rows(Dimension::Model)?, Dimension::Model, &labels),
             limits: latest_limits(conn)?,
             summary,
@@ -260,10 +274,11 @@ pub fn telemetry_dashboard(
     wardian_core::db::get_db_conn(|conn| {
         // No practical limit: the roster is the answer, so truncating it would
         // silently drop agents from a view whose job is to list them.
-        let measured = breakdown(conn, Dimension::Agent, &window.from, &window.to, usize::MAX)?;
+        let measured =
+            grouped_breakdown(conn, Dimension::Agent, &window.from, &window.to, usize::MAX)?;
 
         // One grid for every agent's sparkline, rather than a query per row.
-        let grid = matrix_at(
+        let grid = grouped_matrix_at(
             conn,
             &window,
             Dimension::Agent,
@@ -573,7 +588,7 @@ pub fn telemetry_fleet(
         // grid. This read used to ask `matrix_at` for six grids and discard six
         // sets of buckets: on a 1.2 GB store over 30 days that cost 1197ms
         // against 506ms for the same six answers.
-        let agent_totals = totals_at(conn, &window, Dimension::Agent, &FLEET_MEASURES)?;
+        let agent_totals = grouped_totals_at(conn, &window, Dimension::Agent, &FLEET_MEASURES)?;
         let total_for = |measure: Measure, key: &str| -> i64 {
             agent_totals
                 .get(&measure)
@@ -583,7 +598,7 @@ pub fn telemetry_fleet(
         };
 
         // The one grid this read does need: the trend measure's cells.
-        let trend = matrix_at(
+        let trend = grouped_matrix_at(
             conn,
             &window,
             Dimension::Agent,
@@ -786,31 +801,6 @@ pub fn telemetry_fleet(
         })
     })
     .map_err(|error| format!("could not read telemetry fleet: {error}"))
-}
-
-/// Agents whose provider reported any token accounting inside an exact window.
-///
-/// Fact-backed rather than rollup-backed, because the Dashboard's window is a
-/// trailing interval that routinely starts mid-hour, and an hourly bucket whose
-/// start precedes the window is invisible to a `bucket_start >= from` filter.
-///
-/// Presence, not magnitude: an agent that genuinely burned zero tokens in the
-/// window still belongs here, because "reported zero" and "reports nothing" are
-/// different claims and only the second may render as unknown.
-fn token_reporting_agents(
-    conn: &rusqlite::Connection,
-    from: &str,
-    to: &str,
-) -> rusqlite::Result<std::collections::HashSet<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT session_id FROM telemetry_turns
-         WHERE ended_at >= ?1 AND ended_at < ?2
-           AND (input_tokens IS NOT NULL
-                OR output_tokens IS NOT NULL
-                OR cached_input_tokens IS NOT NULL)",
-    )?;
-    let rows = stmt.query_map(rusqlite::params![from, to], |row| row.get::<_, String>(0))?;
-    rows.collect()
 }
 
 /// Put the provider cards in the order the strip lays them out.
@@ -1086,8 +1076,11 @@ pub fn telemetry_matrix(
     let row_limit = limit.unwrap_or(MATRIX_ROW_LIMIT).clamp(1, MATRIX_ROW_CAP);
 
     wardian_core::db::get_db_conn(|conn| {
-        let grid =
-            wardian_core::telemetry::matrix::matrix(conn, &window, dimension, measure, row_limit)?;
+        let grid = if dimension == Dimension::Agent {
+            grouped_matrix_at(conn, &window, dimension, measure, row_limit, None)?
+        } else {
+            wardian_core::telemetry::matrix::matrix(conn, &window, dimension, measure, row_limit)?
+        };
         Ok(TelemetryMatrixDto {
             dimension: dimension.as_str().to_string(),
             measure: measure.as_str().to_string(),
@@ -1127,8 +1120,14 @@ pub fn telemetry_series(horizon: String, dimension: String) -> Result<Vec<Series
         .ok_or_else(|| format!("unknown telemetry dimension: {dimension}"))?;
     let window = resolve_horizon(horizon, Utc::now());
 
-    wardian_core::db::get_db_conn(|conn| Ok(series(conn, dimension, &window.from, &window.to)?))
-        .map_err(|error| format!("could not read telemetry series: {error}"))
+    wardian_core::db::get_db_conn(|conn| {
+        if dimension == Dimension::Agent {
+            Ok(grouped_series(conn, dimension, &window.from, &window.to)?)
+        } else {
+            Ok(series(conn, dimension, &window.from, &window.to)?)
+        }
+    })
+    .map_err(|error| format!("could not read telemetry series: {error}"))
 }
 
 /// See [`telemetry_overview`] for why this is `(async)`.

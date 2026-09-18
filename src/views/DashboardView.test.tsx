@@ -105,6 +105,17 @@ function respondWith(
 ) {
   invokeMock.mockImplementation((command: string) => {
     if (command === "telemetry_fleet") return Promise.resolve(payload(rows, strip));
+    if (command === "telemetry_agent_breakdown") return Promise.resolve({
+      key: "uuid-1",
+      label: "Wardian-Codex",
+      can_open_agent: true,
+      window: payload(rows, strip).window,
+      measures: [
+        { measure: "active_ms", total: 2_400_000, own: 1_800_000, subagents: 600_000 },
+        { measure: "turns", total: 4, own: 3, subagents: 1 },
+        { measure: "total_tokens", total: null, own: null, subagents: null },
+      ],
+    });
     if (command === "telemetry_refresh") return Promise.resolve({ advanced: 1 });
     return Promise.reject(new Error(`unexpected command ${command}`));
   });
@@ -424,14 +435,21 @@ describe("DashboardView", () => {
     });
   });
 
-  it("drills through to Analytics scoped to one agent", async () => {
+  it("opens shared details from the row while retaining the Analytics shortcut", async () => {
     const onOpenAnalytics = vi.fn();
     respondWith();
     render(<DashboardView onOpenAnalytics={onOpenAnalytics} />);
 
-    await userEvent.click(
-      await screen.findByRole("button", { name: "Open Wardian-Codex in Analytics" }),
-    );
+    await userEvent.click(await screen.findByText("Wardian-Codex"));
+
+    expect(await screen.findByRole("dialog", { name: "Wardian-Codex" })).toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("telemetry_agent_breakdown", {
+      session_id: "uuid-1",
+      from: "2026-08-14T23:00:00.000Z",
+      to: "2026-08-15T00:00:00.000Z",
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Close telemetry details" }));
+    await userEvent.click(screen.getByRole("button", { name: "Open Wardian-Codex in Analytics" }));
     expect(onOpenAnalytics).toHaveBeenCalledWith("uuid-1");
   });
 });
