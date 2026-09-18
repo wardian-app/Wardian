@@ -25,15 +25,25 @@ jobs:
     timeout-minutes: 30
     env:
       WARDIAN_EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      WARDIAN_QA_DIR: ${{ runner.temp }}/wardian-macos-native-chrome-${{ github.run_id }}
-      WARDIAN_HOME: ${{ runner.temp }}/wardian-e2e-native-macos-${{ github.run_id }}
-      WARDIAN_E2E_NATIVE_HOME: ${{ runner.temp }}/wardian-e2e-native-macos-${{ github.run_id }}
     steps:
       - name: Checkout exact pull-request head
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
+
+      - name: Initialize isolated native QA paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          qa_dir="$RUNNER_TEMP/wardian-macos-native-chrome-$GITHUB_RUN_ID"
+          wardian_home="$RUNNER_TEMP/wardian-e2e-native-macos-$GITHUB_RUN_ID"
+          {
+            printf 'WARDIAN_QA_DIR=%s\n' "$qa_dir"
+            printf 'WARDIAN_HOME=%s\n' "$wardian_home"
+            printf 'WARDIAN_E2E_NATIVE_HOME=%s\n' "$wardian_home"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$qa_dir" "$wardian_home"
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -48,9 +58,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
-
-      - name: Create isolated native QA directory
-        run: mkdir -p "$WARDIAN_QA_DIR" "$WARDIAN_HOME"
 
       - name: Install dependencies
         run: npm ci
