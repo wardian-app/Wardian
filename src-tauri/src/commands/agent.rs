@@ -6805,8 +6805,8 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         let (result, updated_fields) = update.await.unwrap().expect("update after lifecycle lock");
         assert_eq!(updated_fields, vec!["workspace"]);
         assert_eq!(
-            result.config.folder,
-            workspace.to_string_lossy().replace('\\', "/")
+            std::fs::canonicalize(&result.config.folder).expect("resolve updated workspace"),
+            std::fs::canonicalize(&workspace).expect("resolve expected workspace")
         );
         unsafe { std::env::remove_var("WARDIAN_HOME") };
     }
