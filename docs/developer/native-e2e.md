@@ -562,3 +562,39 @@ as replacing the API's user-data-folder argument. An effective-profile check
 must observe the owned browser child's `--user-data-dir` value; an environment
 value alone does not prove what the runtime used.
 See also Microsoft's [EdgeDriver WebView options](https://learn.microsoft.com/en-us/microsoft-edge/webdriver/capabilities-edge-options#webviewoptions-object).
+
+## macOS native chrome acceptance
+
+`.github/workflows/macos-native-chrome.yml` is a pull-request-only, macOS 15
+job for changes that can affect the native titlebar. It uses the existing
+Node/Rust action pins, installs from the lockfile, builds an unsigned debug
+`.app` bundle with `npm run tauri -- build --debug --bundles app`, and launches
+that exact bundle with an isolated `RUNNER_TEMP` Wardian home. It does not use
+provider credentials, signing or notarization secrets, release publication, or
+`workflow_dispatch`.
+
+The job runs `scripts/macos-native-chrome-qa.mjs` as the sole owner of the app
+process. The harness reads the configured bundle identifier from
+`src-tauri/tauri.conf.json`, verifies the built `Info.plist`, executable hash,
+checked-out head, and PID, then queries the live window through macOS
+Accessibility. It discovers roles from the hosted run and fails closed for
+unknown roles, frames, enabled state, fullscreen state, or permission errors.
+Acceptance requires enabled, nonzero `AXCloseButton`, `AXMinimizeButton`, and
+`AXZoomButton` frames inside the window's first 36 points, followed by genuine
+`AXPress` zoom and restore actions, real PNG captures for baseline, zoomed, and
+restored states, and an `AXPress` minimize followed by setting
+`AXMinimized=false` and performing `AXRaise`; the next AX snapshot must report
+the window restored and frontmost. The final red action is allowed only for the
+owned PID and must close or hide that app according to its normal policy;
+cleanup can signal only the detached process group established by that PID,
+and the run must confirm both leader and group quiescence before passing. The
+run never changes TCC state or uses global process termination.
+`AXFullScreen=false` is recorded for each visible state; this reports the
+observed native policy and does not claim to enumerate Mission Control Spaces.
+The job also compiles the small `.github/macos-native-ax-hit-test.swift`
+helper. For the owned PID, it uses `AXUIElementCopyElementAtPosition` at each
+traffic-light center, requires the hit result to remain in that PID and resolve
+to the expected AX subrole, and rejects overlapping frames outside the 72-point
+left reservation. The Node harness promotes `hittable` only after that helper
+evidence; AXPress alone is action evidence, not a pointer hit-test substitute.
+Browser or WebDriver evidence cannot satisfy this acceptance.

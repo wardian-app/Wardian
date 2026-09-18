@@ -1,0 +1,89 @@
+name: macOS Native Chrome
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/macos-native-chrome.yml"
+      - ".github/macos-native-ax-hit-test.swift"
+      - "scripts/macos-native-chrome-qa.mjs"
+      - "src-tauri/tauri.conf.json"
+      - "src-tauri/tauri.macos.conf.json"
+      - "src-tauri/src/macos_window.rs"
+      - "src/config/macosWindowIntegration.test.ts"
+      - "src/layout/titlebar/**"
+      - "package.json"
+      - "package-lock.json"
+
+permissions:
+  contents: read
+
+jobs:
+  macos-native-chrome:
+    name: macOS Native Chrome (AppKit)
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      WARDIAN_EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      WARDIAN_QA_DIR: ${{ runner.temp }}/wardian-macos-native-chrome-${{ github.run_id }}
+      WARDIAN_HOME: ${{ runner.temp }}/wardian-e2e-native-macos-${{ github.run_id }}
+      WARDIAN_E2E_NATIVE_HOME: ${{ runner.temp }}/wardian-e2e-native-macos-${{ github.run_id }}
+    steps:
+      - name: Checkout exact pull-request head
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: Create isolated native QA directory
+        run: mkdir -p "$WARDIAN_QA_DIR" "$WARDIAN_HOME"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build unsigned debug app bundle
+        run: npm run tauri -- build --debug --bundles app
+
+      - name: Compile owned-app AX hit-test helper
+        run: swiftc .github/macos-native-ax-hit-test.swift -framework ApplicationServices -framework CoreGraphics -o "$WARDIAN_QA_DIR/macos-native-ax-hit-test"
+
+      - name: Select the single debug app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          apps=()
+          while IFS= read -r app; do
+            [ -n "$app" ] && apps+=("$app")
+          done < <(find "$GITHUB_WORKSPACE" -type d -path '*/target/*/bundle/macos/Wardian.app' -print)
+          if [ "${#apps[@]}" -ne 1 ]; then
+            echo "Expected exactly one Wardian.app debug bundle; found ${#apps[@]}" >&2
+            printf '%s\n' "${apps[@]}" >&2
+            exit 1
+          fi
+          printf 'WARDIAN_NATIVE_APP=%s\n' "${apps[0]}" >> "$GITHUB_ENV"
+
+      - name: Run native AppKit chrome acceptance
+        run: node scripts/macos-native-chrome-qa.mjs
+
+      - name: Upload native AppKit evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-native-chrome-${{ github.run_id }}
+          path: ${{ runner.temp }}/wardian-macos-native-chrome-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 7
