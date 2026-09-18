@@ -67,11 +67,11 @@ the prompt. An unknown Codex resume identity remains a bootstrap error.
 | Provider | Working root | Instruction file | Skill model | Session identity |
 | --- | --- | --- | --- | --- |
 | Antigravity | Real target workspace | `AGENTS.md` | `--add-dir` roots expose Wardian context | Captured after the first real prompt |
-| Claude | Real target workspace | `CLAUDE.md` | `.claude/skills` points at Wardian's `.agents/skills` | Wardian assigns `--session-id` up front |
+| Claude | Real target workspace | `AGENTS.md` | `.claude/skills` points at Wardian's `.agents/skills` | Wardian assigns `--session-id` up front |
 | Codex | Real target workspace via `--cd`; habitat-backed `CODEX_HOME` | `AGENTS.md` | Per-agent `CODEX_HOME/skills` under habitat | Fresh local rollout, then exact resume |
 | OpenCode | Habitat command root; real workspace passed as a positional arg (interactive) or `--dir` (headless `run`) | `AGENTS.md` plus injected runtime config | Skills junctioned into the habitat `.opencode` config dir | Discovered from provider output (`ses_…`) |
 | Pi | Real target workspace | `AGENTS.md` plus appended Wardian instruction files | Repeated `--skill` paths point at Wardian-managed skill roots | Wardian assigns `--session-id` up front |
-| Gemini *(unmaintained)* | Projected habitat workspace for headless runs | `GEMINI.md` | Patched CLI can discover skills from include directories | Discovered from provider output |
+| Gemini *(unmaintained)* | Projected habitat workspace for headless runs | Legacy `GEMINI.md`; not generated | Patched CLI can discover skills from include directories | Discovered from provider output |
 
 ### Windows projected-habitat working directories
 
@@ -168,20 +168,13 @@ Claude also runs directly in the real target workspace. Wardian does not use a p
 
 ### Instruction and skill discovery
 
-- Claude reads `CLAUDE.md`.
+- Claude reads `AGENTS.md` natively.
 - Wardian enables `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` so Claude can discover instruction files from `--add-dir` roots.
-- Ordinary habitat preparation materializes existing owned common/class/agent
-  `CLAUDE.md` bridges from sibling canonical `AGENTS.md`; habitat generation and
-  the subsequent memory append also refresh the habitat bridge. These are
-  bootstrap snapshots, with no live refresh guarantee. Exact legacy stubs and
-  unchanged versioned/hash-marked projections are eligible; customized files and
-  links are preserved. Nested imports are copied verbatim and retain provider
-  consent. See the [operator freshness rules](../providers.md#instruction-and-skill-discovery-1).
+- Wardian generates only canonical `AGENTS.md` instruction files. Home and
+  habitat initialization retire exact legacy stubs and unchanged hash-marked
+  Claude projections from real Wardian-managed roots. Customized files and
+  linked files or directories are preserved.
 - Wardian also maintains `.claude/skills -> .agents/skills` links where needed so provider-native skill discovery still works.
-- On Windows, publishing generated `CLAUDE.md` siblings supports long ASCII and
-  Unicode habitat and managed-root paths. The writer uses the existing parent's
-  canonical path for both temporary creation and the destination join, after
-  checking ownership and links; it does not resolve the destination leaf.
 - Wardian enables `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` for Claude launches in Wardian-managed terminal surfaces so mobile and remote terminal scrollback remains native to xterm.
 
 ### Approval handling
@@ -194,7 +187,7 @@ Claude also runs directly in the real target workspace. Wardian does not use a p
 ### Practical implications
 
 - Claude depends heavily on the permission-hook path being writable and stable.
-- Bugs here are usually about hook setup, `CLAUDE.md` discovery, or resume/session flags.
+- Bugs here are usually about hook setup, `AGENTS.md` discovery, or resume/session flags.
 - If mobile or remote drag scrolling fails only for Claude, verify that the managed launch environment still includes the alternate-screen opt-out before changing terminal gesture handling.
 - On Windows, Claude may invoke both PowerShell and bash-family tool shells during one Wardian-managed session. Wardian therefore installs both `%USERPROFILE%\.wardian\bin\wardian.cmd` and `%USERPROFILE%\.wardian\bin\wardian`, then prepends the active Wardian `bin` directory to the managed provider process PATH. Verify shell parity from inside the managed runtime, not only from the parent Wardian process.
 - If `%USERPROFILE%\bin\wardian` or `%USERPROFILE%\bin\wardian.cmd` is a Wardian-owned legacy launcher, the Windows installer rewrites it to forward to the active `%USERPROFILE%\.wardian\bin\wardian-cli.exe`. This protects Claude bash tool shells that prepend `~/bin` ahead of the inherited provider PATH.
@@ -596,7 +589,7 @@ provider process runs from the habitat workspace path during headless execution.
 
 ### Instruction and skill discovery
 
-- Gemini reads `GEMINI.md`.
+- Gemini's legacy contract reads `GEMINI.md`, but Wardian no longer generates it.
 - Wardian passes include roots through `--include-directories`.
 - Skill discovery depends on Wardian's Gemini patching flow; see [Gemini CLI Patches](./gemini-cli-patches.md).
 - If Gemini stops seeing Wardian-managed skills, check the patched CLI bundle before changing spawn logic.
@@ -616,7 +609,7 @@ provider process runs from the habitat workspace path during headless execution.
 When provider behavior breaks, start with the provider-specific seam instead of the generic agent UI.
 
 - Antigravity problems: inspect visible include-root projections, the exact workspace conversation mapping, and the conversation transcript.
-- Claude problems: inspect `CLAUDE.md` discovery, permission hooks, and explicit session flags.
+- Claude problems: inspect `AGENTS.md` discovery, permission hooks, and explicit session flags.
 - Codex problems: inspect `CODEX_HOME`, `--cd`, bootstrap migration, and sandbox approval transitions.
 - OpenCode problems: inspect the generated `OPENCODE_CONFIG` file, junctioned skills, real-workspace directory argument, and `ses_…` session discovery.
 - Pi problems: inspect appended system-prompt and skill arguments, the private session directory, and the exact Pi session ID and JSONL boundary.

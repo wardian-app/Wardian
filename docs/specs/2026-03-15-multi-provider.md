@@ -1,6 +1,6 @@
 # Multi-Provider Support (The Provider Trait)
 
-* **Status:** Implemented
+* **Status:** Implemented; provider-specific instruction stubs superseded by [AGENTS-only provider instructions](./2026-09-18-agents-only-provider-instructions.md)
 * **Date:** 2026-03-15
 
 ## Context and Problem Statement

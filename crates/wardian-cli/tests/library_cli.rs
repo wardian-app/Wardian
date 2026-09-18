@@ -815,12 +815,6 @@ fn fresh_home_default_classes_support_cli_access_and_deployment() {
         std::fs::read_to_string(root.join("AGENTS.md")).unwrap(),
         "# Edited Reviewer\n"
     );
-    assert_eq!(
-        std::fs::read_to_string(root.join("GEMINI.md")).unwrap(),
-        "@AGENTS.md\n"
-    );
-    assert_eq!(
-        std::fs::read_to_string(root.join("CLAUDE.md")).unwrap(),
-        "@AGENTS.md\n"
-    );
+    assert!(!root.join("GEMINI.md").exists());
+    assert!(!root.join("CLAUDE.md").exists());
 }

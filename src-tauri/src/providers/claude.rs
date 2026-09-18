@@ -481,7 +481,7 @@ impl AgentProvider for ClaudeProvider {
     }
 
     fn get_instruction_filename(&self) -> &str {
-        "CLAUDE.md"
+        "AGENTS.md"
     }
 }
 
@@ -539,9 +539,9 @@ mod tests {
     }
 
     #[test]
-    fn instruction_filename_is_claude_md() {
+    fn instruction_filename_is_agents_md() {
         let p = make_provider();
-        assert_eq!(p.get_instruction_filename(), "CLAUDE.md");
+        assert_eq!(p.get_instruction_filename(), "AGENTS.md");
     }
 
     #[cfg(target_os = "windows")]

@@ -6,8 +6,6 @@ use std::sync::{Mutex, OnceLock};
 use crate::utils::logging::log_debug;
 use fs2::FileExt;
 
-mod claude_instructions;
-
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
@@ -110,9 +108,7 @@ pub fn provider_uses_projected_workspace(provider: &str) -> bool {
     matches!(provider, "codex" | "gemini" | "opencode")
 }
 
-/// Prepare the generated habitat for an ordinary provider launch. Claude also
-/// refreshes existing owned instruction bridges in its managed include roots;
-/// canonical AGENTS.md files and custom or linked CLAUDE.md files stay intact.
+/// Prepare the generated habitat for an ordinary provider launch.
 pub fn prepare_provider_habitat(
     provider: &str,
     workspace_root: &std::path::Path,
@@ -133,9 +129,6 @@ pub fn prepare_provider_habitat(
         {
             log_debug(&format!("[Wardian] Codex messaging unavailable: {reason}"));
         }
-    } else if provider == "claude" {
-        let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
-        claude_instructions::refresh_managed_roots(&wardian_home, class_name, session_id)?;
     }
 
     Ok(Some(habitat_root))
@@ -143,8 +136,6 @@ pub fn prepare_provider_habitat(
 
 /// Add Wardian's runtime-owned memory contract and startup brief to the
 /// generated habitat instructions without touching user-authored files.
-/// Refresh the owned Claude sibling snapshot after the append so it includes
-/// the final launch-time memory text; preserve custom or linked Claude files.
 pub fn append_habitat_memory_instructions(
     habitat_root: &std::path::Path,
     startup_brief: Option<&str>,
@@ -154,8 +145,7 @@ pub fn append_habitat_memory_instructions(
         std::fs::read_to_string(&path).unwrap_or_else(|_| "# Wardian Habitat\n".into());
     content.push('\n');
     content.push_str(&wardian_memory_instructions(startup_brief));
-    std::fs::write(path, content).map_err(|error| error.to_string())?;
-    claude_instructions::refresh_habitat(habitat_root)
+    std::fs::write(path, content).map_err(|error| error.to_string())
 }
 
 /// Build the provider-neutral memory context used by both generated habitat
@@ -1736,9 +1726,10 @@ fn write_habitat_instruction_files(
 ) -> Result<(), String> {
     let agents_md = managed_instruction_content(wardian_home, class_name, session_id);
     std::fs::write(habitat_root.join("AGENTS.md"), agents_md).map_err(|e| e.to_string())?;
-
-    std::fs::write(habitat_root.join("GEMINI.md"), "@AGENTS.md\n").map_err(|e| e.to_string())?;
-    claude_instructions::refresh_habitat(habitat_root)
+    wardian_core::provider_instructions::retire_legacy_provider_instruction_files(
+        wardian_home,
+        habitat_root,
+    )
 }
 
 fn build_habitat_skill_projection(
@@ -2134,9 +2125,9 @@ mod tests {
     }
 
     #[test]
-    fn habitat_instruction_files_use_stable_source_labels() {
+    fn habitat_instruction_files_use_stable_source_labels_and_retire_provider_files() {
         let wardian_home = unique_temp_dir("habitat-source-labels-home");
-        let habitat_root = unique_temp_dir("habitat-source-labels-root");
+        let habitat_root = wardian_home.join("agents/agent-1/habitat");
         let common = wardian_home.join("common");
         let class = wardian_home.join("classes").join("Builder");
         let agent = wardian_home.join("agents").join("agent-1");
@@ -2144,6 +2135,8 @@ mod tests {
         std::fs::create_dir_all(&class).expect("create class");
         std::fs::create_dir_all(&agent).expect("create agent");
         std::fs::create_dir_all(&habitat_root).expect("create habitat");
+        std::fs::write(habitat_root.join("CLAUDE.md"), "@AGENTS.md\n").expect("write claude stub");
+        std::fs::write(habitat_root.join("GEMINI.md"), "@AGENTS.md\n").expect("write gemini stub");
         std::fs::write(common.join("AGENTS.md"), "common instructions").expect("write common");
         std::fs::write(class.join("AGENTS.md"), "class instructions").expect("write class");
         std::fs::write(agent.join("AGENTS.md"), "agent instructions").expect("write agent");
@@ -2158,31 +2151,20 @@ mod tests {
         assert!(agents_md.contains("Source: Agent"));
         assert!(!agents_md.contains(&wardian_home.to_string_lossy().to_string()));
         assert!(!agents_md.contains("agent-1/AGENTS.md"));
-        let claude_md =
-            std::fs::read_to_string(habitat_root.join("CLAUDE.md")).expect("read CLAUDE.md");
-        assert!(
-            claude_md.ends_with(&agents_md),
-            "Claude must load the managed instruction text directly"
-        );
-        assert_ne!(claude_md.trim(), "@AGENTS.md");
+        assert!(!habitat_root.join("CLAUDE.md").exists());
+        assert!(!habitat_root.join("GEMINI.md").exists());
         assert_eq!(
             agents_md,
             super::managed_instruction_content(&wardian_home, "Builder", Some("agent-1"))
         );
-        // Neither class nor agent selection can redirect the bridge outside
-        // the managed source roots. Workspace/include files are not inputs.
+        // Neither class nor agent selection can redirect generated instructions
+        // outside the managed source roots. Workspace/include files are not inputs.
         let escaped =
             super::managed_instruction_content(&wardian_home, "../common", Some("../common"));
         assert!(escaped.contains("Source: Common"));
         assert!(!escaped.contains("Source: Class"));
         assert!(!escaped.contains("Source: Agent"));
-        assert_eq!(
-            std::fs::read_to_string(habitat_root.join("GEMINI.md")).expect("read GEMINI.md"),
-            "@AGENTS.md\n"
-        );
-
         let _ = std::fs::remove_dir_all(&wardian_home);
-        let _ = std::fs::remove_dir_all(&habitat_root);
     }
 
     #[test]

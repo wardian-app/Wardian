@@ -100,6 +100,7 @@ pub fn initialize_classes(home: &Path) -> Result<Vec<AgentClassDefinition>, Stri
     for class in &classes {
         ensure_class_directory(home, class, None)?;
     }
+    crate::provider_instructions::retire_legacy_provider_instruction_tree(home)?;
     Ok(classes)
 }
 
@@ -128,12 +129,7 @@ pub fn ensure_class_directory(
         std::fs::write(agents_md_path, content).map_err(|error| error.to_string())?;
     }
 
-    for stub_name in ["GEMINI.md", "CLAUDE.md"] {
-        let stub_path = role_dir.join(stub_name);
-        if !stub_path.exists() {
-            std::fs::write(stub_path, "@AGENTS.md\n").map_err(|error| error.to_string())?;
-        }
-    }
+    crate::provider_instructions::retire_legacy_provider_instruction_files(home, &role_dir)?;
 
     Ok(())
 }
@@ -251,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_class_directory_creates_agents_file_and_provider_stubs() {
+    fn ensure_class_directory_creates_only_agents_file_and_retires_provider_stubs() {
         let temp = tempfile::tempdir().expect("temp dir");
         let class = AgentClassDefinition {
             name: "Pair Programmer".to_string(),
@@ -261,22 +257,20 @@ mod tests {
             assigned_skills: None,
         };
 
+        let root = temp.path().join("classes").join("Pair Programmer");
+        std::fs::create_dir_all(&root).expect("class root");
+        std::fs::write(root.join("GEMINI.md"), "@AGENTS.md\n").expect("gemini stub");
+        std::fs::write(root.join("CLAUDE.md"), "@AGENTS.md\n").expect("claude stub");
+
         super::ensure_class_directory(temp.path(), &class, Some("# Pair\n"))
             .expect("class directory");
 
-        let root = temp.path().join("classes").join("Pair Programmer");
         assert_eq!(
             std::fs::read_to_string(root.join("AGENTS.md")).expect("agents file"),
             "# Pair\n"
         );
-        assert_eq!(
-            std::fs::read_to_string(root.join("GEMINI.md")).expect("gemini stub"),
-            "@AGENTS.md\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(root.join("CLAUDE.md")).expect("claude stub"),
-            "@AGENTS.md\n"
-        );
+        assert!(!root.join("GEMINI.md").exists());
+        assert!(!root.join("CLAUDE.md").exists());
     }
 
     #[test]
@@ -288,14 +282,34 @@ mod tests {
         assert!(classes.iter().any(|class| class.name == "Reviewer"));
         let root = temp.path().join("classes").join("Reviewer");
         assert!(root.join("AGENTS.md").is_file());
-        assert_eq!(
-            std::fs::read_to_string(root.join("GEMINI.md")).expect("gemini stub"),
-            "@AGENTS.md\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(root.join("CLAUDE.md")).expect("claude stub"),
-            "@AGENTS.md\n"
-        );
+        assert!(!root.join("GEMINI.md").exists());
+        assert!(!root.join("CLAUDE.md").exists());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn initialize_classes_preserves_provider_files_beneath_linked_classes_parent() {
+        let home = tempfile::tempdir().expect("home");
+        let external = tempfile::tempdir().expect("external classes");
+        let reviewer = external.path().join("Reviewer");
+        std::fs::create_dir_all(&reviewer).expect("reviewer class");
+        std::fs::write(reviewer.join("CLAUDE.md"), "@AGENTS.md\n").expect("claude stub");
+        std::fs::write(reviewer.join("GEMINI.md"), "@AGENTS.md\n").expect("gemini stub");
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(external.path(), home.path().join("classes"))
+            .expect("linked classes parent");
+        #[cfg(windows)]
+        junction::create(external.path(), home.path().join("classes"))
+            .expect("linked classes parent");
+
+        super::initialize_classes(home.path()).expect("initialize classes");
+
+        assert!(reviewer.join("CLAUDE.md").exists());
+        assert!(reviewer.join("GEMINI.md").exists());
+
+        #[cfg(windows)]
+        junction::delete(home.path().join("classes")).expect("remove classes junction");
     }
 
     #[test]

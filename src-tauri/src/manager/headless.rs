@@ -2999,7 +2999,9 @@ mod tests {
         assert_eq!(context.habitat_root, Some(expected_habitat.clone()));
         assert_eq!(context.command_cwd, expected_habitat.join("workspace"));
         assert_eq!(context.args_cwd, context.command_cwd);
-        assert!(expected_habitat.join("GEMINI.md").is_file());
+        assert!(expected_habitat.join("AGENTS.md").is_file());
+        assert!(!expected_habitat.join("GEMINI.md").exists());
+        assert!(!expected_habitat.join("CLAUDE.md").exists());
         assert!(expected_habitat
             .join(".agents")
             .join("skills")

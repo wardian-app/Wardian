@@ -13,8 +13,8 @@ overrides this default. Read-only investigation, explanation, or review does
 not authorize implementation or publication.
 
 This policy applies to Wardian only. Keep shared skills and class/global
-instructions project-neutral. CLAUDE.md and GEMINI.md already import AGENTS.md;
-do not duplicate the policy in those files.
+instructions project-neutral; do not duplicate this repository policy outside
+the canonical `AGENTS.md`.
 
 ## Publish verified work
 

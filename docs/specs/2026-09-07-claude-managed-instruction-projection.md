@@ -1,6 +1,6 @@
 # Claude managed instruction projection
 
-- **Status:** Implemented; real-provider acceptance pending
+- **Status:** Superseded by [AGENTS-only provider instructions](./2026-09-18-agents-only-provider-instructions.md)
 - **Date:** 2026-09-07
 - **Issue:** #1176
 
