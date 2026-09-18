@@ -233,8 +233,8 @@ export const LibraryList: React.FC = () => {
     const handleCreateItem = (name: string) => {
         if (activeSection === 'classes') {
             // Classes must be created through `create_agent_class` — it
-            // registers the class in classes.json and writes the provider
-            // stubs (GEMINI.md/CLAUDE.md). The generic `saveItem` write only
+            // registers the class in classes.json and creates its canonical
+            // AGENTS.md. The generic `saveItem` write only
             // creates `classes/<name>/AGENTS.md` on disk, producing a
             // "phantom" class the rest of the app can never see (absent from
             // the spawn dropdown) or delete (final-review FIX-NOW 1).

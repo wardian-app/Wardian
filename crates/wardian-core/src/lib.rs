@@ -22,6 +22,7 @@ pub mod memory;
 pub mod models;
 pub mod native_transport;
 pub mod paths;
+pub mod provider_instructions;
 pub mod queue;
 pub mod registry_reconciliation;
 pub mod schedule;
