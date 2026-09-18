@@ -2338,6 +2338,56 @@ describe("Agent Watchlist Sidebar", () => {
     });
   });
 
+  it("projects a structured provider question from agent-json-event while the agent is processing", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    const { emitStatus, emitJson } = captureQueueAgentListeners();
+
+    await act(async () => {
+      render(<App />);
+    });
+    await screen.findByText("All Agents");
+    mockInvoke.mockClear();
+
+    await act(async () => {
+      emitStatus({ session_id: "agent-1", current_status: "Processing..." });
+      emitJson({
+        session_id: "agent-1",
+        data: {
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "request_user_input_async",
+            call_id: "codex-live-question-1",
+            arguments: JSON.stringify({
+              questions: [{ title: "Which environment?", options: ["Staging", "Production"] }],
+            }),
+          },
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(useQueueStore.getState().items).toEqual([
+        expect.objectContaining({
+          type: "action_needed",
+          agent_session_id: "agent-1",
+          agent_name: "Alpha",
+          evidence_id: "provider-question:agent-1:codex:codex-live-question-1",
+          provider_question: expect.objectContaining({
+            provider: "codex",
+            call_id: "codex-live-question-1",
+          }),
+        }),
+      ]);
+    });
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "save_queue_items",
+      expect.objectContaining({
+        items: [expect.objectContaining({ type: "action_needed" })],
+      }),
+    );
+  });
+
   it("adds an action-needed queue item when Action Needed is the first observed status", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     const { emitStatus } = captureQueueAgentListeners();

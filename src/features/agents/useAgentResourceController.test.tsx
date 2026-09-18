@@ -302,6 +302,7 @@ describe("useAgentResourceController", () => {
     expect(on_agent_json_event).toHaveBeenCalledWith(
       "agent-1",
       { type: "progress", content: "Indexing files" },
+      "Alpha",
     );
 
     act(() => {

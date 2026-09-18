@@ -165,6 +165,45 @@ describe("RemoteInboxView", () => {
     expect(runInboxAction).toHaveBeenCalledWith("resolve_approval", "approval-1", "Approve");
   });
 
+  it("renders structured provider questions without numeric response buttons", () => {
+    const openAgent = vi.fn().mockResolvedValue(undefined);
+    useRemoteStore.setState({
+      openAgent,
+      remoteQueueItems: [{
+        id: "remote-structured-question",
+        type: "action_needed",
+        timestamp: Date.now(),
+        read: false,
+        agent_session_id: "agent-1",
+        agent_name: "Coder",
+        summary: "Which files should be included?",
+        evidence_id: "provider-question:agent-1:claude:claude-call-1",
+        evidence_source: "provider_runtime",
+        provider_question: {
+          provider: "claude",
+          call_id: "claude-call-1",
+          questions: [{
+            header: "Scope",
+            prompt: "Which files should be included?",
+            options: [{ label: "Frontend", description: "Use the frontend source tree." }],
+          }],
+        },
+      }],
+    });
+
+    render(<RemoteInboxView />);
+
+    expect(screen.getByText("Which files should be included?")).toBeVisible();
+    expect(screen.getByText("Frontend")).toBeVisible();
+    expect(screen.getByTestId("provider-question-details")).toHaveTextContent("Use the frontend source tree.");
+    expect(screen.getByRole("button", { name: "Open agent terminal" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /send action response/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Frontend" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open agent terminal" }));
+    expect(openAgent).toHaveBeenCalledWith("agent-1");
+  });
+
   it("does not resend a provider choice when Inbox acknowledgement fails", async () => {
     const runInboxAction = vi.fn()
       .mockRejectedValueOnce(new Error("Remote request failed: 503"))

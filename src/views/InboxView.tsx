@@ -5,6 +5,7 @@ import type { QueueItem } from "../types";
 import { DocsLink } from "../components/DocsLink";
 import { QUEUE_EVENT_LABELS, QUEUE_EVENT_TYPES, queueItemIsVisible } from "../features/queue/queueFilters";
 import { parseQueueActionChoices, type QueueActionChoice } from "../features/queue/actionChoices";
+import { ProviderQuestionDetails } from "../features/queue/ProviderQuestionDetails";
 import { QUEUE_TONE_CLASSES, queueItemIsAgentEvent, queueItemLabel, queueItemTone } from "../features/queue/queuePresentation";
 import { isClearableLegacyCompletion, providerChoiceRecorded } from "../features/queue/queueTriage";
 import { useLazyQueueItems } from "../features/queue/useLazyQueueItems";
@@ -68,11 +69,13 @@ function QueueCard({ item, onOpenAgent, onSendAgentPrompt }: QueueCardProps) {
   const isActionNeeded = item.type === "action_needed";
   const isApprovalRequest = item.type === "approval_request";
   const title = item.notification_title ?? (isAgent ? item.agent_name : item.automation_name);
-  const bodyText = item.status === "failed" && item.error ? item.error : item.summary;
+  const bodyText = item.provider_question
+    ? undefined
+    : item.status === "failed" && item.error ? item.error : item.summary;
   const isExpandable = Boolean(bodyText && (bodyText.length > 220 || bodyText.split("\n").length > 4));
   const summaryId = `queue-item-summary-${item.id}`;
   const canOpenAgent = Boolean(item.agent_session_id && onOpenAgent);
-  const actionChoices = isActionNeeded ? parseQueueActionChoices(bodyText) : [];
+  const actionChoices = isActionNeeded && !item.provider_question ? parseQueueActionChoices(bodyText) : [];
   const canUseActionChoices = Boolean(item.agent_session_id && onSendAgentPrompt && actionChoices.length > 0);
   const providerChoiceUncertain = Boolean(item.provider_choice_pending);
   const providerChoiceNeedsAcknowledgement = Boolean(item.provider_choice_sent && !item.read);
@@ -177,6 +180,7 @@ function QueueCard({ item, onOpenAgent, onSendAgentPrompt }: QueueCardProps) {
               )}
             </div>
           )}
+          {item.provider_question && <ProviderQuestionDetails question={item.provider_question} />}
           {isApprovalRequest && (
             <dl className="mt-3 grid gap-2 text-[12px] leading-5 text-muted">
               <div><dt className="font-semibold text-primary">Proposed action</dt><dd>{item.proposed_action}</dd></div>

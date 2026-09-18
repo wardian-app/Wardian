@@ -16,11 +16,23 @@ async function installQueueV2IpcMock(page: Page) {
       status?: "completed" | "failed";
       summary?: string;
       error?: string;
+      provider_question?: {
+        provider: "codex" | "claude";
+        call_id: string;
+        questions: Array<{
+          id?: string;
+          header?: string;
+          prompt: string;
+          options: Array<{ label: string; description?: string }>;
+        }>;
+      };
     };
 
     const now = Date.now();
     const useQueueBacklog = (window as Window & { __WARDIAN_E2E_QUEUE_BACKLOG__?: boolean })
       .__WARDIAN_E2E_QUEUE_BACKLOG__ === true;
+    const useStructuredQuestion = (window as Window & { __WARDIAN_E2E_QUEUE_STRUCTURED_QUESTION__?: boolean })
+      .__WARDIAN_E2E_QUEUE_STRUCTURED_QUESTION__ === true;
     let queueItems: QueueItem[] = useQueueBacklog ? Array.from({ length: 120 }, (_, index) => ({
       id: `backlog-${index}`,
       type: "agent_completed",
@@ -28,7 +40,7 @@ async function installQueueV2IpcMock(page: Page) {
       read: false,
       agent_name: `Inbox history ${index}`,
       summary: `Completed queued task ${index}.`,
-    })) : [
+    })) : useStructuredQuestion ? [] : [
       {
         id: "action-needed-1",
         type: "action_needed",
@@ -75,6 +87,7 @@ async function installQueueV2IpcMock(page: Page) {
       __TAURI_EVENT_PLUGIN_INTERNALS__?: Record<string, unknown>;
       __WARDIAN_E2E_SUBMITTED_PROMPTS__?: Array<{ sessionId: string; prompt: string }>;
       __WARDIAN_E2E_AUTOMATION_INBOX_UPDATE__?: (payload: Record<string, unknown>) => void;
+      __WARDIAN_E2E_QUEUE_RUNTIME__?: { emit: (event: string, payload: unknown) => void };
     };
 
     tauriWindow.__WARDIAN_E2E_SUBMITTED_PROMPTS__ = submittedPrompts;
@@ -93,6 +106,15 @@ async function installQueueV2IpcMock(page: Page) {
         ? undefined
         : callbacks.get(handlerId) as ((event: unknown) => void) | undefined;
       handler?.({ payload });
+    };
+    tauriWindow.__WARDIAN_E2E_QUEUE_RUNTIME__ = {
+      emit: (event, payload) => {
+        const handlerId = eventHandlers.get(event);
+        const handler = handlerId === undefined
+          ? undefined
+          : callbacks.get(handlerId) as ((event: unknown) => void) | undefined;
+        handler?.({ event, id: 0, payload });
+      },
     };
     tauriWindow.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
       unregisterListener: () => undefined,
@@ -251,6 +273,68 @@ test.describe("Inbox", () => {
     await expect.poll(async () =>
       page.evaluate(() => window.__WARDIAN_E2E_SUBMITTED_PROMPTS__?.[0]?.prompt ?? ""),
     ).toBe("1");
+  });
+
+  test("projects live Codex questions through agent-json-event and keeps them read-only", async ({ page }, testInfo) => {
+    await page.addInitScript(() => {
+      (window as Window & { __WARDIAN_E2E_QUEUE_STRUCTURED_QUESTION__?: boolean })
+        .__WARDIAN_E2E_QUEUE_STRUCTURED_QUESTION__ = true;
+    });
+    await installQueueV2IpcMock(page);
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
+    await openSurface(page, "inbox");
+
+    const emit = (event: string, payload: unknown) => page.evaluate(
+      ({ eventName, eventPayload }) => {
+        (window as Window & {
+          __WARDIAN_E2E_QUEUE_RUNTIME__?: { emit: (event: string, payload: unknown) => void };
+        }).__WARDIAN_E2E_QUEUE_RUNTIME__?.emit(eventName, eventPayload);
+      },
+      { eventName: event, eventPayload: payload },
+    );
+    const call = (callId: string) => ({
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "request_user_input_async",
+        call_id: callId,
+        arguments: JSON.stringify({
+          questions: [{ title: "Which environment should receive this change?", options: ["Staging", "Production"] }],
+        }),
+      },
+    });
+
+    await emit("agent-status-updated", { session_id: "mock-session-e2e-001", current_status: "Processing..." });
+    await emit("agent-json-event", { session_id: "mock-session-e2e-001", data: call("codex-call-1") });
+    await expect(page.getByText("Which environment should receive this change?", { exact: true })).toBeVisible();
+    await expect(page.getByText("Staging", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Open agent terminal" }).first()).toBeVisible();
+    await expect(page.getByRole("button", { name: /send action response/i })).toHaveCount(0);
+
+    await emit("agent-json-event", { session_id: "mock-session-e2e-001", data: call("codex-call-1") });
+    await emit("agent-json-event", { session_id: "mock-session-e2e-001", data: call("codex-call-2") });
+    await emit("agent-json-event", {
+      session_id: "mock-session-e2e-001",
+      data: {
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          call_id: "codex-call-1",
+          output: JSON.stringify({ accepted: true }),
+        },
+      },
+    });
+    await expect(page.getByTestId("provider-question-details")).toHaveCount(2);
+
+    const screenshotPath = process.env.WARDIAN_ISSUE1367_SCREENSHOT
+      ?? testInfo.outputPath("provider-question-inbox.png");
+    await page.locator('[data-testid="surface-panel"][data-surface-type="inbox"]')
+      .screenshot({ path: screenshotPath, animations: "disabled" });
+    await testInfo.attach("issue1367-provider-question-inbox", {
+      path: screenshotPath,
+      contentType: "image/png",
+    });
   });
 
   test("projects automation approval and completion events into Inbox", async ({ page }) => {

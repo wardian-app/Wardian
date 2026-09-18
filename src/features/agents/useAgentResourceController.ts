@@ -34,7 +34,7 @@ export type AgentTurnCompletion = {
 
 export type AgentResourceControllerOptions = {
   /** Receives the provider event after the resource controller updates its thought projection. */
-  on_agent_json_event?: (session_id: string, data: Record<string, unknown>) => void;
+  on_agent_json_event?: (session_id: string, data: Record<string, unknown>, agent_name?: string) => void;
   /** Receives status transitions so queue policy can remain outside this resource owner. */
   on_agent_status_transition?: (transition: AgentStatusTransition) => void;
   /** Receives explicit provider turn completions, separate from ordinary idle status changes. */
@@ -335,7 +335,11 @@ export function useAgentResourceController(
       listen<AgentJsonEvent>("agent-json-event", (event) => {
         const { session_id, data } = event.payload;
         const json_data = data as Record<string, unknown>;
-        options_ref.current.on_agent_json_event?.(session_id, json_data);
+        options_ref.current.on_agent_json_event?.(
+          session_id,
+          json_data,
+          agents_ref.current.find((agent) => agent.session_id === session_id)?.session_name,
+        );
         const effect = classifyJsonEvent(json_data);
         // One event per JSON line of provider output. Without the identity check
         // a streaming agent re-rendered the whole application per line, including

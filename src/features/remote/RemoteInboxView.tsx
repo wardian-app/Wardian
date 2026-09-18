@@ -2,6 +2,7 @@ import React, { useMemo, useState } from "react";
 import { Bot, CheckCheck, ChevronDown, ChevronUp, Filter, GitBranch, Inbox, Terminal, Trash2, X } from "lucide-react";
 import type { QueueItem } from "../../types";
 import { parseQueueActionChoices, type QueueActionChoice } from "../queue/actionChoices";
+import { ProviderQuestionDetails } from "../queue/ProviderQuestionDetails";
 import { QUEUE_TONE_CLASSES, queueItemIsAgentEvent, queueItemLabel, queueItemTone } from "../queue/queuePresentation";
 import { isClearableLegacyCompletion, providerChoiceAcknowledgementUnresolved } from "../queue/queueTriage";
 import { useLazyQueueItems } from "../queue/useLazyQueueItems";
@@ -63,7 +64,9 @@ function RemoteInboxCard({ item, onAction, onOpenAgent, onSendAgentPrompt, onRef
   const providerChoiceRecoveryByItem = useRemoteStore((state) => state.providerChoiceRecoveryByItem[item.id]);
   const recordProviderChoiceRecovery = useRemoteStore((state) => state.recordProviderChoiceRecovery);
   const title = item.notification_title ?? item.agent_name ?? item.automation_name ?? "Unknown";
-  const bodyText = item.status === "failed" && item.error ? item.error : item.summary;
+  const bodyText = item.provider_question
+    ? undefined
+    : item.status === "failed" && item.error ? item.error : item.summary;
   const Icon = queueItemIsAgentEvent(item) ? Bot : GitBranch;
   const classes = QUEUE_TONE_CLASSES[queueItemTone(item)];
   const isExpandable = Boolean(bodyText && (bodyText.length > 220 || bodyText.split("\n").length > 4));
@@ -71,7 +74,7 @@ function RemoteInboxCard({ item, onAction, onOpenAgent, onSendAgentPrompt, onRef
   const isApprovalRequest = item.type === "approval_request";
   const isPendingApproval = Boolean(item.automation_approval || item.notification_status === "awaiting_reply");
   const canOpenAgent = Boolean(item.agent_session_id);
-  const actionChoices = item.type === "action_needed" ? parseQueueActionChoices(bodyText) : [];
+  const actionChoices = item.type === "action_needed" && !item.provider_question ? parseQueueActionChoices(bodyText) : [];
   const approvalChoices = isApprovalRequest && isPendingApproval ? item.approval_choices ?? [] : [];
   const providerChoiceSent = item.provider_choice_sent ?? providerChoiceRecoveryByItem ?? null;
   const providerChoicePending = item.provider_choice_pending ?? null;
@@ -169,6 +172,7 @@ function RemoteInboxCard({ item, onAction, onOpenAgent, onSendAgentPrompt, onRef
               )}
             </div>
           )}
+          {item.provider_question && <ProviderQuestionDetails question={item.provider_question} />}
           {isApprovalRequest && (
             <dl className="mt-3 grid gap-2 text-[12px] leading-5 text-muted">
               {item.proposed_action && <div><dt className="font-semibold text-primary">Proposed action</dt><dd>{item.proposed_action}</dd></div>}
