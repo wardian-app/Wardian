@@ -23,6 +23,7 @@
 //! provider that cannot report never ranks as the cheapest one.
 
 pub mod activity;
+pub mod attribution;
 pub mod horizon;
 pub mod identity;
 pub mod ingest;

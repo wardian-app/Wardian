@@ -19,7 +19,7 @@ Where [Dashboard](./dashboard.md) answers *is anything wrong right now*, Analyti
 2. Choose what the **rows** are: agent, model, or provider.
 3. Choose the **measure**. Options are grouped as Work (active time, turns), Tokens (new content processed, new input, cached input, cache writes, output, reasoning, cache hit rate), and Files.
 4. Choose the **horizon**: today, 24 hours, 7 days, 30 days, or all.
-5. Read the matrix. Hover any cell for its exact value and moment; click an agent row to open that agent.
+5. Read the matrix. Hover any cell for its exact value and moment; click an agent row to open its combined, own-work, and subagent breakdown. Use **Open agent** inside the detail view to preserve the usual agent navigation.
 
 The bucket size follows the horizon, and the axis labels the start of each day rather than printing a run of bare hours.
 
@@ -41,7 +41,7 @@ Pick "Cached input" to see the reads on their own, "Cache writes" for the new co
 - Not every provider reports every measure. Cache writes are routine on Claude and Pi, and reported as zero by Codex, whose upstream does not bill for them. "Reasoning" is reported by Codex, Pi, and OpenCode, and is already counted inside output, so it is never added to a total.
 - History begins when telemetry ingest first read a provider's logs. Sessions whose logs have been deleted cannot be recovered.
 - The matrix is a lookup surface. For live state and a monitor you leave open, use [Dashboard](./dashboard.md).
-- For per-conversation detail, open the agent session rather than reading it off the axis.
+- For per-conversation detail, use **Open agent** in the breakdown view rather than reading it off the axis.
 
 ## Related Links
 

@@ -744,6 +744,7 @@ pub fn run() {
             commands::telemetry::telemetry_series,
             commands::telemetry::telemetry_activity,
             commands::telemetry::telemetry_refresh,
+            commands::telemetry_agent_breakdown::telemetry_agent_breakdown,
             commands::terminal::send_input_to_agent,
             commands::terminal::submit_prompt_to_agent,
             commands::terminal::send_binary_input_to_agent,

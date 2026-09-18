@@ -1,6 +1,10 @@
 import React, { useState } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
 
+import {
+  AgentTelemetryDetails,
+  type AgentTelemetryDetailsTarget,
+} from "../features/telemetry/AgentTelemetryDetails";
 import { useTelemetryMatrix } from "../features/telemetry/useTelemetryMatrix";
 import {
   cellIntensity,
@@ -66,6 +70,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
   );
   const focusKey = initial?.focus_key ?? null;
   const [refreshing, setRefreshing] = useState(false);
+  const [detailsTarget, setDetailsTarget] = useState<AgentTelemetryDetailsTarget | null>(null);
 
   const { matrix, loading, error, refresh } = useTelemetryMatrix({
     horizon,
@@ -170,8 +175,22 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
       )}
 
       {matrix && (
-        <MatrixGrid matrix={matrix} focusKey={focusKey} onSelectRow={onOpenAgent} />
+        <MatrixGrid
+          matrix={matrix}
+          focusKey={focusKey}
+          onSelectRow={(row) => setDetailsTarget({
+            session_id: row.key,
+            label: row.label,
+            window: matrix.window,
+          })}
+        />
       )}
+
+      <AgentTelemetryDetails
+        target={detailsTarget}
+        onClose={() => setDetailsTarget(null)}
+        onOpenAgent={onOpenAgent}
+      />
     </div>
   );
 };
@@ -183,7 +202,7 @@ function MatrixGrid({
 }: {
   matrix: TelemetryMatrix;
   focusKey?: string | null;
-  onSelectRow?: (key: string) => void;
+  onSelectRow?: (row: TelemetryMatrixRow) => void;
 }) {
   if (matrix.rows.length === 0) {
     return (
@@ -356,14 +375,14 @@ function MatrixRowView({
   row: TelemetryMatrixRow;
   matrix: TelemetryMatrix;
   focused?: boolean;
-  onSelect?: (key: string) => void;
+  onSelect?: (row: TelemetryMatrixRow) => void;
 }) {
   const Wrapper = onSelect ? "button" : "div";
   const dayStarts = dayStartIndices(matrix.buckets);
   return (
     <Wrapper
       {...(onSelect
-        ? { type: "button" as const, onClick: () => onSelect(row.key) }
+        ? { type: "button" as const, onClick: () => onSelect(row) }
         : {})}
       className={`analytics-view__row flex items-center gap-2 min-w-fit rounded px-1 py-0.5 text-left ${
         onSelect ? "hover:bg-wardian-card-bg-muted cursor-pointer" : ""

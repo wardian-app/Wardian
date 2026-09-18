@@ -23,6 +23,7 @@ For "exactly how much did this agent do between Tuesday and Friday", use [Analyt
 3. Scan the rows. Each quantitative cell carries an inline bar or sparkline beside its number.
 4. Set the trailing **window** from the header when the default 24 hours is the wrong span for what you are watching.
 5. Use **Columns** to add or remove measures *in the table*. Your choice is remembered per Dashboard, so two Dashboards can watch different things. The provider strip above is not affected; it always carries the same six figures.
+6. Click any agent row, including an idle row, to inspect the same combined, own-work, and subagent breakdown used by Analytics. Use **Open agent** inside the detail view to preserve the usual agent navigation.
 
 Dashboard is a singleton surface. Opening it again focuses its existing tab instead of creating a duplicate.
 

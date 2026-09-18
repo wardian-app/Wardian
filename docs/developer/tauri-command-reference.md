@@ -565,6 +565,28 @@ same exact grant function as the native picker; the latter exposes aggregate
 ownership counts only. Both are compiled out of release builds and are not
 frontend application APIs.
 
+## Telemetry (`commands/telemetry.rs`, `commands/telemetry_agent_breakdown.rs`)
+
+Current telemetry commands:
+
+- `telemetry_overview`
+- `telemetry_dashboard`
+- `telemetry_fleet`
+- `telemetry_matrix`
+- `telemetry_series`
+- `telemetry_activity`
+- `telemetry_refresh`
+- `telemetry_agent_breakdown(session_id, from, to)`
+
+`telemetry_agent_breakdown` accepts exact RFC 3339 `from` and `to` values with
+`from < to`. Its IPC argument keys are `session_id`, `from`, and `to`; the
+response preserves that exact window and returns the stable 13-value
+`TelemetryMeasure` list with independent `own` and `subagents` coverage.
+
+Dashboard fleet token-reporting presence uses the same verified root grouping
+as its totals. Any non-null token component, including cache writes or reasoning,
+counts as reported within the exact window; a reported zero remains visible.
+
 ## Automations (`commands/automation.rs`)
 
 Current automation commands:

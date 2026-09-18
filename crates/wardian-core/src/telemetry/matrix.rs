@@ -18,6 +18,7 @@
 //! the empty ones, because the columns are a time axis: dropping quiet buckets
 //! would compress it and make two rows with different gaps appear to line up.
 
+use crate::telemetry::attribution::{agent_root_join, agent_root_key, distinct_turn_expr};
 use crate::telemetry::horizon::HorizonWindow;
 use crate::telemetry::query::Dimension;
 use chrono::{DateTime, Datelike, Duration, Local, TimeZone, Utc};
@@ -371,6 +372,47 @@ pub fn matrix_at(
     row_limit: usize,
     max_buckets: Option<usize>,
 ) -> rusqlite::Result<Matrix> {
+    matrix_at_impl(
+        conn,
+        window,
+        dimension,
+        measure,
+        row_limit,
+        max_buckets,
+        false,
+    )
+}
+
+/// Build a matrix after grouping verified provider-child facts under roster roots.
+pub fn grouped_matrix_at(
+    conn: &Connection,
+    window: &HorizonWindow,
+    dimension: Dimension,
+    measure: Measure,
+    row_limit: usize,
+    max_buckets: Option<usize>,
+) -> rusqlite::Result<Matrix> {
+    matrix_at_impl(
+        conn,
+        window,
+        dimension,
+        measure,
+        row_limit,
+        max_buckets,
+        true,
+    )
+}
+
+fn matrix_at_impl(
+    conn: &Connection,
+    window: &HorizonWindow,
+    dimension: Dimension,
+    measure: Measure,
+    row_limit: usize,
+    max_buckets: Option<usize>,
+    grouped_agents: bool,
+) -> rusqlite::Result<Matrix> {
+    let grouped_agent_rows = grouped_agents && dimension == Dimension::Agent;
     let from = parse_instant(&window.from);
     let to = parse_instant(&window.to);
 
@@ -397,11 +439,18 @@ pub fn matrix_at(
     let cells = if needs_rollup {
         rollup_active_cells(conn, window, grain)?
     } else if measure == Measure::ActiveMs {
-        activity_cells(conn, window, dimension, &bounds)?
+        activity_cells(conn, window, dimension, &bounds, grouped_agent_rows)?
     } else {
-        fact_cells(conn, window, dimension, measure, grain)?
+        fact_cells(conn, window, dimension, measure, grain, grouped_agent_rows)?
     };
-    let totals = row_totals(conn, window, dimension, measure, needs_rollup)?;
+    let totals = row_totals(
+        conn,
+        window,
+        dimension,
+        measure,
+        needs_rollup,
+        grouped_agent_rows,
+    )?;
 
     let index: HashMap<&str, usize> = buckets
         .iter()
@@ -567,6 +616,7 @@ fn fact_cells(
     dimension: Dimension,
     measure: Measure,
     grain: Grain,
+    grouped_agents: bool,
 ) -> rusqlite::Result<CellMap> {
     let source = measure.source();
     let table = source.table();
@@ -574,16 +624,24 @@ fn fact_cells(
     let needs_join = dimension == Dimension::Model && source == MeasureSource::Edits;
     // Aliased whenever the model join is in play, so `e.path` resolves.
     let (alias, join, column) = if needs_join {
-        ("e", EDIT_MODEL_JOIN, format!("e.{time}"))
+        ("e", EDIT_MODEL_JOIN.to_string(), format!("e.{time}"))
+    } else if grouped_agents {
+        ("f", agent_root_join("f"), format!("f.{time}"))
     } else {
-        ("", "", time.to_string())
+        ("", String::new(), time.to_string())
     };
-    let expr = if needs_join {
+    let expr = if grouped_agents && measure == Measure::Turns {
+        distinct_turn_expr(alias)
+    } else if needs_join {
         measure.fact_expr().replace("path", "e.path")
     } else {
         measure.fact_expr().to_string()
     };
-    let key = fact_key(dimension, source);
+    let key = if grouped_agents {
+        agent_root_key(alias)
+    } else {
+        fact_key(dimension, source).to_string()
+    };
     let bucket = bucket_expr(&column, grain);
 
     let sql = format!(
@@ -606,14 +664,22 @@ fn activity_cells(
     window: &HorizonWindow,
     dimension: Dimension,
     bounds: &[(DateTime<Utc>, DateTime<Utc>)],
+    grouped_agents: bool,
 ) -> rusqlite::Result<CellMap> {
-    let key = match dimension {
-        Dimension::Provider => "provider",
-        // Model is handled by the rollup path; activity carries no model.
-        _ => "session_id",
+    let (key, join) = if grouped_agents {
+        (agent_root_key("a"), agent_root_join("a"))
+    } else {
+        (
+            match dimension {
+                Dimension::Provider => "provider".to_string(),
+                // Model is handled by the rollup path; activity carries no model.
+                _ => "session_id".to_string(),
+            },
+            String::new(),
+        )
     };
     let sql = format!(
-        "SELECT {key}, started_at, ended_at FROM telemetry_activity
+        "SELECT {key}, a.started_at, a.ended_at FROM telemetry_activity a {join}
          WHERE ended_at > ?1 AND started_at < ?2"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -717,6 +783,27 @@ pub fn totals_at(
     dimension: Dimension,
     measures: &[Measure],
 ) -> rusqlite::Result<HashMap<Measure, HashMap<String, i64>>> {
+    totals_at_impl(conn, window, dimension, measures, false)
+}
+
+/// Window-wide totals after grouping verified provider-child facts under roots.
+pub fn grouped_totals_at(
+    conn: &Connection,
+    window: &HorizonWindow,
+    dimension: Dimension,
+    measures: &[Measure],
+) -> rusqlite::Result<HashMap<Measure, HashMap<String, i64>>> {
+    totals_at_impl(conn, window, dimension, measures, true)
+}
+
+fn totals_at_impl(
+    conn: &Connection,
+    window: &HorizonWindow,
+    dimension: Dimension,
+    measures: &[Measure],
+    grouped_agents: bool,
+) -> rusqlite::Result<HashMap<Measure, HashMap<String, i64>>> {
+    let grouped_agent_rows = grouped_agents && dimension == Dimension::Agent;
     let mut answers: HashMap<Measure, HashMap<String, i64>> = HashMap::new();
 
     // Grouped by source, in a stable order, so the emitted SQL does not depend
@@ -743,9 +830,16 @@ pub fn totals_at(
                 let needs_rollup = dimension == Dimension::Model;
                 answers.insert(
                     measure,
-                    row_totals(conn, window, dimension, measure, needs_rollup)?
-                        .into_iter()
-                        .collect(),
+                    row_totals(
+                        conn,
+                        window,
+                        dimension,
+                        measure,
+                        needs_rollup,
+                        grouped_agent_rows,
+                    )?
+                    .into_iter()
+                    .collect(),
                 );
             }
             continue;
@@ -755,15 +849,23 @@ pub fn totals_at(
         let time = source.time_column();
         let needs_join = dimension == Dimension::Model && source == MeasureSource::Edits;
         let (alias, join, column) = if needs_join {
-            ("e", EDIT_MODEL_JOIN, format!("e.{time}"))
+            ("e", EDIT_MODEL_JOIN.to_string(), format!("e.{time}"))
+        } else if grouped_agent_rows {
+            ("f", agent_root_join("f"), format!("f.{time}"))
         } else {
-            ("", "", time.to_string())
+            ("", String::new(), time.to_string())
         };
-        let key = fact_key(dimension, source);
+        let key = if grouped_agent_rows {
+            agent_root_key(alias)
+        } else {
+            fact_key(dimension, source).to_string()
+        };
         let exprs: Vec<String> = batch
             .iter()
             .map(|measure| {
-                if needs_join {
+                if grouped_agent_rows && *measure == Measure::Turns {
+                    distinct_turn_expr(alias)
+                } else if needs_join {
                     measure.fact_expr().replace("path", "e.path")
                 } else {
                     measure.fact_expr().to_string()
@@ -817,6 +919,7 @@ fn row_totals(
     dimension: Dimension,
     measure: Measure,
     needs_rollup: bool,
+    grouped_agents: bool,
 ) -> rusqlite::Result<Vec<(String, i64)>> {
     let sql = if needs_rollup {
         "SELECT model, COALESCE(SUM(measured_active_ms), 0) + COALESCE(SUM(clustered_active_ms), 0)
@@ -825,18 +928,25 @@ fn row_totals(
          GROUP BY model"
             .to_string()
     } else if measure == Measure::ActiveMs {
-        let key = match dimension {
-            Dimension::Provider => "provider",
-            _ => "session_id",
+        let (key, join) = if grouped_agents {
+            (agent_root_key("a"), agent_root_join("a"))
+        } else {
+            (
+                match dimension {
+                    Dimension::Provider => "provider".to_string(),
+                    _ => "session_id".to_string(),
+                },
+                String::new(),
+            )
         };
         // Clamped to the window so a span crossing the edge contributes only
         // the part inside it, matching what the cells drew.
         format!(
             "SELECT {key}, COALESCE(SUM(
-                 (MIN(strftime('%s', ended_at), strftime('%s', ?2))
-                  - MAX(strftime('%s', started_at), strftime('%s', ?1))) * 1000), 0)
-             FROM telemetry_activity
-             WHERE ended_at > ?1 AND started_at < ?2
+                 (MIN(strftime('%s', a.ended_at), strftime('%s', ?2))
+                  - MAX(strftime('%s', a.started_at), strftime('%s', ?1))) * 1000), 0)
+             FROM telemetry_activity a {join}
+             WHERE a.ended_at > ?1 AND a.started_at < ?2
              GROUP BY {key}"
         )
     } else {
@@ -845,16 +955,24 @@ fn row_totals(
         let time = source.time_column();
         let needs_join = dimension == Dimension::Model && source == MeasureSource::Edits;
         let (alias, join, column) = if needs_join {
-            ("e", EDIT_MODEL_JOIN, format!("e.{time}"))
+            ("e", EDIT_MODEL_JOIN.to_string(), format!("e.{time}"))
+        } else if grouped_agents {
+            ("f", agent_root_join("f"), format!("f.{time}"))
         } else {
-            ("", "", time.to_string())
+            ("", String::new(), time.to_string())
         };
-        let expr = if needs_join {
+        let expr = if grouped_agents && measure == Measure::Turns {
+            distinct_turn_expr(alias)
+        } else if needs_join {
             measure.fact_expr().replace("path", "e.path")
         } else {
             measure.fact_expr().to_string()
         };
-        let key = fact_key(dimension, source);
+        let key = if grouped_agents {
+            agent_root_key(alias)
+        } else {
+            fact_key(dimension, source).to_string()
+        };
         format!(
             "SELECT {key}, {expr}
              FROM {table} {alias} {join}

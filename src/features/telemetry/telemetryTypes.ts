@@ -68,6 +68,24 @@ export interface HorizonWindow {
   from_floored: boolean;
 }
 
+/** One row in the on-demand own-versus-subagents telemetry view. */
+export interface TelemetryAgentBreakdownMeasure {
+  measure: TelemetryMeasure;
+  total: number | null;
+  own: number | null;
+  subagents: number | null;
+}
+
+/** @ipcContract `telemetry_agent_breakdown` response DTO. */
+export interface TelemetryAgentBreakdown {
+  key: string;
+  label: string;
+  can_open_agent: boolean;
+  window: HorizonWindow;
+  /** Stable backend order; the client renders this list without aggregation. */
+  measures: TelemetryAgentBreakdownMeasure[];
+}
+
 /** How an interval's duration was established. */
 /** @ipcContract Mirrors the Rust activity-method enum. No TypeScript client reads it today. */
 export type ActivityMethod = "measured" | "clustered" | "decoded";
