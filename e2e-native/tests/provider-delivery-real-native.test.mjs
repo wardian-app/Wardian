@@ -24,6 +24,11 @@ import {
   startNativeSession,
   waitForAppShell,
 } from "../lib/harness.mjs";
+import {
+  WINDOWS_CWD_LIMIT,
+  afterMaintainedProviderPause,
+  assertLongHabitatPrerequisites,
+} from "../lib/provider-long-path-evidence.mjs";
 
 // Gemini is deprecated. Keep the real delivery matrix aligned with the
 // providers Wardian currently supports for new agent sessions.
@@ -122,8 +127,10 @@ function buildCanonicalReplyTaskPrompt(inputCase, marker) {
 const runRealDelivery = process.env.WARDIAN_E2E_REAL_DELIVERY === "1";
 const verifyFreshTranscript = process.env.WARDIAN_E2E_REAL_FRESH_TRANSCRIPT === "1";
 const allowPartialDelivery = process.env.WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL === "1";
+const assertLongHabitat = process.env.WARDIAN_E2E_ASSERT_LONG_HABITAT === "1";
 const workspacePath = process.env.WARDIAN_E2E_REAL_WORKSPACE || process.cwd();
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
+const longHabitatEvidenceRoot = process.env.WARDIAN_E2E_LONG_HABITAT_EVIDENCE_ROOT || null;
 function parseOpenCodeNativeMode(value) {
   const mode = value?.trim().toLowerCase() || "resume";
   if (!new Set(["resume", "fresh"]).has(mode)) {
@@ -292,6 +299,25 @@ function configOverrideForProvider(provider, environment = process.env) {
     };
   }
   return config;
+}
+
+function expectedCodexLaunchValues(environment = process.env) {
+  const override = configOverrideForProvider("codex", environment);
+  const values = [
+    {
+      key: "model",
+      value: override.model,
+      source: "configOverrideForProvider.codex.model",
+    },
+    {
+      key: "model_reasoning_effort",
+      value: override.provider_config?.reasoning_effort,
+      source: "configOverrideForProvider.codex.provider_config.reasoning_effort",
+    },
+  ].filter((expected) => typeof expected.value === "string" && expected.value.trim());
+  assert.ok(values.length > 0,
+    "long-habitat Codex acceptance requires a nonempty source-derived semantic field");
+  return values;
 }
 
 function providerInputReadinessObserved(provider, metric, visibleGrid = "") {
@@ -2252,6 +2278,13 @@ test("human composer delivery uses actual providers; not peer messaging", { time
     );
   }
 
+  if (assertLongHabitat) {
+    assert.ok(providers.includes("codex") && providers.includes("claude"),
+      "WARDIAN_E2E_ASSERT_LONG_HABITAT requires both Codex and Claude in the selected providers");
+    assert.ok(longHabitatEvidenceRoot && path.isAbsolute(longHabitatEvidenceRoot),
+      "WARDIAN_E2E_ASSERT_LONG_HABITAT requires an absolute WARDIAN_E2E_LONG_HABITAT_EVIDENCE_ROOT");
+  }
+
   if (!runRealDelivery) {
     t.skip("Set WARDIAN_E2E_REAL_DELIVERY=1 to run real-provider delivery validation.");
     return;
@@ -2308,11 +2341,36 @@ test("human composer delivery uses actual providers; not peer messaging", { time
   for (const provider of providers) {
     const agentName = `E2E-RealDelivery-${provider}-${runId}`;
     let agent = null;
+    let longHabitatPreflight = null;
+    let longHabitatDeliveryMarker = null;
     let providerError = null;
     let providerTerminalTail = null;
     let failureEvidence = null;
     try {
       agent = await spawnRealProviderAgent(session.driver, provider, agentName, workspacePath);
+      if (assertLongHabitat && ["codex", "claude"].includes(provider)) {
+        longHabitatPreflight = await assertLongHabitatPrerequisites({
+          home: harness.isolatedHome,
+          agent,
+          provider,
+          workspacePath,
+          expectedCodexValues: provider === "codex" ? expectedCodexLaunchValues() : undefined,
+        });
+        report.long_habitat ??= {};
+        report.long_habitat[provider] = {
+          preflight: {
+            managed_habitat_path_over_limit:
+              longHabitatPreflight.cwd_evidence.managed_habitat_path_utf16_units > WINDOWS_CWD_LIMIT,
+            managed_habitat_path_utf16_units: longHabitatPreflight.cwd_evidence.managed_habitat_path_utf16_units,
+            provider_cwd_utf16_units: longHabitatPreflight.cwd_evidence.provider_cwd_utf16_units,
+            provider_cwd_mode: longHabitatPreflight.cwd_evidence.provider_cwd_mode,
+            habitat_alias_expected: provider === "claude",
+            alias_owned: provider === "claude",
+            codex_launch_config_contract_captured: provider === "codex",
+          },
+        };
+        await save();
+      }
       if (provider === "antigravity" && await antigravityStartupNeedsAction(cliPath, harness, agentName)) {
         providerTerminalTail = await readProviderTerminalTail(session.driver, agent.session_id);
         assert.match(
@@ -2333,6 +2391,7 @@ test("human composer delivery uses actual providers; not peer messaging", { time
         // Setup is not native task acceptance and never substitutes for the case below.
         const setupDelivery = await runRealDeliveryCase({ driver: session.driver, harness, provider,
           agentSessionId: agent.session_id, inputCase: INPUT_CASES[0], runId: `setup-${runId}`, report, save });
+        longHabitatDeliveryMarker = setupDelivery.expected;
         if (provider === "opencode") {
           assert.ok(setupDelivery.providerSessionId, "OpenCode setup did not return its discovered provider session");
           if (opencodeNativeMode === "resume") {
@@ -2374,6 +2433,7 @@ test("human composer delivery uses actual providers; not peer messaging", { time
         // its input sender attached for the canonical task fallback case.
         deliveredCases.push(await runRealDeliveryCase({ driver: session.driver, harness, provider,
           agentSessionId: agent.session_id, inputCase: INPUT_CASES[0], runId: `setup-${runId}`, report, save }));
+        longHabitatDeliveryMarker = deliveredCases.at(-1).expected;
         composerTaskOrigin = await invokeTauri(session.driver, "spawn_agent", { req: {
           sessionName: `Composer-Task-Origin-${provider}-${runId}`, agentClass: "TestClass", folder: workspacePath,
           isOff: true, resumeSession: null, configOverride: { provider: "mock" },
@@ -2405,6 +2465,7 @@ test("human composer delivery uses actual providers; not peer messaging", { time
           report,
           save,
         }));
+        longHabitatDeliveryMarker = deliveredCases.at(-1).expected;
       }
       if (verifyFreshTranscript) {
         const staleDelivery = deliveredCases.find((delivery) => delivery.expected);
@@ -2481,6 +2542,42 @@ test("human composer delivery uses actual providers; not peer messaging", { time
         } catch (cleanupError) {
           cleanupFailure ??= cleanupError;
           providerError ??= cleanupError;
+        }
+        if (assertLongHabitat && longHabitatPreflight && !providerError) {
+          try {
+            assert.ok(longHabitatDeliveryMarker, `${provider} long-habitat evidence requires a delivered marker`);
+            const evidence = await afterMaintainedProviderPause({
+              driver: session.driver,
+              harness,
+              cliPath,
+              agent,
+              provider,
+              workspacePath,
+              preflight: longHabitatPreflight,
+              deliveryMarker: longHabitatDeliveryMarker,
+              maintainedReport: report,
+              evidenceRoot: longHabitatEvidenceRoot,
+              invokeTauri,
+              pauseRealProviderAgent,
+              waitForProviderInputReady,
+              runCliOk,
+            });
+            report.long_habitat[provider] = {
+              ...report.long_habitat[provider],
+              lifecycle: evidence,
+            };
+            await save();
+          } catch (evidenceError) {
+            cleanupFailure ??= evidenceError;
+            providerError ??= evidenceError;
+            report.status = "fail";
+            report.error = evidenceError.message;
+            try {
+              await save();
+            } catch (saveError) {
+              cleanupFailure ??= saveError;
+            }
+          }
         }
       }
     }

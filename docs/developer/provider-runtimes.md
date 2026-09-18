@@ -52,6 +52,24 @@ the prompt. An unknown Codex resume identity remains a bootstrap error.
 | Pi | Real target workspace | `AGENTS.md` plus appended Wardian instruction files | Repeated `--skill` paths point at Wardian-managed skill roots | Wardian assigns `--session-id` up front |
 | Gemini *(unmaintained)* | Projected habitat workspace for headless runs | `GEMINI.md` | Patched CLI can discover skills from include directories | Discovered from provider output |
 
+### Windows projected-habitat working directories
+
+Interactive providers that use a projected habitat can receive a short Windows
+working-directory alias when their logical cwd exceeds the Windows path limit.
+The alias is an owned junction to the complete habitat, so the provider starts
+in the same instruction and skill ancestry. A workspace launch uses the
+corresponding `h\workspace` descendant; the provider arguments, configuration,
+archive identity, and Wardian records continue to use the logical habitat and
+workspace paths.
+
+Alias allocation uses a private compact slot with an ownership record and
+identity checks. Preparation is serialized with the existing habitat lock.
+Removal happens after the provider process has been joined and removes only the
+exact owned junction and its slot records. A foreign, retargeted, or ambiguous
+slot is retained and reported as an error. Short paths and non-Windows launches
+keep their existing cwd behavior, and no insecure fallback is attempted when a
+safe alias cannot be published.
+
 ## Antigravity
 
 ### Model discovery

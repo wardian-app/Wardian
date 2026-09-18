@@ -91,6 +91,17 @@ pub(super) fn cleanup_removed_agent_directory(
     // remove the agent directory after a rejected or incomplete owned cleanup.
     // Off agents and other providers may never have materialized a habitat.
     // Inspect without following links; any ownership record requires validation.
+    let has_habitat_alias = match std::fs::symlink_metadata(
+        agent_dir.join(crate::utils::codex_home::HABITAT_ALIAS_RECORD),
+    ) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.to_string()),
+    };
+    if has_habitat_alias {
+        crate::utils::codex_home::cleanup_habitat_alias(home, agent_id)?;
+    }
+
     let mut has_codex_state = false;
     for path in [
         agent_dir.join(".wardian-codex-home.json"),
@@ -116,6 +127,7 @@ pub(super) fn cleanup_failed_clone_profile_dir(profile_dir: &Path) {
     let no_compact_records = [
         ".wardian-codex-home.json",
         ".wardian-codex-home-cleanup.json",
+        crate::utils::codex_home::HABITAT_ALIAS_RECORD,
     ]
     .iter()
     .all(|name| {

@@ -401,6 +401,84 @@ Wardian request and bound to the observed provider session, generation, and
 native evidence. Setup, a task claim, a receipt, a terminal echo, a historical
 receipt, or mock-provider output alone does not qualify as native acceptance.
 
+#### Long-habitat acceptance gate
+
+Issue #1285 adds an explicit opt-in gate to the maintained provider-delivery
+suite. Set `WARDIAN_E2E_ASSERT_LONG_HABITAT=1` only when the selected run
+includes both `codex` and `claude`. The managed habitat path under test is
+`<wardian-home>/agents/<agent-id>/habitat/workspace`; its computed UTF-16 path
+must exceed the observed Windows limit. `WARDIAN_E2E_REAL_WORKSPACE` may remain
+a short external project folder. The gate checks the returned `AgentConfig.folder`
+and records the managed path length separately from the actual provider CWD before
+the first paid provider prompt. Claude uses the managed habitat path through the
+owned short alias and therefore requires the alias record, alias workspace target,
+pause/resume reuse, and exact cleanup after owned agent deletion. Codex uses the
+short external project folder as its actual provider CWD and requires no habitat
+alias; it verifies long-home publication, captures the nonempty runtime request
+values separately from the restored persistent baseline leaves, including explicit
+absence for leaves that were not persisted. It checks launch-journal cleanup and
+baseline preservation across pause/resume. For Codex, runtime proof requires one
+owned rollout whose completed turn has a matching `turn_context` model and effort,
+plus the user and provider-authored marker on that same turn. A request hash or
+terminal footer does not qualify model selection.
+
+Before explicit owned-agent deletion, the helper writes a bounded private
+report containing hashed transcript fields, provider/archive identity counts,
+relative habitat paths, cwd-length evidence, and separate baseline presence/value
+hashes and request value hashes. Codex also retains the bounded selected
+model/effort and hashed thread/turn identities before deletion. Claude's
+report includes alias ownership identities and exact cleanup; Codex's report
+records that no alias was expected and retains the short provider CWD alongside
+the long managed-habitat path evidence. Reports include the CWD mode, measured
+managed path length, and measured external/provider CWD length. The long
+managed path is evidence about Wardian habitat publication; it does not claim that
+the provider process CWD was over the Windows limit. Both paths verify pause/resume
+identity, the normal provider turn, joined owned-agent deletion, and retention
+of the external workspace marker. The helper does not claim that normal agent
+removal preserves the removed agent's local habitat or provider archive. Direct
+child `GetCurrentDirectory` observation is not required; the provider CWD mode is
+reported from the inspected provider spawn wiring and provider-specific filesystem
+evidence. A Codex report therefore says explicitly that the managed habitat path
+is long while the actual provider CWD is the short external workspace.
+
+Choose a disposable Wardian home whose own path is commonly about 205–231
+UTF-16 units, then use a short external project folder. The managed
+`agents/<agent-id>/habitat/workspace` suffix supplies the boundary pressure while
+the project path stays short, isolating the managed habitat path from the actual
+provider CWD.
+
+Run the offline helper exercise without an app or provider:
+
+```bash
+node --test e2e-native/tests/provider-long-path-evidence.test.mjs
+```
+
+For the paid acceptance run, add the gate and a private evidence root to the
+maintained provider-delivery command above:
+
+```bash
+WARDIAN_E2E_ASSERT_LONG_HABITAT=1 \
+WARDIAN_E2E_LONG_HABITAT_EVIDENCE_ROOT=<absolute-private-evidence-root> \
+WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL=1 \
+WARDIAN_E2E_DELIVERY_PROVIDERS=codex,claude \
+npm run test:e2e:native:fast -- e2e-native/tests/provider-delivery-real-native.test.mjs
+```
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_E2E_ASSERT_LONG_HABITAT = '1'
+$env:WARDIAN_E2E_LONG_HABITAT_EVIDENCE_ROOT = '<absolute-private-evidence-root>'
+$env:WARDIAN_E2E_DELIVERY_ALLOW_PARTIAL = '1'
+$env:WARDIAN_E2E_DELIVERY_PROVIDERS = 'codex,claude'
+npm run test:e2e:native:fast -- e2e-native/tests/provider-delivery-real-native.test.mjs
+```
+
+Keep the evidence root private and retain its bounded report before the
+explicit deletion step removes agent-local state. The offline test uses a
+disposable Windows junction fixture; it does not establish real-provider or
+packaged-app acceptance.
+
 Attached runs use an input-only block that prevents composer/task input while
 keeping the attached runtime and native provider owner alive. Privileged control
 replies remain available; terminal pause or termination is not the acceptance

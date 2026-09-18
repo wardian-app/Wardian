@@ -2,6 +2,7 @@
 //! Generic projection/MCP callers resolve authenticated mappings without recovery.
 mod cleanup;
 mod copy_metadata;
+mod habitat_alias;
 mod migration;
 mod platform;
 
@@ -20,6 +21,9 @@ mod tests;
 mod tree;
 
 pub(crate) use cleanup::cleanup_managed_home;
+pub(crate) use habitat_alias::{
+    cleanup_habitat_alias, prepare_habitat_cwd_alias, HABITAT_ALIAS_RECORD,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 pub(crate) use storage::HomePreparationGuard;
