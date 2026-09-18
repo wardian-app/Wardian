@@ -115,7 +115,7 @@ describe("canvas aggregate and route paint", () => {
     expect(container.querySelector('[data-name="district-population"]')).toBeNull();
   });
 
-  it("paints localized failure, a temporary workspace silhouette, pause stroke and concurrent count", () => {
+  it("paints localized failure, a temporary-provider marker, pause stroke and concurrent count", () => {
     const input: CanvasAutomationInput = { id: "s", label: "Build", nodeCount: 2, agentIds: ["a", "b"], runStatus: "running", activeRunCount: 2,
       schedule: { id: "s", blueprint_id: "bp", name: "Build", input: null, bindings: {}, is_paused: true, schedule: { schedule_type: "interval", active: true } },
       stages: [{ nodeId: "failed-step", agentId: "b", status: "failed" }, { nodeId: "temp", temporaryProvider: "provider", workspace: "/workspace" }],
@@ -128,7 +128,9 @@ describe("canvas aggregate and route paint", () => {
     expect(container.querySelector('[data-id="r:failed-step:b"]')).toHaveAttribute("data-y", "0");
     expect(container.querySelector('[data-name="stage-attention"]')).toBeNull();
     expect(container.querySelector('[data-id="r:temp:provider"]')).toHaveAttribute("data-y", "65");
-    expect(container.querySelector('[data-name="temporary-provider"]')).not.toBeNull();
+    expect(container.querySelector('[data-id="r:temp:provider"]')).toHaveTextContent("temp · Active run · Temporary provider");
+    expect(screen.getByText("temp · Active run · Temporary provider")).toBeInTheDocument();
+    expect(container.querySelector('[data-name="temporary-provider"]')).toBeNull();
     expect(screen.getByText(/failed-step · Failed/)).toBeInTheDocument();
   });
 });

@@ -1,4 +1,4 @@
-import { Arrow, Circle, Group, Rect, Text } from "react-konva";
+import { Arrow, Circle, Group, Text } from "react-konva";
 import type { SituatedRoute } from "./canvasHierarchy";
 import type { GardenEntityRef } from "./garden.types";
 import type { GardenTheme } from "./useGardenTheme";
@@ -57,9 +57,6 @@ export function AutomationRoutesLayer({ routes, theme, scale, selectedKey, onSel
           && !(labelOpacity > 0 && rectInCanvasViewport(labelRect, viewport))) return null;
         const color = marker.attention === "failed" ? theme.change.deleted : marker.attention ? theme.change.modified : theme.labelMuted;
         return <Group key={marker.key} name="automation-stage-marker" id={marker.key} x={marker.position.x} y={marker.position.y}>
-          {marker.temporary && <Rect name="temporary-provider" x={-10 / scale} y={-10 / scale} width={20 / scale} height={20 / scale}
-            perfectDrawEnabled={false}
-            cornerRadius={5 / scale} fill={theme.groundFile} stroke={color} strokeWidth={1.5 / scale} dash={[3 / scale, 3 / scale]} />}
           {marker.attention === "awaiting_approval" && <Circle name="stage-attention" radius={18 / scale} stroke={color} strokeWidth={2 / scale} />}
           {marker.attention && <Text x={10 / scale} y={-18 / scale} text={marker.attention === "failed" ? "×" : "!"}
             fontSize={15 / scale} fontFamily={theme.font} fill={color} />}
