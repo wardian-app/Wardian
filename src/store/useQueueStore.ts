@@ -6,6 +6,7 @@ import { AutomationTelemetryEvent } from "../types/automation";
 import { DEFAULT_QUEUE_PREFERENCES, normalizeQueuePreferences, normalizeQueueSoundVolume } from "../features/queue/queueFilters";
 import { dispatchQueueNotification } from "../features/queue/queueNotifications";
 import { isClearableLegacyCompletion, providerChoiceAcknowledgementUnresolved } from "../features/queue/queueTriage";
+import { parseProviderQuestionEvents } from "../features/queue/providerQuestions";
 
 export const QUEUE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days - future settings hook-in point
 const SUMMARY_MAX_CHARS = 500;
@@ -42,7 +43,7 @@ interface QueueState {
   loadMoreInboxNotifications: () => Promise<void>;
   loadPreferences: () => Promise<void>;
   resolveApprovalRequest: (item: QueueItem, choice: string) => Promise<void>;
-  appendAgentEvent: (sessionId: string, data: Record<string, unknown>) => void;
+  appendAgentEvent: (sessionId: string, data: Record<string, unknown>, agentName?: string) => void;
   appendAgentTerminalOutput: (sessionId: string, data: string, provider?: string) => void;
   hasAgentBufferedContent: (sessionId: string) => boolean;
   flushAgentCompletion: (
@@ -57,6 +58,7 @@ interface QueueState {
     summary?: string | null,
     evidenceId?: string,
     evidenceSource?: QueueItem["evidence_source"],
+    providerQuestion?: QueueItem["provider_question"],
   ) => void;
   trackAutomationNodeOutput: (event: AutomationTelemetryEvent) => void;
   addAutomationCompletion: (
@@ -433,7 +435,25 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     await get().loadItems();
   },
 
-  appendAgentEvent(sessionId, data) {
+  appendAgentEvent(sessionId, data, agentName) {
+    const providerQuestions = parseProviderQuestionEvents(sessionId, data);
+    if (providerQuestions.length > 0) {
+      const resolvedAgentName = agentName
+        ?? get().items.find((item) => item.agent_session_id === sessionId)?.agent_name
+        ?? sessionId;
+      for (const providerQuestion of providerQuestions) {
+        get().addActionNeeded(
+          sessionId,
+          resolvedAgentName,
+          providerQuestion.summary,
+          providerQuestion.evidence_id,
+          "provider_runtime",
+          providerQuestion.question,
+        );
+      }
+      return;
+    }
+
     const { text, isToolCall } = extractQueueContent(data);
     if (isToolCall) {
       set((s) => ({ _agentBuffers: { ...s._agentBuffers, [sessionId]: "" } }));
@@ -500,7 +520,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     });
   },
 
-  addActionNeeded(sessionId, agentName, summary, evidenceId, evidenceSource) {
+  addActionNeeded(sessionId, agentName, summary, evidenceId, evidenceSource, providerQuestion) {
     const { items, _agentBuffers } = get();
     const recent = items.find((i) => {
       if (evidenceId) return matchesActionNeededEvidence(i, sessionId, evidenceId, evidenceSource);
@@ -522,6 +542,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       summary: boundSummary(itemSummary),
       evidence_id: evidenceId,
       evidence_source: evidenceSource,
+      provider_question: providerQuestion,
     };
 
     queueMutationRevision += 1;

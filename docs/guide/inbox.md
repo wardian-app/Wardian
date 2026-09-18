@@ -14,7 +14,7 @@ Wardian records these items:
 - **Important update**: an agent explicitly sends a concise user-facing update with `wardian notify update`. Use this for a material result, a significant limitation, or a change that affects the user's next decision.
 - **Approval request**: an agent explicitly sends a structured request with `wardian notify approval`. It names the proposed action, why it is risky, the available choices, and an expiry. Provider-native permission prompts remain provider-sourced **Action needed** items.
 - **Automation outcome**: an automation completed or failed. Automation approval nodes also project their waiting decision into Inbox; the automation engine remains authoritative for its state and resolution.
-- **Action needed**: provider runtime evidence says an agent needs input, such as a provider permission, authentication, or selection prompt.
+- **Action needed**: provider runtime evidence says an agent needs input, such as a provider permission, authentication, selection prompt, or structured question. Structured provider questions show the provider's question text and options as read-only context; use **Open agent** to answer in the provider UI.
 
 Manual approval is intentionally exceptional. Agents should request it only for irreversible, external, security-sensitive, or materially costly actions, or when you explicitly asked for approval. A request must name the action and risk, offers explicit choices, allows only one unresolved request per agent, and expires without proceeding automatically.
 
@@ -42,7 +42,7 @@ Inbox preferences persist under the active Wardian home.
 
 - Click an item to mark it read.
 - Use **Open** on an agent card to open or focus the related agent-session surface.
-- Use recognized provider choices only on a provider-sourced **Action needed** card.
+- Use recognized provider choices only on a provider-sourced **Action needed** card. Structured provider questions are informational Inbox projections: their options do not submit a response, and reading or dismissing the card does not resolve the provider request. Use **Open agent** to answer it in the original provider UI.
 - Use the explicit choices on a manual **Approval request** card. Wardian records the decision durably and returns it to the requesting agent; it does not send a free-text response to the provider terminal.
 - Use **Approve** or **Reject** on an automation approval card to resolve its waiting gate from Inbox. Wardian records the decision before it continues an approved automation in the background.
 - Use **Mark all read**, **Clear read**, or the item trash control for reviewed, non-pending items.

@@ -331,6 +331,137 @@ describe("useQueueStore - action needed", () => {
 
     expect(useQueueStore.getState().items).toHaveLength(2);
   });
+
+  it("projects a structured Codex question through the agent event path", () => {
+    useQueueStore.getState().appendAgentEvent("agent-1", {
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "request_user_input_async",
+        call_id: "codex-question-1",
+        arguments: JSON.stringify({
+          questions: [{ title: "Which environment?", options: ["Staging", "Production"] }],
+        }),
+      },
+    });
+
+    expect(useQueueStore.getState().items[0]).toMatchObject({
+      type: "action_needed",
+      evidence_id: "provider-question:agent-1:codex:codex-question-1",
+      evidence_source: "provider_runtime",
+      summary: "Which environment?",
+      provider_question: {
+        provider: "codex",
+        call_id: "codex-question-1",
+        questions: [{
+          prompt: "Which environment?",
+          options: [{ label: "Staging" }, { label: "Production" }],
+        }],
+      },
+    });
+  });
+
+  it("deduplicates the same structured call while retaining a distinct call with the same text", () => {
+    const event = (callId: string) => ({
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "request_user_input_async",
+        call_id: callId,
+        arguments: JSON.stringify({ questions: [{ title: "Continue?", options: ["Yes", "No"] }] }),
+      },
+    });
+
+    useQueueStore.getState().appendAgentEvent("agent-1", event("call-1"));
+    useQueueStore.getState().appendAgentEvent("agent-1", event("call-1"));
+    useQueueStore.getState().appendAgentEvent("agent-1", event("call-2"));
+
+    expect(useQueueStore.getState().items).toHaveLength(2);
+    expect(useQueueStore.getState().items.map((item) => item.evidence_id)).toEqual([
+      "provider-question:agent-1:codex:call-2",
+      "provider-question:agent-1:codex:call-1",
+    ]);
+  });
+
+  it("projects every valid Claude question call and deduplicates a replayed record", () => {
+    const event = {
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            name: "AskUserQuestion",
+            id: "claude-call-1",
+            input: { questions: [{ question: "Which target?", options: [{ label: "Staging" }] }] },
+          },
+          {
+            type: "tool_use",
+            name: "AskUserQuestion",
+            id: "malformed-neighbor",
+            input: { questions: [{ header: "No prompt", options: [] }] },
+          },
+          {
+            type: "tool_use",
+            name: "AskUserQuestion",
+            id: "claude-call-2",
+            input: { questions: [{ question: "Which target?", options: [{ label: "Staging" }] }] },
+          },
+        ],
+      },
+    };
+
+    useQueueStore.getState().appendAgentEvent("agent-1", event);
+    useQueueStore.getState().appendAgentEvent("agent-1", event);
+
+    expect(useQueueStore.getState().items).toHaveLength(2);
+    expect(new Set(useQueueStore.getState().items.map((item) => item.provider_question?.call_id))).toEqual(
+      new Set(["claude-call-1", "claude-call-2"]),
+    );
+  });
+
+  it("ignores an accepted async receipt and preserves a read question across reload", async () => {
+    const persisted: QueueItem = {
+      id: "persisted-question",
+      type: "action_needed",
+      timestamp: Date.now(),
+      read: true,
+      agent_session_id: "agent-1",
+      agent_name: "Coder",
+      summary: "Choose a target",
+      evidence_id: "provider-question:agent-1:codex:call-persisted",
+      evidence_source: "provider_runtime",
+      provider_question: {
+        provider: "codex",
+        call_id: "call-persisted",
+        questions: [{ prompt: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    };
+    mockInvoke.mockImplementation((command) => command === "load_queue_items"
+      ? Promise.resolve([persisted])
+      : Promise.resolve([]));
+
+    await useQueueStore.getState().loadItems();
+    useQueueStore.getState().appendAgentEvent("agent-1", {
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        call_id: "call-persisted",
+        output: JSON.stringify({ accepted: true }),
+      },
+    });
+    useQueueStore.getState().appendAgentEvent("agent-1", {
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "request_user_input_async",
+        call_id: "call-persisted",
+        arguments: JSON.stringify({ questions: [{ title: "Choose a target", options: ["Staging"] }] }),
+      },
+    });
+
+    expect(useQueueStore.getState().items).toHaveLength(1);
+    expect(useQueueStore.getState().items[0]).toEqual(persisted);
+  });
 });
 
 describe("useQueueStore - automation completion", () => {

@@ -340,6 +340,24 @@ export interface QueuePreferences {
     sound_volume: number;
 }
 
+export interface ProviderQuestionOption {
+    label: string;
+    description?: string;
+}
+
+export interface ProviderQuestionPrompt {
+    id?: string;
+    header?: string;
+    prompt: string;
+    options: ProviderQuestionOption[];
+}
+
+export interface ProviderQuestion {
+    provider: "codex" | "claude";
+    call_id: string;
+    questions: ProviderQuestionPrompt[];
+}
+
 export interface QueueItem {
     id: string;
     type: "action_needed" | "agent_completed" | "automation_completed" | "agent_update" | "approval_request";
@@ -362,6 +380,7 @@ export interface QueueItem {
     summary?: string;
     provider_choice_sent?: string;
     provider_choice_pending?: string;
+    provider_question?: ProviderQuestion;
     // durable user-facing notification fields
     inbox_notification_id?: string;
     notification_status?: "completed" | "awaiting_reply" | "expired";

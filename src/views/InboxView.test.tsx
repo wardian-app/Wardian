@@ -160,6 +160,47 @@ describe("InboxView", () => {
     expect(screen.queryByRole("button", { name: /send action response/i })).not.toBeInTheDocument();
   });
 
+  it("renders structured provider questions with read-only options and Open agent", () => {
+    const onOpenAgent = vi.fn();
+    useQueueStore.setState({
+      items: [{
+        id: "structured-question",
+        type: "action_needed",
+        timestamp: Date.now(),
+        read: false,
+        agent_session_id: "sess-1",
+        agent_name: "My Coder",
+        summary: "Which environment?",
+        evidence_id: "provider-question:sess-1:codex:call-1",
+        evidence_source: "provider_runtime",
+        provider_question: {
+          provider: "codex",
+          call_id: "call-1",
+          questions: [{
+            header: "Target",
+            prompt: "Which environment?",
+            options: [
+              { label: "Staging", description: "Use the test environment." },
+              { label: "Production", description: "Use the live environment." },
+            ],
+          }],
+        },
+      }],
+    });
+
+    render(<InboxView onOpenAgent={onOpenAgent} onSendAgentPrompt={vi.fn()} />);
+
+    expect(screen.getByText("Which environment?")).toBeVisible();
+    expect(screen.getByText("Staging")).toBeVisible();
+    expect(screen.getByTestId("provider-question-details")).toHaveTextContent("Use the test environment.");
+    expect(screen.getByRole("button", { name: "Open agent terminal" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /send action response/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Staging" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open agent terminal" }));
+    expect(onOpenAgent).toHaveBeenCalledWith("sess-1");
+  });
+
   it("does not replay a provider choice while delivery recovery is unresolved", () => {
     const onSendAgentPrompt = vi.fn(async () => undefined);
     useQueueStore.setState({
