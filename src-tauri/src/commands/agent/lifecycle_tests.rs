@@ -271,10 +271,11 @@ async fn installed_candidate_and_non_codex_runtime_do_not_create_stop_fences() {
         let runtime = fixture.runtime(&id, &child);
         runtime.config.lock().unwrap().provider = provider.into();
         let config = runtime.config.lock().unwrap().clone();
-        let pending = PendingRuntime::prepare(&config, &Arc::new(TerminalSessionBroker::default()))
-            .unwrap()
-            .attach(runtime);
-        let mut installed = pending.installed();
+        let mut pending =
+            PendingRuntime::prepare(&config, &Arc::new(TerminalSessionBroker::default()))
+                .unwrap()
+                .attach(runtime);
+        let mut installed = pending.take_runtime();
         await_quiescent(&fixture.home, &id).await.unwrap();
         assert_eq!(child.kills.load(Ordering::SeqCst), 0);
         child.exited.store(true, Ordering::SeqCst);

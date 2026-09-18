@@ -306,6 +306,17 @@ Current sequence:
 
 Legacy bootstrap migration remains available as a fallback when local rollout materialization is unavailable. It merges a new rollout into an existing projected `sessions/**` tree instead of discarding it.
 
+For a fresh visible Codex launch, Wardian publishes the same PTY-backed runtime
+to the roster provisionally before native app-server attachment finishes. The
+terminal remains available for human input, while provider input readiness stays
+`Booting`, so automatic delivery waits for the attachment finalizer. The
+finalizer checks the exact runtime generation, persists the discovered provider
+identity, then promotes readiness to `Ready`. Attachment cancellation or a
+stale generation disposes the exact native owner and removes only the current
+provisional roster entry; a durable-state failure leaves that entry visible in
+`Error` behind the retained stop fence. Restored agents and other providers
+keep their existing synchronous publication path.
+
 #### Shared thread index
 
 `codex app-server` migrates legacy rollout files into paginated thread history

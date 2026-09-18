@@ -23,6 +23,10 @@ use tauri::{AppHandle, Emitter, Manager};
 use wardian_core::control::{ProviderInputReadiness, WatchTranscriptMessage};
 use wardian_core::models::{AgentChatRole, AgentConfig, AgentEvent, ProviderConfig};
 
+use super::codex_onboarding::{
+    finalize_synchronous_codex, CodexAttachmentCompletion, CodexAttachmentCompletionContext,
+    SpawnPublication, SpawnedAgent, SynchronousCodexFinalizationContext,
+};
 use super::codex_terminal_theme::CodexTerminalThemeProbeResponder;
 
 use super::claude::{
@@ -850,10 +854,44 @@ fn persist_runtime_agent_configs(app: &AppHandle) {
 
 pub async fn spawn_agent(
     app: AppHandle,
-    mut config: AgentConfig,
+    config: AgentConfig,
     is_restored: bool,
     initial_timestamp: Option<String>,
 ) -> Result<ActiveAgent, String> {
+    Ok(spawn_agent_inner(
+        app,
+        config,
+        is_restored,
+        initial_timestamp,
+        SpawnPublication::Synchronous,
+    )
+    .await?
+    .active)
+}
+
+pub(crate) async fn spawn_agent_provisionally(
+    app: AppHandle,
+    config: AgentConfig,
+    is_restored: bool,
+    initial_timestamp: Option<String>,
+) -> Result<SpawnedAgent, String> {
+    spawn_agent_inner(
+        app,
+        config,
+        is_restored,
+        initial_timestamp,
+        SpawnPublication::Provisional,
+    )
+    .await
+}
+
+async fn spawn_agent_inner(
+    app: AppHandle,
+    mut config: AgentConfig,
+    is_restored: bool,
+    initial_timestamp: Option<String>,
+    publication: SpawnPublication,
+) -> Result<SpawnedAgent, String> {
     let spawn_started_at = std::time::Instant::now();
     super::validate_session_values_for_launch(
         &config.session_id,
@@ -923,7 +961,7 @@ pub async fn spawn_agent(
         let _ = wardian_core::db::update_agent_status(&config.session_id, "Off", None);
         let session_id = config.session_id.clone();
 
-        return Ok(ActiveAgent {
+        return Ok(SpawnedAgent::without_completion(ActiveAgent {
             config: std::sync::Arc::new(std::sync::Mutex::new(config)),
             child_process: None,
             background_processes: Vec::new(),
@@ -944,7 +982,7 @@ pub async fn spawn_agent(
             log_last_modified: std::sync::Arc::new(std::sync::Mutex::new(None)),
             #[cfg(windows)]
             job_object: None,
-        });
+        }));
     }
 
     let provider_generation = app_state
@@ -1439,9 +1477,11 @@ pub async fn spawn_agent(
             )
         }),
     );
-    if let Some(guard) = codex_attach_guard.as_mut() {
-        // StartingCodexTui now owns joined PTY + owner cleanup on every error.
-        guard.attached();
+    if publication == SpawnPublication::Synchronous {
+        if let Some(guard) = codex_attach_guard.as_mut() {
+            // StartingCodexTui now owns joined PTY + owner cleanup on every error.
+            guard.attached();
+        }
     }
     let process_id = child.process_id();
     if pi_attachment.is_some() {
@@ -1505,12 +1545,9 @@ pub async fn spawn_agent(
         .master
         .take_writer()
         .map_err(|e| format!("Failed to get pty writer: {}", e))?;
-    // Tracks only cleanup ownership; human terminal input remains available
-    // during trust/login/onboarding while native peer delivery stays unbound.
-    let codex_attachment_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let codex_reader_alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let reader_alive = codex_reader_alive.clone();
-    let reader_attachment_ready = codex_attachment_ready.clone();
+    let defer_codex_startup_readiness =
+        config.provider == "codex" && publication == SpawnPublication::Provisional;
     let pty_master: crate::state::terminal_session::SharedPtyMaster =
         std::sync::Arc::new(std::sync::Mutex::new(pair.master));
     drop(pair.slave);
@@ -1618,6 +1655,17 @@ pub async fn spawn_agent(
         4096,
         262_144,
     )));
+    // Keep the attachment gate on the runtime's existing ActiveAgent-owned
+    // watch-state Arc so every status/readiness/admission path sees it.
+    let codex_attachment_ready = {
+        let watch_state = watch_state
+            .lock()
+            .map_err(|_| "Agent watch state lock unavailable".to_string())?;
+        watch_state.set_codex_attachment_ready(!defer_codex_startup_readiness);
+        watch_state.codex_attachment_ready_flag()
+    };
+    let reader_alive = codex_reader_alive.clone();
+    let reader_attachment_ready = codex_attachment_ready.clone();
     let watch_state_clone = watch_state.clone();
     let terminal_title = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let terminal_title_clone = terminal_title.clone();
@@ -1810,26 +1858,28 @@ pub async fn spawn_agent(
                             &sid_for_pty,
                             &provider_name_for_pty,
                         );
-                        set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, "Idle");
-                        let readiness_app = pty_app.clone();
-                        let readiness_session_id = sid_for_pty.clone();
-                        let observation = startup_observation.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let state = readiness_app.state::<AppState>();
-                            crate::control::startup_readiness::publish_startup_readiness(
-                                Some(&readiness_app),
-                                state.inner(),
-                                &readiness_session_id,
-                                &observation,
-                                wardian_core::control::ProviderReadyEvidence::PromptDetected,
-                            )
-                            .await;
-                            crate::control::spawn_agent_messaging_if_idle(
-                                &readiness_app,
-                                &readiness_session_id,
-                                "Idle",
-                            );
-                        });
+                        if !defer_codex_startup_readiness {
+                            set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, "Idle");
+                            let readiness_app = pty_app.clone();
+                            let readiness_session_id = sid_for_pty.clone();
+                            let observation = startup_observation.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let state = readiness_app.state::<AppState>();
+                                crate::control::startup_readiness::publish_startup_readiness(
+                                    Some(&readiness_app),
+                                    state.inner(),
+                                    &readiness_session_id,
+                                    &observation,
+                                    wardian_core::control::ProviderReadyEvidence::PromptDetected,
+                                )
+                                .await;
+                                crate::control::spawn_agent_messaging_if_idle(
+                                    &readiness_app,
+                                    &readiness_session_id,
+                                    "Idle",
+                                );
+                            });
+                        }
                     } else if startup_output.as_deref().is_some_and(|output| {
                         should_auto_confirm_claude_bypass_permissions(
                             &provider_name_for_pty,
@@ -2143,76 +2193,33 @@ pub async fn spawn_agent(
         guard.disarm();
     }
 
+    let mut codex_attachment_completion = None;
     if let Some(attachment) = &codex_attachment {
-        let finalized = app_state
-            .native_delivery
-            .finalize_codex_tui(
-                &config.session_id,
-                attachment.generation,
-                || {
-                    if !codex_reader_alive.load(std::sync::atomic::Ordering::Acquire) {
-                        return Err(
-                            crate::delivery::codex_shared::CodexSharedError::unsupported(
-                                "captured Codex PTY reader exited during attachment",
-                            ),
-                        );
-                    }
-                    child.alive()
-                },
-                |id| {
-                    let mut captured_config = config_lock.lock().map_err(|_| {
-                        crate::delivery::codex_shared::CodexSharedError::unsupported(
-                            "agent config lock unavailable",
-                        )
-                    })?;
-                    super::apply_provider_identity("codex", &mut captured_config, id)
-                        .map(|_| ())
-                        .map_err(crate::delivery::codex_shared::CodexSharedError::unsupported)
-                },
-            )
-            .await;
-        if let Err(error) = finalized {
-            child.stop().await;
-            // Failed attachment otherwise discards the only TUI evidence (for
-            // example a blocking startup picker). Preserve a bounded plain tail.
-            let output = watch_state
-                .lock()
-                .ok()
-                .and_then(|state| state.snapshot_since(None, Some(4096)).ok())
-                .map(|snapshot| snapshot.output.text)
-                .unwrap_or_default();
-            return Err(if output.trim().is_empty() {
-                error.to_string()
-            } else {
-                format!("{error}\nProvider terminal output:\n{output}")
-            });
+        if publication == SpawnPublication::Synchronous {
+            config = finalize_synchronous_codex(SynchronousCodexFinalizationContext {
+                native_delivery: &app_state.native_delivery,
+                session_id: &config.session_id,
+                provider_generation: attachment.generation,
+                child: &mut child,
+                config_lock: &config_lock,
+                codex_attachment_ready: &codex_attachment_ready,
+                codex_reader_alive: &codex_reader_alive,
+                watch_state: &watch_state,
+            })
+            .await?;
+            app_state
+                .interactions
+                .record_provider_input_state(
+                    &config.session_id,
+                    provider_generation,
+                    ProviderInputReadiness::Ready,
+                    None,
+                )
+                .await;
+            set_agent_status(&app, &config.session_id, &current_status, "Idle");
         }
-        if let Err(error) = child.alive() {
-            child.stop().await;
-            return Err(error.to_string());
-        }
-        config = config_lock
-            .lock()
-            .map_err(|_| "agent config lock unavailable")?
-            .clone();
-        codex_attachment_ready.store(true, std::sync::atomic::Ordering::Release);
-        if !codex_reader_alive.load(std::sync::atomic::Ordering::Acquire) {
-            codex_attachment_ready.store(false, std::sync::atomic::Ordering::Release);
-            child.stop().await;
-            return Err("captured Codex PTY reader exited during finalization".into());
-        }
-        app_state
-            .interactions
-            .record_provider_input_state(
-                &config.session_id,
-                provider_generation,
-                ProviderInputReadiness::Ready,
-                None,
-            )
-            .await;
-        set_agent_status(&app, &config.session_id, &current_status, "Idle");
     }
-    if codex_attachment.is_some() {
+    if codex_attachment.is_some() && publication == SpawnPublication::Synchronous {
         let observations = app_state
             .native_delivery
             .codex_observations(&config.session_id, provider_generation)
@@ -3196,11 +3203,13 @@ pub async fn spawn_agent(
         cfg.folder = expected_folder;
     }
 
-    if let Some(guard) = codex_attach_guard.as_mut() {
-        guard.attached();
+    if publication == SpawnPublication::Synchronous {
+        if let Some(guard) = codex_attach_guard.as_mut() {
+            guard.attached();
+        }
     }
-    Ok(ActiveAgent {
-        config: config_lock,
+    let active = ActiveAgent {
+        config: config_lock.clone(),
         child_process: Some(child.attached()),
         background_processes,
         memory_capability,
@@ -3209,15 +3218,36 @@ pub async fn spawn_agent(
         query_count,
         init_timestamp,
         last_query_timestamp: std::sync::Arc::new(std::sync::Mutex::new(None)),
-        current_status,
+        current_status: current_status.clone(),
         last_status_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
-        watch_state,
+        watch_state: watch_state.clone(),
         terminal_title,
         last_output_at,
         log_path,
         log_last_modified: std::sync::Arc::new(std::sync::Mutex::new(None)),
         #[cfg(windows)]
         job_object,
+    };
+    if publication == SpawnPublication::Provisional {
+        codex_attachment_completion = codex_attachment.as_ref().map(|attachment| {
+            CodexAttachmentCompletion::new(CodexAttachmentCompletionContext {
+                app: app.clone(),
+                session_id: config.session_id.clone(),
+                provider_generation: attachment.generation,
+                runtime_generation,
+                config_lock,
+                current_status,
+                watch_state,
+                native_delivery: app_state.native_delivery.clone(),
+                codex_attachment_ready,
+                codex_reader_alive,
+                cleanup_guard: codex_attach_guard.take(),
+            })
+        });
+    }
+    Ok(SpawnedAgent {
+        active,
+        completion: codex_attachment_completion,
     })
 }
 

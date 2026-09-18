@@ -272,6 +272,21 @@ impl CodexAttachGuard {
         self.armed = false;
     }
 
+    /// Await native-owner disposal when provisional publication fails. The
+    /// normal Drop path remains detached for reader-side cleanup, while the
+    /// publication owner must report cleanup before its command completes.
+    pub(super) async fn dispose(mut self) -> Result<(), String> {
+        let result = self
+            .broker
+            .dispose_codex_generation(&self.agent_id, self.generation)
+            .await
+            .map_err(|error| error.to_string());
+        if result.is_ok() {
+            self.armed = false;
+        }
+        result
+    }
+
     pub(super) fn for_reader(
         mut self,
         alive: Arc<std::sync::atomic::AtomicBool>,

@@ -6,7 +6,7 @@ use crate::providers::claude::claude_output_has_bypass_permissions_consent_promp
 use crate::state::AppState;
 use crate::utils::strip_ansi_controls;
 use std::sync::{Arc, Mutex};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use wardian_core::control::{ProviderInputReadiness, ProviderReadyEvidence};
 
 pub(super) async fn record_provider_ready_evidence(
@@ -15,6 +15,16 @@ pub(super) async fn record_provider_ready_evidence(
     generation: u64,
     evidence: ProviderReadyEvidence,
 ) -> bool {
+    let attachment_ready = state
+        .agents
+        .lock()
+        .await
+        .get(session_id)
+        .map(crate::manager::codex_onboarding::codex_attachment_is_ready)
+        .unwrap_or(true);
+    if !attachment_ready {
+        return false;
+    }
     let recorded = state
         .interactions
         .record_provider_input_state(
@@ -25,6 +35,48 @@ pub(super) async fn record_provider_ready_evidence(
         )
         .await;
     recorded.generation == generation && recorded.state == ProviderInputReadiness::Ready
+}
+
+pub(super) async fn ensure_codex_attachment_ready(
+    state: &AppState,
+    provider: &str,
+    session_id: &str,
+) -> Result<(), String> {
+    if provider == "codex"
+        && !state
+            .agents
+            .lock()
+            .await
+            .get(session_id)
+            .is_some_and(crate::manager::codex_onboarding::codex_attachment_is_ready)
+    {
+        return Err(format!(
+            "Agent {session_id} Codex attachment is still starting; provider input is not ready"
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn codex_attachment_allows_messaging(app: &AppHandle, session_id: &str) -> bool {
+    let state = app.state::<AppState>();
+    let Ok(agents) = state.agents.try_lock() else {
+        return false;
+    };
+    agents
+        .get(session_id)
+        .map(crate::manager::codex_onboarding::codex_attachment_is_ready)
+        .unwrap_or(true)
+}
+
+pub(crate) fn codex_status_allows_messaging(
+    app: &AppHandle,
+    session_id: &str,
+    status: &str,
+) -> bool {
+    matches!(
+        wardian_core::identity::normalize_status(status).as_str(),
+        "idle" | "off"
+    ) && codex_attachment_allows_messaging(app, session_id)
 }
 
 /// Records startup readiness only after the provider has rendered its own

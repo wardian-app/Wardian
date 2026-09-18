@@ -343,13 +343,17 @@ impl NativeDeliveryBroker {
 
     /// Manager has started the captured PTY reader/responder. Keep this owner
     /// unavailable until exclusive loaded membership, identity and policy agree.
-    pub(crate) async fn finalize_codex_tui(
+    pub(crate) async fn finalize_codex_tui<F, Fut>(
         &self,
         agent_id: &str,
         generation: u64,
-        tui_alive: impl FnMut() -> Result<(), CodexSharedError>,
+        tui_alive: F,
         publish_identity: impl FnOnce(&str) -> Result<(), CodexSharedError>,
-    ) -> Result<CodexSharedReceipt, CodexSharedError> {
+    ) -> Result<CodexSharedReceipt, CodexSharedError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<(), CodexSharedError>>,
+    {
         let gate = self.owner_gate(agent_id).await;
         let _gate = gate.lock().await;
         let owner = self.shared_codex(agent_id, generation).await?;

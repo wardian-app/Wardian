@@ -1,5 +1,8 @@
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use tokio::sync::Notify;
 use wardian_core::control::{WatchEvent, WatchOutput, WatchTranscript, WatchTranscriptMessage};
@@ -14,6 +17,7 @@ pub struct AgentWatchState {
     next_sequence: u64,
     records: VecDeque<WatchRecord>,
     notify: Arc<Notify>,
+    codex_attachment_ready: Arc<AtomicBool>,
 }
 
 impl AgentWatchState {
@@ -25,7 +29,23 @@ impl AgentWatchState {
             next_sequence: 0,
             records: VecDeque::new(),
             notify: Arc::new(Notify::new()),
+            // Non-Codex and already-attached runtimes are ready by default;
+            // fresh Codex publication flips this exact runtime gate closed
+            // before the ActiveAgent enters the roster.
+            codex_attachment_ready: Arc::new(AtomicBool::new(true)),
         }
+    }
+
+    pub fn codex_attachment_ready(&self) -> bool {
+        self.codex_attachment_ready.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn codex_attachment_ready_flag(&self) -> Arc<AtomicBool> {
+        self.codex_attachment_ready.clone()
+    }
+
+    pub(crate) fn set_codex_attachment_ready(&self, ready: bool) {
+        self.codex_attachment_ready.store(ready, Ordering::Release);
     }
 
     pub fn latest_cursor(&self) -> String {
