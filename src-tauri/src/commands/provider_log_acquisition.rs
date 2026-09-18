@@ -17,7 +17,12 @@ use crate::providers::chat_transcript::{
     normalize_chat_lines_with_state, TranscriptNormalizationState,
 };
 
+/// Normal forward-acquisition work per pass. A record that starts in this
+/// window may use additional bounded reads solely to find its first newline.
 pub(crate) const PROVIDER_LOG_BATCH_BYTES: u64 = 256 * 1024;
+/// Maximum size of one newline-terminated JSONL record, including its newline.
+/// This is a record-framing bound, separate from the normal batch work budget.
+pub(crate) const PROVIDER_LOG_MAX_RECORD_BYTES: u64 = 16 * 1024 * 1024;
 const PROVIDER_LOG_ANCHOR_BYTES: u64 = 4 * 1024;
 const MAX_PROVIDER_LOG_POLICY_SPANS: usize = 256;
 
@@ -187,29 +192,63 @@ pub(crate) fn acquire_provider_log_batch(
     Read::by_ref(&mut file)
         .take(read_len)
         .read_to_end(&mut bytes)?;
-    let Some(last_newline) = bytes.iter().rposition(|byte| *byte == b'\n') else {
-        state.status = if remaining > PROVIDER_LOG_BATCH_BYTES {
-            "incomplete".to_string()
-        } else {
-            "pending".to_string()
-        };
-        state.reason = Some(
-            if remaining > PROVIDER_LOG_BATCH_BYTES {
-                "provider_log_record_exceeds_batch_limit"
-            } else {
-                "provider_log_partial_record"
+    let mut complete_len = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map(|index| index + 1);
+    if complete_len.is_none() {
+        loop {
+            let buffered_len = bytes.len() as u64;
+            if buffered_len >= PROVIDER_LOG_MAX_RECORD_BYTES {
+                state.status = "incomplete".to_string();
+                state.reason = Some("provider_log_record_exceeds_record_limit".to_string());
+                return Ok(ProviderLogBatch {
+                    events: Vec::new(),
+                    previous,
+                    next: state,
+                    consumed_bytes: 0,
+                    continue_immediately: false,
+                });
             }
-            .to_string(),
-        );
-        return Ok(ProviderLogBatch {
-            events: Vec::new(),
-            previous,
-            next: state,
-            consumed_bytes: 0,
-            continue_immediately: false,
-        });
-    };
-    let complete_len = last_newline + 1;
+            if buffered_len >= remaining {
+                state.status = "pending".to_string();
+                state.reason = Some("provider_log_partial_record".to_string());
+                return Ok(ProviderLogBatch {
+                    events: Vec::new(),
+                    previous,
+                    next: state,
+                    consumed_bytes: 0,
+                    continue_immediately: false,
+                });
+            }
+
+            let read_len = (remaining - buffered_len)
+                .min(PROVIDER_LOG_BATCH_BYTES)
+                .min(PROVIDER_LOG_MAX_RECORD_BYTES - buffered_len);
+            let previous_len = bytes.len();
+            Read::by_ref(&mut file)
+                .take(read_len)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() == previous_len {
+                state.status = "incomplete".to_string();
+                state.reason = Some("provider_log_unexpected_eof".to_string());
+                return Ok(ProviderLogBatch {
+                    events: Vec::new(),
+                    previous,
+                    next: state,
+                    consumed_bytes: 0,
+                    continue_immediately: false,
+                });
+            }
+            if let Some(index) = bytes[previous_len..].iter().position(|byte| *byte == b'\n') {
+                let record_end = previous_len + index + 1;
+                bytes.truncate(record_end);
+                complete_len = Some(record_end);
+                break;
+            }
+        }
+    }
+    let complete_len = complete_len.expect("complete provider record length");
     let complete = match std::str::from_utf8(&bytes[..complete_len]) {
         Ok(complete) => complete,
         Err(error) => {
@@ -274,17 +313,20 @@ pub(crate) fn acquire_provider_log_batch(
     state.committed_offset = state.committed_offset.saturating_add(consumed_bytes);
     state.continuity_anchor = read_anchor(&mut file, state.committed_offset)?;
     state.normalizer = next_normalizer;
+    let record_spanned_batch = complete_len as u64 > PROVIDER_LOG_BATCH_BYTES;
     let unread_complete_bytes = state.committed_offset < file_len
         && bytes
             .get(complete_len..)
             .is_some_and(|tail| tail.contains(&b'\n'));
     let more_file_bytes = state.committed_offset < file_len;
+    let batch_limit_reached = more_file_bytes
+        && (unread_complete_bytes || remaining > PROVIDER_LOG_BATCH_BYTES || record_spanned_batch);
     state.status = if more_file_bytes || state.normalizer_has_pending_events() {
         "pending".to_string()
     } else {
         "complete".to_string()
     };
-    state.reason = if unread_complete_bytes || remaining > PROVIDER_LOG_BATCH_BYTES {
+    state.reason = if batch_limit_reached {
         Some("provider_log_batch_limit".to_string())
     } else if more_file_bytes {
         Some("provider_log_partial_record".to_string())
@@ -301,9 +343,7 @@ pub(crate) fn acquire_provider_log_batch(
         previous,
         next: state,
         consumed_bytes,
-        continue_immediately: unread_complete_bytes
-            || remaining > PROVIDER_LOG_BATCH_BYTES
-            || policy_boundary_pending,
+        continue_immediately: batch_limit_reached || policy_boundary_pending,
     })
 }
 
@@ -786,6 +826,207 @@ mod tests {
     }
 
     #[test]
+    fn record_over_limit_fails_closed_without_cursor_progress() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.jsonl");
+        let oversized = format!(
+            "{{\"type\":\"compacted\",\"payload\":{{\"summary\":\"{}\"}}}}",
+            "x".repeat(PROVIDER_LOG_MAX_RECORD_BYTES as usize)
+        );
+        std::fs::write(&path, oversized).expect("write over-limit provider record");
+
+        let batch =
+            acquire_provider_log_batch("agent-1", "codex", &path, "codex:session:one", None, true)
+                .expect("represent over-limit record as capture status");
+
+        assert_eq!(batch.next.status, "incomplete");
+        assert_eq!(
+            batch.next.reason.as_deref(),
+            Some("provider_log_record_exceeds_record_limit")
+        );
+        assert_eq!(batch.next.committed_offset, 0);
+        assert_eq!(batch.consumed_bytes, 0);
+        assert!(!batch.continue_immediately);
+    }
+
+    #[test]
+    fn oversized_compacted_record_recovers_without_losing_pending_context() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.jsonl");
+        let context = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "context-before-compaction",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Prior host context."}],
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "turn-after-compaction",
+                    "content_item_kinds": ["agents_md.instructions"]
+                }
+            }
+        });
+        let compacted_summary = format!(
+            "Compacted history summary: {}",
+            "x".repeat(PROVIDER_LOG_BATCH_BYTES as usize * 2 + 128 * 1024)
+        );
+        let compacted = serde_json::json!({
+            "type": "compacted",
+            "payload": {"summary": compacted_summary}
+        });
+        let request = serde_json::json!({
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Current user request"}
+        });
+        let answer_text = format!(
+            "Current assistant answer with a large retained message: {}",
+            "y".repeat(PROVIDER_LOG_BATCH_BYTES as usize + 64 * 1024)
+        );
+        let answer = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": answer_text}]
+            }
+        });
+        let tool_command = format!(
+            "printf large-tool-input-{}",
+            "z".repeat(PROVIDER_LOG_BATCH_BYTES as usize + 32 * 1024)
+        );
+        let tool_call = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "shell_command",
+                "call_id": "large-call",
+                "input": {"command": tool_command}
+            }
+        });
+        let tool_result = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "large-call",
+                "output": format!(
+                    "large-tool-output-{}",
+                    "q".repeat(PROVIDER_LOG_BATCH_BYTES as usize + 32 * 1024)
+                )
+            }
+        });
+
+        let mut context_line = serde_json::to_vec(&context).expect("serialize context record");
+        context_line.push(b'\n');
+        let mut content = Vec::new();
+        content.extend(&context_line);
+        for record in [compacted, request, answer, tool_call, tool_result] {
+            content.extend(serde_json::to_vec(&record).expect("serialize provider record"));
+            content.push(b'\n');
+        }
+        std::fs::write(&path, &content).expect("write oversized provider log");
+
+        let first =
+            acquire_provider_log_batch("agent-1", "codex", &path, "codex:session:one", None, true)
+                .expect("capture context before oversized record");
+        assert!(first.next.normalizer_has_pending_events());
+        assert_eq!(first.next.committed_offset, context_line.len() as u64);
+        assert!(first.continue_immediately);
+
+        let mut saved_incomplete = first.next.clone();
+        saved_incomplete.status = "incomplete".to_string();
+        saved_incomplete.reason = Some("provider_log_record_exceeds_batch_limit".to_string());
+        let restored_incomplete: ProviderLogCaptureState = serde_json::from_str(
+            &serde_json::to_string(&saved_incomplete).expect("serialize incomplete state"),
+        )
+        .expect("restore incomplete state");
+        let second = acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            "codex:session:one",
+            Some(restored_incomplete.clone()),
+            true,
+        )
+        .expect("capture oversized compacted record");
+        assert_eq!(
+            second.previous.as_ref().map(|state| state.status.as_str()),
+            Some("incomplete")
+        );
+        assert_eq!(
+            second
+                .previous
+                .as_ref()
+                .and_then(|state| state.reason.as_deref()),
+            Some("provider_log_record_exceeds_batch_limit")
+        );
+        assert!(second.next.committed_offset > first.next.committed_offset);
+        assert_ne!(
+            second.next.reason.as_deref(),
+            Some("provider_log_record_exceeds_batch_limit")
+        );
+        assert!(second.next.normalizer_has_pending_events());
+
+        let mut previous = Some(second.next);
+        let mut events = second.events;
+        for _ in 0..32 {
+            let batch = acquire_provider_log_batch(
+                "agent-1",
+                "codex",
+                &path,
+                "codex:session:one",
+                previous,
+                true,
+            )
+            .expect("acquire post-compaction provider batch");
+            let should_continue = batch.continue_immediately;
+            events.extend(batch.events);
+            previous = Some(batch.next);
+            if !should_continue {
+                break;
+            }
+        }
+
+        let final_state = previous.expect("final capture state");
+        assert_eq!(final_state.status, "complete");
+        assert_eq!(
+            final_state.committed_offset,
+            std::fs::metadata(&path).expect("provider metadata").len()
+        );
+        assert!(events.iter().any(|event| {
+            event.role == Some(AgentChatRole::User)
+                && event.text.as_deref() == Some("Current user request")
+                && event.metadata["request_root_id"].is_string()
+        }));
+        assert!(events.iter().any(|event| {
+            event.role == Some(AgentChatRole::Assistant)
+                && event
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| text.starts_with("Current assistant answer"))
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == AgentChatEventKind::ToolCall
+                && event.turn_id.as_deref() == Some("large-call")
+                && event.command.as_deref().is_some_and(|command| {
+                    command.starts_with("printf large-tool-input-")
+                        && command.len() > PROVIDER_LOG_BATCH_BYTES as usize
+                })
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == AgentChatEventKind::ToolResult
+                && event.turn_id.as_deref() == Some("large-call")
+                && event
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| text.starts_with("large-tool-output-"))
+        }));
+        assert!(events.iter().any(|event| {
+            event.text.as_deref() == Some("Prior host context.")
+                && event.metadata["request_root_id"].is_string()
+        }));
+    }
+
+    #[test]
     fn disabled_span_is_not_normalized_and_cannot_carry_pending_context_forward() {
         let temp = tempfile::tempdir().expect("temp dir");
         let path = temp.path().join("provider.jsonl");
@@ -810,7 +1051,11 @@ mod tests {
             .open(&path)
             .and_then(|mut file| {
                 use std::io::Write as _;
-                writeln!(file, "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"SECRET_DISABLED\"}}}}")
+                let disabled_record = format!(
+                    "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"SECRET_DISABLED{}\"}}}}",
+                    "x".repeat(PROVIDER_LOG_BATCH_BYTES as usize + 1024)
+                );
+                writeln!(file, "{disabled_record}")
             })
             .expect("append disabled content");
         let enabled = observe_provider_log_policy(
@@ -1157,6 +1402,125 @@ mod tests {
     }
 
     #[test]
+    fn oversized_partial_record_waits_at_same_cursor_then_recovers_after_append() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.jsonl");
+        let complete = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Complete request\"}}\n";
+        let partial = format!(
+            "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"Partial{}",
+            "x".repeat(PROVIDER_LOG_BATCH_BYTES as usize + 1024)
+        );
+        std::fs::write(&path, format!("{complete}{partial}"))
+            .expect("write complete prefix and oversized partial record");
+
+        let first =
+            acquire_provider_log_batch("agent-1", "codex", &path, "codex:session:one", None, true)
+                .expect("capture complete prefix");
+        assert_eq!(first.next.status, "pending");
+        assert_eq!(
+            first.next.reason.as_deref(),
+            Some("provider_log_batch_limit")
+        );
+        assert!(first.continue_immediately);
+        assert_eq!(first.next.committed_offset, complete.len() as u64);
+
+        let waiting = acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            "codex:session:one",
+            Some(first.next),
+            true,
+        )
+        .expect("wait for oversized partial record");
+        assert!(waiting.events.is_empty());
+        assert_eq!(waiting.next.status, "pending");
+        assert_eq!(
+            waiting.next.reason.as_deref(),
+            Some("provider_log_partial_record")
+        );
+        assert!(!waiting.continue_immediately);
+        assert_eq!(waiting.next.committed_offset, complete.len() as u64);
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| {
+                use std::io::Write as _;
+                writeln!(file, " answer\"}}}}")
+            })
+            .expect("finish oversized partial record");
+        let recovered = acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            "codex:session:one",
+            Some(waiting.next),
+            true,
+        )
+        .expect("capture appended record");
+        assert_eq!(recovered.events.len(), 1);
+        assert!(recovered.events[0]
+            .text
+            .as_deref()
+            .is_some_and(|text| text.starts_with("Partial")));
+        assert_eq!(recovered.next.status, "complete");
+    }
+
+    #[test]
+    fn codex_context_after_cross_batch_user_prompt_keeps_request_root() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.jsonl");
+        let user = r#"{"type":"response_item","payload":{"type":"message","id":"request-1","role":"user","content":[{"type":"input_text","text":"Current request"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-1","content_item_kinds":["user.text"]}}}"#;
+        let filler = (0..1_000)
+            .map(|index| {
+                format!(
+                    r#"{{"type":"response_item","payload":{{"type":"custom_tool_call_output","call_id":"filler-{index}","output":"{}"}}}}"#,
+                    "filler-output-".to_string() + &"x".repeat(160)
+                )
+            })
+            .collect::<Vec<_>>();
+        let context = r#"{"type":"response_item","payload":{"type":"message","id":"context-after","role":"user","content":[{"type":"input_text","text":"Late workspace context."}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-1","content_item_kinds":["agents_md.instructions"]}}}"#;
+        let content = format!("{user}\n{}\n{context}\n", filler.join("\n"));
+        assert!(content.len() > PROVIDER_LOG_BATCH_BYTES as usize);
+        std::fs::write(&path, content).expect("write cross-batch Codex context");
+
+        let first =
+            acquire_provider_log_batch("agent-1", "codex", &path, "codex:session:one", None, true)
+                .expect("capture user prompt and first batch");
+        let request_root_id = first
+            .events
+            .iter()
+            .find(|event| event.text.as_deref() == Some("Current request"))
+            .and_then(|event| event.metadata["request_root_id"].as_str())
+            .expect("known Codex request root")
+            .to_string();
+        assert!(first.continue_immediately);
+
+        let second = acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            "codex:session:one",
+            Some(first.next),
+            true,
+        )
+        .expect("capture context after the batch boundary");
+        let context_event = second
+            .events
+            .iter()
+            .find(|event| event.text.as_deref() == Some("Late workspace context."))
+            .expect("cross-batch context is emitted immediately");
+        assert_eq!(context_event.metadata["request_root_id"], request_root_id);
+        assert_eq!(context_event.metadata["provider_turn_id"], "turn-1");
+        assert_eq!(
+            context_event.metadata["causal_ref"],
+            "provider:message:context-after"
+        );
+        assert!(!second.next.normalizer_has_pending_events());
+    }
+
+    #[test]
     fn serialized_restart_state_keeps_explicit_tool_identity() {
         let temp = tempfile::tempdir().expect("temp dir");
         let path = temp.path().join("provider.jsonl");
@@ -1230,7 +1594,7 @@ mod tests {
         let content = (0..=crate::providers::chat_transcript::MAX_TOOL_REQUEST_ROOTS)
             .map(|index| {
                 format!(
-                    "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"custom_tool_call\",\"name\":\"shell_command\",\"call_id\":\"call-{index}\",\"input\":{{\"command\":\"true\"}}}}}}"
+                    "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"tool_use\",\"name\":\"Bash\",\"id\":\"call-{index}\",\"input\":{{\"command\":\"true\"}}}}]}}}}"
                 )
             })
             .collect::<Vec<_>>()
@@ -1239,9 +1603,15 @@ mod tests {
         assert!(content.len() < PROVIDER_LOG_BATCH_BYTES as usize);
         std::fs::write(&path, content).expect("write excessive tool roots");
 
-        let batch =
-            acquire_provider_log_batch("agent-1", "codex", &path, "codex:session:one", None, true)
-                .expect("state limit is represented as capture status");
+        let batch = acquire_provider_log_batch(
+            "agent-1",
+            "claude",
+            &path,
+            "claude:session:one",
+            None,
+            true,
+        )
+        .expect("state limit is represented as capture status");
 
         assert!(batch.events.is_empty());
         assert_eq!(batch.next.status, "incomplete");

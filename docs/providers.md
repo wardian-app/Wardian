@@ -140,6 +140,15 @@ including WAL/SHM sidecars, remain isolated per agent. `auth.json` and
 was verified against Codex CLI `0.150.1` and should be rechecked when the
 provider changes its on-disk contract.
 
+Wardian's conversation archive reads append-only provider JSONL forward from a
+durable cursor. Normal archive work is processed in 256 KiB batches. A valid
+record that crosses that boundary is completed across bounded reads and then
+committed as one record, with a 16 MiB per-record ceiling. Partial records wait
+for their terminating newline; malformed, replaced, truncated, discontinuous,
+or over-limit input remains uncommitted so the source is never silently
+skipped. Logging policy boundaries still exclude bytes written while capture
+is disabled.
+
 ### Plugin Pass-Through
 
 Wardian does not class-filter, install, enable, disable, or globally suppress

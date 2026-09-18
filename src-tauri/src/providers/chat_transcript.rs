@@ -76,6 +76,13 @@ pub(crate) fn normalize_chat_lines_with_state(
     enforce_limits: bool,
 ) -> Result<Vec<AgentChatEvent>, String> {
     let normalized_provider = normalize_provider(provider);
+    let uses_tool_request_roots = normalized_provider == "claude";
+    if !uses_tool_request_roots {
+        // Older saved Codex/Pi/etc. states may contain roots from the former
+        // provider-agnostic cache. Clear only that obsolete correlation data;
+        // request, pending-event, sequence, and native-turn state remain live.
+        state.tool_request_roots.clear();
+    }
     let mut events: Vec<AgentChatEvent> = Vec::new();
 
     for line in lines {
@@ -216,7 +223,7 @@ pub(crate) fn normalize_chat_lines_with_state(
             state.codex_user_mirror_pending = false;
         }
 
-        if event.kind == AgentChatEventKind::ToolCall {
+        if uses_tool_request_roots && event.kind == AgentChatEventKind::ToolCall {
             if let Some(tool_id) = event.turn_id.clone() {
                 let is_skill = metadata_string(&event.metadata, "tool_name")
                     .or_else(|| event.title.clone())
@@ -232,15 +239,21 @@ pub(crate) fn normalize_chat_lines_with_state(
         }
 
         if input_origin.as_deref() == Some("context_injection") {
-            if let Some(causal_ref) = metadata_string(&event.metadata, "causal_ref") {
-                if let Some(tool_id) = causal_ref.strip_prefix("provider:tool_use:") {
-                    if let Some(tool_root) = state.tool_request_roots.get(tool_id).cloned() {
-                        if let Some(root_id) = tool_root.request_root_id {
-                            set_metadata_string(&mut event.metadata, "request_root_id", &root_id);
-                            state.request_root_id = Some(root_id);
-                        }
-                        if tool_root.is_skill {
-                            set_metadata_string(&mut event.metadata, "input_purpose", "skill");
+            if uses_tool_request_roots {
+                if let Some(causal_ref) = metadata_string(&event.metadata, "causal_ref") {
+                    if let Some(tool_id) = causal_ref.strip_prefix("provider:tool_use:") {
+                        if let Some(tool_root) = state.tool_request_roots.get(tool_id).cloned() {
+                            if let Some(root_id) = tool_root.request_root_id {
+                                set_metadata_string(
+                                    &mut event.metadata,
+                                    "request_root_id",
+                                    &root_id,
+                                );
+                                state.request_root_id = Some(root_id);
+                            }
+                            if tool_root.is_skill {
+                                set_metadata_string(&mut event.metadata, "input_purpose", "skill");
+                            }
                         }
                     }
                 }
@@ -2394,6 +2407,105 @@ mod tests {
 
     fn one(provider: &str, line: &str) -> AgentChatEvent {
         normalize_chat_line("agent-1", provider, line, 7).expect("event")
+    }
+
+    #[test]
+    fn codex_tool_ids_survive_many_chunks_and_restart_without_tool_root_cache() {
+        let tool_count = MAX_TOOL_REQUEST_ROOTS + 1;
+        let tool_calls = (0..tool_count)
+            .map(|index| {
+                format!(
+                    r#"{{"type":"response_item","payload":{{"type":"custom_tool_call","name":"shell_command","call_id":"call-{index}","input":{{"command":"true"}}}}}}"#
+                )
+            })
+            .collect::<Vec<_>>();
+        let tool_results = (0..tool_count)
+            .map(|index| {
+                format!(
+                    r#"{{"type":"response_item","payload":{{"type":"custom_tool_call_output","call_id":"call-{index}","output":"passed"}}}}"#
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let mut state = TranscriptNormalizationState::default();
+        let mut events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            tool_calls.iter(),
+            &mut state,
+            false,
+            true,
+        )
+        .expect("normalize Codex tool calls without a correlation cache");
+        assert!(state.tool_request_roots.is_empty());
+
+        let serialized = serde_json::to_string(&state).expect("serialize Codex continuation state");
+        let mut restored: TranscriptNormalizationState =
+            serde_json::from_str(&serialized).expect("restore Codex continuation state");
+        events.extend(
+            normalize_chat_lines_with_state(
+                "agent-1",
+                "codex",
+                tool_results.iter(),
+                &mut restored,
+                false,
+                true,
+            )
+            .expect("normalize Codex tool results after restart"),
+        );
+
+        assert_eq!(events.len(), tool_count * 2);
+        assert!(restored.tool_request_roots.is_empty());
+        for call_id in ["call-0", "call-1024"] {
+            assert!(events.iter().any(|event| {
+                event.kind == AgentChatEventKind::ToolCall
+                    && event.turn_id.as_deref() == Some(call_id)
+            }));
+            assert!(events.iter().any(|event| {
+                event.kind == AgentChatEventKind::ToolResult
+                    && event.turn_id.as_deref() == Some(call_id)
+            }));
+        }
+    }
+
+    #[test]
+    fn non_claude_normalization_clears_legacy_tool_roots_without_other_state_loss() {
+        let mut state = TranscriptNormalizationState {
+            next_sequence: 19,
+            request_root_id: Some("request-root".to_string()),
+            codex_provider_turn_id: Some("codex-turn".to_string()),
+            codex_user_mirror_pending: true,
+            pending_events: vec![one(
+                "codex",
+                r#"{"type":"event_msg","payload":{"type":"user_message","message":"pending request"}}"#,
+            )],
+            pending_context_indices: vec![0],
+            ..TranscriptNormalizationState::default()
+        };
+        state
+            .seen_gemini_messages
+            .insert("seen-message".to_string());
+        state.tool_request_roots.insert(
+            "legacy-tool".to_string(),
+            ToolRequestRootState {
+                request_root_id: Some("request-root".to_string()),
+                is_skill: true,
+            },
+        );
+        let mut expected = state.clone();
+        expected.tool_request_roots.clear();
+
+        normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            std::iter::empty::<&str>(),
+            &mut state,
+            false,
+            true,
+        )
+        .expect("clear legacy Codex tool roots");
+
+        assert_eq!(state, expected);
     }
 
     #[test]
