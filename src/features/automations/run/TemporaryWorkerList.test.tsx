@@ -66,6 +66,30 @@ describe("TemporaryWorkerList", () => {
     expect(screen.queryByText("Codex child")).toBeInTheDocument();
   });
 
+  it("can aggregate only the visible roster while retaining lineage usage", () => {
+    const parent = worker("parent", "running");
+    const child = worker("child", "succeeded", "parent");
+    const workers = [parent, child];
+
+    render(
+      <TemporaryWorkerList
+        aggregateWorkers={[parent]}
+        allWorkers={workers}
+        showAggregate
+        telemetry={{
+          parent: telemetry("parent", 10, 1),
+          child: telemetry("child", 20, 2),
+        }}
+        workers={[parent]}
+      />,
+    );
+
+    expect(screen.getByTestId("temporary-worker-combined-usage")).toHaveTextContent(
+      "1 worker · 1 combined turn · input 10, output 1",
+    );
+    expect(screen.getByText(/2 combined turns across 2 workers · input 30, output 3/)).toBeInTheDocument();
+  });
+
   it("keeps the default warning tone for unknown automation workers", () => {
     render(
       <TemporaryWorkerList
