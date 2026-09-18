@@ -14,7 +14,11 @@ An installed-app update was reported as failing around `latest.json`. The releas
 ## Decision
 
 - Keep `titleBarStyle: Overlay` and native traffic lights; do not add custom window buttons or change terminal rendering.
-- Set the logical traffic-light inset to `x: 14, y: 47`. The 36px increase matches Wardian's titlebar height and moves the native control centerline onto the sidebar-toggle centerline.
+- Set the logical traffic-light inset to `x: 14, y: 11`. In the pinned Tao
+  implementation, `y` increases the native titlebar container height from the
+  window's upper edge; changing it from `11` to `47` therefore shifted the
+  native row down by Wardian's full 36px topbar instead of aligning it with
+  that row.
 - Set the main `NSWindow` collection behavior to `FullScreenNone` after Tauri creates it. The green traffic light then performs native zoom rather than creating a separate full-screen Space, so the controls remain in Wardian's top-left chrome.
 - Use a dedicated full-canvas dark-green `icon.icns` for the macOS bundle. The existing transparent and white-circle families remain unchanged for other targets.
 - After publishing a stable release, retry and validate the public `latest.json` route, including both macOS updater entries, before package-workflow dispatch.

@@ -21,14 +21,14 @@ describe("macOS window integration", () => {
     ]);
   });
 
-  it("uses native macOS traffic lights positioned inside Wardian's titlebar", () => {
+  it("uses native macOS traffic lights positioned in Wardian's top overlay row", () => {
     const macWindow = JSON.parse(macosConfig).app.windows[0];
 
     expect(macWindow).toMatchObject({
       decorations: true,
       titleBarStyle: "Overlay",
       hiddenTitle: true,
-      trafficLightPosition: { x: 14, y: 47 },
+      trafficLightPosition: { x: 14, y: 11 },
     });
   });
 
