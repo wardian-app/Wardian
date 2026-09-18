@@ -41,11 +41,22 @@ that stronger guarantee.
 
 ## Batching and progress
 
-One acquisition pass reads at most 256 KiB and commits only through its final
-newline. A partial final record remains `pending` at the previous cursor. A
-record that cannot fit within a pass, invalid UTF-8, invalid JSON, exhausted
-normalizer state, replacement, truncation, or continuity mismatch is
-`incomplete`; its reason is persisted and the cursor does not advance.
+Normal batch work per acquisition pass is capped at 256 KiB and commits only
+through a final newline. If the first unread record has no newline in that
+window, acquisition reads further 256 KiB chunks solely to find that record's
+first newline. One complete record may therefore exceed the batch budget, but
+it is bounded at 16 MiB including its newline. The framing read never admits
+following records into the same pass. The 16 MiB ceiling is a separate memory
+and work bound with substantial headroom over the largest observed source
+record (about 2.48 MB); records beyond it fail closed rather than being
+skipped or truncated.
+
+A partial final record remains `pending` at the previous cursor, including
+when it has already crossed the normal batch budget but remains below the
+record ceiling. Invalid UTF-8, invalid JSON, exhausted normalizer state,
+unexpected EOF while reading the stable source range, replacement,
+truncation, continuity mismatch, and an over-limit record are `incomplete`;
+their reason is persisted and the cursor does not advance.
 
 Status-triggered and restored-agent archive owners automatically request the
 next pass while complete source bytes remain. Each pass releases the policy and
@@ -114,9 +125,10 @@ the ordinary archive owner and retains that call, its matching result, and the
 final assistant answer.
 
 Focused checks also cover opened-handle same-path replacement, truncation,
-anchor mismatch, partial lines, serialized restart state, explicit tool
+anchor mismatch, partial lines, oversized compacted records, recovery from a
+serialized `incomplete` cursor, serialized restart state, explicit tool
 identity after restart, state exhaustion without progress, unknown prefixes,
 disabled pending context, global and per-agent policy transitions,
 append-before-cursor ordering, stale compare-and-set, and existing lifecycle
-archive behavior. No provider is started and no paid request is sent by these
-tests.
+archive behavior. No provider is started and no paid request is sent by the
+maintained tests.
