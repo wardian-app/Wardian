@@ -1,7 +1,7 @@
 //! Codex's shared owner lives in the existing native sessions registry.
 use super::*;
 use crate::delivery::codex_shared::{
-    CodexSharedError, CodexSharedOwner, CodexSharedReceipt, CodexTuiAttachment,
+    CodexSettingsUpdate, CodexSharedError, CodexSharedOwner, CodexSharedReceipt, CodexTuiAttachment,
 };
 use std::time::Duration;
 
@@ -441,6 +441,31 @@ impl NativeDeliveryBroker {
             .client
             .receipt("owner_ready")
             .map_err(shared_error)
+    }
+
+    /// Apply one model/effort pair through the already-owned Codex client.
+    /// Recheck the exact owner after every awaited operation before exposing
+    /// either acceptance or rejection to the caller.
+    pub async fn codex_update_thread_settings(
+        &self,
+        agent_id: &str,
+        generation: u64,
+        model: &str,
+        effort: &str,
+    ) -> Result<CodexSettingsUpdate, CodexSharedError> {
+        let owner = self.shared_codex(agent_id, generation).await?;
+        let binding = owner.client.settings_binding()?;
+        let result = owner.update_thread_settings(&binding, model, effort).await;
+        let current = self.shared_codex(agent_id, generation).await;
+        if !current
+            .as_ref()
+            .is_ok_and(|current| Arc::ptr_eq(current, &owner))
+        {
+            return Err(CodexSharedError::uncertain(
+                "Codex owner changed after settings submission",
+            ));
+        }
+        result
     }
 
     /// Read-only selection predicate for routing. A current-generation session

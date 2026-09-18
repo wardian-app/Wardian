@@ -257,7 +257,7 @@ async fn acknowledged_config_survives_paused_and_live_restore_publication() {
         match first_poll {
             Poll::Ready(result) => result.unwrap(),
             Poll::Pending => update.await.unwrap(),
-        }
+        };
         persist_roster(&state).await.unwrap();
         let live = list_agents(app.state()).await.unwrap().pop().unwrap();
         assert_eq!(live.session_persistence, AgentSessionPersistenceOverride::Fresh,

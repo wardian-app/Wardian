@@ -5,9 +5,10 @@ use crate::state::AppState;
 use wardian_core::conversations::ConversationLoggingSetting;
 use wardian_core::models::AgentConfig;
 
-pub(super) async fn persist_agent_config_while_lifecycle_locked(
+pub(super) async fn persist_agent_config_with_roster_barrier(
     mut new_config: AgentConfig,
     state: &AppState,
+    _roster_barrier: &wardian_core::agent_replacement::AgentRosterBarrier,
 ) -> Result<(), String> {
     new_config.validate_provider_config_matches_provider()?;
     new_config.description = normalize_agent_description(&new_config.description)?;
@@ -15,22 +16,15 @@ pub(super) async fn persist_agent_config_while_lifecycle_locked(
     let capture_snapshot =
         crate::commands::chat::agent_archive_capture_snapshot(state, &new_config.session_id)
             .await?;
-    let (config_handle, previous_config, previous_state_snapshot, created_at) = {
+    let (config_handle, previous_config, created_at) = {
         let agents = state.agents.lock().await;
-        let order = state.agent_order.lock().await;
         let agent = agents
             .get(&new_config.session_id)
             .ok_or_else(|| format!("Agent {} not found", new_config.session_id))?;
         let config_handle = agent.config.clone();
         let previous_config = agent.config.lock().unwrap().clone();
-        let previous_state_snapshot = manager::state_configs_snapshot(&agents, &order);
         let created_at = agent.init_timestamp.lock().unwrap().clone();
-        (
-            config_handle,
-            previous_config,
-            previous_state_snapshot,
-            created_at,
-        )
+        (config_handle, previous_config, created_at)
     };
 
     // If class has changed, auto-update the system_include_directories.
@@ -69,9 +63,8 @@ pub(super) async fn persist_agent_config_while_lifecycle_locked(
         )?;
     }
 
-    let roster_barrier = wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "Agent roster barrier is unavailable".to_string())?;
+    let (agents, order) = (state.agents.lock().await, state.agent_order.lock().await);
+    let previous_state_snapshot = manager::state_configs_snapshot(&agents, &order);
     let mut state_snapshot = previous_state_snapshot.clone();
     let persisted_config = state_snapshot
         .iter_mut()
@@ -90,7 +83,7 @@ pub(super) async fn persist_agent_config_while_lifecycle_locked(
         .to_string_lossy()
         .to_string();
     let project = wardian_core::db::project_name_from_workspace(&workspace);
-    wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+    if let Err(error) = wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
         session_id: &new_config.session_id,
         session_name: &new_config.session_name,
         description: &new_config.description,
@@ -100,18 +93,23 @@ pub(super) async fn persist_agent_config_while_lifecycle_locked(
         project: project.as_deref(),
         is_off: new_config.is_off,
         created_at: created_at.as_deref(),
-    })
-    .map_err(|error| {
+    }) {
         let rollback_error = manager::try_save_state_snapshot_unlocked(&previous_state_snapshot)
             .err()
             .map(|rollback| format!("; state rollback also failed: {rollback}"))
             .unwrap_or_default();
-        format!("Failed to persist agent metadata: {error}{rollback_error}")
-    })?;
+        let suffix = if rollback_error.is_empty() {
+            String::new()
+        } else {
+            format!("; persistence_unknown{rollback_error}")
+        };
+        return Err(format!("Failed to persist agent metadata: {error}{suffix}"));
+    }
 
-    *config_handle.lock().unwrap() = new_config;
-    // Never carry the global roster barrier into the per-agent archive gate.
-    drop(roster_barrier);
+    *config_handle.lock().unwrap() = new_config.clone();
+    drop(order);
+    drop(agents);
+
     if previous_logging == ConversationLoggingSetting::Disabled
         && next_logging != ConversationLoggingSetting::Disabled
     {

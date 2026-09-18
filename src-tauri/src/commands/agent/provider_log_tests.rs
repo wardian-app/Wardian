@@ -1,12 +1,24 @@
 use super::agent_lifecycle::fresh_provider_session_for_initial_capture;
+use super::config_persistence::persist_agent_config_with_roster_barrier;
 use super::tests::{make_test_agent, WardianHomeGuard};
-use super::{
-    lifecycle_config_for_session, persist_agent_config_while_lifecycle_locked,
-    promote_fresh_provider_session_after_resume,
-};
+use super::{lifecycle_config_for_session, promote_fresh_provider_session_after_resume};
 use crate::state::AppState;
 use wardian_core::conversations::{AgentConversationLoggingSetting, ConversationLoggingSetting};
 use wardian_core::models::AgentConfig;
+
+async fn persist_agent_config_for_test(
+    new_config: AgentConfig,
+    state: &AppState,
+) -> Result<(), String> {
+    let roster_barrier = tokio::task::spawn_blocking(|| {
+        wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "Agent roster barrier is unavailable".to_string())?;
+    persist_agent_config_with_roster_barrier(new_config, state, &roster_barrier).await
+}
 
 #[test]
 fn pi_fresh_provider_session_promotion_retains_launch_provenance() {
@@ -265,7 +277,7 @@ async fn agent_logging_transition_excludes_provider_bytes_written_while_disabled
         .await
         .expect("load agent config");
     disabled.conversation_logging = AgentConversationLoggingSetting::Disabled;
-    persist_agent_config_while_lifecycle_locked(disabled, &state)
+    persist_agent_config_for_test(disabled, &state)
         .await
         .expect("disable agent logging");
     std::fs::OpenOptions::new()
@@ -281,7 +293,7 @@ async fn agent_logging_transition_excludes_provider_bytes_written_while_disabled
         .await
         .expect("reload agent config");
     enabled.conversation_logging = AgentConversationLoggingSetting::Enabled;
-    persist_agent_config_while_lifecycle_locked(enabled, &state)
+    persist_agent_config_for_test(enabled, &state)
         .await
         .expect("re-enable agent logging");
     std::fs::OpenOptions::new()

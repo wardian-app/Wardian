@@ -919,8 +919,14 @@ function ChatModelSelection({
       persisted = true;
       if (result.live_application === "failed") {
         setSaveError(`Saved, but the live model could not be changed: ${result.live_error ?? "Codex did not confirm the selection."}`);
+      } else if (result.live_application === "unknown") {
+        setSaveError(`Saved, but the live model change is unconfirmed: ${result.live_error ?? "The provider runtime changed or stopped before acknowledgement."}`);
       } else if (result.live_application === "deferred") {
         setSaveNotice("Saved for the next start or restart.");
+      } else if (result.model?.intent === "default" || result.reasoning_effort?.intent === "default") {
+        const effectiveModel = result.model?.effective_value ?? "provider default";
+        const effectiveEffort = result.reasoning_effort?.effective_value ?? "provider default";
+        setSaveNotice(`Saved as provider defaults. Live runtime accepted ${effectiveModel} / ${effectiveEffort} for future turns.`);
       }
     } catch (reason) {
       if (!persisted) {

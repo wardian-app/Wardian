@@ -421,8 +421,8 @@ pub fn agent_update(
             class: class.map(str::to_string),
             workspace: workspace.map(str::to_string),
             description: description.map(str::to_string),
-            model: model.map(str::to_string),
-            reasoning_effort: reasoning_effort.map(str::to_string),
+            model: model.map(|value| Some(value.to_string())),
+            reasoning_effort: reasoning_effort.map(|value| Some(value.to_string())),
         }),
     )?;
     serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
