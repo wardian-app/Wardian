@@ -4,6 +4,13 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.6.2](https://github.com/wardian-app/Wardian/compare/v0.6.1...v0.6.2) (2026-09-19)
+
+
+### Bug Fixes
+
+* **release:** serialize updater metadata publishing ([#1380](https://github.com/wardian-app/Wardian/issues/1380)) ([6581efc](https://github.com/wardian-app/Wardian/commit/6581efcf98880c2937989b6f688fbf87f9742e12))
+
 ## [0.6.1](https://github.com/wardian-app/Wardian/compare/v0.6.0...v0.6.1) (2026-09-18)
 
 
