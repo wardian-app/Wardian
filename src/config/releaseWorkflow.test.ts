@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import releasePleaseConfig from "../../release-please-config.json";
 import releaseWorkflow from "../../.github/workflows/release.yml?raw";
 import releasePleaseWorkflow from "../../.github/workflows/release-please.yml?raw";
 import stageCliScript from "../../scripts/stage-cli.mjs?raw";
 import tauriConfig from "../../src-tauri/tauri.conf.json?raw";
 import tauriUpdaterConfig from "../../src-tauri/tauri.updater.conf.json?raw";
+
+const updaterMetadataModuleUrl = pathToFileURL(
+  resolve(process.cwd(), "scripts/release/updater-metadata.mjs"),
+).href;
 
 describe("release workflow contract", () => {
   it("keeps Release Please releases draft until assets are uploaded", () => {
@@ -74,8 +80,7 @@ describe("release workflow contract", () => {
     expect(releaseWorkflow).toContain("tagName: ${{ inputs.release_tag }}");
     expect(releaseWorkflow).toContain("WARDIAN_UPDATE_CHANNEL: ${{ needs.create-release.outputs.is_prerelease == 'false' && 'stable' || '' }}");
     expect(releaseWorkflow).toContain("WARDIAN_UPDATE_CHANNEL: ${{ needs.resolve-release.outputs.is_prerelease == 'false' && 'stable' || '' }}");
-    expect(releaseWorkflow).toContain("includeUpdaterJson: ${{ needs.create-release.outputs.is_prerelease == 'false' }}");
-    expect(releaseWorkflow).toContain("includeUpdaterJson: ${{ needs.resolve-release.outputs.is_prerelease == 'false' }}");
+    expect(releaseWorkflow.match(/includeUpdaterJson: false/g)).toHaveLength(2);
     expect(releaseWorkflow).not.toContain("uploadUpdaterJson:");
     expect(releaseWorkflow).not.toContain("uploadUpdaterSignatures:");
     expect(releaseWorkflow).toContain("updaterJsonPreferNsis: true");
@@ -143,6 +148,98 @@ describe("release workflow contract", () => {
     expect(releaseWorkflow).toContain("tag !== expectedTag");
     expect(releaseWorkflow).toContain("releaseAssetNames.has(assetName)");
     expect(releaseWorkflow).toContain("needs.validate-updater-metadata.result == 'success'");
+  });
+
+  it("assembles stable updater metadata once after parallel builds", () => {
+    expect(releaseWorkflow).toContain("assemble-updater-metadata:");
+    expect(releaseWorkflow).toContain("Assemble and upload updater metadata");
+    expect(releaseWorkflow).toContain("scripts/release/updater-metadata.mjs");
+    expect(releaseWorkflow).toContain("requiredUpdaterSignatureNames");
+    expect(releaseWorkflow).toContain("buildUpdaterMetadata");
+    expect(releaseWorkflow).toContain("needs: [create-release, resolve-release, build, assemble-updater-metadata]");
+    expect(releaseWorkflow).toContain("needs.assemble-updater-metadata.result == 'success'");
+  });
+
+  it("builds complete updater metadata from release assets", async () => {
+    const { buildUpdaterMetadata, requiredUpdaterSignatureNames } = await import(
+      /* @vite-ignore */ updaterMetadataModuleUrl
+    );
+    const tag = "v1.2.3";
+    const bundleNames = [
+      "Wardian_aarch64.app.tar.gz",
+      "Wardian_x64.app.tar.gz",
+      "Wardian_1.2.3_amd64.AppImage",
+      "Wardian_1.2.3_amd64.deb",
+      "Wardian_1.2.3_x64-setup.exe",
+    ];
+    const signatureNames = requiredUpdaterSignatureNames(tag);
+    const signatures = Object.fromEntries(
+      signatureNames.map((name: string) => [name, `signature:${name}`]),
+    );
+
+    const metadata = buildUpdaterMetadata({
+      tag,
+      repository: "wardian-app/Wardian",
+      assetNames: [...bundleNames, ...signatureNames],
+      signatures,
+      pubDate: "2026-09-19T12:00:00.000Z",
+    });
+
+    expect(metadata).toMatchObject({
+      version: "1.2.3",
+      notes: "",
+      pub_date: "2026-09-19T12:00:00.000Z",
+      platforms: {
+        "darwin-aarch64": {
+          url: "https://github.com/wardian-app/Wardian/releases/download/v1.2.3/Wardian_aarch64.app.tar.gz",
+        },
+        "darwin-x86_64": {
+          url: "https://github.com/wardian-app/Wardian/releases/download/v1.2.3/Wardian_x64.app.tar.gz",
+        },
+        "linux-x86_64": {
+          url: "https://github.com/wardian-app/Wardian/releases/download/v1.2.3/Wardian_1.2.3_amd64.AppImage",
+        },
+        "windows-x86_64": {
+          url: "https://github.com/wardian-app/Wardian/releases/download/v1.2.3/Wardian_1.2.3_x64-setup.exe",
+        },
+      },
+    });
+    expect(Object.keys(metadata.platforms)).toEqual([
+      "darwin-aarch64",
+      "darwin-aarch64-app",
+      "darwin-x86_64",
+      "darwin-x86_64-app",
+      "linux-x86_64",
+      "linux-x86_64-appimage",
+      "linux-x86_64-deb",
+      "windows-x86_64",
+      "windows-x86_64-nsis",
+    ]);
+  });
+
+  it("refuses to publish metadata with a missing platform signature", async () => {
+    const { buildUpdaterMetadata, requiredUpdaterSignatureNames } = await import(
+      /* @vite-ignore */ updaterMetadataModuleUrl
+    );
+    const tag = "v1.2.3";
+    const signatureNames = requiredUpdaterSignatureNames(tag);
+    const missingSignature = "Wardian_aarch64.app.tar.gz.sig";
+
+    expect(() =>
+      buildUpdaterMetadata({
+        tag,
+        repository: "wardian-app/Wardian",
+        assetNames: [
+          "Wardian_aarch64.app.tar.gz",
+          "Wardian_x64.app.tar.gz",
+          "Wardian_1.2.3_amd64.AppImage",
+          "Wardian_1.2.3_amd64.deb",
+          "Wardian_1.2.3_x64-setup.exe",
+          ...signatureNames.filter((name: string) => name !== missingSignature),
+        ],
+        signatures: {},
+      }),
+    ).toThrow(`Missing updater signature asset: ${missingSignature}`);
   });
 
   it("removes loose updater signature assets before release validation and publication", () => {

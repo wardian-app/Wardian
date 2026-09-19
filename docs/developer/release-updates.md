@@ -83,7 +83,7 @@ On Windows, official stable builds also verify that the running `Wardian.exe` li
 
 ## Release Workflow
 
-The release workflow builds platform installers, signs update artifacts, uploads `latest.json`, removes loose `.sig` release assets, validates updater metadata, and only then publishes the release. Tauri embeds the signature content that the app needs inside `latest.json`.
+The release workflow builds platform installers and signs update artifacts in parallel. Matrix jobs upload bundles and loose `.sig` assets without writing `latest.json`. After every build succeeds, one job assembles the complete metadata file from the release assets and replaces `latest.json` once. The workflow then removes loose `.sig` assets, validates updater metadata, and only then publishes the release. This single-writer sequence prevents concurrent release jobs from deleting or overwriting each other's metadata. Tauri embeds the signature content that the app needs inside `latest.json`.
 
 Local `npm run tauri build` creates an installable bundle without updater artifacts, so it does not require `TAURI_SIGNING_PRIVATE_KEY`. Release builds opt into updater artifact generation by passing `--config src-tauri/tauri.updater.conf.json` to Tauri. That overlay sets `bundle.createUpdaterArtifacts` to `true` only inside release infrastructure.
 

@@ -255,7 +255,7 @@ jobs:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           tagName: ${{ github.ref_name }}
           releaseDraft: true
-          includeUpdaterJson: ${{ needs.create-release.outputs.is_prerelease == 'false' }}
+          includeUpdaterJson: false
           updaterJsonPreferNsis: true
           args: --config src-tauri/tauri.updater.conf.json ${{ matrix.platform.args || '' }}
 
@@ -278,7 +278,7 @@ jobs:
           releaseId: ${{ needs.resolve-release.outputs.release_id }}
           tagName: ${{ inputs.release_tag }}
           releaseDraft: true
-          includeUpdaterJson: ${{ needs.resolve-release.outputs.is_prerelease == 'false' }}
+          includeUpdaterJson: false
           updaterJsonPreferNsis: true
           args: --config src-tauri/tauri.updater.conf.json ${{ matrix.platform.args || '' }}
 
@@ -405,10 +405,122 @@ jobs:
             src-tauri/target/*/release/bundle/**/*.deb
           if-no-files-found: warn
 
+  assemble-updater-metadata:
+    name: Assemble updater metadata
+    needs: [create-release, resolve-release, build]
+    if: >-
+      always() &&
+      needs.build.result == 'success' &&
+      ((github.event_name == 'push' && needs.create-release.outputs.is_prerelease == 'false') ||
+      (github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true' && needs.resolve-release.outputs.is_prerelease == 'false'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Assemble and upload updater metadata
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ github.event_name == 'push' && needs.create-release.outputs.release_id || needs.resolve-release.outputs.release_id }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+        with:
+          script: |
+            const path = require('path');
+            const { pathToFileURL } = require('url');
+            const moduleUrl = pathToFileURL(path.join(
+              process.env.GITHUB_WORKSPACE,
+              'scripts/release/updater-metadata.mjs',
+            ));
+            const {
+              buildUpdaterMetadata,
+              requiredUpdaterSignatureNames,
+            } = await import(moduleUrl.href);
+
+            const releaseId = Number(process.env.RELEASE_ID);
+            const tag = process.env.RELEASE_TAG;
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: releaseId,
+              per_page: 100,
+            });
+            const assetsByName = new Map(assets.map((asset) => [asset.name, asset]));
+            const signatures = {};
+
+            for (const signatureName of requiredUpdaterSignatureNames(tag)) {
+              const signatureAsset = assetsByName.get(signatureName);
+              if (!signatureAsset) {
+                core.setFailed(`Missing updater signature asset: ${signatureName}`);
+                return;
+              }
+              const response = await github.rest.repos.getReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                asset_id: signatureAsset.id,
+                headers: { accept: 'application/octet-stream' },
+              });
+              signatures[signatureName] = Buffer.from(response.data).toString('utf8');
+            }
+
+            const metadata = buildUpdaterMetadata({
+              tag,
+              repository: `${context.repo.owner}/${context.repo.repo}`,
+              assetNames: assets.map((asset) => asset.name),
+              signatures,
+            });
+            const data = Buffer.from(`${JSON.stringify(metadata, null, 2)}\n`);
+            const stagedName = `latest.json.${process.env.GITHUB_RUN_ID}.${process.env.GITHUB_RUN_ATTEMPT}.tmp`;
+
+            for (const staleAsset of assets.filter((asset) => asset.name === stagedName)) {
+              await github.rest.repos.deleteReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                asset_id: staleAsset.id,
+              });
+            }
+
+            const { data: stagedAsset } = await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: releaseId,
+              name: stagedName,
+              data,
+              headers: {
+                'content-type': 'application/json',
+                'content-length': data.length,
+              },
+            });
+
+            for (const currentAsset of assets.filter((asset) => asset.name === 'latest.json')) {
+              await github.rest.repos.deleteReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                asset_id: currentAsset.id,
+              });
+            }
+            await github.rest.repos.updateReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              asset_id: stagedAsset.id,
+              name: 'latest.json',
+              label: '',
+            });
+            core.info(`Uploaded complete updater metadata for ${tag}`);
+
   cleanup-updater-signatures:
     name: Remove loose updater signature assets
-    needs: [create-release, resolve-release, build]
-    if: always() && needs.build.result == 'success' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true'))
+    needs: [create-release, resolve-release, build, assemble-updater-metadata]
+    if: >-
+      always() &&
+      needs.build.result == 'success' &&
+      (github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.dry_run != 'true')) &&
+      (((github.event_name == 'push' && needs.create-release.outputs.is_prerelease == 'false') ||
+      (github.event_name == 'workflow_dispatch' && needs.resolve-release.outputs.is_prerelease == 'false')) &&
+      needs.assemble-updater-metadata.result == 'success' ||
+      (github.event_name == 'push' && needs.create-release.outputs.is_prerelease == 'true') ||
+      (github.event_name == 'workflow_dispatch' && needs.resolve-release.outputs.is_prerelease == 'true'))
     runs-on: ubuntu-latest
     steps:
       - name: Remove loose updater signature assets
