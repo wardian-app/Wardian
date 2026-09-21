@@ -19,6 +19,8 @@ Use it when you need to inspect generated files, logs, prompt assets, or the sel
 1. Select an agent in the right roster, or clear selection for global Wardian home browsing.
 2. Open the **Explorer** tab in the left sidebar.
 3. Expand folders to inspect files.
+   Large folders show an initial set of rows immediately, then finish loading
+   the sorted directory listing in the background.
 4. Click a file to use the matching broad file-family preference in
    [Settings](./settings.md). Wardian-supported files open in a permanent Files
    tab by default; unsupported files use the system-preferred viewer.

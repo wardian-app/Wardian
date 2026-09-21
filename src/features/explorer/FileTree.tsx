@@ -93,10 +93,40 @@ const FileTreeBranch: React.FC<FileTreeBranchProps> = ({
   const [listingNextOffset, setListingNextOffset] = useState<number | null>(null);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
+  const [completingListing, setCompletingListing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const requestGeneration = useRef(0);
+  const mounted = useRef(true);
+  const completionFrame = useRef<number | null>(null);
+  const completionTimer = useRef<number | null>(null);
+  const initialRefresh = useRef({ path, token: refreshToken });
+  if (initialRefresh.current.path !== path) {
+    initialRefresh.current = { path, token: refreshToken };
+  }
+
+  const cancelDeferredCompletion = useCallback(() => {
+    if (completionFrame.current !== null) {
+      window.cancelAnimationFrame(completionFrame.current);
+      completionFrame.current = null;
+    }
+    if (completionTimer.current !== null) {
+      window.clearTimeout(completionTimer.current);
+      completionTimer.current = null;
+    }
+  }, []);
+
+  const beginRequest = useCallback(() => {
+    cancelDeferredCompletion();
+    requestGeneration.current += 1;
+    return requestGeneration.current;
+  }, [cancelDeferredCompletion]);
+
+  const isCurrentRequest = useCallback((generation: number) => (
+    mounted.current && requestGeneration.current === generation
+  ), []);
 
   const fetchTree = useCallback(async (
-    isMounted: () => boolean,
+    generation: number,
     showLoading: boolean,
     offset = 0,
     append = false,
@@ -109,7 +139,7 @@ const FileTreeBranch: React.FC<FileTreeBranchProps> = ({
         'get_directory_tree',
         offset > 0 ? { path, offset } : { path },
       );
-      if (isMounted()) {
+      if (isCurrentRequest(generation)) {
         const page = result.nodes;
         setNodes((current) => {
           if (!append) return page;
@@ -121,42 +151,86 @@ const FileTreeBranch: React.FC<FileTreeBranchProps> = ({
         });
         setListingTruncated(result.truncated);
         setListingNextOffset(result.next_offset ?? null);
+        setCompletingListing(false);
         setError(null);
       }
     } catch (err) {
-      if (isMounted()) {
+      if (isCurrentRequest(generation)) {
+        setCompletingListing(false);
         setError(String(err));
         console.error("Failed to load directory tree for", path, err);
       }
     } finally {
-      if (isMounted() && showLoading) setLoading(false);
+      if (isCurrentRequest(generation) && showLoading) setLoading(false);
     }
-  }, [path]);
+  }, [isCurrentRequest, path]);
 
   const loadMore = () => {
     if (listingNextOffset === null || loading) return;
-    let isMounted = true;
-    void fetchTree(() => isMounted, true, listingNextOffset, true).finally(() => {
-      isMounted = false;
-    });
+    const generation = beginRequest();
+    void fetchTree(generation, true, listingNextOffset, true);
   };
 
   useEffect(() => {
-    let isMounted = true;
-    void fetchTree(() => isMounted, true);
-    return () => { isMounted = false; };
-  }, [fetchTree]);
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      requestGeneration.current += 1;
+      cancelDeferredCompletion();
+    };
+  }, [cancelDeferredCompletion]);
 
   useEffect(() => {
-    if (refreshToken === 0) return;
+    const generation = beginRequest();
+    const fetchPreview = async () => {
+      setLoading(true);
+      try {
+        const result = await invoke<DirectoryTreeResult>('get_directory_preview', { path });
+        if (!isCurrentRequest(generation)) return;
+        setNodes(result.nodes);
+        setListingTruncated(false);
+        setListingNextOffset(null);
+        setError(null);
+        setLoading(false);
+        if (result.truncated) {
+          setCompletingListing(true);
+          completionFrame.current = window.requestAnimationFrame(() => {
+            completionFrame.current = null;
+            completionTimer.current = window.setTimeout(() => {
+              completionTimer.current = null;
+              if (!isCurrentRequest(generation)) return;
+              void fetchTree(generation, false);
+            }, 0);
+          });
+        } else {
+          setCompletingListing(false);
+        }
+      } catch (err) {
+        if (!isCurrentRequest(generation)) return;
+        setLoading(false);
+        setError(String(err));
+        console.error("Failed to load directory preview for", path, err);
+      }
+    };
+    void fetchPreview();
+    return () => {
+      if (requestGeneration.current === generation) {
+        requestGeneration.current += 1;
+      }
+      cancelDeferredCompletion();
+    };
+  }, [beginRequest, cancelDeferredCompletion, fetchTree, isCurrentRequest, path]);
+
+  useEffect(() => {
+    if (refreshToken === initialRefresh.current.token) return;
     if (!changedPaths.some((changedPath) => pathAffectsDirectory(changedPath, path))) {
       return;
     }
 
-    let isMounted = true;
-    void fetchTree(() => isMounted, false);
-    return () => { isMounted = false; };
-  }, [changedPaths, fetchTree, path, refreshToken]);
+    const generation = beginRequest();
+    setCompletingListing(false);
+    void fetchTree(generation, true);
+  }, [beginRequest, changedPaths, fetchTree, path, refreshToken]);
 
   useLayoutEffect(() => {
     const visibleItems = Array.from(
@@ -278,11 +352,11 @@ const FileTreeBranch: React.FC<FileTreeBranchProps> = ({
     }
   };
 
-  if (loading && depth === 0) {
+  if (loading && depth === 0 && nodes.length === 0) {
     return <div className="text-sm text-wardian-text-muted p-2 animate-pulse">Loading workspace...</div>;
   }
 
-  if (error && depth === 0) {
+  if (error && depth === 0 && nodes.length === 0) {
     return <div className="p-2 text-sm text-wardian-error break-words">Error: {error}</div>;
   }
 
@@ -389,6 +463,16 @@ const FileTreeBranch: React.FC<FileTreeBranchProps> = ({
           </div>
         );
       })}
+      {completingListing && (
+        <div className="px-2 py-1 text-[11px] text-wardian-text-muted italic" role="status">
+          Loading remaining files…
+        </div>
+      )}
+      {error && nodes.length > 0 && (
+        <div className="px-2 py-1 text-[11px] text-wardian-error" role="status">
+          Couldn’t finish loading this folder.
+        </div>
+      )}
       {listingTruncated && (
         <div className="flex items-center gap-2 px-2 py-1 text-[11px] text-wardian-text-muted italic" role="status">
           <span>Showing the first 500 items in this folder; pages are capped at 500.</span>

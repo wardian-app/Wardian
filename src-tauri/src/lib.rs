@@ -785,6 +785,7 @@ pub fn run() {
             commands::fs::resolve_system_include_directories,
             commands::fs::validate_directory_path,
             commands::fs::get_explorer_root,
+            commands::fs::get_directory_preview,
             commands::fs::get_directory_tree,
             commands::fs::explorer_watch,
             commands::fs::explorer_unwatch,

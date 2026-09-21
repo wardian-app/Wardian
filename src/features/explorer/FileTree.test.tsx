@@ -16,6 +16,7 @@ describe('FileTree Component', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -48,6 +49,196 @@ describe('FileTree Component', () => {
     });
   });
 
+  it('renders a bounded preview before the canonical directory listing settles', async () => {
+    let paintCallback: FrameRequestCallback | undefined;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      paintCallback = callback;
+      return 1;
+    });
+    let resolveListing: ((value: ReturnType<typeof dirPage>) => void) | undefined;
+    vi.mocked(invoke).mockImplementation((command) => {
+      if (command === 'get_directory_preview') {
+        return Promise.resolve({
+          nodes: [{ name: 'visible-now.txt', path: '/test/visible-now.txt', is_dir: false, extension: 'txt' }],
+          truncated: true,
+          next_offset: null,
+        });
+      }
+      if (command === 'get_directory_tree') {
+        return new Promise((resolve) => {
+          resolveListing = resolve;
+        });
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    });
+
+    render(<FileTree path="/test" />);
+
+    expect(await screen.findByText('visible-now.txt')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Loading remaining files');
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'get_directory_tree')).toBe(false);
+
+    act(() => paintCallback?.(0));
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'get_directory_tree')).toBe(false);
+    await waitFor(() => {
+      expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'get_directory_tree')).toBe(true);
+    });
+
+    await act(async () => {
+      resolveListing?.(dirPage([
+        { name: 'canonical.txt', path: '/test/canonical.txt', is_dir: false, extension: 'txt' },
+      ]));
+    });
+
+    expect(await screen.findByText('canonical.txt')).toBeInTheDocument();
+    expect(screen.queryByText('visible-now.txt')).not.toBeInTheDocument();
+  });
+
+  it('does not replay an inherited watcher refresh when a branch first mounts', async () => {
+    let resolvePreview: ((value: ReturnType<typeof dirPage>) => void) | undefined;
+    vi.mocked(invoke).mockImplementation((command) => {
+      if (command === 'get_directory_preview') {
+        return new Promise((resolve) => {
+          resolvePreview = resolve;
+        });
+      }
+      if (command === 'get_directory_tree') return Promise.resolve(dirPage([]));
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    });
+
+    render(
+      <FileTree
+        path="/test/src"
+        refreshToken={7}
+        changedPaths={['/test/src/new.txt']}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith('get_directory_preview', { path: '/test/src' });
+    });
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'get_directory_tree')).toBe(false);
+
+    await act(async () => {
+      resolvePreview?.(dirPage([
+        { name: 'new.txt', path: '/test/src/new.txt', is_dir: false, extension: 'txt' },
+      ]));
+    });
+
+    expect(await screen.findByText('new.txt')).toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'get_directory_tree')).toBe(false);
+  });
+
+  it('keeps a watcher refresh result when an older preview settles later', async () => {
+    let resolvePreview: ((value: ReturnType<typeof dirPage>) => void) | undefined;
+    vi.mocked(invoke).mockImplementation((command) => {
+      if (command === 'get_directory_preview') {
+        return new Promise((resolve) => {
+          resolvePreview = resolve;
+        });
+      }
+      if (command === 'get_directory_tree') {
+        return Promise.resolve(dirPage([
+          { name: 'fresh.txt', path: '/test/src/fresh.txt', is_dir: false, extension: 'txt' },
+        ]));
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    });
+
+    const { rerender } = render(
+      <FileTree path="/test/src" refreshToken={0} changedPaths={[]} />,
+    );
+    await waitFor(() => {
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith('get_directory_preview', { path: '/test/src' });
+    });
+
+    rerender(
+      <FileTree
+        path="/test/src"
+        refreshToken={1}
+        changedPaths={['/test/src/fresh.txt']}
+      />,
+    );
+
+    expect(await screen.findByText('fresh.txt')).toBeInTheDocument();
+
+    await act(async () => {
+      resolvePreview?.(dirPage([
+        { name: 'stale.txt', path: '/test/src/stale.txt', is_dir: false, extension: 'txt' },
+      ]));
+    });
+
+    expect(screen.getByText('fresh.txt')).toBeInTheDocument();
+    expect(screen.queryByText('stale.txt')).not.toBeInTheDocument();
+  });
+
+  it('blocks pagination until a watcher refresh establishes the current page offset', async () => {
+    let treeReads = 0;
+    let resolveRefresh: ((value: ReturnType<typeof dirPage>) => void) | undefined;
+    vi.mocked(invoke).mockImplementation((command, args) => {
+      if (command === 'get_directory_preview') {
+        return Promise.resolve({
+          nodes: [{ name: 'old.txt', path: '/test/old.txt', is_dir: false, extension: 'txt' }],
+          truncated: true,
+          next_offset: null,
+        });
+      }
+      if (command === 'get_directory_tree') {
+        treeReads += 1;
+        if (treeReads === 1) {
+          return Promise.resolve({
+            nodes: [{ name: 'old.txt', path: '/test/old.txt', is_dir: false, extension: 'txt' }],
+            truncated: true,
+            next_offset: 500,
+          });
+        }
+        if (treeReads === 2) {
+          return new Promise((resolve) => {
+            resolveRefresh = resolve;
+          });
+        }
+        expect(args).toEqual({ path: '/test', offset: 300 });
+        return Promise.resolve(dirPage([
+          { name: 'next.txt', path: '/test/next.txt', is_dir: false, extension: 'txt' },
+        ]));
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    });
+
+    const { rerender } = render(
+      <FileTree path="/test" refreshToken={0} changedPaths={[]} />,
+    );
+    expect(await screen.findByText('old.txt')).toBeInTheDocument();
+    const initialLoadMore = await screen.findByRole('button', { name: 'Load next 500' });
+
+    rerender(
+      <FileTree
+        path="/test"
+        refreshToken={1}
+        changedPaths={['/test/old.txt']}
+      />,
+    );
+
+    await waitFor(() => expect(treeReads).toBe(2));
+    expect(screen.getByRole('button', { name: 'Loading…' })).toBeDisabled();
+    fireEvent.click(initialLoadMore);
+    expect(treeReads).toBe(2);
+
+    await act(async () => {
+      resolveRefresh?.({
+        nodes: [{ name: 'fresh.txt', path: '/test/fresh.txt', is_dir: false, extension: 'txt' }],
+        truncated: true,
+        next_offset: 300,
+      });
+    });
+
+    expect(await screen.findByText('fresh.txt')).toBeInTheDocument();
+    expect(screen.queryByText('old.txt')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Load next 500' }));
+    expect(await screen.findByText('next.txt')).toBeInTheDocument();
+    expect(treeReads).toBe(3);
+  });
+
   it('makes workspace files draggable with a Wardian path payload', async () => {
     vi.mocked(invoke).mockResolvedValueOnce(dirPage([
       { name: 'notes.md', path: '/test/notes.md', is_dir: false, extension: 'md' },
@@ -71,18 +262,29 @@ describe('FileTree Component', () => {
   });
 
   it('shows when a directory listing is partial', async () => {
-    vi.mocked(invoke).mockResolvedValueOnce({
-      nodes: [{ name: 'file.txt', path: '/test/file.txt', is_dir: false, extension: 'txt' }],
-      truncated: true,
-    });
+    vi.mocked(invoke)
+      .mockResolvedValueOnce({
+        nodes: [{ name: 'file.txt', path: '/test/file.txt', is_dir: false, extension: 'txt' }],
+        truncated: true,
+      })
+      .mockResolvedValueOnce({
+        nodes: [{ name: 'file.txt', path: '/test/file.txt', is_dir: false, extension: 'txt' }],
+        truncated: true,
+        next_offset: 500,
+      });
 
     render(<FileTree path="/test" />);
 
-    expect(await screen.findByRole('status')).toHaveTextContent('first 500 items');
+    expect(await screen.findByText(/first 500 items/i)).toBeInTheDocument();
   });
 
   it('loads one more bounded directory page', async () => {
     vi.mocked(invoke)
+      .mockResolvedValueOnce({
+        nodes: [{ name: 'first.txt', path: '/test/first.txt', is_dir: false, extension: 'txt' }],
+        truncated: true,
+        next_offset: null,
+      })
       .mockResolvedValueOnce({
         nodes: [{ name: 'first.txt', path: '/test/first.txt', is_dir: false, extension: 'txt' }],
         truncated: true,

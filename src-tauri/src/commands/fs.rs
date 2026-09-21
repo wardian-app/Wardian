@@ -9,6 +9,7 @@ use wardian_core::models::AgentConfig;
 use wardian_core::models::{DirectoryTreeResult, FileNode};
 
 const EXPLORER_WATCH_DEBOUNCE_MS: u64 = 150;
+const EXPLORER_PREVIEW_CHILDREN: usize = 32;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ExplorerChangedPayload {
@@ -134,6 +135,84 @@ pub async fn get_explorer_root(
 }
 
 #[tauri::command]
+pub async fn get_directory_preview(path: String) -> Result<DirectoryTreeResult, String> {
+    tokio::task::spawn_blocking(move || {
+        let dir_path = Path::new(&path);
+        validate_directory_path_for_listing(dir_path, &path)?;
+        let entries = fs::read_dir(dir_path)
+            .map_err(|error| error.to_string())?
+            .map(|entry| entry.map_err(|error| error.to_string()));
+        let (mut nodes, truncated) =
+            collect_bounded_preview(entries, EXPLORER_PREVIEW_CHILDREN, file_node_from_entry)?;
+        sort_file_nodes(&mut nodes);
+
+        Ok(DirectoryTreeResult {
+            nodes,
+            truncated,
+            next_offset: None,
+        })
+    })
+    .await
+    .map_err(|error| format!("Failed to join directory preview task: {error}"))?
+}
+
+fn validate_directory_path_for_listing(dir_path: &Path, path: &str) -> Result<(), String> {
+    if !dir_path.exists() || !dir_path.is_dir() {
+        return Err(format!(
+            "Path does not exist or is not a directory: {}",
+            path
+        ));
+    }
+    Ok(())
+}
+
+fn file_node_from_entry(entry: fs::DirEntry) -> Result<FileNode, String> {
+    let metadata = entry.metadata().map_err(|error| error.to_string())?;
+    let is_dir = metadata.is_dir();
+    let name = entry.file_name().to_string_lossy().into_owned();
+    let extension = entry
+        .path()
+        .extension()
+        .map(|value| value.to_string_lossy().into_owned());
+
+    Ok(FileNode {
+        name,
+        path: entry.path().to_string_lossy().into_owned(),
+        is_dir,
+        extension,
+    })
+}
+
+fn collect_bounded_preview<T, I, F>(
+    entries: I,
+    limit: usize,
+    mut to_node: F,
+) -> Result<(Vec<FileNode>, bool), String>
+where
+    I: IntoIterator<Item = Result<T, String>>,
+    F: FnMut(T) -> Result<FileNode, String>,
+{
+    let mut nodes = Vec::with_capacity(limit);
+    for entry in entries {
+        let entry = entry?;
+        if nodes.len() == limit {
+            return Ok((nodes, true));
+        }
+        nodes.push(to_node(entry)?);
+    }
+    Ok((nodes, false))
+}
+
+fn sort_file_nodes(nodes: &mut [FileNode]) {
+    nodes.sort_by(|left, right| {
+        right
+            .is_dir
+            .cmp(&left.is_dir)
+            .then(left.name.cmp(&right.name))
+    });
+}
+
+#[tauri::command]
 pub async fn get_directory_tree(
     path: String,
     offset: Option<usize>,
@@ -143,12 +222,7 @@ pub async fn get_directory_tree(
     let mut truncated = false;
     let dir_path = Path::new(&path);
 
-    if !dir_path.exists() || !dir_path.is_dir() {
-        return Err(format!(
-            "Path does not exist or is not a directory: {}",
-            path
-        ));
-    }
+    validate_directory_path_for_listing(dir_path, &path)?;
 
     let mut entries = fs::read_dir(dir_path)
         .map_err(|e| e.to_string())?
@@ -160,24 +234,11 @@ pub async fn get_directory_tree(
             truncated = true;
             break;
         }
-        let metadata = entry.metadata().map_err(|e| e.to_string())?;
-        let is_dir = metadata.is_dir();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let extension = entry
-            .path()
-            .extension()
-            .map(|s| s.to_string_lossy().into_owned());
-
-        nodes.push(FileNode {
-            name,
-            path: entry.path().to_string_lossy().into_owned(),
-            is_dir,
-            extension,
-        });
+        nodes.push(file_node_from_entry(entry)?);
     }
 
     // Sort directories first, then alphabetically
-    nodes.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
+    sort_file_nodes(&mut nodes);
 
     Ok(DirectoryTreeResult {
         next_offset: truncated.then_some(offset + nodes.len()),
@@ -815,6 +876,57 @@ mod tests {
 
         assert!(!key.contains('\\'));
         assert!(key.ends_with("/deleted-before-unwatch"));
+    }
+
+    #[tokio::test]
+    async fn directory_preview_returns_a_complete_sorted_small_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        fs::create_dir(temp.path().join("z-directory")).unwrap();
+        fs::create_dir(temp.path().join("a-directory")).unwrap();
+        fs::write(temp.path().join("z-file.txt"), "x").unwrap();
+        fs::write(temp.path().join("a-file.txt"), "x").unwrap();
+
+        let result = get_directory_preview(temp.path().to_string_lossy().into_owned())
+            .await
+            .expect("directory preview");
+
+        assert!(!result.truncated);
+        assert_eq!(result.next_offset, None);
+        assert_eq!(
+            result
+                .nodes
+                .iter()
+                .map(|node| node.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a-directory", "z-directory", "a-file.txt", "z-file.txt"]
+        );
+    }
+
+    #[test]
+    fn bounded_preview_consumes_only_one_entry_beyond_the_visible_batch() {
+        let visited = std::cell::Cell::new(0);
+        let mapped = std::cell::Cell::new(0);
+        let entries = (0..10_000).map(|index| {
+            visited.set(visited.get() + 1);
+            Ok(index)
+        });
+
+        let (nodes, truncated) =
+            collect_bounded_preview(entries, EXPLORER_PREVIEW_CHILDREN, |index| {
+                mapped.set(mapped.get() + 1);
+                Ok(FileNode {
+                    name: format!("file-{index}.txt"),
+                    path: format!("/test/file-{index}.txt"),
+                    is_dir: false,
+                    extension: Some("txt".to_string()),
+                })
+            })
+            .expect("bounded preview");
+
+        assert!(truncated);
+        assert_eq!(nodes.len(), EXPLORER_PREVIEW_CHILDREN);
+        assert_eq!(mapped.get(), EXPLORER_PREVIEW_CHILDREN);
+        assert_eq!(visited.get(), EXPLORER_PREVIEW_CHILDREN + 1);
     }
 
     #[tokio::test]
