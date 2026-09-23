@@ -154,7 +154,7 @@ mod tests {
     fn ipc_dispatch_reads_contract_snake_case_arguments() {
         let app = tauri::test::mock_builder()
             .invoke_handler(tauri::generate_handler![telemetry_agent_breakdown])
-            .build(tauri::generate_context!())
+            .build(crate::app_context())
             .unwrap();
         let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
             .build()
