@@ -35,6 +35,12 @@ The local sequence covers the frontend, backend, and documentation quality
 steps. PR screenshot/code-claim checks, dependency audits, coverage uploads,
 and browser/native suites remain CI- or environment-specific.
 
+The hosted `Backend (macOS - Codex Home ACL)` job runs the focused Codex home
+platform tests on `macos-latest`. Its native fixtures check that a private
+directory without an extended ACL is accepted and one with an ACL entry is
+rejected. This is filesystem validation, not a Codex spawn or provider test;
+that runtime acceptance still requires a separate Mac run.
+
 A local pass does not complete PR delivery. Follow [Pull Request
 Delivery](./pull-requests.md) to monitor hosted checks on the latest published
 commit, resolve failures, and verify that all applicable checks have finished

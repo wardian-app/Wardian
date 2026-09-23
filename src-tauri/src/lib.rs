@@ -29,6 +29,11 @@ use wardian_core::models::AgentConfig;
 const TELEMETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 const TELEMETRY_TICK_SLOW_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(30);
 
+// Keep one macro expansion in the library: macOS embeds a process-wide plist symbol.
+fn app_context<R: tauri::Runtime>() -> tauri::Context<R> {
+    tauri::generate_context!()
+}
+
 async fn publish_restored_agent(
     app: &AppHandle,
     publication: &startup_restore::RestorePublication,
@@ -950,7 +955,7 @@ pub fn run() {
             commands::settings::set_guided_tour_state,
             commands::settings::reset_onboarding_hints,
         ])
-        .build(tauri::generate_context!())
+        .build(app_context())
         .expect("error while building tauri application");
 
     app.run(|app_handle, event| {

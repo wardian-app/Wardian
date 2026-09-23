@@ -235,16 +235,33 @@ mod native {
             );
         }
         #[cfg(target_os = "macos")]
-        validate_macos_acl(&directory)?;
+        validate_macos_acl(std::os::fd::AsRawFd::as_raw_fd(&directory))?;
         Ok(())
     }
 
     #[cfg(target_os = "macos")]
-    fn validate_macos_acl(directory: &std::fs::File) -> Result<(), String> {
+    pub(super) fn validate_macos_acl(fd: libc::c_int) -> Result<(), String> {
         use std::ffi::c_void;
-        use std::os::fd::AsRawFd;
         extern "C" {
-            fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> *mut c_void;
+            fn filesec_init() -> *mut c_void;
+            fn filesec_free(security: *mut c_void);
+            // macOS x86_64 retains the legacy inode ABI under the unsuffixed name.
+            #[cfg_attr(target_arch = "x86_64", link_name = "fstatx_np$INODE64")]
+            fn fstatx_np(
+                fd: libc::c_int,
+                stat: *mut libc::stat,
+                security: *mut c_void,
+            ) -> libc::c_int;
+            fn filesec_query_property(
+                security: *mut c_void,
+                property: libc::c_int,
+                valid: *mut libc::c_int,
+            ) -> libc::c_int;
+            fn filesec_get_property(
+                security: *mut c_void,
+                property: libc::c_int,
+                value: *mut c_void,
+            ) -> libc::c_int;
             fn acl_valid(acl: *mut c_void) -> libc::c_int;
             fn acl_get_entry(
                 acl: *mut c_void,
@@ -253,16 +270,47 @@ mod native {
             ) -> libc::c_int;
             fn acl_free(acl: *mut c_void) -> libc::c_int;
         }
-        // Darwin extended ACLs can grant access beyond mode bits. Require an
-        // empty valid ACL; even deny-only entries are conservatively rejected.
-        // SAFETY: the fd remains open; the returned ACL is freed exactly once.
+        // Darwin extended ACLs can grant access beyond mode bits. Accept an
+        // absent or empty valid ACL; even deny-only entries are rejected.
+        // SAFETY: the fd remains open; filesec and any returned ACL are freed.
         unsafe {
-            let acl = acl_get_fd_np(directory.as_raw_fd(), 0x100);
-            if acl.is_null() {
+            let security = filesec_init();
+            if security.is_null() {
                 return Err(format!(
                     "Cannot inspect private directory ACL: {}",
                     std::io::Error::last_os_error()
                 ));
+            }
+            let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+            if fstatx_np(fd, metadata.as_mut_ptr(), security) != 0 {
+                let error = std::io::Error::last_os_error();
+                filesec_free(security);
+                return Err(format!("Cannot inspect private directory ACL: {error}"));
+            }
+            // FILESEC_ACL is 5. Query presence before converting the ACL:
+            // conversion failures can also return an errno such as ENOENT.
+            let mut present = 0;
+            if filesec_query_property(security, 5, &mut present) != 0 {
+                let error = std::io::Error::last_os_error();
+                filesec_free(security);
+                return Err(format!("Cannot inspect private directory ACL: {error}"));
+            }
+            if present == 0 {
+                filesec_free(security);
+                return Ok(());
+            }
+            let mut acl: *mut c_void = std::ptr::null_mut();
+            let status = filesec_get_property(security, 5, std::ptr::addr_of_mut!(acl).cast());
+            let error = std::io::Error::last_os_error();
+            filesec_free(security);
+            if status != 0 {
+                if !acl.is_null() {
+                    acl_free(acl);
+                }
+                return Err(format!("Cannot inspect private directory ACL: {error}"));
+            }
+            if acl.is_null() {
+                return Err("Cannot inspect private directory ACL: no ACL returned".into());
             }
             let valid = acl_valid(acl) == 0;
             let mut entry = std::ptr::null_mut();

@@ -117,6 +117,95 @@ fn broad_unix_permissions_are_rejected_without_chmod() {
     assert_eq!(std::fs::metadata(&root).unwrap().mode() & 0o777, 0o755);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn directory_without_extended_acl_is_accepted() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("no-acl");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // Strip any ACL inherited from the runner's temporary directory.
+    assert!(std::process::Command::new("chmod")
+        .arg("-N")
+        .arg(&root)
+        .status()
+        .unwrap()
+        .success());
+    validate_private_root(&root).unwrap();
+    create_private_root(&root).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn preparation_creates_and_reuses_private_locks_without_acl() {
+    use std::os::unix::fs::MetadataExt;
+    let fixture = tempfile::Builder::new()
+        .prefix("codex-locks")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let home = std::fs::canonicalize(fixture.path())
+        .unwrap()
+        .join("wardian-home");
+    let habitat = home.join("agents/agent/habitat");
+    std::fs::create_dir_all(&habitat).unwrap();
+    let locks = home.join("locks");
+    assert!(!locks.exists());
+
+    let guard = super::super::acquire_preparation(&home, "agent").unwrap();
+    validate_private_root(&locks).unwrap();
+    let created = std::fs::metadata(&locks).unwrap();
+    assert_eq!(created.mode() & 0o7777, 0o700);
+    drop(guard);
+
+    // Make the reuse fixture explicitly ACL-free, then leave it untouched.
+    assert!(std::process::Command::new("chmod")
+        .arg("-N")
+        .arg(&locks)
+        .status()
+        .unwrap()
+        .success());
+    let guard = super::super::acquire_preparation(&home, "agent").unwrap();
+    validate_private_root(&locks).unwrap();
+    let reused = std::fs::metadata(&locks).unwrap();
+    assert_eq!((reused.dev(), reused.ino()), (created.dev(), created.ino()));
+    assert_eq!(reused.mode() & 0o7777, 0o700);
+    assert!(habitat.is_dir());
+    drop(guard);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn directory_with_extended_acl_is_rejected() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("with-acl");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(std::process::Command::new("chmod")
+        .args(["+a", "everyone allow read"])
+        .arg(&root)
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(
+        std::fs::metadata(&root).unwrap().permissions().mode() & 0o7777,
+        0o700
+    );
+    assert!(validate_private_root(&root)
+        .unwrap_err()
+        .contains("extended ACL"));
+    assert!(create_private_root(&root).is_err());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn failed_extended_stat_cannot_be_treated_as_absent_acl() {
+    assert!(super::native::validate_macos_acl(-1)
+        .unwrap_err()
+        .contains("Cannot inspect private directory ACL"));
+}
+
 #[cfg(windows)]
 #[test]
 fn protected_everyone_dacl_is_rejected_without_repair() {
