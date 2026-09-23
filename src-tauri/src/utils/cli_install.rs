@@ -14,6 +14,10 @@ pub fn bundled_cli_file_name() -> &'static str {
     }
 }
 
+pub fn bundled_mcp_file_name() -> &'static str {
+    "wardian-mcp.exe"
+}
+
 pub fn launcher_file_name() -> &'static str {
     if cfg!(windows) {
         "wardian.cmd"
@@ -71,15 +75,40 @@ where
             source.display()
         ));
     }
+    #[cfg(windows)]
+    let mcp_source = {
+        let direct = resources_dir.join("bin").join(bundled_mcp_file_name());
+        let source = if direct.is_file() {
+            direct
+        } else {
+            resources_dir
+                .join("resources")
+                .join("bin")
+                .join(bundled_mcp_file_name())
+        };
+        if !source.is_file() {
+            return Err(format!(
+                "MCP launcher resource was not found at {}",
+                source.display()
+            ));
+        }
+        source
+    };
 
     let target_dir = target_home.join("bin");
     let launcher = target_dir.join(launcher_file_name());
     let target = target_dir.join(bundled_cli_file_name());
+    #[cfg(windows)]
+    let mcp_target = target_dir.join(bundled_mcp_file_name());
 
     std::fs::create_dir_all(&target_dir)
         .map_err(|err| format!("Failed to create {}: {err}", target_dir.display()))?;
 
     let should_copy_binary = binary_needs_update(&source, &target)?;
+    #[cfg(windows)]
+    let should_copy_mcp = binary_needs_update(&mcp_source, &mcp_target)?;
+    #[cfg(not(windows))]
+    let should_copy_mcp = false;
     let should_write_launcher = launcher_needs_update(&launcher, &launcher_contents());
     #[cfg(windows)]
     let posix_launcher = target_dir.join("wardian");
@@ -89,7 +118,11 @@ where
     #[cfg(not(windows))]
     let should_write_posix_launcher = false;
 
-    let outcome = if should_copy_binary || should_write_launcher || should_write_posix_launcher {
+    let outcome = if should_copy_binary
+        || should_write_launcher
+        || should_write_posix_launcher
+        || should_copy_mcp
+    {
         if should_copy_binary {
             std::fs::copy(&source, &target).map_err(|err| {
                 format!(
@@ -99,6 +132,17 @@ where
                 )
             })?;
             make_executable(&target)?;
+        }
+        #[cfg(windows)]
+        if should_copy_mcp {
+            std::fs::copy(&mcp_source, &mcp_target).map_err(|err| {
+                format!(
+                    "Failed to copy MCP launcher from {} to {}: {err}",
+                    mcp_source.display(),
+                    mcp_target.display()
+                )
+            })?;
+            make_executable(&mcp_target)?;
         }
 
         write_launcher(&launcher)?;
@@ -477,6 +521,13 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn write_test_mcp_launcher(source_dir: &Path) {
+        #[cfg(windows)]
+        std::fs::write(source_dir.join(bundled_mcp_file_name()), b"wardian mcp").unwrap();
+        #[cfg(not(windows))]
+        let _ = source_dir;
+    }
+
     #[test]
     fn target_binary_name_matches_platform() {
         let expected = if cfg!(windows) {
@@ -499,6 +550,12 @@ mod tests {
         assert_eq!(bundled_cli_file_name(), expected);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn bundled_mcp_launcher_uses_dedicated_windows_binary_name() {
+        assert_eq!(bundled_mcp_file_name(), "wardian-mcp.exe");
+    }
+
     #[test]
     fn installer_copies_cli_binary_to_wardian_home_bin() {
         let _guard = crate::utils::wardian_test_env_lock();
@@ -507,6 +564,7 @@ mod tests {
         let source_dir = resources.path().join("bin");
         std::fs::create_dir_all(&source_dir).unwrap();
         std::fs::write(source_dir.join(bundled_cli_file_name()), b"wardian cli").unwrap();
+        write_test_mcp_launcher(&source_dir);
         std::env::set_var("WARDIAN_HOME", home.path());
 
         let mut path_updates = 0;
@@ -517,9 +575,13 @@ mod tests {
         .unwrap();
 
         let impl_target = home.path().join("bin").join(bundled_cli_file_name());
+        #[cfg(windows)]
+        let mcp_target = home.path().join("bin").join(bundled_mcp_file_name());
         let launcher_target = home.path().join("bin").join(launcher_file_name());
         assert_eq!(outcome, InstallOutcome::Installed(launcher_target.clone()));
         assert_eq!(std::fs::read(impl_target).unwrap(), b"wardian cli");
+        #[cfg(windows)]
+        assert_eq!(std::fs::read(mcp_target).unwrap(), b"wardian mcp");
         assert!(std::fs::read_to_string(launcher_target)
             .unwrap()
             .contains("wardian-cli"));
@@ -539,6 +601,7 @@ mod tests {
         let source_dir = resources.path().join("bin");
         std::fs::create_dir_all(&source_dir).unwrap();
         std::fs::write(source_dir.join(bundled_cli_file_name()), b"debug cli").unwrap();
+        write_test_mcp_launcher(&source_dir);
 
         let mut path_updates = 0;
         let outcome = install_cli_from_resources_to_home_with_path_update(
@@ -591,6 +654,7 @@ mod tests {
         let source_dir = resources.path().join("bin");
         std::fs::create_dir_all(&source_dir).unwrap();
         std::fs::write(source_dir.join(bundled_cli_file_name()), b"wardian cli").unwrap();
+        write_test_mcp_launcher(&source_dir);
         std::env::set_var("WARDIAN_HOME", home.path());
 
         let mut path_updates = 0;
@@ -613,6 +677,7 @@ mod tests {
         let source_dir = resources.path().join("resources").join("bin");
         std::fs::create_dir_all(&source_dir).unwrap();
         std::fs::write(source_dir.join(bundled_cli_file_name()), b"packaged cli").unwrap();
+        write_test_mcp_launcher(&source_dir);
         std::env::set_var("WARDIAN_HOME", home.path());
 
         let outcome =
@@ -657,7 +722,10 @@ mod tests {
         std::fs::create_dir_all(&source_dir).unwrap();
         std::fs::create_dir_all(&target_dir).unwrap();
         std::fs::write(source_dir.join(bundled_cli_file_name()), b"wardian cli").unwrap();
+        write_test_mcp_launcher(&source_dir);
         std::fs::write(target_dir.join(bundled_cli_file_name()), b"wardian cli").unwrap();
+        #[cfg(windows)]
+        std::fs::write(target_dir.join(bundled_mcp_file_name()), b"wardian mcp").unwrap();
         std::fs::write(
             target_dir.join(launcher_file_name()),
             launcher_contents().replace('\n', "\r\n"),
@@ -693,6 +761,7 @@ mod tests {
         std::fs::create_dir_all(&source_dir).unwrap();
         std::fs::create_dir_all(&target_dir).unwrap();
         std::fs::write(source_dir.join(bundled_cli_file_name()), b"new cli").unwrap();
+        write_test_mcp_launcher(&source_dir);
         std::fs::write(target_dir.join(bundled_cli_file_name()), b"old cli").unwrap();
         std::fs::write(target_dir.join(launcher_file_name()), launcher_contents()).unwrap();
         std::env::set_var("WARDIAN_HOME", home.path());
@@ -742,6 +811,7 @@ mod tests {
         let source_dir = resources.path().join("bin");
         std::fs::create_dir_all(&source_dir).unwrap();
         std::fs::write(source_dir.join(bundled_cli_file_name()), b"wardian cli").unwrap();
+        write_test_mcp_launcher(&source_dir);
         std::env::set_var("WARDIAN_HOME", home.path());
 
         install_cli_from_resources_with_path_update(resources.path(), |_bin_dir| Ok(())).unwrap();

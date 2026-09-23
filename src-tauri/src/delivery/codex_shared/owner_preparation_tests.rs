@@ -35,6 +35,13 @@ impl Fixture {
             b"inert CLI fixture; never executed",
         )
         .unwrap();
+        #[cfg(windows)]
+        std::fs::write(
+            home.join("bin")
+                .join(crate::utils::cli_install::bundled_mcp_file_name()),
+            b"inert MCP launcher fixture; never executed",
+        )
+        .unwrap();
         let old_home = std::env::var_os("WARDIAN_HOME");
         std::env::set_var("WARDIAN_HOME", &home);
         let old_source = TEST_NATIVE_HOME.with(|source| source.replace(Some(native)));

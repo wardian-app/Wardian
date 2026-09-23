@@ -15,6 +15,12 @@ fn prepare(home: &Path, agent: &str, cli: bool) -> std::path::PathBuf {
             b"inert CLI fixture",
         )
         .unwrap();
+        #[cfg(windows)]
+        std::fs::write(
+            bin.join(super::super::cli_install::bundled_mcp_file_name()),
+            b"inert MCP launcher fixture",
+        )
+        .unwrap();
     }
     codex
 }
@@ -43,7 +49,7 @@ fn registration_binds_two_agents_and_is_byte_idempotent_without_approval_grants(
         assert!(Path::new(command).is_absolute());
         assert_eq!(
             Path::new(command).file_name().unwrap(),
-            super::super::cli_install::bundled_cli_file_name()
+            super::messaging_server_file_name()
         );
         assert_eq!(entry["env"]["WARDIAN_SESSION_ID"].as_str(), Some(agent));
         assert_eq!(entry["env"]["WARDIAN_HOME"].as_str(), temp.path().to_str());
@@ -63,6 +69,55 @@ fn registration_binds_two_agents_and_is_byte_idempotent_without_approval_grants(
         assert_eq!(std::fs::read(codex.join("config.toml")).unwrap(), bytes);
         assert_eq!(std::fs::read(codex.join(RECORD)).unwrap(), record);
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn previously_owned_console_registration_moves_to_the_silent_mcp_launcher() {
+    let temp = tempfile::tempdir().unwrap();
+    let codex = prepare(temp.path(), "agent", true);
+    ensure_managed_messaging(temp.path(), "agent").unwrap();
+
+    let cli = temp
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("bin")
+        .join(super::super::cli_install::bundled_cli_file_name());
+    let mut config = read_config(&codex);
+    let entry = &mut config["mcp_servers"][SERVER];
+    entry["command"] = value(cli.to_str().unwrap());
+    entry["enabled"] = value(false);
+    entry["tools"] = Item::Table(Table::new());
+    entry["tools"]["send_message"] = Item::Table(Table::new());
+    entry["tools"]["send_message"]["approval_mode"] = value("prompt");
+    std::fs::write(codex.join("config.toml"), config.to_string()).unwrap();
+
+    let ownership = serde_json::json!({
+        "version": 1,
+        "agent_id": "agent",
+        "command": cli,
+        "wardian_home": temp.path().to_str().unwrap(),
+    });
+    std::fs::write(codex.join(RECORD), serde_json::to_vec(&ownership).unwrap()).unwrap();
+
+    assert_eq!(
+        ensure_managed_messaging(temp.path(), "agent").unwrap(),
+        Registration::Updated
+    );
+    let config = read_config(&codex);
+    let entry = &config["mcp_servers"][SERVER];
+    assert_eq!(
+        Path::new(entry["command"].as_str().unwrap())
+            .file_name()
+            .unwrap(),
+        super::messaging_server_file_name()
+    );
+    assert_eq!(entry["enabled"].as_bool(), Some(false));
+    assert_eq!(
+        entry["tools"]["send_message"]["approval_mode"].as_str(),
+        Some("prompt")
+    );
 }
 
 #[test]

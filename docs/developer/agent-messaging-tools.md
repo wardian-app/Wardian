@@ -103,6 +103,12 @@ approval settings. An occupied server name or missing CLI is reported instead
 of silently replacing configuration. The app's global provider home is not
 modified.
 
+On Windows, managed startup registers `wardian-mcp.exe`, a GUI-subsystem
+launcher that starts the console CLI with `CREATE_NO_WINDOW`. It passes the
+MCP server's standard input, output, and error through unchanged; closing the
+launcher also closes its server process. The ordinary `wardian-cli.exe`
+remains console-backed for interactive CLI use.
+
 For a separately configured managed Codex host, the registration command is:
 
 ```bash
@@ -114,6 +120,12 @@ The same command works in PowerShell. Configure the intended host's
 `WARDIAN_SESSION_ID` in the MCP server environment; registration does not
 create an agent identity.
 
+For a separately configured Windows host, use the silent launcher:
+
+```powershell
+codex mcp add wardian -- wardian-mcp mcp serve
+```
+
 Codex also accepts the equivalent configuration:
 
 ```toml
@@ -122,6 +134,8 @@ command = "wardian"
 args = ["mcp", "serve"]
 tool_timeout_sec = 70
 ```
+
+On Windows, set `command = "wardian-mcp"` and keep the same arguments.
 
 Codex can require approval for this tool because it sends a message. A
 background session with `approval_policy = "never"` cannot display that
