@@ -127,6 +127,21 @@ jobs:
         # local-verify: backend
         run: cargo check --workspace
 
+  backend-macos-acl:
+    name: Backend (macOS - Codex Home ACL)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+      - name: Test Codex home platform security
+        run: cargo test --lib utils::codex_home::platform::tests -- --test-threads=1
+        working-directory: src-tauri
+
   docs-quality:
     name: Documentation
     runs-on: ubuntu-latest
