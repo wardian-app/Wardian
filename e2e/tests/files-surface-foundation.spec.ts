@@ -93,7 +93,7 @@ interface RecoveryCheckpoint {
 
 async function bootFilesWorkbench(
   page: Page,
-  options: Pick<WorkbenchIpcMockOptions, "explorer_root" | "files" | "responses"> & {
+  options: Pick<WorkbenchIpcMockOptions, "explorer_root" | "files" | "responses" | "response_delays_ms"> & {
     document?: WorkbenchDocumentV1;
   } = {},
 ): Promise<WorkbenchIpcMockController> {
@@ -136,6 +136,7 @@ async function bootFilesWorkbench(
         stream_url: ONE_PIXEL_PNG,
       },
     ],
+    response_delays_ms: options.response_delays_ms,
     load_result: {
       source: "primary",
       document,
@@ -167,6 +168,32 @@ async function bootFilesWorkbench(
   await expect(page.getByRole("tree", { name: "Workspace files" })).toBeVisible();
   return ipc;
 }
+
+test("renders visible Explorer rows before the canonical listing finishes", async ({ page }) => {
+  const files = Array.from({ length: 60 }, (_, index) => ({
+    path: `${ROOT}/file-${String(index).padStart(2, "0")}.txt`,
+    content: `File ${index}`,
+  }));
+
+  const ipc = await bootFilesWorkbench(page, {
+    files,
+    response_delays_ms: { get_directory_tree: 1_000 },
+  });
+  const explorer = page.getByTestId("explorer-panel");
+
+  await expect(explorer.getByRole("treeitem", { name: "file-00.txt" })).toBeVisible();
+  await expect(explorer.getByRole("status")).toHaveText("Loading remaining files…");
+  expect((await ipc.calls("get_directory_preview")).length).toBe(1);
+  const screenshotPath = path.resolve(
+    "e2e/screenshots/explorer-lazy-loading/2026-09-21/preview-first.png",
+  );
+  mkdirSync(path.dirname(screenshotPath), { recursive: true });
+  await explorer.screenshot({ path: screenshotPath });
+
+  await expect(explorer.getByRole("status")).toBeHidden();
+  await expect(explorer.getByRole("treeitem", { name: "file-59.txt" })).toBeVisible();
+  expect((await ipc.calls("get_directory_tree")).length).toBe(1);
+});
 
 test("keeps artifact details limited to actionable provenance and history", async ({ page }) => {
   const artifactPath = `${ROOT}/Wardian-README.md`;

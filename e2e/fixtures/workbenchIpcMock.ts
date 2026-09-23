@@ -425,12 +425,17 @@ export async function installWorkbenchIpcMock(
             ...(args === undefined ? {} : { args: clone(args) }),
           });
 
+          const responseDelayMs = responseDelaysMs[command] ?? 0;
+          if (responseDelayMs > 0) {
+            await new Promise((resolve) => window.setTimeout(resolve, responseDelayMs));
+          }
+
           if (command === "get_workbench_boot_config") return { safe_mode: safeMode };
           if (command === "load_workbench_state") return clone(runtime.load_result);
           if (command === "list_agents") return clone(runtime.agents);
 
           if (command === "get_explorer_root") return explorerRoot;
-          if (command === "get_directory_tree") {
+          if (command === "get_directory_tree" || command === "get_directory_preview") {
             const requestedPath = normalizePath(String(args?.path ?? ""));
             const prefix = `${requestedPath}/`;
             const children = new Map<string, {
@@ -452,10 +457,23 @@ export async function installWorkbenchIpcMock(
                 extension: isDirectory || !name.includes(".") ? null : name.split(".").pop() ?? null,
               });
             }
+            const nodes = [...children.values()].sort((left, right) =>
+              Number(right.is_dir) - Number(left.is_dir) || left.name.localeCompare(right.name),
+            );
+            if (command === "get_directory_preview") {
+              return {
+                nodes: nodes.slice(0, 32),
+                truncated: nodes.length > 32,
+                next_offset: null,
+              };
+            }
+            const offset = Number(args?.offset ?? 0);
+            const page = nodes.slice(offset, offset + 500);
+            const truncated = nodes.length > offset + page.length;
             return {
-              nodes: [...children.values()].sort((left, right) => left.name.localeCompare(right.name)),
-              truncated: false,
-              next_offset: null,
+              nodes: page,
+              truncated,
+              next_offset: truncated ? offset + page.length : null,
             };
           }
           if (command === "git_status") return { files: [] };
@@ -824,10 +842,6 @@ export async function installWorkbenchIpcMock(
           }
           if (command === "plugin:event|unlisten") return null;
 
-          const responseDelayMs = responseDelaysMs[command] ?? 0;
-          if (responseDelayMs > 0) {
-            await new Promise((resolve) => window.setTimeout(resolve, responseDelayMs));
-          }
           if (Object.prototype.hasOwnProperty.call(responses, command)) {
             return clone(responses[command]);
           }

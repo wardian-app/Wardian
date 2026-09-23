@@ -100,10 +100,15 @@ Agent-created updates and approvals are durable `InteractionKind::Notification` 
 - `resolve_system_include_directories`
 - `validate_directory_path`
 - `get_explorer_root`
+- `get_directory_preview`
 - `get_directory_tree`
 - `delete_file`
 - `reveal_in_explorer`
 - `read_file_preview`
+
+Explorer branches request `get_directory_preview` first. It inspects a fixed
+32-entry window so the frontend can paint useful rows before
+`get_directory_tree` produces the canonical sorted, paginated listing.
 
 ## Files resources (`commands/files.rs`)
 
