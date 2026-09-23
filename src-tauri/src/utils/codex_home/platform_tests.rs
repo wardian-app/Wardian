@@ -138,6 +138,44 @@ fn directory_without_extended_acl_is_accepted() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn preparation_creates_and_reuses_private_locks_without_acl() {
+    use std::os::unix::fs::MetadataExt;
+    let fixture = tempfile::Builder::new()
+        .prefix("codex-locks")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let home = std::fs::canonicalize(fixture.path())
+        .unwrap()
+        .join("wardian-home");
+    let habitat = home.join("agents/agent/habitat");
+    std::fs::create_dir_all(&habitat).unwrap();
+    let locks = home.join("locks");
+    assert!(!locks.exists());
+
+    let guard = super::super::acquire_preparation(&home, "agent").unwrap();
+    validate_private_root(&locks).unwrap();
+    let created = std::fs::metadata(&locks).unwrap();
+    assert_eq!(created.mode() & 0o7777, 0o700);
+    drop(guard);
+
+    // Make the reuse fixture explicitly ACL-free, then leave it untouched.
+    assert!(std::process::Command::new("chmod")
+        .arg("-N")
+        .arg(&locks)
+        .status()
+        .unwrap()
+        .success());
+    let guard = super::super::acquire_preparation(&home, "agent").unwrap();
+    validate_private_root(&locks).unwrap();
+    let reused = std::fs::metadata(&locks).unwrap();
+    assert_eq!((reused.dev(), reused.ino()), (created.dev(), created.ino()));
+    assert_eq!(reused.mode() & 0o7777, 0o700);
+    assert!(habitat.is_dir());
+    drop(guard);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn directory_with_extended_acl_is_rejected() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = tempfile::tempdir().unwrap();

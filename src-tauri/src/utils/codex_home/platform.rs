@@ -299,7 +299,7 @@ mod native {
                 filesec_free(security);
                 return Ok(());
             }
-            let mut acl = std::ptr::null_mut();
+            let mut acl: *mut c_void = std::ptr::null_mut();
             let status = filesec_get_property(security, 5, std::ptr::addr_of_mut!(acl).cast());
             let error = std::io::Error::last_os_error();
             filesec_free(security);
