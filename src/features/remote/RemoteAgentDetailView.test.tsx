@@ -59,6 +59,7 @@ function registered(options: { owner?: boolean; requiresResync?: boolean; state?
       sequence_barrier: 4,
       geometry: { cols: 80, rows: 24 },
       terminal_state_base64: btoa(options.state ?? "ready"),
+      alternate_screen: false,
       visible_grid: options.state ?? "ready",
       scrollback: [] as string[],
     },
@@ -273,7 +274,10 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
     });
   });
 
-  it("renders the bounded text fallback when formatted snapshot state is omitted", async () => {
+  it.each([
+    { alternate: false, expected: "older line\r\nnewer line\r\nvisible row" },
+    { alternate: true, expected: "\x1b[?1049holder line\r\nnewer line\r\nvisible row" },
+  ])("renders bounded text fallback with alternate screen $alternate", async ({ alternate, expected }) => {
     const socket = new DetailSocket();
     let handlers: Parameters<typeof remoteClient.openTerminalStream>[3] | undefined;
     vi.spyOn(remoteClient, "openTerminalStream").mockImplementation(async (_session, _cols, _rows, nextHandlers) => {
@@ -286,6 +290,7 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
     await waitFor(() => expect(handlers).toBeDefined());
     const message = registered();
     message.initial_snapshot.terminal_state_base64 = "";
+    message.initial_snapshot.alternate_screen = alternate;
     message.initial_snapshot.scrollback = ["older line", "newer line"];
     message.initial_snapshot.visible_grid = "visible row";
 
@@ -296,7 +301,7 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
     const terminalResults = vi.mocked(Terminal).mock.results;
     const terminal = terminalResults[terminalResults.length - 1]?.value as Terminal;
     expect(terminal.write).toHaveBeenCalledWith(
-      "older line\r\nnewer line\r\nvisible row",
+      expected,
       expect.any(Function),
     );
   });

@@ -66,7 +66,6 @@ pub(super) fn codex_shared_tui_args(
     if let Some(id) = expected_resume_id {
         prefix_args.extend(["resume".into(), id.into()]);
     }
-    prefix_args.push("--no-alt-screen".into());
     prefix_args.extend(["--cd".into(), workspace.to_string_lossy().into_owned()]);
     prefix_args
 }

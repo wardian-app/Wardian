@@ -1202,10 +1202,6 @@ fn reconcile_codex_config(
         Err(error) => return Err(error.to_string()),
     };
 
-    if base_content.is_empty() && agent_content.is_empty() {
-        return Ok(());
-    }
-
     let base = base_content
         .parse::<toml_edit::DocumentMut>()
         .map_err(|error| format!("Could not parse shared Codex config.toml: {error}"))?;
@@ -1217,6 +1213,21 @@ fn reconcile_codex_config(
         .and_then(super::codex_messaging::local_registration);
 
     merge_codex_config_items(base.as_item(), agent.as_item_mut(), real_codex_home);
+    if agent.get("tui").is_none() {
+        agent["tui"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let tui = agent["tui"]
+        .as_table_like_mut()
+        .ok_or("Could not set agent Codex fullscreen transcript: [tui] is not a table")?;
+    // Codex cannot activate its fullscreen transcript when alternate screen is disabled.
+    if tui
+        .get("alternate_screen")
+        .and_then(toml_edit::Item::as_str)
+        != Some("never")
+        && tui.get("fullscreen_transcript").is_none()
+    {
+        tui.insert("fullscreen_transcript", toml_edit::value(true));
+    }
     let rendered = rewrite_codex_home_paths(&agent.to_string(), real_codex_home, projected_home);
     // A local command/env may intentionally point into the native Codex home.
     // Preserve it through path rewriting as well as the provider-table merge.
@@ -2557,14 +2568,14 @@ mod tests {
         std::fs::write(
             real_home.join("config.toml"),
             format!(
-                "model = \"gpt-5\"\n[marketplaces.shared]\nsource = \"{real_home_text}/marketplace\"\nlast_updated = \"base\"\n[marketplaces.backslash]\nsource = \"{real_home_toml}\\\\marketplace\"\n[marketplaces.verbatim]\nsource = '{real_home_verbatim}\\marketplace'\n[mcp_servers.shared]\ncommand = \"{real_home_text}/runtime.exe\"\n[hooks.state.shared]\ntrusted_hash = \"base\"\n"
+                "model = \"gpt-5\"\n[marketplaces.shared]\nsource = \"{real_home_text}/marketplace\"\nlast_updated = \"base\"\n[marketplaces.backslash]\nsource = \"{real_home_toml}\\\\marketplace\"\n[marketplaces.verbatim]\nsource = '{real_home_verbatim}\\marketplace'\n[mcp_servers.shared]\ncommand = \"{real_home_text}/runtime.exe\"\n[hooks.state.shared]\ntrusted_hash = \"base\"\n[tui]\nalternate_screen = \"always\"\n"
             ),
         )
         .expect("write base config");
         std::fs::write(
             projected_home.join("config.toml"),
             format!(
-                "model = \"agent-model\"\n[projects.\"/agent\"]\ntrust_level = \"trusted\"\n[marketplaces.shared]\nsource = \"stale-marketplace\"\nlast_updated = \"stale\"\n[mcp_servers.shared]\ncommand = \"stale-runtime\"\n[mcp_servers.agent_only]\ncommand = \"agent-custom\"\n[mcp_servers.stale_provider]\ncommand = \"{real_home_text}/plugins/cache/stale/mcp.exe\"\nenabled = false\n[hooks.state.shared]\ntrusted_hash = \"stale\"\n"
+                "model = \"agent-model\"\n[projects.\"/agent\"]\ntrust_level = \"trusted\"\n[marketplaces.shared]\nsource = \"stale-marketplace\"\nlast_updated = \"stale\"\n[mcp_servers.shared]\ncommand = \"stale-runtime\"\n[mcp_servers.agent_only]\ncommand = \"agent-custom\"\n[mcp_servers.stale_provider]\ncommand = \"{real_home_text}/plugins/cache/stale/mcp.exe\"\nenabled = false\n[hooks.state.shared]\ntrusted_hash = \"stale\"\n[tui]\nalternate_screen = \"never\"\n"
             ),
         )
         .expect("write agent config");
@@ -2584,6 +2595,12 @@ mod tests {
         );
         assert!(config.contains("last_updated = \"base\""), "{config}");
         assert!(config.contains("trusted_hash = \"base\""), "{config}");
+        assert!(config.contains("alternate_screen = \"never\""), "{config}");
+        assert!(!config.contains("fullscreen_transcript"), "{config}");
+        assert!(
+            !config.contains("alternate_screen = \"always\""),
+            "{config}"
+        );
         assert!(
             config.contains(&format!(
                 "source = \"{projected_home_toml}\\\\marketplace\""
@@ -2959,13 +2976,145 @@ mod tests {
         sync_codex_agent_home(&real_home, &projected_home, &root.join("wardian-skills"))
             .expect("sync codex agent home");
 
-        assert_eq!(
-            std::fs::read_to_string(projected_home.join("config.toml"))
-                .expect("agent config should be preserved"),
-            "[projects.\"/tmp/workspace\"]\ntrust_level = \"trusted\"\n"
-        );
+        let config = std::fs::read_to_string(projected_home.join("config.toml"))
+            .expect("agent config should be preserved");
+        assert!(config.contains("[projects.\"/tmp/workspace\"]\ntrust_level = \"trusted\""));
+        assert!(config.contains("fullscreen_transcript = true"), "{config}");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn codex_config_projection_defaults_fullscreen_only_when_unset_and_alternate_screen_allowed() {
+        for (name, base, local, expected) in [
+            ("new-home", "", "", Some(true)),
+            (
+                "merged-config",
+                "model = 'base'\n[tui]\nalternate_screen = 'always'\n",
+                "model = 'agent' # keep this choice\n[tui]\nshow_tooltips = false\n",
+                Some(true),
+            ),
+            (
+                "agent-false",
+                "[tui]\nalternate_screen = 'always'\n",
+                "[tui]\nfullscreen_transcript = false # scrollback choice\n",
+                Some(false),
+            ),
+            (
+                "agent-true",
+                "[tui]\nfullscreen_transcript = false\n",
+                "[tui]\nfullscreen_transcript = true # fullscreen choice\n",
+                Some(true),
+            ),
+            (
+                "global-false",
+                "[tui]\nfullscreen_transcript = false\n",
+                "",
+                Some(false),
+            ),
+            (
+                "global-true",
+                "[tui]\nfullscreen_transcript = true\n",
+                "",
+                Some(true),
+            ),
+            (
+                "agent-never",
+                "[tui]\nalternate_screen = 'always'\n",
+                "[tui]\nalternate_screen = 'never'\n",
+                None,
+            ),
+            (
+                "global-never",
+                "[tui]\nalternate_screen = 'never'\n",
+                "",
+                None,
+            ),
+            (
+                "inline-tui",
+                "",
+                "tui = { alternate_screen = 'always', show_tooltips = false } # inline choice\n",
+                Some(true),
+            ),
+        ] {
+            let root = tempfile::tempdir().expect("private config fixture");
+            let real_home = root.path().join("native");
+            let projected_home = root.path().join("agent");
+            std::fs::create_dir_all(&real_home).unwrap();
+            std::fs::create_dir_all(&projected_home).unwrap();
+            let base_path = real_home.join("config.toml");
+            let agent_path = projected_home.join("config.toml");
+            if !base.is_empty() {
+                std::fs::write(&base_path, base).unwrap();
+            }
+            if !local.is_empty() {
+                std::fs::write(&agent_path, local).unwrap();
+            }
+
+            let mut previous = None;
+            for _ in 0..2 {
+                super::reconcile_codex_config(&base_path, &agent_path, &real_home, &projected_home)
+                    .unwrap_or_else(|error| panic!("{name}: {error}"));
+                let content = std::fs::read_to_string(&agent_path).unwrap();
+                if let Some(previous) = previous.replace(content.clone()) {
+                    assert_eq!(content, previous, "{name}: sync must be idempotent");
+                }
+                let parsed = content.parse::<toml_edit::DocumentMut>().unwrap();
+                let tui = parsed
+                    .get("tui")
+                    .and_then(toml_edit::Item::as_table_like)
+                    .unwrap();
+                assert_eq!(
+                    tui.get("fullscreen_transcript")
+                        .and_then(toml_edit::Item::as_bool),
+                    expected,
+                    "{name}: {content}"
+                );
+                if name == "merged-config" {
+                    assert!(
+                        content.contains("model = 'agent' # keep this choice"),
+                        "{content}"
+                    );
+                    assert!(content.contains("show_tooltips = false"), "{content}");
+                    assert!(content.contains("alternate_screen = 'always'"), "{content}");
+                }
+                if name == "agent-false" {
+                    assert!(
+                        content.contains("fullscreen_transcript = false # scrollback choice"),
+                        "{content}"
+                    );
+                }
+                if name == "agent-never" {
+                    assert!(content.contains("alternate_screen = 'never'"), "{content}");
+                }
+                if name == "inline-tui" {
+                    assert!(content.contains("# inline choice"), "{content}");
+                    assert!(content.contains("show_tooltips = false"), "{content}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn codex_config_projection_rejects_malformed_tui_without_changing_agent_config() {
+        let root = tempfile::tempdir().expect("private config fixture");
+        let real_home = root.path().join("native");
+        let projected_home = root.path().join("agent");
+        std::fs::create_dir_all(&real_home).unwrap();
+        std::fs::create_dir_all(&projected_home).unwrap();
+        let base_path = real_home.join("config.toml");
+        let agent_path = projected_home.join("config.toml");
+        let invalid_config = "tui = 'invalid' # preserve\n";
+        std::fs::write(&agent_path, invalid_config).unwrap();
+
+        let error =
+            super::reconcile_codex_config(&base_path, &agent_path, &real_home, &projected_home)
+                .expect_err("malformed tui must fail closed");
+        assert!(error.contains("[tui] is not a table"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&agent_path).unwrap(),
+            invalid_config
+        );
     }
 
     #[test]

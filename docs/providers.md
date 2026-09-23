@@ -228,6 +228,19 @@ not keep input blocked.
 The provider's claim of lower credit usage is not an API-price comparison;
 Wardian preserves the selected model until the user chooses otherwise.
 
+### Terminal Screen Mode
+
+Wardian defaults an unset agent-local `[tui]` choice to Fullscreen when Codex
+allows the alternate screen. It preserves an explicit Fullscreen or Scrollback
+choice, including `alternate_screen = "never"`. Fullscreen places the
+composer at the bottom of the terminal and
+keeps the transcript scrollable inside Codex. Choose **Scrollback** with `/tui`
+when native terminal scrollback is more useful; in that inline mode, the
+composer follows the current content and blank rows below it are expected in
+a taller card. Fullscreen transcript selection requires Codex 0.156.0 or
+later. The choice takes effect on the next Codex launch. Existing
+terminal processes keep the mode in which they started.
+
 ### Debug First
 
 If startup reports `list_turns is not supported yet`, the installed Codex

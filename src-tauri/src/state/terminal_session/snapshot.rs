@@ -13,7 +13,17 @@ pub(super) fn build_snapshot(
     snapshot_number: u64,
 ) -> TerminalSnapshot {
     let visible_grid = screen.contents();
+    let alternate_screen = screen.alternate_screen();
     let (scrollback, formatted_scrollback) = snapshot_scrollback(screen);
+    let terminal_state = screen.state_formatted();
+    let terminal_state = if alternate_screen {
+        // Formatted state paints the active grid but does not select its buffer.
+        let mut state = b"\x1b[?1049h".to_vec();
+        state.extend_from_slice(&terminal_state);
+        state
+    } else {
+        terminal_state
+    };
     let mut snapshot = TerminalSnapshot {
         snapshot_id: format!(
             "terminal-snapshot-{runtime_generation}-{sequence_barrier}-{snapshot_number}"
@@ -22,8 +32,8 @@ pub(super) fn build_snapshot(
         runtime_generation,
         sequence_barrier,
         geometry,
-        terminal_state_base64: base64::engine::general_purpose::STANDARD
-            .encode(screen.state_formatted()),
+        alternate_screen,
+        terminal_state_base64: base64::engine::general_purpose::STANDARD.encode(terminal_state),
         visible_grid,
         scrollback,
         formatted_scrollback,
@@ -144,6 +154,7 @@ mod tests {
             runtime_generation: 1,
             sequence_barrier: 0,
             geometry: TerminalGeometry { cols: 80, rows: 24 },
+            alternate_screen: false,
             terminal_state_base64,
             visible_grid: "visible fallback".to_string(),
             scrollback: Vec::new(),
@@ -205,6 +216,53 @@ mod tests {
         );
         assert!(!formatted.contains("history row 01"));
         assert!(formatted.contains("history row 12"));
+    }
+
+    #[test]
+    fn snapshot_preserves_normal_and_alternate_screen_modes() {
+        let mut normal_parser = vt100::Parser::new(3, 40, SNAPSHOT_SCROLLBACK_LINES);
+        normal_parser.process(b"normal buffer");
+        let normal_state = normal_parser.screen().state_formatted();
+        let normal_snapshot = build_snapshot(
+            "session",
+            1,
+            1,
+            TerminalGeometry { cols: 40, rows: 3 },
+            normal_parser.screen(),
+            1,
+        );
+
+        assert!(!normal_snapshot.alternate_screen);
+        assert_eq!(decoded_state(&normal_snapshot), normal_state);
+
+        let mut alternate_parser = vt100::Parser::new(3, 40, SNAPSHOT_SCROLLBACK_LINES);
+        alternate_parser.process(b"normal buffer");
+        alternate_parser.process(b"\x1b[?1049halt alternate");
+        let alternate_screen_state = alternate_parser.screen().state_formatted();
+        let alternate_snapshot = build_snapshot(
+            "session",
+            1,
+            2,
+            TerminalGeometry { cols: 40, rows: 3 },
+            alternate_parser.screen(),
+            2,
+        );
+        let alternate_state = decoded_state(&alternate_snapshot);
+        let mode_prefix = b"\x1b[?1049h";
+
+        assert!(alternate_snapshot.alternate_screen);
+        assert!(alternate_state.starts_with(mode_prefix));
+        assert_eq!(
+            &alternate_state[mode_prefix.len()..],
+            alternate_screen_state
+        );
+
+        let mut restored = vt100::Parser::new(3, 40, SNAPSHOT_SCROLLBACK_LINES);
+        restored.process(&alternate_state);
+        assert!(restored.screen().alternate_screen());
+        assert!(restored.screen().contents().contains("alt alternate"));
+        restored.process(b"\x1b[?1049l");
+        assert!(!restored.screen().alternate_screen());
     }
 
     #[test]

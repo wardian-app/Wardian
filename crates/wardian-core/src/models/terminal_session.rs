@@ -294,6 +294,8 @@ pub struct TerminalSnapshot {
     pub runtime_generation: u64,
     pub sequence_barrier: u64,
     pub geometry: TerminalGeometry,
+    #[serde(default)]
+    pub alternate_screen: bool,
     pub terminal_state_base64: String,
     pub visible_grid: String,
     pub scrollback: Vec<String>,

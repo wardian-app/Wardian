@@ -939,6 +939,7 @@ export type TerminalSnapshot = {
     sequence_barrier: number;
     geometry: TerminalGeometry;
     terminal_state_base64: string;
+    alternate_screen?: boolean;
     visible_grid: string;
     scrollback: string[];
     formatted_scrollback?: string[];
