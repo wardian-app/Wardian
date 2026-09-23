@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentConfig, AgentTelemetry } from "../types";
+import type { AgentRevealRequest } from "../features/workbench/surfaces/coreSurfaceMetadata";
 import type { AgentInteractions, AgentTeam, Watchlist } from "../layout/watchlist/types";
 import { buildAgentGraph, type GraphRelationshipReason } from "../features/graph/graphProjection";
 import {
@@ -91,6 +92,7 @@ function clampToDistrict(
 }
 
 export interface GardenViewProps {
+  revealAgentRequest?: AgentRevealRequest | null;
   visibility?: "visible" | "hidden";
   rendererActive?: boolean;
   initialSurfaceState?: GardenSurfaceState;
@@ -109,6 +111,7 @@ export interface GardenViewProps {
 }
 
 export const GardenView: React.FC<GardenViewProps> = ({
+  revealAgentRequest,
   filteredAgents,
   telemetry,
   teams,
@@ -148,6 +151,7 @@ export const GardenView: React.FC<GardenViewProps> = ({
   const [selectedKey, setSelectedKey] = useState<string | null>(
     missingAnchor < 0 ? initialSurfaceState?.selected_unit_key ?? null : restoredTrail.length ? unitKey(restoredTrail[restoredTrail.length - 1].ref) : null,
   );
+  const handledRevealSequence = useRef<number | null>(null);
   const [trail, setTrail] = useState<GardenNavigationFrame[]>(restoredTrail);
   const [camera, setCamera] = useState<GardenCamera | undefined>(initialSurfaceState?.camera);
   const [contentsCache] = useState(createGardenContentsCache);
@@ -488,7 +492,7 @@ export const GardenView: React.FC<GardenViewProps> = ({
     if (ref.kind === "agent") { visitUnit(unitKey(ref)); onSelectionChange(new Set([ref.id])); }
   };
   const openCanonicalAgent = (id: string) => (onOpenAgent ?? onOpenAgentInGrid)?.(id);
-  const enterObject = (ref: GardenEntityRef) => {
+  const enterObject = (ref: GardenEntityRef, fromRoot = false) => {
     setRecoveryNotice(null);
     if (currentFrame?.ref.kind === ref.kind && currentFrame.ref.id === ref.id && gardenRecordKind(ref.kind)) {
       if (ref.kind === "identity") openCanonicalAgent(ref.id);
@@ -496,7 +500,7 @@ export const GardenView: React.FC<GardenViewProps> = ({
       if (ref.kind === "path") openPath(ref.id);
       return;
     }
-    let frames = trail;
+    let frames = fromRoot ? [] : trail;
     const district = ref.kind === "agent" ? districtByAgentId.get(ref.id) : undefined;
     if (frames.length === 0 && district) frames = [{ ref: { kind: "district", id: district }, label: districtLabels.get(district) ?? "Workstream", camera }];
     const bounds = candidate && unitKey(candidate.ref) === unitKey(ref) ? candidate.bounds : boundsFor(ref);
@@ -505,6 +509,14 @@ export const GardenView: React.FC<GardenViewProps> = ({
     setSelectedKey(unitKey(ref));
     if (bounds) motion.move(cameraForBounds(ref.kind === "agent" || ref.kind === "district" ? bounds : recordPlaneBounds(bounds), viewSize(), ref.kind === "district" ? 0 : 720), viewSize());
   };
+  const enterObjectRef = useRef(enterObject);
+  enterObjectRef.current = enterObject;
+  useEffect(() => {
+    if (!revealAgentRequest || handledRevealSequence.current === revealAgentRequest.sequence
+      || !filteredAgents.some((agent) => agent.session_id === revealAgentRequest.agent_id)) return;
+    handledRevealSequence.current = revealAgentRequest.sequence;
+    enterObjectRef.current({ kind: "agent", id: revealAgentRequest.agent_id }, true);
+  }, [filteredAgents, revealAgentRequest]);
   const returnTo = (length: number) => {
     const departed = trail[length];
     const finish = () => setTrail(trail.slice(0, length));

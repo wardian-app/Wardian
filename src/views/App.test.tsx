@@ -22,6 +22,8 @@ import { normalizeWatchlistState } from "../layout/watchlist/watchlistUtils";
 import type { AgentInteractions, WatchlistPrefs } from "../layout/watchlist/types";
 import { ConfirmProvider } from "../components/ConfirmDialog";
 import { makeSingleGroupDocument, makeSurface } from "../features/workbench/workbenchTestUtils";
+import { createCoreWorkbenchSurfaceRegistry } from "../features/workbench/coreSurfaceRegistry";
+import type { TelemetryFleet } from "../features/telemetry/telemetryTypes";
 
 // Mock window.matchMedia globally for tests
 Object.defineProperty(window, 'matchMedia', {
@@ -80,13 +82,15 @@ vi.mock("./GraphView", () => ({
   GraphView: ({
     filteredAgents,
     onOpenAgent,
+    revealAgentRequest,
   }: {
     filteredAgents: unknown[];
     onOpenAgent?: (agentId: string) => void;
+    revealAgentRequest?: { agent_id: string } | null;
   }) => {
     graphViewFilteredAgentsSpy(filteredAgents);
     return (
-      <div data-testid="graph-view">
+      <div data-testid="graph-view" data-reveal-agent={revealAgentRequest?.agent_id ?? ""}>
         <div data-testid="graph-canvas" />
         <button type="button" onClick={() => onOpenAgent?.("agent-1")}>Open graph agent</button>
       </div>
@@ -1096,6 +1100,161 @@ describe("Workbench persistence boot integration", () => {
       expect(screen.getAllByTestId("agent-session-surface")).toHaveLength(2);
     });
     expect(mockInvoke).not.toHaveBeenCalledWith("kill_agent", expect.anything());
+  });
+
+  it.each(["dashboard", "graph", "garden"] as const)(
+    "keeps a watchlist click in the active %s surface even when Agents is open",
+    async (surfaceType) => {
+      setupDefaultMocks(sampleAgents, defaultClasses);
+      const defaultInvoke = mockInvoke.getMockImplementation();
+      const registry = createCoreWorkbenchSurfaceRegistry();
+      const overview = makeSurface("overview-inactive", {
+        surface_type: "agents-overview",
+        state: registry.default_state("agents-overview"),
+      });
+      const activeSurface = makeSurface(`${surfaceType}-active`, {
+        surface_type: surfaceType,
+        state: registry.default_state(surfaceType),
+      });
+      mockInvoke.mockImplementation((command, args) => {
+        if (command === "load_workbench_state") return Promise.resolve({
+          source: "primary",
+          document: makeSingleGroupDocument([overview, activeSurface]),
+          notice: null,
+          durable_revision: 0,
+          durable_token: "test-durable-zero",
+        });
+        return defaultInvoke?.(command, args) ?? Promise.resolve(null);
+      });
+
+      render(<App />);
+      const activeTab = await screen.findByRole("tab", {
+        name: surfaceType === "dashboard" ? "Dashboard" : surfaceType === "graph" ? "Graph" : "Garden",
+      });
+      const betaRow = await waitFor(() => {
+        const row = screen.getAllByText("Beta")
+          .map((node) => node.closest("div.watchlist-row"))
+          .find((candidate): candidate is HTMLElement => Boolean(candidate));
+        if (!row) throw new Error("Beta roster row not found");
+        return row;
+      });
+      fireEvent.click(betaRow);
+
+      await waitFor(() => {
+        expect(activeTab).toHaveAttribute("aria-selected", "true");
+        expect(screen.getByRole("tab", { name: "Agents" })).toHaveAttribute("aria-selected", "false");
+        expect(betaRow).toHaveAttribute("data-selected", "true");
+      });
+      if (surfaceType === "graph") {
+        expect(screen.getByTestId("graph-view")).toHaveAttribute("data-reveal-agent", "agent-2");
+      }
+      if (surfaceType === "garden") {
+        await waitFor(() => expect(screen.getByTestId("garden-selection-summary")).toHaveTextContent("Beta"));
+      }
+      expect(screen.queryByTestId("agent-session-surface")).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(["switch", "switch-and-click", "modifier", "bulk"] as const)("cancels a pending Dashboard reveal after %s intent", async (intent) => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    let resolveFleet!: (fleet: TelemetryFleet) => void;
+    const pendingFleet = new Promise<TelemetryFleet>((resolve) => { resolveFleet = resolve; });
+    const registry = createCoreWorkbenchSurfaceRegistry();
+    const dashboard = makeSurface("dashboard-pending", {
+      surface_type: "dashboard", state: registry.default_state("dashboard"),
+    });
+    const overview = makeSurface("overview-pending", {
+      surface_type: "agents-overview", state: registry.default_state("agents-overview"),
+    });
+    const workbenchDocument = {
+      ...makeSingleGroupDocument(),
+      root: {
+        kind: "split" as const, node_id: "dashboard-agents-split",
+        direction: "horizontal" as const, ratio: 0.5,
+        first: { kind: "group" as const, group_id: "dashboard-group" },
+        second: { kind: "group" as const, group_id: "agents-group" },
+      },
+      groups: {
+        "dashboard-group": { group_id: "dashboard-group", surface_ids: [dashboard.surface_id], active_surface_id: dashboard.surface_id },
+        "agents-group": { group_id: "agents-group", surface_ids: [overview.surface_id], active_surface_id: overview.surface_id },
+      },
+      surfaces: { [dashboard.surface_id]: dashboard, [overview.surface_id]: overview },
+      active_group_id: "dashboard-group",
+    };
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "load_workbench_state") return Promise.resolve({
+        source: "primary", document: workbenchDocument, notice: null, durable_revision: 0, durable_token: "test-durable-zero",
+      });
+      if (command === "telemetry_fleet") return pendingFleet;
+      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
+    });
+
+    render(<App />);
+    await screen.findByText("Reading the telemetry store…");
+    const rosterRow = (name: string) => screen.getAllByText(name)
+      .map((node) => node.closest("div.watchlist-row"))
+      .find((candidate): candidate is HTMLElement => Boolean(candidate));
+    const alphaRow = await waitFor(() => {
+      const row = rosterRow("Alpha");
+      if (!row) throw new Error("Alpha roster row not found");
+      return row;
+    });
+    fireEvent.click(alphaRow);
+    if (intent === "switch" || intent === "switch-and-click") {
+      const agentsTab = screen.getByRole("tab", { name: "Agents" });
+      fireEvent.pointerDown(agentsTab);
+      fireEvent.mouseDown(agentsTab);
+      fireEvent.click(agentsTab);
+      await waitFor(() => expect(document.querySelector('[data-group-id="agents-group"]'))
+        .toHaveAttribute("data-active", "true"));
+    }
+    const betaRow = await waitFor(() => {
+      const row = rosterRow("Beta");
+      if (!row) throw new Error("Beta roster row not found");
+      return row;
+    });
+    if (intent === "switch-and-click") fireEvent.click(betaRow);
+    if (intent === "modifier") fireEvent.click(betaRow, { ctrlKey: true });
+    if (intent === "bulk") fireEvent.click(within(screen.getByTestId("agent-watchlist"))
+      .getByRole("button", { name: "Select All" }));
+
+    const zeroes = {
+      tokens_per_hour: 0, turns_per_hour: 0, turns: 0, active_ms: 0,
+      total_tokens: 0, files_touched: 0, lines: 0, spark: 0,
+    };
+    await act(async () => resolveFleet({
+      window: { from: "2026-09-23T00:00:00Z", to: "2026-09-23T01:00:00Z", from_floored: false },
+      window_minutes: 60,
+      rows: [{
+        key: "agent-1", label: "Alpha", sublabel: "Coder", tokens_per_hour: null,
+        turns_per_hour: 0, active_ms: 0, turns: 0, total_tokens: null,
+        files_touched: 0, lines_added: 0, lines_removed: 0,
+        tokens_reported: false, idle: true, spark: [],
+      }],
+      maxima: zeroes, buckets: [], trend_measure: "total_tokens", grain: "minute5",
+      habitat: {
+        provider: "all", roster_agent_count: 1, active_agent_count: 0,
+        active_ms: 0, turns: 0, total_tokens: null, files_touched: 0,
+        lines_added: 0, lines_removed: 0, tokens_reported: false, spark: [], idle: true,
+      },
+      providers: [], provider_maxima: zeroes,
+    }));
+
+    const dashboardRow = await screen.findByRole("row", { name: "View telemetry details for Alpha" });
+    expect(dashboardRow).not.toHaveFocus();
+    expect(dashboardRow).toHaveAttribute("aria-selected", "false");
+    if (intent !== "switch") expect(betaRow).toHaveAttribute("data-selected", "true");
+    if (intent === "switch" || intent === "switch-and-click") {
+      const dashboardTab = screen.getByRole("tab", { name: "Dashboard" });
+      fireEvent.pointerDown(dashboardTab);
+      fireEvent.mouseDown(dashboardTab);
+      fireEvent.click(dashboardTab);
+      await waitFor(() => expect(document.querySelector('[data-group-id="dashboard-group"]'))
+        .toHaveAttribute("data-active", "true"));
+      expect(dashboardRow).not.toHaveFocus();
+      expect(dashboardRow).toHaveAttribute("aria-selected", "false");
+    }
   });
 
   it("retargets an adjacent Agent Session when Graph opens an agent", async () => {

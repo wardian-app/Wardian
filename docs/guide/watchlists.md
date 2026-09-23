@@ -14,20 +14,21 @@ Use it when you need persistent awareness of all agents while working in any Wor
 ## Basic Automation
 
 1. Spawn agents from [Getting Started](./getting-started.md) or the left Agent Configuration tab.
-2. Use the roster to select the agents you want to inspect or target.
+2. Click a roster row to reveal that agent in the active Dashboard, Graph, Garden, or Agents surface. On other surfaces, the click opens or focuses Agents. Ctrl/Cmd-click and Shift-click adjust selection without navigating.
 3. Sort or filter the list when the swarm grows.
 4. Create watchlists or teams for repeated groups.
 5. Use **Open** to focus or open an agent session in the active pane, or **Open to Side** to create a neighboring pane. Use the remaining context actions for lifecycle controls.
 
-## Selection Is Not Navigation
+## Selection and Navigation
 
-Roster selection and Workbench navigation are deliberately separate:
+The roster has separate click and context-action paths:
 
-- Select one or more rows to target Explorer, Source Control, Command, Library prompt runs, and other auxiliary tools.
+- Plain-click a row to select and reveal that agent in the active supported Workbench surface. Dashboard scrolls to its row, Graph inspects its node, and Garden enters its agent record. An active Agents surface focuses its card. If the active surface cannot show the agent, Agents is the fallback.
+- Ctrl/Cmd-click or Shift-click rows to adjust the selection for Explorer, Source Control, Command, Library prompt runs, and other auxiliary tools without navigating.
 - Use **Open** when you want an agent-session tab in the active pane.
 - Use **Open to Side** when you want the session beside the current surface.
 
-Selecting an agent never replaces the active Workbench surface. Opening an agent does not change which agents a multi-target Command operation will use.
+Clicking a row does not replace a Dashboard, Graph, or Garden surface. Opening an agent session remains an explicit context action and does not change which agents a multi-target Command operation will use.
 
 ## Real-Time Monitoring
 
@@ -100,7 +101,7 @@ As your swarm grows, a single list becomes difficult to manage. Wardian allows y
 
 ### Managing Agents
 - **Reordering Lists**: Drag custom watchlist tabs left or right to reorder them. The **All** tab stays fixed as the first view.
-- **Reordering**: Drag and drop agent cards within a watchlist to prioritize your view. A press only becomes a drag once the pointer moves, so clicking a row still just selects it. Holding a dragged row over the top or bottom edge of the roster scrolls the list, so you can move an agent to a position that is currently out of view without letting go.
+- **Reordering**: Drag and drop agent cards within a watchlist to prioritize your view. A press only becomes a drag once the pointer moves, so clicking a row still selects and reveals the agent. Holding a dragged row over the top or bottom edge of the roster scrolls the list, so you can move an agent to a position that is currently out of view without letting go.
 - **Filtering**: Click a watchlist tab to focus only on that group of agents.
 - **Bulk Selection**: Use `Ctrl+Click` on Windows/Linux or `Cmd+Click` on macOS to select multiple agents within a watchlist for broadcast commands.
 - **Bulk Context Menu**: If you right-click inside the current multi-selection, the menu applies to the whole selection. Bulk delete shows one confirmation dialog for the full selected set instead of prompting once per agent.

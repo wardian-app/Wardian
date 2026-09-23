@@ -94,6 +94,11 @@ export type CoreViewSurfaceState =
   | AnalyticsSurfaceState
   | DashboardSurfaceState;
 export type SurfaceVisibility = "visible" | "hidden";
+/** Transient roster navigation intent, not persisted surface state. */
+export type AgentRevealRequest = Readonly<{
+  agent_id: string;
+  sequence: number;
+}>;
 
 const EMPTY_STATE: EmptyCoreViewSurfaceState = Object.freeze({});
 const GRAPH_REASONS = new Set<GraphRelationshipReason>([
