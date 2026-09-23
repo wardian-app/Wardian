@@ -27,7 +27,7 @@ fn init(session_id: &str) -> AgentEvent {
 }
 
 #[test]
-fn shared_codex_tui_args_preserve_model_and_fresh_or_resumed_identity() {
+fn shared_codex_tui_args_preserve_identity_without_overriding_screen_mode() {
     let prefix = vec!["codex-wrapper".to_string(), "--wrapper-option".to_string()];
     let workspace = Path::new("workspace");
     let model = "gpt-5.6-luna";
@@ -41,7 +41,6 @@ fn shared_codex_tui_args_preserve_model_and_fresh_or_resumed_identity() {
             "--wrapper-option",
             "--model",
             model,
-            "--no-alt-screen",
             "--cd",
             "workspace",
         ]
@@ -57,13 +56,14 @@ fn shared_codex_tui_args_preserve_model_and_fresh_or_resumed_identity() {
             model,
             "resume",
             thread_id,
-            "--no-alt-screen",
             "--cd",
             "workspace",
         ]
     );
     assert!(!fresh.iter().any(|argument| argument == "-c"));
     assert!(!resumed.iter().any(|argument| argument == "-c"));
+    assert!(!fresh.iter().any(|argument| argument == "--no-alt-screen"));
+    assert!(!resumed.iter().any(|argument| argument == "--no-alt-screen"));
 }
 
 #[test]

@@ -69,4 +69,15 @@ describe("broker snapshot replay in the actual xterm parser", () => {
     data.terminal_state_base64 = "%%%";
     expect(decodeTerminalSnapshot(data, true)).toBe("\r\nhistory\r\nfallback");
   });
+  it("retains alternate-screen ownership when formatted state cannot be replayed", async () => {
+    const data = snapshot([], "\x1b[?1049h\x1b[H\x1b[Jcomposer", 4);
+    data.alternate_screen = true;
+    const term = await replay(data, false);
+    try {
+      expect(term.buffer.active.type).toBe("alternate");
+      expect(lines(term)[0]).toBe("fallback");
+      data.terminal_state_base64 = "";
+      expect(decodeTerminalSnapshot(data, true)).toBe("\x1b[?1049hfallback");
+    } finally { term.dispose(); }
+  });
 });

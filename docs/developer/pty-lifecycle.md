@@ -205,7 +205,7 @@ Some TUIs repaint by moving the cursor home and rewriting the current viewport i
 - A clear-screen preamble made from many `EL + newline` writes followed by cursor-home is treated as a real clear-and-home operation. This prevents TUI redraws, such as Claude's mascot frame, from being copied into scrollback during maximize/restore.
 - Synchronized home-redraw TUIs are marked as transient screen renderers. Before a row-shrinking resize, Wardian moves the local xterm cursor home so xterm does not promote the old visible TUI frame into scrollback before the provider redraws at the new size.
 - After any resize, Wardian arms one duplicate-redraw suppression window. If the next synchronized home-redraw batch is mostly already present in the parser buffer, Wardian drops that repaint instead of letting xterm append a second copy of the same transcript to scrollback.
-- Codex interactive sessions use its documented `--no-alt-screen` inline mode, and Wardian journals overlapping home-redraw frames into xterm scrollback. Codex still emits a sliding viewport, so Wardian reconstructs dropped frame lines before applying the next repaint.
+- Codex interactive sessions follow the agent-local terminal screen setting. In Fullscreen mode, Codex owns the alternate screen and its transcript scrolling. In inline Scrollback mode, Wardian journals overlapping home-redraw frames into xterm scrollback. Codex still emits a sliding viewport in that mode, so Wardian reconstructs dropped frame lines before applying the next repaint.
 
 ### PTY Output Batching
 

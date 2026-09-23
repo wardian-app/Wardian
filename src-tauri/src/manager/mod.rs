@@ -2049,7 +2049,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_interactive_spawn_preserves_inline_scrollback_mode() {
+    fn codex_interactive_spawn_preserves_explicit_inline_override() {
         let args = finalize_interactive_spawn_args(
             "codex",
             true,

@@ -3,6 +3,7 @@ import test from "node:test";
 import { cleanupConformanceSession, pauseConformanceAgents } from "../lib/conformance-cleanup.mjs";
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -15,6 +16,7 @@ import {
   startNativeSession,
   waitForAppShell,
 } from "../lib/harness.mjs";
+import { readHomeLock } from "../lib/sessionHome.mjs";
 import {
   auditRenderingEvidence,
   createRenderingEvidenceDir,
@@ -83,6 +85,7 @@ const parsedPostInputWaitMs = Number.parseInt(process.env.WARDIAN_E2E_RENDERING_
 const auditPostInputWaitMs =
   Number.isFinite(parsedPostInputWaitMs) && parsedPostInputWaitMs > 0 ? parsedPostInputWaitMs : 0;
 const auditSubmitInput = process.env.WARDIAN_E2E_RENDERING_SUBMIT_INPUT !== "0";
+const auditMaskPrivateScreenshotRows = process.env.WARDIAN_E2E_RENDERING_MASK_PRIVATE_ROWS === "1";
 const auditInputSubmitSequence = decodeInputSequence(process.env.WARDIAN_E2E_RENDERING_SUBMIT_SEQUENCE ?? "\\r");
 const parsedPostSubmitWaitMs = Number.parseInt(
   process.env.WARDIAN_E2E_RENDERING_POST_SUBMIT_WAIT_MS ?? "8000",
@@ -261,6 +264,68 @@ async function invokeTauri(driver, command, args = {}) {
   return result.value;
 }
 
+function assertConfiguredWorkspaceIsGitRoot(workspace) {
+  const configuredWorkspace = fs.realpathSync(workspace);
+  const reportedGitRoot = execFileSync(
+    "git",
+    ["-C", configuredWorkspace, "rev-parse", "--show-toplevel"],
+    { encoding: "utf8" },
+  ).trim();
+  const gitRoot = fs.realpathSync(reportedGitRoot);
+  assert.equal(path.relative(configuredWorkspace, gitRoot), "",
+    "Codex trust opt-in requires the configured workspace to be its Git root");
+  assert.equal(path.relative(gitRoot, configuredWorkspace), "",
+    "Codex trust opt-in requires the configured workspace to be its Git root");
+  return { configured_workspace: configuredWorkspace, git_root: gitRoot };
+}
+
+async function trustCodexWorkspaceInTestHome(driver, harness, workspacePath) {
+  assert.ok(harness.homeLock, "The Codex trust override requires an owned native test home");
+  assert.equal(harness.homeLock.runId, harness.runId, "The native home lock belongs to another test run");
+  const owner = readHomeLock(harness.isolatedHome);
+  assert.equal(owner?.runId, harness.runId, "The exact isolated test home is not owned by this run");
+  assert.equal(owner?.pid, harness.homeLock.pid, "The isolated test-home owner changed");
+
+  const agents = await invokeTauri(driver, "list_agents");
+  assert.deepEqual(agents, [], "Codex workspace trust must be configured before any agent is spawned");
+  const workspaceBinding = assertConfiguredWorkspaceIsGitRoot(workspacePath);
+
+  const document = await invokeTauri(driver, "load_shell_settings");
+  assert.equal(document.schema_version, 2);
+  const settings = {
+    ...document,
+    settings: {
+      ...document.settings,
+      codex_runtime_policy: {
+        ...document.settings.codex_runtime_policy,
+        trust_workspaces: true,
+      },
+    },
+    overrides: {
+      ...document.overrides,
+      codex_runtime_policy: {
+        ...document.overrides.codex_runtime_policy,
+        trust_workspaces: true,
+      },
+    },
+  };
+  const saved = await invokeTauri(driver, "save_shell_settings", { settings });
+  assert.equal(saved.settings.codex_runtime_policy.trust_workspaces, true);
+  assert.equal(saved.overrides.codex_runtime_policy.trust_workspaces, true);
+
+  const settingsPath = path.join(harness.isolatedHome, "settings", "shell.json");
+  const settingsBytes = await fs.promises.readFile(settingsPath);
+  const persisted = JSON.parse(settingsBytes.toString("utf8"));
+  assert.equal(persisted.overrides.codex_runtime_policy.trust_workspaces, true);
+  return {
+    enabled: true,
+    scope: "owned_isolated_test_home_only",
+    settings_path: settingsPath,
+    workspace_binding: workspaceBinding,
+    settings_sha256: createHash("sha256").update(settingsBytes).digest("hex"),
+  };
+}
+
 function providerConfig(provider) {
   const config = {
     provider,
@@ -274,7 +339,6 @@ function providerConfig(provider) {
 
   if (provider === "codex") {
     config.codex_skip_git_repo_check = true;
-    config.custom_args = "-c tui.show_tooltips=false";
   }
   if (provider === "claude") {
     config.permission_mode = "bypassPermissions";
@@ -367,6 +431,11 @@ async function readPageDiagnostics(driver) {
 }
 
 async function spawnProviderAgent(driver, provider) {
+  if (provider === "codex") {
+    // spawn_agent can spend 120s creating the owner daemon socket and another
+    // 120s spawning/attaching the TUI; keep 60s of WebDriver headroom.
+    await driver.manage().setTimeouts({ script: 300_000 });
+  }
   return await invokeTauri(driver, "spawn_agent", {
     req: {
       sessionName: `Rendering-${provider}-${RUN_ID}`,
@@ -1478,6 +1547,59 @@ async function writeCardScreenshot(driver, providerDir, sessionId, name) {
   }
 }
 
+async function writeEvidenceScreenshots(driver, providerDir, sessionId, stateName, capture) {
+  const privateRows = (capture.debug?.renderer?.lines ?? []).flatMap((line, index) =>
+    /(?:directory\s*:|\.wardian[\\/](?:agents|c)[\\/])/i.test(line) ? [index] : []);
+  const hiddenRows = auditMaskPrivateScreenshotRows
+    ? await driver.executeScript((sid, rowIndexes, rowCount) => {
+        const card = document.getElementById(`agent-card-${sid}`);
+        const screen = card?.querySelector(".xterm-screen");
+        if (rowIndexes.length > 0 && (!screen || rowCount < 1)) {
+          throw new Error("Cannot mask private terminal rows without an xterm screen");
+        }
+        if (!screen) return 0;
+        screen.dataset.wardianEvidencePosition = screen.style.position;
+        screen.style.position = "relative";
+        const rowHeight = screen.clientHeight / rowCount;
+        for (const index of rowIndexes) {
+          const mask = document.createElement("div");
+          mask.dataset.wardianEvidenceMask = "";
+          Object.assign(mask.style, {
+            position: "absolute",
+            left: "0",
+            right: "0",
+            top: `${Math.max(0, index * rowHeight - 1)}px`,
+            height: `${rowHeight + 2}px`,
+            backgroundColor: "#000",
+            zIndex: "2147483647",
+            pointerEvents: "none",
+          });
+          screen.appendChild(mask);
+        }
+        return rowIndexes.length;
+      }, sessionId, privateRows, capture.debug?.renderer?.rows ?? 0)
+    : 0;
+  try {
+    return {
+      screenshot: await writeScreenshot(driver, providerDir, stateName),
+      cardScreenshot: await writeCardScreenshot(driver, providerDir, sessionId, stateName),
+      hiddenRows,
+    };
+  } finally {
+    if (auditMaskPrivateScreenshotRows) {
+      await driver.executeScript((sid) => {
+        const card = document.getElementById(`agent-card-${sid}`);
+        const screen = card?.querySelector(".xterm-screen");
+        if (screen) {
+          for (const mask of screen.querySelectorAll("[data-wardian-evidence-mask]")) mask.remove();
+          screen.style.position = screen.dataset.wardianEvidencePosition ?? "";
+          delete screen.dataset.wardianEvidencePosition;
+        }
+      }, sessionId);
+    }
+  }
+}
+
 function screenRectMatchesDebug(capture) {
   const screenRect = capture?.layout?.screenRect;
   const renderer = capture?.debug?.renderer;
@@ -1496,20 +1618,20 @@ async function captureState(driver, providerDir, sessionId, stateName, options =
   const captureStartedAt = nowIso();
   const stability = options.stability ?? await waitForStableRenderedRows(driver, sessionId);
   const capture = stability.capture ?? await readTerminalCapture(driver, sessionId);
-  if (options.expectPreservedLocalScrollback) {
-    const replay = [...(capture.debug?.snapshotReplays ?? [])]
-      .reverse()
-      .find((item) => item?.preservedLocalScrollback === true);
-    assert.ok(
-      replay &&
-        replay.brokerScrollbackRows === 0 &&
-        replay.rendererBefore?.baseY > 0 &&
-        replay.rendererAfter?.baseY >= replay.rendererBefore.baseY,
-      `Expected the owner resize to preserve real Codex scrollback for ${stateName}: ${JSON.stringify(replay)}`,
-    );
+  if (options.expectCodexFullscreen) {
+    const renderer = capture.debug?.renderer;
+    assert.equal(renderer?.bufferType, "alternate", `Expected Codex fullscreen buffer for ${stateName}`);
+    if (options.expectCodexDraftAtBottom && auditInputText.length < (renderer?.cols ?? 0) - 4) {
+      const visibleTail = (renderer?.lines ?? []).slice(-6).join("\n");
+      assert.ok(
+        terminalTextIncludes(visibleTail, auditInputText),
+        `Expected the Codex draft near the bottom for ${stateName}: ${JSON.stringify(visibleTail)}`,
+      );
+    }
   }
-  const screenshot = await writeScreenshot(driver, providerDir, stateName);
-  const cardScreenshot = await writeCardScreenshot(driver, providerDir, sessionId, stateName);
+  const { screenshot, cardScreenshot, hiddenRows } = await writeEvidenceScreenshots(
+    driver, providerDir, sessionId, stateName, capture,
+  );
   assert.ok(screenshot.bytes > 0, `Expected a non-empty app screenshot for ${stateName}`);
 
   const resize = options.resize ?? null;
@@ -1527,6 +1649,7 @@ async function captureState(driver, providerDir, sessionId, stateName, options =
     card_screenshot_duration_ms: cardScreenshot.duration_ms,
     card_screenshot_selector: cardScreenshot.selector,
     card_screenshot_error: cardScreenshot.error,
+    screenshot_private_rows_hidden: hiddenRows,
     xterm_screen_rect: capture.layout?.screenRect ?? null,
     terminal_debug: compactDebug(capture.debug),
     fit_count: debugCounts(capture.debug).fit_count,
@@ -1837,7 +1960,12 @@ async function readAgentTerminalDebugSnapshot(driver, sessionId) {
 async function addCapturedState(record, driver, providerDir, sessionId, stateName, options = {}) {
   const state = {
     name: stateName,
-    ...(await captureState(driver, providerDir, sessionId, stateName, options)),
+    ...(await captureState(driver, providerDir, sessionId, stateName, {
+      ...options,
+      expectCodexFullscreen: record.provider === "codex" && stateName !== "minimized",
+      expectCodexDraftAtBottom: record.provider === "codex" && !auditSubmitInput &&
+        !stateName.startsWith("cleared") && stateName !== "resumed",
+    })),
   };
   record.states.push(state);
   record.save?.();
@@ -1915,6 +2043,14 @@ test("real provider terminal rendering audit captures user-visible Wardian state
   }
 
   const providers = parseRenderingProviders(process.env.WARDIAN_E2E_RENDERING_PROVIDERS);
+  const trustWorkspaceOptIn = process.env.WARDIAN_E2E_RENDERING_TRUST_CODEX_WORKSPACE;
+  assert.ok(
+    trustWorkspaceOptIn === undefined || trustWorkspaceOptIn === "0" || trustWorkspaceOptIn === "1",
+    "WARDIAN_E2E_RENDERING_TRUST_CODEX_WORKSPACE must be 0 or 1",
+  );
+  const trustCodexWorkspace = trustWorkspaceOptIn === "1";
+  assert.ok(!trustCodexWorkspace || providers.includes("codex"),
+    "Codex workspace trust opt-in requires codex in WARDIAN_E2E_RENDERING_PROVIDERS");
   if (providers.includes("opencode") && auditSubmitInput && auditInputText.trim().length > 0) {
     assert.notEqual(expectedPlainNumberedResponseMax(), null,
       "OpenCode clear/resume requires a native numbered-answer oracle before any submission");
@@ -2099,6 +2235,11 @@ test("real provider terminal rendering audit captures user-visible Wardian state
 
   saveManifest();
   try {
+  if (trustCodexWorkspace) {
+    progress("codex-workspace-trust");
+    manifest.codex_workspace_trust = await trustCodexWorkspaceInTestHome(driver, harness, workspacePath);
+    saveManifest();
+  }
   const readers = new Map();
   // Storage/source capability is checked before any real provider spawn or prompt.
   if (expectedPlainNumberedResponseMax() !== null) {
@@ -2174,7 +2315,6 @@ test("real provider terminal rendering audit captures user-visible Wardian state
     const narrowStateOptions = {
       ...narrowTransition,
       expectAuditText: true,
-      expectPreservedLocalScrollback: provider === "codex",
     };
     await addCapturedStateWithScrollback(record, driver, providerDir, sessionId, "narrow", narrowStateOptions);
     await addCapturedStateWithScrollback(record, driver, providerDir, sessionId, "resized", narrowStateOptions);

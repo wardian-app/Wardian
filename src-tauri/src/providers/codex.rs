@@ -278,11 +278,6 @@ impl CodexProvider {
 
         if is_exec_mode {
             self.append_headless_exec_args(args, Some(config));
-        } else {
-            // Codex documents this as inline TUI mode that preserves terminal
-            // scrollback. Wardian embeds the TUI inside xterm, so interactive
-            // sessions should prefer scrollback-friendly output.
-            args.push("--no-alt-screen".into());
         }
     }
 
@@ -832,18 +827,18 @@ mod tests {
         assert!(args.contains(&"--ask-for-approval".to_string()));
         assert!(args.contains(&"on-request".to_string()));
         assert!(args.contains(&"--search".to_string()));
-        assert!(args.contains(&"--no-alt-screen".to_string()));
+        assert!(!args.contains(&"--no-alt-screen".to_string()));
         assert!(!args.windows(2).any(|pair| pair[0] == "--disable"));
     }
 
     #[test]
-    fn spawn_args_enable_no_alt_screen_by_default() {
+    fn spawn_args_leave_alternate_screen_mode_to_codex_config() {
         let p = make_provider();
         let config = AgentConfig::default();
 
         let args = p.get_spawn_args(&config, false);
 
-        assert!(args.contains(&"--no-alt-screen".to_string()));
+        assert!(!args.contains(&"--no-alt-screen".to_string()));
         assert!(!args.windows(2).any(|pair| pair[0] == "--disable"));
     }
 

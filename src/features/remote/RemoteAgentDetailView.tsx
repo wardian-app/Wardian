@@ -950,9 +950,11 @@ function decodeRemoteTerminalSnapshot(snapshot: TerminalSnapshot) {
     ? snapshot.formatted_scrollback
     : snapshot.scrollback ?? [];
   let visibleState = snapshot.visible_grid;
+  let formattedStateApplied = false;
   if (snapshot.terminal_state_base64) {
     try {
       visibleState = base64ToTerminalString(snapshot.terminal_state_base64);
+      formattedStateApplied = true;
     } catch {
       // The broker omits oversized formatted state atomically. A malformed
       // payload follows the same bounded plain-text recovery path.
@@ -961,9 +963,12 @@ function decodeRemoteTerminalSnapshot(snapshot: TerminalSnapshot) {
   // Formatted terminal state is only the geometry-bound visible frame. Keep
   // the broker's oldest-first scrollback ahead of it so a recovery snapshot
   // cannot turn a remote terminal into a single unscrollable viewport.
-  return [...scrollback, visibleState]
+  const projection = [...scrollback, visibleState]
     .filter(Boolean)
     .join("\r\n");
+  return snapshot.alternate_screen && !formattedStateApplied
+    ? `\x1b[?1049h${projection}`
+    : projection;
 }
 
 function base64ToTerminalBytes(value: string) {

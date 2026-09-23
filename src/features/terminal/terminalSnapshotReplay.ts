@@ -23,5 +23,8 @@ export function decodeTerminalSnapshot(snapshot: TerminalSnapshot, useFormattedS
       // bounded plain-text projection is the recovery fallback.
     }
   }
-  return [...scrollback, snapshot.visible_grid].join("\r\n");
+  const plainProjection = [...scrollback, snapshot.visible_grid].join("\r\n");
+  // vt100's plain projection has no screen-mode control; preserve alternate
+  // ownership when formatted state is unavailable or local geometry differs.
+  return snapshot.alternate_screen ? `\x1b[?1049h${plainProjection}` : plainProjection;
 }

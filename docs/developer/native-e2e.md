@@ -277,6 +277,14 @@ npm run tauri -- build --debug --no-bundle
 npm run test:e2e:native:fast -- e2e-native/tests/real-provider-rendering-native.test.mjs
 ```
 
+For screenshot evidence that may be published, set
+`WARDIAN_E2E_RENDERING_MASK_PRIVATE_ROWS=1`. The harness hides terminal rows
+containing the workspace directory or managed-home path only while capturing
+PNG screenshots, then restores the live terminal. The JSON and raw-output
+artifacts remain private and may still contain paths. Set
+`WARDIAN_E2E_RENDERING_SUBMIT_INPUT=0` to inspect a typed draft without sending
+a provider turn.
+
 The provider list also accepts `pi`. Include it in
 `WARDIAN_E2E_RENDERING_PROVIDERS` for a Pi rendering run, and set
 `WARDIAN_E2E_RENDERING_PI_MODEL` when the test should use a specific configured

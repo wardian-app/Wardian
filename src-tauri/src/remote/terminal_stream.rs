@@ -1336,6 +1336,7 @@ fn v1_snapshot_payload(
         "type":"snapshot",
         "attachment_id": binding.presentation_id,
         "owner_attachment_id": binding.owner_presentation_id,
+        "alternate_screen": snapshot.alternate_screen,
         "cols": snapshot.geometry.cols,
         "rows": snapshot.geometry.rows,
         "state_base64": snapshot.terminal_state_base64,
@@ -1705,6 +1706,7 @@ mod tests {
                     cols: 120,
                     rows: 40,
                 },
+                alternate_screen: true,
                 terminal_state_base64: "AA==".to_string(),
                 visible_grid: String::new(),
                 scrollback: Vec::new(),
@@ -1712,6 +1714,7 @@ mod tests {
             },
         );
         assert_eq!(recovery["owner_attachment_id"], "desktop-again");
+        assert_eq!(recovery["alternate_screen"], true);
     }
 
     #[test]

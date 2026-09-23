@@ -448,6 +448,12 @@ hydrating archived turns, so large conversations do not exceed the control
 transport's frame limit. The ordinary TUI still owns history display. Its launch
 explicitly selects the configured workspace with `--cd`, avoiding Codex's resume
 directory picker when a saved conversation records another working directory.
+Wardian does not force Codex's terminal screen mode with a CLI flag. When
+agent-local `[tui].fullscreen_transcript` is absent and alternate screen is
+allowed, home projection defaults it to `true`. Explicit `false` and
+`alternate_screen = "never"` are retained. `/tui` changes the preference for
+the next provider launch. Fullscreen uses
+Codex's own scrollable transcript, while inline mode uses xterm scrollback.
 Attachment failures retain the transport reason and a bounded terminal tail.
 
 On Windows, replacing or removing a launch configuration file can briefly fail
