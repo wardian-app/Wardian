@@ -74,6 +74,7 @@ import {
 import { createCoreWorkbenchSurfaceRegistry } from "../features/workbench/coreSurfaceRegistry";
 import { findExistingSurface } from "../features/workbench/adjacentSurfaceTargeting";
 import { createWorkbenchNavigationService } from "../features/workbench/navigationService";
+import { useWatchlistAgentReveal } from "../features/workbench/useWatchlistAgentReveal";
 import { SurfaceRecoveryPlaceholder } from "../features/workbench/SurfaceRecoveryPlaceholder";
 import { AgentSessionSurface } from "../features/workbench/surfaces/AgentSessionSurface";
 import {
@@ -1356,32 +1357,10 @@ function AppBody() {
     });
   }, [workbenchNavigation]);
 
-  const revealAgentInOverview = useCallback((sessionId: string) => {
-    const store = workbenchPersistence.store;
-    const snapshot = store.getState();
-    const overviewSurfaceId = findExistingSurface(
-      snapshot.document,
-      snapshot.surface_mru,
-      "agents-overview",
-    );
-
-    if (!overviewSurfaceId) {
-      setSelectedAgentIds(new Set([sessionId]));
-      workbenchNavigation.open({
-        surface_type: "agents-overview",
-        state: {
-          ...normalizeAgentsOverviewSurfaceState(
-            workbenchRegistry.default_state("agents-overview"),
-          ),
-          focused_agent_id: sessionId,
-        },
-      });
-      scheduleAgentOverviewScroll(sessionId);
-      return;
-    }
-
-    focusAgentInOverviewSurface(overviewSurfaceId, sessionId);
-  }, [focusAgentInOverviewSurface, scheduleAgentOverviewScroll, setSelectedAgentIds, workbenchNavigation, workbenchPersistence.store, workbenchRegistry]);
+  const { watchlistReveal, revealAgentFromWatchlist, selectAgentFromWatchlist, setWatchlistSelection } = useWatchlistAgentReveal({
+    store: workbenchPersistence.store, navigation: workbenchNavigation, registry: workbenchRegistry,
+    filteredAgents, focusAgentInOverviewSurface, scheduleAgentOverviewScroll, setSelectedAgentIds, selectAgent,
+  });
 
   const workbenchNotice = [
     workbenchPersistence.notice,
@@ -1670,6 +1649,7 @@ function AppBody() {
       return (
         <DashboardSurface
           surface_id={surface.surface_id}
+          revealAgentRequest={watchlistReveal?.surface_id === surface.surface_id ? watchlistReveal : null}
           state={normalizeDashboardSurfaceState(restoredSurface)}
           visibility={visibility}
           // Surface state first, global prefs as the seed. A Dashboard the
@@ -1738,6 +1718,7 @@ function AppBody() {
       return (
         <GraphSurface
           surface_id={surface.surface_id}
+          revealAgentRequest={watchlistReveal?.surface_id === surface.surface_id ? watchlistReveal : null}
           state={normalizeGraphSurfaceState(restoredSurface)}
           visibility={visibility}
           filteredAgents={filteredAgents}
@@ -1785,6 +1766,7 @@ function AppBody() {
       return (
         <GardenSurface
           surface_id={surface.surface_id}
+          revealAgentRequest={watchlistReveal?.surface_id === surface.surface_id ? watchlistReveal : null}
           state={normalizeGardenSurfaceState(restoredSurface)}
           visibility={visibility}
           filteredAgents={filteredAgents}
@@ -2032,11 +2014,11 @@ function AppBody() {
           agents={agents}
           selectedAgentIds={selectedAgentIds}
           offAgentIds={offAgentIds}
-          onSelectionChange={setSelectedAgentIds}
           filter={rosterFilter}
           onFilterChange={setRosterFilter}
-          onSelectAgent={selectAgent}
-          onRevealAgent={revealAgentInOverview}
+          onSelectAgent={selectAgentFromWatchlist}
+          onSelectionChange={setWatchlistSelection}
+          onRevealAgent={revealAgentFromWatchlist}
           onOpenAgent={openAgent}
           onOpenAgentToSide={openAgentToSide}
           onRename={renameAgent}

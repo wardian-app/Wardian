@@ -11,6 +11,7 @@ import { OnboardingHint } from "../components/OnboardingHint";
 import { GraphCanvas } from "../features/graph/GraphCanvas";
 import { isUserFacingProviderName, providerDisplayName } from "../features/agents/providerOptions";
 import type { GraphSurfaceState } from "../features/workbench/surfaces/coreSurfaceMetadata";
+import type { AgentRevealRequest } from "../features/workbench/surfaces/coreSurfaceMetadata";
 import { formatAgentStatusLabel } from "../utils/statusUtils";
 
 function formatProviderName(provider: string | null | undefined): string {
@@ -26,6 +27,7 @@ import {
 type MaybePromise = void | Promise<void>;
 
 export interface GraphViewProps {
+  revealAgentRequest?: AgentRevealRequest | null;
   visibility?: "visible" | "hidden";
   rendererActive?: boolean;
   initialSurfaceState?: GraphSurfaceState;
@@ -83,6 +85,7 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
     initialSurfaceState?.inspected_agent_id ?? Array.from(props.selectedAgentIds)[0] ?? null,
   );
   const [inspectorOpen, setInspectorOpen] = useState(initialSurfaceState?.inspector_open ?? true);
+  const handledRevealSequence = useRef<number | null>(null);
   const [resetSignal, setResetSignal] = useState(0);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(
     initialSurfaceState?.selected_edge_id ?? null,
@@ -221,6 +224,16 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
       return projection.nodes[0]?.id ?? null;
     });
   }, [projection.nodes, projectionNodeIds, props.selectedAgentIds]);
+
+  useEffect(() => {
+    const request = props.revealAgentRequest;
+    if (!request || handledRevealSequence.current === request.sequence
+      || !projectionNodeIds.has(request.agent_id)) return;
+    handledRevealSequence.current = request.sequence;
+    setSelectedEdgeId(null);
+    setInspectedAgentId(request.agent_id);
+    setInspectorOpen(true);
+  }, [projectionNodeIds, props.revealAgentRequest]);
 
   useEffect(() => {
     if (props.visibility === "hidden") return;

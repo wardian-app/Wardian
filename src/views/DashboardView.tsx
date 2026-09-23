@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowDown, ArrowUp, BarChart3, RefreshCw, SlidersHorizontal } from "lucide-react";
 
 import {
@@ -26,6 +26,7 @@ import {
   UNREPORTED,
 } from "../features/telemetry/telemetryFormat";
 import type { FleetRow, HorizonWindow, TelemetryFleetMaxima } from "../features/telemetry/telemetryTypes";
+import type { AgentRevealRequest } from "../features/workbench/surfaces/coreSurfaceMetadata";
 
 /** Live agent state the instant columns read, supplied by the app shell. */
 export interface DashboardLiveAgent {
@@ -36,6 +37,7 @@ export interface DashboardLiveAgent {
 }
 
 export interface DashboardViewProps {
+  revealAgentRequest?: AgentRevealRequest | null;
   prefs?: DashboardPrefs;
   /** Called on every change; the app persists it with no save step. */
   onPrefsChange?: (prefs: DashboardPrefs) => void;
@@ -69,6 +71,7 @@ export interface DashboardViewProps {
  * runaway needs an outlier rather than an absolute maximum.
  */
 export const DashboardView: React.FC<DashboardViewProps> = ({
+  revealAgentRequest,
   prefs = DEFAULT_DASHBOARD_PREFS,
   onPrefsChange,
   live,
@@ -76,6 +79,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onOpenAnalytics,
   enabled = true,
 }) => {
+  const tableRef = useRef<HTMLDivElement>(null);
+  const handledRevealSequence = useRef<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [picking, setPicking] = useState(false);
   const [detailsTarget, setDetailsTarget] = useState<AgentTelemetryDetailsTarget | null>(null);
@@ -116,6 +121,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   const active = rows.filter((row) => !row.idle);
   const idle = rows.filter((row) => row.idle);
+
+  useEffect(() => {
+    if (!enabled || loading || !revealAgentRequest
+      || handledRevealSequence.current === revealAgentRequest.sequence) return;
+    const row = Array.from(tableRef.current?.querySelectorAll<HTMLElement>("[data-agent-id]") ?? [])
+      .find((candidate) => candidate.dataset.agentId === revealAgentRequest.agent_id);
+    if (!row) return;
+    handledRevealSequence.current = revealAgentRequest.sequence;
+    row.scrollIntoView?.({ block: "nearest" });
+    row.focus({ preventScroll: true });
+  }, [enabled, loading, revealAgentRequest, rows]);
 
   const update = useCallback(
     (next: DashboardPrefs) => onPrefsChange?.(next),
@@ -259,7 +275,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         // The rows scroll, the header does not. A fleet outgrows one screen
         // quickly, and a monitor whose column headings scroll away stops
         // answering what a number means halfway down the list.
-        <div className="dashboard-view__table flex-1 min-h-0 overflow-y-auto rounded-xl border border-wardian-border/50 bg-[var(--color-wardian-card)]">
+        <div ref={tableRef} className="dashboard-view__table flex-1 min-h-0 overflow-y-auto rounded-xl border border-wardian-border/50 bg-[var(--color-wardian-card)]">
           <div
             role="row"
             className="grid items-center gap-2 px-3 py-2 border-b border-wardian-border/40 sticky top-0 z-10 bg-[var(--color-wardian-card)]"
@@ -281,6 +297,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           {active.map((row) => (
             <FleetRowView
               key={row.key}
+              selected={revealAgentRequest?.agent_id === row.key}
               row={row}
               columns={columns}
               maxima={maxima}
@@ -302,6 +319,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           {idle.map((row) => (
             <FleetRowView
               key={row.key}
+              selected={revealAgentRequest?.agent_id === row.key}
               row={row}
               columns={columns}
               maxima={maxima}
@@ -392,6 +410,7 @@ function ColumnHeader({
 
 function FleetRowView({
   row,
+  selected,
   columns,
   maxima,
   template,
@@ -401,6 +420,7 @@ function FleetRowView({
   onOpenAnalytics,
 }: {
   row: FleetRow;
+  selected: boolean;
   columns: readonly DashboardColumn[];
   maxima: TelemetryFleetMaxima;
   template: string;
@@ -418,6 +438,8 @@ function FleetRowView({
   return (
     <div
       role="row"
+      data-agent-id={row.key}
+      aria-selected={selected}
       tabIndex={0}
       aria-label={`View telemetry details for ${row.label}`}
       onClick={openDetails}
@@ -428,6 +450,8 @@ function FleetRowView({
         }
       }}
       className={`dashboard-view__row grid cursor-pointer items-center gap-2 px-3 py-1.5 border-b border-wardian-border/20 hover:bg-wardian-card-bg-muted transition-colors ${
+        selected ? "ring-1 ring-inset ring-[var(--color-wardian-accent)]" : ""
+      } ${
         row.idle ? "opacity-40" : ""
       }`}
       style={{ gridTemplateColumns: template }}

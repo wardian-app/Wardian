@@ -471,6 +471,27 @@ test.describe("Custom Agent Clone", () => {
     });
   });
 
+  test("watchlist click inspects an agent without leaving the active Graph", async ({ page }) => {
+    await installCustomCloneIpcMock(page, { includeRecentSortFixture: true });
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15_000 });
+    await openSurface(page, "graph");
+
+    const sourceRow = page.locator('[data-testid="agent-watchlist"] .watchlist-row', { hasText: "E2E Older Agent" });
+    await sourceRow.click();
+
+    await expect(page.getByRole("tab", { name: "Graph" })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tab", { name: "Agents" })).toHaveAttribute("aria-selected", "false");
+    await expect(surfacePanel(page, "graph").locator(".graph-inspector h2")).toHaveText("E2E Older Agent");
+    await expect(sourceRow).toHaveAttribute("data-selected", "true");
+    await expect(page.getByText("Saving workbench changes…")).toHaveCount(0);
+    await page.screenshot({
+      path: path.join("e2e", "screenshots", "watchlist-active-surface", "2026-09-23", "graph-watchlist-reveal.png"),
+      animations: "disabled",
+      clip: { x: 285, y: 0, width: 1635, height: 1080 },
+    });
+  });
+
   test("first Last sort shows the most recently queried agent first", async ({ page }) => {
     await installCustomCloneIpcMock(page, { includeRecentSortFixture: true });
     await page.goto("/", { waitUntil: "domcontentloaded" });

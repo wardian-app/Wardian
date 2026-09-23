@@ -352,6 +352,18 @@ describe("GraphView", () => {
     expect(screen.queryByRole("heading", { name: "Alpha" })).not.toBeInTheDocument();
   });
 
+  it("opens the inspector for a roster reveal even when it was closed", async () => {
+    const { rerender } = render(<GraphView {...defaultProps} initialSurfaceState={{
+      enabled_reasons: [], inspected_agent_id: "a", inspector_open: false,
+      selected_edge_id: null, picker_search: "", show_all_labels: true,
+    }} />);
+    expect(screen.getByRole("button", { name: "Show inspector" })).toBeInTheDocument();
+
+    rerender(<GraphView {...defaultProps} revealAgentRequest={{ agent_id: "b", sequence: 1 }} />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Beta" })).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Hide inspector" })).toBeInTheDocument();
+  });
+
   it("hides inspector and reopens it from a graph node", () => {
     const { container } = render(<GraphView {...defaultProps} />);
 

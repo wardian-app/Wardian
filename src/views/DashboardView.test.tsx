@@ -290,6 +290,28 @@ describe("DashboardView", () => {
     expect(screen.queryByText("uuid-1")).not.toBeInTheDocument();
   });
 
+  it("focuses and highlights a roster-revealed agent after the fleet loads", async () => {
+    respondWith([row(), row({ key: "uuid-2", label: "Second Agent" })]);
+    const scrollIntoView = vi.fn();
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    try {
+      const { rerender } = render(<DashboardView revealAgentRequest={{ agent_id: "uuid-2", sequence: 1 }} />);
+      const target = await screen.findByRole("row", { name: "View telemetry details for Second Agent" });
+      await waitFor(() => expect(target).toHaveFocus());
+      expect(target).toHaveAttribute("aria-selected", "true");
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+
+      rerender(<DashboardView revealAgentRequest={{ agent_id: "uuid-1", sequence: 2 }} />);
+      const next = screen.getByRole("row", { name: "View telemetry details for Wardian-Codex" });
+      await waitFor(() => expect(next).toHaveFocus());
+      expect(next).toHaveAttribute("aria-selected", "true");
+      expect(target).toHaveAttribute("aria-selected", "false");
+    } finally {
+      HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
+    }
+  });
+
   it("lists agents that recorded nothing as available capacity", async () => {
     // On a resource monitor an idle agent is spare capacity, which answers
     // "where can I spend what's left" — not dead weight to hide.

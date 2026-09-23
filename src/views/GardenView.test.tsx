@@ -81,6 +81,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 function renderPersistenceView(onSurfaceStateChange: ComponentProps<typeof GardenView>["onSurfaceStateChange"]) {
@@ -490,5 +491,32 @@ describe("GardenView", () => {
     expect(screen.getByTestId("garden-selection-summary")).toHaveTextContent("AlphaIdle");
     expect(screen.getByRole("button", { name: "Open agent session" })).toBeVisible();
     expect(onSurfaceStateChange).toHaveBeenCalledWith(expect.objectContaining({ selected_unit_key: "agent:a1", trail: [], time_lens: "recent" }));
+  });
+
+  it("enters a roster-revealed agent even from another local selection", () => {
+    vi.stubGlobal("matchMedia", () => ({ matches: true }));
+    const agents = [
+      { session_id: "a1", session_name: "Alpha" } as AgentConfig,
+      { session_id: "a2", session_name: "Beta" } as AgentConfig,
+    ];
+    const props = {
+      initialSurfaceState: {
+        selected_unit_key: "agent:a1",
+        trail: [{ ref: { kind: "agent" as const, id: "a1" }, label: "Alpha" }],
+      },
+      filteredAgents: agents,
+      telemetry: {}, teams: [], activeList: null, interactions: {},
+      selectedAgentIds: new Set(["a2"]), offAgentIds: new Set<string>(),
+      onSelectionChange: vi.fn(), onOpenAgent: vi.fn(),
+    };
+    const { rerender } = render(<GardenView {...props} />);
+    expect(screen.getByTestId("garden-canvas")).toHaveAttribute("data-selected-key", "agent:a1");
+
+    rerender(<GardenView {...props} revealAgentRequest={{ agent_id: "a2", sequence: 1 }} />);
+    expect(screen.getByTestId("garden-canvas")).toHaveAttribute("data-selected-key", "agent:a2");
+    expect(screen.getByTestId("garden-selection-summary")).toHaveTextContent("Beta");
+    expect(screen.getByRole("navigation", { name: "Garden breadcrumb" })).not.toHaveTextContent("Alpha");
+    expect(screen.getByRole("navigation", { name: "Garden breadcrumb" })).toHaveTextContent("Beta");
+    expect(props.onOpenAgent).not.toHaveBeenCalled();
   });
 });
