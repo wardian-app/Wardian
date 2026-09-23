@@ -1,5 +1,6 @@
 [package]
 name = "wardian-cli"
+default-run = "wardian-cli"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -11,6 +12,10 @@ homepage.workspace = true
 name = "wardian-cli"
 path = "src/main.rs"
 
+[[bin]]
+name = "wardian-mcp"
+path = "src/mcp_main.rs"
+
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 rusqlite = { workspace = true }
@@ -20,6 +25,9 @@ chrono = { workspace = true }
 fs2 = { workspace = true }
 tokio = { version = "1.49.0", features = ["io-util", "net", "rt", "time"] }
 wardian-core = { path = "../wardian-core" }
+
+[target.'cfg(windows)'.dependencies]
+win32job = "2.0.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }

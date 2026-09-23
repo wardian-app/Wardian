@@ -30,6 +30,14 @@ pub(crate) enum Registration {
     Unavailable(&'static str),
 }
 
+pub(super) fn messaging_server_file_name() -> &'static str {
+    if cfg!(windows) {
+        super::cli_install::bundled_mcp_file_name()
+    } else {
+        super::cli_install::bundled_cli_file_name()
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Ownership {
@@ -75,9 +83,7 @@ pub(crate) fn ensure_managed_messaging(
     if !codex_home.is_dir() {
         return Err("Managed Codex habitat must be prepared before MCP registration".into());
     }
-    let cli = home
-        .join("bin")
-        .join(super::cli_install::bundled_cli_file_name());
+    let cli = home.join("bin").join(messaging_server_file_name());
     if !cli.is_file() {
         return Ok(Registration::Unavailable("bundled native CLI is missing"));
     }

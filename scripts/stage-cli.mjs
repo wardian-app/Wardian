@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 
 const isWindows = process.platform === 'win32';
 const exe = isWindows ? 'wardian-cli.exe' : 'wardian-cli';
+const mcpExe = 'wardian-mcp.exe';
 
 function repoRoot() {
   return resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -126,6 +127,26 @@ export function main() {
   const stagedResource = join(destDir, exe);
   copyFileSync(source, stagedResource);
   signMacReleaseResource(stagedResource, profile);
+
+  if (isWindows) {
+    const mcpSource = resolveCliSourcePath({
+      targetDirectory: cargoTargetDirectory(root),
+      target,
+      profile,
+      exe: mcpExe,
+    });
+    const stagedMcp = join(destDir, mcpExe);
+    copyFileSync(mcpSource, stagedMcp);
+    if (profile === 'dev') {
+      const devMcp = resolveDevResourcePath({
+        targetDirectory: cargoTargetDirectory(root),
+        target,
+        exe: mcpExe,
+      });
+      mkdirSync(dirname(devMcp), { recursive: true });
+      copyFileSync(mcpSource, devMcp);
+    }
+  }
 
   if (profile === 'dev') {
     const devResource = resolveDevResourcePath({

@@ -5925,6 +5925,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "wardian-core",
+ "win32job",
 ]
 
 [[package]]

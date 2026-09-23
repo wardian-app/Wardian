@@ -1,7 +1,7 @@
 //! Real CLI process and local control transport; no provider or Wardian app runs.
 use serde_json::{json, Value};
 use std::{
-    io::Write,
+    io::{BufRead, BufReader as StdBufReader, Read, Write},
     path::Path,
     process::{Command, Stdio},
     sync::mpsc,
@@ -23,7 +23,11 @@ fn run(test_home: &Path, requests: Vec<Value>) -> Vec<Value> {
 }
 
 fn run_with_sender(test_home: &Path, requests: Vec<Value>, managed: bool) -> Vec<Value> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_wardian-cli"));
+    #[cfg(windows)]
+    let executable = env!("CARGO_BIN_EXE_wardian-mcp");
+    #[cfg(not(windows))]
+    let executable = env!("CARGO_BIN_EXE_wardian-cli");
+    let mut command = Command::new(executable);
     if managed {
         command.env("WARDIAN_SESSION_ID", "sender-managed-uuid");
     } else {
@@ -63,6 +67,61 @@ fn run_with_sender(test_home: &Path, requests: Vec<Value>, managed: bool) -> Vec
         .lines()
         .map(|line| serde_json::from_str(line).expect("stdout must contain only JSON-RPC"))
         .collect()
+}
+
+#[cfg(windows)]
+#[test]
+fn registered_mcp_launcher_uses_the_windows_gui_subsystem() {
+    let image = std::fs::read(env!("CARGO_BIN_EXE_wardian-mcp")).unwrap();
+    let pe_offset = u32::from_le_bytes(image[0x3c..0x40].try_into().unwrap()) as usize;
+    assert_eq!(&image[pe_offset..pe_offset + 4], b"PE\0\0");
+    let subsystem_offset = pe_offset + 24 + 68;
+    let subsystem = u16::from_le_bytes(
+        image[subsystem_offset..subsystem_offset + 2]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(subsystem, 2, "MCP launcher must not request a console");
+}
+
+#[cfg(windows)]
+#[test]
+fn terminating_registered_launcher_closes_the_mcp_child_stdio() {
+    let test_home = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wardian-mcp"))
+        .args(["mcp", "serve"])
+        .env("WARDIAN_HOME", test_home.path())
+        .env("WARDIAN_SESSION_ID", "sender-managed-uuid")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = StdBufReader::new(child.stdout.take().unwrap());
+    let initialization = handshake().remove(0);
+    writeln!(stdin, "{initialization}").unwrap();
+    let mut response = String::new();
+    stdout.read_line(&mut response).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&response).unwrap()["result"]["serverInfo"]["name"],
+        "wardian"
+    );
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut remaining = Vec::new();
+        let result = stdout.read_to_end(&mut remaining);
+        let _ = sender.send(result);
+    });
+    let closed = receiver.recv_timeout(Duration::from_secs(2)).is_ok();
+    drop(stdin);
+    assert!(
+        closed,
+        "killing the registered launcher must close its child's inherited MCP stdout"
+    );
 }
 
 #[test]
