@@ -1,5 +1,6 @@
 use super::session_identity::ProviderIdentityOutcome;
-use super::spawn::handle_provider_init_event;
+use super::spawn::{codex_shared_tui_args, handle_provider_init_event};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use wardian_core::models::{AgentConfig, AgentEvent};
 
@@ -23,6 +24,46 @@ fn init(session_id: &str) -> AgentEvent {
         session_id: session_id.to_string(),
         timestamp: Some("2026-07-16T12:00:00Z".to_string()),
     }
+}
+
+#[test]
+fn shared_codex_tui_args_preserve_model_and_fresh_or_resumed_identity() {
+    let prefix = vec!["codex-wrapper".to_string(), "--wrapper-option".to_string()];
+    let workspace = Path::new("workspace");
+    let model = "gpt-5.6-luna";
+    let thread_id = "019db2f3-22de-7861-8bc6-1b86db1686db";
+
+    let fresh = codex_shared_tui_args(prefix.clone(), Some(model), None, workspace);
+    assert_eq!(
+        fresh,
+        vec![
+            "codex-wrapper",
+            "--wrapper-option",
+            "--model",
+            model,
+            "--no-alt-screen",
+            "--cd",
+            "workspace",
+        ]
+    );
+
+    let resumed = codex_shared_tui_args(prefix, Some(model), Some(thread_id), workspace);
+    assert_eq!(
+        resumed,
+        vec![
+            "codex-wrapper",
+            "--wrapper-option",
+            "--model",
+            model,
+            "resume",
+            thread_id,
+            "--no-alt-screen",
+            "--cd",
+            "workspace",
+        ]
+    );
+    assert!(!fresh.iter().any(|argument| argument == "-c"));
+    assert!(!resumed.iter().any(|argument| argument == "-c"));
 }
 
 #[test]

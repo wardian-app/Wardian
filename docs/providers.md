@@ -175,7 +175,9 @@ Wardian materializes fresh Codex history without a bootstrap model turn and
 retains the exact provider UUID in the agent's private `CODEX_HOME`. A
 Wardian-owned app-server manages the session, and the original Codex terminal
 attaches to it. Status tracking observes native turn events, including work
-started from that terminal.
+started from that terminal. During attachment, Wardian temporarily disables
+Codex's startup update check in the private config overlay so an update notice
+cannot block the terminal; the prior setting is restored afterward.
 
 The [agent messaging tools](./developer/agent-messaging-tools.md) separate
 information, follow-up tasks, and interruption. Delivery uses the shared

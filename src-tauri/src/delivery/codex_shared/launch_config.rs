@@ -51,9 +51,10 @@ pub(super) fn recover_launch_config(home: &Path) -> Result<(), CodexSharedError>
 }
 
 /// Prepare a startup-only overlay in the caller's known private agent home.
-/// Input is the exact generated app-server/-c sequence, without executable or
-/// listen prefixes. All input validates before recovery/mutation. Recovery runs
-/// again here; callers must ALSO recover before config-derived args generation.
+/// Input is the app-server/-c sequence plus internal overlay-only leaves,
+/// without executable or listen prefixes. All input validates before
+/// recovery/mutation. Recovery runs again here; callers must ALSO recover
+/// before config-derived args generation.
 /// Call only for interactive startup, with no prior readers and under the
 /// lifecycle gate. Keep the guard until both clients read and policy verifies.
 pub(super) fn prepare_launch_config(
@@ -61,6 +62,27 @@ pub(super) fn prepare_launch_config(
     generated_args: &[String],
 ) -> Result<LaunchConfigGuard, CodexSharedError> {
     let overrides = leaves::parse(generated_args)?;
+    prepare_launch_config_with_overrides(home, overrides)
+}
+
+/// Prepare the ordinary TUI's overlay with its interactive update notice
+/// suppressed. Keep this in the guarded home config so local-daemon discovery
+/// continues to use Codex's normal CLI startup path.
+pub(super) fn prepare_tui_launch_config(
+    home: &Path,
+    generated_args: &[String],
+) -> Result<LaunchConfigGuard, CodexSharedError> {
+    let mut overlay_args = generated_args.to_vec();
+    // This parser-only pair is not passed to the ordinary Codex TUI command.
+    overlay_args.push("-c".into());
+    overlay_args.push("check_for_update_on_startup=false".into());
+    prepare_launch_config(home, &overlay_args)
+}
+
+fn prepare_launch_config_with_overrides(
+    home: &Path,
+    overrides: leaves::Overrides,
+) -> Result<LaunchConfigGuard, CodexSharedError> {
     recover_launch_config(home)?;
     let config_path = home.join("config.toml");
     let journal_path = home.join(journal::FILE);
