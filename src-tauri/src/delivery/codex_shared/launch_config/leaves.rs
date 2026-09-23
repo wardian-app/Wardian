@@ -1,4 +1,4 @@
-//! Restrict journal contents to the trusted generator's scalar/string-array leaves.
+//! Restrict journal contents to allowlisted strings, booleans, and string arrays.
 use super::{failure, CodexSharedError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -14,12 +14,16 @@ use toml_edit::{value, Array, DocumentMut, Item, Table, TableLike};
 pub(super) enum Leaf {
     String(String),
     Strings(Vec<String>),
+    Boolean(bool),
 }
 
 impl Leaf {
     pub(super) fn read(item: &Item) -> Option<Self> {
         if let Some(text) = item.as_str() {
             return Some(Self::String(text.to_owned()));
+        }
+        if let Some(boolean) = item.as_bool() {
+            return Some(Self::Boolean(boolean));
         }
         item.as_array().and_then(|array| {
             array
@@ -40,6 +44,7 @@ impl Leaf {
                 }
                 value(array)
             }
+            Self::Boolean(boolean) => value(*boolean),
         }
     }
 }
@@ -56,18 +61,17 @@ pub(super) type Overrides = BTreeMap<Vec<String>, Leaf>;
 
 pub(super) fn validate(path: &[String], leaf: &Leaf) -> Result<(), CodexSharedError> {
     let allowed = match path {
-        [key] => {
-            matches!(
-                key.as_str(),
-                "model"
-                    | "model_reasoning_effort"
-                    | "sandbox_mode"
-                    | "approval_policy"
-                    | "approvals_reviewer"
-                    | "web_search"
-                    | "developer_instructions"
-            ) && matches!(leaf, Leaf::String(_))
-        }
+        [key] => match key.as_str() {
+            "check_for_update_on_startup" => matches!(leaf, Leaf::Boolean(_)),
+            "model"
+            | "model_reasoning_effort"
+            | "sandbox_mode"
+            | "approval_policy"
+            | "approvals_reviewer"
+            | "web_search"
+            | "developer_instructions" => matches!(leaf, Leaf::String(_)),
+            _ => false,
+        },
         [table, key] => {
             table == "sandbox_workspace_write"
                 && key == "writable_roots"

@@ -52,6 +52,25 @@ use crate::providers::gemini::gemini_status_from_title;
 const OUTPUT_READY_EMIT_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
 const ANTIGRAVITY_TRANSCRIPT_OVERLAP_STEPS: u64 = 16;
 
+/// Build the shared-owner TUI invocation without config overrides, preserving
+/// Codex's ordinary local-daemon discovery for both fresh and resumed threads.
+pub(super) fn codex_shared_tui_args(
+    mut prefix_args: Vec<String>,
+    model_override: Option<&str>,
+    expected_resume_id: Option<&str>,
+    workspace: &std::path::Path,
+) -> Vec<String> {
+    if let Some(model) = model_override {
+        prefix_args.extend(["--model".into(), model.into()]);
+    }
+    if let Some(id) = expected_resume_id {
+        prefix_args.extend(["resume".into(), id.into()]);
+    }
+    prefix_args.push("--no-alt-screen".into());
+    prefix_args.extend(["--cd".into(), workspace.to_string_lossy().into_owned()]);
+    prefix_args
+}
+
 type PendingMemoryInjection = (
     wardian_core::memory::MemoryStore,
     wardian_core::memory::CompiledMemoryBrief,
@@ -1247,19 +1266,12 @@ async fn spawn_agent_inner(
         ));
         // Both clients read the aligned private home; ordinary local discovery
         // requires no CLI key/value config overrides and no --remote mode.
-        provider_args = provider.get_executable().1;
-        // --model is replayable by the local daemon and makes a cold resume
-        // honor current configuration, including the aligned effort setting.
-        if let Some(model) = &attachment.model_override {
-            provider_args.extend(["--model".into(), model.clone()]);
-        }
-        if let Some(id) = &attachment.expected_resume_id {
-            provider_args.extend(["resume".into(), id.clone()]);
-        }
-        provider_args.push("--no-alt-screen".into());
-        // A saved thread can have another historical cwd. Explicitly select the
-        // configured workspace so Codex cannot block attachment on its cwd picker.
-        provider_args.extend(["--cd".into(), provider_cwd.to_string_lossy().into_owned()]);
+        provider_args = codex_shared_tui_args(
+            provider.get_executable().1,
+            attachment.model_override.as_deref(),
+            attachment.expected_resume_id.as_deref(),
+            &provider_cwd,
+        );
         Some(attachment)
     } else {
         None

@@ -318,6 +318,11 @@ Current sequence:
    Wardian requires that exact thread to appear in the owned daemon before
    subscribing and enabling peer delivery. No model bootstrap turn is required.
 
+The ordinary TUI startup overlay also sets
+`check_for_update_on_startup = false` so an interactive update notice cannot
+block attachment. The guarded journal restores the prior setting after the TUI
+has attached and the selected model and policy have been verified.
+
 Legacy bootstrap migration remains available as a fallback when local rollout materialization is unavailable. It merges a new rollout into an existing projected `sessions/**` tree instead of discarding it.
 
 For a fresh visible Codex launch, Wardian publishes the same PTY-backed runtime

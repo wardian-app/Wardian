@@ -334,7 +334,7 @@ impl CodexSharedOwner {
             None
         } else {
             Some(phase(&mut timings.launch_config, || {
-                super::launch_config::prepare_launch_config(&codex_home, &generated_args)
+                super::launch_config::prepare_tui_launch_config(&codex_home, &generated_args)
             })?)
         };
         let child_spawn_at = std::time::Instant::now();

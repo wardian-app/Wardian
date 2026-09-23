@@ -86,6 +86,122 @@ fn launch_values_restore_and_preserve_mcp_credentials_policy_and_comments() {
 }
 
 #[test]
+fn tui_update_check_overlay_is_journaled_and_restores_model_effort_and_config() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("config.toml");
+    let original = "# saved preferences\ncheck_for_update_on_startup = true\nmodel = 'gpt-5.4'\nmodel_reasoning_effort = 'low'\n[mcp_servers.wardian.env]\nWARDIAN_TOKEN = 'keep-private'\n";
+    fs::write(&path, original).unwrap();
+
+    let mut guard = prepare_tui_launch_config(
+        home.path(),
+        &args(&["model=\"gpt-5.6-luna\"", "model_reasoning_effort=\"high\""]),
+    )
+    .unwrap();
+
+    let config = read(home.path());
+    assert_eq!(config["check_for_update_on_startup"].as_bool(), Some(false));
+    assert_eq!(config["model"].as_str(), Some("gpt-5.6-luna"));
+    assert_eq!(config["model_reasoning_effort"].as_str(), Some("high"));
+    assert_eq!(
+        config["mcp_servers"]["wardian"]["env"]["WARDIAN_TOKEN"].as_str(),
+        Some("keep-private")
+    );
+
+    let record = fs::read_to_string(home.path().join(journal::FILE)).unwrap();
+    let journal: serde_json::Value = serde_json::from_str(&record).unwrap();
+    let changes = journal["changes"].as_array().unwrap();
+    let changed_paths = changes
+        .iter()
+        .map(|change| {
+            change["path"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|part| part.as_str().unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        changed_paths,
+        vec![
+            vec!["check_for_update_on_startup"],
+            vec!["model"],
+            vec!["model_reasoning_effort"],
+        ]
+    );
+    let update_change = changes
+        .iter()
+        .find(|change| change["path"] == serde_json::json!(["check_for_update_on_startup"]))
+        .unwrap();
+    assert_eq!(update_change["before"]["type"].as_str(), Some("boolean"));
+    assert_eq!(update_change["before"]["value"].as_bool(), Some(true));
+    assert_eq!(update_change["applied"]["type"].as_str(), Some("boolean"));
+    assert_eq!(update_change["applied"]["value"].as_bool(), Some(false));
+    assert!(!record.contains("mcp_servers"));
+    assert!(!record.contains("WARDIAN_TOKEN"));
+    assert!(!record.contains("keep-private"));
+
+    guard.restore().unwrap();
+    let restored = read(home.path());
+    assert_eq!(
+        restored["check_for_update_on_startup"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(restored["model"].as_str(), Some("gpt-5.4"));
+    assert_eq!(restored["model_reasoning_effort"].as_str(), Some("low"));
+    assert_eq!(
+        restored["mcp_servers"]["wardian"]["env"]["WARDIAN_TOKEN"].as_str(),
+        Some("keep-private")
+    );
+    assert!(fs::read_to_string(&path)
+        .unwrap()
+        .contains("# saved preferences"));
+    assert!(!home.path().join(journal::FILE).exists());
+}
+
+#[test]
+fn tui_update_check_overlay_removes_key_when_initially_absent() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("config.toml");
+    let original = "model = 'gpt-5.4'\nmodel_reasoning_effort = 'high'\n";
+    fs::write(&path, original).unwrap();
+
+    let mut guard = prepare_tui_launch_config(
+        home.path(),
+        &args(&["model=\"gpt-5.4\"", "model_reasoning_effort=\"high\""]),
+    )
+    .unwrap();
+
+    let config = read(home.path());
+    assert_eq!(config["check_for_update_on_startup"].as_bool(), Some(false));
+    let record = fs::read_to_string(home.path().join(journal::FILE)).unwrap();
+    let journal: serde_json::Value = serde_json::from_str(&record).unwrap();
+    let change = &journal["changes"][0];
+    assert_eq!(
+        change["path"],
+        serde_json::json!(["check_for_update_on_startup"])
+    );
+    assert!(change["before"].is_null());
+    assert_eq!(change["applied"]["value"].as_bool(), Some(false));
+
+    guard.restore().unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    assert!(read(home.path())
+        .get("check_for_update_on_startup")
+        .is_none());
+    assert!(!home.path().join(journal::FILE).exists());
+}
+
+#[test]
+fn boolean_launch_leaf_is_scoped_to_the_startup_update_setting() {
+    let update_path = vec!["check_for_update_on_startup".to_string()];
+    assert!(leaves::validate(&update_path, &leaves::Leaf::Boolean(false)).is_ok());
+    assert!(leaves::validate(&update_path, &leaves::Leaf::String("false".into())).is_err());
+    assert!(leaves::validate(&update_path, &leaves::Leaf::Strings(vec!["false".into()])).is_err());
+    assert!(leaves::validate(&["model".to_string()], &leaves::Leaf::Boolean(false)).is_err());
+}
+
+#[test]
 fn duplicate_keys_last_wins_and_repeated_restore_is_a_noop() {
     let home = tempfile::tempdir().unwrap();
     let path = home.path().join("config.toml");
