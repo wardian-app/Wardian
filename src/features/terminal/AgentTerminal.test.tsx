@@ -3493,6 +3493,65 @@ describe("AgentTerminal scrollback", () => {
     expect(instance.refresh).not.toHaveBeenCalled();
   });
 
+  it("handles Codex scrollback before xterm can emit a wheel mouse report", async () => {
+    render(<AgentTerminal sessionId="codex-wheel-report" provider="codex" theme="dark" />);
+    await waitFor(() => expect(mockTerminal).toHaveBeenCalled());
+
+    const instance = getLatestTerminalInstance();
+    instance.buffer.active.baseY = 27;
+    instance.buffer.active.viewportY = 27;
+    instance.modes.mouseTrackingMode = "any";
+    const xtermWheelReport = vi.fn();
+    const xtermChild = document.createElement("div");
+    xtermChild.addEventListener("wheel", xtermWheelReport);
+    instance.element.append(xtermChild);
+
+    fireEvent.wheel(xtermChild, { deltaY: -240, deltaMode: 0 });
+
+    expect(instance.scrollLines).toHaveBeenCalled();
+    expect(xtermWheelReport).not.toHaveBeenCalled();
+  });
+
+  it("consumes Codex normal-screen wheel input with mouse tracking and no scrollback", async () => {
+    render(<AgentTerminal sessionId="codex-wheel-empty" provider="codex" theme="dark" />);
+    await waitFor(() => expect(mockTerminal).toHaveBeenCalled());
+
+    const instance = getLatestTerminalInstance();
+    instance.buffer.active.type = "normal";
+    instance.buffer.active.baseY = 0;
+    instance.buffer.active.viewportY = 0;
+    instance.modes.mouseTrackingMode = "any";
+    const xtermWheelReport = vi.fn();
+    const xtermChild = document.createElement("div");
+    xtermChild.addEventListener("wheel", xtermWheelReport);
+    instance.element.append(xtermChild);
+
+    fireEvent.wheel(xtermChild, { deltaY: -120, deltaMode: 0 });
+
+    expect(instance.scrollLines).not.toHaveBeenCalled();
+    expect(xtermWheelReport).not.toHaveBeenCalled();
+  });
+
+  it("leaves alternate-screen Codex wheel input to xterm's mouse protocol", async () => {
+    render(<AgentTerminal sessionId="codex-wheel-alternate" provider="codex" theme="dark" />);
+    await waitFor(() => expect(mockTerminal).toHaveBeenCalled());
+
+    const instance = getLatestTerminalInstance();
+    instance.buffer.active.type = "alternate";
+    instance.buffer.active.baseY = 0;
+    instance.buffer.active.viewportY = 0;
+    instance.modes.mouseTrackingMode = "any";
+    const xtermWheelReport = vi.fn();
+    const xtermChild = document.createElement("div");
+    xtermChild.addEventListener("wheel", xtermWheelReport);
+    instance.element.append(xtermChild);
+
+    fireEvent.wheel(xtermChild, { deltaY: -120, deltaMode: 0 });
+
+    expect(instance.scrollLines).not.toHaveBeenCalled();
+    expect(xtermWheelReport).toHaveBeenCalledTimes(1);
+  });
+
   it("leaves alternate-screen OpenCode wheel input to xterm's mouse protocol", async () => {
     render(<AgentTerminal sessionId="opencode-wheel-scroll" provider="opencode" theme="dark" />);
 
@@ -4114,6 +4173,92 @@ describe("AgentTerminal scrollback", () => {
       expect(terminalInstance.refresh.mock.calls.length).toBe(baselineRefreshCalls);
       expect(window.__wardianTerminalDebug?.snapshot("gemini-resize")?.fitCount).toBe(baselineFitCount);
       expect(mockInvoke).not.toHaveBeenCalledWith("resize_agent_terminal", expect.anything());
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it("retries a Codex fit at unchanged bounds after dimensions become measurable", async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+    globalThis.ResizeObserver = class ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+
+    try {
+      fitDimensions = null as never;
+      render(<AgentTerminal sessionId="codex-late-fit" provider="codex" theme="dark" />);
+      await waitFor(() => expect(resizeCallback).toBeDefined());
+      const instance = getLatestTerminalInstance();
+      expect(instance.cols).toBe(80);
+      expect(instance.rows).toBe(24);
+
+      fitDimensions = { cols: 100, rows: 30 };
+      act(() => resizeCallback!([], {} as ResizeObserver));
+
+      await waitFor(() => {
+        expect(instance.cols).toBe(100);
+        expect(instance.rows).toBe(30);
+      });
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it("retries a failed Codex fit proposal at unchanged bounds", async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+    globalThis.ResizeObserver = class ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+
+    try {
+      render(<AgentTerminal sessionId="codex-failed-fit-proposal" provider="codex" theme="dark" />);
+      await waitFor(() => {
+        expect(resizeCallback).toBeDefined();
+        expect(window.__wardianTerminalDebug?.snapshot("codex-failed-fit-proposal")?.renderer?.ready).toBe(true);
+      });
+
+      const instance = getLatestTerminalInstance();
+      const initialFitCount = window.__wardianTerminalDebug?.snapshot("codex-failed-fit-proposal")?.fitCount ?? 0;
+      rectSpy.mockReturnValue({
+        width: 901,
+        height: 600,
+        top: 0,
+        left: 0,
+        right: 901,
+        bottom: 600,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      } as DOMRect);
+      fitDimensions = null as never;
+      act(() => resizeCallback!([], {} as ResizeObserver));
+
+      await waitFor(() => {
+        expect(window.__wardianTerminalDebug?.snapshot("codex-failed-fit-proposal")?.fitCount)
+          .toBeGreaterThan(initialFitCount);
+      });
+      expect(instance.cols).toBe(80);
+      expect(instance.rows).toBe(24);
+
+      fitDimensions = { cols: 100, rows: 30 };
+      act(() => resizeCallback!([], {} as ResizeObserver));
+
+      await waitFor(() => {
+        expect(instance.cols).toBe(100);
+        expect(instance.rows).toBe(30);
+      });
     } finally {
       globalThis.ResizeObserver = originalResizeObserver;
     }
