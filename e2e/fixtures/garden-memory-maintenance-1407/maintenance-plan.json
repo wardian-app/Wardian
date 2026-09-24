@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "plan_id": "fixture-plan-1407",
+  "agent_id": "fixture-agent-1407",
+  "idempotency_key": "fixture-idempotency-1407",
+  "operations": [
+    {
+      "op": "revise",
+      "memory_id": "fixture-memory-setup",
+      "expected_revision_id": "fixture-revision-4",
+      "text": "Keep successful setup steps and note each observed result.",
+      "kind": "stable",
+      "scope": {
+        "kind": "agent"
+      },
+      "evidence_excerpt": "Two runs repeat this sequence; record each outcome.",
+      "add_sources": [
+        {
+          "source_type": "artifact",
+          "locator": "setup.md",
+          "primary": false
+        }
+      ]
+    }
+  ]
+}

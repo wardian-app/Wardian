@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { By } from "selenium-webdriver";
 
 import {
@@ -138,6 +139,45 @@ async function activeMemories(driver, agentId, workspace) {
   return invokeTauri(driver, "memory_list", { agentId, workspace });
 }
 
+function maintenancePlan(agentId, operation) {
+  return {
+    schema_version: 1,
+    plan_id: randomUUID(),
+    agent_id: agentId,
+    idempotency_key: randomUUID(),
+    operations: [operation],
+  };
+}
+
+async function applyReviewedMemoryPlan(t, driver, plan, expectedBefore, expectedAfter) {
+  const preview = await invokeTauri(driver, "memory_maintenance_preview", { plan });
+  assert.equal(preview.plan_id, plan.plan_id);
+  assert.equal(preview.agent_id, plan.agent_id);
+  assert.equal(preview.operation_count, 1);
+  assert.deepEqual(preview.conflicts, []);
+  assert.equal(preview.changes.length, 1);
+  assert.equal(preview.changes[0].operation_index, 0);
+  assert.equal(preview.changes[0].op, plan.operations[0].op);
+  assert.equal(preview.changes[0].before?.text ?? null, expectedBefore);
+  assert.equal(preview.changes[0].after?.text, expectedAfter);
+  assert.ok(preview.preview_digest);
+
+  // This acceptance test is deliberately manual: the operator reviews the
+  // preview and chooses Yes in the real desktop dialog for each write.
+  t.diagnostic(`Review the complete memory preview, then accept its native dialog:\n${JSON.stringify(preview, null, 2)}`);
+  await driver.manage().setTimeouts({ script: 180_000 });
+  const receipt = await invokeTauri(driver, "memory_maintenance_apply", {
+    plan,
+    previewDigest: preview.preview_digest,
+  });
+  assert.equal(receipt.plan_id, plan.plan_id);
+  assert.equal(receipt.agent_id, plan.agent_id);
+  assert.equal(receipt.idempotency_key, plan.idempotency_key);
+  assert.equal(receipt.preview_digest, preview.preview_digest);
+  assert.ok(receipt.applied_at);
+  return receipt;
+}
+
 async function waitForMemory(driver, agentId, workspace, predicate, description) {
   const startedAt = Date.now();
   let memories = [];
@@ -213,24 +253,39 @@ test("temporary GPT-5.6-Luna agents receive, save, revise, and recall durable me
 
   const tokenA = `LUNA_MEMORY_ALPHA_${RUN_ID}`;
   const tokenB = `LUNA_MEMORY_BRAVO_${RUN_ID}`;
-  const savedA = await invokeTauri(session.driver, "memory_save", { request: {
-    agent_id: agentAId,
-    workspace: null,
+  const tokenAText = `The verification token is ${tokenA}`;
+  const tokenBText = `The verification token is ${tokenB}`;
+  const createToken = (text, evidenceExcerpt) => ({
+    op: "create",
+    client_key: "verification-token",
+    text,
     kind: "stable",
-    text: `The verification token is ${tokenA}`,
-    evidence_excerpt: "Native acceptance seeded the first agent's private token.",
+    scope: { kind: "agent" },
+    evidence_excerpt: evidenceExcerpt,
     sources: [],
-    idempotency_key: null,
-  } });
-  await invokeTauri(session.driver, "memory_save", { request: {
-    agent_id: agentBId,
-    workspace: null,
-    kind: "stable",
-    text: `The verification token is ${tokenB}`,
-    evidence_excerpt: "Native acceptance seeded the second agent's private token.",
-    sources: [],
-    idempotency_key: null,
-  } });
+  });
+  await applyReviewedMemoryPlan(t, session.driver, maintenancePlan(agentAId, createToken(
+    tokenAText,
+    "Native acceptance seeded the first agent's private token.",
+  )), null, tokenAText);
+  await applyReviewedMemoryPlan(t, session.driver, maintenancePlan(agentBId, createToken(
+    tokenBText,
+    "Native acceptance seeded the second agent's private token.",
+  )), null, tokenBText);
+  const savedA = (await activeMemories(session.driver, agentAId, null))
+    .find((memory) => memory.text === tokenAText);
+  const savedB = (await activeMemories(session.driver, agentBId, null))
+    .find((memory) => memory.text === tokenBText);
+  assert.ok(savedA?.memory_id && savedA?.revision_id, "the first plan must create an active revision");
+  assert.ok(savedB?.memory_id && savedB?.revision_id, "the second plan must create an active revision");
+  assert.equal(savedA.agent_id, agentAId);
+  assert.equal(savedB.agent_id, agentBId);
+  assert.equal(savedA.kind, "stable");
+  assert.equal(savedB.kind, "stable");
+  assert.equal(savedA.workspace, null);
+  assert.equal(savedB.workspace, null);
+  assert.equal(savedA.revision, 1);
+  assert.equal(savedB.revision, 1);
 
   runCliOk(cliPath, harness, ["agent", "restart", agentAName]);
   runCliOk(cliPath, harness, ["agent", "restart", agentBName]);
@@ -240,13 +295,23 @@ test("temporary GPT-5.6-Luna agents receive, save, revise, and recall durable me
   assert.doesNotMatch(firstB.latest.text, new RegExp(tokenA));
 
   const tokenA2 = `${tokenA}_UPDATED`;
-  await invokeTauri(session.driver, "memory_update", { request: {
+  const tokenA2Text = `The verification token is ${tokenA2}`;
+  await applyReviewedMemoryPlan(t, session.driver, maintenancePlan(agentAId, {
+    op: "revise",
     memory_id: savedA.memory_id,
-    text: `The verification token is ${tokenA2}`,
+    expected_revision_id: savedA.revision_id,
+    text: tokenA2Text,
+    kind: "stable",
+    scope: { kind: "agent" },
     evidence_excerpt: "Native acceptance replaced the first agent's token.",
-    sources: [],
-    idempotency_key: null,
-  } });
+    add_sources: [],
+  }), tokenAText, tokenA2Text);
+  const revisedA = (await activeMemories(session.driver, agentAId, null))
+    .find((memory) => memory.memory_id === savedA.memory_id);
+  assert.equal(revisedA?.text, tokenA2Text);
+  assert.equal(revisedA?.revision, savedA.revision + 1);
+  assert.notEqual(revisedA?.revision_id, savedA.revision_id);
+  assert.equal(revisedA?.supersedes_revision_id, savedA.revision_id);
   runCliOk(cliPath, harness, ["agent", "restart", agentAName]);
   const resumedA = await waitForLoadedMemory(
     session.driver,

@@ -6,6 +6,7 @@ import type { GardenAutomationInput } from "./gardenProjection";
 import type { GardenSkillGlyph } from "./skillGlyphs";
 import { normalizeEntityPath } from "./entityRef";
 import { agentMonogram } from "./agentMonogram";
+import { GardenMemoryMaintenance } from "./GardenMemoryMaintenance";
 import { automationRunStatusColor } from "../automations/run/statusLabels";
 import type { SituatedAutomationInput } from "./automationProjection";
 import { useGardenAgentContents, type GardenContentState, type GardenContentsCache, type GardenConversationEntry, type GardenMemoryRecord } from "./useGardenAgentContents";
@@ -175,7 +176,9 @@ export function GardenAgentInterior({ agent, status, crown, automations, selecte
         `${skill.provenance === "class" ? "Class-inherited" : skill.provenance === "global" ? "Global" : "Direct"} · ${skill.copied ? "Copied; does not sync" : "Linked"}`, skill))
         : <p>No deployed skills in this projection.</p>}</div>
     </Region>
-    <Region name="Memory" count={contents.memories.data?.length}>
+    <Region name="Memory" count={contents.memories.data?.length} action={
+      <GardenMemoryMaintenance key={agent.session_id} agentId={agent.session_id} agentName={agent.session_name} onApplied={contents.refresh} />
+    }>
       <ContentNotice state={contents.memories} label="Memory" />
       {contents.memories.data && <p className="garden-collection-count garden-memory-count">{contents.memories.data.length} loaded {contents.memories.data.length === 1 ? "memory" : "memories"}</p>}
       {contents.memories.data && contents.memories.data.length > 48 && <MemorySearch key={JSON.stringify([agent.session_id, workspaceId])} memories={contents.memories.data} />}

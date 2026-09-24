@@ -79,6 +79,173 @@ agent`, or `Memory removed · This agent`. A provider process that receives memo
 shows a collapsed `Memory loaded` row. Expand it to inspect the exact context.
 No row appears when there was nothing to load.
 
+## Operator maintenance in Garden
+
+When memory records accumulate outdated checkpoints, misclassified kinds, or
+redundant historical notes, an operator can review and apply batch corrections
+through the Garden desktop interface.
+
+Managed agents may draft a local JSON plan file, but only a human desktop
+operator can preview, confirm, and apply maintenance. Plans are reviewable
+proposals rather than authority. Managed CLI tools cannot modify memory across
+agents, and the desktop backend enforces native confirmation even if a caller
+bypasses the frontend.
+
+### Opening the maintenance surface
+
+1. Navigate to **Garden** in the desktop application.
+2. Select an agent to open its interior panel.
+3. In the **Memory** region, click **Maintain memory…**.
+
+The dialog binds to that exact agent owner (`<agent-name> · owner <agent-id>`).
+Plans targeting any other agent are rejected on import.
+
+### Plan structure and constraints
+
+Maintenance plans use schema version 1 and contain 1 to 100 operations.
+The imported file must be at most 1 MiB.
+
+Key constraints:
+- `plan_id`, `agent_id`, and `idempotency_key` are required strings.
+- Text and evidence excerpts are capped at 8,192 characters each.
+- Each operation accepts at most 64 sources, and each source locator is capped at 4,096 characters.
+- Scopes must use explicit tagged objects: `{ "kind": "agent" }` or `{ "kind": "workspace", "path": "<absolute-workspace-path>" }`. Relative workspace paths are rejected by platform-aware validation.
+- An existing memory ID may appear in at most one source operation, though a `revise` target may also absorb records via `retire_into`.
+
+Supported operations:
+- `revise`: Updates text, kind (`stable` or `current`), scope, evidence excerpt, or additional sources for an existing `memory_id` matching an `expected_revision_id`. Existing sources are preserved and combined with normalized additions.
+- `create`: Allocates a new record using a plan-local `client_key`. This allows splitting mixed records without generating synthetic IDs beforehand.
+- `retire`: Marks a record as removed (`status = "removed"`) using its `memory_id`, `expected_revision_id`, and an explicit `reason`. Preserves revision history and evidence for auditing.
+- `retire_into`: Retires a record into another surviving `target_memory_id` or `target_client_key`, transferring and deduplicating source locators into the recipient.
+
+### Example plan file
+
+Save the plan as a `.json` file, such as `maintenance-plan.json`:
+
+```json
+{
+  "schema_version": 1,
+  "plan_id": "plan-2026-09-24-cleanup",
+  "agent_id": "<agent-id>",
+  "idempotency_key": "cleanup-batch-001",
+  "operations": [
+    {
+      "op": "revise",
+      "memory_id": "<memory-uuid>",
+      "expected_revision_id": "<revision-uuid>",
+      "text": "Production build requires Rust 1.80+ and Node 22.",
+      "kind": "stable",
+      "scope": {
+        "kind": "workspace",
+        "path": "<absolute-workspace-path>"
+      },
+      "evidence_excerpt": "Verified in repository toolchain manifest.",
+      "add_sources": [
+        {
+          "source_type": "artifact",
+          "locator": "rust-toolchain.toml",
+          "primary": true
+        }
+      ]
+    },
+    {
+      "op": "create",
+      "client_key": "new-test-rule",
+      "text": "Run native E2E tests with npm run test:e2e:native:fast.",
+      "kind": "current",
+      "scope": {
+        "kind": "agent"
+      },
+      "evidence_excerpt": "Updated in test running instructions.",
+      "sources": []
+    },
+    {
+      "op": "retire",
+      "memory_id": "<stale-memory-uuid>",
+      "expected_revision_id": "<stale-revision-uuid>",
+      "reason": "Superseded by automated nightly validation."
+    }
+  ]
+}
+```
+
+Preparing a plan via shell:
+
+POSIX:
+
+```bash
+cat << 'EOF' > maintenance-plan.json
+{
+  "schema_version": 1,
+  "plan_id": "plan-cleanup-01",
+  "agent_id": "<agent-id>",
+  "idempotency_key": "cleanup-01",
+  "operations": [
+    {
+      "op": "retire",
+      "memory_id": "<memory-uuid>",
+      "expected_revision_id": "<revision-uuid>",
+      "reason": "Outdated test instruction."
+    }
+  ]
+}
+EOF
+```
+
+PowerShell:
+
+```powershell
+@'
+{
+  "schema_version": 1,
+  "plan_id": "plan-cleanup-01",
+  "agent_id": "<agent-id>",
+  "idempotency_key": "cleanup-01",
+  "operations": [
+    {
+      "op": "retire",
+      "memory_id": "<memory-uuid>",
+      "expected_revision_id": "<revision-uuid>",
+      "reason": "Outdated test instruction."
+    }
+  ]
+}
+'@ | Set-Content -Path maintenance-plan.json -Encoding utf8
+```
+
+### Import and preview
+
+Click the file selector in the maintenance modal to import `maintenance-plan.json`.
+
+Wardian validates the schema and executes a read-only preview against `memory.db`:
+- Computes a canonical `preview_digest` binding the plan ID, owner, operations, and expected revisions.
+- Displays operation counts and detailed Before / After summaries for every entry.
+- Renders source additions and absorbed memory IDs. Retirements are distinguished from active consolidations.
+
+### Handling revision conflicts
+
+If an active record was edited, superseded, or retired after the plan was generated, the preview highlights a conflict:
+- **`revision_changed`**: The record's current revision ID differs from `expected_revision_id`.
+- **`target_missing`** or **`already_retired`**: Referenced memories are not present or have already been removed.
+
+When one or more conflicts are detected:
+- The **Apply reviewed plan…** button is disabled.
+- The operator must inspect the conflict details, adjust the plan file to match the latest revisions shown in Garden's memory and history view, and re-import or re-preview.
+
+### Native confirmation and atomic apply
+
+When no conflicts exist, click **Apply reviewed plan…**.
+
+1. **Native confirmation dialog**: The host OS displays a native modal confirmation detailing the owner ID, operation count, and preview digest prefix. If declined or dismissed, the operation aborts with zero changes.
+2. **Atomic transaction**: The backend opens an immediate SQLite transaction, re-verifying the preview digest and expected revisions. If any concurrent modification occurred, the transaction rolls back cleanly.
+3. **Receipt display**: Upon success, a `MaintenanceReceipt` is stored and rendered in the modal. The receipt records the applied timestamp, plan ID, owner ID, idempotency key, preview digest, and allocated IDs for newly created or revised records.
+
+### Idempotency and failure recovery
+
+- **Replay**: Re-applying a plan with an identical `idempotency_key` and contents returns the existing receipt without duplicate writes or additional native prompts.
+- **Uncertain response**: If an application crash or desktop IPC interruption occurs while awaiting the apply response, reopen the dialog, import the plan, and click **Check apply receipt**. The backend queries the stored receipts by owner and idempotency key to confirm whether the batch was committed.
+- **Recovery after conflict**: Any failed apply clears the cached preview, requiring a fresh preview before another apply can be attempted.
+
 ## Optional consolidation
 
 The Library includes the editable `Memory Consolidation` automation sample. Assign

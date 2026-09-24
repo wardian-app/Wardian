@@ -1,0 +1,65 @@
+.garden-maintenance-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 11000;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: color-mix(in srgb, var(--color-wardian-bg) 55%, transparent);
+}
+
+.garden-maintenance-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(960px, 100%);
+  max-height: calc(100dvh - 32px);
+  min-height: 0;
+  border: 1px solid var(--color-wardian-border);
+  border-radius: 12px;
+  background: var(--color-wardian-bg);
+  box-shadow: 0 16px 64px color-mix(in srgb, black 35%, transparent);
+  color: var(--color-wardian-text);
+  font: inherit;
+}
+
+.garden-maintenance-dialog > header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--color-wardian-border);
+}
+
+.garden-maintenance-dialog h2 { margin: 0; font-size: 18px; }
+.garden-maintenance-dialog header p { margin: 4px 0 0; color: var(--color-wardian-text-muted); overflow-wrap: anywhere; }
+.garden-maintenance-dialog button { padding: 7px 12px; border: 1px solid var(--color-wardian-border); border-radius: 6px; background: transparent; color: inherit; cursor: pointer; }
+.garden-maintenance-dialog button:disabled { opacity: .5; cursor: default; }
+.garden-maintenance-dialog :is(button, input):focus-visible { outline: 2px solid var(--color-wardian-accent); outline-offset: 2px; }
+.garden-maintenance-body { min-height: 0; overflow: auto; padding: 16px 20px 24px; }
+.garden-maintenance-body > p:first-child { margin-top: 0; }
+.garden-maintenance-file { display: grid; gap: 6px; max-width: 480px; font-weight: 600; }
+.garden-maintenance-file input { max-width: 100%; font: inherit; font-weight: normal; }
+.garden-maintenance-hint { color: var(--color-wardian-text-muted); font-size: 12px; overflow-wrap: anywhere; }
+.garden-maintenance-error { padding: 10px; border: 1px solid var(--color-wardian-error); border-radius: 6px; overflow-wrap: anywhere; }
+.garden-maintenance-facts, .garden-maintenance-record dl { display: grid; grid-template-columns: minmax(90px, 135px) minmax(0, 1fr); gap: 4px 12px; }
+.garden-maintenance-facts dt, .garden-maintenance-record dt { color: var(--color-wardian-text-muted); }
+.garden-maintenance-facts dd, .garden-maintenance-record dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.garden-maintenance-digest { font-family: ui-monospace, monospace; }
+.garden-maintenance-conflicts { padding: 12px 12px 12px 32px; border: 1px solid var(--color-wardian-error); border-radius: 6px; }
+.garden-maintenance-changes { display: grid; gap: 16px; padding-left: 24px; }
+.garden-maintenance-change { padding: 12px; border: 1px solid var(--color-wardian-border); border-radius: 8px; }
+.garden-maintenance-change h3 { margin-top: 0; }
+.garden-maintenance-records { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.garden-maintenance-record { min-width: 0; padding: 12px; border: 1px solid var(--color-wardian-border); border-radius: 6px; }
+.garden-maintenance-record h4 { margin-top: 0; }
+.garden-maintenance-text, .garden-maintenance-sources pre, .garden-maintenance-receipt pre { max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, monospace; }
+.garden-maintenance-sources { padding-left: 20px; }
+.garden-maintenance-apply { margin-top: 12px; border-color: var(--color-wardian-accent) !important; }
+.garden-maintenance-receipt { margin-top: 16px; padding: 12px; border: 1px solid var(--color-wardian-accent); border-radius: 8px; overflow-wrap: anywhere; }
+
+@media (max-width: 700px) {
+  .garden-maintenance-records { grid-template-columns: minmax(0, 1fr); }
+  .garden-maintenance-dialog { max-height: calc(100dvh - 16px); }
+  .garden-maintenance-overlay { padding: 8px; }
+}
