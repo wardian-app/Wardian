@@ -1751,7 +1751,8 @@ mod tests {
 
     #[test]
     fn test_kind_and_scope_revision_and_sources() {
-        let (_temp, store) = make_test_store();
+        let (temp, store) = make_test_store();
+        let work_path = temp.path().join("work").display().to_string();
         let src1 = MemorySource {
             source_type: "conversation".into(),
             locator: Some("turn-1".into()),
@@ -1799,9 +1800,7 @@ mod tests {
                     expected_revision_id: rec1.revision_id.clone(),
                     text: "Consolidated Rule".into(),
                     kind: MemoryKind::Current,
-                    scope: MemoryMaintenanceScope::Workspace {
-                        path: "C:/Project".into(),
-                    },
+                    scope: MemoryMaintenanceScope::Workspace { path: work_path },
                     evidence_excerpt: "Merged evidence".into(),
                     add_sources: vec![src3.clone()],
                 },
