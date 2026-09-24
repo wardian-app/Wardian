@@ -10,7 +10,10 @@ import {
   createNativeHarness,
   ensureNativeAppBuilt,
   prepareIsolatedHome,
+  readTauriEventCapture,
   startNativeSession,
+  startTauriEventCapture,
+  stopTauriEventCapture,
   waitForAppShell,
 } from "../lib/harness.mjs";
 import {
@@ -189,21 +192,37 @@ test(
     const previousTerminalDebug = process.env.VITE_WARDIAN_TERMINAL_DEBUG;
     let normalSession = null;
     let safeSession = null;
+    let mockEvents = null;
 
     process.env.WARDIAN_MOCK_SCRIPT = mockScript;
     process.env.VITE_WARDIAN_TERMINAL_DEBUG = "1";
     delete process.env.WARDIAN_WORKBENCH_SAFE_MODE;
 
     t.after(async () => {
-      await safeSession?.close();
-      await normalSession?.close();
-      fs.rmSync(mockScript, { force: true });
-      if (previousMockScript === undefined) delete process.env.WARDIAN_MOCK_SCRIPT;
-      else process.env.WARDIAN_MOCK_SCRIPT = previousMockScript;
-      if (previousSafeMode === undefined) delete process.env.WARDIAN_WORKBENCH_SAFE_MODE;
-      else process.env.WARDIAN_WORKBENCH_SAFE_MODE = previousSafeMode;
-      if (previousTerminalDebug === undefined) delete process.env.VITE_WARDIAN_TERMINAL_DEBUG;
-      else process.env.VITE_WARDIAN_TERMINAL_DEBUG = previousTerminalDebug;
+      try {
+        if (mockEvents && normalSession) {
+          await stopTauriEventCapture(normalSession.driver, mockEvents);
+        }
+      } finally {
+        try {
+          await safeSession?.close();
+        } finally {
+          try {
+            await normalSession?.close();
+          } finally {
+            try {
+              fs.rmSync(mockScript, { force: true });
+            } finally {
+              if (previousMockScript === undefined) delete process.env.WARDIAN_MOCK_SCRIPT;
+              else process.env.WARDIAN_MOCK_SCRIPT = previousMockScript;
+              if (previousSafeMode === undefined) delete process.env.WARDIAN_WORKBENCH_SAFE_MODE;
+              else process.env.WARDIAN_WORKBENCH_SAFE_MODE = previousSafeMode;
+              if (previousTerminalDebug === undefined) delete process.env.VITE_WARDIAN_TERMINAL_DEBUG;
+              else process.env.VITE_WARDIAN_TERMINAL_DEBUG = previousTerminalDebug;
+            }
+          }
+        }
+      }
     });
 
     if (!skipNativeBuild) ensureNativeAppBuilt(harness);
@@ -214,6 +233,7 @@ test(
     const { driver } = normalSession;
     await waitForAppShell(driver, 20000);
     await driver.manage().window().setRect({ width: 1400, height: 900 });
+    mockEvents = await startTauriEventCapture(driver, "agent-json-event");
 
     const agent = await invokeTauri(driver, "spawn_agent", {
       req: {
@@ -288,6 +308,28 @@ test(
         ok: snapshotText(snapshot).includes("runtime-input:before-clear"),
         snapshot,
       };
+    });
+
+    // Clear replaces a provider that has finished bootstrap and published its
+    // runtime. Terminal input or an Idle label alone cannot prove that state.
+    await waitFor("validated mock Init before workbench clear", 10000, async () => {
+      const events = await readTauriEventCapture(driver, mockEvents);
+      const init = events.find((event) => event.session_id === wardianSessionId
+        && event.data?.type === "init"
+        && event.data.session_id === PROVIDER_SESSION_ID);
+      return { ok: Boolean(init), observed_events: events.length };
+    });
+    await stopTauriEventCapture(driver, mockEvents);
+    mockEvents = null;
+    const leasePath = path.join(harness.isolatedHome, "runtime", "conversation-leases.json");
+    await waitFor("published mock startup lease release before workbench clear", 10000, async () => {
+      if (!fs.existsSync(leasePath)) return { ok: false, lease_file: "missing" };
+      const leases = JSON.parse(fs.readFileSync(leasePath, "utf8")).leases;
+      const pending = leases.find((lease) => lease.agent_id === wardianSessionId
+        && lease.provider === "mock"
+        && lease.resume_session === PROVIDER_SESSION_ID
+        && lease.owner_kind === "provider_spawn");
+      return { ok: !pending, pending_owner: pending?.owner_kind ?? null };
     });
 
     await invokeTauri(driver, "clear_agent_session", { sessionId: wardianSessionId });
