@@ -61,6 +61,14 @@ describe("GardenAgentInterior", () => {
     expect(screen.getByText("Agent-wide")).toBeInTheDocument();
   });
 
+  it("opens the operator plan review from the selected agent's Memory region", () => {
+    render(<GardenAgentInterior {...props()} />);
+    const memoryRegion = within(screen.getByRole("region", { name: "Memory" }));
+    fireEvent.click(memoryRegion.getByRole("button", { name: "Maintain memory…" }));
+    expect(screen.getByRole("dialog", { name: "Memory maintenance" })).toHaveTextContent("Agent A · owner a");
+    expect(screen.getByLabelText("Maintenance plan (.json)")).toBeInTheDocument();
+  });
+
   it("selects without entering and exposes selected canonical memory identity", () => {
     const callbacks = props();
     render(<GardenAgentInterior {...callbacks} selectedKey="memory:m1" />);

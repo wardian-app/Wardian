@@ -1,0 +1,49 @@
+{
+  "plan_id": "fixture-plan-1407",
+  "agent_id": "fixture-agent-1407",
+  "operation_count": 1,
+  "preview_digest": "sha256:8b6d4c2a59f0212c",
+  "changes": [
+    {
+      "operation_index": 0,
+      "op": "revise",
+      "before": {
+        "memory_id": "fixture-memory-setup",
+        "revision_id": "fixture-revision-4",
+        "text": "Group setup notes by task and keep outcomes.",
+        "kind": "stable",
+        "scope": {
+          "kind": "agent"
+        },
+        "evidence_excerpt": "Repeated in two runs.",
+        "sources": []
+      },
+      "after": {
+        "memory_id": "fixture-memory-setup",
+        "revision_id": null,
+        "text": "Keep successful setup steps and note each observed result.",
+        "kind": "stable",
+        "scope": {
+          "kind": "agent"
+        },
+        "evidence_excerpt": "Two runs repeat this sequence; record each outcome.",
+        "sources": [
+          {
+            "source_type": "artifact",
+            "locator": "setup.md",
+            "primary": false
+          }
+        ]
+      },
+      "source_additions": [
+        {
+          "source_type": "artifact",
+          "locator": "setup.md",
+          "primary": false
+        }
+      ],
+      "absorbed_memory_ids": []
+    }
+  ],
+  "conflicts": []
+}

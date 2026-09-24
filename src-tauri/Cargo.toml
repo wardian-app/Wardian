@@ -35,6 +35,7 @@ chrono = { workspace = true }
 hmac = { workspace = true }
 p256 = { workspace = true }
 rand = { workspace = true }
+raw-window-handle = "0.6"
 tauri = { version = "=2.11.2", features = ["devtools"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }

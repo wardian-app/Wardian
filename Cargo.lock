@@ -23,6 +23,7 @@ dependencies = [
  "p256",
  "portable-pty",
  "rand 0.8.6",
+ "raw-window-handle",
  "regex",
  "reqwest",
  "rusqlite",

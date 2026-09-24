@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 4;
+pub mod maintenance;
+pub use maintenance::*;
+
+const SCHEMA_VERSION: i64 = 5;
 pub const DEFAULT_STALE_DAYS: i64 = 30;
 pub const MEMORY_BUDGET_POLICY_VERSION: u32 = 1;
 pub const MEMORY_CAPABILITY_ENV: &str = "WARDIAN_MEMORY_CAPABILITY";
@@ -59,6 +62,7 @@ impl MemoryStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MemorySource {
     pub source_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -258,6 +262,8 @@ pub enum MemoryError {
         actor_agent_id: String,
         subject_agent_id: String,
     },
+    #[error("memory maintenance conflict: {0}")]
+    Conflict(String),
     #[error("memory database is unavailable")]
     HomeUnavailable,
     #[error("memory database error: {0}")]
@@ -375,7 +381,7 @@ impl MemoryStore {
             .is_some())
     }
 
-    fn connection(&self) -> Result<Connection, MemoryError> {
+    pub(crate) fn connection(&self) -> Result<Connection, MemoryError> {
         let connection = Connection::open(&self.path)?;
         connection.busy_timeout(StdDuration::from_secs(5))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -1135,6 +1141,40 @@ impl MemoryStore {
             .map(|revision_id| self.get_revision(revision_id))
             .collect()
     }
+
+    pub fn preview_maintenance(
+        &self,
+        actor: &MemoryActor,
+        plan: &MemoryMaintenancePlan,
+    ) -> Result<MemoryMaintenancePreview, MemoryError> {
+        maintenance::preview_maintenance(self, actor, plan)
+    }
+
+    pub fn maintenance_replay(
+        &self,
+        actor: &MemoryActor,
+        plan: &MemoryMaintenancePlan,
+    ) -> Result<Option<MemoryMaintenanceReceipt>, MemoryError> {
+        maintenance::maintenance_replay(self, actor, plan)
+    }
+
+    pub fn apply_maintenance(
+        &self,
+        actor: &MemoryActor,
+        plan: &MemoryMaintenancePlan,
+        preview_digest: &str,
+    ) -> Result<MemoryMaintenanceReceipt, MemoryError> {
+        maintenance::apply_maintenance(self, actor, plan, preview_digest)
+    }
+
+    pub fn maintenance_receipt(
+        &self,
+        actor: &MemoryActor,
+        agent_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<MemoryMaintenanceReceipt>, MemoryError> {
+        maintenance::maintenance_receipt(self, actor, agent_id, idempotency_key)
+    }
 }
 
 fn migrate(connection: &Connection) -> Result<(), MemoryError> {
@@ -1187,6 +1227,18 @@ fn migrate(connection: &Connection) -> Result<(), MemoryError> {
         );
         CREATE INDEX IF NOT EXISTS idx_memory_process_capabilities_agent
           ON memory_process_capabilities(agent_id, created_at);
+        CREATE TABLE IF NOT EXISTS memory_maintenance_receipts (
+          idempotency_key TEXT NOT NULL,
+          agent_id TEXT NOT NULL,
+          plan_id TEXT NOT NULL,
+          plan_hash TEXT NOT NULL,
+          preview_digest TEXT NOT NULL,
+          receipt_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(agent_id, idempotency_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_maintenance_receipts_plan
+          ON memory_maintenance_receipts(plan_id);
     "#))?;
     Ok(())
 }
@@ -1266,7 +1318,7 @@ fn canonical_consolidation_cursor_key(
     format!("memory-consolidation:{}", hash_text(&scope))
 }
 
-fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
+pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
     let kind: String = row.get("kind")?;
     let status: String = row.get("status")?;
     Ok(MemoryRecord {
@@ -1408,11 +1460,11 @@ fn idempotent_record(
     Ok(record)
 }
 
-fn sources_for_revision(
-    transaction: &Transaction<'_>,
+pub(crate) fn sources_for_revision(
+    connection: &Connection,
     revision_id: &str,
 ) -> Result<Vec<MemorySource>, MemoryError> {
-    let mut statement = transaction.prepare(
+    let mut statement = connection.prepare(
         "SELECT source_type, locator, source_hash, is_primary FROM memory_sources
          WHERE revision_id=?1 ORDER BY source_type, locator, source_hash, is_primary",
     )?;
@@ -1458,14 +1510,14 @@ fn normalize_sources(sources: &[MemorySource]) -> Result<Vec<MemorySource>, Memo
     Ok(normalized)
 }
 
-fn insert_sources(
-    transaction: &Transaction<'_>,
+pub(crate) fn insert_sources(
+    connection: &Connection,
     revision_id: &str,
     sources: &[MemorySource],
 ) -> Result<(), MemoryError> {
     for source in sources {
         let source_type = required("source_type", &source.source_type)?;
-        transaction.execute(
+        connection.execute(
             "INSERT INTO memory_sources(revision_id, source_type, locator, source_hash, is_primary)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
@@ -1480,15 +1532,15 @@ fn insert_sources(
     Ok(())
 }
 
-fn insert_event(
-    transaction: &Transaction<'_>,
+pub(crate) fn insert_event(
+    connection: &Connection,
     agent_id: &str,
     memory_id: Option<&str>,
     revision_id: Option<&str>,
     action: &str,
     payload: Option<&serde_json::Value>,
 ) -> Result<(), MemoryError> {
-    transaction.execute(
+    connection.execute(
         "INSERT INTO memory_events(event_id, agent_id, memory_id, revision_id, action, payload_json, occurred_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![Uuid::new_v4().to_string(), agent_id, memory_id, revision_id, action,
@@ -1497,7 +1549,7 @@ fn insert_event(
     Ok(())
 }
 
-fn required(field: &str, value: &str) -> Result<String, MemoryError> {
+pub(crate) fn required(field: &str, value: &str) -> Result<String, MemoryError> {
     let value = value.trim();
     if value.is_empty() {
         Err(MemoryError::Validation(format!("{field} is required")))
@@ -1506,12 +1558,12 @@ fn required(field: &str, value: &str) -> Result<String, MemoryError> {
     }
 }
 
-fn normalize_text(value: &str) -> Result<String, MemoryError> {
+pub(crate) fn normalize_text(value: &str) -> Result<String, MemoryError> {
     let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
     required("text", &value)
 }
 
-fn normalize_evidence(value: &str) -> Result<String, MemoryError> {
+pub(crate) fn normalize_evidence(value: &str) -> Result<String, MemoryError> {
     let value = value.trim();
     required("evidence_excerpt", value)
 }
