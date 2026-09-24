@@ -3,8 +3,8 @@
 The Graph view is the control surface for the communication topology. Use it to build and inspect your agent network: create and delete manual connections between agents, visualize communication activity, and understand the default communication boundaries that shape CLI behavior and agent visibility.
 
 Pan by dragging the canvas and zoom with the mouse wheel or trackpad. Zoom uses
-the wheel delta, so high-resolution trackpads move continuously while a normal
-wheel notch remains a small step. Graph nodes, topology edges, and animated
+the wheel delta, so high-resolution trackpads move continuously while each
+regular wheel notch covers more ground. Graph nodes, topology edges, and animated
 communication activity share the same camera frame, so overlays remain attached
 to their endpoints throughout the gesture.
 

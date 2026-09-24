@@ -20,7 +20,11 @@ import { GardenAutomationInterior } from "../features/garden/GardenAutomationInt
 import { GardenSpatialCell } from "../features/garden/GardenSpatialCell";
 import { agentCellBounds, cameraForBounds, projectBounds, recordPlaneBounds, type GardenWorldBounds } from "../features/garden/gardenSpatialZoom";
 import { useGardenCameraMotion } from "../features/garden/useGardenCameraMotion";
-import { wheelZoomFactor } from "../utils/wheelZoom";
+import {
+  GARDEN_DETAIL_WHEEL_ZOOM_STEP,
+  GARDEN_WHEEL_ZOOM_STEP,
+  wheelZoomFactor,
+} from "../utils/wheelZoom";
 import { zoomAt } from "../features/garden/gardenViewport";
 import { normalizeEntityPath } from "../features/garden/entityRef";
 import { gardenAgentStatusColor } from "../features/garden/gardenStatus";
@@ -539,7 +543,11 @@ export const GardenView: React.FC<GardenViewProps> = ({
     event.preventDefault(); event.stopPropagation(); motion.cancel();
     const rect = viewRef.current.getBoundingClientRect();
     const next = zoomAt({ x: event.clientX - rect.left, y: event.clientY - rect.top }, camera,
-      wheelZoomFactor(event.deltaY, event.deltaMode), { min: Math.min(.04, camera.scale), max: 100000 });
+      wheelZoomFactor(
+        event.deltaY,
+        event.deltaMode,
+        selectionRef ? GARDEN_DETAIL_WHEEL_ZOOM_STEP : GARDEN_WHEEL_ZOOM_STEP,
+      ), { min: Math.min(.04, camera.scale), max: 100000 });
     setCamera(next);
     if (event.deltaY < 0 && !interiorOpen && !candidate) {
       const unit = agentUnits.find((item) => {

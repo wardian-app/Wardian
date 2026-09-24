@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import type { TerrainCell } from "./terrain";
-import { WHEEL_ZOOM_STEP } from "../../utils/wheelZoom";
+import { GARDEN_WHEEL_ZOOM_STEP } from "../../utils/wheelZoom";
 
 const konvaMocks = vi.hoisted(() => {
   let position = { x: 0, y: 0 };
@@ -347,13 +347,13 @@ describe("GardenCanvas", () => {
     fireEvent.wheel(screen.getByTestId("garden-stage"), { deltaY: -60 });
 
     expect(konvaMocks.stage.scale).toHaveBeenCalledWith({
-      x: Math.sqrt(WHEEL_ZOOM_STEP),
-      y: Math.sqrt(WHEEL_ZOOM_STEP),
+      x: Math.sqrt(GARDEN_WHEEL_ZOOM_STEP),
+      y: Math.sqrt(GARDEN_WHEEL_ZOOM_STEP),
     });
     expect(konvaMocks.stage.position).toHaveBeenCalledWith({
-      x: 100 - 100 * Math.sqrt(WHEEL_ZOOM_STEP),
-      y: 80 - 80 * Math.sqrt(WHEEL_ZOOM_STEP),
+      x: 100 - 100 * Math.sqrt(GARDEN_WHEEL_ZOOM_STEP),
+      y: 80 - 80 * Math.sqrt(GARDEN_WHEEL_ZOOM_STEP),
     });
-    expect(screen.getByTestId("garden-zoom-level")).toHaveTextContent("104%");
+    expect(screen.getByTestId("garden-zoom-level")).toHaveTextContent("112%");
   });
 });

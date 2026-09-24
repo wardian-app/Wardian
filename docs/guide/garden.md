@@ -196,8 +196,9 @@ resolve approvals inside the composition.
   return to an ancestor or **Habitat** through that camera.
 - **Wheel** zooms through every scale, including compositions and records;
   reverse wheel zooms back out. Zoom uses the wheel delta, so high-resolution trackpads
-  move continuously while a normal wheel notch remains a small step. It is
-  anchored at the pointer, so the point under the cursor stays put.
+  move continuously while each regular notch covers more ground. Focused detail
+  uses a gentler step while its reading plane reshapes. Zoom is anchored at the
+  pointer, so the point under the cursor stays put.
 - **Alt + wheel** explicitly scrolls overflowing record content under the
   pointer. Ordinary wheel over content continues to zoom the world. Use Tab
   to focus a named reading region, then scroll with the keyboard using arrows,
