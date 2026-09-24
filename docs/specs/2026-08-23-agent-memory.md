@@ -48,9 +48,12 @@ does not cascade into the other.
 
 Before provider launch, Wardian selects active agent-wide memory plus active
 memory for the resolved workspace. A deterministic 12,000-character policy
-orders stable before current records and reports omissions. A fingerprint covers
-scope, logical ID, revision, kind, evidence integrity, text, staleness, and the
-budget-policy version.
+balances stable memory with fresh current records, preferring a complete record
+from both groups when they fit and alternating between them as space permits.
+Selected records are presented stable first; stale current records have lower
+priority. The policy reports omissions. A fingerprint covers scope, logical ID,
+revision, kind, evidence integrity, text, staleness, and the budget-policy
+version.
 
 Fresh processes receive full `Stable memory` and `Current state` sections.
 Restored/resumed processes compare against the latest fingerprint for their

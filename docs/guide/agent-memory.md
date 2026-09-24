@@ -1,7 +1,7 @@
 # Agent memory
 
 Wardian agents can save durable preferences, decisions, corrections, lessons,
-and current project state. Memory is available when the agent starts a new
+and useful active project checkpoints. Memory is available when the agent starts a new
 provider process, even when the provider changes.
 
 Direct memory is disabled by default while the feature matures. Enable **Agent
@@ -18,8 +18,9 @@ run it or bind it to a session-close invoker.
 
 You do not need to say "remember this." At the end of an ordinary task, an agent
 checks for clear preferences, project conventions, decisions, corrections,
-lessons, and ongoing state that will matter in a future session. It saves a
-small number of useful records when the evidence is clear. Brief or explicitly
+lessons, and active checkpoints that materially help resume work. It saves a
+small number of useful records when the evidence is clear. Routine progress
+reports and task journals belong in task or conversation records. Brief or explicitly
 one-response-only instructions are not saved merely because they appeared in a
 conversation. The check happens before the agent's final answer; it does not
 require loading an optional consolidation automation or making another model
@@ -48,10 +49,12 @@ wardian memory save "Prefer concise technical handoffs" `
   --scope agent
 ```
 
-Workspace scope is the default. Use agent scope only for a preference or working
-convention that should follow the agent between projects. Every save requires an
-evidence excerpt. Optional `--source` values preserve a link for deeper
-inspection without coupling retention.
+The default kind is Stable. Use Current (`--kind current`) for an active
+checkpoint worth carrying to the next session. Update it when state changes and
+remove it when the work resolves. Workspace scope is the default. Use agent
+scope only for a preference or working convention that should follow the agent
+between projects. Every save requires an evidence excerpt. Optional `--source`
+values preserve a link for deeper inspection without coupling retention.
 
 Use `show`, `history`, `update`, and `remove` with the returned memory ID. The
 full ID and any unique prefix are accepted, including the eight-character IDs
@@ -60,8 +63,9 @@ one memory, use a longer prefix. Update and remove preserve audit history.
 
 Inside a Wardian-managed terminal, memory commands are restricted to that
 agent's own records and authenticated with a launch-scoped capability. Run them
-only from that managed context. Cross-agent administration is available through
-Wardian's desktop memory surface; an uncredentialed operator shell fails closed.
+only from that managed context. The desktop currently exposes cross-agent memory
+inspection; managed terminals cannot use it to change another agent's records.
+An uncredentialed operator shell fails closed.
 
 The capability expires when Wardian terminates, replaces, or reclaims that
 provider runtime. A PTY reader or broker error alone does not revoke a still-live
