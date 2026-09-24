@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 const SCHEMA_VERSION: i64 = 4;
 pub const DEFAULT_STALE_DAYS: i64 = 30;
-pub const MEMORY_BUDGET_POLICY_VERSION: u32 = 1;
+pub const MEMORY_BUDGET_POLICY_VERSION: u32 = 2;
 pub const MEMORY_CAPABILITY_ENV: &str = "WARDIAN_MEMORY_CAPABILITY";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1603,62 +1603,183 @@ fn render_brief(
     if records.is_empty() && removed.is_empty() {
         return (String::new(), 0);
     }
-    let mut output = match kind {
+    let title = match kind {
         MemoryBriefKind::Fresh => "# Wardian memory\n".to_string(),
         MemoryBriefKind::ResumeDelta => "# Wardian memory changes\n".to_string(),
     };
-    let mut omitted = 0;
-    for (heading, target_kind) in [
-        ("Stable memory", MemoryKind::Stable),
-        ("Current state", MemoryKind::Current),
-    ] {
-        let entries = records
-            .iter()
-            .filter(|record| record.kind == target_kind)
-            .collect::<Vec<_>>();
-        if entries.is_empty() {
-            continue;
-        }
-        let heading = format!("\n## {heading}\n");
-        if output.len() + heading.len() <= max_chars {
-            output.push_str(&heading);
-        }
-        for record in entries {
-            let scope = record.workspace.as_deref().unwrap_or("agent-wide");
-            let stale = record.kind == MemoryKind::Current
-                && DateTime::parse_from_rfc3339(&record.last_verified_at)
-                    .map(|value| {
-                        value.with_timezone(&Utc) < Utc::now() - Duration::days(DEFAULT_STALE_DAYS)
-                    })
-                    .unwrap_or(true);
-            let stale_label = if stale { " [stale]" } else { "" };
-            let short_id = &record.memory_id[..record.memory_id.len().min(8)];
-            let line = format!(
-                "- [{short_id}]{} {} (scope: {scope}; verified: {})\n",
-                stale_label, record.text, record.last_verified_at
-            );
-            if output.len() + line.len() > max_chars {
-                omitted += 1;
-            } else {
-                output.push_str(&line);
-            }
+
+    if title.len() > max_chars {
+        return (String::new(), records.len() + removed.len());
+    }
+
+    let now = Utc::now();
+    let stale = records
+        .iter()
+        .map(|record| brief_record_is_stale(record, now))
+        .collect::<Vec<_>>();
+    let lines = records
+        .iter()
+        .zip(&stale)
+        .map(|(record, stale)| brief_record_line(record, *stale))
+        .collect::<Vec<_>>();
+    let mut selected = vec![false; records.len()];
+    let mut selected_removed = vec![false; removed.len()];
+    let mut used = title.len();
+
+    let stable_indices = records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| (record.kind == MemoryKind::Stable).then_some(index))
+        .collect::<Vec<_>>();
+    let fresh_current_indices = records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| {
+            (record.kind == MemoryKind::Current && !stale[index]).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let stale_current_indices = records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| {
+            (record.kind == MemoryKind::Current && stale[index]).then_some(index)
+        })
+        .collect::<Vec<_>>();
+
+    // Reserve a whole stable and fresh current record together when the pair
+    // fits. Preserve recall order within each selection tier.
+    let anchors = fresh_current_indices.iter().find_map(|current_index| {
+        stable_indices.iter().find_map(|stable_index| {
+            let pair_len = title.len()
+                + brief_section_heading(MemoryKind::Stable).len()
+                + lines[*stable_index].len()
+                + brief_section_heading(MemoryKind::Current).len()
+                + lines[*current_index].len();
+            (pair_len <= max_chars).then_some((*stable_index, *current_index))
+        })
+    });
+    if let Some((stable_index, current_index)) = anchors {
+        select_brief_record(
+            stable_index,
+            records,
+            &lines,
+            &mut selected,
+            &mut used,
+            max_chars,
+        );
+        select_brief_record(
+            current_index,
+            records,
+            &lines,
+            &mut selected,
+            &mut used,
+            max_chars,
+        );
+    } else {
+        // If there is room for only one anchor, fresh current state takes
+        // precedence. A stable entry is the fallback when no fresh checkpoint
+        // can fit as a complete line.
+        let current_anchor = fresh_current_indices.iter().copied().find(|index| {
+            title.len() + brief_section_heading(MemoryKind::Current).len() + lines[*index].len()
+                <= max_chars
+        });
+        let stable_anchor = stable_indices.iter().copied().find(|index| {
+            title.len() + brief_section_heading(MemoryKind::Stable).len() + lines[*index].len()
+                <= max_chars
+        });
+        if let Some(index) = current_anchor.or(stable_anchor) {
+            select_brief_record(index, records, &lines, &mut selected, &mut used, max_chars);
         }
     }
-    if !removed.is_empty() {
-        let heading = "\n## Removed or superseded\n";
-        if output.len() + heading.len() <= max_chars {
-            output.push_str(heading);
+
+    // Alternate stable history and fresh current state so either tier can use
+    // remaining space without crowding the other one out.
+    let stable_remaining = stable_indices
+        .iter()
+        .copied()
+        .filter(|index| !selected[*index]);
+    let fresh_current_remaining = fresh_current_indices
+        .iter()
+        .copied()
+        .filter(|index| !selected[*index]);
+    let stable_remaining = stable_remaining.collect::<Vec<_>>();
+    let fresh_current_remaining = fresh_current_remaining.collect::<Vec<_>>();
+    let mut stable_cursor = 0;
+    let mut fresh_current_cursor = 0;
+    loop {
+        let mut selected_any = false;
+        if let Some(index) = stable_remaining.get(stable_cursor).copied() {
+            stable_cursor += 1;
+            select_brief_record(index, records, &lines, &mut selected, &mut used, max_chars);
+            selected_any = true;
         }
-        for memory_id in removed {
+        if let Some(index) = fresh_current_remaining.get(fresh_current_cursor).copied() {
+            fresh_current_cursor += 1;
+            select_brief_record(index, records, &lines, &mut selected, &mut used, max_chars);
+            selected_any = true;
+        }
+        if !selected_any {
+            break;
+        }
+    }
+
+    let removed_lines = removed
+        .iter()
+        .map(|memory_id| {
             let short_id = &memory_id[..memory_id.len().min(8)];
-            let line = format!("- [{short_id}] no longer applies\n");
-            if output.len() + line.len() > max_chars {
-                omitted += 1;
-            } else {
-                output.push_str(&line);
+            format!("- [{short_id}] no longer applies\n")
+        })
+        .collect::<Vec<_>>();
+    for (index, line) in removed_lines.iter().enumerate() {
+        let heading_cost = if selected_removed.iter().any(|is_selected| *is_selected) {
+            0
+        } else {
+            "\n## Removed or superseded\n".len()
+        };
+        if used + heading_cost + line.len() <= max_chars {
+            selected_removed[index] = true;
+            used += heading_cost + line.len();
+        }
+    }
+
+    for index in &stale_current_indices {
+        if !selected[*index] {
+            select_brief_record(*index, records, &lines, &mut selected, &mut used, max_chars);
+        }
+    }
+
+    let mut output = title;
+    for (target_kind, heading) in [
+        (MemoryKind::Stable, "\n## Stable memory\n"),
+        (MemoryKind::Current, "\n## Current state\n"),
+    ] {
+        if selected
+            .iter()
+            .zip(records)
+            .any(|(is_selected, record)| *is_selected && record.kind == target_kind)
+        {
+            output.push_str(heading);
+            for (index, record) in records.iter().enumerate() {
+                if selected[index] && record.kind == target_kind {
+                    output.push_str(&lines[index]);
+                }
             }
         }
     }
+    if selected_removed.iter().any(|is_selected| *is_selected) {
+        output.push_str("\n## Removed or superseded\n");
+        for (index, is_selected) in selected_removed.iter().enumerate() {
+            if *is_selected {
+                output.push_str(&removed_lines[index]);
+            }
+        }
+    }
+
+    let omitted = selected.iter().filter(|is_selected| !**is_selected).count()
+        + selected_removed
+            .iter()
+            .filter(|is_selected| !**is_selected)
+            .count();
     if omitted > 0 {
         let notice = format!("\n_{omitted} additional memories omitted by the startup budget._\n");
         if output.len() + notice.len() <= max_chars {
@@ -1666,6 +1787,57 @@ fn render_brief(
         }
     }
     (output.trim().to_string(), omitted)
+}
+
+fn brief_section_heading(kind: MemoryKind) -> &'static str {
+    match kind {
+        MemoryKind::Stable => "\n## Stable memory\n",
+        MemoryKind::Current => "\n## Current state\n",
+    }
+}
+
+fn brief_record_is_stale(record: &MemoryRecord, now: DateTime<Utc>) -> bool {
+    record.kind == MemoryKind::Current
+        && DateTime::parse_from_rfc3339(&record.last_verified_at)
+            .map(|value| value.with_timezone(&Utc) < now - Duration::days(DEFAULT_STALE_DAYS))
+            .unwrap_or(true)
+}
+
+fn brief_record_line(record: &MemoryRecord, stale: bool) -> String {
+    let scope = record.workspace.as_deref().unwrap_or("agent-wide");
+    let stale_label = if stale { " [stale]" } else { "" };
+    let short_id = &record.memory_id[..record.memory_id.len().min(8)];
+    format!(
+        "- [{short_id}]{} {} (scope: {scope}; verified: {})\n",
+        stale_label, record.text, record.last_verified_at
+    )
+}
+
+fn select_brief_record(
+    index: usize,
+    records: &[MemoryRecord],
+    lines: &[String],
+    selected: &mut [bool],
+    used: &mut usize,
+    max_chars: usize,
+) -> bool {
+    let kind = records[index].kind;
+    let has_section = selected
+        .iter()
+        .zip(records)
+        .any(|(is_selected, record)| *is_selected && record.kind == kind);
+    let heading_cost = if has_section {
+        0
+    } else {
+        brief_section_heading(kind).len()
+    };
+    let added = heading_cost + lines[index].len();
+    if *used + added > max_chars {
+        return false;
+    }
+    selected[index] = true;
+    *used += added;
+    true
 }
 
 #[cfg(test)]
@@ -1681,6 +1853,36 @@ mod tests {
             evidence_excerpt: format!("Evidence for {text}"),
             sources: vec![],
             idempotency_key: None,
+        }
+    }
+
+    fn brief_record(
+        memory_id: impl Into<String>,
+        kind: MemoryKind,
+        text: impl Into<String>,
+        last_verified_at: impl Into<String>,
+    ) -> MemoryRecord {
+        let memory_id = memory_id.into();
+        let text = text.into();
+        let evidence_excerpt = format!("Evidence for {text}");
+        MemoryRecord {
+            revision_id: format!("revision-{memory_id}"),
+            memory_id,
+            revision: 1,
+            agent_id: "agent-a".into(),
+            workspace: Some("fixture-workspace".into()),
+            kind,
+            text,
+            evidence_hash: hash_text(&evidence_excerpt),
+            evidence_excerpt,
+            status: MemoryStatus::Active,
+            supersedes_revision_id: None,
+            replaced_by_revision_id: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            last_verified_at: last_verified_at.into(),
+            idempotency_key: None,
+            sources: vec![],
         }
     }
 
@@ -1966,16 +2168,21 @@ mod tests {
             .unwrap()
             .expect("second injection receipt");
         assert_ne!(first_receipt, second_receipt);
+        let loaded_events = store
+            .list_events(&MemoryActor::agent("agent-a"), "agent-a")
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.action == "loaded")
+            .collect::<Vec<_>>();
         assert_eq!(
-            store
-                .list_events(&MemoryActor::agent("agent-a"), "agent-a")
-                .unwrap()
-                .into_iter()
-                .filter(|event| event.action == "loaded")
-                .count(),
+            loaded_events.len(),
             2,
             "every successful launch injection needs its own audit receipt"
         );
+        assert!(loaded_events.iter().all(|event| {
+            event.payload["budget_policy_version"]
+                == serde_json::json!(MEMORY_BUDGET_POLICY_VERSION)
+        }));
         let unchanged = store
             .compile_brief(
                 &MemoryActor::agent("agent-a"),
@@ -2228,6 +2435,403 @@ mod tests {
         assert_eq!(first.fingerprint, second.fingerprint);
         assert!(first.omitted_count > 0);
         assert!(first.context_text.len() <= 360);
+    }
+
+    #[test]
+    fn twelve_kilobyte_brief_keeps_current_checkpoint_with_66_stable_records() {
+        // Mirrors the frozen 67-active-record source-policy case with sanitized
+        // journal text and the checkpoint identity retained.
+        let verified = (Utc::now() - Duration::days(1)).to_rfc3339();
+        let mut records = (0..66)
+            .map(|index| {
+                brief_record(
+                    format!("{index:08x}-0000-0000-0000-{index:012x}"),
+                    MemoryKind::Stable,
+                    format!("Stable journal {index}: {}", "x".repeat(250)),
+                    verified.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        records.push(brief_record(
+            "e1f065d2-a347-4565-9cf0-53f2c4c97f48",
+            MemoryKind::Current,
+            "EE follow-up checkpoint: routing changes are applied; live-use benefit remains unverified. The existing EE-only deployment targets and Konnect writes remain guarded. A paired decision screen scored baseline 4/6 and candidate 6/6 with preservation gates passing; static review found no blockers. No live CAD or activation test ran, and no monitor is scheduled. On the next applicable audit, check branch preservation, electrical tradeoffs, and scope overreach.",
+            verified,
+        ));
+
+        let (first, omitted) = render_brief(MemoryBriefKind::Fresh, &records, &[], 12_000);
+        let (second, second_omitted) = render_brief(MemoryBriefKind::Fresh, &records, &[], 12_000);
+        let visible_records = first.lines().filter(|line| line.starts_with("- [")).count();
+
+        assert_eq!(records.len(), 67);
+        assert!(first.len() <= 12_000);
+        assert!(first.contains("[e1f065d2]"));
+        assert!(first.contains("EE follow-up checkpoint: routing changes are applied"));
+        assert!(first.contains("Stable journal 0:"));
+        assert_eq!(omitted, records.len() - visible_records);
+        assert!(omitted > 0);
+        assert_eq!(first, second);
+        assert_eq!(omitted, second_omitted);
+    }
+
+    #[test]
+    fn twelve_kilobyte_brief_keeps_stable_history_with_66_current_records() {
+        let verified = (Utc::now() - Duration::days(1)).to_rfc3339();
+        let mut records = vec![brief_record(
+            "stable-anchor-memory",
+            MemoryKind::Stable,
+            "Stable rule survives current-heavy history.",
+            verified.clone(),
+        )];
+        records.extend((0..66).map(|index| {
+            brief_record(
+                format!("{index:08x}-1111-2222-3333-{index:012x}"),
+                MemoryKind::Current,
+                format!("Current journal {index}: {}", "c".repeat(250)),
+                verified.clone(),
+            )
+        }));
+
+        let (context, omitted) = render_brief(MemoryBriefKind::Fresh, &records, &[], 12_000);
+        let visible_records = context
+            .lines()
+            .filter(|line| line.starts_with("- ["))
+            .count();
+
+        assert!(context.len() <= 12_000);
+        assert!(context.contains("Stable rule survives current-heavy history."));
+        assert!(context.contains("Current journal 0:"));
+        assert!(omitted > 0);
+        assert_eq!(omitted, records.len() - visible_records);
+    }
+
+    #[test]
+    fn brief_selection_round_robins_stable_and_fresh_current_tiers() {
+        let verified = (Utc::now() - Duration::days(1)).to_rfc3339();
+        let mut records = (0..20)
+            .map(|index| {
+                brief_record(
+                    format!("a{index:07x}-1111-2222-3333-{index:012x}"),
+                    MemoryKind::Stable,
+                    format!("Rule {index:02}: {}", "x".repeat(120)),
+                    verified.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        records.extend((0..20).map(|index| {
+            brief_record(
+                format!("b{index:07x}-1111-2222-3333-{index:012x}"),
+                MemoryKind::Current,
+                format!("Rule {index:02}: {}", "x".repeat(120)),
+                verified.clone(),
+            )
+        }));
+
+        let stable_line = brief_record_line(&records[0], false);
+        let current_line = brief_record_line(&records[20], false);
+        let max_chars = "# Wardian memory\n".len()
+            + brief_section_heading(MemoryKind::Stable).len()
+            + stable_line.len()
+            + brief_section_heading(MemoryKind::Current).len()
+            + current_line.len()
+            + 5 * (stable_line.len() + current_line.len());
+        let (context, omitted) = render_brief(MemoryBriefKind::Fresh, &records, &[], max_chars);
+        let stable_count = context
+            .split("## Stable memory\n")
+            .nth(1)
+            .unwrap()
+            .split("## Current state\n")
+            .next()
+            .unwrap()
+            .lines()
+            .filter(|line| line.starts_with("- ["))
+            .count();
+        let current_count = context
+            .split("## Current state\n")
+            .nth(1)
+            .unwrap()
+            .lines()
+            .filter(|line| line.starts_with("- ["))
+            .count();
+
+        assert_eq!(stable_count, 6);
+        assert_eq!(current_count, 6);
+        assert_eq!(omitted, 28);
+        assert!(context.len() <= max_chars);
+    }
+
+    #[test]
+    fn brief_selection_never_truncates_a_record_to_fill_a_tight_budget() {
+        let verified = Utc::now().to_rfc3339();
+        let record = brief_record(
+            "tight-budget-memory",
+            MemoryKind::Current,
+            "Preserve this complete checkpoint statement without changing its meaning.",
+            verified,
+        );
+        let complete_line = brief_record_line(&record, false);
+        let max_chars = "# Wardian memory\n".len()
+            + brief_section_heading(MemoryKind::Current).len()
+            + complete_line.len()
+            - 1;
+
+        let (context, omitted) = render_brief(MemoryBriefKind::Fresh, &[record], &[], max_chars);
+
+        assert!(context.len() <= max_chars);
+        assert!(!context.contains("Preserve this complete checkpoint"));
+        assert_eq!(omitted, 1);
+    }
+
+    #[test]
+    fn brief_selection_prefers_fresh_current_over_stale_current() {
+        let now = Utc::now();
+        let fresh = brief_record(
+            "fresh-current-memory",
+            MemoryKind::Current,
+            "Fresh checkpoint stays visible.",
+            now.to_rfc3339(),
+        );
+        let stale = brief_record(
+            "stale-current-memory",
+            MemoryKind::Current,
+            "Stale checkpoint should be omitted.",
+            (now - Duration::days(DEFAULT_STALE_DAYS + 1)).to_rfc3339(),
+        );
+        let max_chars = "# Wardian memory\n".len()
+            + brief_section_heading(MemoryKind::Current).len()
+            + brief_record_line(&fresh, false).len();
+
+        let (context, omitted) =
+            render_brief(MemoryBriefKind::Fresh, &[stale, fresh], &[], max_chars);
+
+        assert!(context.len() <= max_chars);
+        assert!(context.contains("Fresh checkpoint stays visible."));
+        assert!(!context.contains("Stale checkpoint should be omitted."));
+        assert_eq!(omitted, 1);
+    }
+
+    #[test]
+    fn brief_selection_keeps_removal_notices_ahead_of_stale_current() {
+        let stale = brief_record(
+            "stale-current-memory",
+            MemoryKind::Current,
+            format!("Stale checkpoint: {}", "x".repeat(200)),
+            (Utc::now() - Duration::days(DEFAULT_STALE_DAYS + 1)).to_rfc3339(),
+        );
+        let removed = vec!["removed-memory".into()];
+        let max_chars = "# Wardian memory changes\n".len()
+            + "\n## Removed or superseded\n".len()
+            + "- [removed-] no longer applies\n".len();
+
+        let (context, omitted) =
+            render_brief(MemoryBriefKind::ResumeDelta, &[stale], &removed, max_chars);
+
+        assert!(context.len() <= max_chars);
+        assert!(context.contains("no longer applies"));
+        assert!(!context.contains("Stale checkpoint:"));
+        assert_eq!(omitted, 1);
+    }
+
+    #[test]
+    fn brief_omitted_count_includes_unrendered_removal_notices() {
+        let max_chars = "# Wardian memory changes\n".len();
+        let removed = vec!["memory-1".into(), "memory-2".into(), "memory-3".into()];
+
+        let (context, omitted) =
+            render_brief(MemoryBriefKind::ResumeDelta, &[], &removed, max_chars);
+
+        assert!(context.len() <= max_chars);
+        assert_eq!(omitted, removed.len());
+    }
+
+    #[test]
+    fn bounded_brief_scope_and_resume_keep_the_full_revision_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(temp.path().join("memory.db")).unwrap();
+        let actor = MemoryActor::agent("agent-a");
+        let stable_anchor = store
+            .save(
+                &MemoryActor::Operator,
+                request("agent-a", Some("one"), "Workspace preference"),
+            )
+            .unwrap();
+        let omitted_stable = store
+            .save(
+                &MemoryActor::Operator,
+                request(
+                    "agent-a",
+                    Some("one"),
+                    &format!("Historical journal: {}", "x".repeat(800)),
+                ),
+            )
+            .unwrap();
+        for index in 0..2 {
+            store
+                .save(
+                    &MemoryActor::Operator,
+                    request(
+                        "agent-a",
+                        Some("one"),
+                        &format!("Historical journal {index}: {}", "y".repeat(800)),
+                    ),
+                )
+                .unwrap();
+        }
+        let mut current_request = request("agent-a", Some("one"), "Fresh workspace checkpoint");
+        current_request.kind = MemoryKind::Current;
+        let current = store.save(&MemoryActor::Operator, current_request).unwrap();
+        store
+            .save(
+                &MemoryActor::Operator,
+                request("agent-a", Some("two"), "Other-workspace secret"),
+            )
+            .unwrap();
+        store
+            .save(
+                &MemoryActor::Operator,
+                request("agent-b", Some("one"), "Peer-agent secret"),
+            )
+            .unwrap();
+
+        let initial = store
+            .compile_brief(
+                &actor,
+                "agent-a",
+                Some("one"),
+                "codex",
+                "session-1",
+                false,
+                600,
+            )
+            .unwrap();
+        let unbounded = store
+            .compile_brief(
+                &actor,
+                "agent-a",
+                Some("one"),
+                "codex",
+                "session-unbounded",
+                false,
+                10_000,
+            )
+            .unwrap();
+        let scoped = store.recall(&actor, "agent-a", Some("one")).unwrap();
+        let scoped_revision_ids = scoped
+            .stable
+            .iter()
+            .chain(scoped.current.iter())
+            .map(|entry| entry.record.revision_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(initial.revision_ids, scoped_revision_ids);
+        assert_eq!(initial.revision_ids.len(), 5);
+        assert_eq!(initial.fingerprint, unbounded.fingerprint);
+        assert_eq!(initial.revision_ids, unbounded.revision_ids);
+        assert_ne!(initial.context_text, unbounded.context_text);
+        assert!(initial.omitted_count >= 3);
+        assert!(initial.context_text.contains("Workspace preference"));
+        assert!(initial.context_text.contains("Fresh workspace checkpoint"));
+        assert!(!initial.context_text.contains("Other-workspace secret"));
+        assert!(!initial.context_text.contains("Peer-agent secret"));
+
+        store
+            .record_injection(
+                &actor,
+                "agent-a",
+                Some("one"),
+                "codex",
+                "session-1",
+                &initial,
+            )
+            .unwrap();
+        store
+            .update(
+                &MemoryActor::Operator,
+                UpdateMemoryRequest {
+                    memory_id: current.memory_id.clone(),
+                    text: "Updated workspace current checkpoint".into(),
+                    evidence_excerpt: "The current workspace checkpoint was refreshed.".into(),
+                    sources: vec![],
+                    idempotency_key: None,
+                },
+            )
+            .unwrap();
+
+        let current_delta = store
+            .compile_brief(
+                &actor,
+                "agent-a",
+                Some("one"),
+                "codex",
+                "session-1",
+                true,
+                600,
+            )
+            .unwrap();
+        assert_eq!(current_delta.kind, MemoryBriefKind::ResumeDelta);
+        assert!(current_delta
+            .context_text
+            .contains("Updated workspace current checkpoint"));
+        assert!(!current_delta.context_text.contains("Workspace preference"));
+        assert_eq!(current_delta.revision_ids.len(), 5);
+        assert_ne!(current_delta.revision_ids, initial.revision_ids);
+        assert_ne!(current_delta.fingerprint, initial.fingerprint);
+        store
+            .record_injection(
+                &actor,
+                "agent-a",
+                Some("one"),
+                "codex",
+                "session-1",
+                &current_delta,
+            )
+            .unwrap();
+
+        store
+            .update(
+                &MemoryActor::Operator,
+                UpdateMemoryRequest {
+                    memory_id: omitted_stable.memory_id,
+                    text: "Updated omitted journal checkpoint".into(),
+                    evidence_excerpt: "The omitted journal was revised.".into(),
+                    sources: vec![],
+                    idempotency_key: None,
+                },
+            )
+            .unwrap();
+
+        let resumed = store
+            .compile_brief(
+                &actor,
+                "agent-a",
+                Some("one"),
+                "codex",
+                "session-1",
+                true,
+                600,
+            )
+            .unwrap();
+        let updated_scope = store.recall(&actor, "agent-a", Some("one")).unwrap();
+        let updated_revision_ids = updated_scope
+            .stable
+            .iter()
+            .chain(updated_scope.current.iter())
+            .map(|entry| entry.record.revision_id.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(resumed.kind, MemoryBriefKind::ResumeDelta);
+        assert_ne!(resumed.fingerprint, current_delta.fingerprint);
+        assert_eq!(resumed.revision_ids, updated_revision_ids);
+        assert_eq!(resumed.revision_ids.len(), 5);
+        assert!(resumed
+            .context_text
+            .contains("Updated omitted journal checkpoint"));
+        assert!(!resumed
+            .context_text
+            .contains("Updated workspace current checkpoint"));
+        assert!(!resumed.context_text.contains("Other-workspace secret"));
+        assert!(!resumed.context_text.contains("Peer-agent secret"));
+        assert_eq!(stable_anchor.kind, MemoryKind::Stable);
+        assert_eq!(current.kind, MemoryKind::Current);
     }
 
     #[test]
