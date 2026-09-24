@@ -29,6 +29,26 @@ fn same_id_native_capture_repairs_persisted_provenance() {
 }
 
 #[test]
+fn claude_legacy_alias_with_multiple_narrative_owners_fails_closed() {
+    let mut current = event("claude-current-raw-line", "claude", None);
+    current.metadata["legacy_event_ids"] = serde_json::json!(["shared-legacy-alias"]);
+    let mut first = narrative_from_chat_event(&event("claude-old-one", "claude", None), 1).unwrap();
+    first.event_refs = vec!["shared-legacy-alias".into()];
+    let mut second =
+        narrative_from_chat_event(&event("claude-old-two", "claude", None), 2).unwrap();
+    second.event_refs = vec!["shared-legacy-alias".into()];
+    let mut records = vec![first, second];
+    let original_records = records.clone();
+
+    provenance::refresh_records(&mut records, std::slice::from_ref(&current));
+
+    assert_eq!(records, original_records);
+    let error = matching_record_index(&records, &current)
+        .expect_err("multiple legacy owners must remain ambiguous");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
 fn codex_assistant_mirror_projection_requires_one_final_native_turn() {
     let observation = |id: &str,
                        source: &str,

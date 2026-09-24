@@ -721,18 +721,53 @@ pub(super) fn refresh_records(
     events: &[AgentChatEvent],
 ) {
     for event in events {
-        let ids = event_identity_ids(event);
-        let matches: Vec<usize> = records
-            .iter()
-            .enumerate()
-            .filter_map(|(i, record)| {
-                record
-                    .event_refs
+        let claude_raw_line = event.provider == "claude" && event.metadata["provider_log"] == true;
+        let (matches, ids) = if claude_raw_line {
+            let exact_matches: Vec<usize> = records
+                .iter()
+                .enumerate()
+                .filter_map(|(i, record)| record.event_refs.contains(&event.id).then_some(i))
+                .collect();
+            // Claude raw-line IDs retain the provider observation boundary;
+            // its legacy aliases can collide across distinct log positions.
+            if exact_matches.len() > 1 {
+                continue;
+            }
+            if !exact_matches.is_empty() {
+                (exact_matches, vec![event.id.as_str()])
+            } else {
+                let ids = event_identity_ids(event);
+                let matches = records
                     .iter()
-                    .any(|id| ids.contains(&id.as_str()))
-                    .then_some(i)
-            })
-            .collect();
+                    .enumerate()
+                    .filter_map(|(i, record)| {
+                        record
+                            .event_refs
+                            .iter()
+                            .any(|id| ids.contains(&id.as_str()))
+                            .then_some(i)
+                    })
+                    .collect::<Vec<_>>();
+                if matches.len() > 1 {
+                    continue;
+                }
+                (matches, ids)
+            }
+        } else {
+            let ids = event_identity_ids(event);
+            let matches = records
+                .iter()
+                .enumerate()
+                .filter_map(|(i, record)| {
+                    record
+                        .event_refs
+                        .iter()
+                        .any(|id| ids.contains(&id.as_str()))
+                        .then_some(i)
+                })
+                .collect();
+            (matches, ids)
+        };
         let Some(&first) = matches.first() else {
             continue;
         };

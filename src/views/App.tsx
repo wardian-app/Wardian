@@ -58,6 +58,7 @@ import {
 } from "../layout/workbench/WorkbenchHost";
 import { AppShell } from "../layout/AppShell";
 import { AgentResourceContext } from "../features/agents/AgentResourceContext";
+import { runNewSessionAction } from "../features/agents/newSessionAction";
 import {
   useAgentResourceController,
   type AgentStatusTransition,
@@ -1148,11 +1149,7 @@ function AppBody() {
   };
 
   const onClear = async (id: string) => {
-    try {
-      await agentResources.clear_agent(id);
-    } catch (e) {
-      console.error(e);
-    }
+    await runNewSessionAction(agentResources.clear_agent, id);
   };
 
   const onClone = async (id: string, mode: CloneMode) => {
