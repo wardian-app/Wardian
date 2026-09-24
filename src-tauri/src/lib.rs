@@ -542,6 +542,8 @@ pub fn run() {
                                     let Ok(_permit) = restore_slots.acquire_owned().await else {
                                         return;
                                     };
+                                    let mut publication_disposition =
+                                        manager::SpawnPublicationDisposition::new();
                                     let spawn_result = match commands::agent::prepare_provider_owned_fresh_identity(
                                         &mut config,
                                     )
@@ -552,13 +554,15 @@ pub fn run() {
                                             config.clone(),
                                             true,
                                             last_born.clone(),
+                                            publication_disposition.failure_signal(),
                                         )
                                         .await,
                                         Err(error) => Err(error),
                                     };
-                                    let agent = match spawn_result {
-                                        Ok(agent) => agent,
+                                    let (agent, spawned) = match spawn_result {
+                                        Ok(agent) => (agent, true),
                                         Err(error) => {
+                                            publication_disposition.fail();
                                             eprintln!(
                                                 "Failed to restore agent {}: {}",
                                                 config.session_id, error
@@ -582,20 +586,20 @@ pub fn run() {
                                                     "Headless",
                                                     None,
                                                 );
-                                                restored_agent_without_process(
+                                                (restored_agent_without_process(
                                                     config.clone(),
                                                     "Headless",
                                                     String::new(),
                                                     None,
                                                     last_born,
-                                                )
+                                                ), false)
                                             } else {
                                                 let _ = wardian_core::db::update_agent_status(
                                                     &config.session_id,
                                                     "Error",
                                                     None,
                                                 );
-                                                restored_agent_without_process(
+                                                (restored_agent_without_process(
                                                     config.clone(),
                                                     "Error",
                                                     format!(
@@ -604,12 +608,18 @@ pub fn run() {
                                                     ),
                                                     None,
                                                     last_born,
-                                                )
+                                                ), false)
                                             }
                                         }
                                     };
                                     let state = app_handle.state::<AppState>();
-                                    let status = publication.publish(&state, agent).await;
+                                    let status = if spawned {
+                                        publication
+                                            .publish_spawned(&state, agent, publication_disposition)
+                                            .await
+                                    } else {
+                                        publication.publish(&state, agent).await
+                                    };
                                     manager::publish_agent_status(
                                         &app_handle,
                                         &config.session_id,

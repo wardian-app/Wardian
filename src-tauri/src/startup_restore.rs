@@ -83,6 +83,19 @@ impl RestorePublication {
         agents.insert(session_id, agent);
         status
     }
+
+    /// A spawned provider is committed only after its exact runtime enters the
+    /// roster. Dropping this future during publication marks the watcher failed.
+    pub(crate) async fn publish_spawned(
+        &self,
+        state: &AppState,
+        agent: ActiveAgent,
+        mut disposition: crate::manager::SpawnPublicationDisposition,
+    ) -> Arc<Mutex<String>> {
+        let status = self.publish(state, agent).await;
+        disposition.commit();
+        status
+    }
 }
 
 /// Persist the current roster once startup's publications have completed.

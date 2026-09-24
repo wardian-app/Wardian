@@ -6,6 +6,56 @@ use tauri::Manager;
 use wardian_core::models::{AgentConfig, AgentSessionPersistenceOverride, ProviderConfig};
 
 #[tokio::test]
+async fn cancelled_startup_restore_publication_marks_spawn_failed_and_keeps_placeholder() {
+    let state = std::sync::Arc::new(AppState::new());
+    let config = AgentConfig {
+        session_id: uuid::Uuid::new_v4().to_string(),
+        provider: "mock".into(),
+        ..Default::default()
+    };
+    let publication = RestorePublication::begin(&state, &config.session_id)
+        .await
+        .expect("restore claim");
+    publication
+        .publish(
+            &state,
+            crate::restored_agent_without_process(
+                config.clone(),
+                "Restoring",
+                String::new(),
+                None,
+                None,
+            ),
+        )
+        .await;
+    let roster_lock = state.agents.lock().await;
+    let disposition = crate::manager::SpawnPublicationDisposition::new();
+    let failed = disposition.failure_signal();
+    let mut spawned = crate::restored_agent_without_process(
+        config.clone(),
+        "Starting",
+        String::new(),
+        None,
+        None,
+    );
+    spawned.runtime_generation = Some(7);
+    let task_state = state.clone();
+    let (ready, received) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        ready.send(()).unwrap();
+        publication
+            .publish_spawned(&task_state, spawned, disposition)
+            .await;
+    });
+    received.await.expect("restore publication started");
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(failed.load(std::sync::atomic::Ordering::Acquire));
+    assert!(roster_lock[&config.session_id].runtime_generation.is_none());
+}
+
+#[tokio::test]
 async fn failed_restore_exposes_provider_error_to_late_terminal_presentations() {
     use crate::state::terminal_session::{TerminalClientIdentity, TerminalRuntimeHandles};
     use wardian_core::models::*;

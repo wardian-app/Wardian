@@ -1,6 +1,6 @@
 //! Retained lifecycle cleanup with fake children; no provider processes run.
 use super::super::tests::make_test_agent;
-use super::{stop_native_owner, PendingRuntime};
+use super::{stop_native_owner, stop_native_owner_with_before_capture, PendingRuntime};
 use crate::delivery::{codex_shared::CodexSharedOwner, native_broker::NativeSessionSpec};
 use crate::manager::codex_stop::{await_quiescent, retry_stop};
 use crate::state::terminal_session::{
@@ -121,6 +121,34 @@ impl Drop for Fixture {
             None => std::env::remove_var("WARDIAN_HOME"),
         }
     }
+}
+
+#[tokio::test]
+async fn codex_stop_preflight_error_does_not_install_hold_or_detach_runtime() {
+    let _environment = crate::utils::wardian_test_env_lock_async().await;
+    let fixture = Fixture::new();
+    let id = "invalid/agent-id";
+    let child = Arc::new(ChildState::default());
+    let state = AppState::new();
+    state
+        .agents
+        .lock()
+        .await
+        .insert(id.into(), fixture.runtime(id, &child));
+    let callback_ran = AtomicBool::new(false);
+
+    let error = stop_native_owner_with_before_capture(&state, id, false, |_| {
+        callback_ran.store(true, Ordering::SeqCst);
+        Ok(())
+    })
+    .await
+    .unwrap_err();
+    assert!(error.contains("one complete agent ID"), "{error}");
+    assert!(!callback_ran.load(Ordering::SeqCst));
+    let agents = state.agents.lock().await;
+    assert!(agents[id].child_process.is_some());
+    assert_eq!(agents[id].runtime_generation, Some(7));
+    assert_eq!(child.kills.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

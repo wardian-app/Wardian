@@ -19,6 +19,18 @@ fn roster_without_session(configs: &[AgentConfig], session_id: &str) -> Vec<Agen
         .collect()
 }
 
+#[test]
+fn cancelled_registration_marks_publication_failed_without_overriding_commit() {
+    let pending = Arc::new(crate::manager::RegistrationPublicationState::default());
+    drop(super::RegistrationPublicationAttempt(pending.clone()));
+    assert!(pending.is_failed());
+
+    let committed = Arc::new(crate::manager::RegistrationPublicationState::default());
+    committed.commit();
+    drop(super::RegistrationPublicationAttempt(committed.clone()));
+    assert!(!committed.is_failed());
+}
+
 #[derive(Debug, Clone)]
 struct FakeChild {
     exited: Arc<AtomicBool>,

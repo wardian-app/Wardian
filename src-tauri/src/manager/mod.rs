@@ -30,8 +30,11 @@ pub(crate) use opencode::opencode_last_assistant_text;
 pub(crate) use session_identity::{
     apply_provider_identity, validate_config_for_launch, validate_session_values_for_launch,
 };
-pub(crate) use spawn::spawn_agent_provisionally;
-pub use spawn::{resize_pty, spawn_agent};
+pub use spawn::{resize_pty, spawn_agent, spawn_agent_with_lease};
+pub(crate) use spawn::{
+    spawn_agent_for_registration, spawn_agent_provisionally, RegistrationPublicationState,
+    SpawnPublicationDisposition,
+};
 pub use telemetry::{get_all_metrics, get_app_metrics};
 
 pub use crate::utils::fs::*;

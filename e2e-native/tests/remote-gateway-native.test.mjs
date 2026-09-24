@@ -12,7 +12,10 @@ import {
   createNativeHarness,
   ensureNativeAppBuilt,
   prepareIsolatedHome,
+  readTauriEventCapture,
   startNativeSession,
+  startTauriEventCapture,
+  stopTauriEventCapture,
   waitForAppShell,
 } from "../lib/harness.mjs";
 import {
@@ -523,6 +526,7 @@ test("remote gateway authenticates broker ownership transitions across desktop a
   await waitForAppShell(session.driver, 20000);
   await waitForGateway(baseUrl);
   await assertStatusStreamClosesWithoutTicket(baseUrl, canonicalOrigin, gatewayPort);
+  const mockEvents = await startTauriEventCapture(session.driver, "agent-json-event");
 
   const shell = await fetch(`${baseUrl}/remote`);
   assert.equal(shell.status, 200);
@@ -1028,6 +1032,29 @@ test("remote gateway authenticates broker ownership transitions across desktop a
   }));
   const remoteFallbackAck = await inbox.next((message) => message.type === "activation_ack");
   assert.equal(remoteFallbackAck.result.broker_state.owner_presentation_id, remotePresentationId);
+
+  // This test exercises runtime replacement after provider bootstrap. A mock
+  // Init must be parsed and identity-validated before the old runtime is torn
+  // down; a persisted Idle label is not provider readiness evidence.
+  try {
+    await waitFor("validated mock Init before remote resume", 10_000, async () => {
+      const events = await readTauriEventCapture(session.driver, mockEvents);
+      const init = events.find((event) => event.session_id === sessionId
+        && event.data?.type === "init"
+        && event.data.session_id === providerSessionId);
+      return { ok: Boolean(init), observed_events: events.length };
+    });
+  } finally {
+    await stopTauriEventCapture(session.driver, mockEvents);
+  }
+  const leasePath = path.join(harness.isolatedHome, "runtime", "conversation-leases.json");
+  await waitFor("published mock startup lease release before remote resume", 10_000, async () => {
+    const leases = JSON.parse(fs.readFileSync(leasePath, "utf8")).leases;
+    const pending = leases.find((lease) => lease.agent_id === sessionId
+      && lease.resume_session === providerSessionId
+      && lease.owner_kind === "provider_spawn");
+    return { ok: !pending, pending_owner: pending?.owner_kind ?? null };
+  });
 
   await invokeTauri(session.driver, "debug_remove_agent_input_sender", {
     sessionId,
