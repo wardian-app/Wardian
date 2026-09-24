@@ -113,6 +113,41 @@ fn default_schema() -> u8 {
     1
 }
 
+fn validate_lease(lease: &ConversationLease, index: usize) -> Result<(), String> {
+    for (field, value) in [
+        ("agent_id", lease.agent_id.as_str()),
+        ("provider", lease.provider.as_str()),
+        ("owner_kind", lease.owner_kind.as_str()),
+        ("owner_id", lease.owner_id.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(format!("conversation lease {index} has empty {field}"));
+        }
+    }
+    if !matches!(
+        lease.mode.as_str(),
+        "background_resume" | "background_fresh" | "lifecycle_transition"
+    ) {
+        return Err(format!("conversation lease {index} has unknown mode"));
+    }
+    if lease.mode == "background_resume" && lease.resume_session.trim().is_empty() {
+        return Err(format!(
+            "conversation lease {index} has empty resume_session"
+        ));
+    }
+    for (field, value) in [
+        ("started_at", lease.started_at.as_str()),
+        ("heartbeat_at", lease.heartbeat_at.as_str()),
+        ("expires_at", lease.expires_at.as_str()),
+    ] {
+        if parse_rfc3339_utc(value).is_none() {
+            return Err(format!("conversation lease {index} has invalid {field}"));
+        }
+    }
+    // Legacy leases have no acquisition_id, but still exclude by agent and expiry.
+    Ok(())
+}
+
 pub fn find_active_conflict<'a>(
     leases: &'a [ConversationLease],
     agent_id: &str,
@@ -215,15 +250,32 @@ fn acquire_lease_file_lock() -> Result<ConversationLeaseFileLock, String> {
 }
 
 pub fn load_leases() -> Vec<ConversationLease> {
+    load_leases_checked().unwrap_or_default()
+}
+
+/// Loads persisted leases without treating unreadable or malformed ownership
+/// state as an empty lease set. Startup recovery must fail closed on errors.
+pub fn load_leases_checked() -> Result<Vec<ConversationLease>, String> {
     let Some(path) = lease_path() else {
-        return Vec::new();
+        return Err("failed to resolve conversation lease path".to_string());
     };
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return Vec::new();
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("failed to read conversation leases: {error}")),
     };
-    serde_json::from_str::<ConversationLeaseFile>(&content)
-        .map(|file| file.leases)
-        .unwrap_or_default()
+    let file = serde_json::from_str::<ConversationLeaseFile>(&content)
+        .map_err(|error| format!("failed to parse conversation leases: {error}"))?;
+    if file.schema != default_schema() {
+        return Err(format!(
+            "unsupported conversation lease schema {}",
+            file.schema
+        ));
+    }
+    for (index, lease) in file.leases.iter().enumerate() {
+        validate_lease(lease, index)?;
+    }
+    Ok(file.leases)
 }
 
 pub fn save_leases(leases: &[ConversationLease]) -> std::io::Result<()> {
@@ -251,11 +303,12 @@ pub fn try_acquire_lease(
     if lease.acquisition_id.trim().is_empty() {
         return Err("conversation lease acquisition id is required".to_string());
     }
+    validate_lease(&lease, 0)?;
     let _process_guard = LEASE_FILE_LOCK
         .lock()
         .map_err(|_| "conversation lease lock poisoned".to_string())?;
     let _file_guard = acquire_lease_file_lock()?;
-    let mut leases = load_leases();
+    let mut leases = load_leases_checked()?;
     if let Some(conflict) =
         find_active_conflict(&leases, &lease.agent_id, &lease.resume_session, now_rfc3339)
     {
@@ -284,7 +337,7 @@ pub fn release_owner_persisted(owner_kind: &str, owner_id: &str) -> Result<(), S
         .lock()
         .map_err(|_| "conversation lease lock poisoned".to_string())?;
     let _file_guard = acquire_lease_file_lock()?;
-    let mut leases = load_leases();
+    let mut leases = load_leases_checked()?;
     release_owner(&mut leases, owner_kind, owner_id);
     save_leases(&leases)
         .map_err(|error| format!("failed to save conversation lease release: {error}"))
@@ -298,7 +351,7 @@ pub fn release_lease_owner_persisted(owner: &ConversationLeaseOwner) -> Result<(
         .lock()
         .map_err(|_| "conversation lease lock poisoned".to_string())?;
     let _file_guard = acquire_lease_file_lock()?;
-    let mut leases = load_leases();
+    let mut leases = load_leases_checked()?;
     release_lease_owner(&mut leases, owner);
     save_leases(&leases)
         .map_err(|error| format!("failed to save conversation lease release: {error}"))
@@ -334,12 +387,16 @@ pub fn renew_lease_owner_persisted(
     heartbeat_at: &str,
     expires_at: &str,
 ) -> Result<bool, String> {
-    let now = parse_rfc3339_utc(heartbeat_at).unwrap_or_else(chrono::Utc::now);
+    let now = parse_rfc3339_utc(heartbeat_at)
+        .ok_or_else(|| "invalid conversation lease heartbeat_at".to_string())?;
+    if parse_rfc3339_utc(expires_at).is_none() {
+        return Err("invalid conversation lease expires_at".to_string());
+    }
     let _process_guard = LEASE_FILE_LOCK
         .lock()
         .map_err(|_| "conversation lease lock poisoned".to_string())?;
     let _file_guard = acquire_lease_file_lock()?;
-    let mut leases = load_leases();
+    let mut leases = load_leases_checked()?;
     let Some(lease) = leases
         .iter_mut()
         .find(|lease| lease_matches_owner(lease, owner))
@@ -605,5 +662,110 @@ mod tests {
 
         assert!(load_leases().is_empty());
         std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn malformed_lease_store_blocks_acquisition_without_overwriting_it() {
+        let _guard = crate::tests::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        std::env::set_var("WARDIAN_HOME", dir.path());
+        let path = lease_path().expect("isolated lease path");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "not json").unwrap();
+
+        assert!(load_leases_checked().is_err());
+        assert!(try_acquire_lease(lease("agent-1", "resume-1"), "2026-06-01T00:05:00Z").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json");
+
+        match previous_home {
+            Some(home) => std::env::set_var("WARDIAN_HOME", home),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+    }
+
+    #[test]
+    fn semantically_invalid_lease_store_blocks_acquisition_without_overwriting_it() {
+        let _guard = crate::tests::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        std::env::set_var("WARDIAN_HOME", dir.path());
+        let path = lease_path().expect("isolated lease path");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        for (field, bad_value) in [
+            ("agent_id", " "),
+            ("provider", ""),
+            ("resume_session", ""),
+            ("owner_kind", ""),
+            ("owner_id", ""),
+            ("mode", "unknown"),
+            ("started_at", "not-a-date"),
+            ("heartbeat_at", "not-a-date"),
+            ("expires_at", "not-a-date"),
+        ] {
+            let mut file = serde_json::to_value(ConversationLeaseFile {
+                schema: 1,
+                leases: vec![lease("agent-1", "resume-1")],
+            })
+            .unwrap();
+            file["leases"][0][field] = serde_json::Value::String(bad_value.to_string());
+            let body = serde_json::to_string(&file).unwrap();
+            std::fs::write(&path, &body).unwrap();
+
+            let error = load_leases_checked().expect_err("invalid lease must fail closed");
+            assert!(error.contains(field), "{error}");
+            assert!(
+                try_acquire_lease(lease("agent-1", "resume-1"), "2026-06-01T00:05:00Z").is_err(),
+                "invalid {field} must block acquisition"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+        }
+
+        let body = serde_json::to_string(&ConversationLeaseFile {
+            schema: 2,
+            leases: vec![lease("agent-1", "resume-1")],
+        })
+        .unwrap();
+        std::fs::write(&path, &body).unwrap();
+        assert!(load_leases_checked().unwrap_err().contains("schema"));
+        assert!(try_acquire_lease(lease("agent-1", "resume-1"), "2026-06-01T00:05:00Z").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+
+        match previous_home {
+            Some(home) => std::env::set_var("WARDIAN_HOME", home),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+    }
+
+    #[test]
+    fn legacy_lease_without_acquisition_id_still_excludes_a_second_owner() {
+        let _guard = crate::tests::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        std::env::set_var("WARDIAN_HOME", dir.path());
+        let path = lease_path().expect("isolated lease path");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut file = serde_json::to_value(ConversationLeaseFile {
+            schema: 1,
+            leases: vec![lease("agent-1", "resume-1")],
+        })
+        .unwrap();
+        file["leases"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("acquisition_id");
+        std::fs::write(&path, serde_json::to_string(&file).unwrap()).unwrap();
+
+        assert_eq!(load_leases_checked().unwrap()[0].acquisition_id, "");
+        assert!(matches!(
+            try_acquire_lease(lease("agent-1", "resume-2"), "2026-06-01T00:05:00Z"),
+            Ok(ConversationLeaseAcquireOutcome::Conflict(_))
+        ));
+
+        match previous_home {
+            Some(home) => std::env::set_var("WARDIAN_HOME", home),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
     }
 }

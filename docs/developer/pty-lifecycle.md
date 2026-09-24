@@ -23,7 +23,9 @@ To prevent orphaned provider and console-host processes when Wardian crashes or 
 
 Per-agent process-tree termination is still used for normal UI actions such as kill, pause, resume, and clear. Per-agent Job Objects are only a fallback if app-level supervision cannot be installed, because post-spawn assignment is inherently less reliable than inheriting the app-level job at creation time.
 
-At startup, Wardian also sweeps stale persisted interactive sessions before restoring agents. This catches process trees from older builds or from environments where Windows refused app-level job assignment. The sweep uses Wardian session command-line markers and `WARDIAN_SESSION_ID` environment markers, and skips agents that are off or database-marked as headless.
+At startup, Wardian restores an agent as headless only while an unexpired background execution lease protects its conversation. Before an interactive provider spawn, it checks persisted leases under the cross-process lease lock and acquires a lifecycle transition lease. Unreadable or semantically invalid lease data blocks that spawn until inspected. A persisted headless status or `WARDIAN_SESSION_ID` marker alone does not establish a live provider: descendants such as a marked Python server must not prevent restore.
+
+Startup recovery does not automatically kill persisted process trees on Windows, Linux, or macOS. A live process that appears to invoke the same provider with the saved session marker is ambiguous without a proven launch identity; Wardian holds recovery for manual inspection instead of killing it or starting a second provider. Process metadata may be unavailable on some hosts; the scan is best-effort and an empty result cannot prove that no provider exists. Windows Job Object cleanup when the app exits and termination of a provider owned by the current runtime remain separate lifecycle operations.
 
 ## 🔁 Spawning Lifecycle
 Spawning an agent follows a deterministic sequence in `manager::spawn_agent`:

@@ -412,7 +412,7 @@ pub fn update_agent_status_with_conn(
         .optional()?;
     let (last_status, last_pid) = current.unwrap_or((None, None));
 
-    let should_clear_pid = pid.is_none() && status == "Off";
+    let should_clear_pid = pid.is_none() && matches!(status, "Off" | "Headless");
     let pid_changed = pid
         .map(i64::from)
         .is_some_and(|next_pid| Some(next_pid) != last_pid);
@@ -1979,6 +1979,36 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.last_status.as_deref(), Some("Off"));
+        assert_eq!(row.last_pid, None);
+    }
+
+    #[test]
+    fn headless_status_without_verified_pid_clears_stale_pid() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        upsert_agent_with_conn(
+            &conn,
+            &AgentUpsert {
+                session_id: "uuid-1",
+                session_name: "coder-a1",
+                description: "",
+                agent_class: "Coder",
+                provider: "codex",
+                workspace: None,
+                project: None,
+                is_off: false,
+                created_at: None,
+            },
+        )
+        .unwrap();
+
+        update_agent_status_with_conn(&conn, "uuid-1", "Processing...", Some(123)).unwrap();
+        update_agent_status_with_conn(&conn, "uuid-1", "Headless", None).unwrap();
+
+        let row = get_agent_by_session_id_with_conn(&conn, "uuid-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.last_status.as_deref(), Some("Headless"));
         assert_eq!(row.last_pid, None);
     }
 

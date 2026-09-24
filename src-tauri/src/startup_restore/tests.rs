@@ -407,3 +407,79 @@ async fn final_persistence_releases_maps_while_a_durable_writer_is_active() {
         AgentSessionPersistenceOverride::Fresh
     );
 }
+
+#[test]
+fn orphan_session_marker_without_execution_lease_does_not_suppress_restore() {
+    let config = AgentConfig {
+        session_id: "agent-1".into(),
+        provider: "codex".into(),
+        resume_session: Some("resume-1".into()),
+        ..Default::default()
+    };
+    let persisted_status = "Headless";
+    let leases = Vec::new();
+
+    assert_eq!(persisted_status, "Headless");
+    assert!(!super::has_active_headless_execution_lease(
+        &config,
+        &leases,
+        "2026-09-23T12:00:00Z"
+    ));
+}
+
+#[test]
+fn active_background_execution_lease_is_recognized_across_processes() {
+    let config = AgentConfig {
+        session_id: "agent-1".into(),
+        provider: "codex".into(),
+        resume_session: Some("resume-1".into()),
+        ..Default::default()
+    };
+    let leases = vec![wardian_core::conversation_lease::ConversationLease {
+        agent_id: "agent-1".into(),
+        provider: "codex".into(),
+        resume_session: "resume-1".into(),
+        owner_kind: "automation_run".into(),
+        owner_id: "run-1".into(),
+        acquisition_id: "acquisition-1".into(),
+        owner_node_id: Some("agent-1".into()),
+        mode: "background_resume".into(),
+        started_at: "2026-09-23T11:00:00Z".into(),
+        heartbeat_at: "2026-09-23T11:59:00Z".into(),
+        expires_at: "2026-09-23T12:20:00Z".into(),
+    }];
+
+    assert!(super::has_active_headless_execution_lease(
+        &config,
+        &leases,
+        "2026-09-23T12:00:00Z"
+    ));
+}
+
+#[test]
+fn expired_background_lease_does_not_claim_headless_ownership() {
+    let config = AgentConfig {
+        session_id: "agent-1".into(),
+        provider: "codex".into(),
+        resume_session: Some("resume-1".into()),
+        ..Default::default()
+    };
+    let lease = wardian_core::conversation_lease::ConversationLease {
+        agent_id: "agent-1".into(),
+        provider: "codex".into(),
+        resume_session: "resume-1".into(),
+        owner_kind: "automation_run".into(),
+        owner_id: "run-1".into(),
+        acquisition_id: "acquisition-1".into(),
+        owner_node_id: Some("agent-1".into()),
+        mode: "background_resume".into(),
+        started_at: "2026-09-23T11:00:00Z".into(),
+        heartbeat_at: "2026-09-23T11:30:00Z".into(),
+        expires_at: "2026-09-23T11:59:00Z".into(),
+    };
+    assert!(!super::has_active_headless_execution_lease(
+        &config,
+        &[lease],
+        "2026-09-23T12:00:00Z"
+    ));
+}

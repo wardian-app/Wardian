@@ -107,41 +107,27 @@ fn restored_agent_without_process(
     }
 }
 
-pub async fn reconcile_headless_agents() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    use sysinfo::System;
-
-    // Only process environment blocks are needed here; a full refresh_all()
-    // would also sample CPU, memory, and command lines for every process.
-    let mut sys = System::new();
-    sys.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::All,
-        true,
-        sysinfo::ProcessRefreshKind::nothing().with_environ(sysinfo::UpdateKind::OnlyIfNotSet),
-    );
-
-    // Index WARDIAN_SESSION_ID values in one pass instead of rescanning every
-    // process's environment once per agent.
-    let mut session_pids: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    for process in sys.processes().values() {
-        for env_var in process.environ() {
-            let env_str = env_var.to_string_lossy();
-            if let Some(session_id) = env_str.strip_prefix("WARDIAN_SESSION_ID=") {
-                session_pids.insert(session_id.trim().to_string(), process.pid().as_u32());
-            }
-        }
-    }
-
+pub async fn reconcile_headless_agents(
+    leases: &[wardian_core::conversation_lease::ConversationLease],
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let lease_now = chrono::Utc::now().to_rfc3339();
     let agents = wardian_core::db::get_all_agents()?;
     for agent in agents {
         if agent.is_off {
             continue;
         }
 
-        if let Some(pid) = session_pids.get(&agent.session_id) {
-            let _ =
-                wardian_core::db::update_agent_status(&agent.session_id, "Headless", Some(*pid));
-        } else if agent.last_status.as_deref() != Some("Off") {
-            let _ = wardian_core::db::update_agent_status(&agent.session_id, "Off", None);
+        if wardian_core::conversation_lease::find_active_execution_conflict(
+            leases,
+            &agent.session_id,
+            "",
+            &lease_now,
+        )
+        .is_some()
+        {
+            wardian_core::db::update_agent_status(&agent.session_id, "Headless", None)?;
+        } else if agent.last_status.as_deref() != Some("Off") || agent.last_pid.is_some() {
+            wardian_core::db::update_agent_status(&agent.session_id, "Off", None)?;
         }
     }
     Ok(())
@@ -397,11 +383,20 @@ pub fn run() {
 
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
-                #[cfg(windows)]
-                manager::cleanup_stale_persisted_session_processes();
+                let startup_leases = wardian_core::conversation_lease::load_leases_checked();
 
-                if let Err(e) = reconcile_headless_agents().await {
-                    eprintln!("Failed to reconcile headless agents: {}", e);
+                match &startup_leases {
+                    Ok(leases) => {
+                        if let Err(error) = reconcile_headless_agents(leases).await {
+                            eprintln!("Failed to reconcile headless agents: {}", error);
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "Failed to verify conversation ownership during startup recovery: {}",
+                            error
+                        );
+                    }
                 }
                 crate::automation::schedule::start_scheduler(app_handle.clone()).await;
                 crate::automation::listener::start(app_handle.clone()).await;
@@ -413,20 +408,16 @@ pub fn run() {
                             let mut seen_names = std::collections::HashSet::new();
                             // Fetch latest status from DB for all agents
                             let db_agents = wardian_core::db::get_all_agents().unwrap_or_default();
-                            type DbStatus = (Option<String>, Option<u32>, Option<String>);
-                            let db_status_map: std::collections::HashMap<String, DbStatus> =
+                            let db_created_at_map: std::collections::HashMap<String, Option<String>> =
                                 db_agents
                                     .into_iter()
-                                    .map(|a| {
-                                        (a.session_id, (a.last_status, a.last_pid, a.created_at))
-                                    })
+                                    .map(|agent| (agent.session_id, agent.created_at))
                                     .collect();
 
                             // Pass 1: prepare every config and publish the full roster
-                            // immediately. Headless agents are final; PTY agents appear
-                            // as inert "Restoring" placeholders so the watchlist shows
-                            // the complete list instead of agents streaming in one by
-                            // one as each provider spawn completes.
+                            // immediately. Saved agents appear as inert "Restoring"
+                            // placeholders until the provider-spawn boundary makes a
+                            // fresh cross-process ownership decision.
                             type PendingSpawn = (
                                 startup_restore::RestorePublication,
                                 AgentConfig,
@@ -506,35 +497,30 @@ pub fn run() {
                                     ).await;
                                     continue;
                                 }
-                                let (last_status, last_pid, last_born) = db_status_map
+                                let last_born = db_created_at_map
                                     .get(&config.session_id)
                                     .cloned()
-                                    .unwrap_or((None, None, None));
+                                    .flatten();
 
-                                if last_status.as_deref() == Some("Headless") {
-                                    let agent = restored_agent_without_process(
-                                        config.clone(),
-                                        "Headless",
-                                        String::new(),
-                                        last_pid,
-                                        last_born,
-                                    );
-                                    publish_restored_agent(
-                                        &app_handle, &publication, &config.session_id, agent,
-                                    ).await;
-                                } else {
-                                    let placeholder = restored_agent_without_process(
-                                        config.clone(),
-                                        "Restoring",
-                                        String::new(),
-                                        None,
-                                        last_born.clone(),
-                                    );
-                                    publish_restored_agent(
-                                        &app_handle, &publication, &config.session_id, placeholder,
-                                    ).await;
-                                    pending_spawns.push((publication, config, last_born));
-                                }
+                                let placeholder = restored_agent_without_process(
+                                    config.clone(),
+                                    "Restoring",
+                                    String::new(),
+                                    None,
+                                    last_born.clone(),
+                                );
+                                publish_restored_agent(
+                                    &app_handle,
+                                    &publication,
+                                    &config.session_id,
+                                    placeholder,
+                                )
+                                .await;
+                                // The immutable startup lease snapshot is used
+                                // for DB reconciliation only. Restore ownership
+                                // is decided atomically at the provider-spawn
+                                // boundary, after this roster pass completes.
+                                pending_spawns.push((publication, config, last_born));
                             }
 
                             // Pass 2: spawn PTY agents with bounded concurrency,
@@ -581,21 +567,45 @@ pub fn run() {
                                                 "[Wardian] Failed to restore agent {}: {}",
                                                 config.session_id, error
                                             ));
-                                            let _ = wardian_core::db::update_agent_status(
-                                                &config.session_id,
-                                                "Error",
-                                                None,
-                                            );
-                                            restored_agent_without_process(
-                                                config.clone(),
-                                                "Error",
-                                                format!(
-                                                    "Wardian could not restore this agent because its provider could not be launched.\r\n{}\r\n",
-                                                    error
-                                                ),
-                                                None,
-                                                last_born,
-                                            )
+                                            let current_leases = wardian_core::conversation_lease::load_leases_checked();
+                                            let lease_now = chrono::Utc::now().to_rfc3339();
+                                            let active_headless = current_leases.as_ref().is_ok_and(|leases| {
+                                                startup_restore::has_active_headless_execution_lease(
+                                                    &config,
+                                                    leases,
+                                                    &lease_now,
+                                                )
+                                            });
+                                            if active_headless {
+                                                let _ = wardian_core::db::update_agent_status(
+                                                    &config.session_id,
+                                                    "Headless",
+                                                    None,
+                                                );
+                                                restored_agent_without_process(
+                                                    config.clone(),
+                                                    "Headless",
+                                                    String::new(),
+                                                    None,
+                                                    last_born,
+                                                )
+                                            } else {
+                                                let _ = wardian_core::db::update_agent_status(
+                                                    &config.session_id,
+                                                    "Error",
+                                                    None,
+                                                );
+                                                restored_agent_without_process(
+                                                    config.clone(),
+                                                    "Error",
+                                                    format!(
+                                                        "Wardian withheld provider restore to avoid a duplicate writer.\r\n{}\r\n",
+                                                        error
+                                                    ),
+                                                    None,
+                                                    last_born,
+                                                )
+                                            }
                                         }
                                     };
                                     let state = app_handle.state::<AppState>();

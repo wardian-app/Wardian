@@ -40,7 +40,7 @@ pub use crate::utils::process::new_headless_command;
 #[cfg(windows)]
 pub use crate::utils::process::{
     app_process_supervisor_active, assign_pid_to_job, create_kill_on_close_job,
-    find_wardian_session_process_roots, force_kill_process_tree,
+    force_kill_process_tree,
 };
 pub use crate::utils::shell::build_program_launch;
 
@@ -54,106 +54,6 @@ use wardian_core::conversations::write_json_atomic;
 use wardian_core::models::{AgentConfig, AgentEvent};
 pub(crate) fn session_bootstrap_prompt() -> &'static str {
     "Introduce yourself"
-}
-
-#[cfg(windows)]
-pub(crate) fn cleanup_stale_session_processes(session_id: &str, provider: &str) {
-    let mut attempted = std::collections::BTreeSet::new();
-    for _ in 0..2 {
-        let roots = find_wardian_session_process_roots(session_id, Some(std::process::id()));
-        let pending = roots
-            .into_iter()
-            .filter(|pid| attempted.insert(*pid))
-            .collect::<Vec<_>>();
-        if pending.is_empty() {
-            break;
-        }
-
-        for pid in pending {
-            log_debug(&format!(
-                "[Wardian] Cleaning stale {} process tree for session {} via PID {}",
-                provider, session_id, pid
-            ));
-            if let Err(err) = force_kill_process_tree(pid) {
-                log_debug(&format!(
-                    "[Wardian] Failed to clean stale process tree for session {} via PID {}: {}",
-                    session_id, pid, err
-                ));
-            }
-        }
-    }
-}
-
-#[cfg(windows)]
-pub(crate) fn cleanup_stale_persisted_session_processes() {
-    let Some(app_dir) = get_wardian_home() else {
-        return;
-    };
-    let state_path = app_dir.join("settings/state.json");
-    let Ok(data) = std::fs::read_to_string(state_path) else {
-        return;
-    };
-    let Ok(configs) = serde_json::from_str::<Vec<AgentConfig>>(&data) else {
-        return;
-    };
-
-    let db_status_map = wardian_core::db::get_all_agents()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|agent| (agent.session_id, agent.last_status))
-        .collect::<std::collections::HashMap<_, _>>();
-
-    let sessions: Vec<(String, String)> = configs
-        .into_iter()
-        .filter(|config| {
-            !config.is_off
-                && db_status_map
-                    .get(&config.session_id)
-                    .and_then(|status| status.as_deref())
-                    != Some("Headless")
-        })
-        .map(|config| (config.session_id, config.provider))
-        .collect();
-    if sessions.is_empty() {
-        return;
-    }
-
-    // One system scan covers all sessions; scanning per session reads every
-    // process's environment block once per agent and dominates startup time.
-    let session_ids: Vec<String> = sessions.iter().map(|(id, _)| id.clone()).collect();
-    let mut attempted = std::collections::BTreeSet::new();
-    for _ in 0..2 {
-        let roots_by_session =
-            crate::utils::process::find_wardian_session_process_roots_for_sessions(
-                &session_ids,
-                Some(std::process::id()),
-            );
-        let mut killed_any = false;
-        for (session_id, provider) in &sessions {
-            for pid in roots_by_session
-                .get(session_id)
-                .into_iter()
-                .flatten()
-                .copied()
-                .filter(|pid| attempted.insert(*pid))
-            {
-                killed_any = true;
-                log_debug(&format!(
-                    "[Wardian] Cleaning stale {} process tree for session {} via PID {}",
-                    provider, session_id, pid
-                ));
-                if let Err(err) = force_kill_process_tree(pid) {
-                    log_debug(&format!(
-                        "[Wardian] Failed to clean stale process tree for session {} via PID {}: {}",
-                        session_id, pid, err
-                    ));
-                }
-            }
-        }
-        if !killed_any {
-            break;
-        }
-    }
 }
 
 pub fn terminate_active_agent_process(agent: &mut ActiveAgent) {
