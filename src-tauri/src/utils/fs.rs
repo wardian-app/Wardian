@@ -153,15 +153,16 @@ pub fn append_habitat_memory_instructions(
 pub fn wardian_memory_instructions(startup_brief: Option<&str>) -> String {
     let mut content = String::from(
         "## Wardian memory\nSource: Wardian runtime\n\n\
-Use `wardian memory save` for clear durable preferences, decisions, corrections, lessons, current project state, and explicit requests to remember. \
+Use `wardian memory save` for clear durable context and explicit requests to remember. The default kind is stable: save enduring preferences, project conventions, decisions, corrections, and lessons expected to remain useful beyond active work. \
+Use `--kind current` only for a meaningful active project checkpoint that materially improves next-session resumption, such as what is in progress, pending or blocked, or the next action. Routine progress reports and task journals belong in task/conversation records, not memory. Keep project-specific checkpoints in workspace scope. \
 Classify scope before every save. Use workspace scope for project-specific context. If the user says a preference or convention applies across every project, globally, or wherever this agent works, you MUST pass `--scope agent`; never omit that flag for cross-project memory. \
-Always include a durable evidence excerpt. Do not save ambiguous or transient chatter. \
-Before finishing every user task, independently check whether the user established or corrected durable context worth carrying into a future session; save it without waiting for an explicit request when the evidence is clear. \
-In particular, save a clear preference, project convention, decision, correction, or ongoing state stated inside an ordinary task even when the task is brief and the user never says remember or save. \
+Always include the shortest durable evidence excerpt that supports the saved detail; for a current checkpoint, capture its latest state. Do not save ambiguous or transient chatter. \
+Before finishing every user task, independently check whether the user established or corrected durable context or whether a meaningful active checkpoint is worth carrying into a future session; save it without waiting for an explicit request when the evidence is clear. \
+In particular, save a clear preference, project convention, decision, correction, or lesson stated inside an ordinary task as stable, and save useful in-progress state as current, even when the task is brief and the user never says remember or save. \
 This retention check is a required end-of-task step: complete it before the final answer and do not defer it to another turn. \
 The basic commands are `wardian memory save \"<normalized memory>\" --evidence \"<short durable excerpt>\"`, `wardian memory list`, and `wardian memory update <memory-id> \"<replacement>\" --evidence \"<new excerpt>\"`; add `--scope agent` only for cross-project memory. These instructions are sufficient for ordinary retention, so do not open a skill merely to discover the command syntax. \
 Prefer a small number of high-value memories over logging the conversation. \
-When durable context replaces an earlier memory, inspect the relevant active memories and update or remove the older record instead of preserving contradictory active facts. \
+When a current checkpoint's state changes, replace it with the new state; remove it when resolved so stale checkpoints do not persist. When durable context replaces an earlier memory, inspect the relevant active memories and update or remove the older record instead of preserving contradictory active facts. \
 Do not say memory was saved unless the command succeeds. Conversation logging and memory retention are independent.\n",
     );
     if let Some(brief) = startup_brief.filter(|brief| !brief.trim().is_empty()) {
@@ -2058,7 +2059,8 @@ mod tests {
         prepare_provider_habitat, project_antigravity_include_directories,
         projected_link_matches_target, provider_uses_projected_workspace,
         resolve_opencode_runtime_roots, resolve_system_include_directories, sync_codex_agent_home,
-        sync_codex_home_indexes_from, sync_opencode_config_dir, write_habitat_instruction_files,
+        sync_codex_home_indexes_from, sync_opencode_config_dir, wardian_memory_instructions,
+        write_habitat_instruction_files,
     };
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2091,14 +2093,30 @@ mod tests {
         let root = unique_temp_dir("memory-instructions");
         std::fs::create_dir_all(&root).expect("create habitat");
         std::fs::write(root.join("AGENTS.md"), "# Generated\n").expect("seed instructions");
+        let startup_brief = Some("# Wardian memory\n\n## Stable memory\n- Prefer metric units");
+        let runtime_instructions = wardian_memory_instructions(startup_brief);
 
-        append_habitat_memory_instructions(
-            &root,
-            Some("# Wardian memory\n\n## Stable memory\n- Prefer metric units"),
-        )
-        .expect("append memory instructions");
+        assert!(runtime_instructions.contains("The default kind is stable"));
+        assert!(runtime_instructions.contains("enduring preferences"));
+        assert!(runtime_instructions.contains("Use `--kind current`"));
+        assert!(runtime_instructions.contains("meaningful active project checkpoint"));
+        assert!(runtime_instructions.contains("materially improves next-session resumption"));
+        assert!(runtime_instructions.contains(
+            "Routine progress reports and task journals belong in task/conversation records, not memory"
+        ));
+        assert!(
+            runtime_instructions.contains("Keep project-specific checkpoints in workspace scope")
+        );
+        assert!(
+            runtime_instructions.contains("Always include the shortest durable evidence excerpt")
+        );
+        assert!(runtime_instructions.contains("state changes, replace it with the new state"));
+
+        append_habitat_memory_instructions(&root, startup_brief)
+            .expect("append memory instructions");
 
         let content = std::fs::read_to_string(root.join("AGENTS.md")).unwrap();
+        assert!(content.contains(&runtime_instructions));
         assert!(content.contains("Use `wardian memory save`"));
         assert!(content.contains("you MUST pass `--scope agent`"));
         assert!(content.contains("Before finishing every user task"));
