@@ -38,7 +38,8 @@ pub use settings::{
 mod provider_log_tests;
 mod removal;
 use agent_lifecycle::{
-    acquire_agent_lifecycle_guard, lock_agent_lifecycle, stop_native_owner, PendingRuntime,
+    acquire_agent_lifecycle_guard, lock_agent_lifecycle, stop_native_owner,
+    stop_native_owner_with_before_capture, PendingRuntime,
 };
 use agent_naming::{
     generated_agent_name, persisted_agent_session_names, resolve_requested_spawn_session_name,
@@ -304,6 +305,14 @@ impl LifecycleLeaseHeartbeat {
             }
         }
     }
+
+    async fn stop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        self.task.abort();
+        let _ = (&mut self.task).await;
+    }
 }
 
 impl Drop for LifecycleLeaseHeartbeat {
@@ -313,6 +322,43 @@ impl Drop for LifecycleLeaseHeartbeat {
         }
         self.task.abort();
     }
+}
+
+struct ReplacementSpawnLease {
+    lease: wardian_core::conversation_lease::PersistedConversationLeaseGuard,
+    unpublished_failure: Arc<AtomicBool>,
+}
+
+async fn spawn_replacement_under_lifecycle_lease(
+    app: AppHandle,
+    config: AgentConfig,
+    is_restored: bool,
+    initial_timestamp: Option<String>,
+    reservation: ReplacementSpawnLease,
+    heartbeat: &mut LifecycleLeaseHeartbeat,
+    operation: &str,
+) -> Result<ActiveAgent, String> {
+    heartbeat.ensure_active(operation)?;
+    heartbeat.stop().await;
+    manager::spawn_agent_with_lease(
+        app,
+        config,
+        is_restored,
+        initial_timestamp,
+        reservation.lease,
+        reservation.unpublished_failure,
+    )
+    .await
+}
+
+fn retain_uncertain_replacement_until_expiry(
+    unpublished_failure: &Arc<AtomicBool>,
+    error: String,
+) -> String {
+    unpublished_failure.store(true, Ordering::Release);
+    format!(
+        "{error}; replacement provider exit was not confirmed, so its transition lease remains until expiry; retry after expiry and inspection of any provider candidate"
+    )
 }
 
 fn renew_agent_lifecycle_transition_lease(
@@ -398,6 +444,38 @@ async fn acquire_agent_lifecycle_transition_lease_for_session(
     acquire_agent_lifecycle_transition_lease(&config, operation)
 }
 
+/// Preserve a possibly live old conversation before a fresh-session stop.
+/// No process-table observation here can prove provider exit, so the hold is
+/// durable and requires explicit repair after exit is verified.
+fn hold_previous_provider_before_rotation(
+    agent: &ActiveAgent,
+    lease: &wardian_core::conversation_lease::PersistedConversationLeaseGuard,
+) -> Result<Option<wardian_core::conversation_lease::ConversationLeaseOwner>, String> {
+    let config = agent.config.lock().unwrap().clone();
+    let Some(previous_session) = config
+        .resume_session
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    if !agent_has_running_process(agent) {
+        return Ok(None);
+    }
+    let owner = wardian_core::conversation_lease::hold_previous_provider_session_persisted(
+        lease.owner(),
+        &config.session_id,
+        &config.provider,
+        previous_session,
+        &chrono::Utc::now().to_rfc3339(),
+    )?;
+    manager::log_debug(&format!(
+        "[WARDIAN] Prior provider session held pending verified exit for {}: acquisition {}",
+        config.session_id, owner.acquisition_id
+    ));
+    Ok(Some(owner))
+}
+
 struct PreparedAgentClear {
     termination: ActiveAgent,
     config: AgentConfig,
@@ -465,7 +543,14 @@ fn prepare_agent_for_clear(agent: &mut ActiveAgent) -> PreparedAgentClear {
 fn restore_agent_runtime_after_aborted_clear(
     agent: &mut ActiveAgent,
     prepared: &mut PreparedAgentClear,
-) -> std::sync::Arc<std::sync::Mutex<String>> {
+) -> (std::sync::Arc<std::sync::Mutex<String>>, bool) {
+    let same_staged_runtime = Arc::ptr_eq(&agent.current_status, &prepared.status_arc)
+        && agent.runtime_generation.is_none()
+        && agent.process_id.is_none()
+        && agent.child_process.is_none();
+    let old_status = prepared.termination.current_status.clone();
+    let old_generation = prepared.termination.runtime_generation;
+    let old_pid = prepared.termination.process_id;
     agent.child_process = prepared.termination.child_process.take();
     agent.background_processes = std::mem::take(&mut prepared.termination.background_processes);
     agent.memory_capability = prepared.termination.memory_capability.take();
@@ -476,7 +561,24 @@ fn restore_agent_runtime_after_aborted_clear(
         agent.job_object = prepared.termination.job_object.take();
     }
     agent.current_status = prepared.termination.current_status.clone();
-    agent.current_status.clone()
+    let restored_same_runtime = same_staged_runtime
+        && Arc::ptr_eq(&agent.current_status, &old_status)
+        && agent.runtime_generation == old_generation
+        && agent.process_id == old_pid
+        && agent_has_running_process(agent);
+    (agent.current_status.clone(), restored_same_runtime)
+}
+
+fn release_previous_hold_after_restored_clear(
+    owner: Option<&wardian_core::conversation_lease::ConversationLeaseOwner>,
+    restored_same_runtime: bool,
+) -> Result<(), String> {
+    if restored_same_runtime {
+        if let Some(owner) = owner {
+            wardian_core::conversation_lease::release_lease_owner_persisted(owner)?;
+        }
+    }
+    Ok(())
 }
 
 fn clone_quote_custom_arg(arg: &str) -> String {
@@ -1224,13 +1326,21 @@ async fn restore_agent_status_after_failed_runtime_start(
 ) {
     let status_arc = {
         let mut agents = state.agents.lock().await;
-        agents
-            .get_mut(session_id)
-            .map(|agent| replace_agent_status_incarnation(agent, status))
+        set_agent_status_after_failed_runtime_start(&mut agents, session_id, status)
     };
     if let Some(status_arc) = status_arc {
         manager::publish_agent_status(app, session_id, &status_arc);
     }
+}
+
+fn set_agent_status_after_failed_runtime_start(
+    agents: &mut HashMap<String, ActiveAgent>,
+    session_id: &str,
+    status: &str,
+) -> Option<std::sync::Arc<std::sync::Mutex<String>>> {
+    agents
+        .get_mut(session_id)
+        .map(|agent| replace_agent_status_incarnation(agent, status))
 }
 
 #[cfg(test)]
@@ -2938,11 +3048,23 @@ pub async fn resume_agent(
         "[WARDIAN] resume_agent called for session: {}",
         session_id
     ));
-    let _lifecycle_lease =
+    let lifecycle_lease =
         acquire_agent_lifecycle_transition_lease_for_session(&state, &session_id, "resume").await?;
-    let lifecycle_heartbeat = LifecycleLeaseHeartbeat::start(_lifecycle_lease.owner().clone());
+    let mut lifecycle_heartbeat = LifecycleLeaseHeartbeat::start(lifecycle_lease.owner().clone());
     let _lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
-    stop_native_owner(&state, &session_id, false).await?;
+    lifecycle_heartbeat.ensure_active("resume")?;
+    let initial_config = lifecycle_config_for_session(&state, &session_id).await?;
+    let starts_fresh =
+        resolved_session_persistence(&initial_config) == AgentSessionPersistence::Fresh;
+    let codex_stops_before_preflight = starts_fresh && initial_config.provider == "codex";
+    if codex_stops_before_preflight {
+        stop_native_owner_with_before_capture(&state, &session_id, false, |agent| {
+            hold_previous_provider_before_rotation(agent, &lifecycle_lease).map(|_| ())
+        })
+        .await?;
+    } else {
+        stop_native_owner(&state, &session_id, false).await?;
+    }
     let snapshot = {
         let agents = state.agents.lock().await;
         let agent = agents
@@ -2967,7 +3089,6 @@ pub async fn resume_agent(
 
     let status_before_resume = snapshot.current_status.clone();
     let mut config = snapshot.config.clone();
-    let starts_fresh = resolved_session_persistence(&config) == AgentSessionPersistence::Fresh;
     let fresh_pending_boundary =
         if starts_fresh {
             crate::commands::chat::archive_agent_chat_events_until_stable_for_state(
@@ -3027,6 +3148,12 @@ pub async fn resume_agent(
         } else {
             None
         };
+    let persistence_override = config.session_persistence;
+    config.session_persistence = if starts_fresh {
+        AgentSessionPersistenceOverride::Fresh
+    } else {
+        AgentSessionPersistenceOverride::Resume
+    };
     if let Err(error) = prepare_resume_config_for_runtime(&mut config, snapshot.query_count) {
         restore_agent_status_after_failed_runtime_start(
             &state,
@@ -3037,6 +3164,7 @@ pub async fn resume_agent(
         .await;
         return Err(error);
     }
+    config.session_persistence = persistence_override;
     if let Err(error) = prepare_provider_owned_fresh_identity(&mut config).await {
         restore_agent_status_after_failed_runtime_start(
             &state,
@@ -3048,37 +3176,58 @@ pub async fn resume_agent(
         return Err(error);
     }
     let pending = PendingRuntime::prepare(&config, &state.terminal_sessions)?;
-    let mut new_active = match manager::spawn_agent(
+    lifecycle_heartbeat.ensure_active("resume")?;
+    let mut old_runtime = {
+        let mut agents = state.agents.lock().await;
+        let agent = agents
+            .get_mut(&session_id)
+            .ok_or_else(|| format!("Agent {} not found", session_id))?;
+        if starts_fresh && !codex_stops_before_preflight {
+            hold_previous_provider_before_rotation(agent, &lifecycle_lease)?;
+        }
+        take_agent_runtime_for_termination(agent)
+    };
+    if let Some(runtime_generation) = old_runtime.runtime_generation {
+        if let Err(error) = state
+            .terminal_sessions
+            .terminate_and_remove_runtime(&session_id, runtime_generation)
+            .await
+        {
+            manager::log_debug(&format!(
+                "[WARDIAN] old terminal runtime already unavailable during resume {session_id}: {error}"
+            ));
+        }
+    }
+    manager::terminate_active_agent_process(&mut old_runtime);
+    let mut publication_disposition = manager::SpawnPublicationDisposition::new();
+    let unpublished_failure = publication_disposition.failure_signal();
+    let mut new_active = match spawn_replacement_under_lifecycle_lease(
         app.clone(),
         config.clone(),
         !starts_fresh,
         (!starts_fresh)
             .then_some(snapshot.init_timestamp.clone())
             .flatten(),
+        ReplacementSpawnLease {
+            lease: lifecycle_lease,
+            unpublished_failure: unpublished_failure.clone(),
+        },
+        &mut lifecycle_heartbeat,
+        "resume",
     )
     .await
     {
         Ok(active) => pending.attach(active),
         Err(error) => {
-            restore_agent_status_after_failed_runtime_start(
-                &state,
-                &app,
-                &session_id,
-                &status_before_resume,
-            )
-            .await;
+            restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error")
+                .await;
             return Err(error);
         }
     };
     if let Err(error) = lifecycle_heartbeat.ensure_active("resume") {
         let error = new_active.stop_after_failure(error).await;
-        restore_agent_status_after_failed_runtime_start(
-            &state,
-            &app,
-            &session_id,
-            &status_before_resume,
-        )
-        .await;
+        let error = retain_uncertain_replacement_until_expiry(&unpublished_failure, error);
+        restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error").await;
         return Err(error);
     }
     restore_runtime_state_after_resume(&mut new_active, &snapshot, starts_fresh);
@@ -3089,13 +3238,8 @@ pub async fn resume_agent(
     let mut pending_new_active = new_active;
     if let Err(error) = lifecycle_heartbeat.ensure_active("resume") {
         let error = pending_new_active.stop_after_failure(error).await;
-        restore_agent_status_after_failed_runtime_start(
-            &state,
-            &app,
-            &session_id,
-            &status_before_resume,
-        )
-        .await;
+        let error = retain_uncertain_replacement_until_expiry(&unpublished_failure, error);
+        restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error").await;
         return Err(error);
     }
     let commit_result = {
@@ -3121,16 +3265,13 @@ pub async fn resume_agent(
         Ok(result) => result,
         Err(error) => {
             let error = pending_new_active.stop_after_failure(error).await;
-            restore_agent_status_after_failed_runtime_start(
-                &state,
-                &app,
-                &session_id,
-                &status_before_resume,
-            )
-            .await;
+            let error = retain_uncertain_replacement_until_expiry(&unpublished_failure, error);
+            restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error")
+                .await;
             return Err(error);
         }
     };
+    publication_disposition.commit();
     manager::publish_agent_status(&app, &session_id, &new_status_arc);
 
     manager::terminate_active_agent_process(&mut old_agent);
@@ -3808,12 +3949,24 @@ async fn clear_agent_session_inner(
                 .await?
         }
     };
-    let lifecycle_heartbeat = lifecycle
+    let mut lifecycle_heartbeat = lifecycle
         .heartbeat
         .unwrap_or_else(|| LifecycleLeaseHeartbeat::start(lifecycle_lease.owner().clone()));
     let _lifecycle_guard =
         acquire_agent_lifecycle_guard(&state, &session_id, lifecycle.guard).await;
-    stop_native_owner(&state, &session_id, false).await?;
+    lifecycle_heartbeat.ensure_active("clear")?;
+    let codex_stops_before_preflight = lifecycle_config_for_session(&state, &session_id)
+        .await?
+        .provider
+        == "codex";
+    if codex_stops_before_preflight {
+        stop_native_owner_with_before_capture(&state, &session_id, false, |agent| {
+            hold_previous_provider_before_rotation(agent, &lifecycle_lease).map(|_| ())
+        })
+        .await?;
+    } else {
+        stop_native_owner(&state, &session_id, false).await?;
+    }
     let original_config = {
         let agents = state.agents.lock().await;
         let agent = agents
@@ -3910,26 +4063,38 @@ async fn clear_agent_session_inner(
     }
     lifecycle_heartbeat.ensure_active("clear")?;
 
-    let mut prepared = {
+    let (mut prepared, previous_hold_owner) = {
         let mut agents = state.agents.lock().await;
         let Some(agent) = agents.get_mut(&session_id) else {
             return Err(format!("Agent {} not found", session_id));
         };
 
         lifecycle_heartbeat.ensure_active("clear")?;
-        prepare_agent_for_clear(agent)
+        let previous_hold_owner = if !codex_stops_before_preflight {
+            hold_previous_provider_before_rotation(agent, &lifecycle_lease)?
+        } else {
+            None
+        };
+        (prepare_agent_for_clear(agent), previous_hold_owner)
     };
     manager::publish_agent_status(&app, &session_id, &prepared.status_arc);
 
     // 1. Terminate the old agent's process tree outside the global agent lock.
     if let Err(error) = lifecycle_heartbeat.ensure_active("clear") {
-        let restored_status = {
+        let restored = {
             let mut agents = state.agents.lock().await;
             agents
                 .get_mut(&session_id)
                 .map(|agent| restore_agent_runtime_after_aborted_clear(agent, &mut prepared))
         };
-        if let Some(status) = restored_status {
+        if let Some((status, restored_same_runtime)) = restored {
+            release_previous_hold_after_restored_clear(
+                previous_hold_owner.as_ref(),
+                restored_same_runtime,
+            )
+            .map_err(|release_error| {
+                format!("{error}; restored runtime but failed to release prior-session hold: {release_error}")
+            })?;
             manager::publish_agent_status(&app, &session_id, &status);
         }
         return Err(error);
@@ -3954,20 +4119,40 @@ async fn clear_agent_session_inner(
 
     // 5. Spawn a FRESH process (is_restored = false) outside the global agent lock.
     // This ensures Claude uses --session-id and others start clean.
-    let pending = PendingRuntime::prepare(&config, &state.terminal_sessions)?;
-    let new_active =
-        match manager::spawn_agent(app.clone(), config, false, prepared.init_timestamp.clone())
-            .await
-        {
-            Ok(active) => pending.attach(active),
-            Err(error) => {
-                restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error")
-                    .await;
-                return Err(error);
-            }
-        };
+    let pending = match PendingRuntime::prepare(&config, &state.terminal_sessions) {
+        Ok(pending) => pending,
+        Err(error) => {
+            restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error")
+                .await;
+            return Err(error);
+        }
+    };
+    let mut publication_disposition = manager::SpawnPublicationDisposition::new();
+    let unpublished_failure = publication_disposition.failure_signal();
+    let new_active = match spawn_replacement_under_lifecycle_lease(
+        app.clone(),
+        config,
+        false,
+        prepared.init_timestamp.clone(),
+        ReplacementSpawnLease {
+            lease: lifecycle_lease,
+            unpublished_failure: unpublished_failure.clone(),
+        },
+        &mut lifecycle_heartbeat,
+        "clear",
+    )
+    .await
+    {
+        Ok(active) => pending.attach(active),
+        Err(error) => {
+            restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error")
+                .await;
+            return Err(error);
+        }
+    };
     if let Err(error) = lifecycle_heartbeat.ensure_active("clear") {
         let error = new_active.stop_after_failure(error).await;
+        let error = retain_uncertain_replacement_until_expiry(&unpublished_failure, error);
         restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error").await;
         return Err(error);
     }
@@ -3987,6 +4172,8 @@ async fn clear_agent_session_inner(
     let mut pending_new_active = new_active;
     if let Err(error) = lifecycle_heartbeat.ensure_active("clear") {
         let error = pending_new_active.stop_after_failure(error).await;
+        let error = retain_uncertain_replacement_until_expiry(&unpublished_failure, error);
+        restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error").await;
         return Err(error);
     }
     let commit_result = {
@@ -4012,11 +4199,13 @@ async fn clear_agent_session_inner(
         Ok(result) => result,
         Err(error) => {
             let error = pending_new_active.stop_after_failure(error).await;
+            let error = retain_uncertain_replacement_until_expiry(&unpublished_failure, error);
             restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error")
                 .await;
             return Err(error);
         }
     };
+    publication_disposition.commit();
     manager::terminate_active_agent_process(&mut displaced_agent);
     manager::publish_agent_status(&app, &session_id, &new_status_arc);
 
@@ -4771,17 +4960,20 @@ pub async fn reorder_agents(
 }
 
 #[cfg(test)]
+#[path = "agent/lifecycle_transition_tests.rs"]
+mod lifecycle_transition_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{
-        acquire_agent_lifecycle_guard, acquire_agent_lifecycle_transition_lease,
-        acquire_agent_lifecycle_transition_lease_for_session, agent_has_running_process,
-        agent_status_update_payload, apply_agent_model_selection_update, apply_agent_update_fields,
-        archive_agent_lifecycle_boundary, archive_agent_lifecycle_boundary_from_snapshot,
-        assign_worktree_config, build_agent_cli_command_for_session_id_with_shells,
-        build_agent_cli_command_with_shells, build_agent_clone_preview,
-        build_session_close_context, canonical_agent_class_name, canonical_agent_provider_name,
-        capture_resume_runtime_snapshot, clone_cleanup_created_profile_dirs,
-        clone_collect_eligible_file_tree, clone_copy_agent_profile_files, clone_copy_profile_plan,
+        agent_has_running_process, agent_status_update_payload, apply_agent_model_selection_update,
+        apply_agent_update_fields, archive_agent_lifecycle_boundary,
+        archive_agent_lifecycle_boundary_from_snapshot, assign_worktree_config,
+        build_agent_cli_command_for_session_id_with_shells, build_agent_cli_command_with_shells,
+        build_agent_clone_preview, build_session_close_context, canonical_agent_class_name,
+        canonical_agent_provider_name, capture_resume_runtime_snapshot,
+        clone_cleanup_created_profile_dirs, clone_collect_eligible_file_tree,
+        clone_copy_agent_profile_files, clone_copy_profile_plan,
         clone_copy_selected_agent_profile_files, clone_copy_selected_agent_skills,
         clone_ensure_profile_destination_available, clone_match_selected_agent_skills,
         clone_refresh_profile_system_include_directories, clone_remove_existing_path,
@@ -4803,20 +4995,17 @@ mod tests {
         prepare_conversation_boundary, prepare_restored_config_for_spawn, prepare_resume_config,
         prepare_resume_config_for_runtime, promote_fresh_provider_session_after_resume,
         provider_needs_obtain_session_id_on_clear, release_spawn_name_reservation, remove_agent,
-        renew_agent_lifecycle_transition_lease, replace_agent_status_incarnation,
         reserve_rename_session_name, reserve_spawn_session_name,
         resolve_agent_worktree_branch_name, resolve_agent_worktree_path,
-        resolve_external_resume_session, restore_agent_runtime_after_aborted_clear,
-        restore_antigravity_workspace_conversation_from_home, restore_runtime_state_after_resume,
-        restore_runtime_state_snapshot_after_resume, stage_conversation_boundary,
-        strip_claude_embedded_stream_flags, take_agent_runtime_for_termination,
-        terminal_cleared_payload, update_agent_from_control, validate_agent_removal,
-        validate_assignable_worktree_for_agent, validate_deletable_agent_worktree,
-        workspace_paths_match, worktree_deletion_is_already_complete, AgentControlUpdate,
-        AgentModelLiveApplication, AgentOrderPlacement, AgentSettingLiveStatus,
-        AgentWorktreeSummary, CloneProfileCopyPlan, CloneProfileSelection,
-        DeletedAgentReferenceCleanup, DiscoveredGitWorktree, ResumeRuntimeSnapshot,
-        GIT_WORKTREE_DISCOVERY_CONCURRENCY, MAX_AGENT_DESCRIPTION_CHARS,
+        resolve_external_resume_session, restore_antigravity_workspace_conversation_from_home,
+        restore_runtime_state_after_resume, restore_runtime_state_snapshot_after_resume,
+        stage_conversation_boundary, strip_claude_embedded_stream_flags, terminal_cleared_payload,
+        update_agent_from_control, validate_agent_removal, validate_assignable_worktree_for_agent,
+        validate_deletable_agent_worktree, workspace_paths_match,
+        worktree_deletion_is_already_complete, AgentControlUpdate, AgentModelLiveApplication,
+        AgentOrderPlacement, AgentSettingLiveStatus, AgentWorktreeSummary, CloneProfileCopyPlan,
+        CloneProfileSelection, DeletedAgentReferenceCleanup, DiscoveredGitWorktree,
+        ResumeRuntimeSnapshot, GIT_WORKTREE_DISCOVERY_CONCURRENCY, MAX_AGENT_DESCRIPTION_CHARS,
     };
     use crate::providers::antigravity::AntigravityProvider;
     use crate::providers::GeminiProvider;
@@ -8165,272 +8354,6 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
                 persisted_before
             );
         }
-    }
-
-    #[tokio::test]
-    async fn lock_agent_lifecycle_serializes_same_session() {
-        let state = Arc::new(AppState::new());
-        let first_guard = lock_agent_lifecycle(&state, "agent-1").await;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let state_for_task = Arc::clone(&state);
-
-        let waiter = tokio::spawn(async move {
-            let _second_guard = lock_agent_lifecycle(&state_for_task, "agent-1").await;
-            tx.send(()).await.unwrap();
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        assert!(rx.try_recv().is_err());
-
-        drop(first_guard);
-        rx.recv()
-            .await
-            .expect("second lifecycle lock should acquire");
-        waiter.await.unwrap();
-    }
-
-    #[test]
-    fn lifecycle_transition_lease_blocks_mutations_during_headless_execution() {
-        let _lock = crate::utils::wardian_test_env_lock();
-        let temp = tempfile::tempdir().expect("temp wardian home");
-        std::env::set_var("WARDIAN_HOME", temp.path());
-        let _home = WardianHomeGuard;
-        let config = AgentConfig {
-            session_id: "agent-1".to_string(),
-            session_name: "CoderOne".to_string(),
-            provider: "mock".to_string(),
-            resume_session: Some("provider-session-1".to_string()),
-            ..Default::default()
-        };
-        let now = chrono::Utc::now();
-        wardian_core::conversation_lease::acquire_lease(
-            wardian_core::conversation_lease::ConversationLease {
-                agent_id: config.session_id.clone(),
-                provider: config.provider.clone(),
-                resume_session: "provider-session-1".to_string(),
-                owner_kind: "message_delivery".to_string(),
-                owner_id: "interaction-1".to_string(),
-                acquisition_id: "test-acquisition-1".to_string(),
-                owner_node_id: None,
-                mode: "background_resume".to_string(),
-                started_at: now.to_rfc3339(),
-                heartbeat_at: now.to_rfc3339(),
-                expires_at: (now + chrono::Duration::minutes(5)).to_rfc3339(),
-            },
-            &now.to_rfc3339(),
-        )
-        .expect("headless lease");
-
-        for operation in ["resume", "clear", "pause", "remove"] {
-            let error = acquire_agent_lifecycle_transition_lease(&config, operation)
-                .expect_err("lifecycle mutation must not overlap headless execution");
-            assert!(error.contains("saved conversation is in use"), "{error}");
-        }
-    }
-
-    #[test]
-    fn lifecycle_transition_lease_renewal_keeps_its_owner_active() {
-        let _lock = crate::utils::wardian_test_env_lock();
-        let temp = tempfile::tempdir().expect("temp wardian home");
-        std::env::set_var("WARDIAN_HOME", temp.path());
-        let _home = WardianHomeGuard;
-        let config = AgentConfig {
-            session_id: "agent-1".to_string(),
-            session_name: "CoderOne".to_string(),
-            provider: "mock".to_string(),
-            ..Default::default()
-        };
-        let lease =
-            acquire_agent_lifecycle_transition_lease(&config, "clear").expect("lifecycle lease");
-        let owner = lease.owner().clone();
-        let heartbeat_at = chrono::Utc::now() + chrono::Duration::minutes(1);
-
-        assert!(
-            renew_agent_lifecycle_transition_lease(&owner, heartbeat_at)
-                .expect("renew lifecycle lease"),
-            "the lifecycle heartbeat must not silently lose a current lease"
-        );
-        let leases = wardian_core::conversation_lease::load_leases();
-        let active = wardian_core::conversation_lease::find_active_conflict(
-            &leases,
-            "agent-1",
-            "",
-            &heartbeat_at.to_rfc3339(),
-        );
-        assert!(
-            active.is_some(),
-            "renewed lifecycle lease should remain active"
-        );
-    }
-
-    #[tokio::test]
-    async fn lifecycle_transition_claims_the_persisted_lease_before_waiting_for_the_local_gate() {
-        let _lock = crate::utils::wardian_test_env_lock_async().await;
-        let temp = tempfile::tempdir().expect("temp wardian home");
-        std::env::set_var("WARDIAN_HOME", temp.path());
-        let _home = WardianHomeGuard;
-        let state = AppState::new();
-        let agent = make_test_agent();
-        {
-            let mut config = agent.config.lock().unwrap();
-            config.session_id = "agent-1".to_string();
-            config.session_name = "CoderOne".to_string();
-            config.provider = "mock".to_string();
-        }
-        state
-            .agents
-            .lock()
-            .await
-            .insert("agent-1".to_string(), agent);
-
-        let local_gate = lock_agent_lifecycle(&state, "agent-1").await;
-        let lifecycle_lease = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            acquire_agent_lifecycle_transition_lease_for_session(&state, "agent-1", "resume"),
-        )
-        .await
-        .expect("persisted lease acquisition must not wait for the local lifecycle gate")
-        .expect("lifecycle lease");
-
-        assert!(
-            wardian_core::conversation_lease::find_active_conflict(
-                &wardian_core::conversation_lease::load_leases(),
-                "agent-1",
-                "",
-                &chrono::Utc::now().to_rfc3339(),
-            )
-            .is_some(),
-            "the durable lease should be visible before the local gate is acquired"
-        );
-        drop(local_gate);
-        drop(lifecycle_lease);
-    }
-
-    #[tokio::test]
-    async fn existing_lifecycle_guard_is_reused_without_self_deadlock() {
-        let state = AppState::new();
-        let guard = lock_agent_lifecycle(&state, "agent-1").await;
-
-        let reused = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            acquire_agent_lifecycle_guard(&state, "agent-1", Some(guard)),
-        )
-        .await
-        .expect("existing lifecycle guard should be reused");
-
-        drop(reused);
-    }
-
-    #[test]
-    fn take_agent_runtime_for_termination_detaches_process_related_state() {
-        let mut active = make_test_agent();
-        active.runtime_generation = Some(7);
-        active.process_id = Some(12345);
-
-        let detached = take_agent_runtime_for_termination(&mut active);
-
-        assert_eq!(detached.process_id, Some(12345));
-        assert_eq!(detached.runtime_generation, Some(7));
-        assert_eq!(active.process_id, None);
-        assert_eq!(active.runtime_generation, None);
-        assert!(active.child_process.is_none());
-        assert!(active.background_processes.is_empty());
-    }
-
-    #[test]
-    fn prepare_agent_for_clear_preserves_boundary_evidence_until_replacement_commits() {
-        let mut active = make_test_agent();
-        active.runtime_generation = Some(9);
-        active.process_id = Some(12345);
-        let runtime_status = active.current_status.clone();
-        *active.terminal_title.lock().unwrap() = "Old Title".to_string();
-        *active.current_status.lock().unwrap() = "Idle".to_string();
-        *active.query_count.lock().unwrap() = 5;
-        *active.log_path.lock().unwrap() = Some(std::path::PathBuf::from("D:/tmp/agent.log"));
-        *active.log_last_modified.lock().unwrap() = Some(std::time::SystemTime::now());
-        *active.init_timestamp.lock().unwrap() = Some("2026-05-20T00:00:00Z".to_string());
-        {
-            let mut watch = active.watch_state.lock().unwrap();
-            watch.push_output(b"old terminal output");
-            watch.push_transcript(wardian_core::control::WatchTranscriptMessage {
-                role: "assistant".to_string(),
-                text: "old chat answer".to_string(),
-                provider: "codex".to_string(),
-                turn_id: Some("turn-before-clear".to_string()),
-                source: Some("transcript".to_string()),
-                provider_provenance: None,
-            });
-        }
-
-        let mut prepared = prepare_agent_for_clear(&mut active);
-
-        assert_eq!(prepared.termination.process_id, Some(12345));
-        assert_eq!(
-            prepared.config.session_id,
-            active.config.lock().unwrap().session_id
-        );
-        assert_eq!(
-            prepared.init_timestamp.as_deref(),
-            Some("2026-05-20T00:00:00Z")
-        );
-        assert_eq!(active.process_id, None);
-        assert_eq!(active.runtime_generation, None);
-        assert!(
-            !Arc::ptr_eq(&runtime_status, &active.current_status),
-            "clear must detach stale runtime status writers before replacement spawn"
-        );
-        assert!(
-            Arc::ptr_eq(&runtime_status, &prepared.termination.current_status),
-            "the detached runtime must retain its original status Arc"
-        );
-        assert!(
-            Arc::ptr_eq(&prepared.status_arc, &active.current_status),
-            "the replacement status must be the incarnation installed in the agent map"
-        );
-        assert_eq!(active.terminal_title.lock().unwrap().as_str(), "Old Title");
-        assert_eq!(
-            active.current_status.lock().unwrap().as_str(),
-            "Processing..."
-        );
-        assert_eq!(*active.query_count.lock().unwrap(), 5);
-        assert_eq!(
-            active.log_path.lock().unwrap().as_deref(),
-            Some(std::path::Path::new("D:/tmp/agent.log"))
-        );
-        assert!(active.log_last_modified.lock().unwrap().is_some());
-        let watch_snapshot = active
-            .watch_state
-            .lock()
-            .unwrap()
-            .snapshot_since(None, None)
-            .expect("watch snapshot after clear");
-        assert!(watch_snapshot.output.text.contains("old terminal output"));
-        assert_eq!(watch_snapshot.transcript.messages.len(), 1);
-        assert_eq!(
-            watch_snapshot.transcript.messages[0].text,
-            "old chat answer"
-        );
-
-        let restored_status = restore_agent_runtime_after_aborted_clear(&mut active, &mut prepared);
-        assert!(Arc::ptr_eq(&restored_status, &active.current_status));
-        assert_eq!(active.runtime_generation, Some(9));
-        assert_eq!(active.process_id, Some(12345));
-        assert_eq!(active.current_status.lock().unwrap().as_str(), "Idle");
-    }
-
-    #[test]
-    fn runtime_replacement_status_incarnation_rejects_late_runtime_writers() {
-        let mut active = make_test_agent();
-        let old_status = active.current_status.clone();
-
-        let replacement_status = replace_agent_status_incarnation(&mut active, "Off");
-
-        assert!(
-            !Arc::ptr_eq(&old_status, &active.current_status),
-            "late events must keep the old status Arc"
-        );
-        assert!(Arc::ptr_eq(&replacement_status, &active.current_status));
-        assert_eq!(replacement_status.lock().unwrap().as_str(), "Off");
     }
 
     #[test]

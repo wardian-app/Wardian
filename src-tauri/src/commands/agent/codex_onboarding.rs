@@ -2,12 +2,21 @@ use super::agent_lifecycle::PendingRuntime;
 use crate::manager;
 use crate::state::{ActiveAgent, AppState};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use wardian_core::models::AgentConfig;
 
 #[cfg(test)]
 #[path = "codex_onboarding_tests.rs"]
 mod tests;
+
+struct RegistrationPublicationAttempt(Arc<manager::RegistrationPublicationState>);
+
+impl Drop for RegistrationPublicationAttempt {
+    fn drop(&mut self) {
+        self.0.fail();
+    }
+}
 
 pub(super) async fn register_new_agent(
     mut config: AgentConfig,
@@ -22,7 +31,10 @@ pub(super) async fn register_new_agent(
         &session_id,
     ));
     let pending = PendingRuntime::prepare(&config, &state.terminal_sessions)?;
-    let (active_agent, mut completion) = spawn_for_registration(pending, app, &config).await?;
+    let publication =
+        RegistrationPublicationAttempt(Arc::new(manager::RegistrationPublicationState::default()));
+    let (active_agent, mut completion) =
+        spawn_for_registration(pending, app, &config, publication.0.clone()).await?;
     // Propagate any fields that spawn_agent may have auto-assigned (e.g. opencode_port).
 
     {
@@ -47,6 +59,7 @@ pub(super) async fn register_new_agent(
         let agents = state.agents.lock().await;
         if agents.contains_key(&session_id) {
             let error = format!("An agent with session ID '{session_id}' already exists.");
+            publication.0.fail();
             return Err(stop_uncommitted_agent(completion, active_agent, error).await);
         }
     }
@@ -64,6 +77,7 @@ pub(super) async fn register_new_agent(
     ) {
         Ok(session_name) => config.session_name = session_name,
         Err(error) => {
+            publication.0.fail();
             return Err(stop_uncommitted_agent(completion, active_agent, error).await);
         }
     }
@@ -84,6 +98,7 @@ pub(super) async fn register_new_agent(
     )
     .await
     {
+        publication.0.fail();
         return Err(stop_uncommitted_agent(
             completion.take(),
             pending,
@@ -104,6 +119,7 @@ pub(super) async fn register_new_agent(
     )
     .await?;
 
+    publication.0.commit();
     Ok(config)
 }
 
@@ -111,13 +127,21 @@ pub(super) async fn spawn_for_registration(
     pending: PendingRuntime,
     app: &AppHandle,
     config: &AgentConfig,
+    publication: Arc<manager::RegistrationPublicationState>,
 ) -> Result<(PendingRuntime, Option<manager::CodexAttachmentCompletion>), String> {
     if manager::should_publish_provisionally(&config.provider, false) {
-        let spawned =
-            manager::spawn_agent_provisionally(app.clone(), config.clone(), false, None).await?;
+        let spawned = manager::spawn_agent_provisionally(
+            app.clone(),
+            config.clone(),
+            false,
+            None,
+            publication,
+        )
+        .await?;
         Ok((pending.attach(spawned.active), spawned.completion))
     } else {
-        let active = manager::spawn_agent(app.clone(), config.clone(), false, None).await?;
+        let active =
+            manager::spawn_agent_for_registration(app.clone(), config.clone(), publication).await?;
         Ok((pending.attach(active), None))
     }
 }

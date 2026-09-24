@@ -238,7 +238,6 @@ pub fn process_exists(pid: u32) -> bool {
     }
 }
 
-#[cfg(windows)]
 fn is_supported_terminal_wrapper_process(process_name: &str) -> bool {
     matches!(
         process_name,
@@ -246,13 +245,24 @@ fn is_supported_terminal_wrapper_process(process_name: &str) -> bool {
             | "pwsh.exe"
             | "powershell.exe"
             | "codex.exe"
+            | "codex"
             | "claude.exe"
+            | "claude"
             | "gemini.exe"
+            | "gemini"
+            | "opencode.exe"
+            | "opencode"
+            | "antigravity.exe"
+            | "antigravity"
+            | "agy.exe"
+            | "agy"
+            | "pi.exe"
+            | "pi"
             | "node.exe"
+            | "node"
     )
 }
 
-#[cfg(windows)]
 pub fn is_wardian_session_process_candidate(
     process_name: &str,
     command_line: &str,
@@ -284,7 +294,6 @@ pub fn is_wardian_session_process_candidate(
         || command_line.contains(".wardian/")
 }
 
-#[cfg(windows)]
 pub fn is_wardian_session_environment_candidate(environ: &[String], session_id: &str) -> bool {
     let session_id = session_id.trim();
     if session_id.is_empty() {
@@ -299,22 +308,221 @@ pub fn is_wardian_session_environment_candidate(environ: &[String], session_id: 
     })
 }
 
-#[cfg(windows)]
-pub fn find_wardian_session_process_roots(session_id: &str, exclude_pid: Option<u32>) -> Vec<u32> {
-    find_wardian_session_process_roots_for_sessions(
-        std::slice::from_ref(&session_id.to_string()),
+fn provider_cli_tokens(provider: &str) -> &'static [&'static str] {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "codex" => &[
+            "codex",
+            "codex.exe",
+            "codex.cmd",
+            "codex.ps1",
+            "codex.js",
+            "codex-cli",
+        ],
+        "claude" => &[
+            "claude",
+            "claude.exe",
+            "claude.cmd",
+            "claude.ps1",
+            "claude.js",
+        ],
+        "gemini" => &[
+            "gemini",
+            "gemini.exe",
+            "gemini.cmd",
+            "gemini.ps1",
+            "gemini.js",
+        ],
+        "opencode" => &[
+            "opencode",
+            "opencode.exe",
+            "opencode.cmd",
+            "opencode.ps1",
+            "opencode.js",
+        ],
+        "antigravity" => &[
+            "antigravity",
+            "antigravity.exe",
+            "agy",
+            "agy.exe",
+            "agy.cmd",
+            "agy.js",
+        ],
+        "pi" => &["pi", "pi.exe", "pi.cmd", "pi.js"],
+        "mock" => &[
+            "mock",
+            "mock.exe",
+            "wardian-mock-provider",
+            "wardian-mock-provider.exe",
+        ],
+        _ => &[],
+    }
+}
+
+fn argument_has_provider_name(argument: &str, provider: &str) -> bool {
+    let base_name = argument
+        .trim_matches(['"', '\''])
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(argument)
+        .to_ascii_lowercase();
+    provider_cli_tokens(provider).contains(&base_name.as_str())
+}
+
+fn split_process_command_line(command_line: &str) -> Vec<String> {
+    let mut arguments = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+
+    for character in command_line.chars() {
+        match quote {
+            Some(delimiter) if character == delimiter => quote = None,
+            Some(_) => current.push(character),
+            None if character == '"' || character == '\'' => quote = Some(character),
+            None if character.is_whitespace() => {
+                if !current.is_empty() {
+                    arguments.push(std::mem::take(&mut current));
+                }
+            }
+            None => current.push(character),
+        }
+    }
+    if !current.is_empty() {
+        arguments.push(current);
+    }
+    arguments
+}
+
+fn shell_command_target(arguments: &[String], wrappers: &[&str]) -> Option<String> {
+    let first = arguments.first()?;
+    let mut command = split_process_command_line(first);
+    command.extend(arguments.iter().skip(1).cloned());
+    command.into_iter().find(|argument| {
+        !wrappers
+            .iter()
+            .any(|wrapper| argument.eq_ignore_ascii_case(wrapper))
+    })
+}
+
+/// Matches a process executable or Node/shell command that directly launches
+/// the configured provider CLI. Environment markers alone are insufficient:
+/// child tools inherit them without owning the provider conversation.
+pub fn is_wardian_provider_process_candidate(
+    provider: &str,
+    process_name: &str,
+    command_line: &str,
+) -> bool {
+    is_wardian_provider_process_candidate_args(
+        provider,
+        process_name,
+        &split_process_command_line(command_line),
+    )
+}
+
+fn is_wardian_provider_process_candidate_args(
+    provider: &str,
+    process_name: &str,
+    arguments: &[String],
+) -> bool {
+    let process_name = process_name
+        .trim_matches(['"', '\''])
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(process_name)
+        .to_ascii_lowercase();
+    if argument_has_provider_name(&process_name, provider) {
+        return true;
+    }
+
+    match process_name.as_str() {
+        "node" | "node.exe" => arguments
+            .get(1)
+            .is_some_and(|script| argument_has_provider_name(script, provider)),
+        "cmd" | "cmd.exe" => {
+            let Some(command_start) = arguments
+                .iter()
+                .position(|argument| matches!(argument.to_ascii_lowercase().as_str(), "/c" | "/k"))
+                .map(|index| index + 1)
+            else {
+                return false;
+            };
+            let command = arguments.get(command_start..).unwrap_or_default();
+            shell_command_target(command, &["call"])
+                .is_some_and(|argument| argument_has_provider_name(&argument, provider))
+        }
+        "pwsh" | "pwsh.exe" | "powershell" | "powershell.exe" => {
+            let Some(command_start) = arguments
+                .iter()
+                .position(|argument| {
+                    matches!(
+                        argument.to_ascii_lowercase().as_str(),
+                        "-command" | "-c" | "-file"
+                    )
+                })
+                .map(|index| index + 1)
+            else {
+                return false;
+            };
+            let command = arguments.get(command_start..).unwrap_or_default();
+            shell_command_target(command, &["&"])
+                .is_some_and(|argument| argument_has_provider_name(&argument, provider))
+        }
+        _ => false,
+    }
+}
+
+/// Requires both a session association and a command that invokes the configured
+/// provider CLI. This is only a candidate signal; descendants may invoke the
+/// same CLI, so it must never authorize termination by itself.
+pub fn is_wardian_provider_session_process_candidate(
+    provider: &str,
+    process_name: &str,
+    command_line: &str,
+    environ: &[String],
+    session_id: &str,
+) -> bool {
+    is_wardian_provider_session_process_candidate_args(
+        provider,
+        process_name,
+        command_line,
+        &split_process_command_line(command_line),
+        environ,
+        session_id,
+    )
+}
+
+fn is_wardian_provider_session_process_candidate_args(
+    provider: &str,
+    process_name: &str,
+    command_line: &str,
+    arguments: &[String],
+    environ: &[String],
+    session_id: &str,
+) -> bool {
+    is_wardian_provider_process_candidate_args(provider, process_name, arguments)
+        && (is_wardian_session_environment_candidate(environ, session_id)
+            || is_wardian_session_process_candidate(process_name, command_line, session_id))
+}
+
+/// Finds possible provider process candidates for one session. Results are
+/// suitable for conservative restore checks only; they do not prove ownership.
+pub fn find_wardian_provider_process_candidates(
+    session_id: &str,
+    provider: &str,
+    exclude_pid: Option<u32>,
+) -> Vec<u32> {
+    find_wardian_provider_process_candidates_for_sessions(
+        &[(session_id.to_string(), provider.to_string())],
         exclude_pid,
     )
     .remove(session_id)
     .unwrap_or_default()
 }
 
-/// Find candidate root processes for several sessions with a single system
-/// scan. Reading every process's command line and environment block is the
-/// expensive part, so callers with many sessions must not scan per session.
-#[cfg(windows)]
-pub fn find_wardian_session_process_roots_for_sessions(
-    session_ids: &[String],
+/// Scans process metadata once to find possible provider invocations for
+/// multiple sessions. The original argv boundaries are retained for paths
+/// with spaces. A result is ambiguous and must not be killed automatically.
+pub fn find_wardian_provider_process_candidates_for_sessions(
+    sessions: &[(String, String)],
     exclude_pid: Option<u32>,
 ) -> std::collections::HashMap<String, Vec<u32>> {
     let mut sys = sysinfo::System::new();
@@ -326,9 +534,9 @@ pub fn find_wardian_session_process_roots_for_sessions(
             .with_environ(sysinfo::UpdateKind::OnlyIfNotSet),
     );
 
-    let mut matches: std::collections::HashMap<String, Vec<u32>> = session_ids
+    let mut matches: std::collections::HashMap<String, Vec<u32>> = sessions
         .iter()
-        .map(|session_id| (session_id.clone(), Vec::new()))
+        .map(|(session_id, _)| (session_id.clone(), Vec::new()))
         .collect();
     for (pid, process) in sys.processes() {
         let pid_u32 = pid.as_u32();
@@ -337,22 +545,28 @@ pub fn find_wardian_session_process_roots_for_sessions(
         }
 
         let process_name = process.name().to_string_lossy().to_string();
-        let command_line = process
+        let command_arguments = process
             .cmd()
             .iter()
             .map(|part| part.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(" ");
+            .map(|part| part.into_owned())
+            .collect::<Vec<_>>();
+        let command_line = command_arguments.join(" ");
         let environ = process
             .environ()
             .iter()
             .map(|entry| entry.to_string_lossy().to_string())
             .collect::<Vec<_>>();
 
-        for session_id in session_ids {
-            if is_wardian_session_environment_candidate(&environ, session_id)
-                || is_wardian_session_process_candidate(&process_name, &command_line, session_id)
-            {
+        for (session_id, provider) in sessions {
+            if is_wardian_provider_session_process_candidate_args(
+                provider,
+                &process_name,
+                &command_line,
+                &command_arguments,
+                &environ,
+                session_id,
+            ) {
                 matches.entry(session_id.clone()).or_default().push(pid_u32);
             }
         }
@@ -415,6 +629,92 @@ mod tests {
     use super::{
         headless_command_spec, new_headless_std_command, new_silent_command, new_silent_std_command,
     };
+
+    const SESSION_ID: &str = "019d331a-0500-7592-969f-8f437886f42b";
+
+    #[test]
+    fn identifies_provider_in_nested_windows_cmd_payload() {
+        let command_line = format!(
+            "\"C:\\Windows\\system32\\cmd.exe\" /d /c \"call codex.cmd --cd D:\\Trading resume {SESSION_ID} --no-alt-screen\""
+        );
+
+        assert!(super::is_wardian_provider_process_candidate(
+            "codex",
+            "cmd.exe",
+            &command_line,
+        ));
+        assert!(super::is_wardian_provider_session_process_candidate(
+            "codex",
+            "cmd.exe",
+            &command_line,
+            &[],
+            SESSION_ID,
+        ));
+    }
+
+    #[test]
+    fn identifies_direct_unix_provider_invocation_with_session_identity() {
+        let command_line = format!("codex resume {SESSION_ID}");
+        assert!(super::is_wardian_provider_session_process_candidate(
+            "codex",
+            "codex",
+            &command_line,
+            &[],
+            SESSION_ID,
+        ));
+    }
+
+    #[test]
+    fn ignores_provider_name_in_unrelated_command_arguments() {
+        assert!(!super::is_wardian_provider_process_candidate(
+            "codex",
+            "cmd.exe",
+            "cmd.exe /d /c echo codex",
+        ));
+        assert!(!super::is_wardian_provider_process_candidate(
+            "codex",
+            "node.exe",
+            "node.exe script.js codex",
+        ));
+        assert!(!super::is_wardian_provider_session_process_candidate(
+            "codex",
+            "python.exe",
+            "python.exe -m http.server 8000",
+            &[format!("WARDIAN_SESSION_ID={SESSION_ID}")],
+            SESSION_ID,
+        ));
+    }
+
+    #[test]
+    fn identifies_provider_node_script_as_the_invoked_executable() {
+        let command_line = format!(
+            "node.exe \"C:\\Users\\testuser\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js\" resume {SESSION_ID}"
+        );
+
+        assert!(super::is_wardian_provider_process_candidate(
+            "codex",
+            "node.exe",
+            &command_line,
+        ));
+        assert!(super::is_wardian_provider_session_process_candidate(
+            "codex",
+            "node.exe",
+            &command_line,
+            &[format!("WARDIAN_SESSION_ID={SESSION_ID}")],
+            SESSION_ID,
+        ));
+
+        assert!(super::is_wardian_provider_process_candidate_args(
+            "codex",
+            "node.exe",
+            &[
+                "node.exe".into(),
+                r"C:\Program Files\Wardian CLI\codex.js".into(),
+                "resume".into(),
+                SESSION_ID.into(),
+            ],
+        ));
+    }
 
     fn captured_output_command() -> (String, Vec<String>) {
         if cfg!(target_os = "windows") {

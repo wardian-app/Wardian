@@ -6,6 +6,56 @@ use tauri::Manager;
 use wardian_core::models::{AgentConfig, AgentSessionPersistenceOverride, ProviderConfig};
 
 #[tokio::test]
+async fn cancelled_startup_restore_publication_marks_spawn_failed_and_keeps_placeholder() {
+    let state = std::sync::Arc::new(AppState::new());
+    let config = AgentConfig {
+        session_id: uuid::Uuid::new_v4().to_string(),
+        provider: "mock".into(),
+        ..Default::default()
+    };
+    let publication = RestorePublication::begin(&state, &config.session_id)
+        .await
+        .expect("restore claim");
+    publication
+        .publish(
+            &state,
+            crate::restored_agent_without_process(
+                config.clone(),
+                "Restoring",
+                String::new(),
+                None,
+                None,
+            ),
+        )
+        .await;
+    let roster_lock = state.agents.lock().await;
+    let disposition = crate::manager::SpawnPublicationDisposition::new();
+    let failed = disposition.failure_signal();
+    let mut spawned = crate::restored_agent_without_process(
+        config.clone(),
+        "Starting",
+        String::new(),
+        None,
+        None,
+    );
+    spawned.runtime_generation = Some(7);
+    let task_state = state.clone();
+    let (ready, received) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        ready.send(()).unwrap();
+        publication
+            .publish_spawned(&task_state, spawned, disposition)
+            .await;
+    });
+    received.await.expect("restore publication started");
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(failed.load(std::sync::atomic::Ordering::Acquire));
+    assert!(roster_lock[&config.session_id].runtime_generation.is_none());
+}
+
+#[tokio::test]
 async fn failed_restore_exposes_provider_error_to_late_terminal_presentations() {
     use crate::state::terminal_session::{TerminalClientIdentity, TerminalRuntimeHandles};
     use wardian_core::models::*;
@@ -406,4 +456,80 @@ async fn final_persistence_releases_maps_while_a_durable_writer_is_active() {
         disk[0].session_persistence,
         AgentSessionPersistenceOverride::Fresh
     );
+}
+
+#[test]
+fn orphan_session_marker_without_execution_lease_does_not_suppress_restore() {
+    let config = AgentConfig {
+        session_id: "agent-1".into(),
+        provider: "codex".into(),
+        resume_session: Some("resume-1".into()),
+        ..Default::default()
+    };
+    let persisted_status = "Headless";
+    let leases = Vec::new();
+
+    assert_eq!(persisted_status, "Headless");
+    assert!(!super::has_active_headless_execution_lease(
+        &config,
+        &leases,
+        "2026-09-23T12:00:00Z"
+    ));
+}
+
+#[test]
+fn active_background_execution_lease_is_recognized_across_processes() {
+    let config = AgentConfig {
+        session_id: "agent-1".into(),
+        provider: "codex".into(),
+        resume_session: Some("resume-1".into()),
+        ..Default::default()
+    };
+    let leases = vec![wardian_core::conversation_lease::ConversationLease {
+        agent_id: "agent-1".into(),
+        provider: "codex".into(),
+        resume_session: "resume-1".into(),
+        owner_kind: "automation_run".into(),
+        owner_id: "run-1".into(),
+        acquisition_id: "acquisition-1".into(),
+        owner_node_id: Some("agent-1".into()),
+        mode: "background_resume".into(),
+        started_at: "2026-09-23T11:00:00Z".into(),
+        heartbeat_at: "2026-09-23T11:59:00Z".into(),
+        expires_at: "2026-09-23T12:20:00Z".into(),
+    }];
+
+    assert!(super::has_active_headless_execution_lease(
+        &config,
+        &leases,
+        "2026-09-23T12:00:00Z"
+    ));
+}
+
+#[test]
+fn expired_background_lease_does_not_claim_headless_ownership() {
+    let config = AgentConfig {
+        session_id: "agent-1".into(),
+        provider: "codex".into(),
+        resume_session: Some("resume-1".into()),
+        ..Default::default()
+    };
+    let lease = wardian_core::conversation_lease::ConversationLease {
+        agent_id: "agent-1".into(),
+        provider: "codex".into(),
+        resume_session: "resume-1".into(),
+        owner_kind: "automation_run".into(),
+        owner_id: "run-1".into(),
+        acquisition_id: "acquisition-1".into(),
+        owner_node_id: Some("agent-1".into()),
+        mode: "background_resume".into(),
+        started_at: "2026-09-23T11:00:00Z".into(),
+        heartbeat_at: "2026-09-23T11:30:00Z".into(),
+        expires_at: "2026-09-23T11:59:00Z".into(),
+    };
+    assert!(!super::has_active_headless_execution_lease(
+        &config,
+        &[lease],
+        "2026-09-23T12:00:00Z"
+    ));
 }

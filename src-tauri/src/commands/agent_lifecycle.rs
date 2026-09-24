@@ -102,22 +102,40 @@ pub(super) async fn stop_native_owner(
     session_id: &str,
     remove_terminal: bool,
 ) -> Result<(), String> {
+    stop_native_owner_with_before_capture(state, session_id, remove_terminal, |_| Ok(())).await
+}
+
+/// Run an exact-owner action under the roster lock just before Codex runtime
+/// capture. A failed native preflight never reaches the action or detaches it.
+pub(super) async fn stop_native_owner_with_before_capture<F>(
+    state: &AppState,
+    session_id: &str,
+    remove_terminal: bool,
+    before_capture: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&crate::state::ActiveAgent) -> Result<(), String>,
+{
     state
         .native_delivery
         .dispose_agent(session_id)
         .await
         .map_err(|error| error.to_string())?;
-    stop_codex_runtime(state, session_id, remove_terminal).await
+    stop_codex_runtime(state, session_id, remove_terminal, before_capture).await
 }
 
 /// Explicit lifecycle operations may retry the same retained children. Native
 /// startup only awaits quiescence; it must never retry a failed stop itself.
 /// Finish this before clear/resume bootstrap, even when the roster looks Off.
-async fn stop_codex_runtime(
+async fn stop_codex_runtime<F>(
     state: &AppState,
     session_id: &str,
     remove_terminal: bool,
-) -> Result<(), String> {
+    before_capture: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&crate::state::ActiveAgent) -> Result<(), String>,
+{
     let config = {
         let agents = state.agents.lock().await;
         agents
@@ -145,6 +163,7 @@ async fn stop_codex_runtime(
         let agent = agents
             .get_mut(session_id)
             .ok_or_else(|| format!("Agent {session_id} not found"))?;
+        before_capture(agent)?;
         let generation = agent.runtime_generation;
         let guard = registration.capture(super::take_agent_runtime_for_termination(agent));
         (guard, generation)

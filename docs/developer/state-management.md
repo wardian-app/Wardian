@@ -84,6 +84,40 @@ means the configuration remains current in memory and in
 Paused agents use the same boundary even though their restoration opens no PTY.
 Provider startup never holds the global agents, order, or durable roster locks.
 
+### Provider restore ownership across processes
+
+Persisted `last_status = Headless` and `WARDIAN_SESSION_ID` by themselves do
+not prove that a provider still owns a conversation. Startup derives headless
+status from an unexpired `background_resume` or `background_fresh` conversation
+lease. Lease reads used for recovery distinguish a missing lease file from an
+unreadable or malformed file; ownership uncertainty withholds provider startup.
+
+Immediately before an interactive provider process is created, Wardian
+acquires a cross-process transition lease from the shared conversation lease
+store. This rereads lease state under the lease-file lock, so a renewed or newly
+acquired background lease blocks the spawn. The transition lease remains held
+until provider readiness or a terminal startup status (`Error` or `Off`), and
+renews while startup remains pending.
+
+Wardian also scans current process metadata for the configured provider
+invocation associated with the exact Wardian session marker or command-line
+session identity. This scan is available on Windows, macOS, and Linux when the
+OS exposes process arguments and environment. A positive match is only a
+**possible provider candidate**: a tool process can inherit the marker and
+launch the same provider CLI. It is not proof that Wardian launched or owns the
+PID. Candidates withhold restore and are never automatically terminated;
+lease expiry is never permission to kill a live process. An unrelated marked
+descendant such as `python -m http.server`, or a shell/Node process that merely
+mentions the provider name in an argument, does not qualify as a candidate.
+
+If startup reports an existing provider candidate, inspect the reported PID,
+executable, command line, and parent process. Stop it through its owning Wardian
+instance or normal OS process controls only after confirming its role, then
+restart Wardian to retry restoration. Process metadata visibility varies by
+OS and permissions, so this scan is a conservative safeguard rather than a
+complete cross-OS process identity mechanism. The shared lease store is the
+cross-process exclusion mechanism for cooperating Wardian instances.
+
 The deterministic regression in `src-tauri/src/startup_restore/tests.rs` holds
 startup completion at a barrier while polling the real configuration command.
 It covers paused and live publications without a provider process or timing

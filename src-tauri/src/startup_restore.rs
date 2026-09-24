@@ -3,6 +3,20 @@
 use crate::state::{ActiveAgent, AppState};
 use std::sync::{Arc, Mutex};
 
+pub(crate) fn has_active_headless_execution_lease(
+    config: &wardian_core::models::AgentConfig,
+    leases: &[wardian_core::conversation_lease::ConversationLease],
+    now_rfc3339: &str,
+) -> bool {
+    wardian_core::conversation_lease::find_active_execution_conflict(
+        leases,
+        &config.session_id,
+        config.resume_session.as_deref().unwrap_or_default(),
+        now_rfc3339,
+    )
+    .is_some()
+}
+
 /// Own one startup restoration from config selection through final publication.
 pub(crate) struct RestorePublication {
     session_id: String,
@@ -67,6 +81,19 @@ impl RestorePublication {
             order.push(session_id.clone());
         }
         agents.insert(session_id, agent);
+        status
+    }
+
+    /// A spawned provider is committed only after its exact runtime enters the
+    /// roster. Dropping this future during publication marks the watcher failed.
+    pub(crate) async fn publish_spawned(
+        &self,
+        state: &AppState,
+        agent: ActiveAgent,
+        mut disposition: crate::manager::SpawnPublicationDisposition,
+    ) -> Arc<Mutex<String>> {
+        let status = self.publish(state, agent).await;
+        disposition.commit();
         status
     }
 }
