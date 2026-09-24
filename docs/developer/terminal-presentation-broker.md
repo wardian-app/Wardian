@@ -192,7 +192,9 @@ enters the alternate buffer and enables xterm mouse tracking, xterm forwards
 click, drag, hover, and wheel reports to the application instead of treating
 them as Wardian or xterm scrollback gestures. Remote touch input adapts vertical
 travel into the same wheel protocol only while that alternate-screen mouse mode
-is active.
+is active. On Codex's normal screen, Wardian captures wheel input to scroll
+retained history before xterm can emit mouse reports; alternate-screen wheel
+reports remain owned by the application.
 
 Snapshots and replay preserve alternate-buffer, mouse-mode, and synchronized-
 output controls. Synchronized-output boundaries are renderer instructions, not

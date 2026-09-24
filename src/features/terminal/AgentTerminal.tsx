@@ -1177,8 +1177,6 @@ async function fitTerminalToContainer(
     return true;
   }
 
-  entry.lastMeasuredHostSize = { width, height };
-
   try {
     const proposedDimensions = proposeTerminalDimensions(renderer, {
       // A forced fit runs during mount/remount before the browser has painted
@@ -1205,6 +1203,7 @@ async function fitTerminalToContainer(
     } else if (options?.reportUnchanged === true) {
       void reportTerminalSize(entry, nextCols, nextRows, { force: true });
     }
+    entry.lastMeasuredHostSize = { width, height };
     return true;
   } catch {
     // Ignore fit errors during transient layout churn.
@@ -2828,6 +2827,35 @@ export const AgentTerminal = memo(function AgentTerminal({
     }
   }, [terminalKey]);
 
+  // Codex can leave mouse tracking enabled on its normal screen. Capture those
+  // events before xterm's target listener, while alternate-screen TUIs retain them.
+  const handleCodexWheelCapture = useCallback((event: {
+    deltaMode: number;
+    deltaY: number;
+    preventDefault: () => void;
+    stopPropagation: () => void;
+  }) => {
+    const entry = terminalSessionMap.get(terminalKey);
+    const term = entry?.renderer?.term;
+    if (
+      !entry ||
+      entry.provider !== "codex" ||
+      !term ||
+      term.buffer.active.type !== "normal" ||
+      term.modes.mouseTrackingMode === "none"
+    ) {
+      return;
+    }
+
+    const handled = scrollTerminalFromWheel(term, event, wheelRowRemainderRef, terminalKey);
+    if (handled) {
+      syncParserViewportToRenderer(entry);
+    } else {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }, [terminalKey]);
+
   useEffect(() => {
     if (!sessionId || !terminalRef.current) {
       return;
@@ -3538,6 +3566,7 @@ export const AgentTerminal = memo(function AgentTerminal({
         data-terminal-session-id={sessionId}
         tabIndex={0}
         onFocusCapture={handleFocusCapture}
+        onWheelCapture={handleCodexWheelCapture}
         onWheel={handleWheel}
         onClick={() => {
           requestActivation();
