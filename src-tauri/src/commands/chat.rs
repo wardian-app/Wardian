@@ -2688,6 +2688,172 @@ Do you want to proceed?
     }
 
     #[tokio::test]
+    async fn claude_raw_line_identity_recovers_capture_without_rewriting_legacy_alias_history() {
+        let _guard = crate::utils::wardian_test_env_lock_async().await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: ConversationLoggingSetting::Enabled,
+            ..Default::default()
+        })
+        .expect("enable conversation logging");
+
+        let log_path = temp.path().join("claude.jsonl");
+        let first_line = r#"{"type":"user","uuid":"request-1","message":{"role":"user","content":"Initial request"}}"#;
+        let second_line = r#"{"type":"user","uuid":"request-2","message":{"role":"user","content":"Request blocked by ambiguous history"}}"#;
+        std::fs::write(&log_path, format!("{first_line}\n")).expect("write initial Claude log");
+
+        let state = AppState::new();
+        state.agents.lock().await.insert(
+            "agent-1".to_string(),
+            crate::state::ActiveAgent {
+                config: Arc::new(Mutex::new(wardian_core::models::AgentConfig {
+                    session_id: "agent-1".to_string(),
+                    session_name: "Claude One".to_string(),
+                    agent_class: "Coder".to_string(),
+                    provider: "claude".to_string(),
+                    folder: temp.path().to_string_lossy().to_string(),
+                    fresh_provider_session_id: Some("claude-session-one".to_string()),
+                    conversation_logging: AgentConversationLoggingSetting::Default,
+                    ..Default::default()
+                })),
+                child_process: None,
+                background_processes: Vec::new(),
+                memory_capability: None,
+                runtime_generation: None,
+                process_id: None,
+                query_count: Arc::new(Mutex::new(0)),
+                init_timestamp: Arc::new(Mutex::new(None)),
+                last_query_timestamp: Arc::new(Mutex::new(None)),
+                current_status: Arc::new(Mutex::new("Idle".to_string())),
+                last_status_at: Arc::new(Mutex::new(None)),
+                watch_state: Arc::new(Mutex::new(AgentWatchState::new(
+                    "agent-1".to_string(),
+                    32,
+                    4096,
+                ))),
+                terminal_title: Arc::new(Mutex::new(String::new())),
+                last_output_at: Arc::new(Mutex::new(None)),
+                log_path: Arc::new(Mutex::new(Some(log_path.clone()))),
+                log_last_modified: Arc::new(Mutex::new(None)),
+                #[cfg(windows)]
+                job_object: None,
+            },
+        );
+
+        // This is the same helper called by the best-effort status sync and
+        // directly by clear_agent_session_inner before it resets identity.
+        archive_agent_chat_events_until_stable_for_state(&state, "agent-1")
+            .await
+            .expect("capture the first Claude event");
+        let source_key = "claude:session:claude-session-one";
+        let cursor_before = state
+            .conversation_archive
+            .provider_log_capture_state("agent-1", source_key)
+            .expect("read initial cursor")
+            .expect("initial Claude cursor");
+        assert_eq!(cursor_before.committed_offset, first_line.len() as u64 + 1);
+
+        use std::io::Write as _;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log_path)
+                .expect("open Claude log for append"),
+            "{second_line}"
+        )
+        .expect("append second Claude event");
+        let current_event =
+            load_provider_log_chat_events("agent-1", "claude", Some(&log_path), &[])
+                .into_iter()
+                .find(|event| event.text.as_deref() == Some("Request blocked by ambiguous history"))
+                .expect("second Claude provider event");
+
+        let snapshot = agent_archive_capture_snapshot(&state, "agent-1")
+            .await
+            .expect("capture Claude snapshot");
+        let context = conversation_archive_context_from_snapshot(&snapshot);
+        state
+            .conversation_archive
+            .append_chat_events_with_context(context.clone(), std::slice::from_ref(&current_event))
+            .expect("seed the durable event and its exact raw-line owner");
+
+        let conversation_id = state
+            .conversation_archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active conversation");
+        let conversation_dir =
+            wardian_core::paths::agent_conversation_dir("agent-1", &conversation_id)
+                .expect("conversation directory");
+        let records_path = conversation_dir.join("conversation.jsonl");
+        let mut records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
+            wardian_core::conversations::read_jsonl_records(&records_path)
+                .expect("read initial narrative");
+        let current_owner = records
+            .iter_mut()
+            .find(|record| record.event_refs.contains(&current_event.id))
+            .expect("exact raw-line owner");
+        current_owner.seq = 594;
+        current_owner.at = "2026-09-08T12:00:00Z".to_string();
+        current_owner.source_refs = vec!["src_594".to_string()];
+        let mut legacy_owner = current_owner.clone();
+        let legacy_id = current_event.metadata["legacy_event_ids"][0]
+            .as_str()
+            .expect("legacy Claude identity")
+            .to_string();
+        legacy_owner.seq = 780;
+        legacy_owner.at = "2026-09-10T12:00:00Z".to_string();
+        legacy_owner.event_refs = vec![legacy_id.clone()];
+        legacy_owner.source_refs = vec!["src_780".to_string()];
+        records.push(legacy_owner.clone());
+        wardian_core::conversations::write_jsonl_atomic(&records_path, &records)
+            .expect("seed a prior legacy-alias owner in the isolated archive");
+        let events_path = conversation_dir.join("events.jsonl");
+        let events_before = std::fs::read(&events_path).expect("read durable events");
+        let records_before = std::fs::read(&records_path).expect("read durable narratives");
+
+        for path in ["status sync", "clear preflight"] {
+            archive_agent_chat_events_until_stable_for_state(&state, "agent-1")
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{path} should resolve the exact raw-line owner: {error}")
+                });
+            assert_eq!(
+                state
+                    .conversation_archive
+                    .provider_log_capture_state("agent-1", source_key)
+                    .expect("read cursor after retry")
+                    .expect("cursor remains present")
+                    .committed_offset,
+                std::fs::metadata(&log_path)
+                    .expect("Claude log metadata")
+                    .len(),
+                "{path} must commit the provider cursor after a successful exact match"
+            );
+            assert_eq!(
+                std::fs::read(&events_path).expect("read durable events after retry"),
+                events_before,
+                "{path} must not duplicate the already durable raw event"
+            );
+            assert_eq!(
+                std::fs::read(&records_path).expect("read narratives after retry"),
+                records_before,
+                "{path} must preserve both distinct narrative owners and source positions"
+            );
+        }
+
+        assert!(cursor_before.committed_offset < std::fs::metadata(&log_path).unwrap().len());
+        assert!(records.len() > 1);
+        assert_eq!(records.last(), Some(&legacy_owner));
+
+        match previous_home {
+            Some(home) => std::env::set_var("WARDIAN_HOME", home),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+    }
+
+    #[tokio::test]
     async fn incremental_opencode_capture_persists_bound_db_events_once_and_respects_disabled_logging(
     ) {
         let _guard = crate::utils::wardian_test_env_lock_async().await;

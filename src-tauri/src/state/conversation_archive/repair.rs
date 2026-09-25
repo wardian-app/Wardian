@@ -58,16 +58,42 @@ pub(super) fn matching_record_index(
     records: &[ConversationNarrativeRecord],
     current: &AgentChatEvent,
 ) -> io::Result<Option<usize>> {
-    let ids = event_identity_ids(current);
+    if current.provider != "claude" || current.metadata["provider_log"] != true {
+        let ids = event_identity_ids(current);
+        return unique_match(
+            records.iter().enumerate().filter_map(|(index, record)| {
+                record
+                    .event_refs
+                    .iter()
+                    .any(|event_ref| ids.contains(&event_ref.as_str()))
+                    .then_some(index)
+            }),
+            &format!("narrative ownership for event {}", current.id),
+        );
+    }
+
+    let exact = records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| record.event_refs.contains(&current.id).then_some(index));
+    let exact_match = unique_match(
+        exact,
+        &format!("narrative ownership for event {}", current.id),
+    )?;
+    if exact_match.is_some() {
+        return Ok(exact_match);
+    }
+
+    let aliases = event_identity_ids(current);
     unique_match(
         records.iter().enumerate().filter_map(|(index, record)| {
             record
                 .event_refs
                 .iter()
-                .any(|event_ref| ids.contains(&event_ref.as_str()))
+                .any(|event_ref| aliases.contains(&event_ref.as_str()))
                 .then_some(index)
         }),
-        &format!("narrative ownership for event {}", current.id),
+        &format!("legacy narrative ownership for event {}", current.id),
     )
 }
 
