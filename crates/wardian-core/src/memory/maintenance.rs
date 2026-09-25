@@ -9,6 +9,7 @@ use super::{
 };
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -27,12 +28,37 @@ pub enum MemoryMaintenanceScope {
     Workspace { path: String },
 }
 
+struct MemoryMaintenanceScopeFields;
+
+impl<'de> Visitor<'de> for MemoryMaintenanceScopeFields {
+    type Value = serde_json::Map<String, serde_json::Value>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a memory maintenance scope object")
+    }
+
+    fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut fields = serde_json::Map::new();
+        while let Some(key) = access.next_key::<String>()? {
+            if fields.contains_key(&key) && (key == "kind" || key == "path") {
+                let field = if key == "kind" { "kind" } else { "path" };
+                return Err(<A::Error as serde::de::Error>::duplicate_field(field));
+            }
+            fields.insert(key, access.next_value()?);
+        }
+        Ok(fields)
+    }
+}
+
 impl<'de> Deserialize<'de> for MemoryMaintenanceScope {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        let map = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        let map = deserializer.deserialize_map(MemoryMaintenanceScopeFields)?;
 
         let kind_val = map
             .get("kind")
@@ -2179,6 +2205,36 @@ mod tests {
             res_op_ws.is_err(),
             "operation with workspace scope containing extra key must be rejected"
         );
+    }
+
+    #[test]
+    fn test_scope_rejects_duplicate_keys_from_raw_json() {
+        let duplicate_kind = r#"{"kind":"agent","kind":"workspace","path":"/valid/path"}"#;
+        let err_kind = serde_json::from_str::<MemoryMaintenanceScope>(duplicate_kind)
+            .expect_err("a scope with duplicate kind keys must be rejected");
+        assert!(
+            err_kind.to_string().starts_with("duplicate field `kind`"),
+            "duplicate kind error should be stable and identify the field: {err_kind}"
+        );
+
+        let duplicate_path = r#"{"kind":"workspace","path":"/first/path","path":"/second/path"}"#;
+        let err_path = serde_json::from_str::<MemoryMaintenanceScope>(duplicate_path)
+            .expect_err("a scope with duplicate path keys must be rejected");
+        assert!(
+            err_path.to_string().starts_with("duplicate field `path`"),
+            "duplicate path error should be stable and identify the field: {err_path}"
+        );
+    }
+
+    #[test]
+    fn test_scope_preserves_wire_shapes() {
+        for json in [
+            r#"{"kind":"agent"}"#,
+            r#"{"kind":"workspace","path":"/valid/path"}"#,
+        ] {
+            let scope: MemoryMaintenanceScope = serde_json::from_str(json).unwrap();
+            assert_eq!(serde_json::to_string(&scope).unwrap(), json);
+        }
     }
 
     #[test]
