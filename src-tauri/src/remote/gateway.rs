@@ -808,8 +808,8 @@ struct RemoteChatQuery {
     limit: Option<usize>,
 }
 
-async fn load_remote_agent_chat(
-    State(ctx): State<RemoteGatewayContext>,
+async fn load_remote_agent_chat<R: Runtime>(
+    State(ctx): State<RemoteGatewayContext<R>>,
     headers: HeaderMap,
     AxumPath(session_id): AxumPath<String>,
     Query(query): Query<RemoteChatQuery>,
@@ -826,13 +826,37 @@ async fn load_remote_agent_chat(
     let page =
         crate::remote::operations::remote_agent_chat_page(&state, &session_id, query.before, limit)
             .await
-            .map_err(|_| RemoteGatewayError::bad_request("agent_chat_failed"))?;
+            .map_err(|stage| {
+                RemoteGatewayError::bad_request(remote_agent_chat_failure_code(stage))
+            })?;
     audit_gateway_event(
         &session,
         &origin,
         GatewayAuditEvent::accepted("chat_read", "load_agent_chat").target("agent", &session_id),
     );
     Ok(Json(serde_json::json!(page)))
+}
+
+fn remote_agent_chat_failure_code(
+    stage: crate::commands::chat::ChatTranscriptFailureStage,
+) -> &'static str {
+    match stage {
+        crate::commands::chat::ChatTranscriptFailureStage::AgentSnapshot => {
+            "agent_chat_snapshot_failed"
+        }
+        crate::commands::chat::ChatTranscriptFailureStage::ProviderLogCapture => {
+            "agent_chat_provider_capture_failed"
+        }
+        crate::commands::chat::ChatTranscriptFailureStage::ArchiveWrite => {
+            "agent_chat_archive_write_failed"
+        }
+        crate::commands::chat::ChatTranscriptFailureStage::ProviderProjection => {
+            "agent_chat_projection_failed"
+        }
+        crate::commands::chat::ChatTranscriptFailureStage::Provenance => {
+            "agent_chat_provenance_failed"
+        }
+    }
 }
 
 async fn load_remote_agent_terminal(
@@ -1783,6 +1807,24 @@ mod tests {
     }
 
     #[test]
+    fn remote_chat_failure_codes_identify_only_the_processing_stage() {
+        use crate::commands::chat::ChatTranscriptFailureStage as Stage;
+
+        for (stage, code) in [
+            (Stage::AgentSnapshot, "agent_chat_snapshot_failed"),
+            (
+                Stage::ProviderLogCapture,
+                "agent_chat_provider_capture_failed",
+            ),
+            (Stage::ArchiveWrite, "agent_chat_archive_write_failed"),
+            (Stage::ProviderProjection, "agent_chat_projection_failed"),
+            (Stage::Provenance, "agent_chat_provenance_failed"),
+        ] {
+            assert_eq!(remote_agent_chat_failure_code(stage), code);
+        }
+    }
+
+    #[test]
     fn gateway_unauthorized_errors_preserve_machine_code() {
         let error = RemoteGatewayError::unauthorized("missing_session_cookie");
 
@@ -2035,6 +2077,55 @@ mod tests {
             .await
             .expect_err("missing csrf rejected");
         assert_eq!(error.code, "csrf_failed");
+        unsafe { std::env::remove_var("WARDIAN_HOME") };
+    }
+
+    #[tokio::test]
+    async fn remote_chat_snapshot_failure_returns_a_sanitized_stage_code() {
+        let _guard = crate::utils::wardian_test_env_lock_async().await;
+        let temp = tempfile::tempdir().expect("temp home");
+        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        crate::remote::storage::save_remote_config_at(temp.path(), &config())
+            .expect("remote config");
+
+        let app = tauri::test::mock_app();
+        app.manage(AppState::new());
+        let state = app.state::<AppState>();
+        let session = {
+            let mut runtime = state.remote_runtime.lock().await;
+            crate::remote::auth::create_session(
+                &mut runtime,
+                "device-1",
+                chrono::Utc::now().timestamp_millis(),
+            )
+        };
+        let ctx = RemoteGatewayContext {
+            app: app.handle().clone(),
+            config: config(),
+        };
+
+        let error = load_remote_agent_chat(
+            State(ctx),
+            action_headers(&session),
+            AxumPath("sanitized-codex-agent".to_string()),
+            Query(RemoteChatQuery {
+                before: None,
+                limit: None,
+            }),
+        )
+        .await
+        .expect_err("missing fixture agent should fail during capture");
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let body_text = String::from_utf8(body.to_vec()).expect("utf-8 response");
+        let payload: serde_json::Value = serde_json::from_str(&body_text).expect("json response");
+        assert_eq!(payload["code"], "agent_chat_snapshot_failed");
+        assert!(payload.get("detail").is_none());
+        assert!(!body_text.contains("sanitized-codex-agent"));
+
         unsafe { std::env::remove_var("WARDIAN_HOME") };
     }
 

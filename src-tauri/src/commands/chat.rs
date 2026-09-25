@@ -96,20 +96,54 @@ pub async fn load_agent_chat_transcript_for_state(
     state: &AppState,
     session_id: String,
 ) -> Result<Vec<AgentChatEvent>, String> {
+    load_agent_chat_transcript_inner(state, session_id)
+        .await
+        .map_err(|failure| failure.message)
+}
+
+/// Load a remote transcript while preserving a privacy-safe failure stage.
+pub(crate) async fn load_agent_chat_transcript_for_remote_state(
+    state: &AppState,
+    session_id: String,
+) -> Result<Vec<AgentChatEvent>, ChatTranscriptFailureStage> {
+    load_agent_chat_transcript_inner(state, session_id)
+        .await
+        .map_err(|failure| failure.stage)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChatTranscriptFailureStage {
+    AgentSnapshot,
+    ProviderLogCapture,
+    ArchiveWrite,
+    ProviderProjection,
+    Provenance,
+}
+
+struct AgentChatTranscriptFailure {
+    stage: ChatTranscriptFailureStage,
+    message: String,
+}
+
+async fn load_agent_chat_transcript_inner(
+    state: &AppState,
+    session_id: String,
+) -> Result<Vec<AgentChatEvent>, AgentChatTranscriptFailure> {
     let session_id = session_id.trim().to_string();
     if session_id.is_empty() {
-        return Err("session_id is required".to_string());
+        return Err(AgentChatTranscriptFailure {
+            stage: ChatTranscriptFailureStage::AgentSnapshot,
+            message: "session_id is required".to_string(),
+        });
     }
 
-    let result = archive_agent_chat_events_for_state(state, &session_id).await?;
+    let result = archive_agent_chat_events_for_state_with_stage(state, &session_id).await?;
     let mut current_events = result.events;
     let mut archived_events = state
         .conversation_archive
         .chat_events_for_capture(&result.context)
-        .unwrap_or_else(|error| {
-            manager::log_debug(&format!(
-                "[WARDIAN] conversation archive chat replay failed for {session_id}: {error}"
-            ));
+        .unwrap_or_else(|_error| {
+            manager::log_debug("[WARDIAN] conversation archive chat replay failed");
             Vec::new()
         });
     coalesce_codex_watch_observations_across(&mut current_events, &mut archived_events);
@@ -121,7 +155,10 @@ pub async fn load_agent_chat_transcript_for_state(
         current_events,
         archived_events,
     )
-    .map_err(|error| format!("conversation archive provenance refresh failed: {error}"))?;
+    .map_err(|error| AgentChatTranscriptFailure {
+        stage: ChatTranscriptFailureStage::Provenance,
+        message: format!("conversation archive provenance refresh failed: {error}"),
+    })?;
     canonicalize_provider_input_projection(&mut events);
     for event in &mut events {
         normalize_chat_event_visible_text(event);
@@ -453,7 +490,21 @@ pub(crate) async fn archive_agent_chat_events_for_state(
     state: &AppState,
     session_id: &str,
 ) -> Result<ArchiveCaptureResult, String> {
-    let snapshot = agent_archive_capture_snapshot(state, session_id).await?;
+    archive_agent_chat_events_for_state_with_stage(state, session_id)
+        .await
+        .map_err(|failure| failure.message)
+}
+
+async fn archive_agent_chat_events_for_state_with_stage(
+    state: &AppState,
+    session_id: &str,
+) -> Result<ArchiveCaptureResult, AgentChatTranscriptFailure> {
+    let snapshot = agent_archive_capture_snapshot(state, session_id)
+        .await
+        .map_err(|message| AgentChatTranscriptFailure {
+            stage: ChatTranscriptFailureStage::AgentSnapshot,
+            message,
+        })?;
     // Lock order is global roster snapshot (above), policy gate, then the
     // archive's per-agent gate. No caller may hold `state.agents` here.
     let _policy_guard = state.conversation_capture_policy_lock.lock().await;
@@ -478,7 +529,10 @@ pub(crate) async fn archive_agent_chat_events_for_state(
         let previous = state
             .conversation_archive
             .provider_log_capture_state(&snapshot.session_id, provider_source_key)
-            .map_err(|error| format!("provider-log capture state read failed: {error}"))?;
+            .map_err(|error| AgentChatTranscriptFailure {
+                stage: ChatTranscriptFailureStage::ProviderLogCapture,
+                message: format!("provider-log capture state read failed: {error}"),
+            })?;
         let policy =
             super::provider_log_acquisition::observe_provider_log_policy_with_initial_absence(
                 path,
@@ -487,7 +541,10 @@ pub(crate) async fn archive_agent_chat_events_for_state(
                 logging_enabled,
                 trust_source_from_start,
             )
-            .map_err(|error| format!("provider-log policy observation failed: {error}"))?;
+            .map_err(|error| AgentChatTranscriptFailure {
+                stage: ChatTranscriptFailureStage::ProviderLogCapture,
+                message: format!("provider-log policy observation failed: {error}"),
+            })?;
         if let Some(policy) = policy {
             if previous.as_ref() != Some(&policy.next) {
                 state
@@ -498,7 +555,10 @@ pub(crate) async fn archive_agent_chat_events_for_state(
                         previous.as_ref(),
                         &policy.next,
                     )
-                    .map_err(|error| format!("provider-log policy commit failed: {error}"))?;
+                    .map_err(|error| AgentChatTranscriptFailure {
+                        stage: ChatTranscriptFailureStage::ArchiveWrite,
+                        message: format!("provider-log policy commit failed: {error}"),
+                    })?;
             }
             let mut batch = super::provider_log_acquisition::acquire_provider_log_batch(
                 &snapshot.session_id,
@@ -508,7 +568,10 @@ pub(crate) async fn archive_agent_chat_events_for_state(
                 Some(policy.next),
                 trust_source_from_start,
             )
-            .map_err(|error| format!("provider-log acquisition failed: {error}"))?;
+            .map_err(|error| AgentChatTranscriptFailure {
+                stage: ChatTranscriptFailureStage::ProviderLogCapture,
+                message: format!("provider-log acquisition failed: {error}"),
+            })?;
             let _consumed_provider_log_bytes = batch.consumed_bytes;
             decorate_forward_provider_log_events(&mut batch.events, &snapshot.provider, path);
             // OpenCode's watcher can label a fallback message `opencode_db`,
@@ -527,7 +590,10 @@ pub(crate) async fn archive_agent_chat_events_for_state(
                     batch.previous.as_ref(),
                     &batch.next,
                 )
-                .map_err(|error| format!("provider-log archive append failed: {error}"))?;
+                .map_err(|error| AgentChatTranscriptFailure {
+                    stage: ChatTranscriptFailureStage::ArchiveWrite,
+                    message: format!("provider-log archive append failed: {error}"),
+                })?;
 
             if !logging_enabled {
                 // Preserve the existing live projection while the logging
@@ -538,7 +604,11 @@ pub(crate) async fn archive_agent_chat_events_for_state(
                 &snapshot,
                 batch.events,
                 batch.continue_immediately,
-            )?;
+            )
+            .map_err(|message| AgentChatTranscriptFailure {
+                stage: ChatTranscriptFailureStage::ProviderProjection,
+                message,
+            })?;
             let watch_only = result
                 .events
                 .iter()
@@ -549,32 +619,45 @@ pub(crate) async fn archive_agent_chat_events_for_state(
                 state
                     .conversation_archive
                     .append_chat_events_with_context(context, &watch_only)
-                    .map_err(|error| {
-                        format!("conversation archive watch append failed: {error}")
+                    .map_err(|error| AgentChatTranscriptFailure {
+                        stage: ChatTranscriptFailureStage::ArchiveWrite,
+                        message: format!("conversation archive watch append failed: {error}"),
                     })?;
             } else {
                 state
                     .conversation_archive
                     .discard_agent_with_context(context, &watch_only)
-                    .map_err(|error| {
-                        format!("conversation archive disabled cutoff failed: {error}")
+                    .map_err(|error| AgentChatTranscriptFailure {
+                        stage: ChatTranscriptFailureStage::ArchiveWrite,
+                        message: format!("conversation archive disabled cutoff failed: {error}"),
                     })?;
             }
             return Ok(result);
         }
     }
 
-    let result = collect_agent_chat_events_for_archive(&snapshot)?;
+    let result = collect_agent_chat_events_for_archive(&snapshot).map_err(|message| {
+        AgentChatTranscriptFailure {
+            stage: ChatTranscriptFailureStage::ProviderProjection,
+            message,
+        }
+    })?;
     if logging_enabled {
         state
             .conversation_archive
             .append_chat_events_with_context(result.context.clone(), &result.events)
-            .map_err(|error| format!("conversation archive append failed: {error}"))?;
+            .map_err(|error| AgentChatTranscriptFailure {
+                stage: ChatTranscriptFailureStage::ArchiveWrite,
+                message: format!("conversation archive append failed: {error}"),
+            })?;
     } else {
         state
             .conversation_archive
             .discard_agent_with_context(result.context.clone(), &result.events)
-            .map_err(|error| format!("conversation archive disabled cutoff failed: {error}"))?;
+            .map_err(|error| AgentChatTranscriptFailure {
+                stage: ChatTranscriptFailureStage::ArchiveWrite,
+                message: format!("conversation archive disabled cutoff failed: {error}"),
+            })?;
     }
 
     Ok(result)

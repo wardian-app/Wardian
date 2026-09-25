@@ -16,6 +16,7 @@ Use this index when implementing or debugging Wardian internals.
 
 - [IPC and Event Governance](./ipc-events.md)
 - [Tauri Command Reference](./tauri-command-reference.md)
+- [Remote Gateway](./remote-gateway.md)
 - [Native Orchestration and Delivery](./native-orchestration-delivery.md)
 - [Agent Messaging Tools](./agent-messaging-tools.md)
 - [Agent Memory](./agent-memory.md)

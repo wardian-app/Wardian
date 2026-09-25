@@ -1,3 +1,4 @@
+use crate::commands::chat::ChatTranscriptFailureStage;
 use crate::remote::models::{
     RemoteAgentActionRequest, RemoteAgentSummary, RemoteAutomationMonitorRun,
     RemoteAutomationMonitorSchedule, RemoteAutomationMonitorSnapshot, RemoteInboxActionRequest,
@@ -1480,19 +1481,23 @@ fn queue_timestamp(value: &str) -> i64 {
         .unwrap_or_else(|_| chrono::Utc::now().timestamp_millis())
 }
 
-pub async fn remote_agent_chat_transcript(
+pub(crate) async fn remote_agent_chat_transcript(
     state: &AppState,
     session_id: &str,
-) -> Result<Vec<AgentChatEvent>, String> {
-    crate::commands::chat::load_agent_chat_transcript_for_state(state, session_id.to_string()).await
+) -> Result<Vec<AgentChatEvent>, ChatTranscriptFailureStage> {
+    crate::commands::chat::load_agent_chat_transcript_for_remote_state(
+        state,
+        session_id.to_string(),
+    )
+    .await
 }
 
-pub async fn remote_agent_chat_page(
+pub(crate) async fn remote_agent_chat_page(
     state: &AppState,
     session_id: &str,
     before: Option<usize>,
     limit: usize,
-) -> Result<RemoteAgentChatPage, String> {
+) -> Result<RemoteAgentChatPage, ChatTranscriptFailureStage> {
     let events = remote_agent_chat_transcript(state, session_id).await?;
     Ok(page_remote_agent_chat_events(events, before, limit))
 }
