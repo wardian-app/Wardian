@@ -189,14 +189,19 @@ fn maintenance_confirmation_message(
     preview_digest: &str,
 ) -> String {
     let owner = agent_id.escape_debug().to_string();
+    let digest_prefix_chars = "sha256:".len() + 12;
     let digest_chars = preview_digest.chars().count();
     let digest_prefix = preview_digest
         .chars()
-        .take(12)
+        .take(digest_prefix_chars)
         .collect::<String>()
         .escape_debug()
         .to_string();
-    let digest_suffix = if digest_chars > 12 { "…" } else { "" };
+    let digest_suffix = if digest_chars > digest_prefix_chars {
+        "…"
+    } else {
+        ""
+    };
 
     format!(
         "Apply this reviewed memory maintenance plan?\n\nOwner ID: {owner}\nOperation count: {operation_count}\nPreview digest prefix: {digest_prefix}{digest_suffix}\n\nChoose Yes to apply. No or Cancel leaves memory unchanged."
@@ -279,13 +284,13 @@ mod tests {
 
     #[test]
     fn confirmation_names_owner_operation_count_and_digest_prefix() {
-        let digest = "0123456789abcdef";
-        let message = maintenance_confirmation_message("agent-123", 4, digest);
+        let digest = format!("sha256:{}", "0123456789abcdef".repeat(4));
+        let message = maintenance_confirmation_message("agent-123", 4, &digest);
 
         assert!(message.contains("Owner ID: agent-123"));
         assert!(message.contains("Operation count: 4"));
-        assert!(message.contains("Preview digest prefix: 0123456789ab…"));
-        assert!(!message.contains(digest));
+        assert!(message.contains("Preview digest prefix: sha256:0123456789ab…"));
+        assert!(!message.contains(&digest));
     }
 
     #[tokio::test]

@@ -236,7 +236,7 @@ When one or more conflicts are detected:
 
 When no conflicts exist, click **Apply reviewed plan…**.
 
-1. **Native confirmation dialog**: The host OS displays a native modal confirmation detailing the owner ID, operation count, and preview digest prefix. If declined or dismissed, the operation aborts with zero changes.
+1. **Native confirmation dialog**: The host OS displays a native modal confirmation detailing the owner ID, operation count, and preview digest prefix (`sha256:` plus 12 hexadecimal characters). If declined or dismissed, the operation aborts with zero changes.
 2. **Atomic transaction**: The backend opens an immediate SQLite transaction, re-verifying the preview digest and expected revisions. If any concurrent modification occurred, the transaction rolls back cleanly.
 3. **Receipt display**: Upon success, a `MaintenanceReceipt` is stored and rendered in the modal. The receipt records the applied timestamp, plan ID, owner ID, idempotency key, preview digest, and allocated IDs for newly created or revised records.
 
