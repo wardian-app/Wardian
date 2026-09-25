@@ -216,6 +216,7 @@ PowerShell:
 ### Import and preview
 
 Click the file selector in the maintenance modal to import `maintenance-plan.json`.
+Duplicate `kind` or `path` keys in a scope are rejected as malformed before preview.
 
 Wardian validates the schema and executes a read-only preview against `memory.db`:
 - Computes a canonical `preview_digest` binding the plan ID, owner, operations, and expected revisions.

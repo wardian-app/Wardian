@@ -134,6 +134,7 @@ export type WorkbenchIpcMockOptions = {
   safe_mode?: boolean;
   reset_delay_ms?: number;
   reset_outcome?: "saved" | "revision_conflict" | "error";
+  errors?: Record<string, string>;
   responses?: Record<string, unknown>;
   response_delays_ms?: Record<string, number>;
   explorer_root?: string;
@@ -198,6 +199,7 @@ export async function installWorkbenchIpcMock(
       safeMode,
       resetDelayMs,
       resetOutcome,
+      errors,
       responses,
       responseDelaysMs,
       explorerRoot,
@@ -428,6 +430,10 @@ export async function installWorkbenchIpcMock(
           const responseDelayMs = responseDelaysMs[command] ?? 0;
           if (responseDelayMs > 0) {
             await new Promise((resolve) => window.setTimeout(resolve, responseDelayMs));
+          }
+
+          if (Object.prototype.hasOwnProperty.call(errors, command)) {
+            throw new Error(errors[command]);
           }
 
           if (command === "get_workbench_boot_config") return { safe_mode: safeMode };
@@ -858,6 +864,7 @@ export async function installWorkbenchIpcMock(
       safeMode: options.safe_mode ?? false,
       resetDelayMs: options.reset_delay_ms ?? 0,
       resetOutcome: options.reset_outcome ?? "saved",
+      errors: options.errors ?? {},
       responses: options.responses ?? {},
       responseDelaysMs: options.response_delays_ms ?? {},
       explorerRoot: options.explorer_root ?? "/workspace",

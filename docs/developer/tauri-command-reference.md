@@ -95,6 +95,15 @@ Agent-created updates and approvals are durable `InteractionKind::Notification` 
 
 `load_agent_interactions` and `save_agent_interactions` preserve the existing lightweight graph interaction projection. They are separate from the backend interaction control plane records used by structured `ask` and `reply`.
 
+## Memory maintenance (`commands/memory.rs`)
+
+- `memory_maintenance_parse`
+- `memory_maintenance_preview`
+- `memory_maintenance_apply`
+- `memory_maintenance_receipt`
+
+`memory_maintenance_parse` accepts a `rawJson` string containing the plan file. It rejects input larger than 1 MiB in UTF-8 bytes, deserializes directly into `MemoryMaintenancePlan`, and returns that typed plan. Scope objects reject duplicate `kind` or `path` keys during parsing. The frontend calls this command before converting the plan to a JavaScript object; preview and apply retain their existing typed-plan payloads.
+
 ## Filesystem and Explorer (`commands/fs.rs`)
 
 - `resolve_system_include_directories`

@@ -4,7 +4,7 @@ use tauri::Manager;
 use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogKind, MessageDialogResult};
 use wardian_core::memory::{
     MemoryActor, MemoryMaintenancePlan, MemoryMaintenancePreview, MemoryMaintenanceReceipt,
-    MemoryRecord, MemoryStore, RecallResult,
+    MemoryRecord, MemoryStore, RecallResult, MAX_PLAN_BYTES,
 };
 
 const MEMORY_MAINTENANCE_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -50,6 +50,19 @@ pub async fn memory_recall(
     MemoryStore::from_default_home()
         .and_then(|store| store.recall(&MemoryActor::Operator, &agent_id, workspace.as_deref()))
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+/// Parses a raw maintenance plan before JavaScript materializes its JSON objects.
+pub fn memory_maintenance_parse(raw_json: String) -> Result<MemoryMaintenancePlan, String> {
+    if raw_json.len() > MAX_PLAN_BYTES {
+        return Err(format!(
+            "plan exceeds 1 MiB limit: {} bytes",
+            raw_json.len()
+        ));
+    }
+
+    serde_json::from_str(&raw_json).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -270,8 +283,8 @@ where
 mod tests {
     use super::{
         apply_after_confirmation, apply_after_replay, maintenance_confirmation_from_dialog,
-        maintenance_confirmation_message, receive_native_confirmation, with_dialog_parent_handles,
-        MaintenanceConfirmation,
+        maintenance_confirmation_message, memory_maintenance_parse, receive_native_confirmation,
+        with_dialog_parent_handles, MaintenanceConfirmation, MAX_PLAN_BYTES,
     };
     use std::cell::Cell;
     use std::future::{ready, Future};
@@ -456,5 +469,39 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         result
+    }
+
+    #[test]
+    fn raw_maintenance_parse_rejects_duplicate_scope_keys() {
+        let duplicate_kind = r#"{"schema_version":1,"plan_id":"plan-1","agent_id":"agent-a","idempotency_key":"key-1","operations":[{"op":"create","client_key":"new-1","text":"text","kind":"stable","scope":{"kind":"agent","kind":"workspace","path":"/workspace"},"evidence_excerpt":"evidence"}]}"#;
+        let err_kind = memory_maintenance_parse(duplicate_kind.into()).unwrap_err();
+        assert!(err_kind.contains("duplicate field `kind`"), "{err_kind}");
+
+        let duplicate_path = r#"{"schema_version":1,"plan_id":"plan-1","agent_id":"agent-a","idempotency_key":"key-1","operations":[{"op":"create","client_key":"new-1","text":"text","kind":"stable","scope":{"kind":"workspace","path":"/first","path":"/second"},"evidence_excerpt":"evidence"}]}"#;
+        let err_path = memory_maintenance_parse(duplicate_path.into()).unwrap_err();
+        assert!(err_path.contains("duplicate field `path`"), "{err_path}");
+    }
+
+    #[test]
+    fn raw_maintenance_parse_preserves_scope_wire_shapes() {
+        let raw_plan = r#"{"schema_version":1,"plan_id":"plan-1","agent_id":"agent-a","idempotency_key":"key-1","operations":[{"op":"create","client_key":"agent-scope","text":"text","kind":"stable","scope":{"kind":"agent"},"evidence_excerpt":"evidence"},{"op":"create","client_key":"workspace-scope","text":"text","kind":"stable","scope":{"kind":"workspace","path":"/workspace"},"evidence_excerpt":"evidence"}]}"#;
+        let plan = memory_maintenance_parse(raw_plan.into()).unwrap();
+        let serialized = serde_json::to_value(plan).unwrap();
+
+        assert_eq!(
+            serialized["operations"][0]["scope"],
+            serde_json::json!({ "kind": "agent" })
+        );
+        assert_eq!(
+            serialized["operations"][1]["scope"],
+            serde_json::json!({ "kind": "workspace", "path": "/workspace" })
+        );
+    }
+
+    #[test]
+    fn raw_maintenance_parse_enforces_the_byte_limit() {
+        let oversized = " ".repeat(MAX_PLAN_BYTES + 1);
+        let error = memory_maintenance_parse(oversized).unwrap_err();
+        assert!(error.contains("plan exceeds 1 MiB limit"), "{error}");
     }
 }

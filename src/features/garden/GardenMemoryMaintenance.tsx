@@ -224,7 +224,9 @@ export function GardenMemoryMaintenance({ agentId, agentName, onApplied }: Garde
       return;
     }
     try {
-      const candidate = readPlan(JSON.parse(await file.text()) as unknown, agentId);
+      const rawJson = await file.text();
+      const parsed = await invoke<unknown>("memory_maintenance_parse", { rawJson });
+      const candidate = readPlan(parsed, agentId);
       if (currentRequest !== requestId.current) return;
       setPlan(candidate);
       await runPreview(candidate, currentRequest);
