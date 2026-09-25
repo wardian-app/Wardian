@@ -506,6 +506,68 @@ describe("useRemoteStore watchlists", () => {
     expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["Newer transcript"]);
   });
 
+  it("keeps a connected desktop visible when Codex chat returns an application error", async () => {
+    vi.mocked(remoteClient.loadAgentChatPage).mockRejectedValueOnce(
+      new RemoteRequestError("Remote request failed: 400", 400, "agent_chat_failed"),
+    );
+    useRemoteStore.setState({
+      status: "ready",
+      activeAgentId: "agent-1",
+      activeAgentViewMode: "chat",
+      chatEvents: [chatMessage("existing", "Earlier reply", 1)],
+    });
+
+    await useRemoteStore.getState().refreshActiveAgentChat();
+
+    expect(useRemoteStore.getState().status).toBe("ready");
+    expect(useRemoteStore.getState().chatError).toBe("Remote request failed: 400");
+    expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["Earlier reply"]);
+  });
+
+  it("treats chat transport and gateway loss and session expiry as connection failures", async () => {
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat" });
+    vi.mocked(remoteClient.loadAgentChatPage).mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    await useRemoteStore.getState().refreshActiveAgentChat();
+    expect(useRemoteStore.getState().status).toBe("unreachable");
+
+    useRemoteStore.setState({ status: "ready" });
+    vi.mocked(remoteClient.loadAgentChatPage).mockRejectedValueOnce(new RemoteRequestError("Bad gateway", 502));
+    await useRemoteStore.getState().refreshActiveAgentChat();
+    expect(useRemoteStore.getState().status).toBe("unreachable");
+
+    useRemoteStore.setState({ status: "ready" });
+    vi.mocked(remoteClient.loadAgentChatPage).mockRejectedValueOnce(new RemoteRequestError("Request timeout", 408));
+    await useRemoteStore.getState().refreshActiveAgentChat();
+    expect(useRemoteStore.getState().status).toBe("unreachable");
+
+    useRemoteStore.setState({ status: "ready" });
+    vi.mocked(remoteClient.loadAgentChatPage).mockRejectedValueOnce(new RemoteRequestError("expired", 401));
+    await useRemoteStore.getState().refreshActiveAgentChat();
+    expect(useRemoteStore.getState().status).toBe("session_expired");
+  });
+
+  it("keeps older-chat HTTP failures local and ignores errors from a previous agent", async () => {
+    vi.mocked(remoteClient.loadAgentChatPage).mockRejectedValueOnce(
+      new RemoteRequestError("Remote request failed: 400", 400, "agent_chat_failed"),
+    );
+    useRemoteStore.setState({
+      status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      chatNextBefore: 20, chatEvents: [chatMessage("existing", "Earlier reply", 1)],
+    });
+    await useRemoteStore.getState().loadOlderActiveAgentChat();
+    expect(useRemoteStore.getState().status).toBe("ready");
+    expect(useRemoteStore.getState().chatError).toBe("Remote request failed: 400");
+
+    const pending = deferred<RemoteAgentChatPage>();
+    vi.mocked(remoteClient.loadAgentChatPage).mockReturnValueOnce(pending.promise);
+    const refresh = useRemoteStore.getState().refreshActiveAgentChat();
+    useRemoteStore.setState({ activeAgentId: "agent-2", chatError: "" });
+    pending.reject(new RemoteRequestError("stale", 400, "agent_chat_failed"));
+    await refresh;
+    expect(useRemoteStore.getState().status).toBe("ready");
+    expect(useRemoteStore.getState().chatError).toBe("");
+  });
+
   it("loads older remote chat pages only when requested", async () => {
     vi.mocked(remoteClient.loadAgentChatPage)
       .mockResolvedValueOnce({
