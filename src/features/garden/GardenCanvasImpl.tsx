@@ -23,7 +23,7 @@ import { AttributionLayer } from "./AttributionLayer";
 import type { TerrainCell, TerrainDistrict } from "./terrain";
 import type { TerrainPaint } from "./terrainPaint";
 import type { TerrainViewport } from "./terrainFrontier";
-import { wheelZoomFactor } from "../../utils/wheelZoom";
+import { GARDEN_WHEEL_ZOOM_STEP, wheelZoomFactor } from "../../utils/wheelZoom";
 import "./garden-canvas.css";
 
 export interface GardenCanvasProps {
@@ -489,7 +489,7 @@ export const GardenCanvas: React.FC<GardenCanvasProps> = ({
     e.evt.preventDefault();
     const stage = stageRef.current;
     const pointer = stage?.getPointerPosition() ?? { x: size.width / 2, y: size.height / 2 };
-    zoomAround(pointer, wheelZoomFactor(e.evt.deltaY, e.evt.deltaMode));
+    zoomAround(pointer, wheelZoomFactor(e.evt.deltaY, e.evt.deltaMode, GARDEN_WHEEL_ZOOM_STEP));
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
