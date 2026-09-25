@@ -72,6 +72,7 @@ This file is an agent-readable index for the public Wardian documentation. Use t
 - https://docs.wardian.org/developer/release-updates - Configure, validate, and recover signed desktop release updates, including macOS notarization.
 - https://docs.wardian.org/developer/package-manager-distribution - Publish and validate winget, Homebrew Cask, and Linux package-manager metadata from stable release artifacts.
 - https://docs.wardian.org/developer/docs-maintenance - Maintain public docs, screenshots, and this agent-readable index.
+- https://docs.wardian.org/developer/remote-gateway - Understand authenticated remote gateway behavior and sanitized error codes.
 
 ## Project Context
 
