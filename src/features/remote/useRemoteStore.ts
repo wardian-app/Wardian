@@ -119,9 +119,13 @@ const statusFromError = (error: unknown): RemoteStatus => {
 
 const chatConnectionStatusFromError = (error: unknown): RemoteStatus | null => {
   const status = statusFromError(error);
-  // An HTTP response proves the desktop answered. Keep ordinary chat failures
-  // local to the chat pane; only transport and session failures change pairing.
-  return error instanceof RemoteRequestError && status === "unreachable" ? null : status;
+  // Keep application 4xx errors local to Chat. Gateway failures and request
+  // timeouts can still mean the desktop is unreachable.
+  return error instanceof RemoteRequestError
+    && status === "unreachable"
+    && error.status >= 400
+    && error.status < 500
+    && error.status !== 408 ? null : status;
 };
 
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);

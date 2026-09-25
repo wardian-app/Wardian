@@ -524,9 +524,19 @@ describe("useRemoteStore watchlists", () => {
     expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["Earlier reply"]);
   });
 
-  it("treats chat transport loss and session expiry as connection failures", async () => {
+  it("treats chat transport and gateway loss and session expiry as connection failures", async () => {
     useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat" });
     vi.mocked(remoteClient.loadAgentChatPage).mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    await useRemoteStore.getState().refreshActiveAgentChat();
+    expect(useRemoteStore.getState().status).toBe("unreachable");
+
+    useRemoteStore.setState({ status: "ready" });
+    vi.mocked(remoteClient.loadAgentChatPage).mockRejectedValueOnce(new RemoteRequestError("Bad gateway", 502));
+    await useRemoteStore.getState().refreshActiveAgentChat();
+    expect(useRemoteStore.getState().status).toBe("unreachable");
+
+    useRemoteStore.setState({ status: "ready" });
+    vi.mocked(remoteClient.loadAgentChatPage).mockRejectedValueOnce(new RemoteRequestError("Request timeout", 408));
     await useRemoteStore.getState().refreshActiveAgentChat();
     expect(useRemoteStore.getState().status).toBe("unreachable");
 
