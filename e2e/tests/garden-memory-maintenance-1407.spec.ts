@@ -1,6 +1,6 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import * as path from "node:path";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import {
   installWorkbenchIpcMock,
@@ -29,7 +29,10 @@ const atlas: WorkbenchAgentFixture = {
   is_off: false,
 };
 
-test("Issue 1407 imports a maintenance plan and reviews the seeded preview", async ({ page }) => {
+async function openMaintenance(
+  page: Page,
+  ipcOptions: { errors?: Record<string, string>; responses?: Record<string, unknown> } = {},
+) {
   await page.setViewportSize({ width: 1920, height: 1080 });
   const document = makeWorkbenchDocument({
     shell: { left_sidebar_collapsed: true, right_sidebar_collapsed: true },
@@ -46,8 +49,9 @@ test("Issue 1407 imports a maintenance plan and reviews the seeded preview", asy
     responses: {
       memory_list: [],
       list_conversations: { schema: 1, conversations: [] },
-      memory_maintenance_preview: preview,
+      ...ipcOptions.responses,
     },
+    errors: ipcOptions.errors,
   });
 
   await page.goto("/");
@@ -65,6 +69,16 @@ test("Issue 1407 imports a maintenance plan and reviews the seeded preview", asy
 
   const dialog = page.getByRole("dialog", { name: "Memory maintenance" });
   await expect(dialog).toBeVisible();
+  return { dialog, ipc };
+}
+
+test("Issue 1407 imports a maintenance plan and reviews the seeded preview", async ({ page }) => {
+  const { dialog, ipc } = await openMaintenance(page, {
+    responses: {
+      memory_maintenance_parse: plan,
+      memory_maintenance_preview: preview,
+    },
+  });
   await dialog.getByLabel("Maintenance plan (.json)").setInputFiles(planPath);
 
   await expect(dialog.getByText("maintenance-plan.json")).toBeVisible();
@@ -78,8 +92,38 @@ test("Issue 1407 imports a maintenance plan and reviews the seeded preview", asy
   await expect(dialog.getByText("setup.md")).toHaveCount(2);
   await expect(dialog.getByRole("button", { name: "Apply reviewed plan…" })).toBeEnabled();
 
+  const parseCalls = await ipc.calls("memory_maintenance_parse");
+  expect(parseCalls).toHaveLength(1);
+  expect(parseCalls[0]?.args?.rawJson).toBe(readFileSync(planPath, "utf8"));
   const previewCalls = await ipc.calls("memory_maintenance_preview");
   expect(previewCalls).toHaveLength(1);
   expect(previewCalls[0]?.args?.plan).toEqual(plan);
   expect(await ipc.calls("memory_maintenance_apply")).toHaveLength(0);
+});
+
+test("Issue 1414 rejects duplicate scope keys before preview", async ({ page }) => {
+  const rawPlan = `{"schema_version":1,"plan_id":"plan-1414","agent_id":"fixture-agent-1407","idempotency_key":"key-1414","operations":[{"op":"create","client_key":"new-1","text":"sanitized fixture","kind":"stable","scope":{"kind":"agent","kind":"workspace","path":"/fixture/workspace"},"evidence_excerpt":"sanitized fixture evidence"}]}`;
+  const { dialog, ipc } = await openMaintenance(page, {
+    errors: { memory_maintenance_parse: "duplicate field `kind` at line 1 column 256" },
+  });
+  await dialog.locator('input[type="file"]').setInputFiles({
+    name: "duplicate-scope-plan.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(rawPlan, "utf8"),
+  });
+
+  await expect(dialog.getByRole("alert")).toContainText("duplicate field `kind`");
+  const parseCalls = await ipc.calls("memory_maintenance_parse");
+  expect(parseCalls).toHaveLength(1);
+  expect(parseCalls[0]?.args?.rawJson).toBe(rawPlan);
+  expect(await ipc.calls("memory_maintenance_preview")).toHaveLength(0);
+  expect(await ipc.calls("memory_maintenance_apply")).toHaveLength(0);
+
+  const screenshotDirectory = process.env.WARDIAN_E2E_SCREENSHOT_DIR;
+  if (screenshotDirectory) {
+    mkdirSync(screenshotDirectory, { recursive: true });
+    await dialog.screenshot({
+      path: path.join(screenshotDirectory, "duplicate-scope-import-error.png"),
+    });
+  }
 });

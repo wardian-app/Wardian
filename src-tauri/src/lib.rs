@@ -727,6 +727,7 @@ pub fn run() {
             commands::memory::memory_get,
             commands::memory::memory_history,
             commands::memory::memory_recall,
+            commands::memory::memory_maintenance_parse,
             commands::memory::memory_maintenance_preview,
             commands::memory::memory_maintenance_apply,
             commands::memory::memory_maintenance_receipt,
