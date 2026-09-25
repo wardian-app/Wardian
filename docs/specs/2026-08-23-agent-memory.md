@@ -51,9 +51,11 @@ memory for the resolved workspace. A deterministic 12,000-character policy
 balances stable memory with fresh current records, preferring a complete record
 from both groups when they fit and alternating between them as space permits.
 Selected records are presented stable first; stale current records have lower
-priority. The policy reports omissions. A fingerprint covers scope, logical ID,
-revision, kind, evidence integrity, text, staleness, and the budget-policy
-version.
+priority. On resume deltas, removal notices are budgeted before stale Current
+records; notices that do not fit contribute to the omission count. The rendered
+section order remains Stable, Current, then Removed or superseded. The policy
+reports omissions. A fingerprint covers scope, logical ID, revision, kind,
+evidence integrity, text, staleness, and the budget-policy version.
 
 Fresh processes receive full `Stable memory` and `Current state` sections.
 Restored/resumed processes compare against the latest fingerprint for their

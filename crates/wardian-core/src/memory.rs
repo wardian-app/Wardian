@@ -13,7 +13,7 @@ pub use maintenance::*;
 
 const SCHEMA_VERSION: i64 = 5;
 pub const DEFAULT_STALE_DAYS: i64 = 30;
-pub const MEMORY_BUDGET_POLICY_VERSION: u32 = 2;
+pub const MEMORY_BUDGET_POLICY_VERSION: u32 = 3;
 pub const MEMORY_CAPABILITY_ENV: &str = "WARDIAN_MEMORY_CAPABILITY";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1652,6 +1652,16 @@ fn render_brief(
     removed: &[String],
     max_chars: usize,
 ) -> (String, usize) {
+    render_brief_with_anchor_visitor(kind, records, removed, max_chars, || {})
+}
+
+fn render_brief_with_anchor_visitor(
+    kind: MemoryBriefKind,
+    records: &[MemoryRecord],
+    removed: &[String],
+    max_chars: usize,
+    mut visit_anchor_candidate: impl FnMut(),
+) -> (String, usize) {
     if records.is_empty() && removed.is_empty() {
         return (String::new(), 0);
     }
@@ -1675,6 +1685,7 @@ fn render_brief(
         .map(|(record, stale)| brief_record_line(record, *stale))
         .collect::<Vec<_>>();
     let mut selected = vec![false; records.len()];
+    let mut selected_sections = [false; 2];
     let mut selected_removed = vec![false; removed.len()];
     let mut used = title.len();
 
@@ -1700,21 +1711,23 @@ fn render_brief(
 
     // Reserve a whole stable and fresh current record together when the pair
     // fits. Preserve recall order within each selection tier.
-    let anchors = fresh_current_indices.iter().find_map(|current_index| {
-        stable_indices.iter().find_map(|stable_index| {
-            let pair_len = title.len()
-                + brief_section_heading(MemoryKind::Stable).len()
-                + lines[*stable_index].len()
-                + brief_section_heading(MemoryKind::Current).len()
-                + lines[*current_index].len();
-            (pair_len <= max_chars).then_some((*stable_index, *current_index))
-        })
-    });
+    let pair_heading_cost = title.len()
+        + brief_section_heading(MemoryKind::Stable).len()
+        + brief_section_heading(MemoryKind::Current).len();
+    let anchors = find_brief_anchor(
+        &stable_indices,
+        &fresh_current_indices,
+        &lines,
+        pair_heading_cost,
+        max_chars,
+        &mut visit_anchor_candidate,
+    );
     if let Some((stable_index, current_index)) = anchors {
         select_brief_record(
             stable_index,
             records,
             &lines,
+            &mut selected_sections,
             &mut selected,
             &mut used,
             max_chars,
@@ -1723,6 +1736,7 @@ fn render_brief(
             current_index,
             records,
             &lines,
+            &mut selected_sections,
             &mut selected,
             &mut used,
             max_chars,
@@ -1740,7 +1754,15 @@ fn render_brief(
                 <= max_chars
         });
         if let Some(index) = current_anchor.or(stable_anchor) {
-            select_brief_record(index, records, &lines, &mut selected, &mut used, max_chars);
+            select_brief_record(
+                index,
+                records,
+                &lines,
+                &mut selected_sections,
+                &mut selected,
+                &mut used,
+                max_chars,
+            );
         }
     }
 
@@ -1762,12 +1784,28 @@ fn render_brief(
         let mut selected_any = false;
         if let Some(index) = stable_remaining.get(stable_cursor).copied() {
             stable_cursor += 1;
-            select_brief_record(index, records, &lines, &mut selected, &mut used, max_chars);
+            select_brief_record(
+                index,
+                records,
+                &lines,
+                &mut selected_sections,
+                &mut selected,
+                &mut used,
+                max_chars,
+            );
             selected_any = true;
         }
         if let Some(index) = fresh_current_remaining.get(fresh_current_cursor).copied() {
             fresh_current_cursor += 1;
-            select_brief_record(index, records, &lines, &mut selected, &mut used, max_chars);
+            select_brief_record(
+                index,
+                records,
+                &lines,
+                &mut selected_sections,
+                &mut selected,
+                &mut used,
+                max_chars,
+            );
             selected_any = true;
         }
         if !selected_any {
@@ -1782,21 +1820,31 @@ fn render_brief(
             format!("- [{short_id}] no longer applies\n")
         })
         .collect::<Vec<_>>();
+    let mut has_removed_section = false;
     for (index, line) in removed_lines.iter().enumerate() {
-        let heading_cost = if selected_removed.iter().any(|is_selected| *is_selected) {
+        let heading_cost = if has_removed_section {
             0
         } else {
             "\n## Removed or superseded\n".len()
         };
         if used + heading_cost + line.len() <= max_chars {
             selected_removed[index] = true;
+            has_removed_section = true;
             used += heading_cost + line.len();
         }
     }
 
     for index in &stale_current_indices {
         if !selected[*index] {
-            select_brief_record(*index, records, &lines, &mut selected, &mut used, max_chars);
+            select_brief_record(
+                *index,
+                records,
+                &lines,
+                &mut selected_sections,
+                &mut selected,
+                &mut used,
+                max_chars,
+            );
         }
     }
 
@@ -1805,11 +1853,7 @@ fn render_brief(
         (MemoryKind::Stable, "\n## Stable memory\n"),
         (MemoryKind::Current, "\n## Current state\n"),
     ] {
-        if selected
-            .iter()
-            .zip(records)
-            .any(|(is_selected, record)| *is_selected && record.kind == target_kind)
-        {
+        if selected_sections[brief_section_index(target_kind)] {
             output.push_str(heading);
             for (index, record) in records.iter().enumerate() {
                 if selected[index] && record.kind == target_kind {
@@ -1818,7 +1862,7 @@ fn render_brief(
             }
         }
     }
-    if selected_removed.iter().any(|is_selected| *is_selected) {
+    if has_removed_section {
         output.push_str("\n## Removed or superseded\n");
         for (index, is_selected) in selected_removed.iter().enumerate() {
             if *is_selected {
@@ -1839,6 +1883,45 @@ fn render_brief(
         }
     }
     (output.trim().to_string(), omitted)
+}
+
+fn find_brief_anchor(
+    stable_indices: &[usize],
+    fresh_current_indices: &[usize],
+    lines: &[String],
+    pair_heading_cost: usize,
+    max_chars: usize,
+    visit_candidate: &mut impl FnMut(),
+) -> Option<(usize, usize)> {
+    if stable_indices.is_empty() || fresh_current_indices.is_empty() {
+        return None;
+    }
+    let minimum_stable_line_len = stable_indices
+        .iter()
+        .map(|index| {
+            visit_candidate();
+            lines[*index].len()
+        })
+        .min()?;
+    let current_index = fresh_current_indices
+        .iter()
+        .copied()
+        .find(|current_index| {
+            visit_candidate();
+            pair_heading_cost + lines[*current_index].len() + minimum_stable_line_len <= max_chars
+        })?;
+    let stable_index = stable_indices.iter().copied().find(|stable_index| {
+        visit_candidate();
+        pair_heading_cost + lines[current_index].len() + lines[*stable_index].len() <= max_chars
+    })?;
+    Some((stable_index, current_index))
+}
+
+fn brief_section_index(kind: MemoryKind) -> usize {
+    match kind {
+        MemoryKind::Stable => 0,
+        MemoryKind::Current => 1,
+    }
 }
 
 fn brief_section_heading(kind: MemoryKind) -> &'static str {
@@ -1869,15 +1952,14 @@ fn select_brief_record(
     index: usize,
     records: &[MemoryRecord],
     lines: &[String],
+    selected_sections: &mut [bool; 2],
     selected: &mut [bool],
     used: &mut usize,
     max_chars: usize,
 ) -> bool {
     let kind = records[index].kind;
-    let has_section = selected
-        .iter()
-        .zip(records)
-        .any(|(is_selected, record)| *is_selected && record.kind == kind);
+    let section_index = brief_section_index(kind);
+    let has_section = selected_sections[section_index];
     let heading_cost = if has_section {
         0
     } else {
@@ -1888,6 +1970,7 @@ fn select_brief_record(
         return false;
     }
     selected[index] = true;
+    selected_sections[section_index] = true;
     *used += added;
     true
 }
@@ -1936,6 +2019,93 @@ mod tests {
             idempotency_key: None,
             sources: vec![],
         }
+    }
+
+    fn reference_select_brief_record(
+        index: usize,
+        records: &[MemoryRecord],
+        lines: &[String],
+        selected: &mut [bool],
+        used: &mut usize,
+        max_chars: usize,
+    ) -> bool {
+        let kind = records[index].kind;
+        let has_section = selected
+            .iter()
+            .zip(records)
+            .any(|(is_selected, record)| *is_selected && record.kind == kind);
+        let heading_cost = if has_section {
+            0
+        } else {
+            brief_section_heading(kind).len()
+        };
+        let added = heading_cost + lines[index].len();
+        if *used + added > max_chars {
+            return false;
+        }
+        selected[index] = true;
+        *used += added;
+        true
+    }
+
+    fn reference_67_brief_selection(records: &[MemoryRecord], max_chars: usize) -> Vec<bool> {
+        let title_len = "# Wardian memory\n".len();
+        let stable_indices = records
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| (record.kind == MemoryKind::Stable).then_some(index))
+            .collect::<Vec<_>>();
+        let current_index = records
+            .iter()
+            .position(|record| record.kind == MemoryKind::Current)
+            .expect("the frozen 67-record case has a current checkpoint");
+        let lines = records
+            .iter()
+            .map(|record| brief_record_line(record, false))
+            .collect::<Vec<_>>();
+        let mut selected = vec![false; records.len()];
+        let mut used = title_len;
+        let stable_anchor = stable_indices
+            .iter()
+            .copied()
+            .find(|stable_index| {
+                title_len
+                    + brief_section_heading(MemoryKind::Stable).len()
+                    + lines[*stable_index].len()
+                    + brief_section_heading(MemoryKind::Current).len()
+                    + lines[current_index].len()
+                    <= max_chars
+            })
+            .expect("the frozen case fits a stable/current anchor pair");
+        reference_select_brief_record(
+            stable_anchor,
+            records,
+            &lines,
+            &mut selected,
+            &mut used,
+            max_chars,
+        );
+        reference_select_brief_record(
+            current_index,
+            records,
+            &lines,
+            &mut selected,
+            &mut used,
+            max_chars,
+        );
+        for index in stable_indices {
+            if !selected[index] {
+                reference_select_brief_record(
+                    index,
+                    records,
+                    &lines,
+                    &mut selected,
+                    &mut used,
+                    max_chars,
+                );
+            }
+        }
+        selected
     }
 
     #[test]
@@ -2514,12 +2684,37 @@ mod tests {
         let (first, omitted) = render_brief(MemoryBriefKind::Fresh, &records, &[], 12_000);
         let (second, second_omitted) = render_brief(MemoryBriefKind::Fresh, &records, &[], 12_000);
         let visible_records = first.lines().filter(|line| line.starts_with("- [")).count();
+        let reference_selection = reference_67_brief_selection(&records, 12_000);
+        let mut expected_ids = Vec::new();
+        for kind in [MemoryKind::Stable, MemoryKind::Current] {
+            for (index, record) in records.iter().enumerate() {
+                if reference_selection[index] && record.kind == kind {
+                    expected_ids
+                        .push(record.memory_id[..record.memory_id.len().min(8)].to_string());
+                }
+            }
+        }
+        let actual_ids = first
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("- [")
+                    .and_then(|line| line.split_once(']'))
+                    .map(|(memory_id, _)| memory_id.to_string())
+            })
+            .collect::<Vec<_>>();
+        let reference_omitted = records.len()
+            - reference_selection
+                .iter()
+                .filter(|selected| **selected)
+                .count();
 
         assert_eq!(records.len(), 67);
         assert!(first.len() <= 12_000);
         assert!(first.contains("[e1f065d2]"));
         assert!(first.contains("EE follow-up checkpoint: routing changes are applied"));
         assert!(first.contains("Stable journal 0:"));
+        assert_eq!(actual_ids, expected_ids);
+        assert_eq!(omitted, reference_omitted);
         assert_eq!(omitted, records.len() - visible_records);
         assert!(omitted > 0);
         assert_eq!(first, second);
@@ -2555,6 +2750,57 @@ mod tests {
         assert!(context.contains("Current journal 0:"));
         assert!(omitted > 0);
         assert_eq!(omitted, records.len() - visible_records);
+    }
+
+    #[test]
+    fn large_brief_anchor_search_has_linear_bounded_work() {
+        const GROUP_SIZE: usize = 4_096;
+        let verified = Utc::now().to_rfc3339();
+        let text_with_length = |label: &str, index: usize, len: usize| {
+            let prefix = format!("{label} record {index:04}: ");
+            format!("{prefix}{}", "x".repeat(len - prefix.len()))
+        };
+        let mut records = Vec::with_capacity(GROUP_SIZE * 2);
+        for index in 0..GROUP_SIZE {
+            let text_len = if index + 1 == GROUP_SIZE { 256 } else { 257 };
+            records.push(brief_record(
+                format!("{index:08x}-0000-0000-0000-{index:012x}"),
+                MemoryKind::Stable,
+                text_with_length("Stable", index, text_len),
+                verified.clone(),
+            ));
+        }
+        for index in 0..GROUP_SIZE {
+            let text_len = if index + 1 == GROUP_SIZE { 256 } else { 257 };
+            records.push(brief_record(
+                format!("{index:08x}-1111-2222-3333-{index:012x}"),
+                MemoryKind::Current,
+                text_with_length("Current", index, text_len),
+                verified.clone(),
+            ));
+        }
+
+        let stable_anchor_line = brief_record_line(&records[GROUP_SIZE - 1], false);
+        let current_anchor_line = brief_record_line(&records[GROUP_SIZE * 2 - 1], false);
+        let max_chars = "# Wardian memory\n".len()
+            + brief_section_heading(MemoryKind::Stable).len()
+            + stable_anchor_line.len()
+            + brief_section_heading(MemoryKind::Current).len()
+            + current_anchor_line.len();
+        let mut inspected_candidates = 0;
+        let (context, omitted) = render_brief_with_anchor_visitor(
+            MemoryBriefKind::Fresh,
+            &records,
+            &[],
+            max_chars,
+            || inspected_candidates += 1,
+        );
+
+        assert_eq!(inspected_candidates, GROUP_SIZE * 3);
+        assert!(context.len() <= max_chars);
+        assert!(context.contains("Stable record 4095:"));
+        assert!(context.contains("Current record 4095:"));
+        assert_eq!(omitted, GROUP_SIZE * 2 - 2);
     }
 
     #[test]
