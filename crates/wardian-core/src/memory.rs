@@ -2108,6 +2108,135 @@ mod tests {
         selected
     }
 
+    fn reference_brief_anchor(
+        stable_indices: &[usize],
+        fresh_current_indices: &[usize],
+        lines: &[String],
+        pair_heading_cost: usize,
+        max_chars: usize,
+    ) -> Option<(usize, usize)> {
+        for current_index in fresh_current_indices {
+            for stable_index in stable_indices {
+                let pair_len =
+                    pair_heading_cost + lines[*stable_index].len() + lines[*current_index].len();
+                if pair_len <= max_chars {
+                    return Some((*stable_index, *current_index));
+                }
+            }
+        }
+        None
+    }
+
+    fn reference_fresh_brief_selection(
+        records: &[MemoryRecord],
+        max_chars: usize,
+    ) -> (Option<(usize, usize)>, Vec<bool>) {
+        let title_len = "# Wardian memory\n".len();
+        let lines = records
+            .iter()
+            .map(|record| brief_record_line(record, false))
+            .collect::<Vec<_>>();
+        let mut selected = vec![false; records.len()];
+        if title_len > max_chars {
+            return (None, selected);
+        }
+
+        let stable_indices = records
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| (record.kind == MemoryKind::Stable).then_some(index))
+            .collect::<Vec<_>>();
+        let fresh_current_indices = records
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| (record.kind == MemoryKind::Current).then_some(index))
+            .collect::<Vec<_>>();
+        let pair_heading_cost = title_len
+            + brief_section_heading(MemoryKind::Stable).len()
+            + brief_section_heading(MemoryKind::Current).len();
+        let anchors = reference_brief_anchor(
+            &stable_indices,
+            &fresh_current_indices,
+            &lines,
+            pair_heading_cost,
+            max_chars,
+        );
+        let mut used = title_len;
+
+        if let Some((stable_index, current_index)) = anchors {
+            reference_select_brief_record(
+                stable_index,
+                records,
+                &lines,
+                &mut selected,
+                &mut used,
+                max_chars,
+            );
+            reference_select_brief_record(
+                current_index,
+                records,
+                &lines,
+                &mut selected,
+                &mut used,
+                max_chars,
+            );
+        } else {
+            let current_anchor = fresh_current_indices.iter().copied().find(|index| {
+                title_len + brief_section_heading(MemoryKind::Current).len() + lines[*index].len()
+                    <= max_chars
+            });
+            let stable_anchor = stable_indices.iter().copied().find(|index| {
+                title_len + brief_section_heading(MemoryKind::Stable).len() + lines[*index].len()
+                    <= max_chars
+            });
+            if let Some(index) = current_anchor.or(stable_anchor) {
+                reference_select_brief_record(
+                    index,
+                    records,
+                    &lines,
+                    &mut selected,
+                    &mut used,
+                    max_chars,
+                );
+            }
+        }
+
+        let stable_remaining = stable_indices
+            .iter()
+            .copied()
+            .filter(|index| !selected[*index])
+            .collect::<Vec<_>>();
+        let current_remaining = fresh_current_indices
+            .iter()
+            .copied()
+            .filter(|index| !selected[*index])
+            .collect::<Vec<_>>();
+        for cursor in 0..stable_remaining.len().max(current_remaining.len()) {
+            if let Some(index) = stable_remaining.get(cursor) {
+                reference_select_brief_record(
+                    *index,
+                    records,
+                    &lines,
+                    &mut selected,
+                    &mut used,
+                    max_chars,
+                );
+            }
+            if let Some(index) = current_remaining.get(cursor) {
+                reference_select_brief_record(
+                    *index,
+                    records,
+                    &lines,
+                    &mut selected,
+                    &mut used,
+                    max_chars,
+                );
+            }
+        }
+
+        (anchors, selected)
+    }
+
     #[test]
     fn lifecycle_preserves_revision_history_and_sources() {
         let temp = tempfile::tempdir().unwrap();
@@ -2801,6 +2930,134 @@ mod tests {
         assert!(context.contains("Stable record 4095:"));
         assert!(context.contains("Current record 4095:"));
         assert_eq!(omitted, GROUP_SIZE * 2 - 2);
+    }
+
+    #[test]
+    fn optimized_brief_anchor_matches_simple_reference_across_fit_boundaries() {
+        let verified = Utc::now().to_rfc3339();
+        let mut records = Vec::new();
+        for (index, text_len) in [90, 20, 140].into_iter().enumerate() {
+            records.push(brief_record(
+                format!("s{index:07x}-0000-0000-0000-{index:012x}"),
+                MemoryKind::Stable,
+                format!("Stable {index}: {}", "s".repeat(text_len)),
+                verified.clone(),
+            ));
+        }
+        for (index, text_len) in [170, 50, 16].into_iter().enumerate() {
+            records.push(brief_record(
+                format!("c{index:07x}-1111-2222-3333-{index:012x}"),
+                MemoryKind::Current,
+                format!("Current {index}: {}", "c".repeat(text_len)),
+                verified.clone(),
+            ));
+        }
+
+        let lines = records
+            .iter()
+            .map(|record| brief_record_line(record, false))
+            .collect::<Vec<_>>();
+        let stable_indices = vec![0, 1, 2];
+        let fresh_current_indices = vec![3, 4, 5];
+        let pair_heading_cost = "# Wardian memory\n".len()
+            + brief_section_heading(MemoryKind::Stable).len()
+            + brief_section_heading(MemoryKind::Current).len();
+        let minimum_pair_budget = pair_heading_cost + lines[1].len() + lines[5].len();
+        let minimum_single_budget = records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| {
+                "# Wardian memory\n".len()
+                    + brief_section_heading(record.kind).len()
+                    + lines[index].len()
+            })
+            .min()
+            .unwrap();
+
+        assert!(lines[0].len() > lines[1].len());
+        assert!(lines[2].len() > lines[1].len());
+        assert!(lines[3].len() > lines[4].len());
+        assert!(lines[4].len() > lines[5].len());
+
+        let cases = [
+            ("pair one character short", minimum_pair_budget - 1, None),
+            (
+                "shortest pair exactly fits",
+                minimum_pair_budget,
+                Some((1, 5)),
+            ),
+            (
+                "second current fits with shortest stable",
+                pair_heading_cost + lines[1].len() + lines[4].len(),
+                Some((1, 4)),
+            ),
+            (
+                "first stable fits at its boundary",
+                pair_heading_cost + lines[0].len() + lines[4].len(),
+                Some((0, 4)),
+            ),
+            (
+                "first stable is one character over budget",
+                pair_heading_cost + lines[0].len() + lines[4].len() - 1,
+                Some((1, 4)),
+            ),
+            (
+                "first current fits with first stable",
+                pair_heading_cost + lines[0].len() + lines[3].len(),
+                Some((0, 3)),
+            ),
+            ("no complete record fits", minimum_single_budget - 1, None),
+            (
+                "smallest single record exactly fits",
+                minimum_single_budget,
+                None,
+            ),
+        ];
+
+        for (case, max_chars, expected_anchor) in cases {
+            let optimized_anchor = find_brief_anchor(
+                &stable_indices,
+                &fresh_current_indices,
+                &lines,
+                pair_heading_cost,
+                max_chars,
+                &mut || {},
+            );
+            let (reference_anchor, reference_selected) =
+                reference_fresh_brief_selection(&records, max_chars);
+            let (context, omitted) = render_brief(MemoryBriefKind::Fresh, &records, &[], max_chars);
+
+            let mut expected_ids = Vec::new();
+            for kind in [MemoryKind::Stable, MemoryKind::Current] {
+                for (index, record) in records.iter().enumerate() {
+                    if reference_selected[index] && record.kind == kind {
+                        expected_ids
+                            .push(record.memory_id[..record.memory_id.len().min(8)].to_string());
+                    }
+                }
+            }
+            let actual_ids = context
+                .lines()
+                .filter_map(|line| {
+                    line.strip_prefix("- [")
+                        .and_then(|line| line.split_once(']'))
+                        .map(|(memory_id, _)| memory_id.to_string())
+                })
+                .collect::<Vec<_>>();
+            let reference_omitted = records.len()
+                - reference_selected
+                    .iter()
+                    .filter(|is_selected| **is_selected)
+                    .count();
+
+            assert_eq!(
+                reference_anchor, expected_anchor,
+                "{case}: reference fixture"
+            );
+            assert_eq!(optimized_anchor, reference_anchor, "{case}: anchor pair");
+            assert_eq!(actual_ids, expected_ids, "{case}: rendered record order");
+            assert_eq!(omitted, reference_omitted, "{case}: omitted count");
+        }
     }
 
     #[test]
