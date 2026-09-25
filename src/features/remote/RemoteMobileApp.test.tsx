@@ -4482,6 +4482,33 @@ describe("RemoteMobileApp", () => {
     expect(screen.queryByText("Desktop unreachable.")).not.toBeInTheDocument();
   });
 
+  it("shows a Codex Chat HTTP 400 without replacing the connected desktop with a disconnect warning", async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url === "/remote/api/agents/agent-1/chat") {
+        return Promise.resolve(new Response(JSON.stringify({ ok: false, code: "agent_chat_failed" }), { status: 400 }));
+      }
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+    useRemoteStore.setState({
+      agents: [{
+        session_id: "agent-1", session_name: "Coder", agent_class: "Coder", provider: "codex",
+        workspace: "<absolute-workspace-path>", status: "Idle", latest_text: null,
+      }],
+      activeAgentId: "agent-1",
+      activeAgentViewMode: "chat",
+      status: "ready",
+      load: vi.fn(async () => {}),
+    });
+
+    render(<RemoteMobileApp />);
+    await vi.dynamicImportSettled();
+    await act(async () => useRemoteStore.getState().refreshActiveAgentChat());
+
+    expect(screen.getByTestId("remote-agent-detail")).toBeVisible();
+    expect(screen.getByText("Remote request failed: 400")).toBeVisible();
+    expect(screen.queryByText("Desktop unreachable.")).not.toBeInTheDocument();
+  });
+
   it("shows lifecycle actions in agent detail while keeping watchlist rows action-free", async () => {
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {

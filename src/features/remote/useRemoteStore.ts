@@ -117,6 +117,13 @@ const statusFromError = (error: unknown): RemoteStatus => {
   return "unreachable";
 };
 
+const chatConnectionStatusFromError = (error: unknown): RemoteStatus | null => {
+  const status = statusFromError(error);
+  // An HTTP response proves the desktop answered. Keep ordinary chat failures
+  // local to the chat pane; only transport and session failures change pairing.
+  return error instanceof RemoteRequestError && status === "unreachable" ? null : status;
+};
+
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 const REMOTE_ACTIVE_WATCHLIST_STORAGE_KEY = "wardian.remote.activeWatchlistId";
@@ -958,10 +965,12 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       });
     } catch (error) {
       if (requestSerial !== chatRefreshRequestSerial) return;
+      if (get().activeAgentId !== activeAgentId) return;
+      const connectionStatus = chatConnectionStatusFromError(error);
       set({
         chatLoading: false,
         chatError: error instanceof Error ? error.message : String(error),
-        status: statusFromError(error),
+        ...(connectionStatus ? { status: connectionStatus } : {}),
       });
     }
   },
@@ -986,10 +995,12 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       });
     } catch (error) {
       if (requestSerial !== chatRefreshRequestSerial) return;
+      if (get().activeAgentId !== activeAgentId) return;
+      const connectionStatus = chatConnectionStatusFromError(error);
       set({
         chatLoadingOlder: false,
         chatError: error instanceof Error ? error.message : String(error),
-        status: statusFromError(error),
+        ...(connectionStatus ? { status: connectionStatus } : {}),
       });
     }
   },

@@ -262,6 +262,10 @@ boundary.
 - **The installed PWA says the desktop is unreachable:** reopen Tailscale on
   the phone, confirm the desktop gateway is running, and retry. This state is
   reserved for transport or gateway failures rather than stale pairing state.
+- **An agent's Chat shows an HTTP error:** the desktop answered, so the agent
+  detail stays open and earlier chat remains visible. Retry Chat refresh. If
+  the error repeats, inspect the host's chat and archive diagnostics; re-pairing
+  does not resolve an error from the chat endpoint.
 - **The PWA stays on `Restoring` or Inbox does not show a desktop change:** keep
   the gateway reachable while the status stream reconnects, then reload the
   remote URL if the roster and Inbox remain unchanged. If the problem returns,
