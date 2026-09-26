@@ -29,6 +29,108 @@ fn same_id_native_capture_repairs_persisted_provenance() {
 }
 
 #[test]
+fn codex_mirror_legacy_alias_requires_native_turn_and_matching_narrative_root() {
+    let mirror = |id: &str, provider_turn_id: &str, request_root_id: &str| AgentChatEvent {
+        id: id.into(),
+        session_id: "agent-1".into(),
+        provider: "codex".into(),
+        kind: AgentChatEventKind::Message,
+        role: Some(AgentChatRole::User),
+        text: Some("same synthetic prompt".into()),
+        title: None,
+        status: None,
+        turn_id: None,
+        source: Some("event_msg".into()),
+        command: None,
+        exit_code: None,
+        path: None,
+        language: None,
+        created_at: None,
+        sequence: Some(12),
+        metadata: serde_json::json!({
+            "provider_log": true,
+            "log_path": "<codex-log>",
+            "provider_session_id": "codex-session",
+            "raw_type": "user_message",
+            "input_origin": "human_input",
+            "input_purpose": "request",
+            "provider_turn_id": provider_turn_id,
+            "request_root_id": request_root_id,
+        }),
+    };
+    let archived = mirror("legacy-text-hash", "turn-old", "agent-1:12");
+    let mut record = narrative_from_chat_event(&archived, 1).expect("legacy mirror narrative");
+    record.event_refs = vec![archived.id.clone()];
+
+    let mut next_turn = mirror("turn-scoped-id", "turn-new", "agent-1:24");
+    next_turn.metadata["legacy_event_ids"] = serde_json::json!(["legacy-text-hash"]);
+    let archived_events = [archived.clone()];
+    assert!(
+        !provenance::same_observation(&archived, &next_turn),
+        "a shared pre-turn hash cannot bind a different native turn"
+    );
+    assert_eq!(
+        matching_record_index(std::slice::from_ref(&record), &next_turn, &archived_events)
+            .expect("resolve next-turn narrative owner"),
+        None,
+        "the legacy alias cannot attach the new turn to the old narrative root"
+    );
+
+    let mut next_turn_same_root = next_turn.clone();
+    next_turn_same_root.metadata["request_root_id"] = serde_json::json!("agent-1:12");
+    assert_eq!(
+        matching_record_index(
+            std::slice::from_ref(&record),
+            &next_turn_same_root,
+            &archived_events
+        )
+        .expect("native turn must also guard aliases when roots collide"),
+        None
+    );
+
+    let mut same_turn_retry = mirror("turn-scoped-retry-id", "turn-old", "agent-1:12");
+    same_turn_retry.metadata["legacy_event_ids"] = serde_json::json!(["legacy-text-hash"]);
+    assert!(provenance::same_observation(&archived, &same_turn_retry));
+    assert_eq!(
+        matching_record_index(
+            std::slice::from_ref(&record),
+            &same_turn_retry,
+            &archived_events
+        )
+        .expect("resolve same-turn legacy narrative owner"),
+        Some(0),
+        "same-turn compatibility requires the same durable request root"
+    );
+
+    let mut wrong_root_retry = same_turn_retry;
+    wrong_root_retry.metadata["request_root_id"] = serde_json::json!("agent-1:25");
+    assert!(provenance::same_observation(&archived, &wrong_root_retry));
+    assert_eq!(
+        matching_record_index(
+            std::slice::from_ref(&record),
+            &wrong_root_retry,
+            &archived_events
+        )
+        .expect("reject a mismatched narrative root"),
+        None
+    );
+
+    let mut conflicting_exact_identity = archived.clone();
+    conflicting_exact_identity.metadata["provider_turn_id"] =
+        serde_json::json!("conflicting-native-turn");
+    conflicting_exact_identity.metadata["request_root_id"] =
+        serde_json::json!("conflicting-native-root");
+    let mut unchanged = vec![archived.clone()];
+    assert_eq!(
+        provenance::refresh_events(&mut unchanged, &[conflicting_exact_identity])
+            .expect_err("the same exact identity with conflicting native evidence fails closed")
+            .kind(),
+        std::io::ErrorKind::InvalidData
+    );
+    assert_eq!(unchanged, vec![archived]);
+}
+
+#[test]
 fn claude_legacy_alias_with_multiple_narrative_owners_fails_closed() {
     let mut current = event("claude-current-raw-line", "claude", None);
     current.metadata["legacy_event_ids"] = serde_json::json!(["shared-legacy-alias"]);
@@ -43,7 +145,7 @@ fn claude_legacy_alias_with_multiple_narrative_owners_fails_closed() {
     provenance::refresh_records(&mut records, std::slice::from_ref(&current));
 
     assert_eq!(records, original_records);
-    let error = matching_record_index(&records, &current)
+    let error = matching_record_index(&records, &current, &[])
         .expect_err("multiple legacy owners must remain ambiguous");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
 }

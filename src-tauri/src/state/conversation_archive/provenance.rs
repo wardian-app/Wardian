@@ -54,9 +54,35 @@ pub(crate) fn same_observation(old: &AgentChatEvent, current: &AgentChatEvent) -
         return false;
     }
     let current_ids = event_identity_ids(current);
-    event_identity_ids(old)
+    let shares_identity = event_identity_ids(old)
         .iter()
-        .any(|id| !id.is_empty() && current_ids.contains(id))
+        .any(|id| !id.is_empty() && current_ids.contains(id));
+    if !shares_identity {
+        return false;
+    }
+    if old.id != current.id
+        && is_codex_user_message_mirror(old)
+        && is_codex_user_message_mirror(current)
+    {
+        match (
+            string(old, "provider_turn_id"),
+            string(current, "provider_turn_id"),
+        ) {
+            (Some(old_turn), Some(current_turn)) => old_turn == current_turn,
+            _ => old.sequence.is_some() && old.sequence == current.sequence,
+        }
+    } else {
+        true
+    }
+}
+
+pub(super) fn is_codex_user_message_mirror(event: &AgentChatEvent) -> bool {
+    event.provider == "codex"
+        && event.kind == AgentChatEventKind::Message
+        && event.role == Some(AgentChatRole::User)
+        && event.source.as_deref() == Some("event_msg")
+        && string(event, "raw_type") == Some("user_message")
+        && string(event, "input_origin") == Some("human_input")
 }
 
 pub(crate) fn canonicalize_role(event: &mut AgentChatEvent) {
@@ -161,6 +187,19 @@ fn enrich(old: &mut AgentChatEvent, current: &AgentChatEvent) -> io::Result<()> 
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("conflicting native archive provenance: {key}"),
+                    ));
+                }
+            }
+        }
+        if is_codex_user_message_mirror(old) && is_codex_user_message_mirror(current) {
+            if let (Some(old_turn), Some(current_turn)) = (
+                string(old, "provider_turn_id"),
+                string(current, "provider_turn_id"),
+            ) {
+                if old_turn != current_turn {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "conflicting native Codex user-message turn",
                     ));
                 }
             }

@@ -119,6 +119,10 @@ pub(crate) fn attach_native_legacy_aliases(
 }
 
 pub(crate) fn stable_provider_log_event_id(event: &AgentChatEvent, path: &Path) -> String {
+    stable_provider_log_event_id_inner(event, path)
+}
+
+fn stable_provider_log_event_id_inner(event: &AgentChatEvent, path: &Path) -> String {
     let mut hash = Sha256::new();
     hash.update(event.session_id.as_bytes());
     hash.update(b"\0");
@@ -130,6 +134,25 @@ pub(crate) fn stable_provider_log_event_id(event: &AgentChatEvent, path: &Path) 
     hash.update(b"\0");
     hash.update(format!("{:?}", event.role).as_bytes());
     hash.update(b"\0");
+    if is_codex_user_message_mirror(event) {
+        if let Some(provider_turn_id) = codex_user_message_mirror_provider_turn_id(event) {
+            hash.update(b"codex-user-message-mirror-provider-turn\0");
+            hash.update(provider_turn_id.as_bytes());
+        } else if let Some(sequence) = event.sequence {
+            // The capture normalizer persists its per-source line sequence
+            // alongside the append-only cursor, so an unbound mirror remains
+            // stable across retries without being joined by its text.
+            hash.update(b"codex-user-message-mirror-log-sequence\0");
+            hash.update(sequence.to_string().as_bytes());
+        } else {
+            // Normalized provider events always have a sequence. Keep a
+            // non-text identity fallback for callers that construct events
+            // directly; never regress to the shared legacy text hash.
+            hash.update(b"codex-user-message-mirror-event-id\0");
+            hash.update(event.id.as_bytes());
+        }
+        hash.update(b"\0");
+    }
     for value in [
         event.turn_id.as_deref(),
         event.created_at.as_deref(),
@@ -153,4 +176,26 @@ pub(crate) fn stable_provider_log_event_id(event: &AgentChatEvent, path: &Path) 
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     )
+}
+
+fn codex_user_message_mirror_provider_turn_id(event: &AgentChatEvent) -> Option<&str> {
+    is_codex_user_message_mirror(event).then(|| {
+        event
+            .metadata
+            .get("provider_turn_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    })?
+}
+
+fn is_codex_user_message_mirror(event: &AgentChatEvent) -> bool {
+    use wardian_core::models::chat::AgentChatRole;
+
+    event.provider == "codex"
+        && event.kind == AgentChatEventKind::Message
+        && event.role == Some(AgentChatRole::User)
+        && event.source.as_deref() == Some("event_msg")
+        && event.metadata["raw_type"] == "user_message"
+        && event.metadata["input_origin"] == "human_input"
 }
