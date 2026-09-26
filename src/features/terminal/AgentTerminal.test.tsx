@@ -3432,6 +3432,77 @@ describe("AgentTerminal scrollback", () => {
     expect(fallback).not.toHaveBeenCalled();
   });
 
+  it("keeps first owner keys after a failed resize, then requires recovery after degraded repaint", async () => {
+    const brokerState = modernBrokerState("initial-owner");
+    const reportViewport = vi.fn()
+      .mockRejectedValueOnce(new Error("first viewport report failed"))
+      .mockResolvedValue(undefined);
+    const resize = vi.fn().mockResolvedValue({
+      decision: { status: "accepted" },
+    });
+    const entry = {
+      sessionId: "modern-agent",
+      presentationId: "initial-owner",
+      generation: 1,
+      brokerState,
+      terminalClient: { reportViewport, resize },
+      renderer: {
+        canonicalFit: { cols: 80, rows: 24, width: 816, height: 747, scale: 1, pan: false },
+      },
+      lastReportedSize: null,
+      geometrySequence: 0,
+      applyingCanonicalGeometry: false,
+      pendingForceResize: false,
+      repaintRequestedForGeometry: false,
+      ownerGeometryTransitionSettled: false,
+      pendingGeometry: false,
+      snapshotStatus: "ready",
+      allowPendingKeyboard: false,
+      disposed: false,
+      frameGeometry: { cols: 116, rows: 43 },
+      frameGeneration: 1,
+    } as unknown as Parameters<typeof __terminalTesting.reportTerminalSize>[0];
+
+    await __terminalTesting.reportTerminalSize(entry, 116, 43);
+    expect(reportViewport).toHaveBeenCalledTimes(1);
+    expect(resize).not.toHaveBeenCalled();
+    expect(entry.snapshotStatus).toBe("ready");
+    expect(entry.ownerGeometryTransitionSettled).toBe(false);
+
+    await __terminalTesting.reportTerminalSize(entry, 116, 43);
+    expect(resize).toHaveBeenCalledTimes(1);
+    expect(entry.snapshotStatus).toBe("pending");
+    brokerState.geometry = { cols: 116, rows: 43 };
+
+    expect(__terminalTesting.canSendTerminalInput(entry, "before-clear")).toBe(true);
+    expect(__terminalTesting.canSendTerminalInput(entry, "\r")).toBe(true);
+    expect(__terminalTesting.canSendTerminalInput(entry, "\x1b[<0;1;1M")).toBe(false);
+    expect(__terminalTesting.canSendTerminalInput(entry, "\x1b[24;80R")).toBe(false);
+    expect(__terminalTesting.canSendTerminalInput(entry)).toBe(false);
+
+    const degraded = {
+      ...modernSnapshot(),
+      geometry: { cols: 116, rows: 43 },
+      terminal_state_base64: "%%%",
+    };
+    await __terminalTesting.applyBrokerSnapshot("initial-owner", entry, degraded);
+    expect(entry.snapshotStatus).toBe("degraded");
+    expect(entry.ownerGeometryTransitionSettled).toBe(true);
+    entry.pendingGeometry = true;
+    entry.snapshotStatus = "pending";
+    expect(__terminalTesting.canSendTerminalInput(entry, "later resize")).toBe(false);
+    entry.allowPendingKeyboard = true;
+    expect(__terminalTesting.canSendTerminalInput(entry, "manual recovery")).toBe(true);
+    expect(__terminalTesting.canSendTerminalInput(entry, "\x1b[<0;1;1M")).toBe(false);
+    entry.allowPendingKeyboard = false;
+    entry.ownerGeometryTransitionSettled = false;
+    entry.brokerState!.geometry = { cols: 117, rows: 43 };
+    expect(__terminalTesting.canSendTerminalInput(entry, "unacknowledged size")).toBe(false);
+    entry.brokerState!.geometry = { cols: 116, rows: 43 };
+    entry.brokerState!.owner_presentation_id = "another-owner";
+    expect(__terminalTesting.canSendTerminalInput(entry, "transferred lease")).toBe(false);
+  });
+
   it("falls back to FitAddon when xterm cell internals are unavailable", () => {
     const fallback = vi.fn(() => ({ cols: 77, rows: 19 }));
     const renderer = {

@@ -309,6 +309,11 @@ test(
         snapshot,
       };
     });
+    assert.equal(
+      snapshotText(beforeClearInput.snapshot).split("runtime-input:before-clear").length - 1,
+      1,
+      "The initial owner input must reach the provider exactly once",
+    );
 
     // Clear replaces a provider that has finished bootstrap and published its
     // runtime. Terminal input or an Idle label alone cannot prove that state.

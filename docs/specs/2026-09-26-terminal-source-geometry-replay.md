@@ -23,6 +23,11 @@ snapshot's plain visible grid when dimensions differed, losing formatting.
   with an unseen-prompt warning. Mouse-coordinate encodings and binary input
   stay gated; ownership transfer revokes the allowance. Wardian sends no
   synthetic redraw key and runs no retry timer.
+- During the first owner geometry transition, ordinary typed text can pass
+  while repaint is pending once the reported viewport matches the broker's
+  committed geometry. Escape-sequence and binary input remain gated. After
+  a post-geometry snapshot resolves that first transition as ready or degraded,
+  later silent resizes require the explicit keyboard recovery action above.
 - Retain local Codex scrollback when a geometry boundary snapshot contains no
   broker history; a later formatted frame updates the visible screen without
   discarding that local history.

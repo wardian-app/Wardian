@@ -162,6 +162,7 @@ type TerminalSessionEntry = {
   frameGeometry: { cols: number; rows: number } | null;
   frameGeneration: number;
   pendingGeometry: boolean;
+  ownerGeometryTransitionSettled: boolean;
   repaintRequestedForGeometry: boolean;
   preserveOwnerScrollback: boolean;
   snapshotStatus: "ready" | "pending" | "degraded";
@@ -1210,6 +1211,14 @@ function canSendTerminalInput(entry: TerminalSessionEntry, data?: string) {
     return !/\x1b\[(?:<\d+;\d+;\d+[Mm]|\d+;\d+;\d+M|M|\d+;\d+R)/.test(data);
   }
   const state = entry.brokerState;
+  if (data !== undefined && !entry.ownerGeometryTransitionSettled &&
+      entry.pendingGeometry && entry.snapshotStatus === "pending" &&
+      entry.lastReportedSize?.cols === state?.geometry.cols &&
+      entry.lastReportedSize?.rows === state?.geometry.rows) {
+    // A stale source frame cannot safely map mouse or cursor coordinates.
+    // xterm's ordinary keyboard text has no dependency on that frame.
+    return !/[\x1b\x9b]/.test(data);
+  }
   return !entry.pendingGeometry &&
     entry.snapshotStatus === "ready" && fit?.scale === 1 && !fit.pan &&
     fit.cols === state?.geometry.cols && fit.rows === state?.geometry.rows;
@@ -1477,6 +1486,9 @@ async function applyBrokerSnapshot(
     return;
   }
   entry.brokerDecoder = new TextDecoder();
+  // A rejected resize can roll status back to ready without a frame. Only a
+  // post-geometry snapshot consumes the first owner's keyboard allowance.
+  const wasPendingGeometry = entry.pendingGeometry && entry.snapshotStatus === "pending";
   const replay = decodeTerminalSnapshot(snapshot);
   if (replay.kind === "degraded" && entry.frameGeometry &&
       entry.frameGeneration === snapshot.runtime_generation) {
@@ -1488,6 +1500,7 @@ async function applyBrokerSnapshot(
       applyCanonicalGeometry(entry, snapshot.geometry.cols, snapshot.geometry.rows);
     }
     entry.snapshotDegradation = replay.reason;
+    if (entry.pendingGeometry) entry.ownerGeometryTransitionSettled = true;
     setSnapshotStatus(entry, "degraded");
     return;
   }
@@ -1563,6 +1576,7 @@ async function applyBrokerSnapshot(
   entry.repaintRequestedForGeometry = false;
   entry.preserveOwnerScrollback = false;
   entry.snapshotDegradation = replay.kind === "degraded" ? replay.reason : null;
+  if (wasPendingGeometry) entry.ownerGeometryTransitionSettled = true;
   setSnapshotStatus(entry, replay.kind === "formatted" ? "ready" : "degraded");
   terminalSessionMap.get(terminalKey)?.titleHandlerRef.current?.(entry.latestTitle ?? "");
 }
@@ -2059,6 +2073,7 @@ async function getOrCreateTerminalSession(
     frameGeometry: null,
     frameGeneration: 0,
     pendingGeometry: false,
+    ownerGeometryTransitionSettled: false,
     repaintRequestedForGeometry: false,
     preserveOwnerScrollback: false,
     snapshotStatus: "ready",
@@ -3844,6 +3859,9 @@ export const AgentTerminal = memo(function AgentTerminal({
 });
 
 export const __terminalTesting = {
+  applyBrokerSnapshot,
+  canSendTerminalInput,
+  reportTerminalSize,
   captureSnapshotOverlay,
   demoteSessionToDom,
   promoteSessionToWebgl,

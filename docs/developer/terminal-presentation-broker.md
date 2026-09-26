@@ -198,6 +198,13 @@ Mouse coordinates and binary input remain gated. A lease transfer revokes that
 manual keyboard allowance. No timer retries or synthetic provider input are
 issued.
 
+The first owner resize is an exception for ordinary typed text: once the
+reported viewport equals the broker's committed geometry, the owner can type
+while the first repaint is pending. Escape-sequence and binary input stay
+gated. After a post-geometry snapshot resolves that first transition as ready
+or degraded, later silent resizes retain the explicit keyboard recovery
+requirement.
+
 ### Alternate-screen application ownership
 
 The broker owns PTY transport, presentation leases, canonical geometry,
