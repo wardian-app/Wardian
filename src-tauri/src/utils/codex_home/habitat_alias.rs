@@ -78,6 +78,58 @@ pub(crate) fn prepare_habitat_cwd_alias(
     Ok(Some(launch_cwd))
 }
 
+#[cfg(windows)]
+pub(crate) fn is_owned_habitat_workspace_alias(
+    agent_id: &str,
+    habitat_root: &Path,
+    saved_cwd: &Path,
+) -> bool {
+    crate::utils::fs::get_wardian_home().is_some_and(|home| {
+        is_owned_habitat_workspace_alias_in(&home, agent_id, habitat_root, saved_cwd)
+    })
+}
+
+#[cfg(windows)]
+fn is_owned_habitat_workspace_alias_in(
+    wardian_home: &Path,
+    agent_id: &str,
+    habitat_root: &Path,
+    saved_cwd: &Path,
+) -> bool {
+    (|| -> Option<()> {
+        super::validate_agent_id(agent_id).ok()?;
+        let home = canonical(wardian_home).ok()?;
+        let habitat = canonical(habitat_root).ok()?;
+        if expected_habitat(&home, agent_id).ok()? != habitat {
+            return None;
+        }
+        let record_path = home
+            .join("agents")
+            .join(agent_id)
+            .join(HABITAT_ALIAS_RECORD);
+        let record = storage::read_record::<HabitatAliasRecord>(&record_path).ok()??;
+        let identity = storage::directory_identity(&habitat).ok()?;
+        validate_record(&home, agent_id, &habitat, identity, &record).ok()?;
+        if saved_cwd != record.target.join("workspace") {
+            return None;
+        }
+        if canonical(saved_cwd).ok()? != canonical(&habitat.join("workspace")).ok()? {
+            return None;
+        }
+        Some(())
+    })()
+    .is_some()
+}
+
+#[cfg(not(windows))]
+pub(crate) fn is_owned_habitat_workspace_alias(
+    _agent_id: &str,
+    _habitat_root: &Path,
+    _saved_cwd: &Path,
+) -> bool {
+    false
+}
+
 #[cfg(not(windows))]
 pub(crate) fn prepare_habitat_cwd_alias(
     _agent_id: &str,
@@ -509,6 +561,34 @@ mod tests {
             let result = operation();
             super::super::TEST_ROOTS.with(|roots| roots.replace(previous));
             result
+        }
+
+        #[test]
+        fn saved_pi_alias_must_belong_to_the_same_habitat() {
+            let fixture = Fixture::new();
+            let alias = with_fixture(&fixture, || {
+                prepare_alias_for_home(&fixture.home, "agent", &fixture.habitat)
+                    .expect("prepare owned alias")
+            });
+            let saved = alias.join("workspace");
+            assert!(is_owned_habitat_workspace_alias_in(
+                &fixture.home,
+                "agent",
+                &fixture.habitat,
+                &saved
+            ));
+            assert!(!is_owned_habitat_workspace_alias_in(
+                &fixture.home,
+                "another-agent",
+                &fixture.habitat,
+                &saved
+            ));
+            assert!(!is_owned_habitat_workspace_alias_in(
+                &fixture.home,
+                "agent",
+                &fixture.habitat,
+                &fixture.workspace
+            ));
         }
 
         #[derive(Debug)]

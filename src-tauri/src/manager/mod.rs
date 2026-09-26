@@ -1015,7 +1015,10 @@ pub(crate) fn interactive_provider_cwd(
         return provider_cwd.clone();
     }
 
-    if provider_name == "codex" {
+    if matches!(provider_name, "codex" | "pi") {
+        // Pi binds a saved session to its launch directory. A habitat
+        // workspace projection can point at the same files while still
+        // prompting Pi to fork the session into a different project.
         workspace_cwd.to_path_buf()
     } else if provider_name == "opencode" {
         habitat_root
@@ -1911,6 +1914,16 @@ mod tests {
             provider_cwd,
             Path::new("C:/Users/test/.wardian/agents/ses_test/habitat")
         );
+    }
+
+    #[test]
+    fn pi_interactive_launch_uses_the_real_session_workspace() {
+        let workspace_cwd = Path::new("C:/projects/example");
+        let habitat_root = Some(Path::new("C:/wardian-home/agents/pi-test/habitat"));
+
+        let provider_cwd = interactive_provider_cwd("pi", workspace_cwd, habitat_root, None);
+
+        assert_eq!(provider_cwd, workspace_cwd);
     }
 
     #[test]
