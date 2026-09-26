@@ -4,6 +4,41 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.6.2](https://github.com/wardian-app/Wardian/compare/v0.6.1...v0.6.2) (2026-09-26)
+
+
+### Features
+
+* **memory:** add reviewed operator maintenance plans ([#1416](https://github.com/wardian-app/Wardian/issues/1416)) ([941f5dc](https://github.com/wardian-app/Wardian/commit/941f5dcf35e0c3547bc854a631b4c39355221ea0))
+* **remote:** expose sanitized chat capture stages ([#1425](https://github.com/wardian-app/Wardian/issues/1425)) ([7528e94](https://github.com/wardian-app/Wardian/commit/7528e943b9b9f0a3088f26d8d9a2fdff3693bd26))
+* **workbench:** reveal watchlist agents in active surface ([#1389](https://github.com/wardian-app/Wardian/issues/1389)) ([728dab0](https://github.com/wardian-app/Wardian/commit/728dab0c9c8a51c9bb5002fb9de6fdfcd31f17e7))
+
+
+### Bug Fixes
+
+* **agent:** reserve Codex restore before owner start ([#1427](https://github.com/wardian-app/Wardian/issues/1427)) ([e1ef245](https://github.com/wardian-app/Wardian/commit/e1ef245d3d36519e41801327b152864ac256a6c2))
+* **agent:** restore sessions using verified ownership ([#1401](https://github.com/wardian-app/Wardian/issues/1401)) ([86deba2](https://github.com/wardian-app/Wardian/commit/86deba248933d57e3b01d3a1e9d513bf7ebf9e91))
+* **codex:** accept absent macOS ACL in private home ([#1396](https://github.com/wardian-app/Wardian/issues/1396)) ([b98ec82](https://github.com/wardian-app/Wardian/commit/b98ec8213183355cd9bfc8b3b22f33d8f147e304))
+* **codex:** capture terminal wheel before xterm ([#1400](https://github.com/wardian-app/Wardian/issues/1400)) ([71bc5d8](https://github.com/wardian-app/Wardian/commit/71bc5d8717eecfce26992c19261fb7b387620433))
+* **codex:** preserve fullscreen composer across terminal restores ([#1393](https://github.com/wardian-app/Wardian/issues/1393)) ([c755134](https://github.com/wardian-app/Wardian/commit/c7551344838039f3dff35f958bbc0c8e5214a4d9))
+* **codex:** silence managed MCP on Windows ([#1391](https://github.com/wardian-app/Wardian/issues/1391)) ([fc2c87f](https://github.com/wardian-app/Wardian/commit/fc2c87fd72550dd73d849b183ab4ef39b9729038))
+* **memory:** balance startup recall across memory kinds ([#1413](https://github.com/wardian-app/Wardian/issues/1413)) ([b529359](https://github.com/wardian-app/Wardian/commit/b5293596cc27359034a9d50731b6706a389db3bc))
+* **memory:** classify active checkpoints in retention guidance ([#1411](https://github.com/wardian-app/Wardian/issues/1411)) ([83bf50e](https://github.com/wardian-app/Wardian/commit/83bf50ee6b7e724aa3a7a12a6d7f23230faa64fd))
+* **memory:** reject duplicate maintenance scope keys ([#1420](https://github.com/wardian-app/Wardian/issues/1420)) ([2449c1d](https://github.com/wardian-app/Wardian/commit/2449c1d7ccdc4658d2165b20f30fd1cccf54dd99))
+* **memory:** show a useful digest in native maintenance confirmation ([#1417](https://github.com/wardian-app/Wardian/issues/1417)) ([9cfe2e2](https://github.com/wardian-app/Wardian/commit/9cfe2e2f07cfc8e129ac84644c24734ff9afe22a))
+* **pi:** resume from saved project directory ([#1429](https://github.com/wardian-app/Wardian/issues/1429)) ([1227ad0](https://github.com/wardian-app/Wardian/commit/1227ad0d631d71509b686b9056661bb2ccd90ffe))
+* prevent silent New Session archive failure ([#1412](https://github.com/wardian-app/Wardian/issues/1412)) ([f69e503](https://github.com/wardian-app/Wardian/commit/f69e5038ac61813f7c7a745132aa206043c733c7))
+* **release:** serialize updater metadata publishing ([#1380](https://github.com/wardian-app/Wardian/issues/1380)) ([6581efc](https://github.com/wardian-app/Wardian/commit/6581efcf98880c2937989b6f688fbf87f9742e12))
+* **remote:** keep chat HTTP errors in agent detail ([#1422](https://github.com/wardian-app/Wardian/issues/1422)) ([5944976](https://github.com/wardian-app/Wardian/commit/59449761323bbd09d6c8510aceab33522a29103d))
+* **terminal:** preserve formatted snapshots across presentation sizes ([#1431](https://github.com/wardian-app/Wardian/issues/1431)) ([ac48dbe](https://github.com/wardian-app/Wardian/commit/ac48dbeebea941f04875467b1cbb88e90c8dbee0))
+
+
+### Performance
+
+* **explorer:** render directory previews before full listings ([#1383](https://github.com/wardian-app/Wardian/issues/1383)) ([7e55340](https://github.com/wardian-app/Wardian/commit/7e5534092b2fb9b4e49dd87005e6478d1e10f114))
+* **memory:** bound startup recall selection ([#1419](https://github.com/wardian-app/Wardian/issues/1419)) ([739c5fe](https://github.com/wardian-app/Wardian/commit/739c5fe04b32ea0fc1dfe736c54dc5db7c4d315c))
+* **zoom:** speed up Garden and Graph wheel navigation ([#1410](https://github.com/wardian-app/Wardian/issues/1410)) ([1422bc6](https://github.com/wardian-app/Wardian/commit/1422bc6e2b52f44d3eca3720b356b089adf8038b))
+
 ## [0.6.1](https://github.com/wardian-app/Wardian/compare/v0.6.0...v0.6.1) (2026-09-18)
 
 
