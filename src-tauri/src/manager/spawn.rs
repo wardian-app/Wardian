@@ -54,6 +54,90 @@ const ANTIGRAVITY_TRANSCRIPT_OVERLAP_STEPS: u64 = 16;
 const PROVIDER_SPAWN_LEASE_DURATION: chrono::Duration = chrono::Duration::minutes(20);
 const PROVIDER_SPAWN_LEASE_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(60);
 
+fn interactive_provider_launch_cwd(
+    provider: &str,
+    session_id: &str,
+    habitat_root: Option<&std::path::Path>,
+    workspace_cwd: &std::path::Path,
+    provider_cwd: &std::path::Path,
+    is_restored: bool,
+) -> Result<std::path::PathBuf, String> {
+    if provider == "pi" && (is_restored || provider_cwd == workspace_cwd) {
+        // A habitat alias changes the path Pi uses as its saved project
+        // identity, including when it resolves to the same workspace. A fresh
+        // long-path session is the exception: it starts in the habitat and
+        // records the short alias as its project identity.
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            if provider_cwd.as_os_str().encode_wide().count() > 258 {
+                return Err("Pi's saved project directory exceeds the Windows PTY launch path limit; restoring from a short alias would change Pi's project identity and prompt to fork the session".into());
+            }
+        }
+        return Ok(provider_cwd.to_path_buf());
+    }
+    Ok(crate::utils::codex_home::prepare_habitat_cwd_alias(
+        session_id,
+        habitat_root,
+        workspace_cwd,
+        provider_cwd,
+    )?
+    .unwrap_or_else(|| provider_cwd.to_path_buf()))
+}
+
+fn pi_session_project_cwd(
+    agent_id: &str,
+    workspace_cwd: &std::path::Path,
+    habitat_root: Option<&std::path::Path>,
+    session_file: Option<&std::path::Path>,
+    is_restored: bool,
+) -> std::path::PathBuf {
+    if is_restored && session_file.is_some() {
+        if let Some(session_file) = session_file {
+            use std::io::BufRead;
+            if let Ok(file) = std::fs::File::open(session_file) {
+                let mut header = String::new();
+                if std::io::BufReader::new(file).read_line(&mut header).is_ok() {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&header) {
+                        if let Some(saved) = parsed.get("cwd").and_then(|cwd| cwd.as_str()) {
+                            let saved = std::path::Path::new(saved);
+                            if saved == workspace_cwd {
+                                return workspace_cwd.to_path_buf();
+                            }
+                            if let Some(habitat_workspace) =
+                                habitat_root.map(super::habitat_workspace_cwd)
+                            {
+                                if saved == habitat_workspace {
+                                    return habitat_workspace;
+                                }
+                            }
+                            if habitat_root.is_some_and(|root| {
+                                crate::utils::codex_home::is_owned_habitat_workspace_alias(
+                                    agent_id, root, saved,
+                                )
+                            }) {
+                                return saved.to_path_buf();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return workspace_cwd.to_path_buf();
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        if workspace_cwd.as_os_str().encode_wide().count() > 258 {
+            if let Some(habitat_root) = habitat_root {
+                return super::habitat_workspace_cwd(habitat_root);
+            }
+        }
+    }
+    workspace_cwd.to_path_buf()
+}
+
 /// The caller owns publication after the spawn watcher starts. Cancellation
 /// before roster commit must stop renewal without claiming provider exit.
 pub(crate) struct SpawnPublicationDisposition {
@@ -1537,17 +1621,42 @@ async fn spawn_agent_inner(
             }
         }
     }
-    let provider_cwd =
-        interactive_provider_cwd(&config.provider, &cwd, habitat_root.as_deref(), None);
+    let pi_resume_session_file = if config.provider == "pi" && is_restored {
+        config
+            .resume_session
+            .as_deref()
+            .map(str::trim)
+            .filter(|session_id| !session_id.is_empty())
+            .and_then(|provider_session_id| {
+                PiProvider::session_dir(&config.session_id).and_then(|session_dir| {
+                    PiProvider::session_file(&session_dir, provider_session_id)
+                })
+            })
+    } else {
+        None
+    };
+    let pi_has_saved_session = is_restored && pi_resume_session_file.is_some();
+    let provider_cwd = if config.provider == "pi" {
+        pi_session_project_cwd(
+            &config.session_id,
+            &cwd,
+            habitat_root.as_deref(),
+            pi_resume_session_file.as_deref(),
+            is_restored,
+        )
+    } else {
+        interactive_provider_cwd(&config.provider, &cwd, habitat_root.as_deref(), None)
+    };
     // Keep provider_cwd as the logical workspace for arguments, config and
     // records; only the OS process cwd may use the short habitat alias.
-    let launch_cwd = crate::utils::codex_home::prepare_habitat_cwd_alias(
+    let launch_cwd = interactive_provider_launch_cwd(
+        &config.provider,
         &config.session_id,
         habitat_root.as_deref(),
         &cwd,
         &provider_cwd,
-    )?
-    .unwrap_or_else(|| provider_cwd.clone());
+        pi_has_saved_session,
+    )?;
     let antigravity_workspace_before = if config.provider == "antigravity"
         && config
             .resume_session
@@ -1686,17 +1795,7 @@ async fn spawn_agent_inner(
     }
     let attachment_ms = attachment_at.elapsed().as_millis();
     let mut pi_attachment = if config.provider == "pi" && is_restored {
-        let session_file = config
-            .resume_session
-            .as_deref()
-            .map(str::trim)
-            .filter(|session_id| !session_id.is_empty())
-            .and_then(|provider_session_id| {
-                PiProvider::session_dir(&config.session_id).and_then(|session_dir| {
-                    PiProvider::session_file(&session_dir, provider_session_id)
-                })
-            });
-        if let Some(session_file) = session_file {
+        if let Some(session_file) = pi_resume_session_file {
             let extension_path =
                 match crate::delivery::pi_bridge::PiBridgeLaunchPlan::materialize_extension(
                     &session_file,
@@ -3743,6 +3842,94 @@ pub async fn resize_pty(
 mod tests {
     use super::*;
     use wardian_core::models::{AgentProvider, CodexProviderConfig, ProviderConfig};
+
+    #[test]
+    fn pi_restore_keeps_the_saved_project_directory() {
+        let dir = tempfile::tempdir().expect("test directory");
+        let workspace = dir.path().join("workspace");
+        let habitat = dir.path().join("habitat");
+        let habitat_workspace = super::super::habitat_workspace_cwd(&habitat);
+        let session = dir.path().join("session.jsonl");
+
+        for saved in [&workspace, &habitat_workspace] {
+            std::fs::write(
+                &session,
+                format!(
+                    "{{\"type\":\"session\",\"id\":\"pi-test\",\"cwd\":{}}}\n",
+                    serde_json::to_string(&saved.to_string_lossy()).expect("project path")
+                ),
+            )
+            .expect("session header");
+            assert_eq!(
+                pi_session_project_cwd(
+                    "pi-agent",
+                    &workspace,
+                    Some(&habitat),
+                    Some(&session),
+                    true
+                ),
+                saved.clone()
+            );
+            assert_eq!(
+                interactive_provider_launch_cwd(
+                    "pi",
+                    "pi-agent",
+                    Some(&habitat),
+                    &workspace,
+                    saved,
+                    true,
+                )
+                .expect("launch path"),
+                saved.clone()
+            );
+        }
+    }
+
+    #[test]
+    fn pi_restore_rejects_an_unrelated_saved_project_directory() {
+        let dir = tempfile::tempdir().expect("test directory");
+        let workspace = dir.path().join("workspace");
+        let habitat = dir.path().join("habitat");
+        let session = dir.path().join("session.jsonl");
+        std::fs::write(
+            &session,
+            "{\"type\":\"session\",\"id\":\"pi-test\",\"cwd\":\"C:/other-project\"}\n",
+        )
+        .expect("session header");
+        assert_eq!(
+            pi_session_project_cwd("pi-agent", &workspace, Some(&habitat), Some(&session), true),
+            workspace
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fresh_pi_long_workspace_uses_habitat_project_identity() {
+        let dir = tempfile::tempdir().expect("test directory");
+        let workspace = dir.path().join("w".repeat(260));
+        let habitat = dir.path().join("habitat");
+        let habitat_workspace = super::super::habitat_workspace_cwd(&habitat);
+        assert_eq!(
+            pi_session_project_cwd("pi-agent", &workspace, Some(&habitat), None, false),
+            habitat_workspace
+        );
+        // A Wardian agent may be restored before Pi writes its first JSONL.
+        let provider_cwd =
+            pi_session_project_cwd("pi-agent", &workspace, Some(&habitat), None, true);
+        assert_eq!(provider_cwd, habitat_workspace);
+        assert_eq!(
+            interactive_provider_launch_cwd(
+                "pi",
+                "pi-agent",
+                Some(&habitat),
+                &workspace,
+                &provider_cwd,
+                false,
+            )
+            .expect("fresh Pi launch path"),
+            habitat_workspace
+        );
+    }
 
     #[test]
     fn codex_status_log_session_does_not_use_latest_fallback() {

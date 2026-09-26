@@ -22,7 +22,8 @@ mod tree;
 
 pub(crate) use cleanup::cleanup_managed_home;
 pub(crate) use habitat_alias::{
-    cleanup_habitat_alias, prepare_habitat_cwd_alias, HABITAT_ALIAS_RECORD,
+    cleanup_habitat_alias, is_owned_habitat_workspace_alias, prepare_habitat_cwd_alias,
+    HABITAT_ALIAS_RECORD,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};

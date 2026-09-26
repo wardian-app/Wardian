@@ -565,11 +565,19 @@ that the provider's answer satisfies the requested task.
 
 ### Working-root and identity model
 
-Pi runs in the real workspace. Wardian passes a private `--session-dir` under
-the Wardian agent directory, assigns a distinct UUID with `--session-id`, and
-uses `--session` for exact resume. Pi writes the JSONL lazily after its first
-persisted entry, so discovery validates the session header ID and never falls
-back to the newest file.
+Pi normally starts in the real workspace. On resume, Wardian uses the saved
+session header's project directory when it matches either the real workspace
+or that agent's habitat workspace; switching between those two paths can make
+Pi prompt to fork even when they resolve to the same files. On Windows, a
+fresh workspace path beyond the PTY launch limit starts through the habitat
+projection (or its validated short alias) and retains that identity on resume.
+A saved project path beyond that limit cannot be restored through a shorter
+alias without changing Pi's project identity, so Wardian reports the
+limitation. Wardian passes a private
+`--session-dir` under the Wardian agent directory, assigns a distinct UUID
+with `--session-id`, and uses `--session` for exact resume. Pi writes the JSONL
+lazily after its first persisted entry, so discovery validates the session
+header ID and never falls back to the newest file.
 
 ### Instruction and skill model
 
