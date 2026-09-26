@@ -718,6 +718,51 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("reveals a late source-sized mirror when a scrollbar shrinks the content box", async () => {
+    const registrationGate = deferred<ReturnType<typeof modernRegistrationResult>>();
+    const geometry = { cols: 102, rows: 31 };
+    const initial = {
+      ...modernSnapshot(), geometry, terminal_state_base64: btoa("source frame"),
+    };
+    const broker = { ...modernBrokerState(), geometry };
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const presentationId = (args as { request?: { presentation_id?: string } } | undefined)?.request?.presentation_id ?? "pane-scrollbar-reveal";
+      if (command === "register_terminal_presentation") return registrationGate.promise;
+      if (command === "subscribe_terminal_events") return {
+        broker_state: broker, initial_snapshot: initial,
+      };
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult(presentationId).presentation;
+      }
+      if (command === "unregister_terminal_presentation") return broker;
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+    rectSpy.mockReturnValue({
+      width: 520, height: 798.5, top: 0, left: 0, right: 520, bottom: 798.5,
+      x: 0, y: 0, toJSON: () => ({}),
+    } as DOMRect);
+    fitDimensions = { cols: 74, rows: 45 };
+
+    render(<AgentTerminal sessionId="modern-agent" presentationId="pane-scrollbar-reveal" provider="codex" theme="dark" />);
+    const host = screen.getByTestId("agent-terminal-host");
+    Object.defineProperties(host, {
+      clientWidth: { configurable: true, value: 520 },
+      clientHeight: { configurable: true, value: 789 },
+    });
+    const registration = modernRegistrationResult("pane-scrollbar-reveal");
+    registration.broker_state = broker;
+    registration.initial_snapshot = initial;
+    registrationGate.resolve(registration);
+
+    await waitFor(() => expect(getLatestTerminalInstance().write).toHaveBeenCalledWith(
+      "source frame", expect.any(Function),
+    ));
+    await waitFor(() => expect(host).toHaveStyle({ visibility: "visible" }));
+    expect(getLatestTerminalInstance().cols).toBe(102);
+    expect(getLatestTerminalInstance().rows).toBe(31);
+  });
+
   it("settles an in-flight broker snapshot write before disposing its retired renderer", async () => {
     const registrationGate = deferred<ReturnType<typeof modernRegistrationResult>>();
     mockInvoke.mockImplementation(async (command: string, args?: unknown) => {

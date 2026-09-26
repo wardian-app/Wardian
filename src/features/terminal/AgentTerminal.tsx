@@ -1226,6 +1226,16 @@ function sizeRendererToSource(entry: TerminalSessionEntry, cols: number, rows: n
   }
 }
 
+function terminalViewportSize(container: HTMLDivElement) {
+  const rect = container.getBoundingClientRect();
+  // A scrollbar shrinks the content box without changing the outer rect.
+  // Fit, its cache, and the reveal gate must measure the same viewport.
+  return {
+    width: container.clientWidth || Math.round(rect.width || 0),
+    height: container.clientHeight || Math.round(rect.height || 0),
+  };
+}
+
 function fitCanonicalRenderer(
   renderer: TerminalRendererEntry,
   container: HTMLDivElement,
@@ -1239,9 +1249,7 @@ function fitCanonicalRenderer(
     renderer.canonicalFit = null;
     return false;
   }
-  const rect = container.getBoundingClientRect();
-  const width = container.clientWidth || Math.round(rect.width);
-  const height = container.clientHeight || Math.round(rect.height);
+  const { width, height } = terminalViewportSize(container);
   if (width < 10 || height < 10) return false;
   const proposed = !cell?.width || !cell?.height
     ? renderer.fitAddon.proposeDimensions() : null;
@@ -1277,9 +1285,7 @@ async function fitTerminalToContainer(
     return false;
   }
 
-  const rect = container.getBoundingClientRect();
-  const width = Math.round(rect.width || 0);
-  const height = Math.round(rect.height || 0);
+  const { width, height } = terminalViewportSize(container);
   if (width < 10 || height < 10) {
     return false;
   }
@@ -1356,9 +1362,7 @@ function sampleTerminalReveal(
   renderer: TerminalRendererEntry,
   container: HTMLDivElement,
 ): TerminalRevealSample | null {
-  const rect = container.getBoundingClientRect();
-  const width = Math.round(rect.width || 0);
-  const height = Math.round(rect.height || 0);
+  const { width, height } = terminalViewportSize(container);
   if (!container.isConnected || width < 10 || height < 10) {
     return null;
   }
