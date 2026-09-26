@@ -498,9 +498,41 @@ fn is_wardian_provider_session_process_candidate_args(
     environ: &[String],
     session_id: &str,
 ) -> bool {
-    is_wardian_provider_process_candidate_args(provider, process_name, arguments)
-        && (is_wardian_session_environment_candidate(environ, session_id)
-            || is_wardian_session_process_candidate(process_name, command_line, session_id))
+    if !is_wardian_provider_process_candidate_args(provider, process_name, arguments) {
+        return false;
+    }
+
+    // A Wardian-owned provider can mention other agent IDs in projected
+    // instructions or memory. Its explicit marker takes precedence over those
+    // incidental command-line matches; unmarked external processes still use
+    // the conservative command-line fallback.
+    if let Some(marked_session_id) = environ.iter().find_map(|entry| {
+        entry
+            .split_once('=')
+            .filter(|(key, _)| key.eq_ignore_ascii_case("WARDIAN_SESSION_ID"))
+            .map(|(_, value)| value.trim())
+            .filter(|value| !value.is_empty())
+    }) {
+        if marked_session_id.eq_ignore_ascii_case(session_id.trim()) {
+            return true;
+        }
+
+        if provider.eq_ignore_ascii_case("codex")
+            && uuid::Uuid::parse_str(marked_session_id).is_ok()
+            && uuid::Uuid::parse_str(session_id.trim()).is_ok()
+        {
+            // A child may inherit agent A's valid marker while explicitly
+            // resuming B. Keep direct writer evidence, but ignore B mentioned
+            // only in projected instructions or memory on A's command line.
+            let command_line = command_line.to_ascii_lowercase();
+            let session_id = session_id.trim().to_ascii_lowercase();
+            return ["resume", "--resume", "--session"]
+                .iter()
+                .any(|flag| command_line.contains(&format!("{flag} {session_id}")));
+        }
+    }
+
+    is_wardian_session_process_candidate(process_name, command_line, session_id)
 }
 
 /// Finds possible provider process candidates for one session. Results are
@@ -660,6 +692,60 @@ mod tests {
             "codex",
             &command_line,
             &[],
+            SESSION_ID,
+        ));
+    }
+
+    #[test]
+    fn marked_provider_is_not_a_candidate_for_an_agent_named_in_its_instructions() {
+        let other_session = "11111111-2222-4333-8444-555555555555";
+        let command_line = format!(
+            "codex.exe app-server -c developer_instructions=\"inspect .wardian/agents/{SESSION_ID}\""
+        );
+        let environment = [format!("WARDIAN_SESSION_ID={other_session}")];
+
+        assert!(!super::is_wardian_provider_session_process_candidate(
+            "codex",
+            "codex.exe",
+            &command_line,
+            &environment,
+            SESSION_ID,
+        ));
+        assert!(super::is_wardian_provider_session_process_candidate(
+            "codex",
+            "codex.exe",
+            &command_line,
+            &environment,
+            other_session,
+        ));
+        assert!(super::is_wardian_provider_session_process_candidate(
+            "codex",
+            "codex.exe",
+            &command_line,
+            &[],
+            SESSION_ID,
+        ));
+        assert!(super::is_wardian_provider_session_process_candidate(
+            "codex",
+            "codex.exe",
+            &command_line,
+            &["WARDIAN_SESSION_ID= ".to_string()],
+            SESSION_ID,
+        ));
+        assert!(super::is_wardian_provider_session_process_candidate(
+            "codex",
+            "codex.exe",
+            &command_line,
+            &["WARDIAN_SESSION_ID=unknown".to_string()],
+            SESSION_ID,
+        ));
+
+        let direct_resume = format!("codex.exe resume {SESSION_ID}");
+        assert!(super::is_wardian_provider_session_process_candidate(
+            "codex",
+            "codex.exe",
+            &direct_resume,
+            &environment,
             SESSION_ID,
         ));
     }
