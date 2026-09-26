@@ -135,6 +135,7 @@ export class TerminalSessionClient {
   #lastRecoveredReplacementGeneration = 0;
   #runtimeGeneration = 0;
   #cursor = 0;
+  #repaintSnapshotPending: { runtimeGeneration: number; afterSequence: number } | null = null;
   #subscription: Promise<TerminalEventSubscriptionResult> | null = null;
   #eventUnlisten: UnlistenFn | null = null;
   #lifecycleUnlisten: UnlistenFn | null = null;
@@ -739,6 +740,7 @@ export class TerminalSessionClient {
                 ?? null;
               this.#replacementOwnerCandidate = null;
               this.#runtimeGeneration = notification.runtime_generation;
+              this.#repaintSnapshotPending = null;
               this.#subscription = null;
               const recovered = await this.#retryRegistrationsForGeneration(
                 previousOwnerPresentationId,
@@ -882,6 +884,9 @@ export class TerminalSessionClient {
     if (this.#subscription && this.#runtimeGeneration === runtimeGeneration) {
       return this.#subscription;
     }
+    if (this.#runtimeGeneration !== runtimeGeneration) {
+      this.#repaintSnapshotPending = null;
+    }
     this.#runtimeGeneration = runtimeGeneration;
     const subscription = invoke<TerminalEventSubscriptionResult>("subscribe_terminal_events", {
       request: {
@@ -961,12 +966,23 @@ export class TerminalSessionClient {
           ),
         );
         if (repaintNeeded.some(Boolean)) {
-          const snapshot = await invoke<TerminalSnapshot>("request_terminal_snapshot", {
-            request: { session_id: this.sessionId },
-          });
-          await this.#applySnapshotToAll(snapshot, true);
-          this.#cursor = Math.max(this.#cursor, snapshot.sequence_barrier);
+          this.#repaintSnapshotPending = {
+            runtimeGeneration: this.#runtimeGeneration,
+            afterSequence: batch.events[batch.events.length - 1]?.sequence ?? batch.next_sequence,
+          };
         }
+      }
+      const pendingRepaint = this.#repaintSnapshotPending;
+      if (pendingRepaint?.runtimeGeneration === this.#runtimeGeneration) {
+        const snapshot = await invoke<TerminalSnapshot>("request_terminal_snapshot", {
+          request: { session_id: this.sessionId },
+        });
+        if (snapshot.runtime_generation !== pendingRepaint.runtimeGeneration ||
+            snapshot.sequence_barrier < pendingRepaint.afterSequence) {
+          throw new Error("Post-geometry terminal snapshot does not cover the applied output");
+        }
+        await this.#applySnapshotToAll(snapshot, true);
+        this.#cursor = Math.max(this.#cursor, snapshot.sequence_barrier);
       }
       if (!this.#canDrainEvents()) {
         return;
@@ -994,11 +1010,18 @@ export class TerminalSessionClient {
   }
 
   async #applySnapshotToAll(snapshot: TerminalSnapshot, force = false) {
+    const pendingRepaint = this.#repaintSnapshotPending;
+    const coversRepaint = pendingRepaint?.runtimeGeneration === snapshot.runtime_generation &&
+      snapshot.sequence_barrier >= pendingRepaint.afterSequence;
     await Promise.all(
       Array.from(this.#presentations.values(), (binding) =>
-        this.#applySnapshot(binding, snapshot, force),
+        this.#applySnapshot(binding, snapshot, force || coversRepaint),
       ),
     );
+    if (pendingRepaint && this.#repaintSnapshotPending === pendingRepaint &&
+        (coversRepaint || snapshot.runtime_generation > pendingRepaint.runtimeGeneration)) {
+      this.#repaintSnapshotPending = null;
+    }
   }
 
   async #applySnapshot(
@@ -1080,6 +1103,9 @@ export class TerminalSessionClient {
     if (state.runtime_generation < this.#runtimeGeneration) {
       return;
     }
+    if (state.runtime_generation > this.#runtimeGeneration) {
+      this.#repaintSnapshotPending = null;
+    }
     this.#brokerState = state;
     this.#runtimeGeneration = state.runtime_generation;
     if (state.owner_presentation_id && this.#presentations.has(state.owner_presentation_id)) {
@@ -1092,6 +1118,9 @@ export class TerminalSessionClient {
 
   #notifyDecision(decision: TerminalLeaseDecision) {
     if (this.#brokerState && decision.runtime_generation >= this.#runtimeGeneration) {
+      if (decision.runtime_generation > this.#runtimeGeneration) {
+        this.#repaintSnapshotPending = null;
+      }
       this.#brokerState = {
         ...this.#brokerState,
         runtime_generation: decision.runtime_generation,
