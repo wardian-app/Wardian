@@ -613,7 +613,8 @@ impl ConversationArchiveState {
 
         for event in &batch_events {
             let existing_event_index = matching_event_index(&existing_events, event)?;
-            let matching_record = matching_record_index(&existing_records, event)?;
+            let matching_record =
+                matching_record_index(&existing_records, event, &existing_events)?;
             if existing_event_index.is_none()
                 && matching_record
                     .is_some_and(|index| !is_bound_native_delivery(&existing_records[index], event))
