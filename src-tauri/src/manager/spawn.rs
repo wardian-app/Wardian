@@ -1063,6 +1063,30 @@ pub(crate) fn provider_spawn_lease_for_launch(
     }
 }
 
+async fn prepare_codex_owner_after_reservation<T, F, Fut>(
+    config: &AgentConfig,
+    inherited_lease: Option<wardian_core::conversation_lease::PersistedConversationLeaseGuard>,
+    prepare: F,
+) -> Result<
+    (
+        wardian_core::conversation_lease::PersistedConversationLeaseGuard,
+        T,
+    ),
+    String,
+>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    // Native owner preparation can start a provider writer before the PTY
+    // exists. Reserve and scan first, then retain exclusion through any
+    // cancellation or uncertain failure during owner preparation.
+    let mut lease = provider_spawn_lease_for_launch(config, inherited_lease)?;
+    lease.retain_on_drop();
+    let owner = prepare().await?;
+    Ok((lease, owner))
+}
+
 fn provider_spawn_lease_should_release(status: &str) -> bool {
     matches!(status, "Idle" | "Error" | "Off")
 }
@@ -1619,25 +1643,38 @@ async fn spawn_agent_inner(
             .map_err(|error| format!("Failed to reserve OpenCode native ownership: {error}"))?;
     }
 
-    let mut codex_attach_guard = None;
     let attachment_at = std::time::Instant::now();
-    let codex_attachment = if config.provider == "codex" {
-        let attachment = app_state
-            .native_delivery
-            .prepare_codex_tui(crate::delivery::native_broker::NativeSessionSpec {
-                target_agent_id: config.session_id.clone(),
-                provider: "codex".into(),
-                generation: provider_generation,
-                workspace: provider_cwd.clone(),
-                config: config.clone(),
+    let (mut spawn_lease, codex_attachment) = if config.provider == "codex" {
+        let (lease, attachment) =
+            prepare_codex_owner_after_reservation(&config, inherited_lease, || async {
+                app_state
+                    .native_delivery
+                    .prepare_codex_tui(crate::delivery::native_broker::NativeSessionSpec {
+                        target_agent_id: config.session_id.clone(),
+                        provider: "codex".into(),
+                        generation: provider_generation,
+                        workspace: provider_cwd.clone(),
+                        config: config.clone(),
+                    })
+                    .await
+                    .map_err(|error| error.to_string())
             })
-            .await
-            .map_err(|error| error.to_string())?;
-        codex_attach_guard = Some(super::codex_shared::CodexAttachGuard::new(
+            .await?;
+        (lease, Some(attachment))
+    } else {
+        (
+            provider_spawn_lease_for_launch(&config, inherited_lease)?,
+            None,
+        )
+    };
+    let mut codex_attach_guard = codex_attachment.as_ref().map(|_| {
+        super::codex_shared::CodexAttachGuard::new(
             app_state.native_delivery.clone(),
             config.session_id.clone(),
             provider_generation,
-        ));
+        )
+    });
+    if let Some(attachment) = codex_attachment.as_ref() {
         // Both clients read the aligned private home; ordinary local discovery
         // requires no CLI key/value config overrides and no --remote mode.
         provider_args = codex_shared_tui_args(
@@ -1646,10 +1683,7 @@ async fn spawn_agent_inner(
             attachment.expected_resume_id.as_deref(),
             &provider_cwd,
         );
-        Some(attachment)
-    } else {
-        None
-    };
+    }
     let attachment_ms = attachment_at.elapsed().as_millis();
     let mut pi_attachment = if config.provider == "pi" && is_restored {
         let session_file = config
@@ -1832,10 +1866,8 @@ async fn spawn_agent_inner(
     // unable to write, then start the watcher from that exact byte offset.
     let pi_log_baseline = restored_pi_log_baseline(&config, is_restored);
 
-    // The persisted transition lease makes this check and provider creation
-    // exclusive with cross-process headless work. A matching live process is
-    // ambiguous ownership evidence, so recovery is withheld rather than killed.
-    let mut spawn_lease = provider_spawn_lease_for_launch(&config, inherited_lease)?;
+    // The transition lease acquired before native owner preparation remains
+    // held through PTY creation and publication.
     let child_result = pair.slave.spawn_command(cmd);
     let child = match child_result {
         Ok(child) => child,
@@ -3796,6 +3828,76 @@ mod tests {
         wardian_core::conversation_lease::try_acquire_lease(background_lease.clone(), &now_rfc3339)
             .expect("background lease after launch reservation release");
         assert!(acquire_provider_spawn_lease(&config).is_err());
+    }
+
+    #[tokio::test]
+    async fn codex_native_owner_preparation_runs_only_after_spawn_reservation() {
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
+        let config = AgentConfig {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            provider: "codex".into(),
+            resume_session: Some(uuid::Uuid::new_v4().to_string()),
+            ..Default::default()
+        };
+        let (mut lease, owner) = prepare_codex_owner_after_reservation(&config, None, || async {
+            let leases = wardian_core::conversation_lease::load_leases_checked()?;
+            assert!(leases.iter().any(|entry| {
+                entry.agent_id == config.session_id && entry.mode == "lifecycle_transition"
+            }));
+            Ok("prepared")
+        })
+        .await
+        .expect("prepare after reservation");
+        assert_eq!(owner, "prepared");
+        lease.release().expect("release test reservation");
+
+        let now = chrono::Utc::now();
+        let background = wardian_core::conversation_lease::ConversationLease {
+            agent_id: config.session_id.clone(),
+            provider: config.provider.clone(),
+            resume_session: config.resume_session.clone().unwrap(),
+            owner_kind: "automation_run".into(),
+            owner_id: "other-writer".into(),
+            acquisition_id: uuid::Uuid::new_v4().to_string(),
+            owner_node_id: None,
+            mode: "background_resume".into(),
+            started_at: now.to_rfc3339(),
+            heartbeat_at: now.to_rfc3339(),
+            expires_at: (now + chrono::Duration::minutes(5)).to_rfc3339(),
+        };
+        assert!(matches!(
+            wardian_core::conversation_lease::try_acquire_lease(background, &now.to_rfc3339())
+                .expect("competing writer lease"),
+            wardian_core::conversation_lease::ConversationLeaseAcquireOutcome::Acquired
+        ));
+        let prepared = std::sync::atomic::AtomicBool::new(false);
+        let result = prepare_codex_owner_after_reservation(&config, None, || async {
+            prepared.store(true, std::sync::atomic::Ordering::Release);
+            Ok(())
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(!prepared.load(std::sync::atomic::Ordering::Acquire));
+
+        let cancelled_config = AgentConfig {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            provider: "codex".into(),
+            resume_session: Some(uuid::Uuid::new_v4().to_string()),
+            ..Default::default()
+        };
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            prepare_codex_owner_after_reservation(&cancelled_config, None, || async {
+                std::future::pending::<Result<(), String>>().await
+            }),
+        )
+        .await;
+        assert!(cancelled.is_err());
+        assert!(wardian_core::conversation_lease::load_leases_checked()
+            .expect("retained lease after cancellation")
+            .iter()
+            .any(|entry| entry.agent_id == cancelled_config.session_id
+                && entry.mode == "lifecycle_transition"));
     }
 
     #[tokio::test]

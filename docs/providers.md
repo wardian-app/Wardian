@@ -257,6 +257,13 @@ quit it after saving other work. Do not delete the rollout or writer-lock file;
 the owning process must release the lock. Restore failures are also recorded in
 `<wardian-home>/wardian_debug.log`.
 
+If Wardian reports `withheld provider restore to avoid a duplicate writer`,
+read the detailed error in `wardian_debug.log` before retrying. The summary
+can accompany several restore failures; only a detail such as `matching
+provider process candidate already exists (PID ...)` identifies a possible
+competing process. Check whether that PID still exists. Keep the conversation
+history and leases intact while investigating the cause.
+
 If Codex behaves unexpectedly, run `wardian agent doctor <agent-name-or-uuid>`
 first. It reports the agent's effective `CODEX_HOME`, installed/enabled plugins
 from that home, launch flags, and a detectable stalled composer. If doctor
