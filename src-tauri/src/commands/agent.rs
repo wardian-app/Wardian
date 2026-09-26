@@ -38,7 +38,7 @@ pub use settings::{
 mod provider_log_tests;
 mod removal;
 use agent_lifecycle::{
-    acquire_agent_lifecycle_guard, lock_agent_lifecycle, stop_native_owner,
+    acquire_agent_lifecycle_guard, lock_agent_lifecycle, lock_rename_mutation, stop_native_owner,
     stop_native_owner_with_before_capture, PendingRuntime,
 };
 use agent_naming::{
@@ -4237,11 +4237,11 @@ async fn clear_agent_session_inner(
 }
 
 #[tauri::command]
-pub async fn rename_agent(
+pub async fn rename_agent<R: tauri::Runtime>(
     session_id: String,
     new_name: String,
     state: State<'_, AppState>,
-    app: AppHandle,
+    app: AppHandle<R>,
 ) -> Result<(), String> {
     manager::log_debug(&format!(
         "[WARDIAN] rename_agent called for session {}: {}",
@@ -4251,7 +4251,7 @@ pub async fn rename_agent(
     let new_name = new_name.trim().to_string();
     validate_agent_name(&new_name)?;
 
-    let _lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
+    let (_lifecycle_guard, _roster_barrier) = lock_rename_mutation(&state, &session_id).await?;
     let rename_reservation = reserve_rename_session_name(&state, &session_id, &new_name).await?;
 
     let mut agents = state.agents.lock().await;
@@ -4305,7 +4305,7 @@ pub async fn rename_agent(
             return Err(format!("Failed to persist agent rename: {error}"));
         }
         let snapshot = manager::state_configs_snapshot(&agents, &order);
-        if let Err(snapshot_error) = manager::try_save_state_snapshot(&snapshot) {
+        if let Err(snapshot_error) = manager::try_save_state_snapshot_unlocked(&snapshot) {
             if let Some(agent) = agents.get_mut(&session_id) {
                 if let Ok(mut config) = agent.config.lock() {
                     config.session_name = previous_name.clone();

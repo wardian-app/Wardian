@@ -5,6 +5,10 @@ use crate::state::AppState;
 #[path = "agent/lifecycle_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "agent/rename_tests.rs"]
+mod rename_tests;
+
 pub(super) fn fresh_provider_session_for_initial_capture(
     config: &wardian_core::models::AgentConfig,
     actual_resume: Option<&str>,
@@ -82,6 +86,29 @@ pub(super) async fn lock_agent_lifecycle(
     session_id: &str,
 ) -> tokio::sync::OwnedMutexGuard<()> {
     state.lock_agent_lifecycle(session_id).await
+}
+
+pub(super) async fn lock_rename_mutation(
+    state: &AppState,
+    session_id: &str,
+) -> Result<
+    (
+        tokio::sync::OwnedMutexGuard<()>,
+        wardian_core::agent_replacement::AgentRosterBarrier,
+    ),
+    String,
+> {
+    let lifecycle = lock_agent_lifecycle(state, session_id).await;
+    // Configuration saves take the roster barrier before the agent map. A
+    // rename must do the same to avoid holding the map during a barrier wait.
+    let roster = tokio::task::spawn_blocking(|| {
+        wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "Agent roster barrier is unavailable".to_string())?;
+    Ok((lifecycle, roster))
 }
 
 pub(super) async fn acquire_agent_lifecycle_guard(
