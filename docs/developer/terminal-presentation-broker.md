@@ -102,7 +102,7 @@ A snapshot contains canonical geometry, generation, a unique ID, a
 `sequence_barrier`, VT terminal state, the visible grid, and up to 1,000 lines
 of scrollback. Its serialized payload is capped at 2 MiB. Apply it as follows:
 
-1. Replace the local renderer/parser state with the snapshot.
+1. Resize the desktop xterm and parser to the snapshot's canonical geometry, then replay its formatted VT state. Fit or pan that source grid inside the presentation viewport without changing its columns or rows.
 2. Set the cursor to `sequence_barrier`.
 3. Ignore events at or below the barrier.
 4. Apply only consecutive later events.
@@ -111,8 +111,10 @@ Provider-specific output policy is applied before both VT parsing and event
 publication. In particular, the Codex runtime ignores `CSI 3 J` so a provider
 scrollback erase cannot create one history in broker snapshots and another in
 desktop or remote xterm. The filter carries partial control-sequence prefixes
-across PTY reads. Clients do not repeat this policy, and every snapshot remains
-an authoritative replacement of local state.
+across PTY reads. Clients do not repeat this policy. Missing or invalid formatted
+state is reported as degraded rather than silently treated as an equivalent
+plain projection. A plain grid is shown only when no accurate earlier frame is
+available.
 
 Provider agent terminals install one xterm parser handler for `CSI ... SP q`
 (DECSCUSR). The handler consumes provider cursor-shape and blink changes while
@@ -182,6 +184,19 @@ still cannot fit, and letterbox when the viewport is larger. The default floor
 is 0.75 and cannot be configured below 0.5. A phone, narrow split, or remote
 viewport therefore never degrades the desktop PTY by imposing
 smallest-client-wins geometry.
+
+A resize or activation acknowledgement can include a snapshot at newly
+committed geometry before the provider has repainted. Desktop clients consume
+its sequence barrier but retain the last accurate fitted frame. They stop
+writing later output to that old-width xterm. Once ordered post-geometry output
+arrives, the desktop feed requests one fresh snapshot for all presentations,
+sizes each xterm to its source grid, and resumes replay. If the provider emits
+no output, the old frame remains visible with a pending status. Input is gated
+through the transition; the acknowledged owner may explicitly enable keyboard
+input to prompt recovery, with a warning that keys may affect an unseen prompt.
+Mouse coordinates and binary input remain gated. A lease transfer revokes that
+manual keyboard allowance. No timer retries or synthetic provider input are
+issued.
 
 ### Alternate-screen application ownership
 
@@ -255,9 +270,9 @@ current reveal generation must complete this transaction first:
 
 1. confirm connected, non-zero host bounds and physical intersection;
 2. select WebGL or settle on the complete DOM fallback;
-3. fit the local xterm to the measured host;
-4. apply and await the broker snapshot or recovery write;
-5. verify that the host, backend, proposed grid, and actual grid still agree;
+3. measure the local viewport before registration;
+4. apply and await the broker snapshot or recovery write at source geometry;
+5. verify either the local grid or the source-sized grid with its measured fit against the stable host and backend;
 6. reveal the host atomically.
 
 Registration's pre-snapshot hook keeps backend selection and the first fit

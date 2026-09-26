@@ -1,30 +1,39 @@
 import type { TerminalSnapshot } from "../../types";
 
-/** Reconstruct broker history before an absolute visible-grid/cursor restore.
- * Called after resetting xterm, at the snapshot geometry for formatted state.
- */
-export function decodeTerminalSnapshot(snapshot: TerminalSnapshot, useFormattedState: boolean) {
+export type TerminalSnapshotReplay =
+  | { kind: "formatted"; text: string }
+  | { kind: "degraded"; reason: "missing_formatted_state" | "invalid_formatted_state"; text: string };
+
+/** Reconstruct broker history before the absolute frame at snapshot geometry. */
+export function decodeTerminalSnapshot(snapshot: TerminalSnapshot): TerminalSnapshotReplay {
   const scrollback = snapshot.formatted_scrollback?.length === snapshot.scrollback.length
     ? snapshot.formatted_scrollback
     : snapshot.scrollback;
-  if (useFormattedState && snapshot.terminal_state_base64) {
+  if (snapshot.terminal_state_base64) {
     try {
       const binary = atob(snapshot.terminal_state_base64);
       const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-      const state = new TextDecoder().decode(bytes);
-      if (scrollback.length === 0) return state;
+      const state = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      if (!state) throw new Error("Empty formatted terminal state");
+      if (scrollback.length === 0) return { kind: "formatted", text: state };
       // Home + erase-display in the absolute frame would erase history that
       // is still on the visible screen. Advance one screenful from the last
       // history row first, moving every supplied row (including empty rows)
       // into actual scrollback. The frame then restores the grid and cursor.
-      return scrollback.join("\r\n") + "\r\n".repeat(snapshot.geometry.rows) + state;
+      return { kind: "formatted", text: scrollback.join("\r\n") + "\r\n".repeat(snapshot.geometry.rows) + state };
     } catch {
-      // A size-capped snapshot may omit or truncate the formatted state. The
-      // bounded plain-text projection is the recovery fallback.
+      return degradedSnapshot(snapshot, scrollback, "invalid_formatted_state");
     }
   }
+  return degradedSnapshot(snapshot, scrollback, "missing_formatted_state");
+}
+
+function degradedSnapshot(
+  snapshot: TerminalSnapshot,
+  scrollback: string[],
+  reason: "missing_formatted_state" | "invalid_formatted_state",
+): TerminalSnapshotReplay {
   const plainProjection = [...scrollback, snapshot.visible_grid].join("\r\n");
-  // vt100's plain projection has no screen-mode control; preserve alternate
-  // ownership when formatted state is unavailable or local geometry differs.
-  return snapshot.alternate_screen ? `\x1b[?1049h${plainProjection}` : plainProjection;
+  const text = snapshot.alternate_screen ? `\x1b[?1049h${plainProjection}` : plainProjection;
+  return { kind: "degraded", reason, text };
 }

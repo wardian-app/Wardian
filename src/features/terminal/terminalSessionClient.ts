@@ -70,9 +70,9 @@ function recordForegroundResumeTiming(
 export type TerminalPresentationCallbacks = {
   applySnapshot: (
     snapshot: TerminalSnapshot,
-    options?: { preserveLocalScrollback?: boolean },
+    options?: { geometryCommit?: boolean; preserveLocalScrollback?: boolean },
   ) => void | Promise<void>;
-  applyEvents: (events: readonly TerminalBrokerEvent[]) => void | Promise<void>;
+  applyEvents: (events: readonly TerminalBrokerEvent[]) => boolean | void | Promise<boolean | void>;
   onBrokerState?: (state: TerminalBrokerState) => void;
   onRegistrationRecovered?: (result: TerminalPresentationRegistrationResult) => void;
   onLeaseDecision?: (decision: TerminalLeaseDecision) => void;
@@ -466,6 +466,7 @@ export class TerminalSessionClient {
         // broker snapshot, so mark this one owner-resize snapshot as a local
         // history-preserving boundary rather than overwriting that buffer.
         await this.#applySnapshot(binding, result.snapshot, false, undefined, {
+          geometryCommit: true,
           preserveLocalScrollback: true,
         });
       }
@@ -865,7 +866,11 @@ export class TerminalSessionClient {
       },
     });
     if (ack.snapshot) {
-      await this.#applySnapshot(binding, ack.snapshot);
+      await this.#applySnapshot(binding, ack.snapshot, false, undefined, {
+        geometryCommit: begin.snapshot.geometry.cols !== ack.snapshot.geometry.cols ||
+          begin.snapshot.geometry.rows !== ack.snapshot.geometry.rows,
+        preserveLocalScrollback: true,
+      });
     }
     this.#setBrokerState(ack.broker_state);
     this.#notifyDecision(ack.decision);
@@ -950,11 +955,18 @@ export class TerminalSessionClient {
       }
       if (batch.events.length > 0) {
         this.#applyBrokerEventState(batch.events);
-        await Promise.all(
+        const repaintNeeded = await Promise.all(
           Array.from(this.#presentations.values(), (binding) =>
             this.#applyEvents(binding, batch.events),
           ),
         );
+        if (repaintNeeded.some(Boolean)) {
+          const snapshot = await invoke<TerminalSnapshot>("request_terminal_snapshot", {
+            request: { session_id: this.sessionId },
+          });
+          await this.#applySnapshotToAll(snapshot, true);
+          this.#cursor = Math.max(this.#cursor, snapshot.sequence_barrier);
+        }
       }
       if (!this.#canDrainEvents()) {
         return;
@@ -981,10 +993,10 @@ export class TerminalSessionClient {
     });
   }
 
-  async #applySnapshotToAll(snapshot: TerminalSnapshot) {
+  async #applySnapshotToAll(snapshot: TerminalSnapshot, force = false) {
     await Promise.all(
       Array.from(this.#presentations.values(), (binding) =>
-        this.#applySnapshot(binding, snapshot),
+        this.#applySnapshot(binding, snapshot, force),
       ),
     );
   }
@@ -994,7 +1006,7 @@ export class TerminalSessionClient {
     snapshot: TerminalSnapshot,
     force = false,
     shouldApply?: () => boolean,
-    options?: { preserveLocalScrollback?: boolean },
+    options?: { geometryCommit?: boolean; preserveLocalScrollback?: boolean },
   ) {
     if (
       !force &&
@@ -1022,10 +1034,11 @@ export class TerminalSessionClient {
         event.sequence > binding.appliedSequence,
     );
     if (pending.length === 0) {
-      return;
+      return false;
     }
-    await binding.callbacks.applyEvents(pending);
+    const needsRepaintSnapshot = await binding.callbacks.applyEvents(pending);
     binding.appliedSequence = pending[pending.length - 1]?.sequence ?? binding.appliedSequence;
+    return Boolean(needsRepaintSnapshot);
   }
 
   #applyBrokerEventState(events: readonly TerminalBrokerEvent[]) {

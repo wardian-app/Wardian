@@ -181,6 +181,15 @@ The same terminal can appear in more than one desktop or remote presentation. Th
 
 Click inside a terminal, or focus it and press `Enter` or `Space`, to explicitly request interaction ownership for that presentation. Keyboard focus alone does not steal ownership. Short switches away from Agents keep its budgeted terminals warm but hidden and unable to accept input. Returning reuses those renderers; if Wardian had to reclaim one to stay within resource limits, it remains hidden until its backend, snapshot, and final fitted geometry are ready.
 
+Mirrors keep the owner's terminal grid and fit it into their pane. A narrow pane
+may scale the grid down or let you pan across it. After an owner resize, **Waiting
+for terminal repaint** means Wardian is keeping the last accurate frame until
+the provider draws at the new size. The owner can choose **Enable keyboard
+input** to prompt a stalled provider, but keys may affect a prompt that is not
+yet visible. Mouse input stays disabled during this state. **Terminal formatting
+unavailable** or **Terminal formatting invalid** identifies a degraded
+snapshot; the owner can use the same explicit keyboard recovery action.
+
 ### Contextual agent opens
 
 When Graph or Inbox opens an agent, Wardian first reuses the existing
