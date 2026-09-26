@@ -26,6 +26,7 @@ const PROVIDER_SESSION_ID = `e2e-terminal-broker-${RUN_ID}`;
 const SESSION_NAME = `E2E-Terminal-Broker-${RUN_ID}`;
 let wardianSessionId = null;
 const OWNER_GEOMETRY = Object.freeze({ cols: 101, rows: 31 });
+const REPAINT_GEOMETRY = Object.freeze({ cols: 102, rows: 31 });
 const MIRROR_GEOMETRY = Object.freeze({ cols: 151, rows: 44 });
 
 async function invokeTauri(driver, command, args = {}) {
@@ -63,6 +64,7 @@ function writeBrokerMockScript(harness) {
 "use strict";
 const readline = require("node:readline");
 let tick = 0;
+let ticksPaused = false;
 process.stdout.write(JSON.stringify({
   type: "init",
   session_id: ${JSON.stringify(PROVIDER_SESSION_ID)},
@@ -70,11 +72,24 @@ process.stdout.write(JSON.stringify({
 }) + "\\n");
 process.stdout.write("BROKER_READY_${RUN_ID}\\r\\n");
 setInterval(() => {
+  if (ticksPaused) return;
   tick += 1;
   process.stdout.write("broker-tick:" + tick + "\\r\\n");
 }, 100);
 const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
-lines.on("line", (line) => process.stdout.write("broker-echo:" + line + "\\r\\n"));
+lines.on("line", (line) => {
+  if (line === "PAUSE_TICKS_${RUN_ID}") {
+    ticksPaused = true;
+    process.stdout.write("broker-paused:${RUN_ID}\\r\\n");
+    return;
+  }
+  if (line === "PAINT_SOURCE_${RUN_ID}") {
+    process.stdout.write("\\x1b[H\\x1b[2Jsource-width-paint\\x1b[31m\\x1b[1;102H#\\x1b[m");
+    return;
+  }
+  if (line === "RESUME_TICKS_${RUN_ID}") ticksPaused = false;
+  process.stdout.write("broker-echo:" + line + "\\r\\n");
+});
 process.stdin.resume();
 `,
     "utf8",
@@ -402,11 +417,151 @@ test(
     assert.equal(initialAck.broker_state.pending_activation, null);
     brokerState = initialAck.broker_state;
 
-    const ownerCanonical = await resizePresentation(
+    const pauseTicks = await invokeTauri(driver, "send_terminal_presentation_input", {
+      request: {
+        session_id: wardianSessionId,
+        presentation_id: ownerPresentationId,
+        runtime_generation: runtimeGeneration,
+        lease_epoch: brokerState.lease_epoch,
+        input: `PAUSE_TICKS_${RUN_ID}\r`,
+      },
+    });
+    assert.equal(pauseTicks.status, "accepted");
+    let lastQuietBarrier = -1;
+    let quietReads = 0;
+    await waitFor("mock PTY quiet before resize", 20_000, async () => {
+      const source = await invokeTauri(driver, "request_terminal_snapshot", {
+        request: { session_id: wardianSessionId },
+      });
+      quietReads = source.sequence_barrier === lastQuietBarrier ? quietReads + 1 : 0;
+      lastQuietBarrier = source.sequence_barrier;
+      return {
+        ok: source.visible_grid.includes(`broker-paused:${RUN_ID}`) && quietReads >= 2,
+        sequence: source.sequence_barrier,
+      };
+    });
+
+    const repaintCommit = await resizePresentation(
       driver,
       ownerPresentationId,
       brokerState,
       10_000,
+      REPAINT_GEOMETRY,
+    );
+    assert.equal(repaintCommit.decision.status, "accepted");
+    assert.deepEqual(repaintCommit.geometry, REPAINT_GEOMETRY);
+    assert.ok(repaintCommit.snapshot, "source-width repaint must follow a geometry commit");
+    brokerState = {
+      ...brokerState,
+      geometry: repaintCommit.geometry,
+      lease_epoch: repaintCommit.decision.lease_epoch,
+    };
+    const paint = await invokeTauri(driver, "send_terminal_presentation_input", {
+      request: {
+        session_id: wardianSessionId,
+        presentation_id: ownerPresentationId,
+        runtime_generation: runtimeGeneration,
+        lease_epoch: brokerState.lease_epoch,
+        input: `PAINT_SOURCE_${RUN_ID}\r`,
+      },
+    });
+    assert.equal(paint.status, "accepted");
+    const painted = await waitFor("formatted source-width paint", 20_000, async () => {
+      const source = await invokeTauri(driver, "request_terminal_snapshot", {
+        request: { session_id: wardianSessionId },
+      });
+      const formatted = Buffer.from(source.terminal_state_base64, "base64").toString("utf8");
+      return {
+        ok: source.geometry.cols === REPAINT_GEOMETRY.cols &&
+          source.visible_grid.split("\n")[0]?.trimEnd().endsWith("#") &&
+          formatted.includes("[31m"),
+        source,
+      };
+    });
+    await waitFor("both native mirrors at the formatted source geometry", 20_000, async () => {
+      const presentations = await driver.executeScript((ids) => ids.map((id) => {
+        const frame = window.__wardianTerminalDebug?.snapshot(id);
+        const host = document.querySelector(`[data-terminal-presentation-id="${id}"]`);
+        const hostBounds = host?.getBoundingClientRect();
+        const screenBounds = host?.querySelector(".xterm-screen")?.getBoundingClientRect();
+        return frame && {
+          cols: frame.renderer?.cols,
+          rows: frame.renderer?.rows,
+          lines: frame.renderer?.lines,
+          formatted: frame.snapshotReplays?.at(-1)?.appliedFormattedState,
+          hostVisibility: host ? getComputedStyle(host).visibility : null,
+          hostWidth: hostBounds?.width,
+          hostHeight: hostBounds?.height,
+          hostRight: hostBounds?.right,
+          screenWidth: screenBounds?.width,
+          screenRight: screenBounds?.right,
+          scrollWidth: host?.scrollWidth,
+          clientWidth: host?.clientWidth,
+        };
+      }), [ownerPresentationId, mirrorPresentationId]);
+      return {
+        ok: presentations.every((frame) => frame &&
+          frame.cols === painted.source.geometry.cols &&
+          frame.rows === painted.source.geometry.rows &&
+          frame.lines?.some((line) => line.trimEnd().endsWith("#")) &&
+          frame.formatted === true &&
+          frame.hostVisibility === "visible" &&
+          frame.hostWidth > 0 && frame.hostHeight > 0 &&
+          frame.screenWidth > 0 &&
+          (frame.screenRight <= frame.hostRight + 1 || frame.scrollWidth > frame.clientWidth)),
+        presentations,
+      };
+    });
+    const evidenceDirectory = path.join(
+      harness.repoRoot, "e2e", "screenshots", "terminal-snapshot", RUN_ID,
+    );
+    fs.mkdirSync(evidenceDirectory, { recursive: true });
+    const ownerEvidencePanel = await workbenchSurfacePanel(
+      driver, "agent-session", wardianSessionId, { index: 0 },
+    );
+    const mirrorEvidencePanel = await workbenchSurfacePanel(
+      driver, "agent-session", wardianSessionId, { index: -1 },
+    );
+    fs.writeFileSync(
+      path.join(evidenceDirectory, "owner.png"),
+      Buffer.from(await ownerEvidencePanel.takeScreenshot(true), "base64"),
+    );
+    await driver.executeScript((presentationId) => {
+      const host = document.querySelector(`[data-terminal-presentation-id="${presentationId}"]`);
+      if (host) host.scrollLeft = host.scrollWidth;
+    }, mirrorPresentationId);
+    await waitFor("panned mirror exposes source right edge", 5_000, async () => {
+      const exposure = await driver.executeScript((presentationId) => {
+        const host = document.querySelector(`[data-terminal-presentation-id="${presentationId}"]`);
+        const screen = host?.querySelector(".xterm-screen");
+        return {
+          scrollLeft: host?.scrollLeft ?? 0,
+          overflow: host ? host.scrollWidth - host.clientWidth : 0,
+          exposed: Boolean(host && screen &&
+            screen.getBoundingClientRect().right <= host.getBoundingClientRect().right + 1),
+        };
+      }, mirrorPresentationId);
+      return { ok: exposure.exposed && (exposure.overflow <= 0 || exposure.scrollLeft > 0), exposure };
+    });
+    fs.writeFileSync(
+      path.join(evidenceDirectory, "mirror.png"),
+      Buffer.from(await mirrorEvidencePanel.takeScreenshot(true), "base64"),
+    );
+    const resumeTicks = await invokeTauri(driver, "send_terminal_presentation_input", {
+      request: {
+        session_id: wardianSessionId,
+        presentation_id: ownerPresentationId,
+        runtime_generation: runtimeGeneration,
+        lease_epoch: brokerState.lease_epoch,
+        input: `RESUME_TICKS_${RUN_ID}\r`,
+      },
+    });
+    assert.equal(resumeTicks.status, "accepted");
+    const ownerCanonical = await resizePresentation(
+      driver,
+      ownerPresentationId,
+      brokerState,
+      10_001,
       OWNER_GEOMETRY,
     );
     assert.equal(ownerCanonical.decision.status, "accepted");

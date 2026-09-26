@@ -718,6 +718,51 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it("reveals a late source-sized mirror when a scrollbar shrinks the content box", async () => {
+    const registrationGate = deferred<ReturnType<typeof modernRegistrationResult>>();
+    const geometry = { cols: 102, rows: 31 };
+    const initial = {
+      ...modernSnapshot(), geometry, terminal_state_base64: btoa("source frame"),
+    };
+    const broker = { ...modernBrokerState(), geometry };
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const presentationId = (args as { request?: { presentation_id?: string } } | undefined)?.request?.presentation_id ?? "pane-scrollbar-reveal";
+      if (command === "register_terminal_presentation") return registrationGate.promise;
+      if (command === "subscribe_terminal_events") return {
+        broker_state: broker, initial_snapshot: initial,
+      };
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult(presentationId).presentation;
+      }
+      if (command === "unregister_terminal_presentation") return broker;
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+    rectSpy.mockReturnValue({
+      width: 520, height: 798.5, top: 0, left: 0, right: 520, bottom: 798.5,
+      x: 0, y: 0, toJSON: () => ({}),
+    } as DOMRect);
+    fitDimensions = { cols: 74, rows: 45 };
+
+    render(<AgentTerminal sessionId="modern-agent" presentationId="pane-scrollbar-reveal" provider="codex" theme="dark" />);
+    const host = screen.getByTestId("agent-terminal-host");
+    Object.defineProperties(host, {
+      clientWidth: { configurable: true, value: 520 },
+      clientHeight: { configurable: true, value: 789 },
+    });
+    const registration = modernRegistrationResult("pane-scrollbar-reveal");
+    registration.broker_state = broker;
+    registration.initial_snapshot = initial;
+    registrationGate.resolve(registration);
+
+    await waitFor(() => expect(getLatestTerminalInstance().write).toHaveBeenCalledWith(
+      "source frame", expect.any(Function),
+    ));
+    await waitFor(() => expect(host).toHaveStyle({ visibility: "visible" }));
+    expect(getLatestTerminalInstance().cols).toBe(102);
+    expect(getLatestTerminalInstance().rows).toBe(31);
+  });
+
   it("settles an in-flight broker snapshot write before disposing its retired renderer", async () => {
     const registrationGate = deferred<ReturnType<typeof modernRegistrationResult>>();
     mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
@@ -973,6 +1018,411 @@ describe("AgentTerminal scrollback", () => {
     await waitFor(() => expect(renderer.write).toHaveBeenCalledWith("A", expect.any(Function)));
     expect(renderer.reset).not.toHaveBeenCalled();
     expect(mockInvoke).not.toHaveBeenCalledWith("resize_terminal_presentation", expect.anything());
+  });
+
+  it("sizes a mirror to the formatted snapshot before replay and fits it without a PTY resize", async () => {
+    const state = "\x1b[H\x1b[J\x1b[31m\x1b[1;100HX\x1b[m";
+    const snapshot = {
+      ...modernSnapshot(),
+      geometry: { cols: 100, rows: 24 },
+      terminal_state_base64: btoa(state),
+      visible_grid: "plain fallback",
+    };
+    const brokerState = { ...modernBrokerState(), geometry: snapshot.geometry };
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      const presentationId = request?.presentation_id ?? "pane-source-fit";
+      if (command === "register_terminal_presentation") return {
+        ...modernRegistrationResult(presentationId), broker_state: brokerState, initial_snapshot: snapshot,
+      };
+      if (command === "subscribe_terminal_events") return {
+        broker_state: brokerState, initial_snapshot: snapshot,
+      };
+      if (command === "read_terminal_events") return modernCaughtUpBatch();
+      if (command === "ack_terminal_events") return undefined;
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult(presentationId).presentation;
+      }
+      if (command === "unregister_terminal_presentation") return brokerState;
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    render(<AgentTerminal sessionId="modern-agent" presentationId="pane-source-fit" provider="claude" theme="dark" />);
+    await waitFor(() => expect(getLatestTerminalInstance().write).toHaveBeenCalledWith(
+      state, expect.any(Function),
+    ));
+    const renderer = getLatestTerminalInstance();
+    const resizeOrder = renderer.resize.mock.invocationCallOrder.find(
+      (_order: number, index: number) => renderer.resize.mock.calls[index]?.[0] === 100,
+    );
+    const replayOrder = renderer.write.mock.invocationCallOrder.find(
+      (_order: number, index: number) => renderer.write.mock.calls[index]?.[0] === state,
+    );
+    expect(resizeOrder).toBeLessThan(replayOrder!);
+    expect(renderer.cols).toBe(100);
+    expect(renderer.rows).toBe(24);
+    expect(renderer.element.style.transform).toContain("scale(");
+    expect(mockInvoke).not.toHaveBeenCalledWith("resize_terminal_presentation", expect.anything());
+  });
+
+  it("holds a passive mirror at its old grid until ordered output permits one new snapshot", async () => {
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    const initial = { ...modernSnapshot(), terminal_state_base64: btoa("old frame") };
+    const repainted = {
+      ...initial, snapshot_id: "repainted", sequence_barrier: 2,
+      geometry: { cols: 100, rows: 30 }, terminal_state_base64: btoa("new frame"),
+    };
+    const broker = modernBrokerState("other-owner");
+    let reads = 0;
+    mockListen.mockImplementation(async (name, handler) => {
+      listeners.set(name, handler as (event: { payload: unknown }) => void);
+      return () => listeners.delete(name);
+    });
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const presentationId = (args as { request?: { presentation_id?: string } } | undefined)?.request?.presentation_id ?? "pane-mirror-repaint";
+      if (command === "register_terminal_presentation") return {
+        ...modernRegistrationResult(presentationId), broker_state: broker, initial_snapshot: initial,
+      };
+      if (command === "subscribe_terminal_events") return { broker_state: broker, initial_snapshot: initial };
+      if (command === "read_terminal_events") return reads++ === 0 ? {
+        status: "events", runtime_generation: 1,
+        events: [
+          { sequence: 1, runtime_generation: 1, type: "geometry", geometry: repainted.geometry, geometry_sequence: 1 },
+          { sequence: 2, runtime_generation: 1, type: "output", bytes: [65] },
+        ], next_sequence: 2, latest_sequence: 2, recovery_snapshot: null,
+      } : modernCaughtUpBatch();
+      if (command === "request_terminal_snapshot") return repainted;
+      if (command === "ack_terminal_events") return undefined;
+      if (command === "report_terminal_presentation_viewport") return modernRegistrationResult(presentationId).presentation;
+      if (command === "unregister_terminal_presentation") return broker;
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    render(<AgentTerminal sessionId="modern-agent" presentationId="pane-mirror-repaint" provider="claude" theme="dark" />);
+    await waitFor(() => expect(getLatestTerminalInstance().write).toHaveBeenCalledWith("old frame", expect.any(Function)));
+    const renderer = getLatestTerminalInstance();
+    renderer.write.mockClear();
+    const ready = listeners.get("terminal-session-events-ready");
+    if (!ready) throw new Error("expected broker event listener");
+    act(() => ready({ payload: { session_id: "modern-agent", runtime_generation: 1, latest_sequence: 2 } }));
+    await waitFor(() => expect(renderer.write).toHaveBeenCalledWith("new frame", expect.any(Function)));
+    expect(renderer.write).not.toHaveBeenCalledWith("A", expect.any(Function));
+    expect(renderer.cols).toBe(100);
+    expect(renderer.rows).toBe(30);
+    expect(mockInvoke.mock.calls.filter(([command]) => command === "request_terminal_snapshot")).toHaveLength(1);
+    expect(mockInvoke).not.toHaveBeenCalledWith("resize_terminal_presentation", expect.anything());
+  });
+
+  it("requests only one automatic repaint snapshot after degraded geometry until explicit recovery", async () => {
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    const initial = { ...modernSnapshot(), terminal_state_base64: btoa("old frame") };
+    const geometry = { cols: 100, rows: 30 };
+    const degraded = {
+      ...initial, snapshot_id: "degraded-after-output", sequence_barrier: 2,
+      geometry, terminal_state_base64: "", visible_grid: "stale plain frame",
+    };
+    const recovered = {
+      ...degraded, snapshot_id: "recovered", sequence_barrier: 4,
+      terminal_state_base64: btoa("repainted frame"),
+    };
+    const broker = modernBrokerState("pane-repaint-latch");
+    let reads = 0;
+    let requests = 0;
+    mockListen.mockImplementation(async (name, handler) => {
+      listeners.set(name, handler as (event: { payload: unknown }) => void);
+      return () => listeners.delete(name);
+    });
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const presentationId = (args as { request?: { presentation_id?: string } } | undefined)?.request?.presentation_id ?? "pane-repaint-latch";
+      if (command === "register_terminal_presentation") return {
+        ...modernRegistrationResult(presentationId), broker_state: broker, initial_snapshot: initial,
+      };
+      if (command === "subscribe_terminal_events") return { broker_state: broker, initial_snapshot: initial };
+      if (command === "read_terminal_events") {
+        const sequence = reads++ + 2;
+        if (sequence === 2) return {
+          status: "events", runtime_generation: 1,
+          events: [
+            { sequence: 1, runtime_generation: 1, type: "geometry", geometry, geometry_sequence: 1 },
+            { sequence: 2, runtime_generation: 1, type: "output", bytes: [65] },
+          ], next_sequence: 2, latest_sequence: 2, recovery_snapshot: null,
+        };
+        return {
+          status: "events", runtime_generation: 1,
+          events: [{ sequence, runtime_generation: 1, type: "output", bytes: [65] }],
+          next_sequence: sequence, latest_sequence: sequence, recovery_snapshot: null,
+        };
+      }
+      if (command === "request_terminal_snapshot") return requests++ === 0 ? degraded : recovered;
+      if (command === "ack_terminal_events") return undefined;
+      if (command === "report_terminal_presentation_viewport") return modernRegistrationResult(presentationId).presentation;
+      if (command === "unregister_terminal_presentation") return broker;
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    render(<AgentTerminal sessionId="modern-agent" presentationId="pane-repaint-latch" provider="claude" theme="dark" />);
+    await waitFor(() => expect(getLatestTerminalInstance().write).toHaveBeenCalledWith("old frame", expect.any(Function)));
+    const renderer = getLatestTerminalInstance();
+    const ready = listeners.get("terminal-session-events-ready");
+    if (!ready) throw new Error("expected broker event listener");
+    act(() => ready({ payload: { session_id: "modern-agent", runtime_generation: 1, latest_sequence: 2 } }));
+    await screen.findByText("Terminal formatting unavailable");
+    expect(requests).toBe(1);
+    expect(renderer.cols).toBe(80);
+    expect(renderer.write).not.toHaveBeenCalledWith("stale plain frame", expect.any(Function));
+    act(() => ready({ payload: { session_id: "modern-agent", runtime_generation: 1, latest_sequence: 3 } }));
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("ack_terminal_events", expect.objectContaining({
+      request: expect.objectContaining({ applied_sequence: 3 }),
+    })));
+    expect(requests).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "Enable keyboard input" }));
+    act(() => ready({ payload: { session_id: "modern-agent", runtime_generation: 1, latest_sequence: 4 } }));
+    await waitFor(() => expect(renderer.write).toHaveBeenCalledWith("repainted frame", expect.any(Function)));
+    expect(requests).toBe(2);
+    expect(renderer.cols).toBe(100);
+    expect(screen.queryByTestId("terminal-snapshot-status")).toBeNull();
+  });
+
+  it("keeps an owner pending without repaint output and revokes manual keyboard recovery on transfer", async () => {
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    const initial = { ...modernSnapshot(), terminal_state_base64: btoa("old owner frame") };
+    const broker = modernBrokerState("pane-owner-pending");
+    let reads = 0;
+    mockListen.mockImplementation(async (name, handler) => {
+      listeners.set(name, handler as (event: { payload: unknown }) => void);
+      return () => listeners.delete(name);
+    });
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const presentationId = (args as { request?: { presentation_id?: string } } | undefined)?.request?.presentation_id ?? "pane-owner-pending";
+      if (command === "register_terminal_presentation") return {
+        ...modernRegistrationResult(presentationId), broker_state: broker, initial_snapshot: initial,
+      };
+      if (command === "subscribe_terminal_events") return { broker_state: broker, initial_snapshot: initial };
+      if (command === "read_terminal_events") return reads++ === 0 ? {
+        status: "events", runtime_generation: 1,
+        events: [{ sequence: 1, runtime_generation: 1, type: "geometry", geometry: { cols: 100, rows: 30 }, geometry_sequence: 1 }],
+        next_sequence: 1, latest_sequence: 1, recovery_snapshot: null,
+      } : {
+        status: "events", runtime_generation: 1,
+        events: [{ sequence: 2, runtime_generation: 1, type: "ownership", owner_presentation_id: "other-owner", lease_epoch: 2, activation_id: null }],
+        next_sequence: 2, latest_sequence: 2, recovery_snapshot: null,
+      };
+      if (command === "send_terminal_presentation_input") return {
+        status: "accepted", reason: null, runtime_generation: 1, lease_epoch: 1,
+        owner_presentation_id: presentationId,
+      };
+      if (command === "ack_terminal_events") return undefined;
+      if (command === "report_terminal_presentation_viewport") return modernRegistrationResult(presentationId).presentation;
+      if (command === "unregister_terminal_presentation") return broker;
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    render(<AgentTerminal sessionId="modern-agent" presentationId="pane-owner-pending" provider="claude" theme="dark" />);
+    await waitFor(() => expect(getLatestTerminalInstance().write).toHaveBeenCalledWith("old owner frame", expect.any(Function)));
+    const renderer = getLatestTerminalInstance();
+    const onData = renderer.onData.mock.calls[0]?.[0] as (data: string) => void;
+    const ready = listeners.get("terminal-session-events-ready");
+    if (!ready) throw new Error("expected broker event listener");
+    act(() => ready({ payload: { session_id: "modern-agent", runtime_generation: 1, latest_sequence: 1 } }));
+    await screen.findByText("Waiting for terminal repaint");
+    expect(renderer.cols).toBe(80);
+    expect(mockInvoke).not.toHaveBeenCalledWith("request_terminal_snapshot", expect.anything());
+    onData("a");
+    expect(mockInvoke).not.toHaveBeenCalledWith("send_terminal_presentation_input", expect.anything());
+    fireEvent.click(screen.getByRole("button", { name: "Enable keyboard input" }));
+    onData("a");
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("send_terminal_presentation_input", expect.objectContaining({
+      request: expect.objectContaining({ input: "a" }),
+    })));
+    mockInvoke.mockClear();
+    onData("\x1b[<0;1;1M");
+    onData("\x1b[0;1;1M");
+    onData("\x1b[24;80R");
+    expect(mockInvoke).not.toHaveBeenCalledWith("send_terminal_presentation_input", expect.anything());
+    act(() => ready({ payload: { session_id: "modern-agent", runtime_generation: 1, latest_sequence: 2 } }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Enable keyboard input" })).toBeNull());
+    onData("b");
+    expect(mockInvoke).not.toHaveBeenCalledWith("send_terminal_presentation_input", expect.anything());
+  });
+
+  it("keeps Codex local history through a resize commit and post-output formatted replay", async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let resizeCallback: ResizeObserverCallback | undefined;
+    globalThis.ResizeObserver = class ResizeObserver {
+      constructor(callback: ResizeObserverCallback) { resizeCallback = callback; }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+    try {
+      const listeners = new Map<string, (event: { payload: unknown }) => void>();
+      const initial = { ...modernSnapshot(), terminal_state_base64: btoa("old Codex frame") };
+      const geometry = { cols: 100, rows: 30 };
+      const commit = { ...initial, snapshot_id: "commit", sequence_barrier: 1, geometry };
+      const repainted = {
+        ...commit, snapshot_id: "after-output", sequence_barrier: 2,
+        terminal_state_base64: btoa("\x1b[H\x1b[2Jnew Codex frame"),
+      };
+      const broker = modernBrokerState("pane-codex-history");
+      let reads = 0;
+      mockListen.mockImplementation(async (name, handler) => {
+        listeners.set(name, handler as (event: { payload: unknown }) => void);
+        return () => listeners.delete(name);
+      });
+      mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+        const presentationId = (args as { request?: { presentation_id?: string } } | undefined)?.request?.presentation_id ?? "pane-codex-history";
+        if (command === "register_terminal_presentation") return {
+          ...modernRegistrationResult(presentationId), broker_state: broker, initial_snapshot: initial,
+        };
+        if (command === "subscribe_terminal_events") return { broker_state: broker, initial_snapshot: initial };
+        if (command === "report_terminal_presentation_viewport") return modernRegistrationResult(presentationId).presentation;
+        if (command === "resize_terminal_presentation") return {
+          decision: { status: "accepted", reason: null, runtime_generation: 1, lease_epoch: 1, owner_presentation_id: presentationId },
+          geometry_sequence: 1, geometry, snapshot: commit,
+        };
+        if (command === "read_terminal_events") return reads++ === 0 ? {
+          status: "events", runtime_generation: 1,
+          events: [
+            { sequence: 1, runtime_generation: 1, type: "geometry", geometry, geometry_sequence: 1 },
+            { sequence: 2, runtime_generation: 1, type: "output", bytes: [65] },
+          ], next_sequence: 2, latest_sequence: 2, recovery_snapshot: null,
+        } : modernCaughtUpBatch();
+        if (command === "request_terminal_snapshot") return repainted;
+        if (command === "ack_terminal_events") return undefined;
+        if (command === "unregister_terminal_presentation") return broker;
+        if (command === "unsubscribe_terminal_events") return undefined;
+        return null;
+      });
+
+      render(<AgentTerminal sessionId="modern-agent" presentationId="pane-codex-history" provider="codex" theme="dark" />);
+      await waitFor(() => expect(getLatestTerminalInstance().write).toHaveBeenCalledWith("old Codex frame", expect.any(Function)));
+      const renderer = getLatestTerminalInstance();
+      renderer.reset.mockClear();
+      renderer.write.mockClear();
+      fitDimensions = geometry;
+      rectSpy.mockReturnValue({
+        width: 901, height: 600, top: 0, left: 0, right: 901, bottom: 600, x: 0, y: 0,
+        toJSON: () => ({}),
+      } as DOMRect);
+      if (!resizeCallback) throw new Error("expected resize observer");
+      act(() => resizeCallback!([], {} as ResizeObserver));
+      await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("resize_terminal_presentation", expect.anything()));
+      await screen.findByText("Waiting for terminal repaint");
+      expect(renderer.cols).toBe(80);
+      expect(renderer.reset).not.toHaveBeenCalled();
+      expect(renderer.write).not.toHaveBeenCalledWith(expect.stringContaining("old Codex frame"), expect.any(Function));
+
+      const ready = listeners.get("terminal-session-events-ready");
+      if (!ready) throw new Error("expected broker event listener");
+      act(() => ready({ payload: { session_id: "modern-agent", runtime_generation: 1, latest_sequence: 2 } }));
+      await waitFor(() => expect(renderer.write).toHaveBeenCalledWith(
+        expect.stringContaining("\x1b[H\x1b[2Jnew Codex frame"), expect.any(Function),
+      ));
+      expect(renderer.write.mock.calls.some(([data]: [string]) => data.startsWith("\x1b[r\x1b[30;1H"))).toBe(true);
+      expect(renderer.cols).toBe(100);
+      expect(renderer.rows).toBe(30);
+      expect(renderer.reset).not.toHaveBeenCalled();
+      expect(renderer.write).not.toHaveBeenCalledWith("A", expect.any(Function));
+      expect(mockInvoke.mock.calls.filter(([command]) => command === "resize_terminal_presentation")).toHaveLength(1);
+      await act(async () => {
+        resizeCallback!([], {} as ResizeObserver);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      });
+      expect(mockInvoke.mock.calls.filter(([command]) => command === "resize_terminal_presentation")).toHaveLength(1);
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it.each([
+    ["", "Terminal formatting unavailable"],
+    ["%%%", "Terminal formatting invalid"],
+  ])("shows explicit degraded status for an initial formatted payload %j", async (encoded, label) => {
+    const terminalPresentationId = encoded ? "pane-degraded-invalid" : "pane-degraded-missing";
+    const initial = {
+      ...modernSnapshot(), terminal_state_base64: encoded, visible_grid: "plain degraded view",
+    };
+    const broker = modernBrokerState(terminalPresentationId);
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const presentationId = (args as { request?: { presentation_id?: string } } | undefined)?.request?.presentation_id ?? terminalPresentationId;
+      if (command === "register_terminal_presentation") return {
+        ...modernRegistrationResult(presentationId), broker_state: broker, initial_snapshot: initial,
+      };
+      if (command === "subscribe_terminal_events") return { broker_state: broker, initial_snapshot: initial };
+      if (command === "read_terminal_events") return modernCaughtUpBatch();
+      if (command === "send_terminal_presentation_input") return {
+        status: "accepted", reason: null, runtime_generation: 1, lease_epoch: 1,
+        owner_presentation_id: presentationId,
+      };
+      if (command === "report_terminal_presentation_viewport") return modernRegistrationResult(presentationId).presentation;
+      if (command === "unregister_terminal_presentation") return broker;
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    render(<AgentTerminal sessionId="modern-agent" presentationId={terminalPresentationId} provider="claude" theme="dark" />);
+    await screen.findByText(label);
+    const renderer = getLatestTerminalInstance();
+    expect(renderer.write).toHaveBeenCalledWith("plain degraded view", expect.any(Function));
+    const onData = renderer.onData.mock.calls[0]?.[0] as (data: string) => void;
+    onData("a");
+    expect(mockInvoke).not.toHaveBeenCalledWith("send_terminal_presentation_input", expect.anything());
+    fireEvent.click(screen.getByRole("button", { name: "Enable keyboard input" }));
+    onData("a");
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("send_terminal_presentation_input", expect.objectContaining({
+      request: expect.objectContaining({ input: "a" }),
+    })));
+  });
+
+  it("keeps an accurate same-generation frame when a later broker snapshot loses formatting", async () => {
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    const initial = { ...modernSnapshot(), terminal_state_base64: btoa("accurate frame") };
+    const degraded = {
+      ...initial, snapshot_id: "degraded-gap", sequence_barrier: 1,
+      geometry: { cols: 100, rows: 30 },
+      terminal_state_base64: "", visible_grid: "plain replacement",
+    };
+    let reads = 0;
+    mockListen.mockImplementation(async (name, handler) => {
+      listeners.set(name, handler as (event: { payload: unknown }) => void);
+      return () => listeners.delete(name);
+    });
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const presentationId = (args as { request?: { presentation_id?: string } } | undefined)?.request?.presentation_id ?? "pane-degraded-gap";
+      if (command === "register_terminal_presentation") return {
+        ...modernRegistrationResult(presentationId), initial_snapshot: initial,
+      };
+      if (command === "subscribe_terminal_events") return {
+        broker_state: modernBrokerState(), initial_snapshot: initial,
+      };
+      if (command === "read_terminal_events") return reads++ === 0 ? {
+        status: "gap", runtime_generation: 1, events: [],
+        next_sequence: 1, latest_sequence: 1, recovery_snapshot: degraded,
+      } : modernCaughtUpBatch();
+      if (command === "ack_terminal_events") return undefined;
+      if (command === "report_terminal_presentation_viewport") return modernRegistrationResult(presentationId).presentation;
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    render(<AgentTerminal sessionId="modern-agent" presentationId="pane-degraded-gap" provider="claude" theme="dark" />);
+    await waitFor(() => expect(getLatestTerminalInstance().write).toHaveBeenCalledWith("accurate frame", expect.any(Function)));
+    const renderer = getLatestTerminalInstance();
+    renderer.write.mockClear();
+    renderer.reset.mockClear();
+    const ready = listeners.get("terminal-session-events-ready");
+    if (!ready) throw new Error("expected broker event listener");
+    act(() => ready({ payload: { session_id: "modern-agent", runtime_generation: 1, latest_sequence: 1 } }));
+    await screen.findByText("Terminal formatting unavailable");
+    expect(renderer.write).not.toHaveBeenCalledWith("plain replacement", expect.any(Function));
+    expect(renderer.reset).not.toHaveBeenCalled();
+    expect(renderer.cols).toBe(80);
+    expect(getLatestHeadlessTerminalInstance().resize).toHaveBeenCalledWith(100, 30);
   });
 
   it("resets pending Codex SGR before a modern desktop snapshot replaces the buffer", async () => {
@@ -1541,7 +1991,7 @@ describe("AgentTerminal scrollback", () => {
     expect(latestFitAddon.proposeDimensions).toHaveBeenCalled();
   });
 
-  it("fits an unowned presentation locally instead of rendering it as a scaled mirror", async () => {
+  it("keeps an unowned presentation on its snapshot grid with canonical fit", async () => {
     const unownedBroker = modernBrokerState();
     unownedBroker.geometry = { cols: 240, rows: 80 };
     mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
@@ -1575,7 +2025,7 @@ describe("AgentTerminal scrollback", () => {
     await waitFor(() => {
       expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" });
     });
-    expect(getLatestTerminalInstance().element.style.transform).toBe("");
+    expect(getLatestTerminalInstance().element.style.transform).toBe("scale(1)");
     expect(getLatestTerminalInstance().cols).toBe(80);
     expect(getLatestTerminalInstance().rows).toBe(24);
   });
@@ -2367,10 +2817,12 @@ describe("AgentTerminal scrollback", () => {
       expect.anything(),
     ));
     const mirrorRenderer = getLatestTerminalInstance();
-    expect(mirrorRenderer.cols).toBe(100);
-    expect(mirrorRenderer.rows).toBe(30);
-    expect(mirrorRenderer.resize).not.toHaveBeenCalledWith(240, 80);
-    expect(mirrorRenderer.element.style.transform).toBe("");
+    expect(mirrorRenderer.cols).toBe(240);
+    expect(mirrorRenderer.rows).toBe(80);
+    expect(mirrorRenderer.element.style.transform).toContain("scale(");
+    expect(mockInvoke).toHaveBeenCalledWith("report_terminal_presentation_viewport", expect.objectContaining({
+      request: expect.objectContaining({ cols: 100, rows: 30 }),
+    }));
     expect(mockInvoke).not.toHaveBeenCalledWith("resize_terminal_presentation", expect.anything());
   });
 
@@ -2513,8 +2965,8 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
-  it("uses the plain visible grid when a broker snapshot geometry differs from the card", async () => {
-    const formattedVisibleGrid = "\u001b[Hformatted canonical grid";
+  it("replays the formatted source grid when a broker snapshot geometry differs from the card", async () => {
+    const formattedVisibleGrid = "\u001b[H\u001b[J\u001b[31m\u001b[1;120HX\u001b[m";
     const encodedVisibleGrid = btoa(String.fromCharCode(...new TextEncoder().encode(formattedVisibleGrid)));
     const snapshot = {
       ...modernSnapshot(),
@@ -2555,13 +3007,13 @@ describe("AgentTerminal scrollback", () => {
     await waitFor(() => {
       const renderer = getLatestTerminalInstance();
       expect(renderer.write).toHaveBeenCalledWith(
-        "\u001b[31moldest retained row\u001b[m\r\nnewer retained row\r\nplain visible grid",
-        expect.any(Function),
+        expect.stringContaining(formattedVisibleGrid), expect.any(Function),
       );
       expect(renderer.write).not.toHaveBeenCalledWith(
-        expect.stringContaining("formatted canonical grid"),
-        expect.any(Function),
+        expect.stringContaining("plain visible grid"), expect.any(Function),
       );
+      expect(renderer.cols).toBe(120);
+      expect(renderer.rows).toBe(40);
       expect(
         window.__wardianTerminalDebug?.snapshot("snapshot-geometry-fallback")?.snapshotReplays,
       ).toEqual([
@@ -2569,16 +3021,17 @@ describe("AgentTerminal scrollback", () => {
           brokerGeometry: { cols: 120, rows: 40 },
           brokerScrollbackRows: 2,
           brokerFormattedScrollbackRows: 2,
-          appliedFormattedState: false,
+          appliedFormattedState: true,
           rendererBefore: expect.objectContaining({ cols: 80, rows: 24 }),
-          rendererAfter: expect.objectContaining({ cols: 80, rows: 24 }),
+          rendererAfter: expect.objectContaining({ cols: 120, rows: 40 }),
           parserAfter: expect.objectContaining({ cols: 80, rows: 24 }),
         }),
       ]);
+      expect(getLatestHeadlessTerminalInstance().resize).toHaveBeenCalledWith(120, 40);
     });
   });
 
-  it("reserves enough local history for narrow-card snapshot reflow", async () => {
+  it("keeps broker history at source width without multiplying scrollback for a narrow card", async () => {
     const snapshot = {
       ...modernSnapshot(),
       geometry: { cols: 120, rows: 40 },
@@ -2613,7 +3066,7 @@ describe("AgentTerminal scrollback", () => {
     );
 
     await waitFor(() => {
-      expect(getLatestTerminalInstance().options.scrollback).toBe(2_000);
+      expect(getLatestTerminalInstance().options.scrollback).toBe(1_000);
     });
   });
 
@@ -2631,10 +3084,13 @@ describe("AgentTerminal scrollback", () => {
       const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
       const presentationId = request?.presentation_id ?? "opencode-focus-snapshot";
       if (command === "register_terminal_presentation") {
-        return { ...modernRegistrationResult(presentationId), initial_snapshot: snapshot };
+        return {
+          ...modernRegistrationResult(presentationId),
+          broker_state: modernBrokerState(presentationId), initial_snapshot: snapshot,
+        };
       }
       if (command === "subscribe_terminal_events") {
-        return { broker_state: modernBrokerState(), initial_snapshot: snapshot };
+        return { broker_state: modernBrokerState(presentationId), initial_snapshot: snapshot };
       }
       if (command === "read_terminal_events") {
         readCount += 1;
@@ -2657,8 +3113,8 @@ describe("AgentTerminal scrollback", () => {
           status: "accepted",
           reason: null,
           runtime_generation: 1,
-          lease_epoch: 0,
-          owner_presentation_id: null,
+          lease_epoch: 1,
+          owner_presentation_id: presentationId,
         };
       }
       if (command === "ack_terminal_events") return undefined;
@@ -2974,6 +3430,77 @@ describe("AgentTerminal scrollback", () => {
     // 800 / 8 = 100 cols (FitAddon would give floor((800-14)/8) = 98), 320/16 = 20.
     expect(dims).toEqual({ cols: 100, rows: 20 });
     expect(fallback).not.toHaveBeenCalled();
+  });
+
+  it("keeps first owner keys after a failed resize, then requires recovery after degraded repaint", async () => {
+    const brokerState = modernBrokerState("initial-owner");
+    const reportViewport = vi.fn()
+      .mockRejectedValueOnce(new Error("first viewport report failed"))
+      .mockResolvedValue(undefined);
+    const resize = vi.fn().mockResolvedValue({
+      decision: { status: "accepted" },
+    });
+    const entry = {
+      sessionId: "modern-agent",
+      presentationId: "initial-owner",
+      generation: 1,
+      brokerState,
+      terminalClient: { reportViewport, resize },
+      renderer: {
+        canonicalFit: { cols: 80, rows: 24, width: 816, height: 747, scale: 1, pan: false },
+      },
+      lastReportedSize: null,
+      geometrySequence: 0,
+      applyingCanonicalGeometry: false,
+      pendingForceResize: false,
+      repaintRequestedForGeometry: false,
+      ownerGeometryTransitionSettled: false,
+      pendingGeometry: false,
+      snapshotStatus: "ready",
+      allowPendingKeyboard: false,
+      disposed: false,
+      frameGeometry: { cols: 116, rows: 43 },
+      frameGeneration: 1,
+    } as unknown as Parameters<typeof __terminalTesting.reportTerminalSize>[0];
+
+    await __terminalTesting.reportTerminalSize(entry, 116, 43);
+    expect(reportViewport).toHaveBeenCalledTimes(1);
+    expect(resize).not.toHaveBeenCalled();
+    expect(entry.snapshotStatus).toBe("ready");
+    expect(entry.ownerGeometryTransitionSettled).toBe(false);
+
+    await __terminalTesting.reportTerminalSize(entry, 116, 43);
+    expect(resize).toHaveBeenCalledTimes(1);
+    expect(entry.snapshotStatus).toBe("pending");
+    brokerState.geometry = { cols: 116, rows: 43 };
+
+    expect(__terminalTesting.canSendTerminalInput(entry, "before-clear")).toBe(true);
+    expect(__terminalTesting.canSendTerminalInput(entry, "\r")).toBe(true);
+    expect(__terminalTesting.canSendTerminalInput(entry, "\x1b[<0;1;1M")).toBe(false);
+    expect(__terminalTesting.canSendTerminalInput(entry, "\x1b[24;80R")).toBe(false);
+    expect(__terminalTesting.canSendTerminalInput(entry)).toBe(false);
+
+    const degraded = {
+      ...modernSnapshot(),
+      geometry: { cols: 116, rows: 43 },
+      terminal_state_base64: "%%%",
+    };
+    await __terminalTesting.applyBrokerSnapshot("initial-owner", entry, degraded);
+    expect(entry.snapshotStatus).toBe("degraded");
+    expect(entry.ownerGeometryTransitionSettled).toBe(true);
+    entry.pendingGeometry = true;
+    entry.snapshotStatus = "pending";
+    expect(__terminalTesting.canSendTerminalInput(entry, "later resize")).toBe(false);
+    entry.allowPendingKeyboard = true;
+    expect(__terminalTesting.canSendTerminalInput(entry, "manual recovery")).toBe(true);
+    expect(__terminalTesting.canSendTerminalInput(entry, "\x1b[<0;1;1M")).toBe(false);
+    entry.allowPendingKeyboard = false;
+    entry.ownerGeometryTransitionSettled = false;
+    entry.brokerState!.geometry = { cols: 117, rows: 43 };
+    expect(__terminalTesting.canSendTerminalInput(entry, "unacknowledged size")).toBe(false);
+    entry.brokerState!.geometry = { cols: 116, rows: 43 };
+    entry.brokerState!.owner_presentation_id = "another-owner";
+    expect(__terminalTesting.canSendTerminalInput(entry, "transferred lease")).toBe(false);
   });
 
   it("falls back to FitAddon when xterm cell internals are unavailable", () => {

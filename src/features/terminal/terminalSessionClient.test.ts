@@ -1734,6 +1734,7 @@ describe("TerminalSessionClient", () => {
     const snapshots: Array<{
       sequenceBarrier: number;
       preserveLocalScrollback: boolean | undefined;
+      geometryCommit: boolean | undefined;
     }> = [];
     const applied: number[][] = [];
     tauri.invoke.mockImplementation(async (command: string) => {
@@ -1784,6 +1785,7 @@ describe("TerminalSessionClient", () => {
         snapshots.push({
           sequenceBarrier: value.sequence_barrier,
           preserveLocalScrollback: options?.preserveLocalScrollback,
+          geometryCommit: options?.geometryCommit,
         });
       },
       applyEvents: (events) => {
@@ -1796,7 +1798,124 @@ describe("TerminalSessionClient", () => {
     client.queueDrain();
 
     await vi.waitFor(() => expect(applied).toEqual([[3]]));
-    expect(snapshots).toEqual([{ sequenceBarrier: 2, preserveLocalScrollback: true }]);
+    expect(snapshots).toEqual([{ sequenceBarrier: 2, preserveLocalScrollback: true, geometryCommit: true }]);
+  });
+
+  it("takes one post-geometry snapshot for all presentations and acknowledges its barrier", async () => {
+    const applied = new Map<string, number[]>();
+    const acknowledgements: number[] = [];
+    const repaint = { ...snapshot(1, 2), geometry: geometry(100, 30) };
+    let reads = 0;
+    tauri.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      const presentationId = (args as { request?: { presentation_id?: string } } | undefined)?.request?.presentation_id ?? "pane-a";
+      if (command === "register_terminal_presentation") return registeredResult(presentationId);
+      if (command === "subscribe_terminal_events") return {
+        broker_state: brokerState(), initial_snapshot: snapshot(),
+      };
+      if (command === "read_terminal_events") return reads++ === 0 ? eventsBatch([
+        { sequence: 1, runtime_generation: 1, type: "geometry", geometry: repaint.geometry, geometry_sequence: 1 },
+        { sequence: 2, runtime_generation: 1, type: "output", bytes: [65] },
+      ], 2) : eventsBatch([], 2);
+      if (command === "request_terminal_snapshot") return repaint;
+      if (command === "ack_terminal_events") {
+        acknowledgements.push((args as { request: { applied_sequence: number } }).request.applied_sequence);
+        return undefined;
+      }
+      if (command === "unsubscribe_terminal_events") return undefined;
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const client = terminalSessionClientFor("agent-1");
+    for (const presentationId of ["pane-a", "pane-b"]) {
+      await client.registerPresentation(registration(presentationId), {
+        applySnapshot: (value) => {
+          applied.set(presentationId, [...(applied.get(presentationId) ?? []), value.sequence_barrier]);
+        },
+        applyEvents: (events) => events.some((event) => event.type === "output"),
+      });
+    }
+    applied.clear();
+    client.queueDrain();
+    await vi.waitFor(() => expect(applied.get("pane-b")).toEqual([2]));
+    expect(applied.get("pane-a")).toEqual([2]);
+    expect(tauri.invoke.mock.calls.filter(([command]) => command === "request_terminal_snapshot")).toHaveLength(1);
+    expect(acknowledgements).toEqual([2]);
+  });
+
+  it("retries a rejected post-geometry snapshot before acknowledging replayed output", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const output = new Map<string, number[]>();
+    const snapshots = new Map<string, string[]>();
+    const acknowledgements: number[] = [];
+    let snapshotRequests = 0;
+    let reads = 0;
+    const repainted = {
+      ...snapshot(1, 2), geometry: geometry(100, 30), visible_grid: "recovered source frame",
+    };
+    const batch = eventsBatch([
+      { sequence: 1, runtime_generation: 1, type: "geometry", geometry: repainted.geometry, geometry_sequence: 1 },
+      { sequence: 2, runtime_generation: 1, type: "output", bytes: [65] },
+    ], 2);
+    tauri.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      const presentationId = (args as { request?: { presentation_id?: string } } | undefined)?.request?.presentation_id ?? "pane-a";
+      if (command === "register_terminal_presentation") return registeredResult(presentationId);
+      if (command === "subscribe_terminal_events") return {
+        broker_state: brokerState(), initial_snapshot: snapshot(),
+      };
+      if (command === "read_terminal_events") {
+        reads += 1;
+        return batch;
+      }
+      if (command === "request_terminal_snapshot") {
+        snapshotRequests += 1;
+        if (snapshotRequests === 1) throw new Error("snapshot temporarily unavailable");
+        return repainted;
+      }
+      if (command === "ack_terminal_events") {
+        acknowledgements.push((args as { request: { applied_sequence: number } }).request.applied_sequence);
+        return undefined;
+      }
+      if (command === "unsubscribe_terminal_events") return undefined;
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const client = terminalSessionClientFor("agent-1");
+    for (const presentationId of ["pane-a", "pane-b"]) {
+      await client.registerPresentation(registration(presentationId), {
+        applySnapshot: (value) => {
+          snapshots.set(presentationId, [...(snapshots.get(presentationId) ?? []), value.visible_grid]);
+        },
+        applyEvents: (events) => {
+          output.set(presentationId, [
+            ...(output.get(presentationId) ?? []),
+            ...events.filter((event) => event.type === "output").map((event) => event.sequence),
+          ]);
+          return events.some((event) => event.type === "output");
+        },
+      });
+    }
+    snapshots.clear();
+    client.queueDrain();
+    await vi.waitFor(() => expect(warning).toHaveBeenCalledOnce());
+    expect(snapshotRequests).toBe(1);
+    expect(acknowledgements).toEqual([]);
+    expect(output.get("pane-a")).toEqual([2]);
+    expect(output.get("pane-b")).toEqual([2]);
+
+    client.queueDrain();
+    await vi.waitFor(() => expect(snapshots.get("pane-b")).toEqual(["recovered source frame"]));
+    expect(snapshots.get("pane-a")).toEqual(["recovered source frame"]);
+    expect(snapshotRequests).toBe(2);
+    expect(acknowledgements).toEqual([2]);
+    expect(output.get("pane-a")).toEqual([2]);
+    expect(output.get("pane-b")).toEqual([2]);
+    expect(tauri.invoke.mock.calls.some(([command]) => command === "send_terminal_presentation_input")).toBe(false);
+    client.queueDrain();
+    await vi.waitFor(() => expect(reads).toBe(3));
+    expect(snapshotRequests).toBe(2);
+    expect(snapshots.get("pane-a")).toEqual(["recovered source frame"]);
+    expect(snapshots.get("pane-b")).toEqual(["recovered source frame"]);
+    warning.mockRestore();
   });
 
   it("contains a feed read failure and retries on the next wake-up", async () => {

@@ -70,9 +70,9 @@ function recordForegroundResumeTiming(
 export type TerminalPresentationCallbacks = {
   applySnapshot: (
     snapshot: TerminalSnapshot,
-    options?: { preserveLocalScrollback?: boolean },
+    options?: { geometryCommit?: boolean; preserveLocalScrollback?: boolean },
   ) => void | Promise<void>;
-  applyEvents: (events: readonly TerminalBrokerEvent[]) => void | Promise<void>;
+  applyEvents: (events: readonly TerminalBrokerEvent[]) => boolean | void | Promise<boolean | void>;
   onBrokerState?: (state: TerminalBrokerState) => void;
   onRegistrationRecovered?: (result: TerminalPresentationRegistrationResult) => void;
   onLeaseDecision?: (decision: TerminalLeaseDecision) => void;
@@ -135,6 +135,7 @@ export class TerminalSessionClient {
   #lastRecoveredReplacementGeneration = 0;
   #runtimeGeneration = 0;
   #cursor = 0;
+  #repaintSnapshotPending: { runtimeGeneration: number; afterSequence: number } | null = null;
   #subscription: Promise<TerminalEventSubscriptionResult> | null = null;
   #eventUnlisten: UnlistenFn | null = null;
   #lifecycleUnlisten: UnlistenFn | null = null;
@@ -466,6 +467,7 @@ export class TerminalSessionClient {
         // broker snapshot, so mark this one owner-resize snapshot as a local
         // history-preserving boundary rather than overwriting that buffer.
         await this.#applySnapshot(binding, result.snapshot, false, undefined, {
+          geometryCommit: true,
           preserveLocalScrollback: true,
         });
       }
@@ -738,6 +740,7 @@ export class TerminalSessionClient {
                 ?? null;
               this.#replacementOwnerCandidate = null;
               this.#runtimeGeneration = notification.runtime_generation;
+              this.#repaintSnapshotPending = null;
               this.#subscription = null;
               const recovered = await this.#retryRegistrationsForGeneration(
                 previousOwnerPresentationId,
@@ -865,7 +868,11 @@ export class TerminalSessionClient {
       },
     });
     if (ack.snapshot) {
-      await this.#applySnapshot(binding, ack.snapshot);
+      await this.#applySnapshot(binding, ack.snapshot, false, undefined, {
+        geometryCommit: begin.snapshot.geometry.cols !== ack.snapshot.geometry.cols ||
+          begin.snapshot.geometry.rows !== ack.snapshot.geometry.rows,
+        preserveLocalScrollback: true,
+      });
     }
     this.#setBrokerState(ack.broker_state);
     this.#notifyDecision(ack.decision);
@@ -876,6 +883,9 @@ export class TerminalSessionClient {
   async #ensureSubscription(runtimeGeneration: number) {
     if (this.#subscription && this.#runtimeGeneration === runtimeGeneration) {
       return this.#subscription;
+    }
+    if (this.#runtimeGeneration !== runtimeGeneration) {
+      this.#repaintSnapshotPending = null;
     }
     this.#runtimeGeneration = runtimeGeneration;
     const subscription = invoke<TerminalEventSubscriptionResult>("subscribe_terminal_events", {
@@ -950,11 +960,29 @@ export class TerminalSessionClient {
       }
       if (batch.events.length > 0) {
         this.#applyBrokerEventState(batch.events);
-        await Promise.all(
+        const repaintNeeded = await Promise.all(
           Array.from(this.#presentations.values(), (binding) =>
             this.#applyEvents(binding, batch.events),
           ),
         );
+        if (repaintNeeded.some(Boolean)) {
+          this.#repaintSnapshotPending = {
+            runtimeGeneration: this.#runtimeGeneration,
+            afterSequence: batch.events[batch.events.length - 1]?.sequence ?? batch.next_sequence,
+          };
+        }
+      }
+      const pendingRepaint = this.#repaintSnapshotPending;
+      if (pendingRepaint?.runtimeGeneration === this.#runtimeGeneration) {
+        const snapshot = await invoke<TerminalSnapshot>("request_terminal_snapshot", {
+          request: { session_id: this.sessionId },
+        });
+        if (snapshot.runtime_generation !== pendingRepaint.runtimeGeneration ||
+            snapshot.sequence_barrier < pendingRepaint.afterSequence) {
+          throw new Error("Post-geometry terminal snapshot does not cover the applied output");
+        }
+        await this.#applySnapshotToAll(snapshot, true);
+        this.#cursor = Math.max(this.#cursor, snapshot.sequence_barrier);
       }
       if (!this.#canDrainEvents()) {
         return;
@@ -981,12 +1009,19 @@ export class TerminalSessionClient {
     });
   }
 
-  async #applySnapshotToAll(snapshot: TerminalSnapshot) {
+  async #applySnapshotToAll(snapshot: TerminalSnapshot, force = false) {
+    const pendingRepaint = this.#repaintSnapshotPending;
+    const coversRepaint = pendingRepaint?.runtimeGeneration === snapshot.runtime_generation &&
+      snapshot.sequence_barrier >= pendingRepaint.afterSequence;
     await Promise.all(
       Array.from(this.#presentations.values(), (binding) =>
-        this.#applySnapshot(binding, snapshot),
+        this.#applySnapshot(binding, snapshot, force || coversRepaint),
       ),
     );
+    if (pendingRepaint && this.#repaintSnapshotPending === pendingRepaint &&
+        (coversRepaint || snapshot.runtime_generation > pendingRepaint.runtimeGeneration)) {
+      this.#repaintSnapshotPending = null;
+    }
   }
 
   async #applySnapshot(
@@ -994,7 +1029,7 @@ export class TerminalSessionClient {
     snapshot: TerminalSnapshot,
     force = false,
     shouldApply?: () => boolean,
-    options?: { preserveLocalScrollback?: boolean },
+    options?: { geometryCommit?: boolean; preserveLocalScrollback?: boolean },
   ) {
     if (
       !force &&
@@ -1022,10 +1057,11 @@ export class TerminalSessionClient {
         event.sequence > binding.appliedSequence,
     );
     if (pending.length === 0) {
-      return;
+      return false;
     }
-    await binding.callbacks.applyEvents(pending);
+    const needsRepaintSnapshot = await binding.callbacks.applyEvents(pending);
     binding.appliedSequence = pending[pending.length - 1]?.sequence ?? binding.appliedSequence;
+    return Boolean(needsRepaintSnapshot);
   }
 
   #applyBrokerEventState(events: readonly TerminalBrokerEvent[]) {
@@ -1067,6 +1103,9 @@ export class TerminalSessionClient {
     if (state.runtime_generation < this.#runtimeGeneration) {
       return;
     }
+    if (state.runtime_generation > this.#runtimeGeneration) {
+      this.#repaintSnapshotPending = null;
+    }
     this.#brokerState = state;
     this.#runtimeGeneration = state.runtime_generation;
     if (state.owner_presentation_id && this.#presentations.has(state.owner_presentation_id)) {
@@ -1079,6 +1118,9 @@ export class TerminalSessionClient {
 
   #notifyDecision(decision: TerminalLeaseDecision) {
     if (this.#brokerState && decision.runtime_generation >= this.#runtimeGeneration) {
+      if (decision.runtime_generation > this.#runtimeGeneration) {
+        this.#repaintSnapshotPending = null;
+      }
       this.#brokerState = {
         ...this.#brokerState,
         runtime_generation: decision.runtime_generation,

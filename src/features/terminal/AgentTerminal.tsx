@@ -46,7 +46,7 @@ import {
   type TerminalPresentationCallbacks,
   type TerminalSessionClient,
 } from "./terminalSessionClient";
-import { terminalRendererBudget } from "./terminalRendererBudget";
+import { calculateTerminalMirrorFit, terminalRendererBudget } from "./terminalRendererBudget";
 import { terminalCompatibilityAdapter } from "./terminalCompatibilityAdapter";
 import {
   DARK_TERM_THEME,
@@ -107,6 +107,8 @@ type TerminalRendererEntry = {
   webglAttempted: boolean;
   webglActivatedOnce: boolean;
   host: HTMLDivElement;
+  frame: HTMLDivElement;
+  canonicalFit: { cols: number; rows: number; width: number; height: number; scale: number; pan: boolean } | null;
   terminalLinkOptions: TerminalLinkProviderOptions;
   // Pixel-perfect still of the last WebGL frame, overlaid while the terminal
   // is demoted to the DOM renderer. Strictly cosmetic (pointer-events: none);
@@ -157,6 +159,16 @@ type TerminalSessionEntry = {
   generation: number;
   disposed: boolean;
   pendingForceResize: boolean;
+  frameGeometry: { cols: number; rows: number } | null;
+  frameGeneration: number;
+  pendingGeometry: boolean;
+  ownerGeometryTransitionSettled: boolean;
+  repaintRequestedForGeometry: boolean;
+  preserveOwnerScrollback: boolean;
+  snapshotStatus: "ready" | "pending" | "degraded";
+  snapshotDegradation: "missing_formatted_state" | "invalid_formatted_state" | null;
+  allowPendingKeyboard: boolean;
+  onSnapshotStatusChange?: (status: "ready" | "pending" | "degraded", reason: TerminalSessionEntry["snapshotDegradation"]) => void;
 };
 
 const terminalSessionMap = new Map<string, TerminalSessionEntry>();
@@ -538,7 +550,7 @@ function queueAgentInput(terminalKey: string, input: string) {
     return;
   }
   const entry = terminalSessionMap.get(terminalKey);
-  if (!entry) {
+  if (!entry || (!entry.legacyMode && !canSendTerminalInput(entry))) {
     return;
   }
   const request = entry.legacyMode
@@ -1075,6 +1087,18 @@ async function reportTerminalSize(
     return;
   }
 
+  const enteringOwnerTransition = !entry.legacyMode &&
+    entry.brokerState?.owner_presentation_id === entry.presentationId &&
+    entry.brokerState.pending_activation === null &&
+    (entry.pendingForceResize || entry.brokerState.geometry.cols !== cols ||
+      entry.brokerState.geometry.rows !== rows);
+  const previousStatus = entry.snapshotStatus;
+  if (enteringOwnerTransition) {
+    entry.pendingGeometry = true;
+    entry.repaintRequestedForGeometry = false;
+    entry.allowPendingKeyboard = false;
+    setSnapshotStatus(entry, "pending");
+  }
   try {
     if (entry.legacyMode) {
       await terminalCompatibilityAdapter.resize(entry.sessionId, cols, rows);
@@ -1086,18 +1110,28 @@ async function reportTerminalSize(
     const ownsRuntime =
       entry.brokerState?.owner_presentation_id === entry.presentationId &&
       !entry.applyingCanonicalGeometry;
-    if (ownsRuntime) {
+    const needsNativeResize = entry.pendingForceResize ||
+      entry.brokerState?.geometry.cols !== cols || entry.brokerState?.geometry.rows !== rows;
+    if (ownsRuntime && needsNativeResize) {
       entry.geometrySequence += 1;
-      await entry.terminalClient.resize(
+      const result = await entry.terminalClient.resize(
         entry.presentationId,
         entry.geometrySequence,
         cols,
         rows,
       );
+      if (result.decision.status !== "accepted" && enteringOwnerTransition) {
+        entry.pendingGeometry = false;
+        setSnapshotStatus(entry, previousStatus);
+      }
       entry.pendingForceResize = false;
     }
     entry.lastReportedSize = { cols, rows };
   } catch {
+    if (enteringOwnerTransition) {
+      entry.pendingGeometry = false;
+      setSnapshotStatus(entry, previousStatus);
+    }
     // Leave lastReportedSize untouched so the next fit can retry. Poisoning the
     // cache here would block resizes for PTYs that come back up (e.g. after clear).
   }
@@ -1112,7 +1146,7 @@ async function reportTerminalSize(
 // full content box, with FitAddon as the fallback if the internals move.
 function proposeTerminalDimensions(
   renderer: TerminalRendererEntry,
-  options?: { useRenderedRowGeometry?: boolean },
+  options?: { useRenderedRowGeometry?: boolean; container?: HTMLDivElement },
 ): { cols: number; rows: number } | null {
   try {
     const cell = (
@@ -1124,8 +1158,8 @@ function proposeTerminalDimensions(
     )._core?._renderService?.dimensions?.css?.cell;
     const cellWidth = cell?.width ?? 0;
     const cellHeight = cell?.height ?? 0;
-    const hostWidth = renderer.host.clientWidth;
-    const hostHeight = renderer.host.clientHeight;
+    const hostWidth = options?.container?.clientWidth ?? renderer.host.clientWidth;
+    const hostHeight = options?.container?.clientHeight ?? renderer.host.clientHeight;
     if (cellWidth > 0 && cellHeight > 0 && hostWidth > 0 && hostHeight > 0) {
       const cols = Math.floor(hostWidth / cellWidth);
       const renderedRowHeight =
@@ -1153,6 +1187,103 @@ function shouldUseRenderedRowGeometry(term: Terminal, force: boolean) {
   return !force && term.buffer.active.type === "normal";
 }
 
+function setSnapshotStatus(entry: TerminalSessionEntry, status: TerminalSessionEntry["snapshotStatus"]) {
+  entry.snapshotStatus = status;
+  if (status === "ready") {
+    entry.snapshotDegradation = null;
+    entry.allowPendingKeyboard = false;
+  }
+  entry.onSnapshotStatusChange?.(status, entry.snapshotDegradation);
+}
+
+function canEnablePendingKeyboard(entry: TerminalSessionEntry) {
+  const state = entry.brokerState;
+  return state?.owner_presentation_id === entry.presentationId &&
+    state.pending_activation === null && state.runtime_generation === entry.generation;
+}
+
+function canSendTerminalInput(entry: TerminalSessionEntry, data?: string) {
+  if (!canEnablePendingKeyboard(entry)) return false;
+  const fit = entry.renderer?.canonicalFit;
+  if (data !== undefined && entry.allowPendingKeyboard &&
+      (entry.pendingGeometry || entry.snapshotStatus === "degraded")) {
+    // A deliberate keyboard recovery action cannot grant coordinate input.
+    return !/\x1b\[(?:<\d+;\d+;\d+[Mm]|\d+;\d+;\d+M|M|\d+;\d+R)/.test(data);
+  }
+  const state = entry.brokerState;
+  if (data !== undefined && !entry.ownerGeometryTransitionSettled &&
+      entry.pendingGeometry && entry.snapshotStatus === "pending" &&
+      entry.lastReportedSize?.cols === state?.geometry.cols &&
+      entry.lastReportedSize?.rows === state?.geometry.rows) {
+    // A stale source frame cannot safely map mouse or cursor coordinates.
+    // xterm's ordinary keyboard text has no dependency on that frame.
+    return !/[\x1b\x9b]/.test(data);
+  }
+  return !entry.pendingGeometry &&
+    entry.snapshotStatus === "ready" && fit?.scale === 1 && !fit.pan &&
+    fit.cols === state?.geometry.cols && fit.rows === state?.geometry.rows;
+}
+
+function sizeRendererToSource(entry: TerminalSessionEntry, cols: number, rows: number) {
+  const renderer = entry.renderer;
+  if (!renderer || (renderer.term.cols === cols && renderer.term.rows === rows)) return;
+  entry.applyingCanonicalGeometry = true;
+  try {
+    renderer.term.resize(cols, rows);
+  } finally {
+    entry.applyingCanonicalGeometry = false;
+  }
+}
+
+function terminalViewportSize(container: HTMLDivElement) {
+  const rect = container.getBoundingClientRect();
+  // A scrollbar shrinks the content box without changing the outer rect.
+  // Fit, its cache, and the reveal gate must measure the same viewport.
+  return {
+    width: container.clientWidth || Math.round(rect.width || 0),
+    height: container.clientHeight || Math.round(rect.height || 0),
+  };
+}
+
+function fitCanonicalRenderer(
+  renderer: TerminalRendererEntry,
+  container: HTMLDivElement,
+  cols: number,
+  rows: number,
+) {
+  const cell = (renderer.term as unknown as {
+    _core?: { _renderService?: { dimensions?: { css?: { cell?: { width?: number; height?: number } } } } };
+  })._core?._renderService?.dimensions?.css?.cell;
+  if (renderer.term.cols !== cols || renderer.term.rows !== rows) {
+    renderer.canonicalFit = null;
+    return false;
+  }
+  const { width, height } = terminalViewportSize(container);
+  if (width < 10 || height < 10) return false;
+  const proposed = !cell?.width || !cell?.height
+    ? renderer.fitAddon.proposeDimensions() : null;
+  const cellWidth = cell?.width ?? (proposed ? width / proposed.cols : 0);
+  const cellHeight = cell?.height ?? (proposed ? height / proposed.rows : 0);
+  if (cellWidth <= 0 || cellHeight <= 0) return false;
+  const fit = calculateTerminalMirrorFit({
+    cols, rows, cellWidth, cellHeight,
+    viewportWidth: width, viewportHeight: height,
+  });
+  renderer.frame.style.width = `${fit.content_width}px`;
+  renderer.frame.style.height = `${fit.content_height}px`;
+  renderer.frame.style.marginLeft = `${fit.offset_x}px`;
+  renderer.frame.style.marginTop = `${fit.offset_y}px`;
+  renderer.host.style.width = `${cols * cellWidth}px`;
+  renderer.host.style.height = `${rows * cellHeight}px`;
+  renderer.host.style.position = "absolute";
+  renderer.host.style.transform = `scale(${fit.scale})`;
+  renderer.host.style.transformOrigin = "top left";
+  container.style.overflowX = fit.pan_x ? "auto" : "hidden";
+  container.style.overflowY = fit.pan_y ? "auto" : "hidden";
+  renderer.canonicalFit = { cols, rows, width, height, scale: fit.scale, pan: fit.pan_x || fit.pan_y };
+  return true;
+}
+
 async function fitTerminalToContainer(
   entry: TerminalSessionEntry,
   container: HTMLDivElement,
@@ -1163,9 +1294,7 @@ async function fitTerminalToContainer(
     return false;
   }
 
-  const rect = container.getBoundingClientRect();
-  const width = Math.round(rect.width || 0);
-  const height = Math.round(rect.height || 0);
+  const { width, height } = terminalViewportSize(container);
   if (width < 10 || height < 10) {
     return false;
   }
@@ -1183,6 +1312,7 @@ async function fitTerminalToContainer(
       // fresh row DOM. Preserved rows can report stale heights and create a
       // resize -> repaint -> resize cascade, so use xterm's cell metrics only.
       useRenderedRowGeometry: shouldUseRenderedRowGeometry(renderer.term, force),
+      container: !entry.legacyMode && entry.frameGeometry ? container : undefined,
     });
     entry.fitCount += 1;
     if (!proposedDimensions) {
@@ -1190,13 +1320,28 @@ async function fitTerminalToContainer(
     }
     const nextCols = Math.max(MIN_TERMINAL_COLS, proposedDimensions.cols);
     const nextRows = Math.max(MIN_TERMINAL_ROWS, proposedDimensions.rows);
-    // Every presentation owns its local xterm viewport geometry. Broker lease
-    // ownership only controls whether reportTerminalSize may resize the native
-    // PTY; mirrors never scale a stale canonical frame into their container.
+    if (!entry.legacyMode && entry.frameGeometry) {
+      const fitted = fitCanonicalRenderer(
+        renderer, container, entry.frameGeometry.cols, entry.frameGeometry.rows,
+      );
+      if (!fitted) return false;
+      if (options?.reportUnchanged || !lastMeasured ||
+          lastMeasured.width !== width || lastMeasured.height !== height) {
+        void reportTerminalSize(entry, nextCols, nextRows, { force: options?.reportUnchanged });
+      }
+      entry.lastMeasuredHostSize = { width, height };
+      return true;
+    }
     renderer.host.style.transform = "";
     renderer.host.style.transformOrigin = "";
     renderer.host.style.width = "100%";
     renderer.host.style.height = "100%";
+    renderer.host.style.position = "relative";
+    renderer.frame.style.width = "100%";
+    renderer.frame.style.height = "100%";
+    renderer.frame.style.marginLeft = "0";
+    renderer.frame.style.marginTop = "0";
+    renderer.canonicalFit = null;
     container.style.overflow = "hidden";
     if (renderer.term.cols !== nextCols || renderer.term.rows !== nextRows) {
       renderer.term.resize(nextCols, nextRows);
@@ -1219,19 +1364,18 @@ type TerminalRevealSample = {
   cols: number;
   rows: number;
   backend: "webgl" | "dom";
+  canonicalFit: boolean;
 };
 
 function sampleTerminalReveal(
   renderer: TerminalRendererEntry,
   container: HTMLDivElement,
 ): TerminalRevealSample | null {
-  const rect = container.getBoundingClientRect();
-  const width = Math.round(rect.width || 0);
-  const height = Math.round(rect.height || 0);
+  const { width, height } = terminalViewportSize(container);
   if (!container.isConnected || width < 10 || height < 10) {
     return null;
   }
-  const proposed = proposeTerminalDimensions(renderer, { useRenderedRowGeometry: false });
+  const proposed = proposeTerminalDimensions(renderer, { useRenderedRowGeometry: false, container });
   if (!proposed) {
     return null;
   }
@@ -1243,6 +1387,9 @@ function sampleTerminalReveal(
     cols: renderer.term.cols,
     rows: renderer.term.rows,
     backend: renderer.webglAddon ? "webgl" : "dom",
+    canonicalFit: renderer.canonicalFit?.cols === renderer.term.cols &&
+      renderer.canonicalFit?.rows === renderer.term.rows &&
+      renderer.canonicalFit?.width === width && renderer.canonicalFit?.height === height,
   };
 }
 
@@ -1255,8 +1402,8 @@ function revealLayoutMatches(
     before.proposedCols === after.proposedCols &&
     before.proposedRows === after.proposedRows &&
     before.backend === after.backend &&
-    after.cols === after.proposedCols &&
-    after.rows === after.proposedRows;
+    after.cols === before.cols && after.rows === before.rows &&
+    (after.canonicalFit || (after.cols === after.proposedCols && after.rows === after.proposedRows));
 }
 
 async function resetTerminalOutputBuffers(
@@ -1288,19 +1435,14 @@ function reserveRendererScrollbackForSnapshot(
   renderer: TerminalRendererEntry | null,
   snapshot: TerminalSnapshot,
 ) {
-  if (!renderer || snapshot.scrollback.length === 0 || renderer.term.cols >= snapshot.geometry.cols) {
+  if (!renderer || snapshot.scrollback.length === 0) {
     return;
   }
-  // Broker scrollback is stored as visual rows at the canonical terminal
-  // width. Replaying those rows into a narrower card makes xterm reflow each
-  // one into multiple physical rows. Keep enough local capacity for that
-  // reflow; otherwise its default 1,000-line cap immediately evicts the
-  // oldest history during the restore itself.
-  const reflowRowsPerSnapshotRow = Math.ceil(snapshot.geometry.cols / renderer.term.cols);
-  const requiredScrollback = snapshot.scrollback.length * reflowRowsPerSnapshotRow;
+  // Replaying history at its source width no longer multiplies rows by local
+  // card reflow, but the full retained broker history still needs capacity.
   renderer.term.options.scrollback = Math.max(
     Number(renderer.term.options.scrollback ?? TERMINAL_SCROLLBACK_LINES),
-    requiredScrollback,
+    snapshot.scrollback.length,
   );
 }
 
@@ -1320,37 +1462,61 @@ async function applyBrokerSnapshot(
   terminalKey: string,
   entry: TerminalSessionEntry,
   snapshot: TerminalSnapshot,
-  options?: { preserveLocalScrollback?: boolean },
+  options?: { geometryCommit?: boolean; preserveLocalScrollback?: boolean },
 ) {
   if (entry.disposed || snapshot.session_id !== entry.sessionId) {
     return;
   }
   entry.generation = snapshot.runtime_generation;
-  entry.brokerDecoder = new TextDecoder();
   const renderer = entry.renderer;
-  // vt100's formatted state is an absolute, geometry-dependent paint. A card
-  // may be restored into a different local viewport after a watchlist or
-  // surface transition; replaying that frame there wraps it into scrollback.
-  // In that case the broker's plain projection is the stable reconstruction.
-  const rendererMatchesSnapshot = !renderer || (
-    renderer.term.cols === snapshot.geometry.cols &&
-    renderer.term.rows === snapshot.geometry.rows
-  );
-  // The active owner has already reflowed its xterm buffer before committing
-  // geometry to the PTY. Codex's inline scroll region renders real history in
-  // xterm but is not represented by vt100's canonical `scrollback`, so its
-  // resize snapshot can be an otherwise valid visible-grid update with zero
-  // history. Replaying that incomplete snapshot would erase the owner's only
-  // correct copy. Keep the local buffer until Codex's post-resize repaint
-  // arrives through the normal event stream.
+  if (options?.geometryCommit && entry.frameGeometry &&
+      entry.frameGeneration === snapshot.runtime_generation) {
+    // A geometry acknowledgement is a sequence barrier, not provider paint.
+    // Keep the last accurate source frame fitted until later output arrives.
+    entry.pendingGeometry = true;
+    entry.repaintRequestedForGeometry = false;
+    entry.allowPendingKeyboard = false;
+    entry.preserveOwnerScrollback = Boolean(
+      options.preserveLocalScrollback && renderer &&
+      snapshot.scrollback.length === 0 &&
+      (snapshot.formatted_scrollback?.length ?? 0) === 0 &&
+      (renderer.term.buffer.active.baseY ?? 0) > 0,
+    );
+    setSnapshotStatus(entry, "pending");
+    return;
+  }
+  entry.brokerDecoder = new TextDecoder();
+  // A rejected resize can roll status back to ready without a frame. Only a
+  // post-geometry snapshot consumes the first owner's keyboard allowance.
+  const wasPendingGeometry = entry.pendingGeometry && entry.snapshotStatus === "pending";
+  const replay = decodeTerminalSnapshot(snapshot);
+  if (replay.kind === "degraded" && entry.frameGeometry &&
+      entry.frameGeneration === snapshot.runtime_generation) {
+    if (entry.frameGeometry.cols !== snapshot.geometry.cols ||
+        entry.frameGeometry.rows !== snapshot.geometry.rows) {
+      if (!entry.pendingGeometry) entry.repaintRequestedForGeometry = false;
+      entry.pendingGeometry = true;
+      entry.allowPendingKeyboard = false;
+      applyCanonicalGeometry(entry, snapshot.geometry.cols, snapshot.geometry.rows);
+    }
+    entry.snapshotDegradation = replay.reason;
+    if (entry.pendingGeometry) entry.ownerGeometryTransitionSettled = true;
+    setSnapshotStatus(entry, "degraded");
+    return;
+  }
   const preserveLocalScrollback = Boolean(
-    options?.preserveLocalScrollback &&
+    entry.preserveOwnerScrollback && replay.kind === "formatted" &&
     renderer &&
-    rendererMatchesSnapshot &&
     snapshot.scrollback.length === 0 &&
     (snapshot.formatted_scrollback?.length ?? 0) === 0 &&
     (renderer.term.buffer.active.baseY ?? 0) > 0,
   );
+  if (preserveLocalScrollback && renderer) {
+    renderer.term.options.scrollback = Math.max(
+      Number(renderer.term.options.scrollback ?? TERMINAL_SCROLLBACK_LINES),
+      (renderer.term.buffer.active.baseY ?? 0) + snapshot.geometry.rows,
+    );
+  }
   const snapshotTrace = shouldExposeTerminalDebug()
     ? {
         at: Date.now(),
@@ -1359,9 +1525,7 @@ async function applyBrokerSnapshot(
         brokerGeometry: snapshot.geometry,
         brokerScrollbackRows: snapshot.scrollback.length,
         brokerFormattedScrollbackRows: snapshot.formatted_scrollback?.length ?? 0,
-        appliedFormattedState: !preserveLocalScrollback &&
-          rendererMatchesSnapshot &&
-          Boolean(snapshot.terminal_state_base64),
+        appliedFormattedState: replay?.kind === "formatted",
         preservedLocalScrollback: preserveLocalScrollback,
         parserBefore: terminalBufferMetrics(entry.parser),
         rendererBefore: renderer ? terminalBufferMetrics(renderer.term) : null,
@@ -1369,18 +1533,30 @@ async function applyBrokerSnapshot(
     : null;
   reserveRendererScrollbackForSnapshot(renderer, snapshot);
   applyCanonicalGeometry(entry, snapshot.geometry.cols, snapshot.geometry.rows);
-  const state = preserveLocalScrollback ? "" : decodeTerminalSnapshot(snapshot, rendererMatchesSnapshot);
+  // Formatted VT state is absolute at source width. Resize xterm before any
+  // bytes are written; suppress its resize callback from committing a PTY size.
+  sizeRendererToSource(entry, snapshot.geometry.cols, snapshot.geometry.rows);
+  entry.frameGeometry = snapshot.geometry;
+  entry.frameGeneration = snapshot.runtime_generation;
+  // The pre-registration card fit was measured before the canonical source
+  // frame arrived. A second fit must report the viewport to the broker.
+  entry.lastMeasuredHostSize = null;
+  if (renderer?.frame.parentElement) {
+    fitCanonicalRenderer(renderer, renderer.frame.parentElement as HTMLDivElement,
+      snapshot.geometry.cols, snapshot.geometry.rows);
+  }
+  // Growing the row count pulls history onto the visible grid. Move the whole
+  // resized screen back into scrollback before the absolute paint clears it.
+  const state = preserveLocalScrollback
+    ? `\x1b[r\x1b[${snapshot.geometry.rows};1H${"\r\n".repeat(snapshot.geometry.rows)}${replay.text}`
+    : replay.text;
   try {
-    if (preserveLocalScrollback) {
-      // The existing parser/renderer buffers are the authoritative local view
-      // for this owner-resize boundary. Live broker output will repaint the
-      // resized TUI without discarding their retained history.
-    } else if (state) {
+    if (state) {
       // Restored snapshots must pass through the same provider capability and
       // theme normalization as live output. Writing raw broker state here
       // regressed Codex composer recoloring and color-probe filtering.
       await writeTerminalOutputBatch(terminalKey, entry, [state], {
-        resetBeforeWrite: true,
+        resetBeforeWrite: !preserveLocalScrollback,
         recordOutput: false,
         queueCapabilityResponses: false,
       });
@@ -1396,6 +1572,12 @@ async function applyBrokerSnapshot(
       });
     }
   }
+  entry.pendingGeometry = false;
+  entry.repaintRequestedForGeometry = false;
+  entry.preserveOwnerScrollback = false;
+  entry.snapshotDegradation = replay.kind === "degraded" ? replay.reason : null;
+  if (wasPendingGeometry) entry.ownerGeometryTransitionSettled = true;
+  setSnapshotStatus(entry, replay.kind === "formatted" ? "ready" : "degraded");
   terminalSessionMap.get(terminalKey)?.titleHandlerRef.current?.(entry.latestTitle ?? "");
 }
 
@@ -1407,7 +1589,22 @@ async function applyBrokerEvents(
   if (entry.disposed) {
     return;
   }
-  const output: string[] = [];
+  let output: string[] = [];
+  let repaintNeeded = false;
+  const flush = async () => {
+    if (output.length === 0) return;
+    await writeTerminalOutputBatch(terminalKey, entry, output, {
+      // Until a post-geometry snapshot arrives, keep the last accurate frame
+      // visible. The headless parser and transcript still consume the stream.
+      rendererIdentity: entry.pendingGeometry ? null : undefined,
+      queueCapabilityResponses: !entry.pendingGeometry,
+    });
+    if (entry.pendingGeometry && !entry.repaintRequestedForGeometry) {
+      repaintNeeded = true;
+      entry.repaintRequestedForGeometry = true;
+    }
+    output = [];
+  };
   for (const event of events) {
     if (event.runtime_generation !== entry.generation) {
       continue;
@@ -1418,14 +1615,21 @@ async function applyBrokerEvents(
         output.push(text);
       }
     } else if (event.type === "geometry") {
+      await flush();
+      if (entry.frameGeometry && (entry.frameGeometry.cols !== event.geometry.cols ||
+          entry.frameGeometry.rows !== event.geometry.rows)) {
+        entry.pendingGeometry = true;
+        entry.repaintRequestedForGeometry = false;
+        entry.allowPendingKeyboard = false;
+        setSnapshotStatus(entry, "pending");
+      }
       applyCanonicalGeometry(entry, event.geometry.cols, event.geometry.rows);
     } else if (event.type === "lifecycle" && event.lifecycle === "runtime_replaced") {
       entry.brokerDecoder = new TextDecoder();
     }
   }
-  if (output.length > 0) {
-    await writeTerminalOutputBatch(terminalKey, entry, output);
-  }
+  await flush();
+  return repaintNeeded;
 }
 
 function rgbTripletFromHex(hex: string, fallback: string) {
@@ -1866,6 +2070,15 @@ async function getOrCreateTerminalSession(
     generation: 0,
     disposed: false,
     pendingForceResize: false,
+    frameGeometry: null,
+    frameGeneration: 0,
+    pendingGeometry: false,
+    ownerGeometryTransitionSettled: false,
+    repaintRequestedForGeometry: false,
+    preserveOwnerScrollback: false,
+    snapshotStatus: "ready",
+    snapshotDegradation: null,
+    allowPendingKeyboard: false,
     cursorRegistration,
   };
 
@@ -2051,6 +2264,11 @@ function createRenderer(terminalKey: string, entry: TerminalSessionEntry) {
   host.style.height = "100%";
   // Anchor for the absolute-positioned snapshot overlay.
   host.style.position = "relative";
+  const frame = document.createElement("div");
+  frame.style.position = "relative";
+  frame.style.width = "100%";
+  frame.style.height = "100%";
+  frame.appendChild(host);
   const wheelRowRemainder = { current: 0 };
   host.addEventListener(
     "wheel",
@@ -2079,11 +2297,14 @@ function createRenderer(terminalKey: string, entry: TerminalSessionEntry) {
     webglAttempted: false,
     webglActivatedOnce: false,
     host,
+    frame,
+    canonicalFit: null,
     terminalLinkOptions,
     snapshotOverlay: null,
   };
 
   term.onData((data) => {
+    if (!entry.legacyMode && !canSendTerminalInput(entry, data)) return;
     if ((data === "\x1b[I" || data === "\x1b[O") && entry.provider !== "opencode") {
       return;
     }
@@ -2105,6 +2326,7 @@ function createRenderer(terminalKey: string, entry: TerminalSessionEntry) {
   });
 
   term.onBinary((data) => {
+    if (!entry.legacyMode && !canSendTerminalInput(entry)) return;
     const filtered = filterProviderTerminalInput(entry.provider, data, { binary: true });
     if (filtered.length === 0) {
       return;
@@ -2129,15 +2351,9 @@ function createRenderer(terminalKey: string, entry: TerminalSessionEntry) {
 
   term.onResize((size) => {
     entry.resizeCount += 1;
+    if (entry.applyingCanonicalGeometry) return;
     resizeParser(entry, size.cols, size.rows);
     void reportTerminalSize(entry, size.cols, size.rows);
-    if (renderer.resizeTimeout) {
-      clearTimeout(renderer.resizeTimeout);
-      renderer.resizeTimeout = null;
-    }
-    renderer.resizeTimeout = setTimeout(() => {
-      void reportTerminalSize(entry, size.cols, size.rows);
-    }, 120);
   });
 
   return renderer;
@@ -2165,7 +2381,7 @@ function attachRendererHost(
   }
 
   container.replaceChildren();
-  container.appendChild(renderer.host);
+  container.appendChild(renderer.frame);
   if (session.latestTitle) {
     session.titleHandlerRef.current?.(session.latestTitle);
   }
@@ -2325,6 +2541,9 @@ export const AgentTerminal = memo(function AgentTerminal({
   const [rendererEvicted, setRendererEvicted] = useState(false);
   const [rendererRestoreError, setRendererRestoreError] = useState<string | null>(null);
   const [rendererReady, setRendererReady] = useState(false);
+  const [snapshotStatus, setSnapshotStatusView] = useState<TerminalSessionEntry["snapshotStatus"]>("ready");
+  const [snapshotDegradation, setSnapshotDegradationView] = useState<TerminalSessionEntry["snapshotDegradation"]>(null);
+  const [canRecoverKeyboard, setCanRecoverKeyboard] = useState(false);
   const [rendererMountRevision, setRendererMountRevision] = useState(0);
   const terminalFontSize = useSettingsStore((state) => state.terminalFontSize);
   const terminalFontFamily = useSettingsStore((state) => state.terminalFontFamily);
@@ -2929,6 +3148,14 @@ export const AgentTerminal = memo(function AgentTerminal({
         }
 
         entry = session;
+        setSnapshotStatusView(session.snapshotStatus);
+        setSnapshotDegradationView(session.snapshotDegradation);
+        setCanRecoverKeyboard(Boolean(canEnablePendingKeyboard(session)));
+        session.onSnapshotStatusChange = (status, reason) => {
+          setSnapshotStatusView(status);
+          setSnapshotDegradationView(reason);
+          setCanRecoverKeyboard(Boolean(canEnablePendingKeyboard(session)));
+        };
         session.onRendererEvicted = () => {
           rendererEvictedRef.current = true;
           invalidateRendererReveal();
@@ -3057,6 +3284,8 @@ export const AgentTerminal = memo(function AgentTerminal({
               return;
             }
             session.brokerState = state;
+            if (!canEnablePendingKeyboard(session)) session.allowPendingKeyboard = false;
+            setCanRecoverKeyboard(Boolean(canEnablePendingKeyboard(session)));
             if (presentationObserverMountedRef.current) {
               onPresentationStateChangeRef.current?.(state, session.presentationState);
             }
@@ -3073,6 +3302,8 @@ export const AgentTerminal = memo(function AgentTerminal({
             }
             session.presentationState = result.presentation;
             session.brokerState = result.broker_state;
+            if (!canEnablePendingKeyboard(session)) session.allowPendingKeyboard = false;
+            setCanRecoverKeyboard(Boolean(canEnablePendingKeyboard(session)));
             if (presentationObserverMountedRef.current) {
               onPresentationStateChangeRef.current?.(result.broker_state, result.presentation);
             }
@@ -3110,6 +3341,8 @@ export const AgentTerminal = memo(function AgentTerminal({
                 lease_epoch: decision.lease_epoch,
                 owner_presentation_id: decision.owner_presentation_id,
               };
+              if (!canEnablePendingKeyboard(session)) session.allowPendingKeyboard = false;
+              setCanRecoverKeyboard(Boolean(canEnablePendingKeyboard(session)));
               if (presentationObserverMountedRef.current) {
                 onPresentationStateChangeRef.current?.(
                   session.brokerState,
@@ -3304,6 +3537,7 @@ export const AgentTerminal = memo(function AgentTerminal({
       if (entry?.onRendererEvicted) {
         entry.onRendererEvicted = undefined;
       }
+      if (entry) entry.onSnapshotStatusChange = undefined;
       if (rendererRestoreRetryTimerRef.current) {
         clearTimeout(rendererRestoreRetryTimerRef.current);
         rendererRestoreRetryTimerRef.current = null;
@@ -3559,6 +3793,25 @@ export const AgentTerminal = memo(function AgentTerminal({
           </button>
         </div>
       )}
+      {snapshotStatus !== "ready" && !initError && (
+        <div data-testid="terminal-snapshot-status" className="absolute right-2 top-2 z-30 max-w-72 rounded bg-surface px-2 py-1 text-xs text-muted">
+          <span>{snapshotStatus === "pending" ? "Waiting for terminal repaint" :
+            snapshotDegradation === "invalid_formatted_state" ? "Terminal formatting invalid" :
+              "Terminal formatting unavailable"}</span>
+          {canRecoverKeyboard && (
+            <div className="mt-1">
+              <p>The provider has not repainted. Keys may affect an unseen prompt.</p>
+              <button type="button" className="mt-1 rounded border border-current px-2 py-0.5" onClick={() => {
+                const entry = terminalSessionMap.get(terminalKey);
+                if (!entry || !canEnablePendingKeyboard(entry)) return;
+                entry.allowPendingKeyboard = true;
+                entry.repaintRequestedForGeometry = false;
+                focusTerminal();
+              }}>Enable keyboard input</button>
+            </div>
+          )}
+        </div>
+      )}
       <div
         ref={terminalRef}
         data-testid="agent-terminal-host"
@@ -3606,6 +3859,9 @@ export const AgentTerminal = memo(function AgentTerminal({
 });
 
 export const __terminalTesting = {
+  applyBrokerSnapshot,
+  canSendTerminalInput,
+  reportTerminalSize,
   captureSnapshotOverlay,
   demoteSessionToDom,
   promoteSessionToWebgl,
