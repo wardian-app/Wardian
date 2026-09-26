@@ -57,7 +57,47 @@ pub(super) fn matching_event_index(
 pub(super) fn matching_record_index(
     records: &[ConversationNarrativeRecord],
     current: &AgentChatEvent,
+    archived_events: &[AgentChatEvent],
 ) -> io::Result<Option<usize>> {
+    if current.metadata["provider_log"] == true && provenance::is_codex_user_message_mirror(current)
+    {
+        let exact_match = unique_match(
+            records.iter().enumerate().filter_map(|(index, record)| {
+                record.event_refs.contains(&current.id).then_some(index)
+            }),
+            &format!("narrative ownership for event {}", current.id),
+        )?;
+        if exact_match.is_some() {
+            return Ok(exact_match);
+        }
+
+        // A historical text-derived mirror ID may be present as an alias in
+        // an archive. Resolve its archived event first so native turn evidence
+        // can prevent the alias from attaching a different turn's narrative.
+        let Some(archived_event_index) = matching_event_index(archived_events, current)? else {
+            return Ok(None);
+        };
+        let archived_identity_ids = event_identity_ids(&archived_events[archived_event_index]);
+        let Some(request_root_id) = current
+            .metadata
+            .get("request_root_id")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return Ok(None);
+        };
+        return unique_match(
+            records.iter().enumerate().filter_map(|(index, record)| {
+                (record.request_root_id.as_deref() == Some(request_root_id)
+                    && record
+                        .event_refs
+                        .iter()
+                        .any(|event_ref| archived_identity_ids.contains(&event_ref.as_str())))
+                .then_some(index)
+            }),
+            &format!("legacy narrative ownership for event {}", current.id),
+        );
+    }
+
     if current.provider != "claude" || current.metadata["provider_log"] != true {
         let ids = event_identity_ids(current);
         return unique_match(
@@ -218,7 +258,7 @@ pub(super) fn recover_unlinked_observations(
             }
             continue;
         }
-        if matching_record_index(records, event)?.is_some() {
+        if matching_record_index(records, event, events)?.is_some() {
             continue;
         }
         let event_ids = event_identity_ids(event);

@@ -2771,6 +2771,404 @@ Do you want to proceed?
     }
 
     #[tokio::test]
+    async fn incremental_codex_user_mirror_capture_separates_legacy_turn_and_unbound_lines() {
+        use std::io::Write as _;
+
+        let _guard = crate::utils::wardian_test_env_lock_async().await;
+        let temp = tempfile::tempdir().expect("isolated home");
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+
+        let log_path = temp.path().join("codex.jsonl");
+        let source_key = "codex:session:codex-session-one";
+        let prompt = "repeated synthetic request ".repeat(16) + "request";
+        let prompt = prompt.chars().take(421).collect::<String>();
+        assert_eq!(prompt.len(), 421);
+
+        let turn_lines = |turn_id: &str, message_id: &str| {
+            vec![
+                serde_json::json!({
+                    "type": "turn_context",
+                    "payload": {"turn_id": turn_id},
+                })
+                .to_string(),
+                serde_json::json!({
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "id": message_id,
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": prompt}],
+                        "internal_chat_message_metadata_passthrough": {
+                            "turn_id": turn_id,
+                            "content_item_kinds": ["user.text"],
+                        },
+                    },
+                })
+                .to_string(),
+                serde_json::json!({
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": prompt},
+                })
+                .to_string(),
+            ]
+        };
+        let first_lines = turn_lines("provider-turn-old", "native-message-old");
+        std::fs::write(&log_path, format!("{}\n", first_lines.join("\n")))
+            .expect("write initial synthetic Codex turn");
+
+        let context = crate::state::conversation_archive::ConversationArchiveContext {
+            agent_id: "agent-1".to_string(),
+            agent_name: "Synthetic Codex".to_string(),
+            agent_class: "Coder".to_string(),
+            workspace: "<absolute-workspace-path>".to_string(),
+            provider: "codex".to_string(),
+            provider_session_ids: vec!["codex-session-one".to_string()],
+            provider_source_key: Some(source_key.to_string()),
+        };
+        let archive = crate::state::conversation_archive::ConversationArchiveState::default();
+        let mut first = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1", "codex", &log_path, source_key, None, true,
+        )
+        .expect("capture initial synthetic turn");
+        decorate_forward_provider_log_events(&mut first.events, "codex", &log_path);
+        let old_mirror = first
+            .events
+            .iter_mut()
+            .find(|event| event.source.as_deref() == Some("event_msg"))
+            .expect("initial user mirror");
+        assert_eq!(old_mirror.metadata["provider_turn_id"], "provider-turn-old");
+        let old_root = old_mirror.metadata["request_root_id"]
+            .as_str()
+            .expect("initial request root")
+            .to_string();
+        // The legacy hash ignored provenance metadata, so changing this
+        // classification recreates its old text/source-derived identity.
+        let mut legacy_identity = old_mirror.clone();
+        legacy_identity.metadata["input_origin"] = serde_json::json!("provider_internal");
+        let legacy_id = archive_identity::stable_provider_log_event_id(&legacy_identity, &log_path);
+        old_mirror.id = legacy_id.clone();
+        old_mirror
+            .metadata
+            .as_object_mut()
+            .expect("mirror metadata")
+            .remove("legacy_event_ids");
+
+        archive
+            .append_provider_log_batch_with_context(
+                context.clone(),
+                &first.events,
+                None,
+                &first.next,
+            )
+            .expect("archive the legacy-identity turn and commit its cursor");
+        assert_eq!(
+            archive
+                .provider_log_capture_state("agent-1", source_key)
+                .expect("read first cursor"),
+            Some(first.next.clone())
+        );
+
+        let second_lines = turn_lines("provider-turn-new", "native-message-new");
+        let mut append = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .expect("open synthetic Codex log for append");
+        writeln!(append, "{}", second_lines.join("\n")).expect("append next synthetic turn");
+        drop(append);
+
+        let mut second = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &log_path,
+            source_key,
+            Some(first.next.clone()),
+            true,
+        )
+        .expect("capture next synthetic turn incrementally");
+        assert_eq!(second.events.len(), 2);
+        decorate_forward_provider_log_events(&mut second.events, "codex", &log_path);
+        let new_mirror = second
+            .events
+            .iter()
+            .find(|event| event.source.as_deref() == Some("event_msg"))
+            .expect("next user mirror");
+        assert_eq!(new_mirror.text.as_deref(), Some(prompt.as_str()));
+        assert_eq!(new_mirror.text.as_deref().unwrap().len(), 421);
+        assert_eq!(new_mirror.turn_id, None);
+        assert_eq!(new_mirror.created_at, None);
+        assert_eq!(new_mirror.metadata["provider_turn_id"], "provider-turn-new");
+        assert_ne!(new_mirror.metadata["request_root_id"], old_root);
+        assert_ne!(new_mirror.id, legacy_id);
+        assert!(new_mirror.metadata.get("legacy_event_ids").is_none());
+        let new_mirror_id = new_mirror.id.clone();
+        let new_root = new_mirror.metadata["request_root_id"]
+            .as_str()
+            .expect("next request root")
+            .to_string();
+
+        let mut same_turn_retry =
+            crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+                "agent-1",
+                "codex",
+                &log_path,
+                source_key,
+                Some(first.next.clone()),
+                true,
+            )
+            .expect("retry the same incremental turn from its prior cursor");
+        decorate_forward_provider_log_events(&mut same_turn_retry.events, "codex", &log_path);
+        assert_eq!(
+            same_turn_retry
+                .events
+                .iter()
+                .map(|event| event.id.as_str())
+                .collect::<Vec<_>>(),
+            second
+                .events
+                .iter()
+                .map(|event| event.id.as_str())
+                .collect::<Vec<_>>(),
+            "retrying the same native turn must reproduce its event identities"
+        );
+        assert_eq!(same_turn_retry.next, second.next);
+
+        archive
+            .append_provider_log_batch_with_context(
+                context.clone(),
+                &second.events,
+                second.previous.as_ref(),
+                &second.next,
+            )
+            .expect("append the distinct turn without claiming the old narrative");
+        assert_eq!(
+            archive
+                .provider_log_capture_state("agent-1", source_key)
+                .expect("read advanced cursor"),
+            Some(second.next.clone())
+        );
+        assert_eq!(
+            archive
+                .append_provider_log_batch_with_context(
+                    context.clone(),
+                    &same_turn_retry.events,
+                    same_turn_retry.previous.as_ref(),
+                    &same_turn_retry.next,
+                )
+                .expect_err("a stale replay cannot append after its cursor already committed")
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        let malformed_turn_lines = [
+            serde_json::json!({"type": "turn_context"}).to_string(),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "id": "native-message-unbound",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": prompt}],
+                    "internal_chat_message_metadata_passthrough": {
+                        "content_item_kinds": ["user.text"],
+                    },
+                },
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": prompt},
+            })
+            .to_string(),
+        ];
+        let mut append = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .expect("reopen synthetic Codex log");
+        writeln!(append, "{}", malformed_turn_lines.join("\n"))
+            .expect("append unbound synthetic turn");
+        drop(append);
+
+        let mut unbound = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &log_path,
+            source_key,
+            Some(second.next.clone()),
+            true,
+        )
+        .expect("capture malformed turn with no native binding");
+        assert_eq!(unbound.events.len(), 2);
+        let unbound_mirror = unbound
+            .events
+            .iter()
+            .find(|event| event.source.as_deref() == Some("event_msg"))
+            .expect("unbound user mirror");
+        assert!(unbound_mirror.metadata.get("provider_turn_id").is_none());
+        assert!(unbound_mirror.sequence.is_some());
+        decorate_forward_provider_log_events(&mut unbound.events, "codex", &log_path);
+        let unbound_mirror = unbound
+            .events
+            .iter()
+            .find(|event| event.source.as_deref() == Some("event_msg"))
+            .expect("decorated unbound mirror");
+        let unbound_mirror_id = unbound_mirror.id.clone();
+        assert_ne!(unbound_mirror.id, legacy_id);
+        assert!(unbound_mirror.metadata.get("legacy_event_ids").is_none());
+
+        let mut unbound_retry =
+            crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+                "agent-1",
+                "codex",
+                &log_path,
+                source_key,
+                Some(second.next.clone()),
+                true,
+            )
+            .expect("retry the unbound log segment");
+        decorate_forward_provider_log_events(&mut unbound_retry.events, "codex", &log_path);
+        assert_eq!(
+            unbound_retry
+                .events
+                .iter()
+                .find(|event| event.source.as_deref() == Some("event_msg"))
+                .map(|event| event.id.as_str()),
+            Some(unbound_mirror_id.as_str()),
+            "the persisted log sequence must keep an unbound mirror stable on retry"
+        );
+        assert_eq!(unbound_retry.next, unbound.next);
+
+        archive
+            .append_provider_log_batch_with_context(
+                context.clone(),
+                &unbound.events,
+                unbound.previous.as_ref(),
+                &unbound.next,
+            )
+            .expect("append unbound request using its log sequence identity");
+
+        let retry = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &log_path,
+            source_key,
+            Some(unbound.next.clone()),
+            true,
+        )
+        .expect("retry capture at committed end of log");
+        assert!(retry.events.is_empty());
+        archive
+            .append_provider_log_batch_with_context(
+                context.clone(),
+                &retry.events,
+                retry.previous.as_ref(),
+                &retry.next,
+            )
+            .expect("retry empty capture without duplicating archive history");
+        assert_eq!(retry.next, unbound.next);
+
+        let archived = archive
+            .chat_events_for_capture(&context)
+            .expect("read archived synthetic transcript");
+        assert_eq!(
+            archived
+                .iter()
+                .filter(|event| {
+                    event.source.as_deref() == Some("event_msg")
+                        && event.text.as_deref() == Some(prompt.as_str())
+                })
+                .filter_map(|event| event.metadata["provider_turn_id"].as_str())
+                .collect::<Vec<_>>(),
+            vec!["provider-turn-old", "provider-turn-new"]
+        );
+        let archived_mirrors = archived
+            .iter()
+            .filter(|event| event.source.as_deref() == Some("event_msg"))
+            .collect::<Vec<_>>();
+        assert_eq!(archived_mirrors.len(), 3);
+        assert!(archived_mirrors.iter().all(|event| {
+            event.provider == "codex"
+                && event.session_id == "agent-1"
+                && event.metadata["provider_log"] == true
+                && event.metadata["log_path"] == log_path.to_string_lossy().as_ref()
+        }));
+        let mirror_ids = archived_mirrors
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<Vec<_>>();
+        assert!(mirror_ids.contains(&legacy_id));
+        assert_ne!(mirror_ids[0], mirror_ids[1]);
+        assert_ne!(mirror_ids[1], mirror_ids[2]);
+        assert_ne!(mirror_ids[0], mirror_ids[2]);
+
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active synthetic conversation");
+        let conversation_dir =
+            wardian_core::paths::agent_conversation_dir("agent-1", &conversation_id)
+                .expect("synthetic conversation directory");
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(conversation_dir.join("manifest.json"))
+                .expect("read synthetic archive manifest"),
+        )
+        .expect("parse synthetic archive manifest");
+        assert_eq!(manifest["provider_source_key"], source_key);
+        assert_eq!(
+            manifest["provider_session_ids"],
+            serde_json::json!(["codex-session-one"])
+        );
+        let records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
+            wardian_core::conversations::read_jsonl_records(
+                &conversation_dir.join("conversation.jsonl"),
+            )
+            .expect("read synthetic narrative records");
+        let legacy_record = records
+            .iter()
+            .find(|record| record.event_refs.contains(&legacy_id))
+            .expect("legacy mirror narrative owner");
+        let new_record = records
+            .iter()
+            .find(|record| record.event_refs.contains(&new_mirror_id))
+            .expect("new mirror has its own narrative owner");
+        assert_eq!(
+            legacy_record.request_root_id.as_deref(),
+            Some(old_root.as_str())
+        );
+        assert_eq!(
+            new_record.request_root_id.as_deref(),
+            Some(new_root.as_str())
+        );
+        assert_ne!(legacy_record.seq, new_record.seq);
+
+        let replayed = crate::state::conversation_archive::provenance::merge_current_capture(
+            Vec::new(),
+            archived,
+        )
+        .expect("replay archive without text-only deduplication");
+        let transcript = merge_chat_events(Vec::new(), replayed);
+        let repeated_requests = transcript
+            .iter()
+            .filter(|event| {
+                event.role == Some(AgentChatRole::User)
+                    && event.text.as_deref() == Some(prompt.as_str())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(repeated_requests.len(), 4);
+        assert_eq!(
+            repeated_requests
+                .iter()
+                .filter_map(|event| event.metadata["provider_turn_id"].as_str())
+                .collect::<Vec<_>>(),
+            vec!["provider-turn-old", "provider-turn-new"]
+        );
+
+        match previous_home {
+            Some(home) => std::env::set_var("WARDIAN_HOME", home),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+    }
+
+    #[tokio::test]
     async fn claude_raw_line_identity_recovers_capture_without_rewriting_legacy_alias_history() {
         let _guard = crate::utils::wardian_test_env_lock_async().await;
         let temp = tempfile::tempdir().expect("temp dir");
