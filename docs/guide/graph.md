@@ -19,7 +19,7 @@ again in this guide when needed.
 
 ## What the Graph Shows
 
-Each node is an agent. Nodes use status colors (Idle=Emerald, Processing=Cyan, Error=Red, etc.). Edges represent relationships in the communication topology:
+Each node is an agent. Node colors use the same live status as the watchlist, including terminal-title and current-thought changes (Idle=Emerald, Processing=Cyan, Action Required=Amber, Error=Red). Edges represent relationships in the communication topology:
 
 **Edge types and textures:**
 - **Solid edges**: manual connections (you created them or they were seeded by team membership).

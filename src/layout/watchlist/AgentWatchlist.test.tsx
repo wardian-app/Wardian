@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, within, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
+import { buildAgentGraph } from '../../features/graph/graphProjection';
 import AgentWatchlist from './AgentWatchlist';
 import {
   resetAgentTelemetryStore,
@@ -185,6 +186,82 @@ describe('AgentWatchlist', () => {
       'title',
       'Activity: Running command npm test',
     );
+  });
+
+  it('keeps the roster status and Graph node in step through spawn and title/thought updates', () => {
+    const alpha = sampleAgents[0];
+    const gamma: AgentConfig = {
+      session_id: 'agent-3', session_name: 'Gamma', agent_class: 'Coder', folder: 'C:/test', is_off: false,
+    };
+    const offAgentIds = new Set<string>();
+    const statusPrefs: WatchlistPrefs = {
+      ...defaultPrefs,
+      columns: [{ id: 'status_label', visible: true }],
+    };
+    seedProjections({
+      telemetry: { 'agent-1': { ...sampleTelemetry['agent-1'], current_status: 'Idle' } },
+      terminal_titles: { 'agent-1': '✋ Action Required' },
+      current_thoughts: {},
+    });
+
+    const graphNode = (agentId: string, agents: AgentConfig[]) => {
+      const { telemetry, terminal_titles, current_thoughts } = useAgentTelemetryStore.getState();
+      return buildAgentGraph({
+        agents,
+        telemetry,
+        terminalTitles: terminal_titles,
+        currentThoughts: current_thoughts,
+        teams: [],
+        activeList: null,
+        interactions: {},
+        selectedAgentIds: new Set(),
+        enabledReasons: new Set(),
+        offAgentIds,
+      }).nodes.find((node) => node.id === agentId);
+    };
+
+    const watchlistProps = { ...defaultProps, agents: [alpha], offAgentIds, prefs: statusPrefs };
+    const { rerender } = render(<AgentWatchlist {...watchlistProps} />);
+    const alphaRow = screen.getByLabelText('Agent Alpha');
+    expect(useAgentTelemetryStore.getState().telemetry['agent-1'].current_status).toBe('Idle');
+    expect(within(alphaRow).getByLabelText('Status: Action Required')).toHaveClass('text-wardian-warning');
+    expect(alphaRow.querySelector('.bg-wardian-warning')).toBeInTheDocument();
+    expect(graphNode('agent-1', [alpha])).toMatchObject({
+      status: 'Action Needed', color: 'var(--color-wardian-warning)',
+    });
+
+    const spawnedAgents = [alpha, gamma];
+    rerender(<AgentWatchlist {...watchlistProps} agents={spawnedAgents} />);
+    const newRow = screen.getByLabelText('Agent Gamma');
+    expect(within(newRow).getByText('Idle')).toBeInTheDocument();
+    expect(newRow.querySelector('.bg-wardian-success')).toBeInTheDocument();
+    expect(graphNode('agent-3', spawnedAgents)).toMatchObject({
+      status: 'Idle', color: 'var(--color-wardian-success)',
+    });
+    expect(useAgentTelemetryStore.getState().telemetry['agent-3']).toBeUndefined();
+
+    act(() => seedProjections({
+      terminal_titles: { 'agent-1': '✋ Action Required', 'agent-3': '✋ Action Required' },
+    }));
+    const actionRow = screen.getByLabelText('Agent Gamma');
+    expect(within(actionRow).getByLabelText('Status: Action Required')).toHaveClass('text-wardian-warning');
+    expect(actionRow.querySelector('.bg-wardian-warning')).toBeInTheDocument();
+    expect(graphNode('agent-3', spawnedAgents)).toMatchObject({
+      status: 'Action Needed', color: 'var(--color-wardian-warning)',
+    });
+
+    act(() => seedProjections({
+      terminal_titles: { 'agent-1': '✋ Action Required', 'agent-3': '' },
+      current_thoughts: { 'agent-3': 'Starting provider' },
+    }));
+    const processingRow = screen.getByLabelText('Agent Gamma');
+    expect(within(processingRow).getByLabelText('Status: Processing. Activity: Starting provider'))
+      .toHaveClass('text-wardian-processing');
+    expect(processingRow.querySelector('.bg-wardian-processing')).toBeInTheDocument();
+    expect(graphNode('agent-3', spawnedAgents)).toMatchObject({
+      status: 'Processing...', color: 'var(--color-wardian-processing)',
+    });
+    expect(useAgentTelemetryStore.getState().telemetry['agent-3']).toBeUndefined();
   });
 
   it('keeps the optional description out of compact roster metadata', () => {

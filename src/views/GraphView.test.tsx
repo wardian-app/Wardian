@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConfig, AgentTelemetry } from "../types";
 import { useOnboardingStore } from "../store/useOnboardingStore";
+import { deriveCurrentThought } from "../utils/statusUtils";
 import { GraphView } from "./GraphView";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -27,7 +28,10 @@ vi.mock("../features/graph/GraphCanvas", () => ({
     selectedEdgeId,
     onSelectEdge,
   }: {
-    projection: { nodes: Array<{ id: string; x: number; y: number }>; commEdges: Array<{ id: string }> };
+    projection: {
+      nodes: Array<{ id: string; x: number; y: number; status: string; color: string }>;
+      commEdges: Array<{ id: string }>;
+    };
     resetSignal?: number;
     onSelectAgent: (id: string) => void;
     onContextMenu: (id: string, x: number, y: number) => void;
@@ -44,6 +48,8 @@ vi.mock("../features/graph/GraphCanvas", () => ({
         data-connect-mode={connectMode ? "true" : "false"}
         data-selected-edge={selectedEdgeId ?? "none"}
         data-node-positions={JSON.stringify(projection.nodes.map((n) => [n.id, n.x, n.y]))}
+        data-node-statuses={JSON.stringify(projection.nodes.map((n) => [n.id, n.status]))}
+        data-node-colors={JSON.stringify(projection.nodes.map((n) => [n.id, n.color]))}
         data-comm-edge-ids={JSON.stringify(projection.commEdges.map((e) => e.id))}
         onClick={() => onSelectAgent("a")}
         onContextMenu={(event) => {
@@ -285,6 +291,94 @@ describe("GraphView", () => {
     expect(handlers.onSelectionChange).toHaveBeenCalledWith(new Set(["a"]));
     expect(screen.getByRole("heading", { name: "Alpha" })).toBeInTheDocument();
     expect(screen.getByText("Coder / Codex")).toBeInTheDocument();
+  });
+
+  it("matches the canonical status when an action title overrides idle telemetry", () => {
+    const actionTitle = "✋ Action Required";
+    const expectedStatus = deriveCurrentThought(actionTitle, undefined, telemetry.a, false).status;
+
+    render(
+      <GraphView
+        {...defaultProps}
+        selectedAgentIds={new Set(["a"])}
+        terminalTitles={{ a: actionTitle }}
+        deriveCurrentThought={deriveCurrentThought}
+      />,
+    );
+
+    const graphNode = screen.getByTestId("mock-graph-node");
+    const nodeStatuses = JSON.parse(graphNode.getAttribute("data-node-statuses")!) as [string, string][];
+    const nodeColors = JSON.parse(graphNode.getAttribute("data-node-colors")!) as [string, string][];
+
+    expect(telemetry.a.current_status).toBe("Idle");
+    expect(expectedStatus).toBe("Action Needed");
+    expect(nodeStatuses).toContainEqual(["a", expectedStatus]);
+    expect(nodeColors).toContainEqual(["a", "var(--color-wardian-warning)"]);
+    expect(screen.getByText("Action Required")).toBeInTheDocument();
+  });
+
+  it("reprojects a new agent's title transition before telemetry arrives", () => {
+    const spawnedAgent = agent("new-agent");
+    const spawnedAgents = [spawnedAgent];
+    const noTelemetry: Record<string, AgentTelemetry> = {};
+    const noThoughts: Record<string, string> = {};
+    const noTitles: Record<string, string> = {};
+    const actionTitles = { "new-agent": "✋ Action Required" };
+    const activeThoughts = { "new-agent": "Starting provider" };
+    const props = {
+      ...defaultProps,
+      filteredAgents: [] as AgentConfig[],
+      allAgents: [] as AgentConfig[],
+      telemetry: noTelemetry,
+      terminalTitles: noTitles,
+      currentThoughts: noThoughts,
+      deriveCurrentThought,
+    };
+    const { rerender } = render(<GraphView {...props} />);
+
+    rerender(
+      <GraphView
+        {...props}
+        filteredAgents={spawnedAgents}
+        allAgents={spawnedAgents}
+      />,
+    );
+
+    const graphNode = screen.getByTestId("mock-graph-node");
+    expect(JSON.parse(graphNode.getAttribute("data-node-statuses")!)).toContainEqual(["new-agent", "Idle"]);
+    expect(noTelemetry["new-agent"]).toBeUndefined();
+
+    rerender(
+      <GraphView
+        {...props}
+        filteredAgents={spawnedAgents}
+        allAgents={spawnedAgents}
+        terminalTitles={actionTitles}
+      />,
+    );
+
+    expect(JSON.parse(graphNode.getAttribute("data-node-statuses")!)).toContainEqual(["new-agent", "Action Needed"]);
+    expect(JSON.parse(graphNode.getAttribute("data-node-colors")!)).toContainEqual([
+      "new-agent",
+      "var(--color-wardian-warning)",
+    ]);
+    expect(screen.getByText("Action Required")).toBeInTheDocument();
+
+    rerender(
+      <GraphView
+        {...props}
+        filteredAgents={spawnedAgents}
+        allAgents={spawnedAgents}
+        currentThoughts={activeThoughts}
+      />,
+    );
+
+    expect(JSON.parse(graphNode.getAttribute("data-node-statuses")!)).toContainEqual(["new-agent", "Processing..."]);
+    expect(JSON.parse(graphNode.getAttribute("data-node-colors")!)).toContainEqual([
+      "new-agent",
+      "var(--color-wardian-processing)",
+    ]);
+    expect(screen.getByText("Processing")).toBeInTheDocument();
   });
 
   it("shows the selected agent description in the inspector", () => {

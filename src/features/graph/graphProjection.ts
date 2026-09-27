@@ -1,7 +1,7 @@
 import type { AgentConfig, AgentTelemetry, TopologySnapshot, PairActivityEntry } from "../../types";
 import type { AgentInteractions, AgentTeam, Watchlist } from "../../layout/watchlist/types";
 import { getAgentsForList } from "../../layout/watchlist/watchlistUtils";
-import { getAgentStatusColorToken } from "../../utils/statusUtils";
+import { deriveCurrentThought, getAgentStatusColorToken } from "../../utils/statusUtils";
 
 export type GraphRelationshipReason =
   | "same_team"
@@ -79,6 +79,8 @@ export interface BuildAgentGraphInput {
   interactions: AgentInteractions;
   selectedAgentIds: Set<string>;
   enabledReasons: Set<GraphRelationshipReason>;
+  terminalTitles?: Record<string, string>;
+  currentThoughts?: Record<string, string>;
   offAgentIds?: Set<string>;
   topology?: TopologySnapshot;
   pairActivity?: PairActivityEntry[];
@@ -152,11 +154,12 @@ export function buildAgentGraph(input: BuildAgentGraphInput): AgentGraphProjecti
 
   const nodes = visibleAgents.map((agent) => {
     const telemetry = input.telemetry[agent.session_id];
-    const status = telemetry?.current_status === "Headless"
-      ? "Headless"
-      : agent.is_off || input.offAgentIds?.has(agent.session_id)
-        ? "Off"
-        : telemetry?.current_status ?? "Idle";
+    const status = deriveCurrentThought(
+      input.terminalTitles?.[agent.session_id] ?? "",
+      input.currentThoughts?.[agent.session_id],
+      telemetry,
+      input.offAgentIds?.has(agent.session_id) ?? agent.is_off,
+    ).status;
     const position = positions.get(agent.session_id) ?? { x: 0, y: 0 };
 
     return {
