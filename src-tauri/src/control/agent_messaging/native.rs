@@ -196,16 +196,10 @@ pub(super) async fn dispatch_attached_task_with_request(
     info: &DeliveryTargetInfo,
     request_id: Option<&str>,
 ) -> Result<(), ControlError> {
-    let Some(lifecycle) = state.try_lock_agent_lifecycle(&info.uuid).await else {
-        log_opencode_preclaim_stage(
-            state,
-            info,
-            request_id,
-            OpenCodeDispatchDiagnosticReason::LifecycleBusy,
-        )
-        .await;
-        return Ok(());
-    };
+    // Readiness publication may schedule this worker while still holding the
+    // lifecycle gate. Report prolonged contention while preserving the queued
+    // opportunity, then validate the target incarnation after acquisition.
+    let lifecycle = super::lock_agent_lifecycle_for_task_dispatch(state, info, request_id).await;
     let current = delivery_target_info(state, &info.uuid).await?;
     if !same_delivery_target_incarnation(info, &current) {
         log_opencode_preclaim_stage(
@@ -215,6 +209,9 @@ pub(super) async fn dispatch_attached_task_with_request(
             OpenCodeDispatchDiagnosticReason::StaleIncarnation,
         )
         .await;
+        return Ok(());
+    }
+    if current.provider != info.provider || current.config.is_off != info.config.is_off {
         return Ok(());
     }
     if active_conversation_lease_for_delivery(&current) {
