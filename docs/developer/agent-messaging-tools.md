@@ -69,7 +69,8 @@ and an active conversation lease remain authoritative.
 `followup_task` first persists the task and returns its request ID. Manual
 receive and automatic dispatch share a durable claim: only one may expose that
 task as new work. Startup and readiness observations give pending tasks another
-dispatch opportunity; they do not replay a task whose delivery is uncertain.
+dispatch opportunity after the agent roster and startup lifecycle become ready.
+They do not replay a task whose delivery is uncertain.
 
 For an attached Codex session, Wardian validates its native owner and runtime
 generation, then sends `turn/start` with a structured `wardian_task_delivery`
