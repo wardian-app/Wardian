@@ -2315,6 +2315,52 @@ fn event_id(session_id: &str, sequence: u64, source: &str) -> String {
 mod tests {
     use super::*;
 
+    struct WardianHomeGuard<'a> {
+        _env_lock: &'a tokio::sync::MutexGuard<'static, ()>,
+        previous_home: Option<std::ffi::OsString>,
+    }
+
+    impl<'a> WardianHomeGuard<'a> {
+        fn set(env_lock: &'a tokio::sync::MutexGuard<'static, ()>, home: &std::path::Path) -> Self {
+            let guard = Self {
+                _env_lock: env_lock,
+                previous_home: std::env::var_os("WARDIAN_HOME"),
+            };
+            std::env::set_var("WARDIAN_HOME", home);
+            guard
+        }
+    }
+
+    impl Drop for WardianHomeGuard<'_> {
+        fn drop(&mut self) {
+            match self.previous_home.take() {
+                Some(home) => std::env::set_var("WARDIAN_HOME", home),
+                None => std::env::remove_var("WARDIAN_HOME"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn wardian_home_guard_restores_previous_value_during_unwind() {
+        let env_lock = crate::utils::wardian_test_env_lock_async().await;
+        let original_home = std::env::var_os("WARDIAN_HOME");
+        let sentinel_home = tempfile::tempdir().expect("sentinel home");
+        let panic_home = tempfile::tempdir().expect("panic home");
+        let sentinel_value = sentinel_home.path().as_os_str().to_owned();
+        let original_guard = WardianHomeGuard::set(&env_lock, sentinel_home.path());
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _panic_guard = WardianHomeGuard::set(&env_lock, panic_home.path());
+            panic!("exercise WARDIAN_HOME restoration during unwinding");
+        }));
+
+        assert!(panic_result.is_err(), "the test panic must be caught");
+        assert_eq!(std::env::var_os("WARDIAN_HOME"), Some(sentinel_value));
+
+        drop(original_guard);
+        assert_eq!(std::env::var_os("WARDIAN_HOME"), original_home);
+    }
+
     #[test]
     fn launch_owned_fresh_identity_trusts_prefix_but_resume_does_not() {
         assert!(provider_log_source_is_fresh(
@@ -2774,10 +2820,9 @@ Do you want to proceed?
     async fn incremental_codex_user_mirror_capture_separates_legacy_turn_and_unbound_lines() {
         use std::io::Write as _;
 
-        let _guard = crate::utils::wardian_test_env_lock_async().await;
+        let env_lock = crate::utils::wardian_test_env_lock_async().await;
         let temp = tempfile::tempdir().expect("isolated home");
-        let previous_home = std::env::var_os("WARDIAN_HOME");
-        std::env::set_var("WARDIAN_HOME", temp.path());
+        let _home_guard = WardianHomeGuard::set(&env_lock, temp.path());
 
         let log_path = temp.path().join("codex.jsonl");
         let source_key = "codex:session:codex-session-one";
@@ -3161,11 +3206,6 @@ Do you want to proceed?
                 .collect::<Vec<_>>(),
             vec!["provider-turn-old", "provider-turn-new"]
         );
-
-        match previous_home {
-            Some(home) => std::env::set_var("WARDIAN_HOME", home),
-            None => std::env::remove_var("WARDIAN_HOME"),
-        }
     }
 
     #[tokio::test]
