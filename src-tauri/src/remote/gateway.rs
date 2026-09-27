@@ -2129,6 +2129,220 @@ mod tests {
         unsafe { std::env::remove_var("WARDIAN_HOME") };
     }
 
+    #[tokio::test]
+    async fn remote_chat_gateway_returns_repeated_codex_turns_after_legacy_archive_identity() {
+        use std::io::Write as _;
+
+        let _guard = crate::utils::wardian_test_env_lock_async().await;
+        let temp = tempfile::tempdir().expect("temp home");
+        let previous_home = std::env::var_os("WARDIAN_HOME");
+        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        crate::remote::storage::save_remote_config_at(temp.path(), &config())
+            .expect("remote config");
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: wardian_core::conversations::ConversationLoggingSetting::Enabled,
+            ..Default::default()
+        })
+        .expect("enable conversation logging");
+
+        let log_path = temp.path().join("codex.jsonl");
+        let source_key = "codex:session:codex-session-one";
+        let prompt = "Repeated synthetic request";
+        let turn_lines = |turn_id: &str, message_id: &str| {
+            vec![
+                serde_json::json!({
+                    "type": "turn_context",
+                    "payload": {"turn_id": turn_id},
+                })
+                .to_string(),
+                serde_json::json!({
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "id": message_id,
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": prompt}],
+                        "internal_chat_message_metadata_passthrough": {
+                            "turn_id": turn_id,
+                            "content_item_kinds": ["user.text"],
+                        },
+                    },
+                })
+                .to_string(),
+                serde_json::json!({
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": prompt},
+                })
+                .to_string(),
+            ]
+        };
+        let first_lines = turn_lines("provider-turn-old", "native-message-old");
+        std::fs::write(&log_path, format!("{}\n", first_lines.join("\n")))
+            .expect("write first synthetic turn");
+
+        let app = tauri::test::mock_app();
+        app.manage(AppState::new());
+        let state = app.state::<AppState>();
+        let context = crate::state::conversation_archive::ConversationArchiveContext {
+            agent_id: "synthetic-codex-agent".to_string(),
+            agent_name: "Synthetic Codex".to_string(),
+            agent_class: "Coder".to_string(),
+            workspace: "<absolute-workspace-path>".to_string(),
+            provider: "codex".to_string(),
+            provider_session_ids: vec!["codex-session-one".to_string()],
+            provider_source_key: Some(source_key.to_string()),
+        };
+        let mut first = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "synthetic-codex-agent",
+            "codex",
+            &log_path,
+            source_key,
+            None,
+            true,
+        )
+        .expect("capture first synthetic turn");
+        let canonical_log_path = std::fs::canonicalize(&log_path)
+            .expect("canonicalize synthetic log")
+            .to_string_lossy()
+            .to_string();
+        for event in &mut first.events {
+            event.metadata["provider_log"] = serde_json::json!(true);
+            event.metadata["log_source"] = serde_json::json!("active_agent_log_path");
+            event.metadata["log_path"] = serde_json::json!(canonical_log_path.clone());
+            event.id = crate::commands::chat::archive_identity::stable_provider_log_event_id(
+                event, &log_path,
+            );
+        }
+        let old_mirror = first
+            .events
+            .iter_mut()
+            .find(|event| event.source.as_deref() == Some("event_msg"))
+            .expect("first user mirror");
+        let mut legacy_identity = old_mirror.clone();
+        legacy_identity.metadata["input_origin"] = serde_json::json!("provider_internal");
+        old_mirror.id = crate::commands::chat::archive_identity::stable_provider_log_event_id(
+            &legacy_identity,
+            &log_path,
+        );
+        old_mirror
+            .metadata
+            .as_object_mut()
+            .expect("mirror metadata")
+            .remove("legacy_event_ids");
+        state
+            .conversation_archive
+            .append_provider_log_batch_with_context(context, &first.events, None, &first.next)
+            .expect("seed the retained pre-fix archive identity and cursor");
+
+        let second_lines = turn_lines("provider-turn-new", "native-message-new");
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log_path)
+                .expect("open synthetic log for append"),
+            "{}",
+            second_lines.join("\n")
+        )
+        .expect("append repeated second turn");
+
+        state.agents.lock().await.insert(
+            "synthetic-codex-agent".to_string(),
+            crate::state::ActiveAgent {
+                config: std::sync::Arc::new(std::sync::Mutex::new(
+                    wardian_core::models::AgentConfig {
+                        session_id: "synthetic-codex-agent".to_string(),
+                        session_name: "Synthetic Codex".to_string(),
+                        agent_class: "Coder".to_string(),
+                        provider: "codex".to_string(),
+                        folder: temp.path().to_string_lossy().to_string(),
+                        fresh_provider_session_id: Some("codex-session-one".to_string()),
+                        conversation_logging:
+                            wardian_core::conversations::AgentConversationLoggingSetting::Default,
+                        ..Default::default()
+                    },
+                )),
+                child_process: None,
+                background_processes: Vec::new(),
+                memory_capability: None,
+                runtime_generation: None,
+                process_id: None,
+                query_count: std::sync::Arc::new(std::sync::Mutex::new(0)),
+                init_timestamp: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                last_query_timestamp: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                current_status: std::sync::Arc::new(std::sync::Mutex::new("Idle".to_string())),
+                last_status_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                watch_state: std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::state::AgentWatchState::new(
+                        "synthetic-codex-agent".to_string(),
+                        32,
+                        4096,
+                    ),
+                )),
+                terminal_title: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+                last_output_at: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                log_path: std::sync::Arc::new(std::sync::Mutex::new(Some(log_path.clone()))),
+                log_last_modified: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                #[cfg(windows)]
+                job_object: None,
+            },
+        );
+
+        let session = {
+            let mut runtime = state.remote_runtime.lock().await;
+            crate::remote::auth::create_session(
+                &mut runtime,
+                "synthetic-device",
+                chrono::Utc::now().timestamp_millis(),
+            )
+        };
+        let ctx = RemoteGatewayContext {
+            app: app.handle().clone(),
+            config: config(),
+        };
+        let response = load_remote_agent_chat(
+            State(ctx),
+            action_headers(&session),
+            AxumPath("synthetic-codex-agent".to_string()),
+            Query(RemoteChatQuery {
+                before: None,
+                limit: Some(100),
+            }),
+        )
+        .await
+        .expect("authenticated gateway chat read")
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("gateway response body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("gateway JSON");
+        let repeated_users = payload["events"]
+            .as_array()
+            .expect("chat event page")
+            .iter()
+            .filter(|event| event["role"] == "user" && event["text"] == prompt)
+            .collect::<Vec<_>>();
+        assert_eq!(repeated_users.len(), 2);
+        let provider_turn_ids = repeated_users
+            .iter()
+            .filter_map(|event| event["metadata"]["provider_turn_id"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            provider_turn_ids,
+            vec!["provider-turn-old", "provider-turn-new"]
+        );
+        assert!(repeated_users
+            .iter()
+            .all(|event| event["id"].as_str().is_some()));
+        assert_ne!(repeated_users[0]["id"], repeated_users[1]["id"]);
+
+        match previous_home {
+            Some(home) => unsafe { std::env::set_var("WARDIAN_HOME", home) },
+            None => unsafe { std::env::remove_var("WARDIAN_HOME") },
+        }
+    }
+
     #[test]
     fn status_stream_client_messages_do_not_request_immediate_snapshot() {
         assert_eq!(
