@@ -73,7 +73,10 @@ describe("AgentTelemetryDetails", () => {
   });
 
   it("portals above the surface and keeps Tab focus inside the dialog", async () => {
-    invokeMock.mockResolvedValue(breakdown());
+    let resolveBreakdown!: (value: TelemetryAgentBreakdown) => void;
+    invokeMock.mockReturnValue(new Promise<TelemetryAgentBreakdown>((resolve) => {
+      resolveBreakdown = resolve;
+    }));
     render(
       <AgentTelemetryDetails
         target={target}
@@ -84,9 +87,11 @@ describe("AgentTelemetryDetails", () => {
 
     const dialog = await screen.findByRole("dialog", { name: "Parent Agent" });
     expect(dialog.closest(".wardian-dialog-overlay")?.parentElement).toBe(document.body);
+    expect(screen.queryByRole("button", { name: "Open agent" })).not.toBeInTheDocument();
+    resolveBreakdown(breakdown());
 
     const closeButton = screen.getByRole("button", { name: "Close telemetry details" });
-    const openAgentButton = screen.getByRole("button", { name: "Open agent" });
+    const openAgentButton = await screen.findByRole("button", { name: "Open agent" });
     closeButton.focus();
     await userEvent.tab();
     expect(document.activeElement).toBe(openAgentButton);
