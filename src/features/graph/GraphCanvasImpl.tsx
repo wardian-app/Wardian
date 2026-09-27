@@ -281,16 +281,30 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
     let animationFrame: number | null = null;
 
     const syncGraph = () => {
+      const currentProjection = projectionRef.current;
       // A status or activity update can arrive while wheel zoom is animating.
       // Swapping Sigma's graph schedules a render against a new projection,
-      // which interrupts that in-flight camera frame. Keep only the latest
-      // projection and apply it once the camera has settled.
+      // which interrupts that in-flight camera frame. Update only the status
+      // and color of existing nodes while deferring geometry and topology.
       if (renderer.getCamera().isAnimated()) {
+        const displayedGraph = graphRef.current;
+        if (displayedGraph) {
+          for (const node of currentProjection.nodes) {
+            if (!displayedGraph.hasNode(node.id)) continue;
+            const color = resolveGraphColor(node.color, container);
+            const attributes = displayedGraph.getNodeAttributes(node.id);
+            if (attributes.status === node.status && attributes.color === color) continue;
+            displayedGraph.updateNodeAttributes(node.id, (current) => ({
+              ...current,
+              status: node.status,
+              color,
+            }));
+          }
+        }
         animationFrame = requestAnimationFrame(syncGraph);
         return;
       }
 
-      const currentProjection = projectionRef.current;
       // Build off-renderer, then swap once. Mutating Sigma's live Graphology
       // instance emits a refresh for clear and every add.
       const graph = new Graph();
@@ -301,6 +315,7 @@ export const GraphCanvas: React.FC<GraphCanvasProps> = ({
           x: node.x,
           y: node.y,
           size: node.size,
+          status: node.status,
           color: resolveGraphColor(node.color, container),
           highlighted: node.selected,
           forceLabel: showAllLabels || node.selected,

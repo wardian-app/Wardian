@@ -7,6 +7,7 @@ import { WHEEL_ZOOM_STEP } from "../../utils/wheelZoom";
 
 const mocks = vi.hoisted(() => {
   const edgeIds = new Set<string>();
+  const nodeAttributes = new Map<string, Record<string, unknown>>();
   return {
     handlers: new Map<string, (payload: unknown) => void>(),
     animatedReset: vi.fn(),
@@ -27,9 +28,15 @@ const mocks = vi.hoisted(() => {
     loseContext: vi.fn(),
     webglCanvasCount: 3,
     edgeIds,
+    nodeAttributes,
     graphology: {
       clear: vi.fn(() => edgeIds.clear()),
-      addNode: vi.fn(),
+      addNode: vi.fn((id: string, attributes: Record<string, unknown>) => nodeAttributes.set(id, attributes)),
+      hasNode: vi.fn((id: string) => nodeAttributes.has(id)),
+      getNodeAttributes: vi.fn((id: string) => nodeAttributes.get(id)),
+      updateNodeAttributes: vi.fn((id: string, update: (attributes: Record<string, unknown>) => Record<string, unknown>) => {
+        nodeAttributes.set(id, update(nodeAttributes.get(id)!));
+      }),
       addEdgeWithKey: vi.fn((id: string) => edgeIds.add(id)),
       addEdge: vi.fn(),
       updateEdgeAttributes: vi.fn(),
@@ -126,6 +133,7 @@ describe("GraphCanvas", () => {
   beforeEach(() => {
     mocks.handlers.clear();
     mocks.edgeIds.clear();
+    mocks.nodeAttributes.clear();
     mocks.animatedReset.mockClear();
     mocks.isAnimated.mockReset();
     mocks.isAnimated.mockReturnValue(false);
@@ -141,6 +149,7 @@ describe("GraphCanvas", () => {
     mocks.graphology.clear.mockClear();
     mocks.graphology.clear.mockImplementation(() => mocks.edgeIds.clear());
     mocks.graphology.addNode.mockClear();
+    mocks.graphology.updateNodeAttributes.mockClear();
     mocks.graphology.addEdgeWithKey.mockClear();
     mocks.graphology.addEdgeWithKey.mockImplementation(((id: string) => {
       mocks.edgeIds.add(id);
@@ -455,6 +464,70 @@ describe("GraphCanvas", () => {
     act(() => requestAnimationFrame.mock.calls[0][0](0));
 
     expect(mocks.setGraph).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
+  });
+
+  it("updates an existing idle node to Action Needed during camera animation without changing geometry", () => {
+    const requestAnimationFrame = vi.fn<(callback: FrameRequestCallback) => number>();
+    vi.stubGlobal("requestAnimationFrame", requestAnimationFrame);
+    const { rerender } = render(
+      <GraphCanvas
+        projection={projection}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+      />,
+    );
+
+    expect(mocks.nodeAttributes.get("a")).toMatchObject({
+      color: "var(--color-wardian-success)",
+      x: 1,
+      y: 2,
+      size: 6,
+    });
+    const liveGraph = mocks.setGraph.mock.calls[0][0];
+    mocks.isAnimated.mockReturnValue(true);
+    rerender(
+      <GraphCanvas
+        projection={{
+          ...projection,
+          nodes: [{ ...projection.nodes[0], status: "Action Needed", color: "var(--color-wardian-warning)" }],
+        }}
+        onSelectAgent={vi.fn()}
+        onOpenAgent={vi.fn()}
+        onContextMenu={vi.fn()}
+      />,
+    );
+
+    expect(mocks.setGraph).toHaveBeenCalledTimes(1);
+    expect(mocks.setGraph.mock.calls[0][0]).toBe(liveGraph);
+    expect(mocks.nodeAttributes.size).toBe(1);
+    expect(mocks.graphology.addNode).toHaveBeenCalledTimes(1);
+    expect(mocks.graphology.addEdgeWithKey).toHaveBeenCalledTimes(1);
+    expect(mocks.graphology.updateNodeAttributes).toHaveBeenCalledTimes(1);
+    expect(mocks.nodeAttributes.get("a")).toMatchObject({
+      status: "Action Needed",
+      color: "var(--color-wardian-warning)",
+      x: 1,
+      y: 2,
+      size: 6,
+    });
+
+    act(() => requestAnimationFrame.mock.calls[0][0](0));
+    expect(mocks.graphology.updateNodeAttributes).toHaveBeenCalledTimes(1);
+
+    mocks.isAnimated.mockReturnValue(false);
+    act(() => requestAnimationFrame.mock.calls[1][0](0));
+
+    expect(mocks.setGraph).toHaveBeenCalledTimes(2);
+    expect(mocks.nodeAttributes.size).toBe(1);
+    expect(mocks.nodeAttributes.get("a")).toMatchObject({
+      status: "Action Needed",
+      color: "var(--color-wardian-warning)",
+      x: 1,
+      y: 2,
+      size: 6,
+    });
     vi.unstubAllGlobals();
   });
 
