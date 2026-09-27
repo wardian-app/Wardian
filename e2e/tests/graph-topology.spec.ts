@@ -1,6 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { openSurface, surfacePanel } from "../fixtures/workbench";
 import { makeWorkbenchDocument, makeWorkbenchSurface } from "../fixtures/workbenchIpcMock";
+import { Buffer } from "buffer";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -35,6 +36,20 @@ const GRAPH_WORKBENCH_DOCUMENT = makeWorkbenchDocument({
   surfaces: [makeWorkbenchSurface("graph-surface", "graph")],
 });
 
+const GRAPH_STATUS_WATCHLIST_PREFS: Record<string, unknown> = {
+  columns: [
+    { id: "status_label", visible: true },
+    { id: "query_count", visible: false },
+    { id: "uptime", visible: false },
+    { id: "provider_model", visible: false },
+    { id: "last_queried", visible: false },
+  ],
+  sort: null,
+  preserve_team_grouping_when_sorted: false,
+  collapsed_team_ids: [],
+  collapsed_team_ids_by_list: {},
+};
+
 async function installGraphTopologyIpcMock(
   page: Page,
   topology: {
@@ -44,13 +59,36 @@ async function installGraphTopologyIpcMock(
   },
   agents: MockAgent[],
   pairActivity: PairActivity[] = [],
+  watchlistPrefs: Record<string, unknown> | null = null,
 ) {
-  await page.addInitScript(({ topologyFixture, agentsFixture, activityFixture, workbenchDocument }) => {
+  await page.addInitScript(({
+    topologyFixture,
+    agentsFixture,
+    activityFixture,
+    workbenchDocument,
+    watchlistPrefsFixture,
+  }) => {
     let callbackId = 1;
     const callbacks = new Map<number, unknown>();
+    const eventHandlers = new Map<string, number>();
     const tauriWindow = window as Window & {
       __TAURI_INTERNALS__?: Record<string, unknown>;
       __TAURI_EVENT_PLUGIN_INTERNALS__?: Record<string, unknown>;
+      __WARDIAN_E2E_GRAPH_RUNTIME__?: {
+        hasListener: (event: string) => boolean;
+        emit: (event: string, payload: unknown) => void;
+      };
+    };
+
+    tauriWindow.__WARDIAN_E2E_GRAPH_RUNTIME__ = {
+      hasListener: (event) => eventHandlers.has(event),
+      emit: (event, payload) => {
+        const handlerId = eventHandlers.get(event);
+        const handler = handlerId === undefined
+          ? undefined
+          : callbacks.get(handlerId) as ((event: unknown) => void) | undefined;
+        handler?.({ event, id: 0, payload });
+      },
     };
 
     tauriWindow.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
@@ -102,7 +140,7 @@ async function installGraphTopologyIpcMock(
           ];
         }
         if (command === "load_watchlists") return [];
-        if (command === "load_watchlist_prefs") return null;
+        if (command === "load_watchlist_prefs") return watchlistPrefsFixture;
         if (command === "load_agent_interactions") return {};
         if (command === "load_queue_items") return [];
         if (command === "load_queue_preferences") return {};
@@ -137,7 +175,10 @@ async function installGraphTopologyIpcMock(
         if (command === "get_pair_activity") {
           return { pairs: activityFixture, truncated: false, next_offset: null };
         }
-        if (command === "plugin:event|listen") return callbackId++;
+        if (command === "plugin:event|listen") {
+          eventHandlers.set(String(args?.event), Number(args?.handler));
+          return callbackId++;
+        }
         if (command === "plugin:event|unlisten") return null;
         if (command === "sync_provider_theme_settings") return null;
         return null;
@@ -148,6 +189,7 @@ async function installGraphTopologyIpcMock(
     agentsFixture: agents,
     activityFixture: pairActivity,
     workbenchDocument: GRAPH_WORKBENCH_DOCUMENT,
+    watchlistPrefsFixture: watchlistPrefs,
   });
 }
 
@@ -158,6 +200,48 @@ async function openGraphView(page: Page) {
 
   await openSurface(page, "graph");
   await expect(surfacePanel(page, "graph").locator('[data-testid="graph-view"]')).toBeVisible({ timeout: 10_000 });
+}
+
+async function countScreenshotPixelsMatchingColor(
+  page: Page,
+  screenshot: Buffer,
+  cssColor: string,
+): Promise<number> {
+  return page.evaluate(async ({ screenshotBase64, targetColor }) => {
+    const channels = targetColor.match(/[\d.]+/g)?.slice(0, 3).map(Number);
+    if (!channels || channels.length !== 3) {
+      throw new Error(`Could not parse rendered status color: ${targetColor}`);
+    }
+
+    const image = new Image();
+    image.src = `data:image/png;base64,${screenshotBase64}`;
+    await image.decode();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) throw new Error("Could not read Graph canvas screenshot pixels.");
+    context.drawImage(image, 0, 0);
+
+    const { data } = context.getImageData(0, 0, canvas.width, canvas.height);
+    const tolerance = 20;
+    let matchingPixels = 0;
+    for (let index = 0; index < data.length; index += 4) {
+      if (
+        data[index + 3] > 240
+        && Math.abs(data[index] - channels[0]) <= tolerance
+        && Math.abs(data[index + 1] - channels[1]) <= tolerance
+        && Math.abs(data[index + 2] - channels[2]) <= tolerance
+      ) {
+        matchingPixels += 1;
+      }
+    }
+    return matchingPixels;
+  }, {
+    screenshotBase64: screenshot.toString("base64"),
+    targetColor: cssColor,
+  });
 }
 
 test.describe("Graph Topology", () => {
@@ -229,6 +313,95 @@ test.describe("Graph Topology", () => {
     await page.locator(".graph-inspector").screenshot({
       path: path.join("e2e", "screenshots", "graph", "2026-08-04", "agent-description-inspector.png"),
       animations: "disabled",
+    });
+  });
+
+  test("shows an existing agent's status event in both Graph and Watchlist", async ({ page }, testInfo) => {
+    const alpha: MockAgent = {
+      session_id: "graph-status-alpha",
+      session_name: "Alpha",
+      agent_class: "TestClass",
+      folder: "/test/alpha",
+      provider: "claude",
+      is_off: false,
+    };
+    await installGraphTopologyIpcMock(page, {
+      edges: [], ignored_pairs: [], fallback_groups: [],
+    }, [alpha], [], GRAPH_STATUS_WATCHLIST_PREFS);
+    await openGraphView(page);
+
+    const alphaRow = page.getByLabel("Agent Alpha", { exact: true });
+    const graphInspector = surfacePanel(page, "graph").locator(".graph-inspector");
+    const graphCanvas = surfacePanel(page, "graph").locator(".graph-canvas-shell");
+    await expect(alphaRow).toBeVisible();
+    const idleStatusDot = alphaRow.locator(".bg-wardian-success");
+    await expect(idleStatusDot).toBeVisible();
+    const idleStatus = alphaRow.locator('[aria-label^="Status: Idle"]');
+    await expect(idleStatus).toHaveText("Idle");
+    await expect(graphInspector).toContainText("Idle");
+    const idleColor = await idleStatusDot.evaluate((element) => getComputedStyle(element).backgroundColor);
+    await expect.poll(async () => countScreenshotPixelsMatchingColor(
+      page,
+      await graphCanvas.screenshot({ animations: "disabled" }),
+      idleColor,
+    )).toBeGreaterThan(0);
+    await expect.poll(() => page.evaluate(() => (
+      window as Window & {
+        __WARDIAN_E2E_GRAPH_RUNTIME__?: { hasListener: (event: string) => boolean };
+      }
+    ).__WARDIAN_E2E_GRAPH_RUNTIME__?.hasListener("agent-status-updated"))).toBe(true);
+
+    await page.evaluate(() => {
+      (window as Window & {
+        __WARDIAN_E2E_GRAPH_RUNTIME__?: { emit: (event: string, payload: unknown) => void };
+      }).__WARDIAN_E2E_GRAPH_RUNTIME__?.emit("agent-status-updated", {
+        session_id: "graph-status-alpha",
+        current_status: "Action Needed",
+      });
+    });
+
+    const actionNeededStatusDot = alphaRow.locator(".bg-wardian-warning");
+    await expect(actionNeededStatusDot).toBeVisible();
+    const actionRequiredStatus = alphaRow.locator('[aria-label^="Status: Action Required"]');
+    await expect(actionRequiredStatus).toHaveText("Action Required");
+    await expect(actionRequiredStatus).toHaveClass(/text-wardian-warning/);
+    await expect(graphInspector).toContainText("Action Required");
+    const actionNeededColor = await actionNeededStatusDot.evaluate((element) => getComputedStyle(element).backgroundColor);
+    await expect.poll(async () => countScreenshotPixelsMatchingColor(
+      page,
+      await graphCanvas.screenshot({ animations: "disabled" }),
+      actionNeededColor,
+    )).toBeGreaterThan(0);
+    const actionNeededScreenshot = await graphCanvas.screenshot({ animations: "disabled" });
+    expect(await countScreenshotPixelsMatchingColor(page, actionNeededScreenshot, idleColor)).toBe(0);
+
+    const screenshotPath = testInfo.outputPath("graph-and-watchlist-action-required.png");
+    const graphView = surfacePanel(page, "graph").locator('[data-testid="graph-view"]');
+    const watchlist = page.getByTestId("agent-watchlist");
+    const [graphBounds, watchlistBounds] = await Promise.all([
+      graphView.boundingBox(),
+      watchlist.boundingBox(),
+    ]);
+    expect(graphBounds).not.toBeNull();
+    expect(watchlistBounds).not.toBeNull();
+    const clipX = Math.floor(Math.min(graphBounds!.x, watchlistBounds!.x));
+    const clipY = Math.floor(Math.min(graphBounds!.y, watchlistBounds!.y));
+    const clipRight = Math.ceil(Math.max(
+      graphBounds!.x + graphBounds!.width,
+      watchlistBounds!.x + watchlistBounds!.width,
+    ));
+    const clipBottom = Math.ceil(Math.max(
+      graphBounds!.y + graphBounds!.height,
+      watchlistBounds!.y + watchlistBounds!.height,
+    ));
+    await page.screenshot({
+      path: screenshotPath,
+      animations: "disabled",
+      clip: { x: clipX, y: clipY, width: clipRight - clipX, height: clipBottom - clipY },
+    });
+    await testInfo.attach("graph-and-watchlist-action-required", {
+      path: screenshotPath,
+      contentType: "image/png",
     });
   });
 
@@ -472,7 +645,7 @@ test.describe("Graph Topology", () => {
     await expect(deleteBtn).toContainText("×");
   });
 
-  test("keeps the graph surface stable during repeated wheel zoom", async ({}, testInfo) => {
+  test("keeps the graph surface stable during repeated wheel zoom", async ({ page }, testInfo) => {
     const runtimeErrors: string[] = [];
     const onPageError = (error: Error) => runtimeErrors.push(error.message);
     page.on("pageerror", onPageError);
