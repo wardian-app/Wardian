@@ -21,7 +21,9 @@ use std::collections::HashMap;
 use std::io::{BufRead, Read, Seek, Write};
 use tauri::{AppHandle, Emitter, Manager};
 use wardian_core::control::{ProviderInputReadiness, WatchTranscriptMessage};
-use wardian_core::models::{AgentChatRole, AgentConfig, AgentEvent, ProviderConfig};
+use wardian_core::models::{
+    AgentChatRole, AgentConfig, AgentEvent, ProviderConfig, TerminalSnapshot,
+};
 
 use super::codex_onboarding::{
     finalize_synchronous_codex, CodexAttachmentCompletion, CodexAttachmentCompletionContext,
@@ -53,6 +55,17 @@ const OUTPUT_READY_EMIT_MIN_INTERVAL: std::time::Duration = std::time::Duration:
 const ANTIGRAVITY_TRANSCRIPT_OVERLAP_STEPS: u64 = 16;
 const PROVIDER_SPAWN_LEASE_DURATION: chrono::Duration = chrono::Duration::minutes(20);
 const PROVIDER_SPAWN_LEASE_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(60);
+const CLAUDE_TRUST_CONFIRMATION_NOT_STARTED: u8 = 0;
+const CLAUDE_TRUST_CONFIRMATION_PENDING: u8 = 1;
+const CLAUDE_TRUST_CONFIRMATION_CONFIRMED: u8 = 2;
+const CLAUDE_TRUST_CONFIRMATION_FAILED: u8 = 3;
+const CLAUDE_TRUST_PROMPT_SETTLE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(2_500);
+const CLAUDE_TRUST_SELECTION_SETTLE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(400);
+const CLAUDE_TRUST_SELECTION_POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(50);
+const CLAUDE_TRUST_SELECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn interactive_provider_launch_cwd(
     provider: &str,
@@ -806,6 +819,59 @@ fn startup_prompt_is_ready(
         })
 }
 
+fn claude_trust_flow_blocks_readiness(trust_state: u8) -> bool {
+    matches!(
+        trust_state,
+        CLAUDE_TRUST_CONFIRMATION_PENDING | CLAUDE_TRUST_CONFIRMATION_FAILED
+    )
+}
+
+fn claude_trust_reader_should_mark_action_needed(trust_state: u8, assigned_prompt: bool) -> bool {
+    assigned_prompt && !claude_trust_flow_blocks_readiness(trust_state)
+}
+
+fn startup_prompt_ready_for_reader(
+    provider: &str,
+    startup_prompt_pending: bool,
+    trust_state: u8,
+    startup_screen: Option<&str>,
+) -> bool {
+    !claude_trust_flow_blocks_readiness(trust_state)
+        && startup_prompt_is_ready(provider, startup_prompt_pending, startup_screen)
+}
+
+fn finish_claude_trust_readiness(
+    trust_state: &std::sync::atomic::AtomicU8,
+    readiness_claimed: &std::sync::atomic::AtomicBool,
+    wake_queued_delivery: impl FnOnce(),
+) -> bool {
+    if !readiness_claimed.load(std::sync::atomic::Ordering::Acquire)
+        || trust_state
+            .compare_exchange(
+                CLAUDE_TRUST_CONFIRMATION_PENDING,
+                CLAUDE_TRUST_CONFIRMATION_CONFIRMED,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+    {
+        return false;
+    }
+    wake_queued_delivery();
+    true
+}
+
+fn claim_startup_readiness(claimed: &std::sync::atomic::AtomicBool) -> bool {
+    claimed
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_ok()
+}
+
 impl AntigravityTranscriptTracker {
     fn minimum_step_index(&self) -> Option<u64> {
         self.latest_step_index
@@ -884,6 +950,423 @@ fn should_auto_confirm_claude_bypass_permissions(
         && enabled
         && !already_confirmed
         && claude_output_has_bypass_permissions_consent_prompt(output)
+}
+
+fn claude_trust_display_path_for_assigned_workspace(
+    provider_name: &str,
+    configured_workspace: &str,
+    assigned_workspace: &std::path::Path,
+    launch_cwd: &std::path::Path,
+) -> Option<String> {
+    if provider_name != "claude" || configured_workspace.trim().is_empty() {
+        return None;
+    }
+
+    let configured = std::path::Path::new(configured_workspace)
+        .canonicalize()
+        .ok()?;
+    let assigned = assigned_workspace.canonicalize().ok()?;
+    let launched = launch_cwd.canonicalize().ok()?;
+    (assigned.is_dir() && configured == assigned && assigned == launched)
+        .then(|| launch_cwd.to_string_lossy().into_owned())
+}
+
+fn normalized_claude_trust_path(path: &str) -> String {
+    let path = path
+        .trim()
+        .trim_matches(|character| matches!(character, '"' | '\'' | '`'));
+    #[cfg(windows)]
+    {
+        let normalized = path
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_ascii_lowercase();
+        if normalized.ends_with(':') {
+            format!("{normalized}\\")
+        } else {
+            normalized
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let normalized = path.trim_end_matches('/');
+        if normalized.is_empty() && path.starts_with('/') {
+            "/".to_string()
+        } else {
+            normalized.to_string()
+        }
+    }
+}
+
+fn claude_trust_screen_row_text(line: &str) -> &str {
+    line.trim_matches(|character: char| {
+        character.is_whitespace() || matches!(character, '│' | '┃' | '|')
+    })
+}
+
+fn claude_trust_screen_displays_workspace(output: &str, display_path: &str) -> bool {
+    // visible_grid comes from vt100::Screen::contents(), which joins rows
+    // flagged as soft-wrapped. Keep explicit newlines as hard boundaries;
+    // only a standalone label may consume its path row with at most one blank
+    // row between them. Never join partial text across hard row boundaries.
+    let expected = normalized_claude_trust_path(display_path);
+    let cleaned = crate::utils::strip_ansi_controls(output);
+    let lines = cleaned.lines().collect::<Vec<_>>();
+    let Some(question) = lines.iter().enumerate().position(|(index, _)| {
+        crate::control::startup_readiness::claude_workspace_trust_question_span(&lines, index)
+            .is_some()
+    }) else {
+        return false;
+    };
+    lines.iter().enumerate().any(|(index, line)| {
+        if index >= question {
+            return false;
+        }
+        let line = claude_trust_screen_row_text(line)
+            .trim_matches(|character| matches!(character, '"' | '\'' | '`'));
+        let Some(path) = line.strip_prefix("Accessing workspace:") else {
+            return false;
+        };
+        let path_row = |line: &str| {
+            normalized_claude_trust_path(claude_trust_screen_row_text(line)) == expected
+        };
+        let path_index = if path_row(path) {
+            Some(index)
+        } else if path.trim().is_empty() {
+            if lines.get(index + 1).is_some_and(|line| path_row(line)) {
+                Some(index + 1)
+            } else if lines
+                .get(index + 1)
+                .is_some_and(|line| claude_trust_screen_row_text(line).is_empty())
+                && lines.get(index + 2).is_some_and(|line| path_row(line))
+            {
+                Some(index + 2)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let Some(path_index) = path_index else {
+            return false;
+        };
+        path_index < question
+            && question - path_index <= 2
+            && lines[path_index + 1..question]
+                .iter()
+                .all(|line| claude_trust_screen_row_text(line).is_empty())
+    })
+}
+
+fn claude_trust_snapshots_are_stable(
+    before: &TerminalSnapshot,
+    after: &TerminalSnapshot,
+    runtime_generation: u64,
+    display_path: &str,
+    selection: (bool, bool),
+) -> bool {
+    before.runtime_generation == runtime_generation
+        && after.runtime_generation == runtime_generation
+        && before.sequence_barrier == after.sequence_barrier
+        && before.visible_grid == after.visible_grid
+        && [before, after].into_iter().all(|snapshot| {
+            claude_trust_screen_displays_workspace(&snapshot.visible_grid, display_path)
+                && crate::control::startup_readiness::claude_workspace_trust_prompt_selection(
+                    &snapshot.visible_grid,
+                ) == Some(selection)
+        })
+}
+
+fn claude_startup_ready_snapshots_are_stable(
+    before: &TerminalSnapshot,
+    after: &TerminalSnapshot,
+    runtime_generation: u64,
+) -> bool {
+    before.runtime_generation == runtime_generation
+        && after.runtime_generation == runtime_generation
+        && before.sequence_barrier == after.sequence_barrier
+        && before.visible_grid == after.visible_grid
+        && [before, after].into_iter().all(|snapshot| {
+            crate::control::provider_output_has_startup_ready_prompt(
+                "claude",
+                &snapshot.visible_grid,
+            )
+        })
+}
+
+fn claude_assigned_trust_menu_is_current(output: &str, display_path: &str) -> bool {
+    claude_trust_screen_displays_workspace(output, display_path)
+        && crate::control::startup_readiness::claude_workspace_trust_prompt_selection(output)
+            .is_some()
+}
+
+async fn wait_for_claude_trust_selection(
+    terminal_sessions: &crate::state::terminal_session::TerminalSessionBroker,
+    session_id: &str,
+    runtime_generation: u64,
+    display_path: &str,
+    selection: (bool, bool),
+    wait_for_selection: bool,
+    settle_interval: std::time::Duration,
+) -> Result<TerminalSnapshot, String> {
+    let deadline = tokio::time::Instant::now() + CLAUDE_TRUST_SELECTION_TIMEOUT;
+    loop {
+        let before = tokio::time::timeout_at(deadline, terminal_sessions.snapshot(session_id))
+            .await
+            .map_err(|_| "Claude trust screen timed out".to_string())?
+            .map_err(|error| format!("Claude trust screen unavailable: {error}"))?;
+        if before.runtime_generation != runtime_generation {
+            return Err("Claude trust runtime generation changed".to_string());
+        }
+        if !claude_trust_screen_displays_workspace(&before.visible_grid, display_path) {
+            return Err("Claude trust prompt or assigned workspace changed".to_string());
+        }
+
+        let observed = crate::control::startup_readiness::claude_workspace_trust_prompt_selection(
+            &before.visible_grid,
+        );
+        if observed != Some(selection) {
+            if !wait_for_selection {
+                return Err("Claude trust selection changed before it settled".to_string());
+            }
+            tokio::time::timeout_at(
+                deadline,
+                tokio::time::sleep(CLAUDE_TRUST_SELECTION_POLL_INTERVAL),
+            )
+            .await
+            .map_err(|_| "Claude trust selection timed out".to_string())?;
+            continue;
+        }
+
+        tokio::time::timeout_at(deadline, tokio::time::sleep(settle_interval))
+            .await
+            .map_err(|_| "Claude trust screen did not settle".to_string())?;
+        let after = tokio::time::timeout_at(deadline, terminal_sessions.snapshot(session_id))
+            .await
+            .map_err(|_| "Claude trust screen timed out".to_string())?
+            .map_err(|error| format!("Claude trust screen unavailable: {error}"))?;
+        if after.runtime_generation != runtime_generation {
+            return Err("Claude trust runtime generation changed".to_string());
+        }
+        if !claude_trust_screen_displays_workspace(&after.visible_grid, display_path) {
+            return Err("Claude trust prompt or assigned workspace changed".to_string());
+        }
+        if crate::control::startup_readiness::claude_workspace_trust_prompt_selection(
+            &after.visible_grid,
+        ) != Some(selection)
+        {
+            return Err("Claude trust selection changed while settling".to_string());
+        }
+        if claude_trust_snapshots_are_stable(
+            &before,
+            &after,
+            runtime_generation,
+            display_path,
+            selection,
+        ) {
+            return Ok(after);
+        }
+    }
+}
+
+async fn send_claude_trust_key(
+    terminal_sessions: std::sync::Arc<crate::state::terminal_session::TerminalSessionBroker>,
+    session_id: String,
+    runtime_generation: u64,
+    key: &'static [u8],
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        terminal_sessions.send_privileged_input_blocking(
+            &session_id,
+            runtime_generation,
+            key.to_vec(),
+        )
+    })
+    .await
+    .map_err(|error| format!("Claude trust input worker failed: {error}"))?
+    .map_err(|error| format!("Claude trust input rejected: {error}"))
+}
+
+async fn wait_for_claude_startup_ready_prompt(
+    terminal_sessions: &crate::state::terminal_session::TerminalSessionBroker,
+    session_id: &str,
+    runtime_generation: u64,
+    display_path: &str,
+) -> Result<TerminalSnapshot, String> {
+    let deadline = tokio::time::Instant::now() + CLAUDE_TRUST_SELECTION_TIMEOUT;
+    loop {
+        let before = tokio::time::timeout_at(deadline, terminal_sessions.snapshot(session_id))
+            .await
+            .map_err(|_| "Claude ready prompt timed out after trust confirmation".to_string())?
+            .map_err(|error| format!("Claude ready screen unavailable: {error}"))?;
+        if before.runtime_generation != runtime_generation {
+            return Err("Claude trust runtime generation changed after confirmation".to_string());
+        }
+        if crate::control::provider_output_has_startup_ready_prompt("claude", &before.visible_grid)
+        {
+            tokio::time::timeout_at(
+                deadline,
+                tokio::time::sleep(CLAUDE_TRUST_SELECTION_SETTLE_INTERVAL),
+            )
+            .await
+            .map_err(|_| {
+                "Claude ready prompt did not settle after trust confirmation".to_string()
+            })?;
+            let after = tokio::time::timeout_at(deadline, terminal_sessions.snapshot(session_id))
+                .await
+                .map_err(|_| "Claude ready prompt timed out after trust confirmation".to_string())?
+                .map_err(|error| format!("Claude ready screen unavailable: {error}"))?;
+            if after.runtime_generation != runtime_generation {
+                return Err(
+                    "Claude trust runtime generation changed after confirmation".to_string()
+                );
+            }
+            if claude_startup_ready_snapshots_are_stable(&before, &after, runtime_generation) {
+                return Ok(after);
+            }
+        } else if crate::control::provider_output_requires_startup_action(
+            "claude",
+            &before.visible_grid,
+        ) && !claude_assigned_trust_menu_is_current(&before.visible_grid, display_path)
+        {
+            return Err("Claude displayed another startup action after trust confirmation".into());
+        }
+        tokio::time::timeout_at(
+            deadline,
+            tokio::time::sleep(CLAUDE_TRUST_SELECTION_POLL_INTERVAL),
+        )
+        .await
+        .map_err(|_| "Claude ready prompt timed out after trust confirmation".to_string())?;
+    }
+}
+
+async fn confirm_claude_workspace_trust(
+    terminal_sessions: std::sync::Arc<crate::state::terminal_session::TerminalSessionBroker>,
+    session_id: String,
+    runtime_generation: u64,
+    display_path: String,
+) -> Result<TerminalSnapshot, String> {
+    wait_for_claude_trust_selection(
+        &terminal_sessions,
+        &session_id,
+        runtime_generation,
+        &display_path,
+        (true, false),
+        false,
+        CLAUDE_TRUST_PROMPT_SETTLE_INTERVAL,
+    )
+    .await?;
+    send_claude_trust_key(
+        terminal_sessions.clone(),
+        session_id.clone(),
+        runtime_generation,
+        b"\x1b[B",
+    )
+    .await?;
+    wait_for_claude_trust_selection(
+        &terminal_sessions,
+        &session_id,
+        runtime_generation,
+        &display_path,
+        (false, true),
+        true,
+        CLAUDE_TRUST_SELECTION_SETTLE_INTERVAL,
+    )
+    .await?;
+    send_claude_trust_key(
+        terminal_sessions.clone(),
+        session_id.clone(),
+        runtime_generation,
+        b"\r",
+    )
+    .await?;
+    wait_for_claude_startup_ready_prompt(
+        &terminal_sessions,
+        &session_id,
+        runtime_generation,
+        &display_path,
+    )
+    .await
+}
+
+struct ClaudeTrustReadinessHandoff {
+    app: AppHandle,
+    session_id: String,
+    observation: crate::control::startup_readiness::ProviderStartupObservation,
+    trust_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    readiness_claimed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pending_memory_injection: std::sync::Arc<std::sync::Mutex<Option<PendingMemoryInjection>>>,
+    ready_snapshot: TerminalSnapshot,
+    terminal_sessions: std::sync::Arc<crate::state::terminal_session::TerminalSessionBroker>,
+}
+
+async fn publish_claude_trust_readiness(
+    handoff: ClaudeTrustReadinessHandoff,
+) -> Result<(), String> {
+    let ClaudeTrustReadinessHandoff {
+        app,
+        session_id,
+        observation,
+        trust_state,
+        readiness_claimed,
+        pending_memory_injection,
+        ready_snapshot,
+        terminal_sessions,
+    } = handoff;
+    if !claim_startup_readiness(&readiness_claimed) {
+        return Err("Claude startup readiness was already claimed".to_string());
+    }
+
+    let status_app = app.clone();
+    let status_arc = observation.current_status.clone();
+    let status_session_id = session_id.clone();
+    let state = app.state::<AppState>();
+    let validation_broker = terminal_sessions.clone();
+    let validation_session_id = session_id.clone();
+    let validation_snapshot = ready_snapshot.clone();
+    let validation_generation = observation.runtime_generation;
+    let validate_ready = move || {
+        let broker = validation_broker.clone();
+        let session = validation_session_id.clone();
+        let expected = validation_snapshot.clone();
+        async move {
+            broker.snapshot(&session).await.is_ok_and(|current| {
+                claude_startup_ready_snapshots_are_stable(
+                    &expected,
+                    &current,
+                    validation_generation,
+                )
+            })
+        }
+    };
+    let published =
+        crate::control::startup_readiness::publish_startup_readiness_from_action_needed(
+            state.inner(),
+            &session_id,
+            &observation,
+            wardian_core::control::ProviderReadyEvidence::PromptDetected,
+            validate_ready,
+            move |next_status| {
+                set_agent_status(&status_app, &status_session_id, &status_arc, next_status);
+            },
+        )
+        .await;
+    if !published {
+        readiness_claimed.store(false, std::sync::atomic::Ordering::Release);
+        return Err("Claude startup readiness no longer owns the active runtime".to_string());
+    }
+
+    if let Ok(mut pending) = pending_memory_injection.lock() {
+        record_pending_memory_injection(&mut pending, &session_id, "claude");
+    }
+    let wake_app = app.clone();
+    let wake_session_id = session_id.clone();
+    if !finish_claude_trust_readiness(&trust_state, &readiness_claimed, move || {
+        crate::control::spawn_agent_messaging_if_idle(&wake_app, &wake_session_id, "Idle");
+    }) {
+        return Err("Claude startup readiness handoff was no longer pending".to_string());
+    }
+    Ok(())
 }
 
 impl AntigravityUserTurnReceiptTracker {
@@ -1657,6 +2140,12 @@ async fn spawn_agent_inner(
         &provider_cwd,
         pi_has_saved_session,
     )?;
+    let claude_workspace_trust_display_path = claude_trust_display_path_for_assigned_workspace(
+        &config.provider,
+        &config.folder,
+        &cwd,
+        &launch_cwd,
+    );
     let antigravity_workspace_before = if config.provider == "antigravity"
         && config
             .resume_session
@@ -2238,8 +2727,20 @@ async fn spawn_agent_inner(
     let auto_confirm_claude_bypass_permissions = config.provider == "claude"
         && effective_claude_permission_mode(config.claude_config().permission_mode.as_deref())
             == "bypassPermissions";
-    let mut pending_memory_injection = memory_setup
-        .map(|(store, brief)| (store, brief, expected_folder.clone(), memory_process_key));
+    let auto_confirm_claude_workspace_trust =
+        config.provider == "claude" && claude_workspace_trust_display_path.is_some();
+    let claude_workspace_trust_display_path = claude_workspace_trust_display_path.clone();
+    let claude_workspace_trust_state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+        CLAUDE_TRUST_CONFIRMATION_NOT_STARTED,
+    ));
+    let reader_claude_workspace_trust_state = claude_workspace_trust_state.clone();
+    // The reader or the trust watcher may own the final ready transition;
+    // share the receipt so either path records it once before queued delivery.
+    let pending_memory_injection =
+        std::sync::Arc::new(std::sync::Mutex::new(memory_setup.map(|(store, brief)| {
+            (store, brief, expected_folder.clone(), memory_process_key)
+        })));
+    let startup_readiness_claimed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let pi_exit_broker = pi_attachment
         .as_ref()
         .map(|_| app_state.native_delivery.clone());
@@ -2255,6 +2756,7 @@ async fn spawn_agent_inner(
         let mut codex_choice_pending = false;
         let mut antigravity_workspace_trust_confirmed = false;
         let mut claude_bypass_permissions_confirmed = false;
+        let mut claude_workspace_trust_started = false;
         let mut pty_decoder = PtyUtf8Decoder::new();
         let output_ready_emit_gate =
             std::sync::Arc::new(std::sync::Mutex::new(OutputReadyEmitGate::default()));
@@ -2374,19 +2876,36 @@ async fn spawn_agent_inner(
                     } else {
                         startup_output.clone()
                     };
-                    let startup_ready = startup_prompt_is_ready(
+                    let trust_state = reader_claude_workspace_trust_state
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    let trust_flow_blocks_readiness =
+                        claude_trust_flow_blocks_readiness(trust_state);
+                    let startup_ready = startup_prompt_ready_for_reader(
                         &provider_name_for_pty,
                         startup_prompt_pending,
+                        trust_state,
                         startup_screen.as_deref(),
                     );
+                    let assigned_claude_trust_prompt =
+                        startup_screen.as_deref().is_some_and(|output| {
+                            provider_name_for_pty == "claude"
+                                && auto_confirm_claude_workspace_trust
+                                && claude_workspace_trust_display_path.as_deref().is_some_and(
+                                    |path| claude_trust_screen_displays_workspace(output, path),
+                                )
+                        });
                     if startup_ready {
                         startup_prompt_pending = false;
-                        record_pending_memory_injection(
-                            &mut pending_memory_injection,
-                            &sid_for_pty,
-                            &provider_name_for_pty,
-                        );
-                        if !defer_codex_startup_readiness {
+                        if let Ok(mut pending) = pending_memory_injection.lock() {
+                            record_pending_memory_injection(
+                                &mut pending,
+                                &sid_for_pty,
+                                &provider_name_for_pty,
+                            );
+                        }
+                        if !defer_codex_startup_readiness
+                            && claim_startup_readiness(&startup_readiness_claimed)
+                        {
                             set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, "Idle");
                             let readiness_app = pty_app.clone();
                             let readiness_session_id = sid_for_pty.clone();
@@ -2408,7 +2927,98 @@ async fn spawn_agent_inner(
                                 );
                             });
                         }
-                    } else if startup_output.as_deref().is_some_and(|output| {
+                    } else if claude_trust_reader_should_mark_action_needed(
+                        trust_state,
+                        assigned_claude_trust_prompt,
+                    ) {
+                        set_agent_status(
+                            &pty_app,
+                            &sid_for_pty,
+                            &current_status_clone,
+                            "Action Needed",
+                        );
+                        if !claude_workspace_trust_started
+                            && startup_screen.as_deref().is_some_and(|output| {
+                                crate::control::startup_readiness::
+                                    claude_workspace_trust_prompt_selects_no(output)
+                            })
+                        {
+                            claude_workspace_trust_started = true;
+                            reader_claude_workspace_trust_state.store(
+                                CLAUDE_TRUST_CONFIRMATION_PENDING,
+                                std::sync::atomic::Ordering::Release,
+                            );
+                            if let Some(display_path) = claude_workspace_trust_display_path.clone()
+                            {
+                                let trust_broker = terminal_sessions.clone();
+                                let trust_session = sid_for_pty.clone();
+                                let trust_state = reader_claude_workspace_trust_state.clone();
+                                let trust_app = pty_app.clone();
+                                let trust_observation = startup_observation.clone();
+                                let trust_memory_injection = pending_memory_injection.clone();
+                                let trust_readiness_claimed = startup_readiness_claimed.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    match confirm_claude_workspace_trust(
+                                        trust_broker.clone(),
+                                        trust_session.clone(),
+                                        reader_runtime_generation,
+                                        display_path,
+                                    )
+                                    .await
+                                    {
+                                        Ok(ready_snapshot) => match publish_claude_trust_readiness(
+                                            ClaudeTrustReadinessHandoff {
+                                                app: trust_app,
+                                                session_id: trust_session.clone(),
+                                                observation: trust_observation,
+                                                trust_state: trust_state.clone(),
+                                                readiness_claimed: trust_readiness_claimed,
+                                                pending_memory_injection: trust_memory_injection,
+                                                ready_snapshot,
+                                                terminal_sessions: trust_broker,
+                                            },
+                                        )
+                                        .await
+                                        {
+                                            Ok(()) => {}
+                                            Err(error) => {
+                                                trust_state.store(
+                                                    CLAUDE_TRUST_CONFIRMATION_FAILED,
+                                                    std::sync::atomic::Ordering::Release,
+                                                );
+                                                log_debug(&format!(
+                                                        "[WARDIAN] Claude workspace trust readiness stopped for session {} at generation {}: {}",
+                                                        trust_session,
+                                                        reader_runtime_generation,
+                                                        error
+                                                    ));
+                                            }
+                                        },
+                                        Err(error) => {
+                                            trust_state.store(
+                                                CLAUDE_TRUST_CONFIRMATION_FAILED,
+                                                std::sync::atomic::Ordering::Release,
+                                            );
+                                            log_debug(&format!(
+                                                "[WARDIAN] Claude workspace trust confirmation stopped for session {} at generation {}: {}",
+                                                trust_session, reader_runtime_generation, error
+                                            ));
+                                        }
+                                    }
+                                });
+                            } else {
+                                reader_claude_workspace_trust_state.store(
+                                    CLAUDE_TRUST_CONFIRMATION_FAILED,
+                                    std::sync::atomic::Ordering::Release,
+                                );
+                            }
+                        }
+                    } else if trust_flow_blocks_readiness {
+                        // The assigned prompt set Action Needed before trust
+                        // confirmation became pending. Preserve status here:
+                        // the watcher owns it through failure or publication,
+                        // including when this reader sample is stale.
+                    } else if startup_screen.as_deref().is_some_and(|output| {
                         should_auto_confirm_claude_bypass_permissions(
                             &provider_name_for_pty,
                             auto_confirm_claude_bypass_permissions,
@@ -5003,6 +5613,382 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn claude_trust_confirmation_requires_a_stable_same_generation_screen() {
+        let display_path = r"C:\Wardian\agents\test-agent\habitat\workspace";
+        let no_screen = format!(
+            "Accessing workspace: {display_path}\nQuick safety check: Is this a project you created or one you trust?\n❯ No, exit\n  Yes, I trust this folder"
+        );
+        let yes_screen = no_screen
+            .replace("❯ No, exit", "No, exit")
+            .replace("  Yes, I trust this folder", "❯ Yes, I trust this folder");
+        let snapshot =
+            |runtime_generation, sequence_barrier, visible_grid: String| TerminalSnapshot {
+                snapshot_id: "test-snapshot".to_string(),
+                session_id: "test-session".to_string(),
+                runtime_generation,
+                sequence_barrier,
+                geometry: wardian_core::models::TerminalGeometry { rows: 12, cols: 80 },
+                alternate_screen: false,
+                terminal_state_base64: String::new(),
+                visible_grid,
+                scrollback: Vec::new(),
+                formatted_scrollback: Vec::new(),
+            };
+
+        let stable_no = snapshot(7, 10, no_screen.clone());
+        assert!(claude_trust_snapshots_are_stable(
+            &stable_no,
+            &stable_no,
+            7,
+            display_path,
+            (true, false),
+        ));
+        let stable_yes = snapshot(7, 11, yes_screen.clone());
+        assert!(claude_trust_snapshots_are_stable(
+            &stable_yes,
+            &stable_yes,
+            7,
+            display_path,
+            (false, true),
+        ));
+        assert!(!claude_trust_snapshots_are_stable(
+            &stable_yes,
+            &snapshot(7, 12, yes_screen.clone()),
+            7,
+            display_path,
+            (false, true),
+        ));
+        assert!(!claude_trust_snapshots_are_stable(
+            &stable_yes,
+            &snapshot(8, 11, yes_screen.clone()),
+            7,
+            display_path,
+            (false, true),
+        ));
+        assert!(!claude_trust_snapshots_are_stable(
+            &stable_yes,
+            &snapshot(7, 12, no_screen),
+            7,
+            display_path,
+            (false, true),
+        ));
+        assert!(!claude_trust_snapshots_are_stable(
+            &stable_yes,
+            &snapshot(
+                7,
+                11,
+                yes_screen.replace(display_path, r"C:\Wardian\other-workspace"),
+            ),
+            7,
+            display_path,
+            (false, true),
+        ));
+    }
+
+    #[test]
+    fn claude_watcher_publication_wins_over_stale_reader_status_sample() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let trust_state = std::sync::atomic::AtomicU8::new(CLAUDE_TRUST_CONFIRMATION_PENDING);
+        let readiness_claimed = std::sync::atomic::AtomicBool::new(false);
+        let composer = "Claude Code v2.1.283\n❯ Try ask Claude\n────────\nHaiku 4.5 | workspace | /rc\n⏵⏵ bypass permissions on (shift+tab to cycle)";
+        let mut startup_prompt_pending = true;
+        assert!(claude_trust_reader_should_mark_action_needed(
+            CLAUDE_TRUST_CONFIRMATION_NOT_STARTED,
+            true,
+        ));
+        let mut status = "Action Needed";
+        let publications = AtomicUsize::new(0);
+        let wakes = AtomicUsize::new(0);
+
+        // Suspend the reader after it samples pending trust and an unclaimed
+        // readiness handoff. The watcher can publish before that stale reader
+        // sample resumes.
+        let stale_reader_trust_state = trust_state.load(Ordering::Acquire);
+        let stale_reader_claimed = readiness_claimed.load(Ordering::Acquire);
+        assert_eq!(stale_reader_trust_state, CLAUDE_TRUST_CONFIRMATION_PENDING);
+        assert!(!stale_reader_claimed);
+
+        let watcher_claimed = claim_startup_readiness(&readiness_claimed);
+        assert!(watcher_claimed);
+        // A repaint while the watcher is claimed still cannot let the reader
+        // consume startup readiness or change the watcher's status.
+        assert!(!startup_prompt_ready_for_reader(
+            "claude",
+            startup_prompt_pending,
+            trust_state.load(Ordering::Acquire),
+            Some(composer),
+        ));
+        assert!(!claude_trust_reader_should_mark_action_needed(
+            trust_state.load(Ordering::Acquire),
+            true,
+        ));
+        assert_eq!(status, "Action Needed");
+        assert!(startup_prompt_pending);
+
+        // The watcher publishes Idle and wakes queued delivery while the
+        // original reader sample remains suspended.
+        if watcher_claimed {
+            publications.fetch_add(1, Ordering::Relaxed);
+            status = "Idle";
+        }
+        assert!(finish_claude_trust_readiness(
+            &trust_state,
+            &readiness_claimed,
+            || {
+                wakes.fetch_add(1, Ordering::Relaxed);
+            },
+        ));
+
+        // Resume the reader with its stale PENDING sample. It must preserve
+        // the watcher's Idle status even though its old claim sample was false.
+        if claude_trust_reader_should_mark_action_needed(stale_reader_trust_state, true) {
+            status = "Action Needed";
+        }
+        assert_eq!(status, "Idle");
+
+        if startup_prompt_ready_for_reader(
+            "claude",
+            startup_prompt_pending,
+            trust_state.load(Ordering::Acquire),
+            Some(composer),
+        ) {
+            startup_prompt_pending = false;
+            if claim_startup_readiness(&readiness_claimed) {
+                status = "Idle";
+                publications.fetch_add(1, Ordering::Relaxed);
+                wakes.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        assert!(!startup_prompt_pending);
+        assert_eq!(status, "Idle");
+        assert_eq!(publications.load(Ordering::Relaxed), 1);
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        assert!(!claude_trust_reader_should_mark_action_needed(
+            CLAUDE_TRUST_CONFIRMATION_FAILED,
+            true,
+        ));
+        assert!(!finish_claude_trust_readiness(
+            &trust_state,
+            &readiness_claimed,
+            || {
+                wakes.fetch_add(1, Ordering::Relaxed);
+            },
+        ));
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn claude_ready_waiter_allows_the_assigned_trust_menu_until_repaint() {
+        let broker =
+            std::sync::Arc::new(crate::state::terminal_session::TerminalSessionBroker::default());
+        let (input_tx, _input_rx) = tokio::sync::mpsc::channel(1);
+        let generation = broker
+            .start_or_replace_runtime(
+                "trust-waiter",
+                crate::state::terminal_session::TerminalRuntimeHandles::new(input_tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry {
+                    rows: 24,
+                    cols: 120,
+                },
+            )
+            .await
+            .unwrap();
+        let display_path = r"C:\Wardian\agents\test-agent\habitat\workspace";
+        let trust_menu = format!(
+            "Accessing workspace: {display_path}\n\nQuick safety check: Is this a project you created or one you trust?\n❯ No, exit\n  Yes, I trust this folder"
+        );
+        let output_broker = broker.clone();
+        tokio::task::spawn_blocking(move || {
+            output_broker.process_output_blocking(
+                "trust-waiter",
+                generation,
+                format!("\x1b[2J\x1b[H{}", trust_menu.replace('\n', "\r\n")).into_bytes(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let waiter_broker = broker.clone();
+        let waiter = tokio::spawn(async move {
+            wait_for_claude_startup_ready_prompt(
+                &waiter_broker,
+                "trust-waiter",
+                generation,
+                display_path,
+            )
+            .await
+        });
+        tokio::time::sleep(CLAUDE_TRUST_SELECTION_POLL_INTERVAL * 2).await;
+        assert!(
+            !waiter.is_finished(),
+            "the assigned menu is still repainting"
+        );
+
+        let composer = "Claude Code v2.1.283\n❯ Try ask Claude\n────────\nHaiku 4.5 | workspace | /rc\n⏵⏵ bypass permissions on (shift+tab to cycle)";
+        let output_broker = broker.clone();
+        tokio::task::spawn_blocking(move || {
+            output_broker.process_output_blocking(
+                "trust-waiter",
+                generation,
+                format!("\x1b[2J\x1b[H{}", composer.replace('\n', "\r\n")).into_bytes(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+            .await
+            .expect("ready composer should settle")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn claude_ready_waiter_rejects_a_distinct_startup_action() {
+        let broker =
+            std::sync::Arc::new(crate::state::terminal_session::TerminalSessionBroker::default());
+        let (input_tx, _input_rx) = tokio::sync::mpsc::channel(1);
+        let generation = broker
+            .start_or_replace_runtime(
+                "trust-waiter-action",
+                crate::state::terminal_session::TerminalRuntimeHandles::new(input_tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry {
+                    rows: 24,
+                    cols: 120,
+                },
+            )
+            .await
+            .unwrap();
+        let output_broker = broker.clone();
+        tokio::task::spawn_blocking(move || {
+            output_broker.process_output_blocking(
+                "trust-waiter-action",
+                generation,
+                b"\x1b[2J\x1b[HAllow external CLAUDE.md file imports?\r\nNo, disable external imports\r\nYes, allow external imports"
+                    .to_vec(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let error = wait_for_claude_startup_ready_prompt(
+            &broker,
+            "trust-waiter-action",
+            generation,
+            r"C:\Wardian\agents\test-agent\habitat\workspace",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("another startup action"));
+    }
+
+    #[test]
+    fn claude_workspace_trust_matches_assigned_path_wrapped_across_grid_rows() {
+        let display_path = format!(
+            r"C:\Wardian\agents\claude-folder-trust-1444\habitat\workspace\{}",
+            "project-0123456789012345678901234567890123456789"
+        );
+        let prompt = "Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.\r\nClaude Code'll be able to read, edit, and execute files here.\r\n❯ No, exit\r\nYes, I trust this folder";
+        let mut terminal = vt100::Parser::new(12, 80, 0);
+        terminal.process(format!("Accessing workspace: {display_path}\r\n{prompt}").as_bytes());
+        let visible_grid = terminal.screen().contents();
+
+        assert!(claude_trust_screen_displays_workspace(
+            &visible_grid,
+            &display_path
+        ));
+        assert!(!claude_trust_screen_displays_workspace(
+            &visible_grid,
+            r"C:\Wardian\agents\other-agent\habitat\workspace",
+        ));
+    }
+
+    #[test]
+    fn claude_trust_matches_the_2_1_283_current_screen() {
+        let display_path = r"C:\Wardian\agents\test-agent\habitat\workspace";
+        let screen = format!(
+            "\n────────────────────────────────────────────────────────────────\nAccessing workspace:\n\n{display_path}\n\nQuick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's\nin this folder first.\n\nClaude Code'll be able to read, edit, and execute files here.\n\nSecurity guide\n\n❯ No, exit\n  Yes, I trust this folder\n\nEnter to confirm · Esc to cancel"
+        );
+
+        assert!(crate::control::provider_output_requires_startup_action(
+            "claude", &screen
+        ));
+        assert!(claude_trust_screen_displays_workspace(
+            &screen,
+            display_path
+        ));
+        assert!(
+            crate::control::startup_readiness::claude_workspace_trust_prompt_selects_no(&screen,)
+        );
+        assert!(!claude_trust_screen_displays_workspace(
+            &screen,
+            r"C:\Wardian\agents\other-agent\habitat\workspace",
+        ));
+    }
+
+    #[test]
+    fn claude_workspace_trust_requires_an_explicit_assigned_workspace() {
+        let assigned = tempfile::tempdir().expect("assigned workspace");
+        let unrelated = tempfile::tempdir().expect("unrelated workspace");
+        let assigned_path = assigned.path().to_string_lossy().into_owned();
+
+        assert_eq!(
+            claude_trust_display_path_for_assigned_workspace(
+                "claude",
+                &assigned_path,
+                assigned.path(),
+                assigned.path(),
+            ),
+            Some(assigned_path.clone()),
+        );
+        assert!(claude_trust_display_path_for_assigned_workspace(
+            "claude",
+            "",
+            assigned.path(),
+            assigned.path(),
+        )
+        .is_none());
+        assert!(claude_trust_display_path_for_assigned_workspace(
+            "codex",
+            &assigned_path,
+            assigned.path(),
+            assigned.path(),
+        )
+        .is_none());
+        assert!(claude_trust_display_path_for_assigned_workspace(
+            "claude",
+            &assigned_path,
+            assigned.path(),
+            unrelated.path(),
+        )
+        .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_workspace_trust_accepts_a_habitat_link_to_the_assigned_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let assigned = tempfile::tempdir().expect("assigned workspace");
+        let habitat = tempfile::tempdir().expect("habitat");
+        let alias = habitat.path().join("workspace");
+        symlink(assigned.path(), &alias).expect("workspace link");
+
+        assert_eq!(
+            claude_trust_display_path_for_assigned_workspace(
+                "claude",
+                &assigned.path().to_string_lossy(),
+                assigned.path(),
+                &alias,
+            ),
+            Some(alias.to_string_lossy().into_owned()),
+        );
+    }
     #[test]
     fn claude_startup_prompt_rejects_pending_remote_connection() {
         use crate::control::provider_output_has_startup_ready_prompt as ready;

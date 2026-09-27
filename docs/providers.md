@@ -101,6 +101,17 @@ screen. A user-authored external `CLAUDE.md` import consent menu is `Action Need
 idle composer. Queued prompts remain pending until the consent is resolved and
 the composer appears. Wardian does not accept external imports automatically.
 
+For the exact Claude Code quick safety check, Wardian confirms the initial
+folder-trust choice only when the current screen still selects `No, exit` and
+shows the launch path for the agent's explicitly assigned workspace. This also
+covers Wardian's `habitat/workspace` link when it resolves to that workspace.
+Wardian waits for the same current screen to remain quiet for 2.5 seconds before
+sending Down once. It then waits for `Yes, I trust this folder` to remain the
+exclusive selection for 400 ms before sending Enter once. Every check uses the
+same runtime generation and exact assigned path. A changed or missing prompt,
+ambiguous selection, timeout, or failed write remains `Action Needed`. Wardian
+does not write Claude's trust configuration directly.
+
 ### Debug First
 
 If Claude appears blocked, inspect the permission hook output, `AGENTS.md` discovery, and resume flags before treating the issue as a generic PTY failure. If mobile or remote drag scrolling fails only for Claude, verify that the managed launch environment still includes Claude Code's alternate-screen opt-out.
