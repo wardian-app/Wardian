@@ -1719,6 +1719,31 @@ mod tests {
     use axum::http::{header, HeaderMap, HeaderValue};
     use tauri::Manager;
 
+    struct WardianHomeEnvGuard {
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+        previous_home: Option<std::ffi::OsString>,
+    }
+
+    impl WardianHomeEnvGuard {
+        async fn set_async(home: &std::path::Path) -> Self {
+            let guard = Self {
+                _lock: crate::utils::wardian_test_env_lock_async().await,
+                previous_home: std::env::var_os("WARDIAN_HOME"),
+            };
+            std::env::set_var("WARDIAN_HOME", home);
+            guard
+        }
+    }
+
+    impl Drop for WardianHomeEnvGuard {
+        fn drop(&mut self) {
+            match self.previous_home.take() {
+                Some(value) => std::env::set_var("WARDIAN_HOME", value),
+                None => std::env::remove_var("WARDIAN_HOME"),
+            }
+        }
+    }
+
     fn config() -> RemoteGatewayConfig {
         RemoteGatewayConfig {
             schema_version: REMOTE_SETTINGS_SCHEMA_VERSION,
@@ -2133,10 +2158,8 @@ mod tests {
     async fn remote_chat_gateway_returns_repeated_codex_turns_after_legacy_archive_identity() {
         use std::io::Write as _;
 
-        let _guard = crate::utils::wardian_test_env_lock_async().await;
         let temp = tempfile::tempdir().expect("temp home");
-        let previous_home = std::env::var_os("WARDIAN_HOME");
-        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        let _home = WardianHomeEnvGuard::set_async(temp.path()).await;
         crate::remote::storage::save_remote_config_at(temp.path(), &config())
             .expect("remote config");
         crate::utils::save_shell_settings(&crate::utils::ShellSettings {
@@ -2336,11 +2359,6 @@ mod tests {
             .iter()
             .all(|event| event["id"].as_str().is_some()));
         assert_ne!(repeated_users[0]["id"], repeated_users[1]["id"]);
-
-        match previous_home {
-            Some(home) => unsafe { std::env::set_var("WARDIAN_HOME", home) },
-            None => unsafe { std::env::remove_var("WARDIAN_HOME") },
-        }
     }
 
     #[test]
