@@ -57,11 +57,13 @@ type AgentChatDraftControlProps =
 
 type AgentChatViewProps = AgentChatViewBaseProps & AgentChatDraftControlProps;
 
-type LoadState = "loading" | "ready" | "error";
+type LoadState = "loading" | "waiting" | "ready" | "error";
+type TranscriptLoadState = { sessionId: string; state: LoadState };
 const CHAT_REFRESH_INTERVAL_MS = 3000;
+const CHAT_TRANSCRIPT_LOAD_TIMEOUT_MS = 30_000;
 
 
-type AwaitingResponseMarker = { id: string; response_count_after: number };
+type AwaitingResponseMarker = { id: string; response_count_after: number; session_id: string };
 
 const CHAT_INITIAL_ROW_LIMIT = 80;
 const CHAT_ROW_PAGE_SIZE = 60;
@@ -85,11 +87,11 @@ export function AgentChatView({
   onDraftChange,
 }: AgentChatViewProps) {
   const [events, setEvents] = useState<AgentChatEvent[]>([]);
+  const [transcriptSessionId, setTranscriptSessionId] = useState(sessionId);
   const [pendingMessages, setPendingMessages] = useState<AgentChatEvent[]>([]);
   const [awaitingResponse, setAwaitingResponse] = useState<AwaitingResponseMarker | null>(null);
-  const [loadState, setLoadState] = useState<LoadState>("loading");
+  const [transcriptLoad, setTranscriptLoad] = useState<TranscriptLoadState>({ sessionId, state: "loading" });
   const [error, setError] = useState<string | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
   const [internalDraft, setInternalDraft] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isInterrupting, setIsInterrupting] = useState(false);
@@ -104,24 +106,38 @@ export function AgentChatView({
   const fileOpenActions = useSettingsStore((state) => state.fileOpenActions);
   const transcriptScrollRef = useRef<HTMLDivElement>(null);
   const transcriptRequestRef = useRef(0);
+  const refreshTranscriptRef = useRef<(() => void) | null>(null);
+  const transcriptLoadTimeoutRef = useRef<number | null>(null);
+  const loadedTranscriptSessionIdRef = useRef<string | null>(null);
+  const activeSessionIdRef = useRef(sessionId);
   const stickToLatestRef = useRef(true);
   const prependScrollSnapshotRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const activeDraft = draft ?? internalDraft;
   const setActiveDraft = onDraftChange ?? setInternalDraft;
+
+  useLayoutEffect(() => {
+    activeSessionIdRef.current = sessionId;
+  }, [sessionId]);
 
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | null = null;
 
     listen<{ session_id?: string }>("agent-terminal-cleared", (event) => {
-      if (event.payload?.session_id !== sessionId) return;
+      if (event.payload?.session_id !== sessionId || activeSessionIdRef.current !== sessionId) return;
       transcriptRequestRef.current += 1;
+      if (transcriptLoadTimeoutRef.current !== null) {
+        window.clearTimeout(transcriptLoadTimeoutRef.current);
+        transcriptLoadTimeoutRef.current = null;
+      }
       stickToLatestRef.current = true;
       prependScrollSnapshotRef.current = null;
       setEvents([]);
+      setTranscriptSessionId(sessionId);
+      loadedTranscriptSessionIdRef.current = sessionId;
       setPendingMessages([]);
       setAwaitingResponse(null);
-      setLoadState("ready");
+      setTranscriptLoad({ sessionId, state: "ready" });
       setError(null);
       setSubmitError(null);
       setAttachments([]);
@@ -145,50 +161,132 @@ export function AgentChatView({
 
   useEffect(() => {
     let cancelled = false;
-    let intervalId: number | null = null;
+    let refreshTimeoutId: number | null = null;
+    let loadTimeoutId: number | null = null;
+    let loadInFlight = false;
+    let refreshQueued = false;
 
-    const loadTranscript = (showLoading: boolean) => {
-      if (!showLoading && document.visibilityState === "hidden") return;
-      const requestId = ++transcriptRequestRef.current;
-      if (showLoading) {
-        setLoadState("loading");
-        setError(null);
-      }
-
-      invoke<AgentChatEvent[]>("load_agent_chat_transcript", { sessionId })
-        .then((transcript) => {
-          if (cancelled || requestId !== transcriptRequestRef.current) return;
-          const nextEvents = Array.isArray(transcript) ? transcript : [];
-          const scrollRegion = transcriptScrollRef.current;
-          if (scrollRegion && !prependScrollSnapshotRef.current) {
-            stickToLatestRef.current = stickToLatestRef.current || isNearTranscriptBottom(scrollRegion);
-          }
-          setEvents(nextEvents);
-          setPendingMessages((pending) => unconfirmedPendingMessages(nextEvents, pending));
-          setAwaitingResponse((marker) => clearAwaitingResponseWhenAnswered(nextEvents, marker));
-          setLoadState("ready");
-          setError(null);
-        })
-        .catch((reason: unknown) => {
-          if (cancelled || requestId !== transcriptRequestRef.current || !showLoading) return;
-          setEvents([]);
-          setError(errorMessage(reason));
-          setLoadState("error");
-        });
+    const clearVisibleLoadTimeout = () => {
+      if (loadTimeoutId === null) return;
+      window.clearTimeout(loadTimeoutId);
+      if (transcriptLoadTimeoutRef.current === loadTimeoutId) transcriptLoadTimeoutRef.current = null;
+      loadTimeoutId = null;
     };
 
-    loadTranscript(true);
-    intervalId = window.setInterval(() => loadTranscript(false), refreshIntervalMs);
+    function scheduleRefresh() {
+      if (cancelled) return;
+      if (refreshTimeoutId !== null) window.clearTimeout(refreshTimeoutId);
+      refreshTimeoutId = window.setTimeout(() => {
+        refreshTimeoutId = null;
+        void loadTranscript();
+      }, refreshIntervalMs);
+    }
+
+    async function loadTranscript() {
+      if (cancelled) return;
+      const hasLoadedTranscript = loadedTranscriptSessionIdRef.current === sessionId;
+      if (hasLoadedTranscript && document.visibilityState === "hidden") {
+        scheduleRefresh();
+        return;
+      }
+      if (loadInFlight) {
+        refreshQueued = true;
+        if (!hasLoadedTranscript) {
+          setTranscriptLoad({ sessionId, state: "waiting" });
+          setError("Retry is queued behind the current transcript read.");
+        }
+        return;
+      }
+
+      loadInFlight = true;
+      if (!hasLoadedTranscript) {
+        setTranscriptLoad({ sessionId, state: "loading" });
+        setError(null);
+        const timeoutId = window.setTimeout(() => {
+          if (transcriptLoadTimeoutRef.current !== timeoutId || cancelled) return;
+          transcriptLoadTimeoutRef.current = null;
+          loadTimeoutId = null;
+          setError("The transcript read is still running after 30 seconds. Waiting for it to settle.");
+          setTranscriptLoad({ sessionId, state: "waiting" });
+        }, CHAT_TRANSCRIPT_LOAD_TIMEOUT_MS);
+        loadTimeoutId = timeoutId;
+        transcriptLoadTimeoutRef.current = timeoutId;
+      }
+      const requestId = ++transcriptRequestRef.current;
+
+      try {
+        const transcript = await invoke<AgentChatEvent[]>("load_agent_chat_transcript", { sessionId });
+        if (cancelled || requestId !== transcriptRequestRef.current) return;
+        const nextEvents = Array.isArray(transcript) ? transcript : [];
+        const scrollRegion = transcriptScrollRef.current;
+        if (scrollRegion && !prependScrollSnapshotRef.current) {
+          stickToLatestRef.current = stickToLatestRef.current || isNearTranscriptBottom(scrollRegion);
+        }
+        setEvents(nextEvents);
+        setTranscriptSessionId(sessionId);
+        loadedTranscriptSessionIdRef.current = sessionId;
+        setPendingMessages((pending) => unconfirmedPendingMessages(nextEvents, pending));
+        setAwaitingResponse((marker) =>
+          marker?.session_id === sessionId ? clearAwaitingResponseWhenAnswered(nextEvents, marker) : marker,
+        );
+        setTranscriptLoad({ sessionId, state: "ready" });
+        setError(null);
+      } catch (reason: unknown) {
+        if (cancelled || requestId !== transcriptRequestRef.current) return;
+        setError(errorMessage(reason));
+        if (loadedTranscriptSessionIdRef.current === sessionId) {
+          setTranscriptLoad({ sessionId, state: "ready" });
+        } else {
+          setEvents([]);
+          setTranscriptSessionId(sessionId);
+          loadedTranscriptSessionIdRef.current = null;
+          setTranscriptLoad({ sessionId, state: "error" });
+        }
+      } finally {
+        loadInFlight = false;
+        clearVisibleLoadTimeout();
+        if (!cancelled) {
+          if (refreshQueued) {
+            refreshQueued = false;
+            void loadTranscript();
+          } else {
+            scheduleRefresh();
+          }
+        }
+      }
+    }
+
+    const requestRefresh = () => {
+      if (refreshTimeoutId !== null) {
+        window.clearTimeout(refreshTimeoutId);
+        refreshTimeoutId = null;
+      }
+      void loadTranscript();
+    };
+    refreshTranscriptRef.current = requestRefresh;
+    void loadTranscript();
 
     return () => {
       cancelled = true;
-      if (intervalId !== null) window.clearInterval(intervalId);
+      if (refreshTimeoutId !== null) window.clearTimeout(refreshTimeoutId);
+      clearVisibleLoadTimeout();
+      if (refreshTranscriptRef.current === requestRefresh) refreshTranscriptRef.current = null;
     };
-  }, [sessionId, reloadKey, refreshIntervalMs]);
+  }, [sessionId, refreshIntervalMs]);
 
-  const mergedEvents = useMemo(() => mergePendingMessages(events, pendingMessages), [events, pendingMessages]);
+  const visibleEvents = useMemo(
+    () => (transcriptSessionId === sessionId ? events : []),
+    [events, sessionId, transcriptSessionId],
+  );
+  const visiblePendingMessages = pendingMessages.filter((message) => message.session_id === sessionId);
+  const visibleAwaitingResponse = awaitingResponse?.session_id === sessionId ? awaitingResponse : null;
+  const visibleLoadState = transcriptLoad.sessionId === sessionId ? transcriptLoad.state : "loading";
+  const mergedEvents = useMemo(
+    () => mergePendingMessages(visibleEvents, visiblePendingMessages),
+    [visibleEvents, visiblePendingMessages],
+  );
   const activeStatus = status ?? telemetry?.current_status ?? null;
-  const showThinking = isProcessingAgentStatus(activeStatus) || awaitingResponse !== null || pendingMessages.length > 0;
+  const showThinking = isProcessingAgentStatus(activeStatus) || visibleAwaitingResponse !== null || visiblePendingMessages.length > 0;
   const isExecutionActive = showThinking && !interruptRequested;
   const displayEvents = useMemo(
     () =>
@@ -264,7 +362,7 @@ export function AgentChatView({
 
   useLayoutEffect(() => {
     const scrollRegion = transcriptScrollRef.current;
-    if (!scrollRegion || loadState !== "ready") return;
+    if (!scrollRegion || visibleLoadState !== "ready") return;
 
     const prependSnapshot = prependScrollSnapshotRef.current;
     if (prependSnapshot) {
@@ -278,7 +376,7 @@ export function AgentChatView({
       scrollRegion.scrollTop = scrollRegion.scrollHeight;
       stickToLatestRef.current = true;
     }
-  }, [hiddenOlderRowCount, latestVisibleRowKey, loadState, visibleChatRows.length]);
+  }, [hiddenOlderRowCount, latestVisibleRowKey, visibleLoadState, visibleChatRows.length]);
 
   const submitPrompt = async (
     promptValue: string,
@@ -288,7 +386,7 @@ export function AgentChatView({
     const prompt = promptValue.trim();
     if ((!prompt && selectedAttachments.length === 0) || disabledReason) return;
 
-    const providerName = agent?.provider ?? provider ?? providerFromEvents(events);
+    const providerName = agent?.provider ?? provider ?? providerFromEvents(visibleEvents);
     const submittedPrompt = promptWithChatAttachments(prompt, selectedAttachments);
 
     stickToLatestRef.current = true;
@@ -306,15 +404,16 @@ export function AgentChatView({
           sessionId,
           providerName,
           submittedPrompt,
-          maxSequence(events),
-          matchingUserMessageCount(events, submittedPrompt),
+          maxSequence(visibleEvents),
+          matchingUserMessageCount(visibleEvents, submittedPrompt),
         ),
       ]);
       setAwaitingResponse({
         id: `awaiting-response-${sessionId}-${Date.now()}`,
-        response_count_after: responseEventCount(events),
+        response_count_after: responseEventCount(visibleEvents),
+        session_id: sessionId,
       });
-      setReloadKey((key) => key + 1);
+      refreshTranscriptRef.current?.();
     } catch (reason) {
       setSubmitError(errorMessage(reason));
     } finally {
@@ -339,7 +438,7 @@ export function AgentChatView({
       await invoke("send_input_to_agent", { sessionId, input: "\u0003" });
       setAwaitingResponse(null);
       setPendingMessages([]);
-      setReloadKey((key) => key + 1);
+      refreshTranscriptRef.current?.();
     } catch (reason) {
       setInterruptRequested(false);
       setSubmitError(errorMessage(reason));
@@ -381,16 +480,25 @@ export function AgentChatView({
           {fileOpenError}
         </div>
       ) : null}
+      {visibleLoadState === "ready" && error ? (
+        <div
+          role="alert"
+          className="mx-3 mt-2 rounded-md border border-wardian-error/40 bg-wardian-error/10 px-3 py-2 text-xs leading-relaxed text-wardian-error"
+        >
+          Transcript refresh failed: {error}. Retrying automatically.
+        </div>
+      ) : null}
       <div
         className="chat-transcript-scroll min-h-0 flex-1 overflow-auto px-2.5 py-2.5"
         data-testid="agent-chat-scroll-region"
         onScroll={handleTranscriptScroll}
         ref={transcriptScrollRef}
       >
-        {loadState === "loading" ? <LoadingState /> : null}
-        {loadState === "error" ? <ErrorState error={error} onRetry={() => setReloadKey((key) => key + 1)} /> : null}
-        {loadState === "ready" && chatRows.length === 0 ? <EmptyState /> : null}
-        {loadState === "ready" && chatRows.length > 0 ? (
+        {visibleLoadState === "loading" ? <LoadingState /> : null}
+        {visibleLoadState === "waiting" ? <WaitingState error={error} /> : null}
+        {visibleLoadState === "error" ? <ErrorState error={error} onRetry={() => refreshTranscriptRef.current?.()} /> : null}
+        {visibleLoadState === "ready" && chatRows.length === 0 ? <EmptyState /> : null}
+        {visibleLoadState === "ready" && chatRows.length > 0 ? (
           <ol className="chat-transcript-list space-y-1.5" data-testid="agent-chat-transcript">
             {hiddenOlderRowCount > 0 ? (
               <li>
@@ -965,6 +1073,22 @@ function LoadingState() {
   return (
     <div className="flex h-full min-h-[160px] items-center justify-center text-[13px] text-muted-neutral">
       Loading transcript...
+    </div>
+  );
+}
+
+function WaitingState({ error }: { error: string | null }) {
+  return (
+    <div
+      role="status"
+      className="flex h-full min-h-[160px] flex-col items-center justify-center gap-3 text-center"
+    >
+      <div>
+        <div className="text-[13px] font-semibold text-primary">Waiting for transcript read</div>
+        <div className="mt-1 max-w-[42ch] text-[12px] leading-5 text-muted-neutral">
+          {error ?? "Waiting for the current transcript read to settle."}
+        </div>
+      </div>
     </div>
   );
 }

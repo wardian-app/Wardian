@@ -175,6 +175,7 @@ describe("AgentChatView", () => {
   });
 
   it("does not restore stale transcript rows when a pre-clear load resolves after clear", async () => {
+    vi.useFakeTimers();
     let clearHandler: ((event: { payload?: { session_id?: string } }) => void) | null = null;
     const load = deferred<AgentChatEvent[]>();
     listenMock.mockImplementation(async (eventName, handler) => {
@@ -183,31 +184,58 @@ describe("AgentChatView", () => {
       }
       return () => {};
     });
-    invokeMock.mockReturnValue(load.promise);
-
-    render(<AgentChatView sessionId="agent-1" status="Idle" />);
-
-    expect(clearHandler).toBeTruthy();
-    act(() => {
-      clearHandler?.({ payload: { session_id: "agent-1" } });
-    });
-
-    expect(screen.getByText("No chat transcript yet")).toBeInTheDocument();
-
-    await act(async () => {
-      load.resolve([
+    invokeMock
+      .mockReturnValueOnce(load.promise)
+      .mockResolvedValueOnce([
         event({
-          id: "message-before-clear",
-          kind: "message",
+          id: "message-after-clear",
           role: "assistant",
-          text: "This stale answer should stay hidden",
+          text: "Fresh transcript after clear",
           sequence: 1,
         }),
       ]);
-    });
 
-    expect(screen.queryByText("This stale answer should stay hidden")).not.toBeInTheDocument();
-    expect(screen.getByText("No chat transcript yet")).toBeInTheDocument();
+    try {
+      render(<AgentChatView sessionId="agent-1" status="Idle" refreshIntervalMs={3000} />);
+      await act(async () => {});
+
+      expect(clearHandler).toBeTruthy();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(invokeMock).toHaveBeenCalledTimes(1);
+
+      act(() => {
+        clearHandler?.({ payload: { session_id: "agent-1" } });
+      });
+      expect(screen.getByText("No chat transcript yet")).toBeInTheDocument();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(screen.queryByText("Unable to load transcript")).not.toBeInTheDocument();
+
+      await act(async () => {
+        load.resolve([
+          event({
+            id: "message-before-clear",
+            kind: "message",
+            role: "assistant",
+            text: "This stale answer should stay hidden",
+            sequence: 1,
+          }),
+        ]);
+      });
+
+      expect(screen.queryByText("This stale answer should stay hidden")).not.toBeInTheDocument();
+      expect(invokeMock).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(invokeMock).toHaveBeenCalledTimes(2);
+      expect(screen.getByText("Fresh transcript after clear")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("hides routine status lifecycle rows covered by the card header", async () => {
@@ -2516,6 +2544,57 @@ describe("AgentChatView", () => {
     expect(input).toHaveValue("Try again");
   });
 
+  it.each(["success", "failure"] as const)(
+    "applies the initial transcript %s when its load exceeds several refresh intervals",
+    async (outcome) => {
+      vi.useFakeTimers();
+      const pendingLoads: ReturnType<typeof deferred<AgentChatEvent[]>>[] = [];
+      let activeLoads = 0;
+      let maxActiveLoads = 0;
+      invokeMock.mockImplementation((command) => {
+        if (command !== "load_agent_chat_transcript") return Promise.resolve(undefined);
+        const load = deferred<AgentChatEvent[]>();
+        pendingLoads.push(load);
+        activeLoads += 1;
+        maxActiveLoads = Math.max(maxActiveLoads, activeLoads);
+        return load.promise.finally(() => {
+          activeLoads -= 1;
+        });
+      });
+
+      try {
+        render(<AgentChatView sessionId="agent-1" refreshIntervalMs={10} />);
+
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(30);
+        });
+
+        await act(async () => {
+          if (outcome === "success") {
+            pendingLoads[0].resolve([
+              event({
+                id: "initial-transcript",
+                text: "Initial transcript survived polling",
+              }),
+            ]);
+          } else {
+            pendingLoads[0].reject(new Error("Initial transcript load failed"));
+          }
+        });
+
+        expect(screen.queryByText("Loading transcript...")).not.toBeInTheDocument();
+        if (outcome === "success") {
+          expect(screen.getByText("Initial transcript survived polling")).toBeInTheDocument();
+        } else {
+          expect(screen.getByText("Initial transcript load failed")).toBeInTheDocument();
+        }
+        expect(maxActiveLoads).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("refreshes the transcript while chat mode remains mounted", async () => {
     vi.useFakeTimers();
     invokeMock
@@ -2562,51 +2641,212 @@ describe("AgentChatView", () => {
     }
   });
 
-  it("ignores stale transcript responses that resolve after a newer refresh", async () => {
+  it("keeps the last transcript visible and reports a background refresh failure", async () => {
     vi.useFakeTimers();
-    const firstLoad = deferred<AgentChatEvent[]>();
-    const secondLoad = deferred<AgentChatEvent[]>();
     invokeMock
-      .mockReturnValueOnce(firstLoad.promise)
-      .mockReturnValueOnce(secondLoad.promise);
+      .mockResolvedValueOnce([
+        event({
+          id: "last-good-message",
+          text: "Last successfully loaded transcript",
+        }),
+      ])
+      .mockRejectedValueOnce(new Error("Archive provenance validation failed"));
 
     try {
       render(<AgentChatView sessionId="agent-1" refreshIntervalMs={10} />);
 
       await act(async () => {});
-      expect(invokeMock).toHaveBeenCalledTimes(1);
+      expect(screen.getByText("Last successfully loaded transcript")).toBeInTheDocument();
+
       await act(async () => {
         await vi.advanceTimersByTimeAsync(10);
       });
+
+      expect(screen.getByText("Last successfully loaded transcript")).toBeInTheDocument();
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Transcript refresh failed: Archive provenance validation failed. Retrying automatically.",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows waiting for a slow first read and keeps its result through the next poll", async () => {
+    vi.useFakeTimers();
+    const delayedInitialLoad = deferred<AgentChatEvent[]>();
+    const nextPoll = deferred<AgentChatEvent[]>();
+    let activeLoads = 0;
+    let maxActiveLoads = 0;
+    const trackLoad = (promise: Promise<AgentChatEvent[]>) => {
+      activeLoads += 1;
+      maxActiveLoads = Math.max(maxActiveLoads, activeLoads);
+      return promise.finally(() => {
+        activeLoads -= 1;
+      });
+    };
+    let transcriptCalls = 0;
+    invokeMock.mockImplementation((command) => {
+      if (command !== "load_agent_chat_transcript") return Promise.resolve(undefined);
+      transcriptCalls += 1;
+      return transcriptCalls === 1 ? trackLoad(delayedInitialLoad.promise) : trackLoad(nextPoll.promise);
+    });
+
+    try {
+      render(<AgentChatView sessionId="agent-1" refreshIntervalMs={3000} />);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(screen.getByText("Waiting for transcript read")).toBeInTheDocument();
+      expect(screen.getByText(/still running after 30 seconds/)).toBeInTheDocument();
+      expect(invokeMock).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        delayedInitialLoad.resolve([
+          event({
+            id: "delayed-initial-message",
+            text: "Transcript arrived after the visible timeout",
+          }),
+        ]);
+      });
+
+      expect(screen.getByText("Transcript arrived after the visible timeout")).toBeInTheDocument();
+      expect(screen.queryByText("Loading transcript...")).not.toBeInTheDocument();
+      expect(screen.queryByText("Waiting for transcript read")).not.toBeInTheDocument();
+      expect(invokeMock).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(invokeMock).toHaveBeenCalledTimes(2);
+      expect(screen.getByText("Transcript arrived after the visible timeout")).toBeInTheDocument();
+      expect(screen.queryByText("Loading transcript...")).not.toBeInTheDocument();
+      expect(maxActiveLoads).toBe(1);
+
+      await act(async () => {
+        nextPoll.resolve([
+          event({
+            id: "retried-message",
+            text: "Transcript from next poll",
+          }),
+        ]);
+      });
+
+      expect(screen.getByText("Transcript from next poll")).toBeInTheDocument();
+      expect(screen.queryByText("Transcript arrived after the visible timeout")).not.toBeInTheDocument();
+      expect(maxActiveLoads).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("loads a new session immediately without showing the prior session rows", async () => {
+    vi.useFakeTimers();
+    const priorSessionRefresh = deferred<AgentChatEvent[]>();
+    const newSessionLoad = deferred<AgentChatEvent[]>();
+    const activeBySession = new Map<string, number>();
+    let activeLoads = 0;
+    let maxActiveLoads = 0;
+    let calls = 0;
+    const trackLoad = (session: string, promise: Promise<AgentChatEvent[]>) => {
+      const activeForSession = (activeBySession.get(session) ?? 0) + 1;
+      activeBySession.set(session, activeForSession);
+      expect(activeForSession).toBe(1);
+      activeLoads += 1;
+      maxActiveLoads = Math.max(maxActiveLoads, activeLoads);
+      return promise.finally(() => {
+        activeBySession.set(session, (activeBySession.get(session) ?? 1) - 1);
+        activeLoads -= 1;
+      });
+    };
+    invokeMock.mockImplementation((command) => {
+      if (command !== "load_agent_chat_transcript") return Promise.resolve(undefined);
+      calls += 1;
+      if (calls === 1) {
+        return Promise.resolve([
+          event({
+            id: "prior-session-message",
+            text: "Previously loaded session transcript",
+          }),
+        ]);
+      }
+      if (calls === 2) return trackLoad("agent-1", priorSessionRefresh.promise);
+      if (calls === 3) return trackLoad("agent-2", newSessionLoad.promise);
+      return Promise.resolve([]);
+    });
+
+    try {
+      const { rerender } = render(<AgentChatView sessionId="agent-1" refreshIntervalMs={3000} />);
+      await act(async () => {});
+      expect(screen.getByText("Previously loaded session transcript")).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
       expect(invokeMock).toHaveBeenCalledTimes(2);
 
+      rerender(<AgentChatView sessionId="agent-2" refreshIntervalMs={3000} />);
+      expect(screen.queryByText("Previously loaded session transcript")).not.toBeInTheDocument();
+      expect(screen.getByText("Loading transcript...")).toBeInTheDocument();
+      expect(invokeMock).toHaveBeenCalledTimes(3);
+      expect(maxActiveLoads).toBe(2);
+
       await act(async () => {
-        secondLoad.resolve([
+        newSessionLoad.resolve([
           event({
-            id: "newer-message",
-            kind: "message",
-            role: "assistant",
-            text: "Newer transcript",
-            sequence: 2,
+            id: "new-session-message",
+            session_id: "agent-2",
+            text: "New session transcript",
           }),
         ]);
       });
-      expect(screen.getByText("Newer transcript")).toBeInTheDocument();
+      expect(screen.getByText("New session transcript")).toBeInTheDocument();
 
       await act(async () => {
-        firstLoad.resolve([
+        priorSessionRefresh.resolve([
           event({
-            id: "older-message",
-            kind: "message",
-            role: "assistant",
-            text: "Older transcript",
-            sequence: 1,
+            id: "late-old-session-message",
+            session_id: "agent-1",
+            text: "Late old session refresh",
           }),
         ]);
       });
+      expect(screen.queryByText("Late old session refresh")).not.toBeInTheDocument();
+      expect(screen.getByText("New session transcript")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
-      expect(screen.getByText("Newer transcript")).toBeInTheDocument();
-      expect(screen.queryByText("Older transcript")).not.toBeInTheDocument();
+  it("discards an immediate follow-up when the chat view unmounts", async () => {
+    vi.useFakeTimers();
+    const load = deferred<AgentChatEvent[]>();
+    invokeMock.mockImplementation((command) => {
+      if (command === "load_agent_chat_transcript") return load.promise;
+      if (command === "submit_prompt_to_agent") return Promise.resolve(undefined);
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    try {
+      const { unmount } = render(<AgentChatView sessionId="agent-1" refreshIntervalMs={3000} />);
+      const transcriptLoadCalls = () =>
+        invokeMock.mock.calls.filter(([command]) => command === "load_agent_chat_transcript");
+      expect(transcriptLoadCalls()).toHaveLength(1);
+
+      fireEvent.change(screen.getByLabelText("Message agent"), { target: { value: "Refresh after submit" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+      await act(async () => {});
+      expect(invokeMock).toHaveBeenCalledWith("submit_prompt_to_agent", {
+        sessionId: "agent-1",
+        prompt: "Refresh after submit",
+      });
+
+      unmount();
+      await act(async () => {
+        load.resolve([]);
+      });
+
+      expect(transcriptLoadCalls()).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }
