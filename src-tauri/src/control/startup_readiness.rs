@@ -180,6 +180,44 @@ where
     }
 }
 
+/// Publish a delayed OpenCode startup observation only while it still owns a
+/// Starting runtime. Revalidate the current composer on both sides of the
+/// status transition, restoring Starting if the runtime or screen changes.
+pub(crate) async fn publish_startup_readiness_from_starting<Validate, Validation, SetStatus>(
+    state: &AppState,
+    session_id: &str,
+    observation: &ProviderStartupObservation,
+    evidence: ProviderReadyEvidence,
+    mut validate_ready: Validate,
+    mut set_status: SetStatus,
+) -> bool
+where
+    Validate: FnMut() -> Validation + Send,
+    Validation: std::future::Future<Output = bool> + Send,
+    SetStatus: FnMut(&str) + Send,
+{
+    let _lifecycle = state.lock_agent_lifecycle(session_id).await;
+    if !observation
+        .is_current_with_status(state, session_id, Some("Starting"))
+        .await
+        || !validate_ready().await
+    {
+        return false;
+    }
+
+    set_status("Idle");
+    if !validate_ready().await {
+        set_status("Starting");
+        return false;
+    }
+    if publish_startup_readiness_locked(None, state, session_id, observation, evidence).await {
+        true
+    } else {
+        set_status("Starting");
+        false
+    }
+}
+
 async fn publish_startup_readiness_locked(
     app: Option<&AppHandle>,
     state: &AppState,
@@ -812,6 +850,152 @@ mod tests {
                 .sequence_barrier,
             final_output.sequence_barrier,
             "no later provider output is needed for watcher publication"
+        );
+        assert!(input_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn opencode_recheck_rejects_changed_screen_and_current_composer_can_publish() {
+        use super::super::{test_support::TestWardianHome, tests::insert_test_agent};
+        use crate::state::terminal_session::TerminalRuntimeHandles;
+        use tokio::sync::mpsc;
+        use wardian_core::control::ProviderInputReadiness;
+
+        let _home = TestWardianHome::new_async().await;
+        let state = AppState::new();
+        const SESSION_ID: &str = "opencode-recheck-race";
+        insert_test_agent(&state, SESSION_ID, "OpenCodeRecheck", "Coder").await;
+        let (tx, mut input_rx) = mpsc::channel(1);
+        let runtime_generation = state
+            .terminal_sessions
+            .start_or_replace_runtime(
+                SESSION_ID,
+                TerminalRuntimeHandles::new(tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry {
+                    rows: 24,
+                    cols: 120,
+                },
+            )
+            .await
+            .unwrap();
+        let input_generation = state
+            .interactions
+            .start_provider_input_generation(SESSION_ID, ProviderInputReadiness::Booting, None)
+            .await
+            .generation;
+        let current_status = {
+            let mut agents = state.agents.lock().await;
+            let agent = agents.get_mut(SESSION_ID).unwrap();
+            agent.runtime_generation = Some(runtime_generation);
+            agent.config.lock().unwrap().provider = "opencode".to_string();
+            *agent.current_status.lock().unwrap() = "Starting".to_string();
+            agent.current_status.clone()
+        };
+        let observation = ProviderStartupObservation {
+            input_generation,
+            runtime_generation,
+            current_status: current_status.clone(),
+        };
+        let broker = state.terminal_sessions.clone();
+        let ready = b"\x1b[2J\x1b[HAsk anything...\r\nBuild  mimo-v2.5-free\r\nctrl+p commands";
+        let output_broker = broker.clone();
+        tokio::task::spawn_blocking(move || {
+            output_broker.process_output_blocking(SESSION_ID, runtime_generation, ready.to_vec())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(opencode_current_screen_is_ready(&state, SESSION_ID)
+            .await
+            .unwrap());
+
+        let validation_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count_for_validation = validation_count.clone();
+        let state_ref = &state;
+        let status_for_failure = current_status.clone();
+        assert!(
+            !publish_startup_readiness_from_starting(
+                &state,
+                SESSION_ID,
+                &observation,
+                ProviderReadyEvidence::PromptDetected,
+                move || {
+                    let count = count_for_validation.clone();
+                    let broker = broker.clone();
+                    async move {
+                        if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                            tokio::task::spawn_blocking(move || {
+                                broker.process_output_blocking(
+                                    SESSION_ID,
+                                    runtime_generation,
+                                    b"\x1b[2J\x1b[HLoading session...".to_vec(),
+                                )
+                            })
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        }
+                        opencode_current_screen_is_ready(state_ref, SESSION_ID)
+                            .await
+                            .unwrap_or(false)
+                    }
+                },
+                move |next_status| {
+                    *status_for_failure.lock().unwrap() = next_status.to_string();
+                },
+            )
+            .await
+        );
+        assert_eq!(
+            validation_count.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        assert_eq!(*current_status.lock().unwrap(), "Starting");
+        assert_eq!(
+            state
+                .interactions
+                .provider_input_state(SESSION_ID)
+                .await
+                .unwrap()
+                .state,
+            ProviderInputReadiness::Booting,
+            "screen invalidation must not publish a readiness receipt"
+        );
+
+        let output_broker = state.terminal_sessions.clone();
+        tokio::task::spawn_blocking(move || {
+            output_broker.process_output_blocking(SESSION_ID, runtime_generation, ready.to_vec())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let status_for_success = current_status.clone();
+        assert!(
+            publish_startup_readiness_from_starting(
+                &state,
+                SESSION_ID,
+                &observation,
+                ProviderReadyEvidence::PromptDetected,
+                || async {
+                    opencode_current_screen_is_ready(&state, SESSION_ID)
+                        .await
+                        .unwrap_or(false)
+                },
+                move |next_status| {
+                    *status_for_success.lock().unwrap() = next_status.to_string();
+                },
+            )
+            .await
+        );
+        assert_eq!(*current_status.lock().unwrap(), "Idle");
+        assert_eq!(
+            state
+                .interactions
+                .provider_input_state(SESSION_ID)
+                .await
+                .unwrap()
+                .state,
+            ProviderInputReadiness::Ready
         );
         assert!(input_rx.try_recv().is_err());
     }
