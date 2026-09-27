@@ -840,6 +840,42 @@ fn startup_prompt_ready_for_reader(
         && startup_prompt_is_ready(provider, startup_prompt_pending, startup_screen)
 }
 
+/// How many times a reader re-resolves a screen it could not read, and how long
+/// it waits between attempts. Bounded so an unreadable screen cannot hold a
+/// task open indefinitely, and slow enough that a provider still painting gets
+/// several chances to settle.
+const STARTUP_READINESS_RECHECK_ATTEMPTS: usize = 10;
+const STARTUP_READINESS_RECHECK_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(500);
+
+/// Whether the reader must re-resolve its startup screen later.
+///
+/// The reader only evaluates readiness when a chunk arrives. When the current
+/// screen cannot be resolved on the chunk that carried the ready prompt, that
+/// evaluation is lost, and a provider now sitting at its composer emits nothing
+/// further to trigger another. Startup then stays pending for the life of the
+/// session. Codex is excluded because `startup_prompt_is_ready` never admits it;
+/// its readiness is published by its own attachment path.
+fn startup_readiness_needs_recheck(
+    provider: &str,
+    startup_prompt_pending: bool,
+    screen_resolved: bool,
+) -> bool {
+    startup_prompt_pending && !screen_resolved && matches!(provider, "claude" | "opencode" | "pi")
+}
+
+/// Whether a re-resolved screen may end startup.
+///
+/// This is the same predicate the reader applies to a chunk, so a recheck can
+/// never promote readiness on elapsed time alone: an unresolved screen, an
+/// unready one, or one belonging to a replaced runtime all keep the agent
+/// waiting exactly as before.
+fn startup_recheck_admits_screen(provider: &str, screen: Option<&str>) -> bool {
+    screen.is_some_and(|screen| {
+        crate::control::provider_output_has_startup_ready_prompt(provider, screen)
+    })
+}
+
 fn finish_claude_trust_readiness(
     trust_state: &std::sync::atomic::AtomicU8,
     readiness_claimed: &std::sync::atomic::AtomicBool,
@@ -2741,6 +2777,9 @@ async fn spawn_agent_inner(
             (store, brief, expected_folder.clone(), memory_process_key)
         })));
     let startup_readiness_claimed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // One recheck task per reader, however many chunks fail to resolve.
+    let startup_readiness_recheck_started =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let pi_exit_broker = pi_attachment
         .as_ref()
         .map(|_| app_state.native_delivery.clone());
@@ -2886,6 +2925,72 @@ async fn spawn_agent_inner(
                         trust_state,
                         startup_screen.as_deref(),
                     );
+                    // The reader only evaluates readiness when a chunk
+                    // arrives. A chunk that cannot resolve a screen loses that
+                    // evaluation, and a provider parked at its composer sends
+                    // nothing further, so startup would stay pending for the
+                    // life of the session. Re-resolve a bounded number of times
+                    // instead. The recheck applies the same predicate and the
+                    // same generation guard, so it cannot promote readiness on
+                    // elapsed time, and it neither sends input nor ends the
+                    // session when the screen never becomes readable.
+                    if startup_readiness_needs_recheck(
+                        &provider_name_for_pty,
+                        startup_prompt_pending,
+                        startup_screen.is_some(),
+                    ) && !startup_readiness_recheck_started
+                        .swap(true, std::sync::atomic::Ordering::AcqRel)
+                    {
+                        let recheck_broker = terminal_sessions.clone();
+                        let recheck_session = sid_for_pty.clone();
+                        let recheck_provider = provider_name_for_pty.clone();
+                        let recheck_app = pty_app.clone();
+                        let recheck_status = current_status_clone.clone();
+                        let recheck_observation = startup_observation.clone();
+                        let recheck_claimed = startup_readiness_claimed.clone();
+                        tauri::async_runtime::spawn(async move {
+                            for _ in 0..STARTUP_READINESS_RECHECK_ATTEMPTS {
+                                tokio::time::sleep(STARTUP_READINESS_RECHECK_INTERVAL).await;
+                                let screen = recheck_broker
+                                    .snapshot(&recheck_session)
+                                    .await
+                                    .ok()
+                                    .filter(|snapshot| {
+                                        snapshot.runtime_generation == reader_runtime_generation
+                                    })
+                                    .map(|snapshot| snapshot.visible_grid);
+                                if !startup_recheck_admits_screen(
+                                    &recheck_provider,
+                                    screen.as_deref(),
+                                ) {
+                                    continue;
+                                }
+                                if claim_startup_readiness(&recheck_claimed) {
+                                    set_agent_status(
+                                        &recheck_app,
+                                        &recheck_session,
+                                        &recheck_status,
+                                        "Idle",
+                                    );
+                                    let state = recheck_app.state::<AppState>();
+                                    crate::control::startup_readiness::publish_startup_readiness(
+                                        Some(&recheck_app),
+                                        state.inner(),
+                                        &recheck_session,
+                                        &recheck_observation,
+                                        wardian_core::control::ProviderReadyEvidence::PromptDetected,
+                                    )
+                                    .await;
+                                    crate::control::spawn_agent_messaging_if_idle(
+                                        &recheck_app,
+                                        &recheck_session,
+                                        "Idle",
+                                    );
+                                }
+                                return;
+                            }
+                        });
+                    }
                     let assigned_claude_trust_prompt =
                         startup_screen.as_deref().is_some_and(|output| {
                             provider_name_for_pty == "claude"
@@ -6071,6 +6176,116 @@ mod tests {
         assert!(
             input_rx.try_recv().is_err(),
             "observing startup never submits input"
+        );
+    }
+
+    /// #1456: the reader evaluates readiness only when a chunk arrives. If the
+    /// chunk carrying the ready prompt cannot resolve a screen, that evaluation
+    /// is lost and a provider parked at its composer sends nothing further, so
+    /// startup stays pending for the life of the session.
+    #[tokio::test]
+    async fn unresolvable_startup_screen_is_rechecked_instead_of_pinning_startup() {
+        let broker =
+            std::sync::Arc::new(crate::state::terminal_session::TerminalSessionBroker::default());
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(1);
+        let generation = broker
+            .start_or_replace_runtime(
+                "recheck",
+                crate::state::terminal_session::TerminalRuntimeHandles::new(input_tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry {
+                    cols: 120,
+                    rows: 24,
+                },
+            )
+            .await
+            .unwrap();
+
+        // The chunk that carries the ready composer is applied to the broker.
+        let ready = "[2J[HAsk anything...
+Build  mimo-v2.5-free
+ctrl+p commands";
+        let output_broker = broker.clone();
+        tokio::task::spawn_blocking(move || {
+            output_broker.process_output_blocking("recheck", generation, ready.as_bytes().to_vec())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        // The screen is genuinely ready now.
+        let settled = broker.snapshot("recheck").await.unwrap();
+        assert!(crate::control::provider_output_has_startup_ready_prompt(
+            "opencode",
+            &settled.visible_grid
+        ));
+
+        // The reader could not resolve it on that chunk, so its evaluation
+        // yields false and startup stays pending. This is the observed failure.
+        let mut startup_prompt_pending = true;
+        assert!(!startup_prompt_ready_for_reader(
+            "opencode",
+            startup_prompt_pending,
+            CLAUDE_TRUST_CONFIRMATION_NOT_STARTED,
+            None,
+        ));
+        assert!(startup_prompt_pending, "startup is still waiting");
+        assert!(startup_readiness_needs_recheck(
+            "opencode",
+            startup_prompt_pending,
+            false,
+        ));
+
+        // A bounded recheck re-resolves the same broker screen and admits it.
+        // The reader resolves inside a blocking thread; resolve here first so
+        // the helper under test stays synchronous and deterministic.
+        let current = broker
+            .snapshot("recheck")
+            .await
+            .ok()
+            .filter(|snapshot| snapshot.runtime_generation == generation)
+            .map(|snapshot| snapshot.visible_grid);
+        // The first attempt models the lost chunk; a later one resolves.
+        assert!(!startup_recheck_admits_screen("opencode", None));
+        assert!(startup_recheck_admits_screen(
+            "opencode",
+            current.as_deref()
+        ));
+        let resolved = current.clone();
+        if startup_prompt_ready_for_reader(
+            "opencode",
+            startup_prompt_pending,
+            CLAUDE_TRUST_CONFIRMATION_NOT_STARTED,
+            resolved.as_deref(),
+        ) {
+            startup_prompt_pending = false;
+        }
+        assert!(!startup_prompt_pending, "recheck resolves startup");
+
+        // A screen that never resolves must not be promoted on a timer alone.
+        assert!(
+            !startup_recheck_admits_screen("opencode", None),
+            "no resolved screen means no readiness"
+        );
+        // Nor may an unready screen be promoted just because it resolved.
+        assert!(
+            !startup_recheck_admits_screen("opencode", Some("Loading session...")),
+            "an unready screen stays unready"
+        );
+        // A replaced runtime yields no screen, so an old reader cannot publish.
+        let stale = broker
+            .snapshot("recheck")
+            .await
+            .ok()
+            .filter(|snapshot| snapshot.runtime_generation == generation + 1)
+            .map(|snapshot| snapshot.visible_grid);
+        assert!(
+            !startup_recheck_admits_screen("opencode", stale.as_deref()),
+            "a generation mismatch must not resolve"
+        );
+
+        assert!(
+            input_rx.try_recv().is_err(),
+            "rechecking startup never submits input"
         );
     }
 
