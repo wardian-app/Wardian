@@ -99,6 +99,21 @@ describe("buildAgentGraph", () => {
     expect(graph.scopeLabel).toBe("All agents");
   });
 
+  it("uses the canonical title and thought status derivation for nodes", () => {
+    const actionTitle = "✋ Action Required";
+    const graph = buildTestGraph({
+      agents: [agent({ session_id: "a" })],
+      telemetry: { a: metric("a", "Idle") },
+      terminalTitles: { a: actionTitle },
+      currentThoughts: {},
+    });
+
+    expect(graph.nodes[0]).toMatchObject({
+      status: "Action Needed",
+      color: "var(--color-wardian-warning)",
+    });
+  });
+
   it("uses live off-agent state before stale telemetry or saved config state", () => {
     const graph = buildAgentGraph({
       agents: [agent({ session_id: "a", session_name: "Alpha", is_off: false })],
@@ -114,6 +129,24 @@ describe("buildAgentGraph", () => {
     expect(graph.nodes[0]).toMatchObject({
       status: "Off",
       color: "var(--color-wardian-off)",
+    });
+  });
+
+  it("uses cleared live off-agent state before a stale saved off flag", () => {
+    const graph = buildAgentGraph({
+      agents: [agent({ session_id: "a", session_name: "Alpha", is_off: true })],
+      telemetry: { a: metric("a", "Processing...") },
+      teams: [],
+      activeList: null,
+      interactions: {},
+      selectedAgentIds: new Set(),
+      enabledReasons: allReasons(),
+      offAgentIds: new Set(),
+    });
+
+    expect(graph.nodes[0]).toMatchObject({
+      status: "Processing...",
+      color: "var(--color-wardian-processing)",
     });
   });
 
