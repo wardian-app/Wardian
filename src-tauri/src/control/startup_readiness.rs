@@ -101,16 +101,28 @@ pub(crate) struct ProviderStartupObservation {
 }
 
 impl ProviderStartupObservation {
-    async fn is_current(&self, state: &AppState, session_id: &str) -> bool {
+    async fn is_current_with_status(
+        &self,
+        state: &AppState,
+        session_id: &str,
+        expected_status: Option<&str>,
+    ) -> bool {
         let agents = state.agents.lock().await;
         agents.get(session_id).is_some_and(|agent| {
             agent.runtime_generation == Some(self.runtime_generation)
                 && Arc::ptr_eq(&agent.current_status, &self.current_status)
-                && agent
-                    .current_status
-                    .lock()
-                    .is_ok_and(|status| status.eq_ignore_ascii_case("idle"))
+                && expected_status.is_none_or(|expected| {
+                    agent
+                        .current_status
+                        .lock()
+                        .is_ok_and(|status| status.eq_ignore_ascii_case(expected))
+                })
         })
+    }
+
+    async fn is_current(&self, state: &AppState, session_id: &str) -> bool {
+        self.is_current_with_status(state, session_id, Some("idle"))
+            .await
     }
 }
 
@@ -125,6 +137,56 @@ pub(crate) async fn publish_startup_readiness(
     evidence: ProviderReadyEvidence,
 ) -> bool {
     let _lifecycle = state.lock_agent_lifecycle(session_id).await;
+    publish_startup_readiness_locked(app, state, session_id, observation, evidence).await
+}
+
+/// Revalidates the ready screen and moves the owning startup attempt from
+/// Action Needed to Idle before publication, all under the lifecycle lock.
+/// The screen validator runs before and after the guarded status transition.
+pub(crate) async fn publish_startup_readiness_from_action_needed<Validate, Validation, SetStatus>(
+    state: &AppState,
+    session_id: &str,
+    observation: &ProviderStartupObservation,
+    evidence: ProviderReadyEvidence,
+    mut validate_ready: Validate,
+    mut set_status: SetStatus,
+) -> bool
+where
+    Validate: FnMut() -> Validation + Send,
+    Validation: std::future::Future<Output = bool> + Send,
+    SetStatus: FnMut(&str) + Send,
+{
+    let _lifecycle = state.lock_agent_lifecycle(session_id).await;
+    if !observation
+        .is_current_with_status(state, session_id, Some("Action Needed"))
+        .await
+    {
+        return false;
+    }
+
+    if !validate_ready().await {
+        return false;
+    }
+    set_status("Idle");
+    if !validate_ready().await {
+        set_status("Action Needed");
+        return false;
+    }
+    if publish_startup_readiness_locked(None, state, session_id, observation, evidence).await {
+        true
+    } else {
+        set_status("Action Needed");
+        false
+    }
+}
+
+async fn publish_startup_readiness_locked(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    session_id: &str,
+    observation: &ProviderStartupObservation,
+    evidence: ProviderReadyEvidence,
+) -> bool {
     if !observation.is_current(state, session_id).await {
         return false;
     }
@@ -256,13 +318,108 @@ fn opencode_has_restored_composer(lines: &[&str]) -> bool {
     has_commands && footer_rows.iter().any(|line| line.contains("OpenCode"))
 }
 
+const CLAUDE_WORKSPACE_TRUST_QUESTION: &str =
+    "Quick safety check: Is this a project you created or one you trust?";
+const CLAUDE_WORKSPACE_TRUST_QUESTION_2_1_283: &str = "Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.";
+const CLAUDE_WORKSPACE_TRUST_QUESTION_MAX_ROWS: usize = 3;
+
+fn claude_workspace_trust_question_row_text(line: &str) -> &str {
+    line.trim_matches(|character: char| {
+        character.is_whitespace() || matches!(character, '│' | '┃' | '|')
+    })
+}
+
+fn claude_trust_option_text(line: &str) -> &str {
+    let line = line.trim();
+    line.strip_prefix('❯').unwrap_or(line).trim()
+}
+
+pub(crate) fn claude_workspace_trust_question_span(lines: &[&str], index: usize) -> Option<usize> {
+    for row_count in 1..=CLAUDE_WORKSPACE_TRUST_QUESTION_MAX_ROWS {
+        let Some(rows) = lines.get(index..index + row_count) else {
+            break;
+        };
+        if rows
+            .iter()
+            .any(|line| claude_workspace_trust_question_row_text(line).is_empty())
+        {
+            break;
+        }
+        let normalized = rows
+            .iter()
+            .map(|line| {
+                claude_workspace_trust_question_row_text(line)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if (row_count == 1 && normalized.eq_ignore_ascii_case(CLAUDE_WORKSPACE_TRUST_QUESTION))
+            || normalized.eq_ignore_ascii_case(CLAUDE_WORKSPACE_TRUST_QUESTION_2_1_283)
+        {
+            return Some(row_count);
+        }
+    }
+    None
+}
+
+/// Recognizes Claude Code's folder-trust dialog on a current terminal screen.
+/// The option labels and question must be present together so ordinary project
+/// text cannot turn a managed startup into an approval state.
+fn claude_workspace_trust_prompt_indices(lines: &[&str]) -> Option<(usize, usize, usize)> {
+    let question = lines
+        .iter()
+        .enumerate()
+        .find_map(|(index, _)| claude_workspace_trust_question_span(lines, index).map(|_| index));
+    let no_exit = lines
+        .iter()
+        .position(|line| claude_trust_option_text(line).eq_ignore_ascii_case("No, exit"));
+    let yes_trust = lines.iter().position(|line| {
+        claude_trust_option_text(line).eq_ignore_ascii_case("Yes, I trust this folder")
+    });
+    match (question, no_exit, yes_trust) {
+        (Some(question), Some(no_exit), Some(yes_trust))
+            if question < no_exit && no_exit < yes_trust =>
+        {
+            Some((question, no_exit, yes_trust))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn claude_workspace_trust_prompt_is_current(output: &str) -> bool {
+    let cleaned = strip_ansi_controls(output);
+    let lines = cleaned.lines().collect::<Vec<_>>();
+    claude_workspace_trust_prompt_indices(&lines).is_some()
+}
+
+/// Auto-confirmation is safe only while Claude still has the observed default
+/// selection. Any changed selection remains visible as Action Needed.
+pub(crate) fn claude_workspace_trust_prompt_selects_no(output: &str) -> bool {
+    claude_workspace_trust_prompt_selection(output) == Some((true, false))
+}
+
+/// Returns whether the No and Yes rows are selected in one exact current trust
+/// prompt. Keeping both marker states lets callers fail closed during redraws.
+pub(crate) fn claude_workspace_trust_prompt_selection(output: &str) -> Option<(bool, bool)> {
+    let cleaned = strip_ansi_controls(output);
+    let lines = cleaned.lines().collect::<Vec<_>>();
+    let (_, no_exit, yes_trust) = claude_workspace_trust_prompt_indices(&lines)?;
+    let selected = |index: usize| lines[index].trim().starts_with('❯');
+    Some((selected(no_exit), selected(yes_trust)))
+}
+
 /// Provider startup can require an explicit account or workspace decision
 /// before a compose prompt exists. Keep that state visible and prevent queued
 /// delivery from being mistaken for a prompt the provider can receive.
 pub(crate) fn provider_output_requires_startup_action(provider: &str, output: &str) -> bool {
     let cleaned = strip_ansi_controls(output).to_ascii_lowercase();
     match provider {
-        "claude" => cleaned.contains("allow external claude.md file imports?"),
+        "claude" => {
+            cleaned.contains("allow external claude.md file imports?")
+                || claude_workspace_trust_prompt_is_current(output)
+        }
         "codex" => crate::delivery::codex_menu::current_screen_requires_choice(
             &strip_ansi_controls(output),
         ),
@@ -547,6 +704,118 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn claude_trust_watcher_publishes_ready_screen_after_reader_consumed_final_output() {
+        use super::super::{test_support::TestWardianHome, tests::insert_test_agent};
+        use crate::state::terminal_session::TerminalRuntimeHandles;
+        use tokio::sync::mpsc;
+        use wardian_core::control::ProviderInputReadiness;
+
+        let _home = TestWardianHome::new_async().await;
+        let state = AppState::new();
+        const SESSION_ID: &str = "claude-trust-handoff";
+        insert_test_agent(&state, SESSION_ID, "ClaudeTrust", "Coder").await;
+        let (tx, mut input_rx) = mpsc::channel(1);
+        let runtime_generation = state
+            .terminal_sessions
+            .start_or_replace_runtime(
+                SESSION_ID,
+                TerminalRuntimeHandles::new(tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry {
+                    rows: 24,
+                    cols: 120,
+                },
+            )
+            .await
+            .unwrap();
+        let input_generation = state
+            .interactions
+            .start_provider_input_generation(SESSION_ID, ProviderInputReadiness::Booting, None)
+            .await
+            .generation;
+        let current_status = {
+            let mut agents = state.agents.lock().await;
+            let agent = agents.get_mut(SESSION_ID).unwrap();
+            agent.runtime_generation = Some(runtime_generation);
+            agent.config.lock().unwrap().provider = "claude".to_string();
+            *agent.current_status.lock().unwrap() = "Action Needed".to_string();
+            agent.current_status.clone()
+        };
+        let observation = ProviderStartupObservation {
+            input_generation,
+            runtime_generation,
+            current_status: current_status.clone(),
+        };
+        let output = "Claude Code v2.1.283\n❯ Try ask Claude\n────────\nHaiku 4.5 | workspace | /rc\n⏵⏵ bypass permissions on (shift+tab to cycle)";
+        let terminal = state.terminal_sessions.clone();
+        tokio::task::spawn_blocking(move || {
+            terminal.process_output_blocking(
+                SESSION_ID,
+                runtime_generation,
+                format!("\x1b[2J\x1b[H{}", output.replace('\n', "\r\n")).into_bytes(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let final_output = state.terminal_sessions.snapshot(SESSION_ID).await.unwrap();
+        assert!(provider_output_has_startup_ready_prompt(
+            "claude",
+            &final_output.visible_grid
+        ));
+        let validation_broker = state.terminal_sessions.clone();
+        let expected_snapshot = final_output.clone();
+        let validate_ready = move || {
+            let broker = validation_broker.clone();
+            let expected = expected_snapshot.clone();
+            async move {
+                broker.snapshot(SESSION_ID).await.is_ok_and(|current| {
+                    current.runtime_generation == expected.runtime_generation
+                        && current.sequence_barrier == expected.sequence_barrier
+                        && current.visible_grid == expected.visible_grid
+                        && provider_output_has_startup_ready_prompt("claude", &current.visible_grid)
+                })
+            }
+        };
+        let status_arc = current_status.clone();
+        assert!(
+            publish_startup_readiness_from_action_needed(
+                &state,
+                SESSION_ID,
+                &observation,
+                ProviderReadyEvidence::PromptDetected,
+                validate_ready,
+                move |next_status| {
+                    *status_arc.lock().unwrap() = next_status.to_string();
+                },
+            )
+            .await
+        );
+
+        assert_eq!(*current_status.lock().unwrap(), "Idle");
+        assert_eq!(
+            state
+                .interactions
+                .provider_input_state(SESSION_ID)
+                .await
+                .unwrap()
+                .state,
+            ProviderInputReadiness::Ready,
+            "the watcher publishes readiness without another PTY output"
+        );
+        assert_eq!(
+            state
+                .terminal_sessions
+                .snapshot(SESSION_ID)
+                .await
+                .unwrap()
+                .sequence_barrier,
+            final_output.sequence_barrier,
+            "no later provider output is needed for watcher publication"
+        );
+        assert!(input_rx.try_recv().is_err());
+    }
+
     #[test]
     fn startup_ready_prompt_requires_provider_composer() {
         let model_choice = "GPT-5.4 Mini will be deprecated soon\nCodex now uses GPT-5.6 Luna in place of GPT-5.4 Mini.\nChoose how you'd like Codex to proceed.\n› 1. Try new model\n  2. Use existing model\nUse ↑/↓ to move, press enter to confirm";
@@ -577,6 +846,79 @@ mod tests {
         assert!(provider_output_has_startup_ready_prompt(
             "claude",
             "Claude Code v2.1.263\n❯ Try fix typecheck errors\n────────\nHaiku 4.5 | workspace | /rc\n⏵⏵ bypass permissions on (shift+tab to cycle)",
+        ));
+    }
+
+    #[test]
+    fn claude_workspace_trust_screen_requires_the_exact_question_and_both_choices() {
+        let prompt = "Quick safety check: Is this a project you created or one you trust?\n/workspace/project\n❯ No, exit\nYes, I trust this folder";
+
+        assert!(claude_workspace_trust_prompt_is_current(prompt));
+        assert!(claude_workspace_trust_prompt_selects_no(prompt));
+        assert!(provider_output_requires_startup_action("claude", prompt));
+        assert!(!provider_output_has_startup_ready_prompt("claude", prompt));
+        assert!(!provider_output_requires_startup_action("codex", prompt));
+
+        let changed_selection = prompt
+            .replace("❯ No, exit", "No, exit")
+            .replace("Yes, I trust this folder", "❯ Yes, I trust this folder");
+        assert!(claude_workspace_trust_prompt_is_current(&changed_selection));
+        assert!(!claude_workspace_trust_prompt_selects_no(
+            &changed_selection
+        ));
+        assert_eq!(
+            claude_workspace_trust_prompt_selection(&changed_selection),
+            Some((false, true))
+        );
+        assert!(provider_output_requires_startup_action(
+            "claude",
+            &changed_selection,
+        ));
+
+        let transient_both_selected = prompt.replace(
+            "❯ No, exit\nYes, I trust this folder",
+            "❯ No, exit\n❯ Yes, I trust this folder",
+        );
+        assert_eq!(
+            claude_workspace_trust_prompt_selection(&transient_both_selected),
+            Some((true, true))
+        );
+        assert!(!claude_workspace_trust_prompt_selects_no(
+            &transient_both_selected
+        ));
+        assert!(!claude_workspace_trust_prompt_is_current(
+            "Quick safety check: Is this a project you created or one you trust?\n❯ No, exit"
+        ));
+        assert!(!claude_workspace_trust_prompt_is_current(
+            "A project description mentions Quick safety check: Is this a project you created or one you trust?\n❯ No, exit\nYes, I trust this folder"
+        ));
+
+        let current_2_1_283 = "Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.\nClaude Code'll be able to read, edit, and execute files here.\n❯ No, exit\nYes, I trust this folder";
+        assert!(claude_workspace_trust_prompt_is_current(current_2_1_283));
+        assert!(claude_workspace_trust_prompt_selects_no(current_2_1_283));
+        assert!(provider_output_requires_startup_action(
+            "claude",
+            current_2_1_283
+        ));
+
+        let current_2_1_283_wrapped = "  Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's\n  in this folder first.\n  Claude Code'll be able to read, edit, and execute files here.\n  ❯ No, exit\n    Yes, I trust this folder";
+        assert!(claude_workspace_trust_prompt_is_current(
+            current_2_1_283_wrapped
+        ));
+        assert!(claude_workspace_trust_prompt_selects_no(
+            current_2_1_283_wrapped
+        ));
+        assert!(provider_output_requires_startup_action(
+            "claude",
+            current_2_1_283_wrapped
+        ));
+
+        let changed_wrap =
+            current_2_1_283_wrapped.replace("  in this folder first.", "  this folder first.");
+        assert!(!claude_workspace_trust_prompt_is_current(&changed_wrap));
+        assert!(!provider_output_requires_startup_action(
+            "claude",
+            &changed_wrap
         ));
     }
 
