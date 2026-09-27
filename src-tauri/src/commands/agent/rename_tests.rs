@@ -32,35 +32,28 @@ async fn rename_does_not_hold_agent_map_while_waiting_for_roster_barrier() {
     let barrier = wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
         .expect("acquire roster barrier")
         .expect("roster barrier available");
-    let lifecycle_lock = state.agent_lifecycle_lock_for("agent-1").await;
+    let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
     let app_handle = app.handle().clone();
     let rename = tokio::spawn(async move {
-        let state = app_handle.state::<AppState>();
-        rename_agent(
-            "agent-1".to_string(),
-            "Alpha-renamed".to_string(),
-            state,
-            app_handle.clone(),
-        )
-        .await
+        super::RENAME_ROSTER_ATTEMPT
+            .scope(std::cell::RefCell::new(Some(attempt_tx)), async move {
+                let state = app_handle.state::<AppState>();
+                rename_agent(
+                    "agent-1".to_string(),
+                    "Alpha-renamed".to_string(),
+                    state,
+                    app_handle.clone(),
+                )
+                .await
+            })
+            .await
     });
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            if lifecycle_lock.try_lock().is_err() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("rename acquires its lifecycle lock before waiting for the roster barrier");
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    let agent_map_available =
-        tokio::time::timeout(std::time::Duration::from_millis(200), state.agents.lock())
-            .await
-            .is_ok();
+    tokio::time::timeout(std::time::Duration::from_secs(2), attempt_rx)
+        .await
+        .expect("rename reaches the roster barrier while it is held")
+        .expect("rename reports roster-barrier contention");
+    let agent_map_available = state.agents.try_lock().is_ok();
     drop(barrier);
     let rename_result = tokio::time::timeout(std::time::Duration::from_secs(5), rename)
         .await

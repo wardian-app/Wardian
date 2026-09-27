@@ -9,6 +9,11 @@ mod tests;
 #[path = "agent/rename_tests.rs"]
 mod rename_tests;
 
+#[cfg(test)]
+tokio::task_local! {
+    static RENAME_ROSTER_ATTEMPT: std::cell::RefCell<Option<tokio::sync::oneshot::Sender<()>>>;
+}
+
 pub(super) fn fresh_provider_session_for_initial_capture(
     config: &wardian_core::models::AgentConfig,
     actual_resume: Option<&str>,
@@ -101,7 +106,21 @@ pub(super) async fn lock_rename_mutation(
     let lifecycle = lock_agent_lifecycle(state, session_id).await;
     // Configuration saves take the roster barrier before the agent map. A
     // rename must do the same to avoid holding the map during a barrier wait.
-    let roster = tokio::task::spawn_blocking(|| {
+    // The test-scoped probe reports actual contention before asserting map access.
+    #[cfg(test)]
+    let attempt = RENAME_ROSTER_ATTEMPT
+        .try_with(|signal| signal.borrow_mut().take())
+        .ok()
+        .flatten();
+    let roster = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        if let Some(signal) = attempt {
+            let immediate = wardian_core::agent_replacement::acquire_agent_roster_barrier(false)?;
+            if immediate.is_some() {
+                return Ok(immediate);
+            }
+            let _ = signal.send(());
+        }
         wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
     })
     .await
