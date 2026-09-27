@@ -3872,11 +3872,14 @@ pub(crate) async fn push_delivery_for_delivery_service(
     detail: &DeliveryDetail,
 ) {
     let agents = state.agents.lock().await;
-    if let Some(agent) = agents.get(session_id) {
-        if let Ok(mut watch_state) = agent.watch_state.lock() {
-            watch_state.push_delivery(serde_json::json!(detail));
-        }
-    }
+    let Some(agent) = agents.get(session_id) else {
+        return;
+    };
+    let watch_state = Arc::clone(&agent.watch_state);
+    drop(agents);
+    if let Ok(mut watch_state) = watch_state.lock() {
+        watch_state.push_delivery(serde_json::json!(detail));
+    };
 }
 
 pub(crate) async fn mark_delivered_agents_prompt_started_for_delivery_service(
@@ -3889,15 +3892,11 @@ pub(crate) async fn mark_delivered_agents_prompt_started_for_delivery_service(
 
 /// Only canonical v2 work is eligible at status and restore opportunities.
 pub(crate) fn spawn_agent_messaging_if_idle(app: &AppHandle, session_id: &str, status: &str) {
-    if startup_readiness::codex_status_allows_messaging(app, session_id, status) {
-        agent_messaging::spawn_pending_tasks(app, session_id);
-    }
+    agent_messaging::spawn_pending_tasks_when_ready(app, session_id, Some(status));
 }
 
 pub(crate) fn spawn_agent_messaging_after_restore(app: &AppHandle, session_id: &str) {
-    if startup_readiness::codex_attachment_allows_messaging(app, session_id) {
-        agent_messaging::spawn_pending_tasks(app, session_id);
-    }
+    agent_messaging::spawn_pending_tasks_when_ready(app, session_id, None);
 }
 
 pub(crate) async fn dispatch_agent_messaging_from_status_observation(

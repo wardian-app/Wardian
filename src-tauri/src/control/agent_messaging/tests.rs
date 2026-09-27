@@ -1,6 +1,7 @@
 //! Messaging authorization, ownership, correlation, and queue progression tests.
 use super::super::test_support::TestWardianHome;
 use super::*;
+use crate::control::tests::install_test_terminal_runtime;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -75,6 +76,356 @@ fn stored_status(id: &str) -> String {
         )
     })
     .unwrap()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ready_status_wakeup_waits_for_roster_contention() {
+    let _home = TestWardianHome::new_async().await;
+    let state = Arc::new(AppState::new());
+    agent(&state, "receiver", "Receiver").await;
+    state
+        .agents
+        .lock()
+        .await
+        .get_mut("receiver")
+        .unwrap()
+        .process_id = None;
+    let (config, current_status) = {
+        let agents = state.agents.lock().await;
+        let receiver = agents.get("receiver").unwrap();
+        (receiver.config.clone(), receiver.current_status.clone())
+    };
+    config.lock().unwrap().provider = "claude".into();
+    *current_status.lock().unwrap() = "Idle".into();
+
+    let roster = state.agents.lock().await;
+    let check_state = Arc::clone(&state);
+    let check = tokio::spawn(async move {
+        pending_task_wakeup_is_ready(&check_state, "receiver", Some("idle")).await
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !check.is_finished(),
+        "a transient roster lock must defer the readiness check"
+    );
+    drop(roster);
+
+    assert!(check.await.unwrap());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn readiness_snapshot_releases_roster_before_agent_locks_and_revalidates_incarnation() {
+    let _home = TestWardianHome::new_async().await;
+    let state = Arc::new(AppState::new());
+    agent(&state, "receiver", "Receiver").await;
+    state
+        .agents
+        .lock()
+        .await
+        .get_mut("receiver")
+        .unwrap()
+        .process_id = None;
+    let (config, current_status) = {
+        let agents = state.agents.lock().await;
+        let receiver = agents.get("receiver").unwrap();
+        (
+            receiver.config.clone(),
+            Arc::clone(&receiver.current_status),
+        )
+    };
+    config.lock().unwrap().provider = "claude".into();
+    *current_status.lock().unwrap() = "Idle".into();
+
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let status_holder = std::thread::spawn(move || {
+        let _status = current_status.lock().unwrap();
+        locked_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    locked_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("per-agent status lock held");
+
+    let snapshot_result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        pending_task_wakeup_agent_snapshot(&state, "receiver"),
+    )
+    .await;
+    let snapshot = match snapshot_result {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => {
+            release_tx.send(()).unwrap();
+            status_holder.join().unwrap();
+            panic!("registered agent readiness snapshot");
+        }
+        Err(_) => {
+            release_tx.send(()).unwrap();
+            status_holder.join().unwrap();
+            panic!("roster snapshot must not wait on per-agent locks");
+        }
+    };
+
+    let mut replacement = super::super::tests::test_agent("receiver", "Receiver", "Test");
+    replacement.process_id = None;
+    replacement.config.lock().unwrap().provider = "claude".into();
+    *replacement.current_status.lock().unwrap() = "Idle".into();
+    let mut agents = state.agents.lock().await;
+    agents.insert("receiver".into(), replacement);
+    drop(agents);
+
+    release_tx.send(()).unwrap();
+    status_holder.join().unwrap();
+    assert!(pending_task_wakeup_snapshot_is_ready(
+        &snapshot,
+        Some("idle")
+    ));
+    assert!(
+        !pending_task_wakeup_snapshot_is_ready_and_current(
+            &state,
+            "receiver",
+            &snapshot,
+            Some("idle")
+        )
+        .await,
+        "a readiness result from a replaced agent incarnation must be discarded"
+    );
+}
+
+/// Exercises the production telemetry status-observation dispatch hook while
+/// lifecycle ownership is held, without starting a provider.
+#[tokio::test(flavor = "current_thread")]
+async fn startup_ready_task_wakeup_waits_for_lifecycle_release_and_preserves_uncertain_owner() {
+    use wardian_core::control::{DeliveryDetail, ProviderInputReadiness, ProviderReadyEvidence};
+
+    let home = TestWardianHome::new_async().await;
+    let state = Arc::new(AppState::new());
+    agent(&state, "sender", "Sender").await;
+    agent(&state, "receiver", "Receiver").await;
+    {
+        let mut agents = state.agents.lock().await;
+        agents.get_mut("sender").unwrap().process_id = None;
+        agents.get_mut("receiver").unwrap().process_id = None;
+    }
+    let (config, current_status) = {
+        let agents = state.agents.lock().await;
+        let receiver = agents.get("receiver").unwrap();
+        (receiver.config.clone(), receiver.current_status.clone())
+    };
+    {
+        let mut config = config.lock().unwrap();
+        config.provider = "claude".into();
+        config.folder = home.path().to_string_lossy().into_owned();
+    }
+    *current_status.lock().unwrap() = "Idle".into();
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(8);
+    install_test_terminal_runtime(&state, "receiver", input_tx).await;
+    let generation = state
+        .interactions
+        .start_provider_input_generation("receiver", ProviderInputReadiness::Booting, None)
+        .await
+        .generation;
+    let admitted = state
+        .interactions
+        .admit_agent_message(store::Admission {
+            sender: "sender",
+            recipient: "receiver",
+            message: "startup work",
+            idempotency_key: Some("startup-wakeup"),
+            task: true,
+            generation,
+        })
+        .await
+        .unwrap();
+    let duplicate = state
+        .interactions
+        .admit_agent_message(store::Admission {
+            sender: "sender",
+            recipient: "receiver",
+            message: "startup work",
+            idempotency_key: Some("startup-wakeup"),
+            task: true,
+            generation,
+        })
+        .await
+        .unwrap();
+    assert_eq!(duplicate.record.id, admitted.record.id);
+    assert!(duplicate.duplicate);
+
+    // The production ready-observation dispatch must leave the task pending
+    // and expose why it is waiting while startup still owns the lifecycle gate.
+    let lifecycle = state.lock_agent_lifecycle("receiver").await;
+    state
+        .interactions
+        .record_provider_input_state(
+            "receiver",
+            generation,
+            ProviderInputReadiness::Ready,
+            Some(ProviderReadyEvidence::PromptDetected),
+        )
+        .await;
+    let readiness_state = Arc::clone(&state);
+    let readiness_wakeup = tokio::spawn(async move {
+        super::super::dispatch_agent_messaging_from_status_observation(
+            None,
+            &readiness_state,
+            "receiver",
+        )
+        .await;
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !readiness_wakeup.is_finished(),
+        "the readiness opportunity must wait for startup's lifecycle guard"
+    );
+    let pending_detail = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let watch_state = {
+                let agents = state.agents.lock().await;
+                Arc::clone(&agents.get("receiver").unwrap().watch_state)
+            };
+            let snapshot = watch_state
+                .lock()
+                .unwrap()
+                .snapshot_since(None, None)
+                .unwrap();
+            let delivery = super::super::delivery_snapshot_from_events(&snapshot.events).delivery;
+            if let Some(detail) = delivery.into_iter().find(|detail: &DeliveryDetail| {
+                detail.message_id.as_deref() == Some(admitted.record.id.as_str())
+                    && detail.delivery_state == "pending"
+                    && detail.reason.as_deref() == Some("lifecycle_busy")
+            }) {
+                break detail;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("agent watch receives lifecycle wait detail");
+    assert_eq!(pending_detail.runtime_state, "lifecycle_busy");
+    assert_eq!(pending_detail.delivery_phase.as_deref(), Some("preclaim"));
+    assert_eq!(
+        pending_detail.observed_state.as_deref(),
+        Some("lifecycle_busy")
+    );
+    assert!(pending_detail.error.is_none());
+    let ready_state = state
+        .interactions
+        .provider_input_state("receiver")
+        .await
+        .expect("verified ready state");
+    assert_eq!(ready_state.generation, generation);
+    assert_eq!(ready_state.state, ProviderInputReadiness::Ready);
+    assert_eq!(owner(&admitted.record.id), "pending");
+    assert!(
+        input_rx.try_recv().is_err(),
+        "no provider input is submitted while lifecycle ownership is held"
+    );
+    let watch_state = {
+        let agents = state.agents.lock().await;
+        Arc::clone(&agents.get("receiver").unwrap().watch_state)
+    };
+    let watch_snapshot = watch_state
+        .lock()
+        .unwrap()
+        .snapshot_since(None, None)
+        .unwrap();
+    let watch_response = super::super::build_agent_watch_response(
+        wardian_core::control::WatchAgentSnapshot {
+            uuid: "receiver".into(),
+            name: "Receiver".into(),
+            provider: "claude".into(),
+            status: "idle".into(),
+            last_status_at: None,
+        },
+        watch_snapshot,
+        &super::super::WatchIncludes::from_values(&[]),
+    );
+    assert!(
+        watch_response
+            .delivery
+            .delivery
+            .iter()
+            .any(|detail: &DeliveryDetail| {
+                detail.message_id.as_deref() == Some(admitted.record.id.as_str())
+                    && detail.delivery_state == "pending"
+                    && detail.runtime_state == "lifecycle_busy"
+                    && detail.delivery_phase.as_deref() == Some("preclaim")
+                    && detail.observed_state.as_deref() == Some("lifecycle_busy")
+                    && detail.reason.as_deref() == Some("lifecycle_busy")
+                    && detail.error.is_none()
+            }),
+        "agent watch exposes the canonical task as pending while lifecycle is busy"
+    );
+    drop(lifecycle);
+
+    let payload = tokio::time::timeout(std::time::Duration::from_secs(2), input_rx.recv())
+        .await
+        .expect("ready task payload")
+        .expect("terminal payload channel");
+    let payload = if payload.starts_with(b"\x1b[200~") {
+        assert!(
+            payload.ends_with(b"\x1b[201~"),
+            "bracketed paste must close"
+        );
+        &payload[6..payload.len() - 6]
+    } else {
+        assert!(
+            !payload.ends_with(b"\x1b[201~"),
+            "literal task payload must not have a stray paste terminator"
+        );
+        payload.as_slice()
+    };
+    let payload = std::str::from_utf8(payload).expect("structured task payload is UTF-8");
+    let (context_json, reply_instructions) = payload
+        .split_once("\n\nWardian request id: ")
+        .expect("task payload includes correlated reply instructions");
+    let context: serde_json::Value =
+        serde_json::from_str(context_json).expect("canonical task context frame");
+    assert_eq!(context["body"], "startup work");
+    assert_eq!(
+        context["request_id"].as_str(),
+        Some(admitted.record.id.as_str())
+    );
+    assert!(reply_instructions.starts_with(&admitted.record.id));
+    let submit = tokio::time::timeout(std::time::Duration::from_secs(2), input_rx.recv())
+        .await
+        .expect("provider submit")
+        .expect("terminal submit channel");
+    assert_eq!(submit, b"\r");
+    crate::manager::record_agent_turn_started_for_watch(&state, "receiver").await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), readiness_wakeup)
+        .await
+        .expect("ready-observation wake finishes after lifecycle release")
+        .unwrap();
+
+    assert_eq!(
+        owner(&admitted.record.id),
+        "uncertain",
+        "a submitted terminal payload without confirmed task ownership stays non-replayable"
+    );
+    let stored_generation = store::with_db(|conn| {
+        Ok(conn.query_row(
+            "SELECT generation FROM agent_message_delivery WHERE interaction_id=?1",
+            [&admitted.record.id],
+            |row| row.get::<_, u64>(0),
+        )?)
+    })
+    .unwrap();
+    assert_eq!(stored_generation, generation);
+    assert!(
+        input_rx.try_recv().is_err(),
+        "the task is submitted only once"
+    );
+
+    dispatch_pending_queue(None, &state, "receiver")
+        .await
+        .unwrap();
+    assert_eq!(owner(&admitted.record.id), "uncertain");
+    assert!(
+        input_rx.try_recv().is_err(),
+        "a later wake cannot replay it"
+    );
 }
 
 fn opencode_json_response(

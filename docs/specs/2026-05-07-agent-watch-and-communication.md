@@ -194,6 +194,7 @@ Runtime states:
 - `restored_without_sender`: target is live in the roster but has no registered input sender after restore or runtime reconciliation.
 - `headless_available`: target supports a non-PTY submit path, such as OpenCode headless submit.
 - `queued_not_ready`: target runtime exists but provider-specific readiness has not completed.
+- `lifecycle_busy`: task dispatch is waiting for the target's lifecycle gate before claim or submission.
 
 Delivery states:
 

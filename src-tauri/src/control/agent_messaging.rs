@@ -359,6 +359,202 @@ pub(crate) fn spawn_pending_tasks(app: &AppHandle, recipient: &str) {
     spawn_pending_tasks_with_request(app, recipient, None, None, None);
 }
 
+/// Queue a status or startup-readiness opportunity after roster contention has
+/// cleared. The attachment gate is checked from an Arc snapshot outside the
+/// roster lock, then the agent incarnation is revalidated before dispatch.
+pub(super) fn spawn_pending_tasks_when_ready(
+    app: &AppHandle,
+    recipient: &str,
+    expected_status: Option<&str>,
+) {
+    let expected_status = expected_status.map(wardian_core::identity::normalize_status);
+    if expected_status
+        .as_deref()
+        .is_some_and(|status| !matches!(status, "idle" | "off"))
+    {
+        return;
+    }
+
+    let app = app.clone();
+    let recipient = recipient.to_string();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        if !pending_task_wakeup_is_ready(&state, &recipient, expected_status.as_deref()).await {
+            return;
+        }
+        spawn_pending_tasks(&app, &recipient);
+    });
+}
+
+async fn pending_task_wakeup_is_ready(
+    state: &AppState,
+    recipient: &str,
+    expected_status: Option<&str>,
+) -> bool {
+    let Some(snapshot) = pending_task_wakeup_agent_snapshot(state, recipient).await else {
+        return false;
+    };
+    pending_task_wakeup_snapshot_is_ready_and_current(state, recipient, &snapshot, expected_status)
+        .await
+}
+
+struct PendingTaskWakeAgentSnapshot {
+    current_status: std::sync::Arc<std::sync::Mutex<String>>,
+    config: std::sync::Arc<std::sync::Mutex<wardian_core::models::AgentConfig>>,
+    watch_state: std::sync::Arc<std::sync::Mutex<crate::state::AgentWatchState>>,
+    runtime_generation: Option<u64>,
+}
+
+async fn pending_task_wakeup_agent_snapshot(
+    state: &AppState,
+    recipient: &str,
+) -> Option<PendingTaskWakeAgentSnapshot> {
+    let agents = state.agents.lock().await;
+    let agent = agents.get(recipient)?;
+    Some(PendingTaskWakeAgentSnapshot {
+        current_status: agent.current_status.clone(),
+        config: agent.config.clone(),
+        watch_state: agent.watch_state.clone(),
+        runtime_generation: agent.runtime_generation,
+    })
+}
+
+fn pending_task_wakeup_snapshot_is_ready(
+    snapshot: &PendingTaskWakeAgentSnapshot,
+    expected_status: Option<&str>,
+) -> bool {
+    let status_ready = snapshot
+        .current_status
+        .lock()
+        .map(|status| {
+            expected_status.is_none_or(|expected| {
+                wardian_core::identity::normalize_status(&status) == expected
+            })
+        })
+        .unwrap_or(false);
+    if !status_ready {
+        return false;
+    }
+
+    let Ok(config) = snapshot.config.lock() else {
+        return false;
+    };
+    let codex_agent = config.provider == "codex";
+    drop(config);
+    !codex_agent
+        || snapshot
+            .watch_state
+            .lock()
+            .is_ok_and(|watch_state| watch_state.codex_attachment_ready())
+}
+
+async fn pending_task_wakeup_snapshot_is_current(
+    state: &AppState,
+    recipient: &str,
+    snapshot: &PendingTaskWakeAgentSnapshot,
+) -> bool {
+    let agents = state.agents.lock().await;
+    agents.get(recipient).is_some_and(|current| {
+        current.runtime_generation == snapshot.runtime_generation
+            && std::sync::Arc::ptr_eq(&current.current_status, &snapshot.current_status)
+            && std::sync::Arc::ptr_eq(&current.config, &snapshot.config)
+            && std::sync::Arc::ptr_eq(&current.watch_state, &snapshot.watch_state)
+    })
+}
+
+async fn pending_task_wakeup_snapshot_is_ready_and_current(
+    state: &AppState,
+    recipient: &str,
+    snapshot: &PendingTaskWakeAgentSnapshot,
+    expected_status: Option<&str>,
+) -> bool {
+    pending_task_wakeup_snapshot_is_ready(snapshot, expected_status)
+        && pending_task_wakeup_snapshot_is_current(state, recipient, snapshot).await
+}
+
+pub(super) async fn lock_agent_lifecycle_for_task_dispatch(
+    state: &AppState,
+    info: &DeliveryTargetInfo,
+    request_id: Option<&str>,
+) -> tokio::sync::OwnedMutexGuard<()> {
+    let lifecycle_lock = state.agent_lifecycle_lock_for(&info.uuid).await;
+    match lifecycle_lock.clone().try_lock_owned() {
+        Ok(guard) => guard,
+        Err(_) => {
+            // Lifecycle ownership commonly overlaps a short startup handoff.
+            // Wait briefly before recording a watch event so transient lock
+            // contention does not leave a misleading pending observation.
+            let watch_delay = tokio::time::sleep(std::time::Duration::from_secs(1));
+            tokio::pin!(watch_delay);
+            let mut published_wait = false;
+            let mut diagnostics = tokio::time::interval(std::time::Duration::from_secs(30));
+            diagnostics.tick().await;
+            let lock = lifecycle_lock.lock_owned();
+            tokio::pin!(lock);
+            loop {
+                tokio::select! {
+                    guard = &mut lock => return guard,
+                    _ = &mut watch_delay, if !published_wait => {
+                        publish_lifecycle_busy_delivery(state, info, request_id).await;
+                        diagnose_lifecycle_wait(state, info, request_id).await;
+                        published_wait = true;
+                    }
+                    _ = diagnostics.tick() => {
+                        if published_wait {
+                            diagnose_lifecycle_wait(state, info, request_id).await;
+                        }
+                    },
+                }
+            }
+        }
+    }
+}
+
+async fn publish_lifecycle_busy_delivery(
+    state: &AppState,
+    info: &DeliveryTargetInfo,
+    request_id: Option<&str>,
+) {
+    let detail = wardian_core::control::DeliveryDetail {
+        uuid: info.uuid.clone(),
+        name: info.name.clone(),
+        provider: info.provider.clone(),
+        runtime_state: "lifecycle_busy".to_string(),
+        delivery_state: "pending".to_string(),
+        input_mode: wardian_core::control::MessageInputMode::Message,
+        queue_policy: wardian_core::control::QueuePolicy::QueueIfBusy,
+        message_id: request_id.map(|request_id| request_id.to_string()),
+        delivery_phase: Some("preclaim".to_string()),
+        observed_state: Some("lifecycle_busy".to_string()),
+        reason: Some("lifecycle_busy".to_string()),
+        profile: None,
+        error: None,
+    };
+    crate::control::push_delivery_for_delivery_service(state, &info.uuid, &detail).await;
+}
+
+async fn diagnose_lifecycle_wait(
+    state: &AppState,
+    info: &DeliveryTargetInfo,
+    request_id: Option<&str>,
+) {
+    if info.provider == "opencode" && request_id.is_some() {
+        log_opencode_dispatch_stage(
+            state,
+            info,
+            request_id,
+            OpenCodeDispatchDiagnosticStage::Preclaim,
+            OpenCodeDispatchDiagnosticReason::LifecycleBusy,
+        )
+        .await;
+    } else {
+        manager::log_debug(&format!(
+            "[WARDIAN] v2 task dispatch waiting for lifecycle: session={} provider={} reason=lifecycle_busy",
+            info.uuid, info.provider
+        ));
+    }
+}
+
 fn spawn_pending_tasks_with_request(
     app: &AppHandle,
     recipient: &str,
@@ -560,20 +756,18 @@ async fn dispatch_one_with_request(
         TaskDispatchRoute::Background => return dispatch_background_task(app, state, &info).await,
         TaskDispatchRoute::Surface => {}
     }
-    // Never wait behind a long-running lifecycle action. A subsequent idle
-    // observation or receive call can claim still-pending work.
-    let Some(_lifecycle) = state.try_lock_agent_lifecycle(recipient).await else {
-        log_opencode_dispatch_stage(
-            state,
-            &info,
-            request_id,
-            OpenCodeDispatchDiagnosticStage::Preclaim,
-            OpenCodeDispatchDiagnosticReason::LifecycleBusy,
-        )
-        .await;
+    // This is a detached queue worker, so wait for startup/lifecycle ownership
+    // to release instead of returning pending and relying on a later event to
+    // retry. Revalidate the incarnation and readiness after the wait.
+    let _lifecycle = lock_agent_lifecycle_for_task_dispatch(state, &info, request_id).await;
+    let current = delivery_target_info(state, recipient).await?;
+    if !same_delivery_target_incarnation(&info, &current)
+        || info.provider != current.provider
+        || info.config.is_off != current.config.is_off
+    {
         return Ok(());
-    };
-    let info = delivery_target_info(state, recipient).await?;
+    }
+    let info = current;
     if info.status != "idle" {
         log_opencode_dispatch_stage(
             state,
