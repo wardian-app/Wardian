@@ -54,17 +54,6 @@ Use at least six intervals after restoration settles. Timings for nested
 boundaries are not additive. For example, provider reconciliation is part of a
 complete metrics tick.
 
-## Read New Session timing
-
-Every New Session writes one `Clear timing` line to
-`<wardian-home>/wardian_debug.log`, including when the clear fails partway. It
-lists milliseconds per phase in execution order: `lease`, `guard`,
-`stop_native`, `drain`, `snapshot`, `prepare`, `stage`, `identity`,
-`terminate`, `spawn`, and `commit`. The terminal does not change until
-`terminate`, so a slow clear that appears unresponsive shows up in the phases
-before it. `drain` and `stage` pass through the conversation archive and grow
-with conversation length; `drain` also waits behind other archive captures.
-
 ## Capture the Windows process split
 
 The checked-in PowerShell profiler samples CPU, private and working-set memory,
