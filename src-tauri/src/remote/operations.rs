@@ -1171,6 +1171,68 @@ fn is_clearable_legacy_completion(item: &serde_json::Value) -> bool {
         )
 }
 
+fn dismissed_agent_completion(item: &serde_json::Value) -> Option<serde_json::Value> {
+    (item.get("type").and_then(serde_json::Value::as_str) == Some("agent_completed")).then(|| {
+        let mut tombstone = item.clone();
+        tombstone["read"] = serde_json::Value::Bool(true);
+        tombstone["dismissed"] = serde_json::Value::Bool(true);
+        tombstone
+    })
+}
+
+fn clear_read_queue_items(persisted: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut automation_dismissals = Vec::new();
+    let mut next = persisted
+        .into_iter()
+        .filter_map(|item| {
+            let clear = is_clearable_legacy_completion(&item)
+                && item.get("read").and_then(serde_json::Value::as_bool) == Some(true);
+            if clear {
+                if let Some(tombstone) = dismissed_agent_completion(&item) {
+                    return Some(tombstone);
+                }
+                if let Some(marker) = automation_dismissal_marker(&item) {
+                    automation_dismissals.push(marker);
+                }
+                None
+            } else {
+                Some(item)
+            }
+        })
+        .collect::<Vec<_>>();
+    next.extend(automation_dismissals);
+    next
+}
+
+fn dismiss_persisted_queue_item(
+    persisted: Vec<serde_json::Value>,
+    item_id: &str,
+    projected_item: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    let mut found_agent_completion = false;
+    let mut next = persisted
+        .into_iter()
+        .filter_map(|candidate| {
+            if candidate.get("id").and_then(serde_json::Value::as_str) != Some(item_id) {
+                return Some(candidate);
+            }
+            if let Some(tombstone) = dismissed_agent_completion(&candidate) {
+                found_agent_completion = true;
+                return Some(tombstone);
+            }
+            None
+        })
+        .collect::<Vec<_>>();
+    if !found_agent_completion {
+        if let Some(tombstone) = dismissed_agent_completion(projected_item) {
+            next.push(tombstone);
+        } else if let Some(marker) = automation_dismissal_marker(projected_item) {
+            next.push(marker);
+        }
+    }
+    next
+}
+
 fn is_pending_approval(item: &serde_json::Value) -> bool {
     item.get("automation_approval").is_some()
         || (item.get("type").and_then(serde_json::Value::as_str) == Some("approval_request")
@@ -1356,25 +1418,7 @@ pub async fn apply_remote_inbox_action(
             save_persisted_queue_items(&persisted)?;
         }
         "clear_read" => {
-            let persisted = persisted_queue_items();
-            let mut automation_dismissals = Vec::new();
-            let next = persisted
-                .into_iter()
-                .filter_map(|item| {
-                    let clear = is_clearable_legacy_completion(&item)
-                        && item.get("read").and_then(serde_json::Value::as_bool) == Some(true);
-                    if clear {
-                        if let Some(marker) = automation_dismissal_marker(&item) {
-                            automation_dismissals.push(marker);
-                        }
-                        None
-                    } else {
-                        Some(item)
-                    }
-                })
-                .collect::<Vec<_>>();
-            let mut next = next;
-            next.extend(automation_dismissals);
+            let next = clear_read_queue_items(persisted_queue_items());
             save_persisted_queue_items(&next)?;
         }
         "dismiss" => {
@@ -1389,14 +1433,7 @@ pub async fn apply_remote_inbox_action(
             {
                 return Err("inbox_item_not_dismissible".to_string());
             }
-            let persisted = persisted_queue_items();
-            let next = persisted
-                .into_iter()
-                .filter(|candidate| {
-                    candidate.get("id").and_then(serde_json::Value::as_str) != Some(item_id)
-                })
-                .chain(automation_dismissal_marker(item))
-                .collect::<Vec<_>>();
+            let next = dismiss_persisted_queue_item(persisted_queue_items(), item_id, item);
             save_persisted_queue_items(&next)?;
         }
         "resolve_approval" => {
@@ -2571,6 +2608,50 @@ mod tests {
             "read": false,
             "provider_choice_sent": "1"
         })));
+    }
+
+    #[test]
+    fn remote_clear_read_tombstones_agent_completions_for_outbox_replay() {
+        let completion = serde_json::json!({
+            "id": "agent-completed:agent-1:prompt-1",
+            "type": "agent_completed",
+            "timestamp": 123,
+            "read": true,
+            "agent_session_id": "agent-1",
+            "evidence_id": "prompt-1",
+            "response_text": "finished",
+        });
+        let cleared = clear_read_queue_items(vec![completion]);
+
+        assert_eq!(cleared.len(), 1);
+        assert_eq!(cleared[0]["id"], "agent-completed:agent-1:prompt-1");
+        assert_eq!(cleared[0]["dismissed"], true);
+        assert_eq!(cleared[0]["read"], true);
+        assert_eq!(cleared[0]["response_text"], "finished");
+    }
+
+    #[test]
+    fn remote_dismiss_tombstones_agent_completion_without_losing_identity() {
+        let completion = serde_json::json!({
+            "id": "agent-completed:agent-1:prompt-1",
+            "type": "agent_completed",
+            "timestamp": 123,
+            "read": false,
+            "agent_session_id": "agent-1",
+            "evidence_id": "prompt-1",
+            "response_text": "finished",
+        });
+        let dismissed = dismiss_persisted_queue_item(
+            vec![completion.clone()],
+            "agent-completed:agent-1:prompt-1",
+            &completion,
+        );
+
+        assert_eq!(dismissed.len(), 1);
+        assert_eq!(dismissed[0]["id"], completion["id"]);
+        assert_eq!(dismissed[0]["evidence_id"], "prompt-1");
+        assert_eq!(dismissed[0]["dismissed"], true);
+        assert_eq!(dismissed[0]["read"], true);
     }
 
     #[test]

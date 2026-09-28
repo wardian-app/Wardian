@@ -104,7 +104,7 @@ Inbox items appear when:
 - a configured agent completes a provider turn with a final response
 - an automation run finishes or fails
 
-If Inbox is empty after spawning an agent, that can be expected. Send the agent a small task, wait for it to settle back to Idle, then open **Inbox** again. Provider approval prompts still appear through the agent status and terminal rather than as Inbox items until the provider reports actionable evidence.
+If Inbox is empty after spawning an agent, send it a small task and confirm the provider completed the turn successfully. An interim assistant message or a turn that ends with a provider error does not create a completion item. Provider approval prompts still appear through the agent status and terminal rather than as Inbox items until the provider reports actionable evidence.
 
 ## Wardian CLI Is Not Visible
 

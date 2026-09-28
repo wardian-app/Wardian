@@ -17,7 +17,7 @@ use crate::utils::fs::*;
 use crate::utils::logging::{log_debug, log_terminal_trace_bytes, log_terminal_trace_note};
 use crate::utils::PtyUtf8Decoder;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Read, Seek, Write};
 use tauri::{AppHandle, Emitter, Manager};
 use wardian_core::control::{ProviderInputReadiness, WatchTranscriptMessage};
@@ -32,8 +32,8 @@ use super::codex_onboarding::{
 use super::codex_terminal_theme::CodexTerminalThemeProbeResponder;
 
 use super::claude::{
-    claude_log_paths, claude_permission_hook_matches_session, claude_project_dir_name,
-    discover_claude_log_for_session_name,
+    claude_accepted_sessions, claude_log_paths, claude_permission_hook_matches_session,
+    claude_project_dir_name, discover_claude_log_for_session_name,
 };
 use super::codex::{codex_provider_session_is_excluded, codex_session_file_path};
 use super::opencode::{
@@ -66,6 +66,41 @@ const CLAUDE_TRUST_SELECTION_SETTLE_INTERVAL: std::time::Duration =
 const CLAUDE_TRUST_SELECTION_POLL_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(50);
 const CLAUDE_TRUST_SELECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn complete_jsonl_record(pending: &mut String, fragment: &str) -> Option<String> {
+    pending.push_str(fragment);
+    pending.ends_with('\n').then(|| std::mem::take(pending))
+}
+
+pub(crate) fn claude_stop_event_message(
+    event: &serde_json::Value,
+    accepted_sessions: &[String],
+) -> Option<WatchTranscriptMessage> {
+    if event.get("hook_event_name").and_then(|v| v.as_str()) != Some("Stop")
+        || !accepted_sessions
+            .iter()
+            .any(|session_id| claude_permission_hook_matches_session(event, session_id))
+    {
+        return None;
+    }
+    let prompt_id = event
+        .get("prompt_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| uuid::Uuid::parse_str(value).is_ok())?;
+    let text = event
+        .get("last_assistant_message")
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.trim().is_empty())?;
+    Some(WatchTranscriptMessage {
+        role: "assistant".to_string(),
+        text: text.to_string(),
+        provider: "claude".to_string(),
+        turn_id: Some(prompt_id.to_string()),
+        source: Some("claude_stop_hook".to_string()),
+        provider_provenance: None,
+    })
+}
 
 fn interactive_provider_launch_cwd(
     provider: &str,
@@ -4102,12 +4137,16 @@ async fn spawn_agent_inner(
         let watcher_watch_state = watch_state.clone();
         let watcher_skip_existing_log = is_restored;
         let hook_event_log = claude_hook.as_ref().map(|hook| hook.event_log_path.clone());
+        let hook_completion_event_dir = claude_hook
+            .as_ref()
+            .map(|hook| hook.completion_event_dir.clone());
         let waiting_for_permission = std::sync::Arc::new(std::sync::Mutex::new(false));
         let log_waiting_for_permission = waiting_for_permission.clone();
 
         std::thread::spawn(move || {
             let mut offset: u64 = 0;
             let mut positioned_initial_log = !watcher_skip_existing_log;
+            let mut pending_provider_line = String::new();
             loop {
                 let current = watcher_current_status
                     .lock()
@@ -4168,6 +4207,7 @@ async fn spawn_agent_inner(
                             if metadata.len() < offset {
                                 offset = 0;
                                 positioned_initial_log = true;
+                                pending_provider_line.clear();
                             }
                             if !positioned_initial_log {
                                 offset = metadata.len();
@@ -4188,14 +4228,19 @@ async fn spawn_agent_inner(
                                     read as u64,
                                 );
                                 offset += read as u64;
-                                if let Some(message) =
-                                    extract_transcript_message("claude", line.trim())
-                                {
+                                let Some(record) =
+                                    complete_jsonl_record(&mut pending_provider_line, &line)
+                                else {
+                                    break;
+                                };
+                                let raw_line = record.trim();
+                                let message = extract_transcript_message("claude", raw_line);
+                                if let Some(message) = message {
                                     if let Ok(mut watch_state) = watcher_watch_state.lock() {
-                                        watch_state.push_transcript(message);
+                                        watch_state.push_transcript(message.clone());
                                     }
                                 }
-                                if let Some(event) = watcher_provider.parse_output(line.trim()) {
+                                if let Some(event) = watcher_provider.parse_output(raw_line) {
                                     let mut waiting = log_waiting_for_permission
                                         .lock()
                                         .unwrap_or_else(|e| e.into_inner());
@@ -4285,31 +4330,15 @@ async fn spawn_agent_inner(
         if let Some(hook_event_log) = hook_event_log {
             let hook_app = app.clone();
             let hook_session = config.session_id.clone();
-            let hook_accepted_sessions = {
-                let mut sessions = vec![config.session_id.clone()];
-                if let Some(resume_session) = config
-                    .resume_session
-                    .as_ref()
-                    .map(|sid| sid.trim())
-                    .filter(|sid| !sid.is_empty() && *sid != config.session_id)
-                {
-                    sessions.push(resume_session.to_string());
-                }
-                if let Some(fresh_provider_session_id) = config
-                    .fresh_provider_session_id
-                    .as_ref()
-                    .map(|sid| sid.trim())
-                    .filter(|sid| !sid.is_empty() && *sid != config.session_id)
-                {
-                    sessions.push(fresh_provider_session_id.to_string());
-                }
-                sessions
-            };
+            let hook_runtime_generation = runtime_generation;
+            let hook_completion_event_dir = hook_completion_event_dir.clone();
+            let hook_accepted_sessions = claude_accepted_sessions(&config);
             let hook_current_status = current_status.clone();
             let hook_waiting_for_permission = waiting_for_permission.clone();
 
             std::thread::spawn(move || {
                 let mut offset = 0;
+                let mut pending_completion_events = HashSet::new();
                 loop {
                     let current = hook_current_status
                         .lock()
@@ -4378,6 +4407,67 @@ async fn spawn_agent_inner(
                                         }),
                                     );
                                 }
+                            }
+                        }
+                    }
+
+                    if let Some(completion_event_dir) = hook_completion_event_dir.as_ref() {
+                        if let Ok(events) = std::fs::read_dir(completion_event_dir) {
+                            for entry in events.flatten() {
+                                let event_path = entry.path();
+                                if event_path.extension().and_then(|ext| ext.to_str())
+                                    != Some("json")
+                                {
+                                    continue;
+                                }
+                                let Ok(contents) = std::fs::read_to_string(&event_path) else {
+                                    continue;
+                                };
+                                let Ok(parsed) =
+                                    serde_json::from_str::<serde_json::Value>(&contents)
+                                else {
+                                    let _ = std::fs::rename(
+                                        &event_path,
+                                        event_path.with_extension("invalid"),
+                                    );
+                                    log_debug("[Wardian] Quarantined malformed Claude Stop hook outbox record");
+                                    continue;
+                                };
+                                if parsed.get("hook_event_name").and_then(|v| v.as_str())
+                                    != Some("Stop")
+                                {
+                                    let _ = std::fs::rename(
+                                        &event_path,
+                                        event_path.with_extension("ignored"),
+                                    );
+                                    continue;
+                                }
+                                if !hook_accepted_sessions.iter().any(|session_id| {
+                                    claude_permission_hook_matches_session(&parsed, session_id)
+                                }) {
+                                    continue;
+                                }
+                                let Some(message) =
+                                    claude_stop_event_message(&parsed, &hook_accepted_sessions)
+                                else {
+                                    let _ = std::fs::rename(
+                                        &event_path,
+                                        event_path.with_extension("ignored"),
+                                    );
+                                    log_debug("[Wardian] Ignored Claude Stop hook outbox record without prompt identity or assistant text");
+                                    continue;
+                                };
+                                let evidence_id = message.turn_id.as_deref().unwrap_or_default();
+                                if !pending_completion_events.insert(evidence_id.to_string()) {
+                                    continue;
+                                }
+                                super::emit_agent_turn_completed_with_message(
+                                    &hook_app,
+                                    &hook_session,
+                                    hook_runtime_generation,
+                                    Some(message),
+                                    event_path,
+                                );
                             }
                         }
                     }
@@ -4857,6 +4947,48 @@ pub async fn resize_pty(
 mod tests {
     use super::*;
     use wardian_core::models::{AgentProvider, CodexProviderConfig, ProviderConfig};
+
+    #[test]
+    fn claude_jsonl_reader_waits_for_the_complete_record() {
+        let mut pending = String::new();
+        assert_eq!(complete_jsonl_record(&mut pending, r#"{"type":"res"#), None);
+        assert_eq!(
+            complete_jsonl_record(&mut pending, "ult\"}\n"),
+            Some(r#"{"type":"result"}"#.to_string() + "\n")
+        );
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn claude_stop_hook_accepts_only_successful_session_bound_assistant_turns() {
+        let event = serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": "claude-session",
+            "prompt_id": "00000000-0000-0000-0000-000000000001",
+            "last_assistant_message": "  completed response  "
+        });
+        let accepted = vec!["claude-session".to_string()];
+        let message = claude_stop_event_message(&event, &accepted).expect("valid Stop event");
+        assert_eq!(message.role, "assistant");
+        assert_eq!(message.provider, "claude");
+        assert_eq!(message.text, "  completed response  ");
+        assert_eq!(
+            message.turn_id.as_deref(),
+            Some("00000000-0000-0000-0000-000000000001")
+        );
+
+        let mut failure = event.clone();
+        failure["hook_event_name"] = serde_json::Value::String("StopFailure".to_string());
+        assert!(claude_stop_event_message(&failure, &accepted).is_none());
+        assert!(claude_stop_event_message(&event, &["different-session".to_string()]).is_none());
+
+        let mut invalid_id = event.clone();
+        invalid_id["prompt_id"] = serde_json::Value::String("not-a-uuid".to_string());
+        assert!(claude_stop_event_message(&invalid_id, &accepted).is_none());
+        let mut empty_response = event;
+        empty_response["last_assistant_message"] = serde_json::Value::String("  ".to_string());
+        assert!(claude_stop_event_message(&empty_response, &accepted).is_none());
+    }
 
     #[test]
     fn pi_restore_keeps_the_saved_project_directory() {

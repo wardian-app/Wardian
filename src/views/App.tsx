@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AgentConfig, AgentTelemetry, AgentClassDefinition } from "../types";
-import type { AgentChatEvent, CloneMode, OpenSurfaceRequest, WorkbenchShellV1 } from "../types";
+import type { CloneMode, OpenSurfaceRequest, WorkbenchShellV1 } from "../types";
 import "../styles/App.css";
 
 import AgentWatchlist from "../layout/watchlist/AgentWatchlist";
@@ -42,7 +42,7 @@ import { UpdateAvailableNotice } from "../features/settings/UpdateAvailableNotic
 import { useAppUpdate } from "../features/settings/useAppUpdate";
 import { useSelectedAgentGitStatus } from "../features/git/useSelectedAgentGitStatus";
 import { useQueueStore } from "../store/useQueueStore";
-import { completionPreviewFromTranscript } from "../features/queue/completionPreview";
+import { useAgentTurnCompletionHandler } from "../features/queue/useAgentTurnCompletionHandler";
 import { useLibraryStore } from "../store/useLibraryStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { useLayoutStore } from "../store/useLayoutStore";
@@ -62,7 +62,6 @@ import { runNewSessionAction } from "../features/agents/newSessionAction";
 import {
   useAgentResourceController,
   type AgentStatusTransition,
-  type AgentTurnCompletion,
 } from "../features/agents/useAgentResourceController";
 import { RosterProvider } from "../features/agents/RosterContext";
 import { useRosterController } from "../features/agents/useRosterController";
@@ -398,6 +397,7 @@ function App() {
 function AppBody() {
   const confirm = useConfirm();
   const pendingQueueFlushRef = React.useRef<Set<string>>(new Set());
+  const [changeReviewTurnRevision, setChangeReviewTurnRevision] = useState(0);
   const workbenchRootRef = useRef<HTMLDivElement>(null);
   const sidebarIconRailRef = useRef<HTMLElement>(null);
   const agentWatchlistRef = useRef<HTMLElement>(null);
@@ -453,6 +453,7 @@ function AppBody() {
   const seenLibraryNavigationRequestRef = useRef(libraryNavigationRequest);
   const appendAgentEvent = useQueueStore((s) => s.appendAgentEvent);
   const flushAgentCompletion = useQueueStore((s) => s.flushAgentCompletion);
+  const applyPersistedAgentCompletion = useQueueStore((s) => s.applyPersistedAgentCompletion);
   const addActionNeeded = useQueueStore((s) => s.addActionNeeded);
   const addAutomationCompletion = useQueueStore((s) => s.addAutomationCompletion);
   const loadQueueItems = useQueueStore((s) => s.loadItems);
@@ -500,27 +501,12 @@ function AppBody() {
     };
   }, []);
 
-  const handleAgentTurnCompletion = useCallback((
-    completion: AgentTurnCompletion,
-  ) => {
-    setChangeReviewTurnRevision((revision) => revision + 1);
-    const { session_id: sessionId, agent } = completion;
-    const agentName = agent?.session_name.trim();
-    // Never emit a durable notification with a session UUID while the roster
-    // is still loading. A later config load intentionally does not replay it.
-    if (!agentName || pendingQueueFlushRef.current.has(sessionId)) return;
-
-    pendingQueueFlushRef.current.add(sessionId);
-    invoke<AgentChatEvent[]>("load_agent_chat_transcript", { sessionId })
-      .then(completionPreviewFromTranscript)
-      .then((preview) => {
-        if (preview) {
-          flushAgentCompletion(sessionId, agentName, preview.summary, preview.evidence_id);
-        }
-      })
-      .catch(() => undefined)
-      .finally(() => pendingQueueFlushRef.current.delete(sessionId));
-  }, [flushAgentCompletion]);
+  const handleAgentTurnCompletion = useAgentTurnCompletionHandler({
+    pending: pendingQueueFlushRef,
+    onCompletion: () => setChangeReviewTurnRevision((revision) => revision + 1),
+    applyPersisted: applyPersistedAgentCompletion,
+    flush: flushAgentCompletion,
+  });
 
   const maybeAddActionNeededQueueItem = useCallback((
     sessionId: string,
@@ -612,7 +598,6 @@ function AppBody() {
   const [watchlistPrefs, setWatchlistPrefs] = useState<WatchlistPrefs>(DEFAULT_WATCHLIST_PREFS);
   const [dashboardPrefs, setDashboardPrefs] = useState<DashboardPrefs>(DEFAULT_DASHBOARD_PREFS);
   const [agentInteractions, setAgentInteractions] = useState<AgentInteractions>({});
-  const [changeReviewTurnRevision, setChangeReviewTurnRevision] = useState(0);
   const agentInteractionsRef = useRef<AgentInteractions>({});
   const interactionSaveChainRef = useRef<Promise<unknown>>(Promise.resolve());
   const hasAutoPatched = useRef(false);

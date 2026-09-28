@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { AgentChatEvent } from "../../types";
-import { completionPreviewFromTranscript } from "./completionPreview";
+import {
+  completionPreviewFromTranscript,
+  resolveAgentCompletionProjection,
+} from "./completionPreview";
 
 function message(
   id: string,
@@ -58,5 +61,50 @@ describe("completionPreviewFromTranscript", () => {
       message("assistant-1", "assistant", "The first task is done."),
       message("user-2", "user", "Now start another task."),
     ])).toBeNull();
+  });
+});
+
+describe("resolveAgentCompletionProjection", () => {
+  const completion = {
+    session_id: "agent-1",
+    agent: undefined,
+    agent_name: "Claude Agent",
+    summary: "  Final response  ",
+    evidence_id: "assistant-1",
+  };
+
+  it("uses backend-persisted evidence without another transcript read", () => {
+    expect(resolveAgentCompletionProjection({ ...completion, inbox_persisted: true })).toEqual({
+      kind: "persisted",
+      session_id: "agent-1",
+      agent_name: "Claude Agent",
+      summary: "Final response",
+      evidence_id: "assistant-1",
+    });
+  });
+
+  it("does not fall back to a transcript read when backend persistence failed", () => {
+    expect(resolveAgentCompletionProjection({ ...completion, inbox_persisted: false })).toEqual({
+      kind: "ignore",
+    });
+  });
+
+  it("uses transcript fallback for legacy completions without an attached response", () => {
+    expect(resolveAgentCompletionProjection({
+      session_id: "agent-1",
+      agent_name: "Claude Agent",
+    })).toEqual({
+      kind: "transcript",
+      session_id: "agent-1",
+      agent_name: "Claude Agent",
+    });
+  });
+
+  it("fails closed when persistence is claimed without its evidence", () => {
+    expect(resolveAgentCompletionProjection({
+      ...completion,
+      evidence_id: undefined,
+      inbox_persisted: true,
+    })).toEqual({ kind: "ignore" });
   });
 });
