@@ -96,6 +96,8 @@ pub(crate) fn defer_status_transition(
     app: &AppHandle,
     session_id: &str,
     current_status: &Arc<std::sync::Mutex<String>>,
+    expected_status: String,
+    intent_revision: u64,
     next_status: String,
 ) {
     let app = app.clone();
@@ -103,26 +105,52 @@ pub(crate) fn defer_status_transition(
     let current_status = current_status.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        let allowed = {
-            let agents = state.agents.lock().await;
-            agents.get(&session_id).is_some_and(|agent| {
-                Arc::ptr_eq(&agent.current_status, &current_status)
-                    && codex_attachment_is_ready(agent)
-            })
-        };
-        if !allowed {
-            return;
-        }
-        if let Ok(mut status) = current_status.lock() {
-            if *status == next_status {
-                return;
-            }
-            *status = next_status.clone();
-        } else {
+        if !apply_deferred_status_transition(
+            &state,
+            &session_id,
+            &current_status,
+            &expected_status,
+            intent_revision,
+            &next_status,
+        )
+        .await
+        {
             return;
         }
         super::schedule_agent_status_observation(&app, &session_id, &current_status, next_status);
     });
+}
+
+pub(crate) async fn apply_deferred_status_transition(
+    state: &AppState,
+    session_id: &str,
+    current_status: &Arc<std::sync::Mutex<String>>,
+    expected_status: &str,
+    intent_revision: u64,
+    next_status: &str,
+) -> bool {
+    if !deferred_status_target_is_ready(state, session_id, current_status).await {
+        return false;
+    }
+    super::apply_admitted_status_transition(
+        state,
+        session_id,
+        current_status,
+        expected_status,
+        intent_revision,
+        next_status,
+    )
+}
+
+pub(crate) async fn deferred_status_target_is_ready(
+    state: &AppState,
+    session_id: &str,
+    current_status: &Arc<std::sync::Mutex<String>>,
+) -> bool {
+    let agents = state.agents.lock().await;
+    agents.get(session_id).is_some_and(|agent| {
+        Arc::ptr_eq(&agent.current_status, current_status) && codex_attachment_is_ready(agent)
+    })
 }
 
 pub(crate) fn defer_status_publication(

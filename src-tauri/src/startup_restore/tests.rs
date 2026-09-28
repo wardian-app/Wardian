@@ -55,6 +55,958 @@ async fn cancelled_startup_restore_publication_marks_spawn_failed_and_keeps_plac
     assert!(roster_lock[&config.session_id].runtime_generation.is_none());
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn restored_codex_keeps_attached_idle_transition_across_placeholder_publication() {
+    let _environment = crate::utils::wardian_test_env_lock_async().await;
+    let _home = TestHome::new();
+    let app = tauri::test::mock_app();
+    app.manage(AppState::new());
+    let state = app.state::<AppState>();
+    let config = AgentConfig {
+        session_id: uuid::Uuid::new_v4().to_string(),
+        provider: "codex".into(),
+        ..Default::default()
+    };
+    let publication = RestorePublication::begin(&state, &config.session_id)
+        .await
+        .expect("restore claim");
+    publication
+        .publish(
+            &state,
+            crate::restored_agent_without_process(
+                config.clone(),
+                "Restoring",
+                String::new(),
+                None,
+                None,
+            ),
+        )
+        .await;
+
+    let mut spawned = crate::restored_agent_without_process(
+        config.clone(),
+        "Starting",
+        String::new(),
+        Some(4242),
+        None,
+    );
+    spawned.runtime_generation = Some(7);
+    spawned
+        .watch_state
+        .lock()
+        .unwrap()
+        .set_codex_attachment_ready(true);
+    let status = spawned.current_status.clone();
+
+    let roster = state.agents.lock().await;
+    assert_eq!(
+        crate::manager::codex_onboarding::status_admission(
+            app.handle(),
+            &config.session_id,
+            &status,
+            "Idle",
+        ),
+        crate::manager::codex_onboarding::CodexStatusAdmission::WaitForRoster,
+    );
+    drop(roster);
+    // The deferred transition can wake here while the old placeholder still
+    // occupies the roster. Its status-Arc identity check then rejects Idle.
+    assert!(
+        !crate::manager::codex_onboarding::deferred_status_target_is_ready(
+            &state,
+            &config.session_id,
+            &status,
+        )
+        .await
+    );
+
+    publication
+        .publish_spawned(
+            &state,
+            spawned,
+            crate::manager::SpawnPublicationDisposition::new(),
+        )
+        .await;
+    assert_eq!(
+        *status.lock().unwrap(),
+        "Idle",
+        "an attached restored Codex runtime must not remain Starting after publication"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn restored_codex_preserves_newer_queued_processing_across_publication() {
+    let _environment = crate::utils::wardian_test_env_lock_async().await;
+    let _home = TestHome::new();
+    for deferred_before_publication in [true, false] {
+        let app = tauri::test::mock_app();
+        app.manage(AppState::new());
+        let state = app.state::<AppState>();
+        let config = AgentConfig {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            provider: "codex".into(),
+            ..Default::default()
+        };
+        wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+            session_id: &config.session_id,
+            session_name: &config.session_id,
+            description: "",
+            agent_class: "Coder",
+            provider: "codex",
+            workspace: None,
+            project: None,
+            is_off: false,
+            created_at: None,
+        })
+        .expect("persist restored agent");
+        let publication = RestorePublication::begin(&state, &config.session_id)
+            .await
+            .expect("restore claim");
+        publication
+            .publish(
+                &state,
+                crate::restored_agent_without_process(
+                    config.clone(),
+                    "Restoring",
+                    String::new(),
+                    None,
+                    None,
+                ),
+            )
+            .await;
+        let mut spawned = crate::restored_agent_without_process(
+            config.clone(),
+            "Starting",
+            String::new(),
+            Some(4242),
+            None,
+        );
+        spawned.runtime_generation = Some(7);
+        spawned
+            .watch_state
+            .lock()
+            .unwrap()
+            .set_codex_attachment_ready(true);
+        let status = spawned.current_status.clone();
+        let roster = state.agents.lock().await;
+        for next_status in ["Idle", "Processing..."] {
+            assert_eq!(
+                crate::manager::codex_onboarding::status_admission(
+                    app.handle(),
+                    &config.session_id,
+                    &status,
+                    next_status,
+                ),
+                crate::manager::codex_onboarding::CodexStatusAdmission::WaitForRoster,
+            );
+            let _current = status.lock().unwrap();
+            state.reserve_status_intent(&config.session_id, &status, next_status);
+        }
+        let processing_revision = state.status_intent_revision(&config.session_id, &status);
+        drop(roster);
+        if deferred_before_publication {
+            assert!(
+                !crate::manager::codex_onboarding::apply_deferred_status_transition(
+                    &state,
+                    &config.session_id,
+                    &status,
+                    "Starting",
+                    processing_revision,
+                    "Processing...",
+                )
+                .await,
+                "the placeholder still owns the roster"
+            );
+        }
+        publication
+            .publish_spawned(
+                &state,
+                spawned,
+                crate::manager::SpawnPublicationDisposition::new(),
+            )
+            .await;
+        if !deferred_before_publication {
+            assert!(
+                !crate::manager::codex_onboarding::apply_deferred_status_transition(
+                    &state,
+                    &config.session_id,
+                    &status,
+                    "Starting",
+                    processing_revision,
+                    "Processing...",
+                )
+                .await,
+                "publication must have applied the newer queued status"
+            );
+        }
+        assert_eq!(
+            *status.lock().unwrap(),
+            "Processing...",
+            "deferred_before_publication={deferred_before_publication}"
+        );
+        wardian_core::db::update_agent_status(&config.session_id, "Processing...", Some(4242))
+            .expect("publish restored status");
+        assert_eq!(
+            wardian_core::db::get_all_agents()
+                .expect("read persisted agent")
+                .iter()
+                .find(|agent| agent.session_id == config.session_id)
+                .and_then(|agent| agent.last_status.as_deref()),
+            Some("Processing...")
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn reserved_terminal_status_survives_restored_codex_publication() {
+    let _environment = crate::utils::wardian_test_env_lock_async().await;
+    let _home = TestHome::new();
+    for terminal_status in ["Off", "Error", "Action Needed"] {
+        for publication_order in ["before", "waiting", "after"] {
+            let app = tauri::test::mock_app();
+            app.manage(AppState::new());
+            let state = app.state::<AppState>();
+            let config = AgentConfig {
+                session_id: uuid::Uuid::new_v4().to_string(),
+                provider: "codex".into(),
+                ..Default::default()
+            };
+            wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+                session_id: &config.session_id,
+                session_name: &config.session_id,
+                description: "",
+                agent_class: "Coder",
+                provider: "codex",
+                workspace: None,
+                project: None,
+                is_off: false,
+                created_at: None,
+            })
+            .expect("persist restored agent");
+            let publication = RestorePublication::begin(&state, &config.session_id)
+                .await
+                .expect("restore claim");
+            publication
+                .publish(
+                    &state,
+                    crate::restored_agent_without_process(
+                        config.clone(),
+                        "Restoring",
+                        String::new(),
+                        None,
+                        None,
+                    ),
+                )
+                .await;
+            let mut spawned = crate::restored_agent_without_process(
+                config.clone(),
+                "Starting",
+                String::new(),
+                Some(4242),
+                None,
+            );
+            spawned.runtime_generation = Some(7);
+            spawned
+                .watch_state
+                .lock()
+                .unwrap()
+                .set_codex_attachment_ready(true);
+            let status = spawned.current_status.clone();
+
+            let roster = if publication_order == "waiting" {
+                Some(state.agents.lock().await)
+            } else {
+                None
+            };
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let task_app = app.handle().clone();
+            let published = tokio::spawn(async move {
+                started.send(()).unwrap();
+                let task_state = task_app.state::<AppState>();
+                publication
+                    .publish_spawned(
+                        &task_state,
+                        spawned,
+                        crate::manager::SpawnPublicationDisposition::new(),
+                    )
+                    .await
+            });
+            if publication_order == "waiting" {
+                ready.await.expect("publication entered");
+                assert!(!published.is_finished());
+            }
+            if publication_order == "after" {
+                published.await.expect("publication completed");
+                assert_eq!(*status.lock().unwrap(), "Idle");
+                assert_eq!(
+                    crate::manager::codex_onboarding::status_admission(
+                        app.handle(),
+                        &config.session_id,
+                        &status,
+                        terminal_status,
+                    ),
+                    crate::manager::codex_onboarding::CodexStatusAdmission::Allowed,
+                );
+                let intent_revision = {
+                    let _current = status.lock().unwrap();
+                    state.reserve_status_intent(&config.session_id, &status, terminal_status)
+                };
+                assert!(
+                    crate::manager::apply_admitted_status_transition(
+                        &state,
+                        &config.session_id,
+                        &status,
+                        "Idle",
+                        intent_revision,
+                        terminal_status,
+                    ),
+                    "the terminal setter wins after publication"
+                );
+            } else {
+                assert_eq!(
+                    crate::manager::codex_onboarding::status_admission(
+                        app.handle(),
+                        &config.session_id,
+                        &status,
+                        terminal_status,
+                    ),
+                    crate::manager::codex_onboarding::CodexStatusAdmission::Allowed,
+                );
+                let intent_revision = {
+                    let _current = status.lock().unwrap();
+                    state.reserve_status_intent(&config.session_id, &status, terminal_status)
+                };
+                drop(roster);
+                published.await.expect("publication completed");
+                assert!(
+                    state.status_revision(&config.session_id, &status) > intent_revision,
+                    "publication committed the terminal value before the setter resumed"
+                );
+                assert!(
+                    !crate::manager::apply_admitted_status_transition(
+                        &state,
+                        &config.session_id,
+                        &status,
+                        "Starting",
+                        intent_revision,
+                        terminal_status,
+                    ),
+                    "publication already committed the terminal intent"
+                );
+            }
+            assert_eq!(
+                *status.lock().unwrap(),
+                terminal_status,
+                "status={terminal_status}, order={publication_order}"
+            );
+            let observed_at =
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let status_sequence = state.next_status_observation_sequence(&config.session_id);
+            let _lifecycle = state.lock_agent_lifecycle(&config.session_id).await;
+            assert_eq!(
+                crate::manager::persist_status_observation(
+                    &state,
+                    &config.session_id,
+                    &status,
+                    terminal_status,
+                    status_sequence,
+                    &observed_at,
+                )
+                .await
+                .as_deref(),
+                Some(terminal_status)
+            );
+            drop(_lifecycle);
+            assert_eq!(
+                wardian_core::db::get_all_agents()
+                    .expect("read persisted agent")
+                    .iter()
+                    .find(|agent| agent.session_id == config.session_id)
+                    .and_then(|agent| agent.last_status.as_deref()),
+                Some(terminal_status)
+            );
+            let agents = state.agents.lock().await;
+            let watch = agents[&config.session_id].watch_state.lock().unwrap();
+            assert!(
+                watch
+                    .snapshot_since(None, None)
+                    .expect("read status watch")
+                    .events
+                    .iter()
+                    .any(|event| {
+                        event.kind == "status"
+                            && event.payload["status"]
+                                == wardian_core::identity::normalize_status(terminal_status)
+                    }),
+                "watch observed terminal status={terminal_status}, order={publication_order}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_processing_while_publication_waits_for_roster_wins() {
+    let app = tauri::test::mock_app();
+    app.manage(AppState::new());
+    let state = app.state::<AppState>();
+    let config = AgentConfig {
+        session_id: uuid::Uuid::new_v4().to_string(),
+        provider: "codex".into(),
+        ..Default::default()
+    };
+    let publication = RestorePublication::begin(&state, &config.session_id)
+        .await
+        .expect("restore claim");
+    publication
+        .publish(
+            &state,
+            crate::restored_agent_without_process(
+                config.clone(),
+                "Restoring",
+                String::new(),
+                None,
+                None,
+            ),
+        )
+        .await;
+    let mut spawned = crate::restored_agent_without_process(
+        config.clone(),
+        "Starting",
+        String::new(),
+        Some(4242),
+        None,
+    );
+    spawned.runtime_generation = Some(7);
+    spawned
+        .watch_state
+        .lock()
+        .unwrap()
+        .set_codex_attachment_ready(true);
+    let status = spawned.current_status.clone();
+
+    let roster = state.agents.lock().await;
+    assert_eq!(
+        crate::manager::codex_onboarding::status_admission(
+            app.handle(),
+            &config.session_id,
+            &status,
+            "Idle",
+        ),
+        crate::manager::codex_onboarding::CodexStatusAdmission::WaitForRoster,
+    );
+    let idle_revision = {
+        let _current = status.lock().unwrap();
+        state.reserve_status_intent(&config.session_id, &status, "Idle")
+    };
+    let (deferred_started, deferred_ready) = tokio::sync::oneshot::channel();
+    let deferred_app = app.handle().clone();
+    let deferred_session = config.session_id.clone();
+    let deferred_status = status.clone();
+    let deferred = tokio::spawn(async move {
+        deferred_started.send(()).unwrap();
+        let task_state = deferred_app.state::<AppState>();
+        crate::manager::codex_onboarding::apply_deferred_status_transition(
+            &task_state,
+            &deferred_session,
+            &deferred_status,
+            "Starting",
+            idle_revision,
+            "Idle",
+        )
+        .await
+    });
+    deferred_ready.await.expect("deferred Idle is waiting");
+
+    let (publication_started, publication_ready) = tokio::sync::oneshot::channel();
+    let publication_app = app.handle().clone();
+    let published = tokio::spawn(async move {
+        publication_started.send(()).unwrap();
+        let task_state = publication_app.state::<AppState>();
+        publication
+            .publish_spawned(
+                &task_state,
+                spawned,
+                crate::manager::SpawnPublicationDisposition::new(),
+            )
+            .await
+    });
+    publication_ready.await.expect("publication is waiting");
+    assert!(!published.is_finished());
+    assert_eq!(
+        crate::manager::codex_onboarding::status_admission(
+            app.handle(),
+            &config.session_id,
+            &status,
+            "Processing...",
+        ),
+        crate::manager::codex_onboarding::CodexStatusAdmission::WaitForRoster,
+    );
+    {
+        let _current = status.lock().unwrap();
+        state.reserve_status_intent(&config.session_id, &status, "Processing...");
+    }
+    drop(roster);
+    assert!(!deferred.await.expect("deferred Idle completed"));
+    published.await.expect("publication completed");
+    assert_eq!(*status.lock().unwrap(), "Processing...");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_restored_codex_idle_does_not_replace_newer_action_needed() {
+    let _environment = crate::utils::wardian_test_env_lock_async().await;
+    let _home = TestHome::new();
+    let app = tauri::test::mock_app();
+    app.manage(AppState::new());
+    let state = app.state::<AppState>();
+    let config = AgentConfig {
+        session_id: uuid::Uuid::new_v4().to_string(),
+        provider: "codex".into(),
+        ..Default::default()
+    };
+    wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+        session_id: &config.session_id,
+        session_name: "Restored Codex",
+        description: "",
+        agent_class: "Coder",
+        provider: "codex",
+        workspace: None,
+        project: None,
+        is_off: false,
+        created_at: None,
+    })
+    .expect("persist restored agent");
+    let publication = RestorePublication::begin(&state, &config.session_id)
+        .await
+        .expect("restore claim");
+    publication
+        .publish(
+            &state,
+            crate::restored_agent_without_process(
+                config.clone(),
+                "Restoring",
+                String::new(),
+                None,
+                None,
+            ),
+        )
+        .await;
+    let mut spawned = crate::restored_agent_without_process(
+        config.clone(),
+        "Starting",
+        String::new(),
+        Some(4242),
+        None,
+    );
+    spawned.runtime_generation = Some(7);
+    spawned
+        .watch_state
+        .lock()
+        .unwrap()
+        .set_codex_attachment_ready(true);
+    let status = spawned.current_status.clone();
+    let (expected_status, intent_revision) = {
+        let current = status.lock().unwrap();
+        (
+            current.clone(),
+            state.reserve_status_intent(&config.session_id, &status, "Idle"),
+        )
+    };
+    let roster = state.agents.lock().await;
+    assert_eq!(
+        crate::manager::codex_onboarding::status_admission(
+            app.handle(),
+            &config.session_id,
+            &status,
+            "Idle",
+        ),
+        crate::manager::codex_onboarding::CodexStatusAdmission::WaitForRoster,
+    );
+    drop(roster);
+
+    // Keep the queued work pending until after publication so it observes the
+    // same runtime Arc with a newer approval status.
+    let (release, pending) = tokio::sync::oneshot::channel::<()>();
+    let task_app = app.handle().clone();
+    let task_session_id = config.session_id.clone();
+    let task_status = status.clone();
+    let queued = tokio::spawn(async move {
+        pending.await.expect("release queued transition");
+        let task_state = task_app.state::<AppState>();
+        crate::manager::codex_onboarding::apply_deferred_status_transition(
+            &task_state,
+            &task_session_id,
+            &task_status,
+            &expected_status,
+            intent_revision,
+            "Idle",
+        )
+        .await
+    });
+    {
+        let mut current = status.lock().unwrap();
+        *current = "Action Needed".to_string();
+        state.commit_status_revision(&config.session_id, &status, "Action Needed");
+    }
+    wardian_core::db::update_agent_status(&config.session_id, "Action Needed", Some(4242))
+        .expect("persist approval status");
+    publication
+        .publish_spawned(
+            &state,
+            spawned,
+            crate::manager::SpawnPublicationDisposition::new(),
+        )
+        .await;
+    release.send(()).expect("run queued transition");
+    let applied = queued.await.expect("queued transition completes");
+    if applied {
+        wardian_core::db::update_agent_status(&config.session_id, "Idle", Some(4242))
+            .expect("persist accepted deferred transition");
+    }
+    assert!(!applied, "superseded Idle must not schedule persistence");
+    assert_eq!(*status.lock().unwrap(), "Action Needed");
+    assert_eq!(
+        state.agents.lock().await[&config.session_id]
+            .current_status
+            .lock()
+            .unwrap()
+            .as_str(),
+        "Action Needed"
+    );
+    let persisted = wardian_core::db::get_all_agents().expect("read persisted agent");
+    assert_eq!(
+        persisted
+            .iter()
+            .find(|agent| agent.session_id == config.session_id)
+            .and_then(|agent| agent.last_status.as_deref()),
+        Some("Action Needed")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_idle_applies_when_attached_runtime_status_is_unchanged() {
+    let app = tauri::test::mock_app();
+    app.manage(AppState::new());
+    let state = app.state::<AppState>();
+    let config = AgentConfig {
+        session_id: uuid::Uuid::new_v4().to_string(),
+        provider: "codex".into(),
+        ..Default::default()
+    };
+    let mut agent = crate::restored_agent_without_process(
+        config.clone(),
+        "Starting",
+        String::new(),
+        Some(4242),
+        None,
+    );
+    agent.runtime_generation = Some(7);
+    agent
+        .watch_state
+        .lock()
+        .unwrap()
+        .set_codex_attachment_ready(true);
+    let watch_state = agent.watch_state.clone();
+    let status = agent.current_status.clone();
+    state
+        .agents
+        .lock()
+        .await
+        .insert(config.session_id.clone(), agent);
+
+    let roster = state.agents.lock().await;
+    assert_eq!(
+        crate::manager::codex_onboarding::status_admission(
+            app.handle(),
+            &config.session_id,
+            &status,
+            "Idle",
+        ),
+        crate::manager::codex_onboarding::CodexStatusAdmission::WaitForRoster,
+    );
+    let intent_revision = {
+        let _current = status.lock().unwrap();
+        state.reserve_status_intent(&config.session_id, &status, "Idle")
+    };
+    drop(roster);
+    watch_state
+        .lock()
+        .unwrap()
+        .set_codex_attachment_ready(false);
+    assert_eq!(
+        crate::manager::codex_onboarding::status_admission(
+            app.handle(),
+            &config.session_id,
+            &status,
+            "Processing...",
+        ),
+        crate::manager::codex_onboarding::CodexStatusAdmission::Blocked,
+    );
+    assert_eq!(
+        state.status_intent_revision(&config.session_id, &status),
+        intent_revision
+    );
+    watch_state.lock().unwrap().set_codex_attachment_ready(true);
+    assert!(
+        crate::manager::codex_onboarding::apply_deferred_status_transition(
+            &state,
+            &config.session_id,
+            &status,
+            "Starting",
+            intent_revision,
+            "Idle",
+        )
+        .await
+    );
+    assert_eq!(*status.lock().unwrap(), "Idle");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn newer_queued_idle_wins_after_queued_processing_under_roster_contention() {
+    let _environment = crate::utils::wardian_test_env_lock_async().await;
+    let _home = TestHome::new();
+    let app = tauri::test::mock_app();
+    app.manage(AppState::new());
+    let state = app.state::<AppState>();
+    let config = AgentConfig {
+        session_id: uuid::Uuid::new_v4().to_string(),
+        provider: "codex".into(),
+        ..Default::default()
+    };
+    wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+        session_id: &config.session_id,
+        session_name: "Queued Codex",
+        description: "",
+        agent_class: "Coder",
+        provider: "codex",
+        workspace: None,
+        project: None,
+        is_off: false,
+        created_at: None,
+    })
+    .expect("persist queued agent");
+    let mut agent = crate::restored_agent_without_process(
+        config.clone(),
+        "Starting",
+        String::new(),
+        Some(4242),
+        None,
+    );
+    agent.runtime_generation = Some(7);
+    agent
+        .watch_state
+        .lock()
+        .unwrap()
+        .set_codex_attachment_ready(true);
+    let status = agent.current_status.clone();
+    state
+        .agents
+        .lock()
+        .await
+        .insert(config.session_id.clone(), agent);
+
+    let roster = state.agents.lock().await;
+    let mut revisions = Vec::new();
+    for next_status in ["Processing...", "Idle"] {
+        let _current = status.lock().unwrap();
+        revisions.push(state.reserve_status_intent(&config.session_id, &status, next_status));
+        assert_eq!(
+            crate::manager::codex_onboarding::status_admission(
+                app.handle(),
+                &config.session_id,
+                &status,
+                next_status,
+            ),
+            crate::manager::codex_onboarding::CodexStatusAdmission::WaitForRoster,
+        );
+    }
+    drop(roster);
+    let older_applied = crate::manager::codex_onboarding::apply_deferred_status_transition(
+        &state,
+        &config.session_id,
+        &status,
+        "Starting",
+        revisions[0],
+        "Processing...",
+    )
+    .await;
+    assert!(!older_applied, "older queued Processing must be superseded");
+    assert!(
+        crate::manager::codex_onboarding::apply_deferred_status_transition(
+            &state,
+            &config.session_id,
+            &status,
+            "Starting",
+            revisions[1],
+            "Idle",
+        )
+        .await,
+        "the later queued Idle must remain applicable after Processing"
+    );
+    assert_eq!(*status.lock().unwrap(), "Idle");
+    wardian_core::db::update_agent_status(&config.session_id, "Idle", Some(4242))
+        .expect("persist accepted deferred Idle");
+    assert_eq!(
+        wardian_core::db::get_all_agents()
+            .expect("read persisted agent")
+            .iter()
+            .find(|agent| agent.session_id == config.session_id)
+            .and_then(|agent| agent.last_status.as_deref()),
+        Some("Idle")
+    );
+}
+
+#[tokio::test]
+async fn old_runtime_status_intent_cannot_cancel_provisional_replacement_intent() {
+    let state = AppState::new();
+    let config = AgentConfig {
+        session_id: uuid::Uuid::new_v4().to_string(),
+        provider: "codex".into(),
+        ..Default::default()
+    };
+    let placeholder = crate::restored_agent_without_process(
+        config.clone(),
+        "Restoring",
+        String::new(),
+        None,
+        None,
+    );
+    let old_status = placeholder.current_status.clone();
+    state
+        .agents
+        .lock()
+        .await
+        .insert(config.session_id.clone(), placeholder);
+    let mut replacement = crate::restored_agent_without_process(
+        config.clone(),
+        "Starting",
+        String::new(),
+        Some(4242),
+        None,
+    );
+    replacement.runtime_generation = Some(7);
+    replacement
+        .watch_state
+        .lock()
+        .unwrap()
+        .set_codex_attachment_ready(true);
+    let new_status = replacement.current_status.clone();
+    // The new owner can report a status before replacing the old roster entry.
+    let new_revision = {
+        let _current = new_status.lock().unwrap();
+        state.reserve_status_intent(&config.session_id, &new_status, "Idle")
+    };
+    state
+        .agents
+        .lock()
+        .await
+        .insert(config.session_id.clone(), replacement);
+    let old_revision = {
+        let _current = old_status.lock().unwrap();
+        state.reserve_status_intent(&config.session_id, &old_status, "Processing...")
+    };
+    assert!(old_revision > new_revision);
+    assert_eq!(
+        state.status_intent_revision(&config.session_id, &new_status),
+        new_revision
+    );
+    assert!(
+        crate::manager::codex_onboarding::apply_deferred_status_transition(
+            &state,
+            &config.session_id,
+            &new_status,
+            "Starting",
+            new_revision,
+            "Idle",
+        )
+        .await,
+        "a stale owner's intent cannot invalidate the new owner's queued status"
+    );
+    assert_eq!(*new_status.lock().unwrap(), "Idle");
+}
+
+#[test]
+fn no_op_idle_intent_preserves_the_committed_status_revision() {
+    let state = AppState::new();
+    let status = Arc::new(Mutex::new("Idle".to_string()));
+    let committed_revision = {
+        let _current = status.lock().unwrap();
+        state.commit_status_revision("agent", &status, "Idle")
+    };
+    let intent_revision = {
+        let _current = status.lock().unwrap();
+        state.reserve_status_intent("agent", &status, "Idle")
+    };
+    assert!(intent_revision > committed_revision);
+    assert_eq!(state.status_revision("agent", &status), committed_revision);
+    assert_eq!(
+        state.status_intent_revision("agent", &status),
+        intent_revision
+    );
+    assert_eq!(
+        state.status_intent_status("agent", &status).as_deref(),
+        Some("Idle")
+    );
+}
+
+#[tokio::test]
+async fn restored_status_handoff_preserves_unattached_stale_and_other_provider_states() {
+    for (provider, attachment_ready, runtime_generation, initial_status) in [
+        ("codex", false, Some(7), "Starting"),
+        ("codex", true, None, "Starting"),
+        ("claude", true, Some(7), "Starting"),
+        ("codex", true, Some(7), "Action Needed"),
+        ("codex", true, Some(7), "Off"),
+    ] {
+        let state = AppState::new();
+        let config = AgentConfig {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            provider: provider.into(),
+            ..Default::default()
+        };
+        let publication = RestorePublication::begin(&state, &config.session_id)
+            .await
+            .expect("restore claim");
+        publication
+            .publish(
+                &state,
+                crate::restored_agent_without_process(
+                    config.clone(),
+                    "Restoring",
+                    String::new(),
+                    None,
+                    None,
+                ),
+            )
+            .await;
+        let mut spawned = crate::restored_agent_without_process(
+            config.clone(),
+            initial_status,
+            String::new(),
+            None,
+            None,
+        );
+        spawned.runtime_generation = runtime_generation;
+        spawned
+            .watch_state
+            .lock()
+            .unwrap()
+            .set_codex_attachment_ready(attachment_ready);
+        let status = spawned.current_status.clone();
+        publication
+            .publish_spawned(
+                &state,
+                spawned,
+                crate::manager::SpawnPublicationDisposition::new(),
+            )
+            .await;
+        assert_eq!(
+            *status.lock().unwrap(),
+            initial_status,
+            "provider={provider}, attached={attachment_ready}, generation={runtime_generation:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn failed_restore_exposes_provider_error_to_late_terminal_presentations() {
     use crate::state::terminal_session::{TerminalClientIdentity, TerminalRuntimeHandles};

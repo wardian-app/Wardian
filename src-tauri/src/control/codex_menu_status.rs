@@ -117,7 +117,10 @@ pub(crate) async fn constrain_publication(
         return None;
     }
     if let Some(required) = required {
-        *current = required.into();
+        if *current != required {
+            *current = required.into();
+            state.commit_status_revision(session_id, current_status, required);
+        }
     }
     Some(current.clone())
 }
