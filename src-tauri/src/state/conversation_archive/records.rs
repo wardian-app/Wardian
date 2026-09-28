@@ -1,5 +1,6 @@
 use std::io;
 
+use sha2::{Digest, Sha256};
 use wardian_core::conversations::{
     ConversationBoundaryReason, ConversationInputOrigin, ConversationNarrativeRecord,
     ConversationRecordKind, ConversationSourceRecord, ConversationSpeakerType, CONVERSATION_SCHEMA,
@@ -93,9 +94,24 @@ pub(super) fn source_record_from_chat_event(
         .clone()
         .or_else(|| metadata_source_kind(&event.provider, &event.metadata))?;
 
+    let source_id =
+        if event.provider.eq_ignore_ascii_case("codex") && event.metadata["provider_log"] == true {
+            let digest = Sha256::digest(event.id.as_bytes());
+            format!(
+                "src_codex_observation_{}",
+                digest
+                    .iter()
+                    .take(12)
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<Vec<_>>()
+                    .join("")
+            )
+        } else {
+            format!("src_{seq}")
+        };
     Some(ConversationSourceRecord {
         schema: CONVERSATION_SCHEMA,
-        source_id: format!("src_{seq}"),
+        source_id,
         provider: event.provider.clone(),
         provider_session_id: metadata_string(&event.metadata, "opencode_session_id")
             .or_else(|| metadata_string(&event.metadata, "provider_session_id")),

@@ -17,8 +17,8 @@ use super::{
 };
 
 pub(super) struct PendingChatPublication {
-    pub event: Option<AgentChatEvent>,
-    pub source: Option<ConversationSourceRecord>,
+    pub events: Vec<AgentChatEvent>,
+    pub sources: Vec<ConversationSourceRecord>,
     pub record: ConversationNarrativeRecord,
 }
 
@@ -59,6 +59,41 @@ pub(super) fn matching_record_index(
     current: &AgentChatEvent,
     archived_events: &[AgentChatEvent],
 ) -> io::Result<Option<usize>> {
+    if current.metadata["provider_log"] == true
+        && current.provider.eq_ignore_ascii_case("codex")
+        && current.kind == AgentChatEventKind::Message
+        && current.role == Some(AgentChatRole::Assistant)
+    {
+        let exact_match = unique_match(
+            records.iter().enumerate().filter_map(|(index, record)| {
+                record.event_refs.contains(&current.id).then_some(index)
+            }),
+            &format!("narrative ownership for event {}", current.id),
+        )?;
+        if exact_match.is_some() {
+            return Ok(exact_match);
+        }
+
+        return unique_match(
+            records
+                .iter()
+                .enumerate()
+                .filter_map(|(record_index, record)| {
+                    archived_events
+                        .iter()
+                        .any(|archived| {
+                            record.event_refs.contains(&archived.id)
+                                && super::codex_archive_mirror_pair(current, archived)
+                        })
+                        .then_some(record_index)
+                }),
+            &format!(
+                "Codex completion narrative ownership for event {}",
+                current.id
+            ),
+        );
+    }
+
     if current.metadata["provider_log"] == true && provenance::is_codex_user_message_mirror(current)
     {
         let exact_match = unique_match(
@@ -69,6 +104,30 @@ pub(super) fn matching_record_index(
         )?;
         if exact_match.is_some() {
             return Ok(exact_match);
+        }
+
+        let paired_observation = unique_match(
+            archived_events
+                .iter()
+                .enumerate()
+                .filter_map(|(index, archived)| {
+                    crate::providers::chat_transcript::codex_user_mirror_pair(current, archived)
+                        .then_some(index)
+                }),
+            &format!("Codex request mirror for event {}", current.id),
+        )?;
+        if let Some(archived_event_index) = paired_observation {
+            let archived_event = &archived_events[archived_event_index];
+            return unique_match(
+                records.iter().enumerate().filter_map(|(index, record)| {
+                    record
+                        .event_refs
+                        .iter()
+                        .any(|event_ref| event_ref == &archived_event.id)
+                        .then_some(index)
+                }),
+                &format!("Codex mirror narrative ownership for event {}", current.id),
+            );
         }
 
         // A historical text-derived mirror ID may be present as an alias in
@@ -261,6 +320,18 @@ pub(super) fn recover_unlinked_observations(
         if matching_record_index(records, event, events)?.is_some() {
             continue;
         }
+        let paired_codex_mirror_index = unique_match(
+            events.iter().enumerate().filter_map(|(index, candidate)| {
+                crate::providers::chat_transcript::codex_user_mirror_pair(event, candidate)
+                    .then_some(index)
+            }),
+            &format!("Codex recovery mirror for event {}", event.id),
+        )?;
+        if paired_codex_mirror_index.is_some() && event.source.as_deref() != Some("response_item") {
+            // Recover the identified request row once, with its exact event_msg
+            // observation attached below. The mirror alone cannot establish text.
+            continue;
+        }
         let event_ids = event_identity_ids(event);
         if event_ids
             .iter()
@@ -317,6 +388,27 @@ pub(super) fn recover_unlinked_observations(
             record
         };
 
+        let mut paired_source = None;
+        if let Some(mirror) = paired_codex_mirror_index.map(|index| &events[index]) {
+            if !record
+                .event_refs
+                .iter()
+                .any(|event_ref| event_ref == &mirror.id)
+            {
+                record.event_refs.push(mirror.id.clone());
+            }
+            paired_source = source_record_from_chat_event(mirror, record.seq);
+            if let Some(source) = &paired_source {
+                if !record
+                    .source_refs
+                    .iter()
+                    .any(|source_ref| source_ref == &source.source_id)
+                {
+                    record.source_refs.push(source.source_id.clone());
+                }
+            }
+        }
+
         if is_generated {
             validate_reconstructable_record(event, &record)?;
         }
@@ -327,13 +419,21 @@ pub(super) fn recover_unlinked_observations(
             )));
         }
 
-        let sources = if is_generated {
+        let mut sources = if is_generated {
             generated_sources_from_record(context, &mut record)
         } else {
             source_record_from_chat_event(event, record.seq)
                 .into_iter()
                 .collect::<Vec<_>>()
         };
+        if let Some(source) = paired_source {
+            if !sources
+                .iter()
+                .any(|existing| existing.source_id == source.source_id)
+            {
+                sources.push(source);
+            }
+        }
         if !is_generated && !sources.is_empty() {
             record.source_refs = sources
                 .iter()

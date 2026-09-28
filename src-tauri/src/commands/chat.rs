@@ -9,8 +9,8 @@ use crate::manager::{
 };
 use crate::providers::antigravity::AntigravityProvider;
 use crate::providers::chat_transcript::{
-    legacy_visible_chat_text_for_provider, normalize_chat_lines, visible_chat_text,
-    visible_chat_text_for_provider, PROVIDER_RAW_LINE_METADATA_KEY,
+    codex_user_mirror_pair, legacy_visible_chat_text_for_provider, normalize_chat_lines,
+    visible_chat_text, visible_chat_text_for_provider, PROVIDER_RAW_LINE_METADATA_KEY,
 };
 use crate::providers::pi::PiProvider;
 use crate::state::conversation_archive::{
@@ -1788,62 +1788,49 @@ fn codex_watch_native_observation_matches(watch: &AgentChatEvent, native: &Agent
     same_path && same_provider_turn && same_provider_session
 }
 
-/// Projects Codex's two native user-input records into one chat row while
-/// retaining both observation IDs in the returned metadata. The raw provider
-/// log and archive source records remain unchanged, so this is a presentation
-/// projection rather than evidence deletion.
+/// Projects only a source-bound Codex user mirror pair into one chat row.
 fn canonicalize_provider_input_projection(events: &mut Vec<AgentChatEvent>) {
-    let mut canonical_indexes = HashMap::new();
-    let mut projected = Vec::with_capacity(events.len());
-
-    for event in events.drain(..) {
-        let Some(identity) = provider_input_projection_identity(&event) else {
-            projected.push(event);
+    let mut removed = HashSet::new();
+    for mirror_index in 0..events.len() {
+        if removed.contains(&mirror_index)
+            || events[mirror_index].source.as_deref() != Some("event_msg")
+        {
             continue;
-        };
-
-        let Some(&canonical_index) = canonical_indexes.get(&identity) else {
-            let index = projected.len();
-            canonical_indexes.insert(identity, index);
-            projected.push(event);
-            continue;
-        };
-
-        let candidate = event;
-        let replace =
-            should_prefer_message_duplicate_candidate(&projected[canonical_index], &candidate);
-        if replace {
-            let mut replacement = candidate;
-            retain_provider_observation_ids(&mut replacement, &projected[canonical_index]);
-            projected[canonical_index] = replacement;
-        } else {
-            retain_provider_observation_ids(&mut projected[canonical_index], &candidate);
         }
-    }
+        let request_matches = (0..events.len())
+            .filter(|&request_index| {
+                request_index != mirror_index
+                    && !removed.contains(&request_index)
+                    && codex_user_mirror_pair(&events[mirror_index], &events[request_index])
+            })
+            .collect::<Vec<_>>();
+        if request_matches.len() != 1 {
+            continue;
+        }
+        let request_index = request_matches[0];
+        let mirror_matches = (0..events.len())
+            .filter(|&candidate_index| {
+                candidate_index != request_index
+                    && !removed.contains(&candidate_index)
+                    && codex_user_mirror_pair(&events[request_index], &events[candidate_index])
+            })
+            .collect::<Vec<_>>();
+        if mirror_matches.len() != 1 || mirror_matches[0] != mirror_index {
+            continue;
+        }
 
-    *events = projected;
-}
-
-fn provider_input_projection_identity(event: &AgentChatEvent) -> Option<String> {
-    if event.kind != AgentChatEventKind::Message
-        || event.role != Some(AgentChatRole::User)
-        || !event.provider.eq_ignore_ascii_case("codex")
-        || event.metadata["provider_log"] != true
-        || event.metadata["input_origin"] != "human_input"
-        || event.metadata["input_purpose"] != "request"
-    {
-        return None;
+        let mut canonical = events[request_index].clone();
+        retain_provider_observation_ids(&mut canonical, &events[mirror_index]);
+        events[request_index] = canonical;
+        removed.insert(mirror_index);
     }
-    let provider_turn_id = event
-        .metadata
-        .get("provider_turn_id")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    Some(format!(
-        "{}|{}|{provider_turn_id}",
-        event.session_id, event.provider
-    ))
+    if !removed.is_empty() {
+        *events = events
+            .drain(..)
+            .enumerate()
+            .filter_map(|(index, event)| (!removed.contains(&index)).then_some(event))
+            .collect();
+    }
 }
 
 fn retain_provider_observation_ids(canonical: &mut AgentChatEvent, duplicate: &AgentChatEvent) {
@@ -1854,6 +1841,32 @@ fn retain_provider_observation_ids(canonical: &mut AgentChatEvent, duplicate: &A
         }
     }
     canonical.metadata["provider_observation_ids"] = serde_json::json!(ids);
+
+    if canonical.source.as_deref() == Some("response_item")
+        && duplicate.source.as_deref() == Some("event_msg")
+    {
+        let mut roots = canonical.metadata["provider_mirror_request_root_ids"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let mirror_roots = duplicate.metadata["provider_mirror_request_root_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .chain(event_metadata_string(duplicate, "request_root_id"));
+        for root in mirror_roots {
+            if event_metadata_string(canonical, "request_root_id") != Some(root)
+                && !roots.iter().any(|value| value.as_str() == Some(root))
+            {
+                roots.push(serde_json::json!(root));
+            }
+        }
+        if !roots.is_empty() {
+            canonical.metadata["provider_mirror_request_root_ids"] =
+                serde_json::Value::Array(roots);
+        }
+    }
 }
 
 fn provider_observation_ids(event: &AgentChatEvent) -> Vec<String> {
@@ -4064,7 +4077,7 @@ Do you want to proceed?
     }
 
     #[test]
-    fn legacy_pending_codex_state_without_source_row_provenance_fails_closed() {
+    fn legacy_pending_codex_state_without_matching_source_row_fails_closed() {
         use std::io::Write as _;
 
         let temp = tempfile::tempdir().expect("temp dir");
@@ -4087,6 +4100,8 @@ Do you want to proceed?
             .expect("pending event metadata");
         pending_metadata.remove("provider_log_row_offset");
         pending_metadata.remove("_wardian_provider_raw_line");
+        old_state["normalizer"]["pending_events"][0]["text"] =
+            serde_json::json!("A stale pending context that is absent from the source row.");
         let old_state: crate::commands::provider_log_acquisition::ProviderLogCaptureState =
             serde_json::from_value(old_state).expect("restore state without source row proof");
         let original_offset = old_state.committed_offset;
@@ -4392,7 +4407,11 @@ Do you want to proceed?
             language: None,
             created_at: None,
             sequence: Some(1),
-            metadata: serde_json::json!({"provider_log": true}),
+            metadata: serde_json::json!({
+                "provider_log": true,
+                "log_path": "<codex-log>",
+                "provider_turn_id": "provider-turn",
+            }),
         };
         let mut completed = first.clone();
         completed.id = "agent-1:provider:2".to_string();
@@ -4402,6 +4421,7 @@ Do you want to proceed?
         completed.turn_id =
             Some("msg_003d4bf15d017fea016a460ea8668481938d3c49f567fe9108".to_string());
         completed.source = Some("response_item".to_string());
+        completed.metadata["provider_phase"] = serde_json::json!("final_answer");
 
         let chat_events = merge_chat_events(Vec::new(), vec![first, completed]);
 
@@ -4430,6 +4450,7 @@ Do you want to proceed?
         rooted_stream.metadata["request_root_id"] = serde_json::json!("request-a");
         let mut rooted_completion = chat_events[0].clone();
         rooted_completion.metadata["request_root_id"] = serde_json::json!("request-b");
+        rooted_completion.metadata["provider_turn_id"] = serde_json::json!("other-turn");
         assert_eq!(
             merge_chat_events(Vec::new(), vec![rooted_stream, rooted_completion]).len(),
             2
@@ -4620,18 +4641,36 @@ Do you want to proceed?
         lines.extend([
             r#"{"type":"turn_context","payload":{"turn_id":"provider-turn-b"}}"#,
             r#"{"type":"response_item","payload":{"type":"message","id":"message-b","role":"user","content":[{"type":"input_text","text":"Inspect the archive."}],"internal_chat_message_metadata_passthrough":{"turn_id":"provider-turn-b","content_item_kinds":["user.text"]}}}"#,
-            r#"{"type":"event_msg","payload":{"type":"user_message","client_id":"client-b","message":"Inspect the archive."}}"#,
+            r#"{"type":"event_msg","payload":{"type":"user_message","id":"msg:provider-turn-b","client_id":"client-b","message":"Inspect the archive."}}"#,
         ]);
         let mut provider_events = normalize_chat_lines("agent-1", "codex", lines);
         for event in &mut provider_events {
             event.metadata["provider_log"] = serde_json::json!(true);
             event.metadata["provider_session_id"] = serde_json::json!("provider-session");
             event.metadata["log_path"] = serde_json::json!("<provider-log>");
+            if event.role == Some(AgentChatRole::User)
+                && event.source.as_deref() == Some("event_msg")
+            {
+                event.metadata["request_root_id"] = serde_json::json!(format!(
+                    "msg:{}",
+                    event.metadata["provider_turn_id"].as_str().unwrap()
+                ));
+            }
         }
         let raw_user_ids = provider_events
             .iter()
             .filter(|event| event.role == Some(AgentChatRole::User))
             .map(|event| event.id.clone())
+            .collect::<Vec<_>>();
+        let raw_user_roots = provider_events
+            .iter()
+            .filter(|event| event.role == Some(AgentChatRole::User))
+            .map(|event| {
+                event.metadata["request_root_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
             .collect::<Vec<_>>();
 
         let projected = merge_chat_events(Vec::new(), provider_events);
@@ -4641,7 +4680,15 @@ Do you want to proceed?
             .collect::<Vec<_>>();
 
         assert_eq!(raw_user_ids.len(), 4);
+        assert_ne!(raw_user_roots[0], raw_user_roots[1]);
+        assert_ne!(raw_user_roots[2], raw_user_roots[3]);
+        assert_ne!(raw_user_roots[0], raw_user_roots[2]);
         assert_eq!(users.len(), 2);
+        assert_eq!(users[0].text, users[1].text);
+        assert_ne!(
+            users[0].metadata["request_root_id"],
+            users[1].metadata["request_root_id"]
+        );
         assert_eq!(
             users
                 .iter()
@@ -4659,6 +4706,17 @@ Do you want to proceed?
                 .collect::<Vec<_>>(),
             vec!["provider-turn-a", "provider-turn-b"]
         );
+        assert_eq!(
+            users
+                .iter()
+                .map(
+                    |event| event.metadata["provider_mirror_request_root_ids"][0]
+                        .as_str()
+                        .unwrap()
+                )
+                .collect::<Vec<_>>(),
+            vec!["msg:provider-turn-a", "msg:provider-turn-b"]
+        );
         assert!(users.iter().all(|event| {
             event.metadata["provider_observation_ids"]
                 .as_array()
@@ -4669,6 +4727,33 @@ Do you want to proceed?
                         .is_some_and(|id| raw_user_ids.iter().any(|raw_id| raw_id == id))
                 })
         }));
+    }
+
+    #[test]
+    fn does_not_canonicalize_codex_user_rows_with_changed_text_in_one_turn() {
+        let mut events = normalize_chat_lines(
+            "agent-1",
+            "codex",
+            [
+                r#"{"type":"turn_context","payload":{"turn_id":"provider-turn-a"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"native-request-a","role":"user","content":[{"type":"input_text","text":"Inspect the archive."}],"internal_chat_message_metadata_passthrough":{"turn_id":"provider-turn-a","content_item_kinds":["user.text"]}}}"#,
+                r#"{"type":"event_msg","payload":{"type":"user_message","message":"Inspect another archive."}}"#,
+            ],
+        );
+        for event in &mut events {
+            event.metadata["provider_log"] = serde_json::json!(true);
+            event.metadata["provider_session_id"] = serde_json::json!("provider-session");
+            event.metadata["log_path"] = serde_json::json!("<codex-log>");
+        }
+
+        let projected = merge_chat_events(Vec::new(), events);
+        let users = projected
+            .iter()
+            .filter(|event| event.role == Some(AgentChatRole::User))
+            .collect::<Vec<_>>();
+
+        assert_eq!(users.len(), 2);
+        assert_ne!(users[0].text, users[1].text);
     }
 
     #[test]

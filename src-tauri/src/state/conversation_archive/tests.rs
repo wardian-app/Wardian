@@ -1,9 +1,13 @@
+use std::collections::HashSet;
+
 use super::{
     derive_turn_records, effective_conversation_logging, lifecycle_record,
     narrative_from_chat_event, narrative_from_delivered_input, new_conversation_id,
     ActiveConversationHandle, ConversationArchiveContext, ConversationArchiveState,
 };
-use crate::providers::chat_transcript::normalize_chat_lines;
+use crate::providers::chat_transcript::{
+    normalize_chat_lines, normalize_chat_lines_with_state, TranscriptNormalizationState,
+};
 use wardian_core::conversations::{
     read_jsonl_records, AgentConversationLoggingSetting, ConversationBoundaryReason,
     ConversationInputOrigin, ConversationLoggingSetting, ConversationManifest,
@@ -55,6 +59,447 @@ fn terminal_output_is_not_primary_narrative() {
     );
 
     assert!(narrative_from_chat_event(&event, 1).is_none());
+}
+
+#[test]
+fn codex_user_mirror_pair_has_one_narrative_across_same_and_separate_batches() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let context = archive_context("provider-session");
+    let log_path = "<codex-provider-log>";
+    let request_text = "Inspect the archive.";
+    let turn_a = normalize_chat_lines(
+        "agent-1",
+        "codex",
+        [
+            r#"{"type":"turn_context","payload":{"turn_id":"provider-turn-a"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","id":"native-request-a","role":"user","content":[{"type":"input_text","text":"Inspect the archive."}],"internal_chat_message_metadata_passthrough":{"turn_id":"provider-turn-a","content_item_kinds":["user.text"]}}}"#,
+            r#"{"type":"event_msg","payload":{"type":"user_message","message":"Inspect the archive."}}"#,
+        ],
+    );
+    let decorate = |mut events: Vec<AgentChatEvent>| {
+        for event in &mut events {
+            event.id = format!(
+                "{}:{}:{}",
+                event.session_id,
+                event.metadata["provider_turn_id"]
+                    .as_str()
+                    .unwrap_or("unbound"),
+                event.source.as_deref().unwrap_or("unknown")
+            );
+            event.metadata["provider_log"] = serde_json::json!(true);
+            event.metadata["log_path"] = serde_json::json!(log_path);
+            event
+                .metadata
+                .as_object_mut()
+                .unwrap()
+                .remove("provider_session_id");
+            event
+                .metadata
+                .as_object_mut()
+                .unwrap()
+                .remove("provider_source");
+            if event.role == Some(AgentChatRole::User) {
+                let turn = event.metadata["provider_turn_id"].as_str().unwrap();
+                let root = if event.source.as_deref() == Some("response_item") {
+                    format!("wardian:input:{turn}")
+                } else {
+                    format!("msg:{turn}")
+                };
+                event.metadata["request_root_id"] = serde_json::json!(root);
+                if event.source.as_deref() == Some("response_item") {
+                    // Real Wardian delivery echoes can lack the redundant
+                    // digest while retaining the exact request bytes.
+                    event
+                        .metadata
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("codex_user_text_sha256");
+                }
+            }
+        }
+        events
+    };
+    archive
+        .append_chat_events_with_context(context.clone(), &decorate(turn_a))
+        .expect("append same-batch mirror pair");
+
+    let mut state = TranscriptNormalizationState::default();
+    let turn_b_request = normalize_chat_lines_with_state(
+        "agent-1",
+        "codex",
+        [
+            r#"{"type":"turn_context","payload":{"turn_id":"provider-turn-b"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","id":"native-request-b","role":"user","content":[{"type":"input_text","text":"Inspect the archive."}],"internal_chat_message_metadata_passthrough":{"turn_id":"provider-turn-b","content_item_kinds":["user.text"]}}}"#,
+        ],
+        &mut state,
+        false,
+        true,
+    )
+    .expect("normalize second turn request");
+    let turn_b_mirror = normalize_chat_lines_with_state(
+        "agent-1",
+        "codex",
+        [r#"{"type":"event_msg","payload":{"type":"user_message","message":"Inspect the archive."}}"#],
+        &mut state,
+        true,
+        true,
+    )
+    .expect("normalize second turn mirror in separate batch");
+    archive
+        .append_chat_events_with_context(context.clone(), &decorate(turn_b_request))
+        .expect("append second turn request");
+    archive
+        .append_chat_events_with_context(context.clone(), &decorate(turn_b_mirror))
+        .expect("append second turn mirror in separate batch");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let directory =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation directory");
+    let records: Vec<ConversationNarrativeRecord> =
+        read_jsonl_records(&directory.join("conversation.jsonl")).expect("read narrative records");
+    let events: Vec<AgentChatEvent> =
+        read_jsonl_records(&directory.join("events.jsonl")).expect("read archived events");
+    let sources: Vec<ConversationSourceRecord> =
+        read_jsonl_records(&directory.join("sources.jsonl")).expect("read source records");
+
+    assert_eq!(records.len(), 2);
+    let roots = records
+        .iter()
+        .map(|record| record.request_root_id.as_deref().expect("request root"))
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        roots.len(),
+        2,
+        "identical text on distinct native turns stays distinct"
+    );
+    assert!(records
+        .iter()
+        .all(|record| record.text.as_deref() == Some(request_text)));
+    for turn_id in ["provider-turn-a", "provider-turn-b"] {
+        let observations = events
+            .iter()
+            .filter(|event| event.metadata["provider_turn_id"] == turn_id)
+            .collect::<Vec<_>>();
+        assert_eq!(observations.len(), 2);
+        assert_eq!(
+            observations
+                .iter()
+                .filter_map(|event| event.source.as_deref())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["response_item", "event_msg"])
+        );
+        let record = records
+            .iter()
+            .find(|record| {
+                observations
+                    .iter()
+                    .all(|event| record.event_refs.contains(&event.id))
+            })
+            .expect("both provider observations share one narrative");
+        assert_eq!(record.event_refs.len(), 2);
+        assert_eq!(record.source_refs.len(), 2);
+        let linked_sources = sources
+            .iter()
+            .filter(|source| record.source_refs.contains(&source.source_id))
+            .collect::<Vec<_>>();
+        assert_eq!(linked_sources.len(), 2);
+        assert_ne!(linked_sources[0].source_id, linked_sources[1].source_id);
+    }
+}
+
+#[test]
+fn codex_completion_mirror_pair_has_one_narrative_across_batches() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let context = archive_context("provider-session");
+    let log_path = "<codex-provider-log>";
+    let decorate = |mut events: Vec<AgentChatEvent>| {
+        for event in &mut events {
+            event.id = format!(
+                "{}:{}:{}",
+                event.session_id,
+                event.metadata["provider_turn_id"]
+                    .as_str()
+                    .unwrap_or("unbound"),
+                event.source.as_deref().unwrap_or("unknown")
+            );
+            event.metadata["provider_log"] = serde_json::json!(true);
+            event.metadata["log_path"] = serde_json::json!(log_path);
+            event
+                .metadata
+                .as_object_mut()
+                .unwrap()
+                .remove("provider_session_id");
+            event
+                .metadata
+                .as_object_mut()
+                .unwrap()
+                .remove("provider_source");
+        }
+        events
+    };
+
+    let mirror = normalize_chat_lines(
+        "agent-1",
+        "codex",
+        [
+            r#"{"type":"turn_context","payload":{"turn_id":"provider-turn-a"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"agent_message","message":"The observed answer."}}"#,
+        ],
+    );
+    let mirror = decorate(mirror);
+    archive
+        .append_chat_events_with_context(context.clone(), &mirror)
+        .expect("append stream mirror first");
+
+    let completion = normalize_chat_lines(
+        "agent-1",
+        "codex",
+        [
+            r#"{"type":"response_item","payload":{"type":"message","id":"answer-a","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"The observed answer."}],"internal_chat_message_metadata_passthrough":{"turn_id":"provider-turn-a"}}}"#,
+        ],
+    );
+    let mut completion = decorate(completion);
+    completion[0].metadata["provider_turn_id"] = serde_json::json!("provider-turn-a");
+    archive
+        .append_chat_events_with_context(context, &completion)
+        .expect("append identified final response");
+
+    let watch_event = normalize_chat_lines(
+        "agent-1",
+        "codex",
+        [
+            r#"{"type":"event_msg","payload":{"type":"agent_message","message":"The observed answer."}}"#,
+        ],
+    );
+    let mut watch_event = decorate(watch_event);
+    watch_event[0].id.push_str(":watch-event");
+    watch_event[0].metadata["provider_source"] = serde_json::json!("event");
+    watch_event[0].metadata["provider_session_id"] = serde_json::json!("watch-session");
+    watch_event[0].metadata["provider_turn_id"] = serde_json::json!("provider-turn-a");
+    watch_event[0]
+        .metadata
+        .as_object_mut()
+        .unwrap()
+        .remove("raw_type");
+    assert_eq!(watch_event[0].provider, completion[0].provider);
+    assert_eq!(watch_event[0].provider, "codex");
+    assert_eq!(watch_event[0].kind, AgentChatEventKind::Message);
+    assert_eq!(completion[0].kind, AgentChatEventKind::Message);
+    assert_eq!(watch_event[0].session_id, completion[0].session_id);
+    assert_eq!(watch_event[0].role, completion[0].role);
+    assert_eq!(watch_event[0].role, Some(AgentChatRole::Assistant));
+    assert_eq!(watch_event[0].text, completion[0].text);
+    assert_eq!(watch_event[0].source.as_deref(), Some("event_msg"));
+    assert_eq!(completion[0].source.as_deref(), Some("response_item"));
+    assert_eq!(completion[0].metadata["provider_phase"], "final_answer");
+    assert_eq!(
+        watch_event[0].metadata["provider_turn_id"],
+        "provider-turn-a"
+    );
+    assert_eq!(
+        completion[0].metadata["provider_turn_id"],
+        "provider-turn-a"
+    );
+    assert_eq!(
+        watch_event[0].metadata["log_path"],
+        completion[0].metadata["log_path"]
+    );
+    assert_eq!(watch_event[0].metadata["provider_source"], "event");
+    assert_ne!(watch_event[0].metadata["provider_phase"], "final_answer");
+    assert_eq!(watch_event[0].metadata["provider_log"], true);
+    assert_eq!(
+        watch_event[0].metadata["provider_session_id"],
+        "watch-session"
+    );
+    assert_eq!(completion[0].metadata["provider_log"], true);
+    assert!(completion[0]
+        .turn_id
+        .as_deref()
+        .is_some_and(|turn| !turn.is_empty()));
+    assert!(completion[0].metadata["provider_session_id"]
+        .as_str()
+        .is_none_or(|session| session == "watch-session"));
+    assert!(watch_event[0]
+        .text
+        .as_deref()
+        .is_some_and(|text| !text.is_empty()));
+    assert!(super::provenance::codex_stream_completion_pair(
+        &watch_event[0],
+        &completion[0]
+    ));
+    archive
+        .append_chat_events_with_context(archive_context("provider-session"), &watch_event)
+        .expect("append live watch event observation");
+
+    let watch_response = normalize_chat_lines(
+        "agent-1",
+        "codex",
+        [
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The observed answer."}]}}"#,
+        ],
+    );
+    let mut watch_response = decorate(watch_response);
+    watch_response[0].id.push_str(":watch-response");
+    watch_response[0].metadata["provider_source"] = serde_json::json!("event");
+    watch_response[0].metadata["provider_session_id"] = serde_json::json!("watch-session");
+    watch_response[0].metadata["provider_turn_id"] = serde_json::json!("provider-turn-a");
+    watch_response[0]
+        .metadata
+        .as_object_mut()
+        .unwrap()
+        .remove("raw_type");
+    archive
+        .append_chat_events_with_context(archive_context("provider-session"), &watch_response)
+        .expect("append live watch response observation");
+
+    let same_batch = normalize_chat_lines(
+        "agent-1",
+        "codex",
+        [
+            r#"{"type":"turn_context","payload":{"turn_id":"provider-turn-b"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"agent_message","message":"The observed answer."}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","id":"answer-b","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"The observed answer."}],"internal_chat_message_metadata_passthrough":{"turn_id":"provider-turn-b"}}}"#,
+        ],
+    );
+    archive
+        .append_chat_events_with_context(archive_context("provider-session"), &decorate(same_batch))
+        .expect("append same-batch completion pair");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let directory =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation directory");
+    let records: Vec<ConversationNarrativeRecord> =
+        read_jsonl_records(&directory.join("conversation.jsonl")).expect("read narratives");
+    let events: Vec<AgentChatEvent> =
+        read_jsonl_records(&directory.join("events.jsonl")).expect("read archived events");
+    let sources: Vec<ConversationSourceRecord> =
+        read_jsonl_records(&directory.join("sources.jsonl")).expect("read source records");
+
+    let answers = records
+        .iter()
+        .filter(|record| record.role.as_deref() == Some("assistant"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        answers.len(),
+        2,
+        "assistant records: {:?}",
+        answers
+            .iter()
+            .map(|record| (record.turn_id.as_deref(), record.event_refs.clone()))
+            .collect::<Vec<_>>()
+    );
+    for (record, turn_id, expected_refs) in answers
+        .iter()
+        .zip(["answer-a", "answer-b"])
+        .zip([4, 2])
+        .map(|((record, turn_id), expected_refs)| (record, turn_id, expected_refs))
+    {
+        assert_eq!(record.text.as_deref(), Some("The observed answer."));
+        assert_eq!(record.turn_id.as_deref(), Some(turn_id));
+        assert_eq!(record.event_refs.len(), expected_refs);
+        assert_eq!(record.source_refs.len(), expected_refs);
+        assert!(record
+            .event_refs
+            .iter()
+            .all(|event_ref| events.iter().any(|event| &event.id == event_ref)));
+    }
+    assert_eq!(events.len(), 6);
+    assert_eq!(sources.len(), 6);
+    assert_eq!(
+        sources
+            .iter()
+            .map(|source| &source.source_id)
+            .collect::<HashSet<_>>()
+            .len(),
+        6
+    );
+
+    let restarted = ConversationArchiveState::default();
+    restarted
+        .append_chat_events_with_context(archive_context("provider-session"), &events)
+        .expect("replay archived observations into fresh state");
+    let restarted_id = restarted
+        .active_conversation_id_for_test("agent-1")
+        .expect("fresh replay conversation id");
+    let (_, restarted_records) = restarted
+        .show(&restarted_id)
+        .expect("read fresh replay narratives");
+    assert_eq!(restarted_records, records);
+}
+
+#[test]
+fn codex_user_mirror_pairs_long_artifact_text_across_batches_by_exact_digest() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let context = archive_context("provider-session");
+    let text = "long-request-".repeat(900);
+    let request_line = format!(
+        r#"{{"type":"response_item","payload":{{"type":"message","id":"long-request","role":"user","content":[{{"type":"input_text","text":"{text}"}}],"internal_chat_message_metadata_passthrough":{{"turn_id":"provider-turn-long","content_item_kinds":["user.text"]}}}}}}"#
+    );
+    let mirror_line =
+        format!(r#"{{"type":"event_msg","payload":{{"type":"user_message","message":"{text}"}}}}"#);
+    let mut state = TranscriptNormalizationState::default();
+    let decorate = |mut events: Vec<AgentChatEvent>| {
+        for event in &mut events {
+            event.metadata["provider_log"] = serde_json::json!(true);
+            event.metadata["provider_session_id"] = serde_json::json!("provider-session");
+            event.metadata["log_path"] = serde_json::json!("<codex-provider-log>");
+        }
+        events
+    };
+    let request = normalize_chat_lines_with_state(
+        "agent-1",
+        "codex",
+        [
+            r#"{"type":"turn_context","payload":{"turn_id":"provider-turn-long"}}"#,
+            request_line.as_str(),
+        ],
+        &mut state,
+        false,
+        true,
+    )
+    .expect("normalize long request");
+    let mirror = normalize_chat_lines_with_state(
+        "agent-1",
+        "codex",
+        [mirror_line.as_str()],
+        &mut state,
+        true,
+        true,
+    )
+    .expect("normalize long mirror");
+    archive
+        .append_chat_events_with_context(context.clone(), &decorate(request))
+        .expect("append long request");
+    archive
+        .append_chat_events_with_context(context, &decorate(mirror))
+        .expect("append long mirror");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation id");
+    let directory =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation directory");
+    let records: Vec<ConversationNarrativeRecord> =
+        read_jsonl_records(&directory.join("conversation.jsonl")).expect("read narratives");
+    let events: Vec<AgentChatEvent> =
+        read_jsonl_records(&directory.join("events.jsonl")).expect("read archived events");
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].event_refs.len(), 2);
+    assert!(!records[0].artifact_refs.is_empty());
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| event.text.is_none()));
+    assert_eq!(
+        events[0].metadata["codex_user_text_sha256"],
+        events[1].metadata["codex_user_text_sha256"]
+    );
 }
 
 #[test]

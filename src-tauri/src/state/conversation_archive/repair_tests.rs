@@ -1,4 +1,5 @@
-use super::{ConversationArchiveContext, ConversationArchiveState};
+use super::{source_record_from_chat_event, ConversationArchiveContext, ConversationArchiveState};
+use crate::providers::chat_transcript::normalize_chat_lines;
 use wardian_core::conversations::{
     read_jsonl_records, write_jsonl_atomic, ConversationNarrativeRecord, ConversationSourceRecord,
 };
@@ -113,6 +114,129 @@ fn source_failure_retries_the_same_raw_event_and_preserves_large_artifact() {
         .collect::<Vec<_>>();
     assert_eq!(repaired_artifacts, pre_failure_artifacts);
     assert_eq!(repaired_artifacts[0], large_text.as_bytes());
+}
+
+#[test]
+fn codex_mirror_pair_recovery_converges_after_source_publication_failure() {
+    let (_guard, temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let context = archive_context();
+    archive
+        .append_delivered_input_with_context(context.clone(), "seed", None)
+        .expect("seed archive");
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation");
+    let conversation_dir = agent_conversation_dir("agent-1", &conversation_id).expect("directory");
+    let sources_path = conversation_dir.join("sources.jsonl");
+    let saved_sources = temp.path().join("sources.jsonl.saved");
+    std::fs::write(&sources_path, b"").expect("create empty source snapshot");
+    std::fs::rename(&sources_path, &saved_sources).expect("move source snapshot");
+    std::fs::create_dir(&sources_path).expect("obstruct source destination");
+
+    let lines = [
+        r#"{"type":"turn_context","payload":{"turn_id":"provider-turn-recovery"}}"#,
+        r#"{"type":"response_item","payload":{"type":"message","id":"request-recovery","role":"user","content":[{"type":"input_text","text":"recover the paired request"}],"internal_chat_message_metadata_passthrough":{"turn_id":"provider-turn-recovery","content_item_kinds":["user.text"]}}}"#,
+        r#"{"type":"event_msg","payload":{"type":"user_message","message":"recover the paired request"}}"#,
+    ];
+    let mut events = normalize_chat_lines("agent-1", "codex", lines);
+    for event in &mut events {
+        event.metadata["provider_log"] = serde_json::json!(true);
+        event.metadata["provider_session_id"] = serde_json::json!("session-one");
+        event.metadata["log_path"] = serde_json::json!("<codex-provider-log>");
+    }
+    assert!(archive
+        .append_chat_events_with_context(context.clone(), &events)
+        .is_err());
+    let partial_events: Vec<AgentChatEvent> =
+        read_jsonl_records(&conversation_dir.join("events.jsonl")).expect("read partial events");
+    assert!(events
+        .iter()
+        .all(|event| partial_events.iter().any(|row| row.id == event.id)));
+
+    std::fs::remove_dir(&sources_path).expect("remove test obstruction");
+    std::fs::rename(&saved_sources, &sources_path).expect("restore source snapshot");
+    archive
+        .append_chat_events_with_context(context, &events)
+        .expect("retry repairs and converges paired observations");
+    let records: Vec<ConversationNarrativeRecord> =
+        read_jsonl_records(&conversation_dir.join("conversation.jsonl")).expect("read narratives");
+    let sources: Vec<ConversationSourceRecord> =
+        read_jsonl_records(&sources_path).expect("read sources");
+    let pair = events
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect::<Vec<_>>();
+    let owners = records
+        .iter()
+        .filter(|record| {
+            pair.iter()
+                .all(|id| record.event_refs.iter().any(|event_ref| event_ref == id))
+        })
+        .count();
+    assert_eq!(owners, 1);
+    assert_eq!(sources.len(), 2);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.kind
+                == wardian_core::conversations::ConversationRecordKind::Message)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn codex_mirror_pair_recovery_converges_with_one_source_before_narrative() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let context = archive_context();
+    archive
+        .append_delivered_input_with_context(context.clone(), "seed", None)
+        .expect("seed archive");
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation");
+    let directory = agent_conversation_dir("agent-1", &conversation_id).expect("directory");
+    let lines = [
+        r#"{"type":"turn_context","payload":{"turn_id":"provider-turn-partial"}}"#,
+        r#"{"type":"response_item","payload":{"type":"message","id":"request-partial","role":"user","content":[{"type":"input_text","text":"recover partial sources"}],"internal_chat_message_metadata_passthrough":{"turn_id":"provider-turn-partial","content_item_kinds":["user.text"]}}}"#,
+        r#"{"type":"event_msg","payload":{"type":"user_message","message":"recover partial sources"}}"#,
+    ];
+    let mut events = normalize_chat_lines("agent-1", "codex", lines);
+    for event in &mut events {
+        event.metadata["provider_log"] = serde_json::json!(true);
+        event.metadata["provider_session_id"] = serde_json::json!("session-one");
+        event.metadata["log_path"] = serde_json::json!("<codex-provider-log>");
+    }
+    write_jsonl_atomic(&directory.join("events.jsonl"), &events).expect("publish both raw events");
+    let first_source = super::records::source_record_from_chat_event(&events[0], 2)
+        .expect("request source record");
+    write_jsonl_atomic(&directory.join("sources.jsonl"), &[first_source])
+        .expect("publish only first source before narrative");
+
+    archive
+        .append_chat_events_with_context(context, &events)
+        .expect("retry recovers a partially published source pair");
+    let records: Vec<ConversationNarrativeRecord> =
+        read_jsonl_records(&directory.join("conversation.jsonl")).expect("read narratives");
+    let sources: Vec<ConversationSourceRecord> =
+        read_jsonl_records(&directory.join("sources.jsonl")).expect("read sources");
+    let pair = events
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                pair.iter()
+                    .all(|id| record.event_refs.iter().any(|event_ref| event_ref == id))
+            })
+            .count(),
+        1
+    );
+    assert_eq!(sources.len(), 2);
 }
 
 #[test]
@@ -262,7 +386,12 @@ fn delivered_merge_retry_does_not_duplicate_source_rows() {
     let sources: Vec<ConversationSourceRecord> =
         read_jsonl_records(&source_path).expect("read merged sources");
     assert_eq!(sources.len(), 1);
-    assert_eq!(sources[0].source_id, "src_1");
+    assert_eq!(
+        sources[0].source_id,
+        source_record_from_chat_event(&event, 1)
+            .expect("source identity")
+            .source_id
+    );
     assert_eq!(records.len(), 1);
     assert!(records[0]
         .event_refs

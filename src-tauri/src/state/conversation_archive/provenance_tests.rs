@@ -211,6 +211,110 @@ fn codex_assistant_mirror_projection_requires_one_final_native_turn() {
         2
     );
 
+    let mut watch_mirror = observation("watch-mirror", "event_msg", None, "turn-a", None);
+    watch_mirror.metadata["provider_source"] = serde_json::json!("event");
+    watch_mirror.metadata["provider_session_id"] = serde_json::json!("watch-session");
+    watch_mirror
+        .metadata
+        .as_object_mut()
+        .unwrap()
+        .remove("raw_type");
+    let mut watch_response = observation(
+        "watch-response",
+        "response_item",
+        Some("watch-response-turn"),
+        "turn-a",
+        None,
+    );
+    watch_response.metadata["provider_source"] = serde_json::json!("event");
+    watch_response.metadata["provider_session_id"] = serde_json::json!("watch-session");
+    watch_response
+        .metadata
+        .as_object_mut()
+        .unwrap()
+        .remove("raw_type");
+    let watch_group = provenance::merge_current_capture(
+        Vec::new(),
+        vec![
+            observation("mirror-a", "event_msg", None, "turn-a", None),
+            observation(
+                "msg-a",
+                "response_item",
+                Some("msg-a"),
+                "turn-a",
+                Some("final_answer"),
+            ),
+            watch_mirror.clone(),
+            watch_response.clone(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(watch_group.len(), 1);
+    assert_eq!(watch_group[0].id, "msg-a");
+    assert_eq!(
+        watch_group[0].metadata["provider_observation_ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+
+    let mut mismatched_watch_response = watch_response;
+    mismatched_watch_response.metadata["provider_session_id"] =
+        serde_json::json!("different-watch-session");
+    let mismatched_watch_group = provenance::merge_current_capture(
+        Vec::new(),
+        vec![
+            observation("mirror-a", "event_msg", None, "turn-a", None),
+            observation(
+                "msg-a",
+                "response_item",
+                Some("msg-a"),
+                "turn-a",
+                Some("final_answer"),
+            ),
+            watch_mirror,
+            mismatched_watch_response,
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        mismatched_watch_group.len(),
+        4,
+        "watch observations with mismatched sessions fail closed"
+    );
+
+    let mut artifact_mirror = observation("mirror-large", "event_msg", None, "turn-large", None);
+    let mut artifact_completion = observation(
+        "completion-large",
+        "response_item",
+        Some("completion-large"),
+        "turn-large",
+        Some("final_answer"),
+    );
+    artifact_mirror.text = None;
+    artifact_completion.text = None;
+    artifact_mirror.metadata["codex_assistant_text_sha256"] = serde_json::json!("digest-a");
+    artifact_completion.metadata["codex_assistant_text_sha256"] = serde_json::json!("digest-a");
+    assert_eq!(
+        provenance::merge_current_capture(
+            Vec::new(),
+            vec![artifact_mirror.clone(), artifact_completion.clone()]
+        )
+        .unwrap()
+        .len(),
+        1,
+        "matching persisted content digests bind text artifacts"
+    );
+    artifact_completion.metadata["codex_assistant_text_sha256"] = serde_json::json!("digest-b");
+    assert_eq!(
+        provenance::merge_current_capture(Vec::new(), vec![artifact_mirror, artifact_completion])
+            .unwrap()
+            .len(),
+        2,
+        "different artifact digests cannot be paired"
+    );
+
     let distinct_turns = provenance::merge_current_capture(
         Vec::new(),
         vec![
@@ -451,6 +555,261 @@ fn retained_codex_delivery_fixture_collapses_only_the_bound_provider_pair() {
         2
     );
     assert!(assistants.iter().any(|event| event.id == "watch-event-msg"));
+}
+
+#[test]
+#[ignore = "requires private retained Codex event archives"]
+fn retained_codex_logs_replay_to_one_canonical_archive_after_restart() {
+    let (_guard, _temp) = isolate();
+    let paths = std::env::var("WARDIAN_RETAINED_CODEX_EVENT_ARCHIVES")
+        .expect("retained Codex event archive paths")
+        .split(';')
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert!(!paths.is_empty());
+
+    let mut replays = Vec::new();
+    for (index, path) in paths.iter().enumerate() {
+        let archive_text = std::fs::read_to_string(path).expect("read retained event archive");
+        let events = archive_text
+            .lines()
+            .map(|line| serde_json::from_str::<AgentChatEvent>(line).expect("decode event row"))
+            .collect::<Vec<_>>();
+        assert!(!events.is_empty());
+        let agent_id = events[0].session_id.clone();
+        assert!(events.iter().all(|event| event.session_id == agent_id));
+
+        let mut raw_logs = std::collections::HashMap::<String, Vec<u8>>::new();
+        let mut checked_offsets = 0;
+        for event in &events {
+            let Some(offset) = event.metadata["provider_log_row_offset"].as_u64() else {
+                continue;
+            };
+            let log_path = event.metadata["log_path"]
+                .as_str()
+                .expect("retained provider observation log binding");
+            let bytes = raw_logs
+                .entry(log_path.to_string())
+                .or_insert_with(|| std::fs::read(log_path).expect("read bound provider log"));
+            let offset = usize::try_from(offset).expect("provider row offset fits memory");
+            assert!(offset == 0 || bytes.get(offset - 1) == Some(&b'\n'));
+            let row_end = bytes[offset..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map(|relative| offset + relative)
+                .unwrap_or(bytes.len());
+            let raw_row: serde_json::Value =
+                serde_json::from_slice(&bytes[offset..row_end]).expect("decode exact provider row");
+            assert_eq!(raw_row["type"].as_str(), event.source.as_deref());
+            assert_eq!(
+                raw_row["payload"]["type"].as_str(),
+                event.metadata["raw_type"].as_str()
+            );
+            checked_offsets += 1;
+        }
+        assert!(
+            checked_offsets > 0,
+            "retained rows bind to exact provider logs"
+        );
+
+        let context = ConversationArchiveContext {
+            agent_id: agent_id.clone(),
+            agent_name: "CoderOne".to_string(),
+            agent_class: "Coder".to_string(),
+            workspace: "<absolute-workspace-path>".to_string(),
+            provider: "codex".to_string(),
+            provider_session_ids: Vec::new(),
+            provider_source_key: Some(format!("codex:retained-archive-{index}")),
+        };
+        let archive = ConversationArchiveState::default();
+        archive
+            .append_chat_events_with_context(context.clone(), &events)
+            .expect("append retained Codex observations");
+
+        let conversation_id = archive
+            .active_conversation_id_for_test(&agent_id)
+            .expect("retained conversation");
+        let (_, records) = archive
+            .show(&conversation_id)
+            .expect("read narrative records");
+        let context_observation_ids = events
+            .iter()
+            .filter(|event| event.metadata["input_origin"] == "context_injection")
+            .map(|event| event.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(!context_observation_ids.is_empty());
+        let archived_events = archive
+            .chat_events_for_agent(&agent_id)
+            .expect("read retained Codex event archive");
+        let archived_context_ids = archived_events
+            .iter()
+            .filter(|event| event.metadata["input_origin"] == "context_injection")
+            .map(|event| event.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(context_observation_ids.is_subset(&archived_context_ids));
+        assert!(archived_events
+            .iter()
+            .filter(|event| event.metadata["input_origin"] == "context_injection")
+            .all(|event| event.role == Some(AgentChatRole::System)));
+        let provider_turns = events
+            .iter()
+            .filter(|event| {
+                event.role == Some(AgentChatRole::User)
+                    && event.metadata["input_origin"] == "human_input"
+                    && event.metadata["input_purpose"] == "request"
+            })
+            .filter_map(|event| event.metadata["provider_turn_id"].as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let canonical_users = records
+            .iter()
+            .filter(|record| record.role.as_deref() == Some("user"))
+            .collect::<Vec<_>>();
+        assert_eq!(canonical_users.len(), provider_turns.len());
+        let canonical_roots = canonical_users
+            .iter()
+            .filter_map(|record| record.request_root_id.as_deref())
+            .collect::<Vec<_>>();
+        assert!(!canonical_roots.is_empty());
+        assert!(canonical_users.iter().all(|record| record
+            .request_root_id
+            .as_deref()
+            .is_some_and(|root| root.starts_with("wardian:input:"))));
+        for turn_id in &provider_turns {
+            let observations = events
+                .iter()
+                .filter(|event| {
+                    event.metadata["provider_turn_id"].as_str() == Some(*turn_id)
+                        && event.metadata["input_origin"] == "human_input"
+                        && event.metadata["input_purpose"] == "request"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(observations.len(), 2);
+            let record = canonical_users
+                .iter()
+                .find(|record| {
+                    observations
+                        .iter()
+                        .all(|event| record.event_refs.contains(&event.id))
+                })
+                .expect("both request observations share one narrative");
+            assert_eq!(record.event_refs.len(), 2);
+            assert_eq!(record.source_refs.len(), 2);
+            let mirror = observations
+                .iter()
+                .find(|event| event.source.as_deref() == Some("event_msg"))
+                .expect("native Codex user mirror");
+            let mirror_root = mirror.metadata["provider_mirror_request_root_ids"]
+                .as_array()
+                .and_then(|roots| roots.first())
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| mirror.metadata["request_root_id"].as_str())
+                .expect("native mirror root provenance");
+            assert_ne!(record.request_root_id.as_deref(), Some(mirror_root));
+        }
+
+        let final_event_ids = events
+            .iter()
+            .filter(|event| event.metadata["provider_phase"] == "final_answer")
+            .map(|event| event.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let final_records = records
+            .iter()
+            .filter(|record| {
+                record.role.as_deref() == Some("assistant")
+                    && record
+                        .event_refs
+                        .iter()
+                        .any(|event_id| final_event_ids.contains(event_id.as_str()))
+            })
+            .collect::<Vec<_>>();
+        let final_turns = events
+            .iter()
+            .filter(|event| event.metadata["provider_phase"] == "final_answer")
+            .filter_map(|event| event.metadata["provider_turn_id"].as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(final_records.len(), final_turns.len());
+        assert!(final_records
+            .iter()
+            .all(|record| record.event_refs.len() >= 2));
+        let assistant_ref_counts = final_records
+            .iter()
+            .map(|record| (record.event_refs.len(), record.source_refs.len()))
+            .collect::<Vec<_>>();
+        replays.push((context, agent_id, events, records, assistant_ref_counts));
+    }
+
+    for (context, agent_id, events, before, assistant_ref_counts) in replays {
+        let restarted = ConversationArchiveState::default();
+        restarted
+            .append_chat_events_with_context(context, &events)
+            .expect("replay retained Codex observations after restart");
+        let conversation_id = restarted
+            .active_conversation_id_for_test(&agent_id)
+            .expect("replayed conversation");
+        let (_, after) = restarted
+            .show(&conversation_id)
+            .expect("read replayed narrative records");
+        let mut first_difference = None;
+        let mut ignored_capture_times = 0;
+        for (index, (before_record, after_record)) in before.iter().zip(&after).enumerate() {
+            let before_json = serde_json::to_value(before_record).expect("serialize narrative");
+            let after_json = serde_json::to_value(after_record).expect("serialize narrative");
+            first_difference = [
+                "schema",
+                "seq",
+                "turn_id",
+                "kind",
+                "role",
+                "speaker_type",
+                "input_origin",
+                "input_purpose",
+                "request_root_id",
+                "causal_ref",
+                "text",
+                "tool",
+                "status",
+                "summary",
+                "excerpt",
+                "event_refs",
+                "source_refs",
+                "artifact_refs",
+            ]
+            .into_iter()
+            .find(|field| before_json.get(*field) != after_json.get(*field))
+            .map(|field| (index, field));
+            if first_difference.is_some() {
+                break;
+            }
+            if before_record.at != after_record.at {
+                let primary_event = before_record
+                    .event_refs
+                    .first()
+                    .and_then(|id| events.iter().find(|event| &event.id == id));
+                if primary_event.is_some_and(|event| event.created_at.is_none()) {
+                    ignored_capture_times += 1;
+                } else {
+                    first_difference = Some((index, "at"));
+                    break;
+                }
+            }
+        }
+        assert!(
+            before.len() == after.len() && first_difference.is_none(),
+            "fresh-state narrative replay diverged (before={}, after={}, first_difference={:?})",
+            before.len(),
+            after.len(),
+            first_difference
+                .map(|(index, field)| format!("record[{index}].{field}"))
+                .unwrap_or_else(|| "record_count".to_string())
+        );
+        eprintln!("fresh-state replay stable; timestamp deltas from untimed source rows: {ignored_capture_times}");
+        let replayed_counts = after
+            .iter()
+            .filter(|record| record.role.as_deref() == Some("assistant"))
+            .map(|record| (record.event_refs.len(), record.source_refs.len()))
+            .collect::<Vec<_>>();
+        assert_eq!(replayed_counts, assistant_ref_counts);
+    }
 }
 
 #[test]

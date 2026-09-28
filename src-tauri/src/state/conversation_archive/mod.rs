@@ -6,6 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::providers::chat_transcript::codex_user_mirror_pair;
 use serde::{Deserialize, Serialize};
 use wardian_core::conversations::{
     append_index_upsert, append_jsonl_record, read_jsonl_records, read_jsonl_records_resilient,
@@ -48,6 +49,39 @@ use storage::{
 #[cfg(test)]
 pub(crate) use turns::derive_turn_records;
 use turns::{apply_archive_summary_to_manifest, archive_summary, derive_turn_records_with_context};
+
+fn codex_archive_mirror_pair(first: &AgentChatEvent, second: &AgentChatEvent) -> bool {
+    codex_user_mirror_pair(first, second)
+        || provenance::codex_stream_completion_pair(first, second)
+        || provenance::codex_live_watch_observation_pair(first, second)
+}
+
+fn refresh_codex_completion_narrative(
+    record: &mut ConversationNarrativeRecord,
+    event: &AgentChatEvent,
+    conversation_dir: &std::path::Path,
+) -> io::Result<bool> {
+    if event.metadata["provider_phase"] != "final_answer" {
+        return Ok(false);
+    }
+    let Some(mut completion) = narrative_from_chat_event(event, record.seq) else {
+        return Ok(false);
+    };
+    materialize_record_text(conversation_dir, &mut completion)?;
+
+    let mut changed = false;
+    if record.turn_id != completion.turn_id && completion.turn_id.is_some() {
+        record.turn_id = completion.turn_id;
+        changed = true;
+    }
+    for artifact in completion.artifact_refs {
+        if !record.artifact_refs.contains(&artifact) {
+            record.artifact_refs.push(artifact);
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
 
 #[derive(Debug, Default)]
 pub struct ConversationArchiveState {
@@ -606,18 +640,89 @@ impl ConversationArchiveState {
         if records_refreshed && recovered_count == 0 {
             write_jsonl_atomic(&conversation_path, &existing_records)?;
         }
-        let mut appended = Vec::new();
-        let mut pending_publications = Vec::new();
+        let mut appended: Vec<ConversationNarrativeRecord> = Vec::new();
+        let mut pending_publications: Vec<PendingChatPublication> = Vec::new();
         let mut cached_sources = None;
         let mut merged_existing_count = 0_usize;
 
         for event in &batch_events {
+            let same_batch_mirror_matches = pending_publications
+                .iter()
+                .enumerate()
+                .filter_map(|(publication_index, publication)| {
+                    publication
+                        .events
+                        .iter()
+                        .any(|prior| codex_archive_mirror_pair(prior, event))
+                        .then_some(publication_index)
+                })
+                .collect::<Vec<_>>();
+            if same_batch_mirror_matches.len() > 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("ambiguous Codex archive mirror for event {}", event.id),
+                ));
+            }
+            if let Some(publication_index) = same_batch_mirror_matches.first().copied() {
+                let record_seq = pending_publications[publication_index].record.seq;
+                let source_record = source_record_from_chat_event(event, record_seq);
+                let publication = &mut pending_publications[publication_index];
+                let completion_refreshed = refresh_codex_completion_narrative(
+                    &mut publication.record,
+                    event,
+                    &conversation_dir,
+                )?;
+                if !publication
+                    .record
+                    .event_refs
+                    .iter()
+                    .any(|event_ref| event_ref == &event.id)
+                {
+                    publication.record.event_refs.push(event.id.clone());
+                }
+                if let Some(source_record) = source_record {
+                    if !publication
+                        .record
+                        .source_refs
+                        .iter()
+                        .any(|source_ref| source_ref == &source_record.source_id)
+                    {
+                        publication
+                            .record
+                            .source_refs
+                            .push(source_record.source_id.clone());
+                    }
+                    publication.sources.push(source_record);
+                }
+                publication
+                    .events
+                    .push(event_record_for_jsonl(event, &publication.record));
+                if completion_refreshed
+                    || !appended[publication_index].event_refs.contains(&event.id)
+                {
+                    appended[publication_index] = publication.record.clone();
+                }
+                changed_observation_ids.insert(event.id.clone());
+                continue;
+            }
+
             let existing_event_index = matching_event_index(&existing_events, event)?;
             let matching_record =
                 matching_record_index(&existing_records, event, &existing_events)?;
+            let bound_codex_mirror = matching_record.is_some_and(|record_index| {
+                existing_events.iter().any(|archived| {
+                    codex_archive_mirror_pair(archived, event)
+                        && existing_records[record_index]
+                            .event_refs
+                            .iter()
+                            .any(|event_ref| event_ref == &archived.id)
+                })
+            });
             if existing_event_index.is_none()
-                && matching_record
-                    .is_some_and(|index| !is_bound_native_delivery(&existing_records[index], event))
+                && matching_record.is_some_and(|index| {
+                    !is_bound_native_delivery(&existing_records[index], event)
+                        && !bound_codex_mirror
+                })
             {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -631,6 +736,11 @@ impl ConversationArchiveState {
                 let record_seq = existing_records[record_index].seq;
                 let source_record = source_record_from_chat_event(event, record_seq);
                 let mut record_changed = false;
+                record_changed |= refresh_codex_completion_narrative(
+                    &mut existing_records[record_index],
+                    event,
+                    &conversation_dir,
+                )?;
                 if let Some(source_record) = source_record {
                     let source_repaired = append_source_if_needed(
                         &sources_path,
@@ -746,10 +856,12 @@ impl ConversationArchiveState {
                 record.source_refs = vec![source_record.source_id.clone()];
             }
             pending_publications.push(PendingChatPublication {
-                event: existing_event_index
+                events: existing_event_index
                     .is_none()
-                    .then(|| event_record_for_jsonl(event, &record)),
-                source: source_record,
+                    .then(|| event_record_for_jsonl(event, &record))
+                    .into_iter()
+                    .collect(),
+                sources: source_record.into_iter().collect(),
                 record: record.clone(),
             });
             next_seq = next_seq.saturating_add(1);
@@ -779,16 +891,11 @@ impl ConversationArchiveState {
         }
 
         for publication in &pending_publications {
-            if let Some(event_record) = &publication.event {
+            for event_record in &publication.events {
                 append_jsonl_record(&events_path, event_record)?;
             }
-            if let Some(source_record) = &publication.source {
-                append_source_if_needed(
-                    &sources_path,
-                    &mut cached_sources,
-                    source_record,
-                    publication.event.is_none(),
-                )?;
+            for source_record in &publication.sources {
+                append_source_if_needed(&sources_path, &mut cached_sources, source_record, true)?;
             }
             append_jsonl_record(&conversation_path, &publication.record)?;
         }

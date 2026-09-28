@@ -10,40 +10,10 @@ use crate::providers::chat_transcript::{
 };
 use sha2::{Digest, Sha256};
 
-/// Codex emits an identity-less `event_msg` mirror and an identified completed
-/// assistant message. Preserve that established cross-source normalization while
-/// keeping two identified native messages (including equal answers) distinct.
+/// Share the archive's source-bound completion identity with the live Chat
+/// projection so ambiguous or mismatched provider observations stay separate.
 pub(super) fn is_codex_stream_completion_pair(a: &AgentChatEvent, b: &AgentChatEvent) -> bool {
-    use wardian_core::models::chat::AgentChatRole;
-    if a.provider != "codex"
-        || b.provider != "codex"
-        || a.session_id != b.session_id
-        || a.role != Some(AgentChatRole::Assistant)
-        || b.role != Some(AgentChatRole::Assistant)
-    {
-        return false;
-    }
-    let (stream, completed) = match (a.source.as_deref(), b.source.as_deref()) {
-        (Some("event_msg"), Some("response_item" | "item.completed")) => (a, b),
-        (Some("response_item" | "item.completed"), Some("event_msg")) => (b, a),
-        _ => return false,
-    };
-    if stream.turn_id.is_some() || completed.turn_id.as_deref().is_none_or(str::is_empty) {
-        return false;
-    }
-    for key in [
-        "request_root_id",
-        "source_path",
-        "log_path",
-        "conversation_archive_id",
-    ] {
-        if let (Some(left), Some(right)) = (a.metadata.get(key), b.metadata.get(key)) {
-            if left != right {
-                return false;
-            }
-        }
-    }
-    true
+    crate::state::conversation_archive::provenance::codex_stream_completion_pair(a, b)
 }
 
 /// Pi's pre-envelope-ID projection omitted the native entry ID. Recompute its
