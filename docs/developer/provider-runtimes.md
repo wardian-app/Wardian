@@ -336,7 +336,16 @@ identity, then promotes readiness to `Ready`. Attachment cancellation or a
 stale generation disposes the exact native owner and removes only the current
 provisional roster entry; a durable-state failure leaves that entry visible in
 `Error` behind the retained stop fence. Restored agents and other providers
-keep their existing synchronous publication path.
+keep their existing synchronous publication path. A restored Codex runtime
+replaces its `Restoring` placeholder only after owner attachment succeeds. That
+publication reconciles the latest `Idle` or `Processing...` transition deferred
+during roster contention for the same attached runtime. A missing attachment,
+missing runtime generation, or later `Off` or `Action Needed` state does not
+become `Idle`.
+Queued status changes reserve an intent revision for the exact runtime status
+Arc after attachment admission. A newer accepted intent supersedes an older
+queue entry; rejected attempts do not. Value commits have a separate revision
+so a same-value status report does not invalidate an already staged observation.
 
 #### Shared thread index
 

@@ -9,7 +9,7 @@ use crate::state::interactions::InteractionState;
 use crate::state::terminal_session::TerminalSessionBroker;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 use tokio::sync::Mutex;
 
 pub struct LibraryWatchRegistration {
@@ -22,6 +22,39 @@ pub struct LibraryWatchRegistration {
 pub struct ExplorerWatchRegistration {
     pub watcher: notify::RecommendedWatcher,
     pub ref_count: usize,
+}
+
+#[derive(Default)]
+struct StatusRevisionSession {
+    high_water: u64,
+    by_arc: HashMap<usize, StatusArcRevision>,
+}
+
+struct StatusArcRevision {
+    owner: Weak<std::sync::Mutex<String>>,
+    intent_revision: u64,
+    intent_status: String,
+    committed_revision: u64,
+}
+
+impl StatusRevisionSession {
+    fn current(&self, status: &Arc<std::sync::Mutex<String>>) -> Option<&StatusArcRevision> {
+        self.by_arc
+            .get(&(Arc::as_ptr(status) as usize))
+            .filter(|entry| {
+                entry
+                    .owner
+                    .upgrade()
+                    .is_some_and(|owner| Arc::ptr_eq(&owner, status))
+            })
+    }
+
+    fn next(&mut self) -> u64 {
+        self.by_arc
+            .retain(|_, entry| entry.owner.strong_count() > 0);
+        self.high_water += 1;
+        self.high_water
+    }
 }
 
 pub struct AppState {
@@ -43,6 +76,7 @@ pub struct AppState {
     pub agent_lifecycle_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub delivery_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub status_observation_sequences: std::sync::Mutex<HashMap<String, u64>>,
+    status_revisions: std::sync::Mutex<HashMap<String, StatusRevisionSession>>,
     // Map of automation_id to a list of background trigger handles
     pub automation_triggers: Mutex<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>,
     // Map of automation_id to running execution handles
@@ -186,6 +220,9 @@ impl AppState {
         if let Ok(mut sequences) = self.status_observation_sequences.lock() {
             sequences.remove(target_session_id);
         }
+        if let Ok(mut revisions) = self.status_revisions.lock() {
+            revisions.remove(target_session_id);
+        }
         self.remote_agent_status_cache
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -206,6 +243,104 @@ impl AppState {
         };
         let next = sequences.get(target_session_id).copied().unwrap_or(0) + 1;
         sequences.insert(target_session_id.to_string(), next);
+        next
+    }
+
+    /// Reserves an accepted status attempt for the exact runtime status Arc.
+    /// Hold that Arc's value lock while reserving, so attempts have one order.
+    pub fn reserve_status_intent(
+        &self,
+        session_id: &str,
+        current_status: &Arc<std::sync::Mutex<String>>,
+        requested_status: &str,
+    ) -> u64 {
+        let mut revisions = self
+            .status_revisions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let session = revisions.entry(session_id.to_string()).or_default();
+        let next = session.next();
+        let entry = session
+            .by_arc
+            .entry(Arc::as_ptr(current_status) as usize)
+            .or_insert_with(|| StatusArcRevision {
+                owner: Arc::downgrade(current_status),
+                intent_revision: 0,
+                intent_status: String::new(),
+                committed_revision: 0,
+            });
+        entry.owner = Arc::downgrade(current_status);
+        entry.intent_revision = next;
+        entry.intent_status = requested_status.to_string();
+        next
+    }
+
+    /// Returns the latest accepted status attempt for the exact runtime Arc.
+    pub fn status_intent_revision(
+        &self,
+        session_id: &str,
+        current_status: &Arc<std::sync::Mutex<String>>,
+    ) -> u64 {
+        self.status_revisions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(session_id)
+            .and_then(|session| session.current(current_status))
+            .map(|entry| entry.intent_revision)
+            .unwrap_or(0)
+    }
+
+    /// Returns the target of the latest accepted status attempt for this Arc.
+    pub fn status_intent_status(
+        &self,
+        session_id: &str,
+        current_status: &Arc<std::sync::Mutex<String>>,
+    ) -> Option<String> {
+        self.status_revisions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(session_id)
+            .and_then(|session| session.current(current_status))
+            .map(|entry| entry.intent_status.clone())
+    }
+
+    /// Returns the last committed status-value revision for this runtime Arc.
+    pub fn status_revision(
+        &self,
+        session_id: &str,
+        current_status: &Arc<std::sync::Mutex<String>>,
+    ) -> u64 {
+        self.status_revisions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(session_id)
+            .and_then(|session| session.current(current_status))
+            .map(|entry| entry.committed_revision)
+            .unwrap_or(0)
+    }
+
+    /// Records a value mutation; call while holding the exact status Arc lock.
+    pub fn commit_status_revision(
+        &self,
+        session_id: &str,
+        current_status: &Arc<std::sync::Mutex<String>>,
+        committed_status: &str,
+    ) -> u64 {
+        let mut revisions = self
+            .status_revisions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let session = revisions.entry(session_id.to_string()).or_default();
+        let next = session.next();
+        session.by_arc.insert(
+            Arc::as_ptr(current_status) as usize,
+            StatusArcRevision {
+                owner: Arc::downgrade(current_status),
+                intent_revision: next,
+                intent_status: committed_status.to_string(),
+                committed_revision: next,
+            },
+        );
         next
     }
 
@@ -353,6 +488,7 @@ impl Default for AppState {
             agent_lifecycle_locks: Mutex::new(HashMap::new()),
             delivery_locks: Mutex::new(HashMap::new()),
             status_observation_sequences: std::sync::Mutex::new(HashMap::new()),
+            status_revisions: std::sync::Mutex::new(HashMap::new()),
             automation_triggers: Mutex::new(HashMap::new()),
             automation_runs: Mutex::new(HashMap::new()),
             triggers_paused: std::sync::atomic::AtomicBool::new(false),

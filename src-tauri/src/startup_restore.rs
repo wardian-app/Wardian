@@ -92,7 +92,34 @@ impl RestorePublication {
         agent: ActiveAgent,
         mut disposition: crate::manager::SpawnPublicationDisposition,
     ) -> Arc<Mutex<String>> {
+        // A successful synchronous Codex spawn has completed owner attachment,
+        // but deferred status work can discard itself against the old placeholder.
+        // Install the runtime first, then reconcile while this restore still
+        // owns its lifecycle claim. No roster lock is held while locking status.
+        let attached_codex = agent.runtime_generation.is_some()
+            && agent
+                .config
+                .lock()
+                .is_ok_and(|config| config.provider == "codex" && !config.is_off)
+            && crate::manager::codex_onboarding::codex_attachment_is_ready(&agent);
         let status = self.publish(state, agent).await;
+        if attached_codex {
+            if let Ok(mut current) = status.lock() {
+                if *current == "Starting" {
+                    let admitted = state.status_intent_status(&self.session_id, &status);
+                    let reconciled = admitted
+                        .filter(|value| {
+                            matches!(
+                                wardian_core::identity::normalize_status(value).as_str(),
+                                "idle" | "processing"
+                            )
+                        })
+                        .unwrap_or_else(|| "Idle".to_string());
+                    *current = reconciled.clone();
+                    state.commit_status_revision(&self.session_id, &status, &reconciled);
+                }
+            }
+        }
         disposition.commit();
         status
     }

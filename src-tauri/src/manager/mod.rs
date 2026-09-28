@@ -169,13 +169,33 @@ pub(crate) fn set_agent_status(
     current_status: &std::sync::Arc<std::sync::Mutex<String>>,
     next_status: &str,
 ) {
-    match codex_onboarding::status_admission(app, session_id, current_status, next_status) {
+    let Ok(expected_status) = current_status.lock().map(|status| status.clone()) else {
+        return;
+    };
+    let admission =
+        codex_onboarding::status_admission(app, session_id, current_status, next_status);
+    if admission == codex_onboarding::CodexStatusAdmission::Blocked {
+        return;
+    }
+    let Ok(current) = current_status.lock() else {
+        return;
+    };
+    if *current != expected_status {
+        return;
+    }
+    let intent_revision =
+        app.state::<AppState>()
+            .reserve_status_intent(session_id, current_status, next_status);
+    drop(current);
+    match admission {
         codex_onboarding::CodexStatusAdmission::Blocked => return,
         codex_onboarding::CodexStatusAdmission::WaitForRoster => {
             codex_onboarding::defer_status_transition(
                 app,
                 session_id,
                 current_status,
+                expected_status,
+                intent_revision,
                 next_status.to_string(),
             );
             return;
@@ -183,8 +203,18 @@ pub(crate) fn set_agent_status(
         codex_onboarding::CodexStatusAdmission::Allowed => {}
     }
     if let Ok(mut status) = current_status.lock() {
+        if app
+            .state::<AppState>()
+            .status_intent_revision(session_id, current_status)
+            != intent_revision
+            || *status != expected_status
+        {
+            return;
+        }
         if *status != next_status {
             *status = next_status.to_string();
+            app.state::<AppState>()
+                .commit_status_revision(session_id, current_status, next_status);
             schedule_agent_status_observation(
                 app,
                 session_id,
