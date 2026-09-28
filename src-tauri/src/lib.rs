@@ -64,6 +64,195 @@ fn schedule_restored_agent_archive_sync(app_handle: AppHandle, session_id: Strin
     });
 }
 
+fn schedule_lifecycle_conflict_restore_retry(
+    app_handle: AppHandle,
+    expected_saved_configs: Vec<AgentConfig>,
+    config: AgentConfig,
+    expected_status: std::sync::Arc<std::sync::Mutex<String>>,
+    initial_timestamp: Option<String>,
+    expected_lease: wardian_core::conversation_lease::ConversationLease,
+    restore_slots: std::sync::Arc<tokio::sync::Semaphore>,
+) {
+    tauri::async_runtime::spawn(async move {
+        let state = app_handle.state::<AppState>();
+        let expected_config = config.clone();
+        let wait_config = config.clone();
+        let wait_lease = expected_lease.clone();
+        let retry_slots = restore_slots.clone();
+        let retry_app_handle = app_handle.clone();
+        let _ = startup_restore::retry_once_after_lifecycle_lease_clear(
+            &state,
+            &expected_config,
+            &expected_status,
+            move || async move {
+                match startup_restore::wait_for_lifecycle_restore_lease(
+                    &wait_config,
+                    &wait_lease,
+                    wardian_core::conversation_lease::load_leases_checked,
+                    chrono::Utc::now,
+                )
+                .await
+                {
+                    Ok(clear) => clear,
+                    Err(error) => {
+                        manager::log_debug(&format!(
+                            "[Wardian] Automatic restore retry stopped because conversation ownership could not be verified for {}: {error}",
+                            wait_config.session_id
+                        ));
+                        false
+                    }
+                }
+            },
+            move || async move { retry_slots.acquire_owned().await.ok() },
+            move |publication, _permit| async move {
+                retry_lifecycle_conflict_restore(
+                    retry_app_handle,
+                    expected_saved_configs,
+                    config,
+                    initial_timestamp,
+                    publication,
+                )
+                .await;
+            },
+        )
+        .await;
+    });
+}
+
+async fn retry_lifecycle_conflict_restore(
+    app_handle: AppHandle,
+    expected_saved_configs: Vec<AgentConfig>,
+    config: AgentConfig,
+    initial_timestamp: Option<String>,
+    publication: startup_restore::RestorePublication,
+) {
+    let mut publication_disposition = manager::SpawnPublicationDisposition::new();
+    let saved_configs_for_check = expected_saved_configs.clone();
+    let launch_config_for_check = config.clone();
+    let spawn_lease = match tokio::task::spawn_blocking(move || {
+        manager::spawn::acquire_restore_retry_spawn_lease(
+            &saved_configs_for_check,
+            &launch_config_for_check,
+        )
+    })
+    .await
+    {
+        Ok(Ok(Some(lease))) => Ok(lease),
+        Ok(Ok(None)) => {
+            manager::log_debug(&format!(
+                "[Wardian] Automatic restore retry cancelled because the saved configuration changed or was removed for {}",
+                config.session_id
+            ));
+            drop(publication);
+            return;
+        }
+        Ok(Err(error)) => Err(error),
+        Err(error) => Err(format!("restore lease task failed: {error}")),
+    };
+    let spawn_result = match spawn_lease {
+        Ok(lease) => {
+            manager::spawn_agent_with_lease(
+                app_handle.clone(),
+                config.clone(),
+                true,
+                initial_timestamp.clone(),
+                lease,
+                publication_disposition.failure_signal(),
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
+    let (agent, spawned, restored_config) = match spawn_result {
+        Ok(agent) => {
+            let restored_config = agent
+                .config
+                .lock()
+                .map(|config| config.clone())
+                .unwrap_or_else(|_| config.clone());
+            (agent, true, Some(restored_config))
+        }
+        Err(error) => {
+            publication_disposition.fail();
+            manager::log_debug(&format!(
+                "[Wardian] Automatic restore retry failed for {}: {error}",
+                config.session_id
+            ));
+            let current_leases = wardian_core::conversation_lease::load_leases_checked();
+            let lease_now = chrono::Utc::now().to_rfc3339();
+            let active_headless = current_leases.as_ref().is_ok_and(|leases| {
+                startup_restore::has_active_headless_execution_lease(&config, leases, &lease_now)
+            });
+            if active_headless {
+                let _ = wardian_core::db::update_agent_status(&config.session_id, "Headless", None);
+                (
+                    restored_agent_without_process(
+                        config.clone(),
+                        "Headless",
+                        String::new(),
+                        None,
+                        initial_timestamp,
+                    ),
+                    false,
+                    None,
+                )
+            } else {
+                let _ = wardian_core::db::update_agent_status(&config.session_id, "Error", None);
+                (
+                    restored_agent_without_process(
+                        config.clone(),
+                        "Error",
+                        format!(
+                            "Wardian withheld provider restore to avoid a duplicate writer.\r\n{}\r\n",
+                            error
+                        ),
+                        None,
+                        initial_timestamp,
+                    ),
+                    false,
+                    None,
+                )
+            }
+        }
+    };
+
+    let state = app_handle.state::<AppState>();
+    let status = if spawned {
+        publication
+            .publish_spawned(&state, agent, publication_disposition)
+            .await
+    } else {
+        publication.publish(&state, agent).await
+    };
+    manager::publish_agent_status(&app_handle, &config.session_id, &status);
+    crate::control::spawn_agent_messaging_after_restore(&app_handle, &config.session_id);
+    let _ = app_handle.emit("agents-updated", ());
+    if let Some(restored_config) = restored_config {
+        let expected_saved_configs = expected_saved_configs.clone();
+        let session_id = config.session_id.clone();
+        match tokio::task::spawn_blocking(move || {
+            manager::spawn::persist_restore_retry_config_if_unchanged(
+                &expected_saved_configs,
+                &restored_config,
+            )
+        })
+        .await
+        {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => manager::log_debug(&format!(
+                "[Wardian] Successful restore config was not persisted because the saved entry changed for {session_id}"
+            )),
+            Ok(Err(error)) => manager::log_debug(&format!(
+                "[Wardian] Failed to persist successful restore config for {session_id}: {error}"
+            )),
+            Err(error) => manager::log_debug(&format!(
+                "[Wardian] Restore config persistence task failed for {session_id}: {error}"
+            )),
+        }
+    }
+    schedule_restored_agent_archive_sync(app_handle, config.session_id);
+}
+
 fn restored_agent_without_process(
     config: AgentConfig,
     status: &str,
@@ -405,6 +594,7 @@ pub fn run() {
                     let state_path = app_dir.join("settings/state.json");
                     if let Ok(data) = std::fs::read_to_string(state_path) {
                         if let Ok(configs) = serde_json::from_str::<Vec<AgentConfig>>(&data) {
+                            let selected_configs = configs.clone();
                             let mut seen_names = std::collections::HashSet::new();
                             // Fetch latest status from DB for all agents
                             let db_agents = wardian_core::db::get_all_agents().unwrap_or_default();
@@ -420,6 +610,7 @@ pub fn run() {
                             // fresh cross-process ownership decision.
                             type PendingSpawn = (
                                 startup_restore::RestorePublication,
+                                AgentConfig,
                                 AgentConfig,
                                 Option<String>,
                             );
@@ -437,6 +628,7 @@ pub fn run() {
                                 ).await else {
                                     continue;
                                 };
+                                let expected_saved_config = saved_config.clone();
                                 // Only an unregistered agent may select the
                                 // startup snapshot, while holding its claim.
                                 let mut config = saved_config;
@@ -520,7 +712,12 @@ pub fn run() {
                                 // for DB reconciliation only. Restore ownership
                                 // is decided atomically at the provider-spawn
                                 // boundary, after this roster pass completes.
-                                pending_spawns.push((publication, config, last_born));
+                                pending_spawns.push((
+                                    publication,
+                                    expected_saved_config,
+                                    config,
+                                    last_born,
+                                ));
                             }
 
                             // Pass 2: spawn PTY agents with bounded concurrency,
@@ -534,12 +731,23 @@ pub fn run() {
                             let restore_slots = std::sync::Arc::new(tokio::sync::Semaphore::new(
                                 RESTORE_SPAWN_CONCURRENCY,
                             ));
+                            type PendingLifecycleRetry = (
+                                AgentConfig,
+                                AgentConfig,
+                                std::sync::Arc<std::sync::Mutex<String>>,
+                                Option<String>,
+                                wardian_core::conversation_lease::ConversationLease,
+                            );
+                            let pending_lifecycle_retries = std::sync::Arc::new(
+                                std::sync::Mutex::new(Vec::<PendingLifecycleRetry>::new()),
+                            );
                             let mut restore_tasks = tokio::task::JoinSet::new();
-                            for (publication, mut config, last_born) in pending_spawns {
+                            for (publication, expected_saved_config, mut config, last_born) in pending_spawns {
                                 let app_handle = app_handle.clone();
                                 let restore_slots = restore_slots.clone();
+                                let pending_lifecycle_retries = pending_lifecycle_retries.clone();
                                 restore_tasks.spawn(async move {
-                                    let Ok(_permit) = restore_slots.acquire_owned().await else {
+                                    let Ok(_permit) = restore_slots.clone().acquire_owned().await else {
                                         return;
                                     };
                                     let mut publication_disposition =
@@ -559,8 +767,8 @@ pub fn run() {
                                         .await,
                                         Err(error) => Err(error),
                                     };
-                                    let (agent, spawned) = match spawn_result {
-                                        Ok(agent) => (agent, true),
+                                    let (agent, spawned, retry_lease) = match spawn_result {
+                                        Ok(agent) => (agent, true, None),
                                         Err(error) => {
                                             publication_disposition.fail();
                                             eprintln!(
@@ -572,7 +780,8 @@ pub fn run() {
                                                 config.session_id, error
                                             ));
                                             let current_leases = wardian_core::conversation_lease::load_leases_checked();
-                                            let lease_now = chrono::Utc::now().to_rfc3339();
+                                            let now = chrono::Utc::now();
+                                            let lease_now = now.to_rfc3339();
                                             let active_headless = current_leases.as_ref().is_ok_and(|leases| {
                                                 startup_restore::has_active_headless_execution_lease(
                                                     &config,
@@ -580,6 +789,17 @@ pub fn run() {
                                                     &lease_now,
                                                 )
                                             });
+                                            let retry_lease = if active_headless {
+                                                None
+                                            } else {
+                                                current_leases.as_ref().ok().and_then(|leases| {
+                                                    startup_restore::retryable_lifecycle_restore_lease(
+                                                        &config,
+                                                        &error,
+                                                        leases,
+                                                    )
+                                                })
+                                            };
                                             if active_headless {
                                                 let _ = wardian_core::db::update_agent_status(
                                                     &config.session_id,
@@ -591,8 +811,8 @@ pub fn run() {
                                                     "Headless",
                                                     String::new(),
                                                     None,
-                                                    last_born,
-                                                ), false)
+                                                    last_born.clone(),
+                                                ), false, None)
                                             } else {
                                                 let _ = wardian_core::db::update_agent_status(
                                                     &config.session_id,
@@ -607,8 +827,8 @@ pub fn run() {
                                                         error
                                                     ),
                                                     None,
-                                                    last_born,
-                                                ), false)
+                                                    last_born.clone(),
+                                                ), false, retry_lease)
                                             }
                                         }
                                     };
@@ -634,13 +854,59 @@ pub fn run() {
                                         app_handle.clone(),
                                         config.session_id.clone(),
                                     );
+                                    if let Some(expected_lease) = retry_lease {
+                                        // The wait is detached and holds neither the
+                                        // per-agent lifecycle gate nor a restore slot.
+                                        drop(publication);
+                                        drop(_permit);
+                                        pending_lifecycle_retries
+                                            .lock()
+                                            .expect("pending lifecycle retry list poisoned")
+                                            .push((
+                                                expected_saved_config,
+                                                config,
+                                                status,
+                                                last_born,
+                                                expected_lease,
+                                            ));
+                                    }
                                 });
                             }
                             while restore_tasks.join_next().await.is_some() {}
-                            if let Err(error) = startup_restore::persist_roster(&state).await {
-                                manager::log_debug(&format!(
+                            match startup_restore::persist_roster(
+                                &state,
+                                &selected_configs,
+                            )
+                            .await
+                            {
+                                Ok(()) => {
+                                    let retries = std::mem::take(
+                                        &mut *pending_lifecycle_retries
+                                            .lock()
+                                            .expect("pending lifecycle retry list poisoned"),
+                                    );
+                                    for (
+                                        original_saved_config,
+                                        retry_config,
+                                        status,
+                                        last_born,
+                                        expected_lease,
+                                    ) in retries
+                                    {
+                                        schedule_lifecycle_conflict_restore_retry(
+                                            app_handle.clone(),
+                                            vec![original_saved_config, retry_config.clone()],
+                                            retry_config,
+                                            status,
+                                            last_born,
+                                            expected_lease,
+                                            restore_slots.clone(),
+                                        );
+                                    }
+                                }
+                                Err(error) => manager::log_debug(&format!(
                                     "[WARDIAN] Failed to persist state snapshot: {error}",
-                                ));
+                                )),
                             }
                             let _ = app_handle.emit("agents-updated", ());
                         }
