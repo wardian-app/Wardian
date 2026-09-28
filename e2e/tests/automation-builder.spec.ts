@@ -154,7 +154,10 @@ async function openAutomationBuilder(page: Page) {
 async function addNode(page: Page, name: string) {
   await page.getByTestId("automations-view").getByRole("button", { name: "Add node" }).click();
   await expect(page.getByTestId("node-library")).toBeVisible();
-  await page.getByTestId("node-library").getByRole("button", { name }).click();
+  await page.getByTestId("node-library")
+    .getByRole("button")
+    .filter({ has: page.getByText(name, { exact: true }) })
+    .click();
   const node = page.locator(".react-flow__node").filter({ hasText: name }).last();
   await expect(node).toHaveCount(1);
   return node;
