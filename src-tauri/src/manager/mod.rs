@@ -163,6 +163,47 @@ fn should_suppress_interrupted_status(
     interrupted.contains(&status_arc_key(current_status))
 }
 
+/// Reserve an admitted status intent while holding its status Arc stable.
+///
+/// The admission check happens before this helper so blocked provider states do
+/// not invalidate an already queued status transition.
+pub(crate) fn reserve_agent_status_intent(
+    state: &AppState,
+    admission: codex_onboarding::CodexStatusAdmission,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    expected_status: &str,
+    next_status: &str,
+) -> Option<u64> {
+    if admission == codex_onboarding::CodexStatusAdmission::Blocked {
+        return None;
+    }
+    let status = current_status.lock().ok()?;
+    if *status != expected_status {
+        return None;
+    }
+    Some(state.reserve_status_intent(session_id, current_status, next_status))
+}
+
+/// Commit a replacement publication only while its status still matches and
+/// no newer admitted intent targets a different status.
+pub(crate) fn commit_agent_status_publication(
+    state: &AppState,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    expected_status: &str,
+) -> Option<u64> {
+    let current = current_status.lock().ok()?;
+    if *current != expected_status
+        || state
+            .status_intent_status(session_id, current_status)
+            .is_some_and(|intent_status| intent_status != expected_status)
+    {
+        return None;
+    }
+    Some(state.commit_status_revision(session_id, current_status, expected_status))
+}
+
 pub(crate) fn set_agent_status(
     app: &AppHandle,
     session_id: &str,
@@ -177,16 +218,17 @@ pub(crate) fn set_agent_status(
     if admission == codex_onboarding::CodexStatusAdmission::Blocked {
         return;
     }
-    let Ok(current) = current_status.lock() else {
+    let state = app.state::<AppState>();
+    let Some(intent_revision) = reserve_agent_status_intent(
+        state.inner(),
+        admission,
+        session_id,
+        current_status,
+        &expected_status,
+        next_status,
+    ) else {
         return;
     };
-    if *current != expected_status {
-        return;
-    }
-    let intent_revision =
-        app.state::<AppState>()
-            .reserve_status_intent(session_id, current_status, next_status);
-    drop(current);
     match admission {
         codex_onboarding::CodexStatusAdmission::Blocked => return,
         codex_onboarding::CodexStatusAdmission::WaitForRoster => {
@@ -202,20 +244,27 @@ pub(crate) fn set_agent_status(
         }
         codex_onboarding::CodexStatusAdmission::Allowed => {}
     }
-    if apply_admitted_status_transition(
-        app.state::<AppState>().inner(),
+    if let Some((status_sequence, status_revision)) = apply_admitted_status_transition(
+        state.inner(),
         session_id,
         current_status,
         &expected_status,
         intent_revision,
         next_status,
     ) {
-        schedule_agent_status_observation(app, session_id, current_status, next_status.to_string());
+        schedule_agent_status_observation(
+            app,
+            session_id,
+            current_status,
+            next_status.to_string(),
+            status_sequence,
+            status_revision,
+        );
     }
 }
 
 /// Commit an admitted status only while its exact runtime and intent still win.
-/// The caller schedules observation after a successful value change.
+/// Returns its observation sequence and committed status revision.
 pub(crate) fn apply_admitted_status_transition(
     state: &AppState,
     session_id: &str,
@@ -223,19 +272,18 @@ pub(crate) fn apply_admitted_status_transition(
     expected_status: &str,
     intent_revision: u64,
     next_status: &str,
-) -> bool {
-    let Ok(mut status) = current_status.lock() else {
-        return false;
-    };
+) -> Option<(u64, u64)> {
+    let mut status = current_status.lock().ok()?;
     if state.status_intent_revision(session_id, current_status) != intent_revision
         || *status != expected_status
         || *status == next_status
     {
-        return false;
+        return None;
     }
     *status = next_status.to_string();
-    state.commit_status_revision(session_id, current_status, next_status);
-    true
+    let status_revision = state.commit_status_revision(session_id, current_status, next_status);
+    let status_sequence = state.next_status_observation_sequence(session_id);
+    Some((status_sequence, status_revision))
 }
 
 /// Persists and emits an already-current status. Runtime replacement uses this
@@ -247,18 +295,55 @@ pub(crate) fn publish_agent_status(
     session_id: &str,
     current_status: &std::sync::Arc<std::sync::Mutex<String>>,
 ) {
-    let Ok(status) = current_status.lock().map(|status| status.clone()) else {
+    let Ok(expected_status) = current_status.lock().map(|status| status.clone()) else {
         return;
     };
-    match codex_onboarding::status_admission(app, session_id, current_status, &status) {
+    let admission =
+        codex_onboarding::status_admission(app, session_id, current_status, &expected_status);
+    if admission == codex_onboarding::CodexStatusAdmission::Blocked {
+        return;
+    }
+    let state = app.state::<AppState>();
+    let Some(status_revision) = commit_agent_status_publication(
+        state.inner(),
+        session_id,
+        current_status,
+        &expected_status,
+    ) else {
+        return;
+    };
+    match admission {
         codex_onboarding::CodexStatusAdmission::Blocked => return,
         codex_onboarding::CodexStatusAdmission::WaitForRoster => {
-            codex_onboarding::defer_status_publication(app, session_id, current_status);
+            codex_onboarding::defer_status_publication(
+                app,
+                session_id,
+                current_status,
+                status_revision,
+            );
             return;
         }
         codex_onboarding::CodexStatusAdmission::Allowed => {}
     }
-    schedule_agent_status_observation(app, session_id, current_status, status);
+    let status_sequence = {
+        let Ok(current) = current_status.lock() else {
+            return;
+        };
+        if *current != expected_status
+            || state.status_revision(session_id, current_status) != status_revision
+        {
+            return;
+        }
+        state.next_status_observation_sequence(session_id)
+    };
+    schedule_agent_status_observation(
+        app,
+        session_id,
+        current_status,
+        expected_status,
+        status_sequence,
+        status_revision,
+    );
 }
 
 fn schedule_agent_status_observation(
@@ -266,26 +351,26 @@ fn schedule_agent_status_observation(
     session_id: &str,
     current_status: &std::sync::Arc<std::sync::Mutex<String>>,
     status: String,
+    status_sequence: u64,
+    status_revision: u64,
 ) {
     let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let status_app = app.clone();
     let status_session_id = session_id.to_string();
     let current_status = current_status.clone();
-    let status_sequence = app
-        .state::<AppState>()
-        .next_status_observation_sequence(session_id);
     tauri::async_runtime::spawn(async move {
         let state = status_app.state::<AppState>();
         // Startup also schedules Idle here. Serialize with replacement before
         // looking up the input generation so an old status Arc cannot publish
         // Ready into a replacement between identity validation and the write.
         let _lifecycle = state.lock_agent_lifecycle(&status_session_id).await;
-        let Some(status) = persist_status_observation(
+        let Some((status, _status_sequence, status_revision)) = persist_status_observation(
             state.inner(),
             &status_session_id,
             &current_status,
             &status,
             status_sequence,
+            status_revision,
             &observed_at,
         )
         .await
@@ -301,6 +386,7 @@ fn schedule_agent_status_observation(
             &status_session_id,
             &current_status,
             &status,
+            status_revision,
         )
         .await
         {
@@ -310,7 +396,7 @@ fn schedule_agent_status_observation(
             &state,
             &status_session_id,
             &status,
-            status_sequence,
+            status_revision,
         )
         .await;
         if !status_observation_belongs_to_current_agent(
@@ -318,6 +404,7 @@ fn schedule_agent_status_observation(
             &status_session_id,
             &current_status,
             &status,
+            status_revision,
         )
         .await
         {
@@ -349,6 +436,7 @@ fn schedule_agent_status_observation(
             &status_session_id,
             &current_status,
             &status,
+            status_revision,
         )
         .await
         {
@@ -373,15 +461,19 @@ pub(crate) async fn persist_status_observation(
     current_status: &std::sync::Arc<std::sync::Mutex<String>>,
     requested_status: &str,
     status_sequence: u64,
+    status_revision: u64,
     observed_at: &str,
-) -> Option<String> {
-    let status = crate::control::codex_menu_status::constrain_publication(
-        state,
-        session_id,
-        current_status,
-        requested_status,
-    )
-    .await?;
+) -> Option<(String, u64, u64)> {
+    let (status, status_sequence, status_revision) =
+        crate::control::codex_menu_status::constrain_publication(
+            state,
+            session_id,
+            current_status,
+            requested_status,
+            status_sequence,
+            status_revision,
+        )
+        .await?;
     // Keep the map lock through the synchronous durable write so replacement
     // cannot publish a new runtime before this observation is resolved.
     let agents = state.agents.lock().await;
@@ -405,7 +497,9 @@ pub(crate) async fn persist_status_observation(
         let Ok(current_status_value) = agent.current_status.lock() else {
             return None;
         };
-        if *current_status_value != status {
+        if *current_status_value != status
+            || state.status_revision(session_id, current_status) != status_revision
+        {
             log_debug(&format!(
                 "[Wardian] Ignoring superseded status '{}' for session {}",
                 status, session_id
@@ -427,50 +521,97 @@ pub(crate) async fn persist_status_observation(
             );
         }
     }
-    Some(status)
+    Some((status, status_sequence, status_revision))
+}
+
+pub(crate) struct TelemetryStatusPublication {
+    pub(crate) readiness: Option<ProviderInputReadiness>,
+    pub(crate) current_status: Option<String>,
+    pub(crate) status_revision: Option<u64>,
 }
 
 pub(crate) async fn publish_telemetry_status_observation(
     state: &AppState,
     observation: &telemetry::TelemetryProviderStatus,
-) -> ProviderInputReadiness {
-    let agents = state.agents.lock().await;
-    let attachment_ready = agents
-        .get(&observation.session_id)
-        .is_none_or(codex_onboarding::codex_attachment_is_ready);
-    if !attachment_ready
-        && matches!(
-            wardian_core::identity::normalize_status(&observation.status).as_str(),
-            "idle" | "processing"
-        )
-    {
-        return ProviderInputReadiness::Unknown;
-    }
-    if let Some(agent) = agents.get(&observation.session_id) {
-        // Telemetry runs from a detached snapshot. Do not let an observation
-        // from a replaced runtime, or a status that was superseded after the
-        // snapshot, overwrite the fallback roster cache.
-        if std::sync::Arc::ptr_eq(&agent.current_status, &observation.current_status) {
-            if let Ok(current) = agent.current_status.lock() {
-                if *current == observation.status {
-                    let status_sequence =
-                        state.next_status_observation_sequence(&observation.session_id);
-                    state.set_remote_agent_status(
-                        &observation.session_id,
-                        &observation.status,
-                        status_sequence,
-                    );
-                }
-            }
-        }
+) -> TelemetryStatusPublication {
+    let _lifecycle = state.lock_agent_lifecycle(&observation.session_id).await;
+    let active_runtime = {
+        let agents = state.agents.lock().await;
+        agents.get(&observation.session_id).map(|agent| {
+            (
+                std::sync::Arc::ptr_eq(&agent.current_status, &observation.current_status),
+                agent.current_status.clone(),
+                agent.last_status_at.clone(),
+                agent.watch_state.clone(),
+                agent.config.clone(),
+            )
+        })
+    };
+    let Some((owns_runtime, current_status, last_status_at, watch_state, config)) = active_runtime
+    else {
+        return TelemetryStatusPublication {
+            readiness: None,
+            current_status: None,
+            status_revision: None,
+        };
+    };
+
+    let active_status = current_status.lock().ok().map(|status| status.clone());
+    if !owns_runtime {
+        return TelemetryStatusPublication {
+            readiness: None,
+            current_status: active_status,
+            status_revision: None,
+        };
     }
 
-    match wardian_core::identity::normalize_status(&observation.status).as_str() {
-        "idle" => ProviderInputReadiness::Ready,
-        "processing" => ProviderInputReadiness::Busy,
-        "action_required" => ProviderInputReadiness::ActionRequired,
-        "off" | "error" => ProviderInputReadiness::Unavailable,
-        _ => ProviderInputReadiness::Unknown,
+    // Read item state only after releasing the roster lock. The lifecycle guard
+    // keeps this runtime installed while its staged status is validated/applied.
+    let attachment_ready = match config.lock() {
+        Ok(config) if config.provider != "codex" => true,
+        Ok(_) => watch_state
+            .lock()
+            .is_ok_and(|watch_state| watch_state.codex_attachment_ready()),
+        Err(_) => false,
+    };
+    let Some(current_status_value) = telemetry::commit_telemetry_status_observation(
+        state,
+        observation,
+        &current_status,
+        &last_status_at,
+        &watch_state,
+        attachment_ready,
+    ) else {
+        return TelemetryStatusPublication {
+            readiness: None,
+            current_status: current_status.lock().ok().map(|status| status.clone()),
+            status_revision: None,
+        };
+    };
+    let (current_status_value, status_sequence, status_revision) = current_status_value;
+    state.set_remote_agent_status(
+        &observation.session_id,
+        &current_status_value,
+        status_sequence,
+    );
+
+    let normalized_status = wardian_core::identity::normalize_status(&current_status_value);
+    let readiness =
+        if !attachment_ready && matches!(normalized_status.as_str(), "idle" | "processing") {
+            ProviderInputReadiness::Unknown
+        } else {
+            match normalized_status.as_str() {
+                "idle" => ProviderInputReadiness::Ready,
+                "processing" => ProviderInputReadiness::Busy,
+                "action_required" => ProviderInputReadiness::ActionRequired,
+                "off" | "error" => ProviderInputReadiness::Unavailable,
+                _ => ProviderInputReadiness::Unknown,
+            }
+        };
+    TelemetryStatusPublication {
+        readiness: Some(readiness),
+        current_status: Some(current_status_value),
+        status_revision: Some(status_revision),
     }
 }
 
@@ -479,14 +620,18 @@ async fn status_observation_belongs_to_current_agent(
     session_id: &str,
     current_status: &std::sync::Arc<std::sync::Mutex<String>>,
     expected_status: &str,
+    expected_revision: u64,
 ) -> bool {
     let agents = state.agents.lock().await;
     agents.get(session_id).is_some_and(|agent| {
         std::sync::Arc::ptr_eq(&agent.current_status, current_status)
-            && agent
-                .current_status
-                .lock()
-                .is_ok_and(|status| *status == expected_status)
+            && agent.current_status.lock().is_ok_and(|status| {
+                *status == expected_status
+                    && state.status_revision(session_id, current_status) == expected_revision
+                    && state
+                        .status_intent_status(session_id, current_status)
+                        .is_none_or(|intent_status| intent_status == expected_status)
+            })
     })
 }
 
@@ -494,7 +639,7 @@ async fn record_provider_input_from_status_state(
     state: &AppState,
     session_id: &str,
     next_status: &str,
-    status_sequence: u64,
+    status_revision: u64,
 ) {
     let readiness = match wardian_core::identity::normalize_status(next_status).as_str() {
         "idle" => ProviderInputReadiness::Ready,
@@ -514,7 +659,7 @@ async fn record_provider_input_from_status_state(
         .interactions
         .record_provider_input_status_observation(
             session_id,
-            status_sequence,
+            status_revision,
             generation,
             readiness,
             evidence,
@@ -2388,7 +2533,13 @@ mod tests {
             .insert("agent-1".to_string(), new_agent);
 
         assert!(
-            !status_observation_belongs_to_current_agent(&state, "agent-1", &old_status, "Idle")
+            !status_observation_belongs_to_current_agent(
+                &state,
+                "agent-1",
+                &old_status,
+                "Idle",
+                0,
+            )
                 .await,
             "late status events from a cleared runtime must not update the replacement agent"
         );
@@ -2413,6 +2564,7 @@ mod tests {
                 "agent-1",
                 &current_status,
                 "Idle",
+                0,
             )
             .await
         );
@@ -2422,6 +2574,7 @@ mod tests {
                 "agent-1",
                 &current_status,
                 "Processing",
+                0,
             )
             .await
         );
@@ -2440,33 +2593,33 @@ mod tests {
 
         publish_telemetry_status_observation(
             &state,
-            &telemetry::TelemetryProviderStatus {
-                session_id: "agent-1".to_string(),
-                generation: 0,
-                status: "Idle".to_string(),
-                current_status: current_status.clone(),
-            },
+            &telemetry::TelemetryProviderStatus::current(
+                "agent-1",
+                0,
+                "Idle".to_string(),
+                current_status.clone(),
+            ),
         )
         .await;
         *current_status.lock().expect("status") = "Processing".to_string();
         publish_telemetry_status_observation(
             &state,
-            &telemetry::TelemetryProviderStatus {
-                session_id: "agent-1".to_string(),
-                generation: 0,
-                status: "Processing".to_string(),
-                current_status: current_status.clone(),
-            },
+            &telemetry::TelemetryProviderStatus::current(
+                "agent-1",
+                0,
+                "Processing".to_string(),
+                current_status.clone(),
+            ),
         )
         .await;
         publish_telemetry_status_observation(
             &state,
-            &telemetry::TelemetryProviderStatus {
-                session_id: "agent-1".to_string(),
-                generation: 0,
-                status: "Idle".to_string(),
+            &telemetry::TelemetryProviderStatus::current(
+                "agent-1",
+                0,
+                "Idle".to_string(),
                 current_status,
-            },
+            ),
         )
         .await;
 

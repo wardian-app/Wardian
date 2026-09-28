@@ -89,7 +89,10 @@ async fn restore_with_owner(
     if let Some(app) = app {
         crate::manager::set_agent_status(app, session_id, &observation.current_status, status);
     } else {
-        *observation.current_status.lock().unwrap() = status.into();
+        if let Ok(mut current_status) = observation.current_status.lock() {
+            *current_status = status.into();
+            state.commit_status_revision(session_id, &observation.current_status, status);
+        }
     }
     true
 }
@@ -101,7 +104,9 @@ pub(crate) async fn constrain_publication(
     session_id: &str,
     current_status: &Arc<std::sync::Mutex<String>>,
     requested: &str,
-) -> Option<String> {
+    expected_sequence: u64,
+    expected_revision: u64,
+) -> Option<(String, u64, u64)> {
     {
         let agents = state.agents.lock().await;
         let agent = agents.get(session_id)?;
@@ -113,16 +118,23 @@ pub(crate) async fn constrain_publication(
         super::startup_readiness::constrain_codex_status_observation(state, session_id, requested)
             .await;
     let mut current = current_status.lock().ok()?;
-    if *current != requested {
+    if *current != requested
+        || state.status_revision(session_id, current_status) != expected_revision
+        || state
+            .status_intent_status(session_id, current_status)
+            .is_some_and(|intent_status| intent_status != requested)
+    {
         return None;
     }
     if let Some(required) = required {
         if *current != required {
             *current = required.into();
-            state.commit_status_revision(session_id, current_status, required);
+            let revision = state.commit_status_revision(session_id, current_status, required);
+            let sequence = state.next_status_observation_sequence(session_id);
+            return Some((current.clone(), sequence, revision));
         }
     }
-    Some(current.clone())
+    Some((current.clone(), expected_sequence, expected_revision))
 }
 
 #[cfg(test)]

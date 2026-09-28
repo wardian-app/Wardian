@@ -689,11 +689,27 @@ struct AgentSnapshot {
     init_timestamp: Arc<Mutex<Option<String>>>,
     last_query_timestamp: Arc<Mutex<Option<String>>>,
     current_status: Arc<Mutex<String>>,
-    last_status_at: Arc<Mutex<Option<String>>>,
+    status_observation: Mutex<TelemetryStatusDraft>,
     watch_state: Arc<Mutex<crate::state::AgentWatchState>>,
     last_output_at: Arc<Mutex<Option<std::time::SystemTime>>>,
     log_path: Arc<Mutex<Option<std::path::PathBuf>>>,
     log_last_modified: Arc<Mutex<Option<std::time::SystemTime>>>,
+}
+
+#[derive(Default)]
+struct TelemetryStatusDraft {
+    initial_status: String,
+    current_status: String,
+    initial_status_revision: u64,
+    initial_status_intent_revision: u64,
+    transitions: Vec<TelemetryStatusTransition>,
+}
+
+#[derive(Clone)]
+pub(crate) struct TelemetryStatusTransition {
+    pub(crate) previous_status: String,
+    pub(crate) status: String,
+    pub(crate) observed_at: String,
 }
 
 #[derive(Default)]
@@ -705,8 +721,78 @@ struct TelemetryPassResult {
 pub(crate) struct TelemetryProviderStatus {
     pub(crate) session_id: String,
     pub(crate) generation: u64,
+    pub(crate) initial_status: String,
+    pub(crate) initial_status_revision: u64,
+    pub(crate) initial_status_intent_revision: u64,
     pub(crate) status: String,
+    pub(crate) transitions: Vec<TelemetryStatusTransition>,
+    pub(crate) active_execution_conflict: bool,
     pub(crate) current_status: Arc<Mutex<String>>,
+}
+
+#[cfg(test)]
+impl TelemetryProviderStatus {
+    pub(crate) fn current(
+        session_id: impl Into<String>,
+        generation: u64,
+        status: String,
+        current_status: Arc<Mutex<String>>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            generation,
+            initial_status: status.clone(),
+            initial_status_revision: 0,
+            initial_status_intent_revision: 0,
+            status,
+            transitions: Vec::new(),
+            active_execution_conflict: false,
+            current_status,
+        }
+    }
+}
+
+impl AgentSnapshot {
+    fn capture_initial_status(&self, state: &AppState) {
+        let current = self.current_status.lock().unwrap();
+        let status = current.clone();
+        let initial_status_revision = state.status_revision(&self.session_id, &self.current_status);
+        let initial_status_intent_revision =
+            state.status_intent_revision(&self.session_id, &self.current_status);
+        drop(current);
+        let mut observation = self.status_observation.lock().unwrap();
+        observation.initial_status = status.clone();
+        observation.current_status = status;
+        observation.initial_status_revision = initial_status_revision;
+        observation.initial_status_intent_revision = initial_status_intent_revision;
+        observation.transitions.clear();
+    }
+
+    fn telemetry_status(&self) -> String {
+        self.status_observation
+            .lock()
+            .unwrap()
+            .current_status
+            .clone()
+    }
+
+    fn provider_status_observation(
+        &self,
+        active_execution_conflict: bool,
+    ) -> TelemetryProviderStatus {
+        let draft = self.status_observation.lock().unwrap();
+        TelemetryProviderStatus {
+            session_id: self.session_id.clone(),
+            generation: self.provider_generation,
+            initial_status: draft.initial_status.clone(),
+            initial_status_revision: draft.initial_status_revision,
+            initial_status_intent_revision: draft.initial_status_intent_revision,
+            status: draft.current_status.clone(),
+            transitions: draft.transitions.clone(),
+            active_execution_conflict,
+            current_status: self.current_status.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1098,15 +1184,29 @@ fn set_snapshot_status_from_log(snap: &AgentSnapshot, next_status: &str, is_init
     // An append does not make the rolling log's old turn state belong to this
     // process. Check the live status here: a composer repaint may have ended
     // startup while telemetry was reading the log. Never restore stale Starting.
-    if snap.provider == "opencode"
-        && snap
+    if snap.provider == "opencode" {
+        let live_starting = snap
             .current_status
             .lock()
-            .is_ok_and(|status| status.eq_ignore_ascii_case("Starting"))
-    {
-        return;
+            .is_ok_and(|status| status.eq_ignore_ascii_case("Starting"));
+        if live_starting {
+            return;
+        }
     }
     set_snapshot_status(snap, next_status);
+}
+
+fn telemetry_display_status(status: &str, active_execution_conflict: bool) -> String {
+    if active_execution_conflict
+        && matches!(
+            wardian_core::identity::normalize_status(status).as_str(),
+            "off" | "error"
+        )
+    {
+        "Headless".to_string()
+    } else {
+        status.to_string()
+    }
 }
 
 fn apply_claude_log_status(
@@ -1357,7 +1457,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                     init_timestamp: agent.init_timestamp.clone(),
                     last_query_timestamp: agent.last_query_timestamp.clone(),
                     current_status: agent.current_status.clone(),
-                    last_status_at: agent.last_status_at.clone(),
+                    status_observation: Mutex::new(TelemetryStatusDraft::default()),
                     watch_state: agent.watch_state.clone(),
                     last_output_at: agent.last_output_at.clone(),
                     log_path: agent.log_path.clone(),
@@ -1366,6 +1466,9 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
             })
             .collect()
     };
+    for snapshot in &snapshots {
+        snapshot.capture_initial_status(state);
+    }
     for snapshot in &mut snapshots {
         snapshot.provider_generation = state
             .interactions
@@ -1464,7 +1567,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 .and_then(|path| path.as_ref().map(|p| display_log_path(p)));
             let opencode_session_id = snap.resume_session.as_deref();
             let gemini_session_id = snap.resume_session.as_deref();
-            let status_before_log_work = snap.current_status.lock().unwrap().clone();
+            let status_before_log_work = snap.telemetry_status();
             let mut last_query_timestamp = last_user_query_timestamps.remove(&snap.session_id);
             reconcile_cached_last_query_timestamp(
                 &mut last_query_timestamp,
@@ -1765,8 +1868,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                                         );
                                     }
                                     "opencode" => {
-                                        let mut status =
-                                            snap.current_status.lock().unwrap().clone();
+                                        let mut status = snap.telemetry_status();
                                         let Some(effective_session_id) = opencode_session_id else {
                                             continue;
                                         };
@@ -1895,7 +1997,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 || snap.provider == "antigravity")
                 && (snap.process_id.is_none() || process_alive == Some(true))
             {
-                let current_status = snap.current_status.lock().unwrap().clone();
+                let current_status = snap.telemetry_status();
                 let last_output_at = *snap.last_output_at.lock().unwrap();
                 if provider_should_fallback_to_idle_after_quiet_period(
                     &current_status,
@@ -1912,31 +2014,26 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
                 set_snapshot_status(snap, "Off");
             }
 
-            let observed_status = snap.current_status.lock().unwrap().clone();
+            let observed_status = snap.telemetry_status();
             let is_offline = snap.is_off
                 || matches!(
                     wardian_core::identity::normalize_status(&observed_status).as_str(),
                     "off" | "error"
                 );
-            let current_status = if is_offline
-                && wardian_core::conversation_lease::find_active_execution_conflict(
+            let active_execution_conflict =
+                wardian_core::conversation_lease::find_active_execution_conflict(
                     &active_leases,
                     &snap.session_id,
                     snap.resume_session.as_deref().unwrap_or_default(),
                     &lease_now,
                 )
-                .is_some()
-            {
+                .is_some();
+            let current_status = if is_offline && active_execution_conflict {
                 "Headless".to_string()
             } else {
                 observed_status
             };
-            provider_statuses.push(TelemetryProviderStatus {
-                session_id: snap.session_id.clone(),
-                generation: snap.provider_generation,
-                status: snap.current_status.lock().unwrap().clone(),
-                current_status: snap.current_status.clone(),
-            });
+            provider_statuses.push(snap.provider_status_observation(active_execution_conflict));
 
             results.push(AgentTelemetry {
                 session_id: snap.session_id.clone(),
@@ -1977,36 +2074,110 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
     })
     .await
     .unwrap_or_default();
-    apply_provider_status_observations(state, &result.provider_statuses).await;
+    let mut result = result;
+    apply_provider_status_observations(state, &result.provider_statuses, &mut result.metrics).await;
     result.metrics
 }
 
 async fn apply_provider_status_observations(
     state: &AppState,
     observations: &[TelemetryProviderStatus],
+    metrics: &mut [AgentTelemetry],
 ) {
     for observation in observations {
-        let readiness = super::publish_telemetry_status_observation(state, observation).await;
-        let ready_evidence = (readiness == ProviderInputReadiness::Ready)
-            .then_some(ProviderReadyEvidence::ProviderEvent);
-        let (_, became_ready) = state
-            .interactions
-            .record_provider_input_state_with_transition(
-                &observation.session_id,
-                observation.generation,
-                readiness,
-                ready_evidence,
-            )
-            .await;
-        if became_ready {
-            crate::control::dispatch_agent_messaging_from_status_observation(
-                None,
-                state,
-                &observation.session_id,
-            )
-            .await;
+        let publication = super::publish_telemetry_status_observation(state, observation).await;
+        if publication.readiness.is_none()
+            || publication.current_status.as_deref() != Some(observation.status.as_str())
+        {
+            if let (Some(status), Some(metric)) = (
+                publication.current_status.as_ref(),
+                metrics
+                    .iter_mut()
+                    .find(|metric| metric.session_id == observation.session_id),
+            ) {
+                metric.current_status =
+                    telemetry_display_status(status, observation.active_execution_conflict);
+            }
         }
+        if publication.readiness.is_none() {
+            continue;
+        }
+        let _ = apply_telemetry_provider_readiness(state, observation, &publication).await;
     }
+}
+
+async fn apply_telemetry_provider_readiness(
+    state: &AppState,
+    observation: &TelemetryProviderStatus,
+    publication: &super::TelemetryStatusPublication,
+) -> bool {
+    let (Some(readiness), Some(status), Some(status_revision)) = (
+        publication.readiness,
+        publication.current_status.as_deref(),
+        publication.status_revision,
+    ) else {
+        return false;
+    };
+    let ready_evidence = (readiness == ProviderInputReadiness::Ready)
+        .then_some(ProviderReadyEvidence::ProviderEvent);
+    if !super::status_observation_belongs_to_current_agent(
+        state,
+        &observation.session_id,
+        &observation.current_status,
+        status,
+        status_revision,
+    )
+    .await
+    {
+        return false;
+    }
+    let (_, became_ready) = state
+        .interactions
+        .record_provider_input_status_observation_with_transition(
+            &observation.session_id,
+            status_revision,
+            observation.generation,
+            readiness,
+            ready_evidence,
+        )
+        .await;
+    if !became_ready
+        || !super::status_observation_belongs_to_current_agent(
+            state,
+            &observation.session_id,
+            &observation.current_status,
+            status,
+            status_revision,
+        )
+        .await
+    {
+        return false;
+    }
+    crate::control::dispatch_agent_messaging_from_status_observation(
+        None,
+        state,
+        &observation.session_id,
+    )
+    .await;
+    true
+}
+
+pub(crate) fn commit_telemetry_status_observation(
+    state: &AppState,
+    observation: &TelemetryProviderStatus,
+    current_status: &Arc<Mutex<String>>,
+    last_status_at: &Arc<Mutex<Option<String>>>,
+    watch_state: &Arc<Mutex<crate::state::AgentWatchState>>,
+    codex_attachment_ready: bool,
+) -> Option<(String, u64, u64)> {
+    status::commit_snapshot_status_observation(
+        state,
+        observation,
+        current_status,
+        last_status_at,
+        watch_state,
+        codex_attachment_ready,
+    )
 }
 
 pub async fn get_app_metrics(state: &AppState) -> AppTelemetry {
@@ -2099,669 +2270,5 @@ pub async fn get_app_metrics(state: &AppState) -> AppTelemetry {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    include!("telemetry/opencode_startup_tests.rs");
-
-    use super::{AgentSnapshot, TelemetryPassTimings, TelemetrySlowAgent};
-    use rusqlite::Connection;
-    use std::collections::{BTreeSet, HashMap};
-    use std::sync::{Arc, Mutex};
-
-    fn test_snapshot(status: &str) -> AgentSnapshot {
-        AgentSnapshot {
-            session_id: "agent-1".to_string(),
-            provider: "opencode".to_string(),
-            folder: "D:/work".to_string(),
-            is_off: false,
-            resume_session: None,
-            provider_generation: 0,
-            process_id: Some(1234),
-            query_count: Arc::new(Mutex::new(0)),
-            init_timestamp: Arc::new(Mutex::new(None)),
-            last_query_timestamp: Arc::new(Mutex::new(None)),
-            current_status: Arc::new(Mutex::new(status.to_string())),
-            last_status_at: Arc::new(Mutex::new(None)),
-            watch_state: Arc::new(Mutex::new(crate::state::AgentWatchState::new(
-                "agent-1".to_string(),
-                16,
-                1024,
-            ))),
-            last_output_at: Arc::new(Mutex::new(None)),
-            log_path: Arc::new(Mutex::new(None)),
-            log_last_modified: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    #[test]
-    fn cached_provider_query_timestamp_survives_an_unchanged_log_pass() {
-        let snap = test_snapshot("Idle");
-        *snap.last_query_timestamp.lock().unwrap() = Some("2026-05-14T12:00:03.000Z".to_string());
-        let mut latest = Some("2026-05-14T12:00:01.000Z".to_string());
-
-        super::reconcile_cached_last_query_timestamp(&mut latest, &snap.last_query_timestamp);
-
-        assert_eq!(latest.as_deref(), Some("2026-05-14T12:00:03.000Z"));
-        assert_eq!(
-            snap.last_query_timestamp.lock().unwrap().as_deref(),
-            Some("2026-05-14T12:00:03.000Z")
-        );
-    }
-
-    #[test]
-    fn stopped_agents_reconcile_provider_logs_even_with_durable_queries() {
-        assert!(super::should_run_provider_log_telemetry("Off", Some(false)));
-    }
-
-    #[test]
-    fn antigravity_wal_activity_advances_the_telemetry_watermark() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let database = temp.path().join("conversation.db");
-        let writer = Connection::open(&database).expect("open database");
-        writer
-            .execute_batch(
-                "PRAGMA journal_mode = WAL;
-                 CREATE TABLE steps (idx INTEGER, step_type INTEGER, metadata BLOB);
-                 INSERT INTO steps (idx, step_type) VALUES (1, 14);",
-            )
-            .expect("create WAL fixture");
-        let before = super::telemetry_source_modified("antigravity", &database)
-            .expect("initial database watermark");
-
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        writer
-            .execute(
-                "INSERT INTO steps (idx, step_type) VALUES (?1, ?2)",
-                rusqlite::params![2_i64, 14_i64],
-            )
-            .expect("append WAL user message");
-
-        assert!(database.with_file_name("conversation.db-wal").exists());
-        let after = super::telemetry_source_modified("antigravity", &database)
-            .expect("updated database watermark");
-        assert!(after > before, "WAL activity must invalidate the cache");
-    }
-
-    #[test]
-    fn restart_hydration_recovers_a_user_timestamp_before_a_large_jsonl_tail() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let log = temp.path().join("rollout.jsonl");
-        let user_message = serde_json::json!({
-            "type": "event_msg",
-            "timestamp": "2026-08-26T12:00:00.000Z",
-            "payload": { "type": "user_message", "message": "hello" },
-        });
-        let large_assistant_record = serde_json::json!({
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "role": "assistant",
-                "content": "x".repeat((super::LOG_PARSE_TAIL_BYTES + 1024) as usize),
-            },
-        });
-        std::fs::write(
-            &log,
-            format!(
-                "{}\n{}\n",
-                user_message,
-                serde_json::to_string(&large_assistant_record).expect("serialize assistant")
-            ),
-        )
-        .expect("write oversized provider log");
-
-        assert!(std::fs::metadata(&log).expect("log metadata").len() > super::LOG_PARSE_TAIL_BYTES);
-        assert_eq!(
-            super::latest_query_timestamp_from_log_suffix(&log, "codex").as_deref(),
-            Some("2026-08-26T12:00:00.000Z")
-        );
-    }
-
-    #[test]
-    fn normalizes_process_tree_cpu_to_whole_machine_capacity() {
-        assert_eq!(super::normalize_cpu_usage(260.0, 4), 65.0);
-        assert_eq!(super::normalize_cpu_usage(800.0, 4), 100.0);
-        assert_eq!(super::normalize_cpu_usage(-5.0, 4), 0.0);
-    }
-
-    #[test]
-    fn treats_missing_cpu_count_as_single_cpu() {
-        assert_eq!(super::normalize_cpu_usage(260.0, 0), 100.0);
-    }
-
-    #[test]
-    fn converts_resident_bytes_to_mib() {
-        assert_eq!(super::bytes_to_mib(1_048_576), 1.0);
-        assert_eq!(super::bytes_to_mib(2_621_440), 2.5);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn tracked_process_refresh_reuses_inventory_and_costs_less_than_full_scan() {
-        let mut cache = super::process_inventory_cache().lock().unwrap();
-        *cache = None;
-        drop(cache);
-
-        let system = tokio::sync::Mutex::new(sysinfo::System::new());
-        let session_ids = (0..58)
-            .map(|index| format!("agent-{index}"))
-            .collect::<Vec<_>>();
-        let agent_roots = session_ids
-            .iter()
-            .cloned()
-            .map(|session_id| (session_id, Some(std::process::id())))
-            .collect::<Vec<_>>();
-
-        let full = super::refresh_system_process_snapshot(&system, &session_ids, &agent_roots)
-            .expect("full inventory refresh should succeed");
-        let tracked = super::refresh_system_process_snapshot(&system, &session_ids, &agent_roots)
-            .expect("tracked refresh should succeed");
-
-        assert!(std::sync::Arc::ptr_eq(
-            &full.children_map,
-            &tracked.children_map
-        ));
-        assert!(tracked.processes.contains_key(&std::process::id()));
-        eprintln!(
-            "telemetry process refresh: full={:?}, tracked={:?}",
-            full.sys_refresh, tracked.sys_refresh
-        );
-        assert!(tracked.sys_refresh < full.sys_refresh);
-    }
-
-    #[test]
-    fn process_inventory_agent_key_is_order_independent() {
-        let left = super::process_inventory_agent_key(&[
-            ("agent-2".to_string(), Some(2)),
-            ("agent-1".to_string(), Some(1)),
-        ]);
-        let right = super::process_inventory_agent_key(&[
-            ("agent-1".to_string(), Some(1)),
-            ("agent-2".to_string(), Some(2)),
-        ]);
-
-        assert_eq!(left, right);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn changing_agent_process_id_does_not_force_marker_discovery() {
-        let session_id = "pid-churn-marker-discovery-test".to_string();
-        let session_ids = vec![session_id.clone()];
-        let cached_markers = HashMap::from([(session_id.clone(), vec![12345])]);
-
-        *super::process_inventory_cache().lock().unwrap() = None;
-        *super::session_roots_cache().lock().unwrap() = Some(super::SessionRootsCache {
-            roots: cached_markers.clone(),
-            refreshed_at: std::time::Instant::now(),
-            session_key: super::sorted_session_key(&session_ids),
-        });
-
-        let system = tokio::sync::Mutex::new(sysinfo::System::new());
-        super::refresh_system_process_snapshot(
-            &system,
-            &session_ids,
-            &[(session_id.clone(), Some(101))],
-        )
-        .expect("initial inventory refresh should succeed");
-
-        // Re-seed the marker cache so the assertion observes whether the PID
-        // change caused a second marker scan, rather than its initial setup.
-        *super::session_roots_cache().lock().unwrap() = Some(super::SessionRootsCache {
-            roots: cached_markers.clone(),
-            refreshed_at: std::time::Instant::now(),
-            session_key: super::sorted_session_key(&session_ids),
-        });
-
-        super::refresh_system_process_snapshot(&system, &session_ids, &[(session_id, Some(202))])
-            .expect("PID-churn inventory refresh should succeed");
-
-        assert_eq!(super::cached_session_roots(), cached_markers);
-    }
-
-    #[test]
-    fn collects_root_descendants_and_discovered_session_roots_without_duplicates() {
-        let children_map =
-            HashMap::from([(1, vec![2, 4]), (2, vec![3]), (4, vec![5]), (9, vec![10])]);
-
-        let related = super::collect_related_pids(Some(1), &[2, 9], &children_map);
-
-        assert_eq!(related, BTreeSet::from([1_u32, 2, 3, 4, 5, 9, 10]));
-    }
-
-    #[test]
-    fn app_process_pids_exclude_agent_trees_to_prevent_double_counting() {
-        let children_map = HashMap::from([
-            (1, vec![2, 3, 6]),
-            (3, vec![4, 5]),
-            (6, vec![7]),
-            (8, vec![9]),
-        ]);
-
-        let app_pids = super::collect_app_process_pids(1, &[3, 7, 8], &children_map);
-
-        assert_eq!(app_pids, BTreeSet::from([1_u32, 2, 6]));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn discovers_session_roots_for_multiple_agents_from_one_process_marker_snapshot() {
-        let markers = vec![
-            super::ProcessMarkerSnapshot {
-                pid: 10,
-                process_name: "cmd.exe".to_string(),
-                command_line: "cmd.exe /d /c codex.cmd resume session-a --cd D:/repo".to_string(),
-                environ: Vec::new(),
-            },
-            super::ProcessMarkerSnapshot {
-                pid: 11,
-                process_name: "node.exe".to_string(),
-                command_line: "node codex".to_string(),
-                environ: vec!["WARDIAN_SESSION_ID=session-a".to_string()],
-            },
-            super::ProcessMarkerSnapshot {
-                pid: 20,
-                process_name: "node.exe".to_string(),
-                command_line: "node other".to_string(),
-                environ: vec!["WARDIAN_SESSION_ID=session-b".to_string()],
-            },
-            super::ProcessMarkerSnapshot {
-                pid: 30,
-                process_name: "pwsh.exe".to_string(),
-                command_line: "pwsh -NoLogo".to_string(),
-                environ: Vec::new(),
-            },
-        ];
-
-        let roots = super::discover_session_roots_from_process_markers(
-            &["session-a".to_string(), "session-b".to_string()],
-            &markers,
-        );
-
-        assert_eq!(roots["session-a"], vec![10, 11]);
-        assert_eq!(roots["session-b"], vec![20]);
-    }
-
-    #[test]
-    fn telemetry_status_change_records_watch_status_event() {
-        let snap = test_snapshot("Processing...");
-
-        super::set_snapshot_status(&snap, "Idle");
-
-        assert_eq!(*snap.current_status.lock().unwrap(), "Idle");
-        assert!(snap.last_status_at.lock().unwrap().is_some());
-        let snapshot = snap
-            .watch_state
-            .lock()
-            .unwrap()
-            .snapshot_since(None, None)
-            .unwrap();
-        assert!(snapshot.events.iter().any(|event| {
-            event.kind == "status"
-                && event.payload.get("status").and_then(|value| value.as_str()) == Some("idle")
-        }));
-    }
-
-    #[test]
-    fn telemetry_status_noop_does_not_emit_duplicate_watch_event() {
-        let snap = test_snapshot("Idle");
-
-        super::set_snapshot_status(&snap, "Idle");
-
-        let snapshot = snap
-            .watch_state
-            .lock()
-            .unwrap()
-            .snapshot_since(None, None)
-            .unwrap();
-        assert!(snapshot.events.is_empty());
-    }
-
-    #[test]
-    fn slow_telemetry_report_only_formats_slow_passes() {
-        let report = TelemetryPassTimings {
-            total: std::time::Duration::from_millis(750),
-            sys_refresh: std::time::Duration::from_millis(25),
-            agent_count: 3,
-            slow_agents: vec![TelemetrySlowAgent {
-                session_id: "agent-1".to_string(),
-                provider: "codex".to_string(),
-                duration: std::time::Duration::from_millis(620),
-            }],
-        };
-
-        let message = report.slow_log_message(std::time::Duration::from_millis(500));
-
-        assert!(message.is_some_and(|message| {
-            message.contains("total_ms=750")
-                && message.contains("agent_count=3")
-                && message.contains("agent-1:codex:620ms")
-        }));
-        assert!(TelemetryPassTimings {
-            total: std::time::Duration::from_millis(250),
-            sys_refresh: std::time::Duration::from_millis(25),
-            agent_count: 1,
-            slow_agents: Vec::new(),
-        }
-        .slow_log_message(std::time::Duration::from_millis(500))
-        .is_none());
-    }
-
-    #[test]
-    fn live_opencode_tui_output_prevents_log_error_from_masking_running_status() {
-        let current_status = "Processing...";
-        let log_status = "Error".to_string();
-        let last_output_at = Some(std::time::SystemTime::now());
-
-        let status = super::reconcile_live_opencode_log_status(
-            "opencode",
-            current_status,
-            log_status,
-            Some(true),
-            last_output_at,
-        );
-
-        assert_eq!(status, current_status);
-    }
-
-    #[test]
-    fn opencode_log_error_still_applies_without_live_tui_evidence() {
-        let status = super::reconcile_live_opencode_log_status(
-            "opencode",
-            "Processing...",
-            "Error".to_string(),
-            Some(true),
-            None,
-        );
-
-        assert_eq!(status, "Error");
-
-        let status = super::reconcile_live_opencode_log_status(
-            "opencode",
-            "Processing...",
-            "Error".to_string(),
-            Some(false),
-            Some(std::time::SystemTime::now()),
-        );
-
-        assert_eq!(status, "Error");
-    }
-
-    #[test]
-    fn claude_log_status_can_clear_stale_action_needed() {
-        let snap = test_snapshot("Action Needed");
-        let lines = vec![
-            serde_json::json!({
-                "type": "user",
-                "message": { "role": "user", "content": "Run a tool" }
-            }),
-            serde_json::json!({
-                "type": "system",
-                "subtype": "permission_request",
-                "tool_name": "Bash"
-            }),
-            serde_json::json!({
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": "tool-1",
-                        "content": "ok"
-                    }]
-                }
-            }),
-            serde_json::json!({ "type": "system", "subtype": "turn_duration" }),
-        ];
-
-        super::apply_claude_log_status(&snap, &lines, false);
-
-        assert_eq!(*snap.current_status.lock().unwrap(), "Idle");
-    }
-
-    #[test]
-    fn opencode_assistant_text_records_watch_output_and_transcript() {
-        let snap = test_snapshot("Processing...");
-
-        super::record_opencode_assistant_text(&snap, "ses_test", "OC_DONE");
-
-        let snapshot = snap
-            .watch_state
-            .lock()
-            .unwrap()
-            .snapshot_since(None, Some(4096))
-            .unwrap();
-        assert!(snapshot.output.text.contains("OC_DONE"));
-        assert_eq!(snapshot.transcript.latest_text, "OC_DONE");
-        assert_eq!(snapshot.transcript.messages[0].provider, "opencode");
-        assert_eq!(
-            snapshot.transcript.messages[0].turn_id.as_deref(),
-            Some("ses_test")
-        );
-    }
-
-    #[test]
-    fn gemini_assistant_text_records_watch_transcript() {
-        let snap = test_snapshot("Processing...");
-        let content = concat!(
-            r#"{"sessionId":"gemini-session-1","projectHash":"project","startTime":"2026-05-14T12:00:00.000Z"}"#,
-            "\n",
-            r#"{"id":"m1","timestamp":"2026-05-14T12:00:01.000Z","type":"user","content":"hello"}"#,
-            "\n",
-            r#"{"id":"m2","timestamp":"2026-05-14T12:00:03.000Z","type":"model","content":"Gemini answer","tokens":{"input":10,"output":2,"total":12}}"#,
-            "\n"
-        );
-
-        super::record_latest_gemini_assistant_text(&snap, content);
-
-        let snapshot = snap
-            .watch_state
-            .lock()
-            .unwrap()
-            .snapshot_since(None, Some(4096))
-            .unwrap();
-        assert_eq!(snapshot.transcript.latest_text, "Gemini answer");
-        assert_eq!(snapshot.transcript.messages[0].provider, "gemini");
-        assert_eq!(
-            snapshot.transcript.messages[0].turn_id.as_deref(),
-            Some("m2")
-        );
-    }
-
-    #[test]
-    fn gemini_log_matches_legacy_json_session_id() {
-        let content = r#"{
-          "sessionId": "gemini-session-1",
-          "messages": []
-        }"#;
-
-        assert!(super::gemini_log_matches_session(
-            content,
-            "gemini-session-1"
-        ));
-        assert!(!super::gemini_log_matches_session(content, "other-session"));
-    }
-
-    #[test]
-    fn gemini_log_matches_jsonl_metadata_session_id() {
-        let content = concat!(
-            r#"{"sessionId":"gemini-session-1","projectHash":"project","startTime":"2026-05-14T12:00:00.000Z"}"#,
-            "\n",
-            r#"{"id":"m1","timestamp":"2026-05-14T12:00:01.000Z","type":"user","content":"hello"}"#,
-            "\n"
-        );
-
-        assert!(super::gemini_log_matches_session(
-            content,
-            "gemini-session-1"
-        ));
-        assert!(!super::gemini_log_matches_session(content, "other-session"));
-    }
-
-    #[test]
-    fn discover_gemini_log_finds_matching_chat_file() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let chats = temp.path().join("project-a").join("chats");
-        std::fs::create_dir_all(&chats).expect("chats dir");
-        std::fs::write(
-            chats.join("other.json"),
-            r#"{"sessionId":"other-session","messages":[]}"#,
-        )
-        .expect("write other chat");
-        std::fs::write(
-            chats.join("target.json"),
-            r#"{"sessionId":"gemini-session-1","messages":[]}"#,
-        )
-        .expect("write target chat");
-
-        let found = super::discover_gemini_log_in_tmp(temp.path(), "gemini-session-1")
-            .expect("matching chat file");
-        assert!(found.ends_with("target.json"));
-        assert!(super::discover_gemini_log_in_tmp(temp.path(), "missing-session").is_none());
-    }
-
-    #[test]
-    fn gemini_log_prefix_rejects_id_beyond_prefix_window() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let path = temp.path().join("big.json");
-        let mut content = String::from("{\"messages\":[\"");
-        content.push_str(&"x".repeat(super::GEMINI_LOG_SESSION_PREFIX_BYTES as usize));
-        content.push_str("gemini-session-1\"]}");
-        std::fs::write(&path, content).expect("write big chat");
-
-        assert!(!super::gemini_log_prefix_contains(
-            &path,
-            "gemini-session-1"
-        ));
-        assert!(!super::gemini_log_prefix_contains(&path, ""));
-    }
-
-    #[test]
-    fn gemini_log_metrics_parse_legacy_json() {
-        let content = r#"{
-          "sessionId": "gemini-session-1",
-          "startTime": "2026-05-14T12:00:00.000Z",
-          "messages": [
-            { "type": "user", "timestamp": "2026-05-14T12:00:01.000Z", "content": "hello" },
-            { "type": "gemini", "content": "hi" }
-          ]
-        }"#;
-
-        let metrics = super::parse_gemini_log_metrics(content).expect("metrics");
-
-        assert_eq!(metrics.query_count, 1);
-        assert_eq!(
-            metrics.init_timestamp.as_deref(),
-            Some("2026-05-14T12:00:00.000Z")
-        );
-        assert_eq!(
-            metrics.last_query_timestamp.as_deref(),
-            Some("2026-05-14T12:00:01.000Z")
-        );
-        assert_eq!(metrics.status, Some("Idle"));
-    }
-
-    #[test]
-    fn pi_log_metrics_parse_latest_user_message_timestamp() {
-        let content = concat!(
-            r#"{"type":"session","id":"pi-session-1","timestamp":"2026-05-14T12:00:00.000Z"}"#,
-            "\n",
-            r#"{"type":"message","timestamp":"2026-05-14T12:00:01.000Z","message":{"role":"user","content":"first"}}"#,
-            "\n",
-            r#"{"type":"message","timestamp":"2026-05-14T12:00:03.000Z","message":{"role":"user","content":"latest"}}"#,
-            "\n"
-        );
-
-        let metrics = super::parse_pi_log_metrics(content).expect("metrics");
-
-        assert_eq!(metrics.query_count, 2);
-        assert_eq!(
-            metrics.init_timestamp.as_deref(),
-            Some("2026-05-14T12:00:00.000Z")
-        );
-        assert_eq!(
-            metrics.last_query_timestamp.as_deref(),
-            Some("2026-05-14T12:00:03.000Z")
-        );
-    }
-
-    #[test]
-    fn gemini_log_metrics_parse_jsonl_completed_message_record() {
-        let content = concat!(
-            r#"{"sessionId":"gemini-session-1","projectHash":"project","startTime":"2026-05-14T12:00:00.000Z"}"#,
-            "\n",
-            r#"{"id":"m1","timestamp":"2026-05-14T12:00:01.000Z","type":"user","content":"hello"}"#,
-            "\n",
-            r#"{"$set":{"lastUpdated":"2026-05-14T12:00:02.000Z"}}"#,
-            "\n",
-            r#"{"id":"m2","timestamp":"2026-05-14T12:00:03.000Z","type":"gemini","content":"hi","tokens":{"input":10,"output":1,"total":11}}"#,
-            "\n"
-        );
-
-        let metrics = super::parse_gemini_log_metrics(content).expect("metrics");
-
-        assert_eq!(metrics.query_count, 1);
-        assert_eq!(
-            metrics.init_timestamp.as_deref(),
-            Some("2026-05-14T12:00:00.000Z")
-        );
-        assert_eq!(
-            metrics.last_query_timestamp.as_deref(),
-            Some("2026-05-14T12:00:01.000Z")
-        );
-        assert_eq!(metrics.status, Some("Idle"));
-    }
-
-    #[test]
-    fn gemini_log_metrics_jsonl_model_chunk_without_completion_stays_processing() {
-        let content = concat!(
-            r#"{"sessionId":"gemini-session-1","projectHash":"project","startTime":"2026-05-14T12:00:00.000Z"}"#,
-            "\n",
-            r#"{"id":"m1","timestamp":"2026-05-14T12:00:01.000Z","type":"user","content":"hello"}"#,
-            "\n",
-            r#"{"id":"m2","timestamp":"2026-05-14T12:00:03.000Z","type":"model","content":"partial"}"#,
-            "\n"
-        );
-
-        let metrics = super::parse_gemini_log_metrics(content).expect("metrics");
-
-        assert_eq!(metrics.query_count, 1);
-        assert_eq!(
-            metrics.last_query_timestamp.as_deref(),
-            Some("2026-05-14T12:00:01.000Z")
-        );
-        assert_eq!(metrics.status, Some("Processing..."));
-    }
-
-    #[test]
-    fn gemini_log_metrics_jsonl_result_marks_idle() {
-        let content = concat!(
-            r#"{"sessionId":"gemini-session-1","projectHash":"project","startTime":"2026-05-14T12:00:00.000Z"}"#,
-            "\n",
-            r#"{"id":"m1","timestamp":"2026-05-14T12:00:01.000Z","type":"user","content":"hello"}"#,
-            "\n",
-            r#"{"id":"m2","timestamp":"2026-05-14T12:00:03.000Z","type":"model","content":"partial"}"#,
-            "\n",
-            r#"{"type":"result"}"#,
-            "\n"
-        );
-
-        let metrics = super::parse_gemini_log_metrics(content).expect("metrics");
-
-        assert_eq!(metrics.query_count, 1);
-        assert_eq!(metrics.status, Some("Idle"));
-    }
-
-    #[test]
-    fn gemini_log_metrics_jsonl_last_user_is_processing() {
-        let content = concat!(
-            r#"{"sessionId":"gemini-session-1","projectHash":"project","startTime":"2026-05-14T12:00:00.000Z"}"#,
-            "\n",
-            r#"{"id":"m1","timestamp":"2026-05-14T12:00:01.000Z","type":"user","content":"hello"}"#,
-            "\n"
-        );
-
-        let metrics = super::parse_gemini_log_metrics(content).expect("metrics");
-
-        assert_eq!(metrics.query_count, 1);
-        assert_eq!(metrics.status, Some("Processing..."));
-    }
-}
+#[path = "telemetry/tests.rs"]
+pub(crate) mod tests;
