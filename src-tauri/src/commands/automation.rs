@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, State};
 use wardian_core::control::AutomationRunResponse;
 use wardian_core::engine::store::{read_checkpoint, read_events};
@@ -166,17 +166,6 @@ pub(crate) fn automation_list_runs_blocking(
     automation_list_runs_page_from_root(&root, resolve_blueprint_path, offset.unwrap_or(0))
 }
 
-pub(crate) fn automation_list_runs_matching_blocking<F>(
-    offset: usize,
-    include: F,
-) -> Result<AutomationRunListResult, String>
-where
-    F: FnMut(&serde_json::Value) -> bool,
-{
-    let root = wardian_core::paths::automation_runs_dir().ok_or("no wardian home")?;
-    automation_list_runs_page_from_root_matching(&root, resolve_blueprint_path, offset, include)
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AutomationRunFileWatermark {
     len: u64,
@@ -195,29 +184,566 @@ struct CachedAutomationRunSummary {
     summary: serde_json::Value,
 }
 
-#[derive(Default)]
-struct CachedAutomationRunRoot {
-    runs: HashMap<PathBuf, CachedAutomationRunSummary>,
-    scanned_at: Option<Instant>,
+type AutomationRunSummaryMap = HashMap<PathBuf, CachedAutomationRunSummary>;
+
+#[derive(Debug)]
+enum AutomationRunSummaryPublishError {
+    VersionConflict,
+    Expired,
 }
 
-type AutomationRunSummaryRoots = HashMap<PathBuf, CachedAutomationRunRoot>;
+const AUTOMATION_RUN_SUMMARY_MAX_AGE: Duration = Duration::from_secs(5);
+#[cfg(not(test))]
+const AUTOMATION_RUN_SUMMARY_RECONCILE_INTERVAL: Duration = Duration::from_secs(4);
+const AUTOMATION_RUN_SUMMARY_MAX_CONFLICT_RETRIES: usize = 3;
+
+/// One complete, immutable view of run summaries. An Inbox request captures
+/// one snapshot and uses it for both automation sources so their pages agree.
+#[derive(Clone)]
+pub(crate) struct AutomationRunSummarySnapshot {
+    _version: u64,
+    scanned_at: Instant,
+    runs: Arc<AutomationRunSummaryMap>,
+}
+
+#[derive(Default)]
+struct AutomationRunSummaryCacheState {
+    version: u64,
+    snapshot: Option<Arc<AutomationRunSummarySnapshot>>,
+    last_refresh_attempt: Option<Instant>,
+    last_refresh_failed: bool,
+}
+
+struct CachedAutomationRunRoot {
+    state: RwLock<AutomationRunSummaryCacheState>,
+    refresh_active: Mutex<bool>,
+    refresh_finished: Condvar,
+    #[cfg(test)]
+    scan_count: std::sync::atomic::AtomicU64,
+}
+
+impl Default for CachedAutomationRunRoot {
+    fn default() -> Self {
+        Self {
+            state: RwLock::new(AutomationRunSummaryCacheState::default()),
+            refresh_active: Mutex::new(false),
+            refresh_finished: Condvar::new(),
+            #[cfg(test)]
+            scan_count: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+type AutomationRunSummaryRoots = HashMap<PathBuf, Arc<CachedAutomationRunRoot>>;
 
 static AUTOMATION_RUN_SUMMARY_CACHE: OnceLock<Mutex<AutomationRunSummaryRoots>> = OnceLock::new();
+#[cfg(not(test))]
+static AUTOMATION_RUN_SUMMARY_RECONCILER_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
-fn automation_run_file_watermark(path: &Path) -> Option<AutomationRunFileWatermark> {
-    let metadata = std::fs::metadata(path).ok()?;
-    Some(AutomationRunFileWatermark {
+fn automation_run_summary_root_cache(root: &Path) -> Arc<CachedAutomationRunRoot> {
+    let cache = AUTOMATION_RUN_SUMMARY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(root.to_path_buf())
+        .or_default()
+        .clone()
+}
+
+fn automation_run_file_watermark(
+    path: &Path,
+) -> Result<Option<AutomationRunFileWatermark>, String> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("automation run metadata could not be read".to_string()),
+    };
+    Ok(Some(AutomationRunFileWatermark {
         len: metadata.len(),
         modified: metadata.modified().ok(),
         created: metadata.created().ok(),
+    }))
+}
+
+fn automation_run_watermark(dir: &Path) -> Result<AutomationRunWatermark, String> {
+    Ok(AutomationRunWatermark {
+        state: automation_run_file_watermark(&dir.join("state.json"))?,
     })
 }
 
-fn automation_run_watermark(dir: &Path) -> AutomationRunWatermark {
-    AutomationRunWatermark {
-        state: automation_run_file_watermark(&dir.join("state.json")),
+struct AutomationRunRefreshGuard<'a>(&'a CachedAutomationRunRoot);
+
+impl Drop for AutomationRunRefreshGuard<'_> {
+    fn drop(&mut self) {
+        let mut active = self
+            .0
+            .refresh_active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *active = false;
+        self.0.refresh_finished.notify_all();
     }
+}
+
+impl CachedAutomationRunRoot {
+    fn current_snapshot(&self) -> Option<Arc<AutomationRunSummarySnapshot>> {
+        self.state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .snapshot
+            .clone()
+    }
+
+    fn try_begin_refresh(&self) -> Option<AutomationRunRefreshGuard<'_>> {
+        let mut active = self
+            .refresh_active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *active {
+            return None;
+        }
+        *active = true;
+        Some(AutomationRunRefreshGuard(self))
+    }
+
+    fn wait_for_refresh(&self) {
+        let mut active = self
+            .refresh_active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while *active {
+            active = self
+                .refresh_finished
+                .wait(active)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    fn record_run_update(&self, path: PathBuf, summary: Option<CachedAutomationRunSummary>) {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.version = state.version.saturating_add(1);
+        let version = state.version;
+        if let Some(snapshot) = state.snapshot.clone() {
+            let mut runs = (*snapshot.runs).clone();
+            apply_automation_run_summary_update(&mut runs, path, summary);
+            state.snapshot = Some(Arc::new(AutomationRunSummarySnapshot {
+                _version: version,
+                scanned_at: snapshot.scanned_at,
+                runs: Arc::new(runs),
+            }));
+        }
+    }
+
+    fn publish_scan(
+        &self,
+        started_at: Instant,
+        scan_version: u64,
+        runs: AutomationRunSummaryMap,
+    ) -> Result<Arc<AutomationRunSummarySnapshot>, AutomationRunSummaryPublishError> {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if started_at.elapsed() > AUTOMATION_RUN_SUMMARY_MAX_AGE {
+            return Err(AutomationRunSummaryPublishError::Expired);
+        }
+        if state.version != scan_version {
+            return Err(AutomationRunSummaryPublishError::VersionConflict);
+        }
+        let snapshot = Arc::new(AutomationRunSummarySnapshot {
+            _version: state.version,
+            scanned_at: started_at,
+            runs: Arc::new(runs),
+        });
+        if started_at.elapsed() > AUTOMATION_RUN_SUMMARY_MAX_AGE {
+            return Err(AutomationRunSummaryPublishError::Expired);
+        }
+        state.snapshot = Some(Arc::clone(&snapshot));
+        state.last_refresh_failed = false;
+        Ok(snapshot)
+    }
+}
+
+fn apply_automation_run_summary_update(
+    runs: &mut AutomationRunSummaryMap,
+    path: PathBuf,
+    summary: Option<CachedAutomationRunSummary>,
+) {
+    if let Some(summary) = summary {
+        runs.insert(path, summary);
+    } else {
+        runs.remove(&path);
+    }
+}
+
+fn automation_run_summary_snapshot_for_root<F>(
+    root: &Path,
+    mut resolve_blueprint_path: F,
+) -> Result<Arc<AutomationRunSummarySnapshot>, String>
+where
+    F: FnMut(&str) -> Option<PathBuf>,
+{
+    let cache = automation_run_summary_root_cache(root);
+    start_automation_run_summary_reconciler();
+    let mut conflict_retries = 0;
+
+    loop {
+        if let Some(snapshot) = cache.current_snapshot() {
+            if snapshot.scanned_at.elapsed() <= AUTOMATION_RUN_SUMMARY_MAX_AGE {
+                return Ok(snapshot);
+            }
+        }
+
+        let Some(refresh_guard) = cache.try_begin_refresh() else {
+            if let Some(snapshot) = cache.current_snapshot() {
+                if snapshot.scanned_at.elapsed() <= AUTOMATION_RUN_SUMMARY_MAX_AGE {
+                    return Ok(snapshot);
+                }
+            }
+            cache.wait_for_refresh();
+            let state = cache
+                .state
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.last_refresh_failed
+                && state.snapshot.as_ref().is_none_or(|snapshot| {
+                    snapshot.scanned_at.elapsed() > AUTOMATION_RUN_SUMMARY_MAX_AGE
+                })
+            {
+                return Err(automation_run_summary_refresh_error());
+            }
+            continue;
+        };
+
+        let started_at = Instant::now();
+        let (scan_version, previous) = {
+            let mut state = cache
+                .state
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.last_refresh_attempt = Some(started_at);
+            (state.version, state.snapshot.clone())
+        };
+        #[cfg(test)]
+        cache
+            .scan_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        match scan_automation_run_summaries(root, previous.as_deref(), &mut resolve_blueprint_path)
+        {
+            Ok(runs) => {
+                match cache.publish_scan(started_at, scan_version, runs) {
+                    Ok(snapshot)
+                        if snapshot.scanned_at.elapsed() <= AUTOMATION_RUN_SUMMARY_MAX_AGE =>
+                    {
+                        return Ok(snapshot);
+                    }
+                    Ok(_) | Err(AutomationRunSummaryPublishError::Expired) => {
+                        drop(refresh_guard);
+                        let mut state = cache
+                            .state
+                            .write()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        state.last_refresh_failed = true;
+                        if let Some(snapshot) = state.snapshot.as_ref() {
+                            if snapshot.scanned_at.elapsed() <= AUTOMATION_RUN_SUMMARY_MAX_AGE {
+                                return Ok(Arc::clone(snapshot));
+                            }
+                        }
+                        return Err(automation_run_summary_refresh_error());
+                    }
+                    Err(AutomationRunSummaryPublishError::VersionConflict) => {}
+                }
+                drop(refresh_guard);
+                if conflict_retries >= AUTOMATION_RUN_SUMMARY_MAX_CONFLICT_RETRIES {
+                    if let Some(snapshot) = cache.current_snapshot() {
+                        if snapshot.scanned_at.elapsed() <= AUTOMATION_RUN_SUMMARY_MAX_AGE {
+                            return Ok(snapshot);
+                        }
+                    }
+                    cache
+                        .state
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .last_refresh_failed = true;
+                    return Err(automation_run_summary_refresh_error());
+                }
+                std::thread::sleep(Duration::from_millis(10_u64 << conflict_retries));
+                conflict_retries += 1;
+            }
+            Err(_) => {
+                let mut state = cache
+                    .state
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.last_refresh_failed = true;
+                if let Some(snapshot) = state.snapshot.as_ref() {
+                    if snapshot.scanned_at.elapsed() <= AUTOMATION_RUN_SUMMARY_MAX_AGE {
+                        return Ok(Arc::clone(snapshot));
+                    }
+                }
+                return Err(automation_run_summary_refresh_error());
+            }
+        }
+    }
+}
+
+fn automation_run_summary_refresh_error() -> String {
+    "automation Inbox data is temporarily unavailable because the run index refresh failed; retry shortly"
+        .to_string()
+}
+
+fn scan_automation_run_summaries<F>(
+    root: &Path,
+    previous: Option<&AutomationRunSummarySnapshot>,
+    resolve_blueprint_path: &mut F,
+) -> Result<AutomationRunSummaryMap, String>
+where
+    F: FnMut(&str) -> Option<PathBuf>,
+{
+    let mut runs = previous
+        .map(|snapshot| (*snapshot.runs).clone())
+        .unwrap_or_default();
+    let mut observed_runs = HashSet::new();
+    let mut blueprint_paths: HashMap<String, Option<PathBuf>> = HashMap::new();
+    let blueprint_entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(_) => return Err("automation run directory could not be read".to_string()),
+    };
+
+    for blueprint_entry in blueprint_entries {
+        let blueprint_entry = blueprint_entry
+            .map_err(|_| "automation run directory could not be read".to_string())?;
+        if !blueprint_entry
+            .file_type()
+            .map_err(|_| "automation run directory could not be read".to_string())?
+            .is_dir()
+        {
+            continue;
+        }
+
+        let run_entries = std::fs::read_dir(blueprint_entry.path())
+            .map_err(|_| "automation run directory could not be read".to_string())?;
+        for run_entry in run_entries {
+            let run_entry =
+                run_entry.map_err(|_| "automation run directory could not be read".to_string())?;
+            if !run_entry
+                .file_type()
+                .map_err(|_| "automation run directory could not be read".to_string())?
+                .is_dir()
+            {
+                continue;
+            }
+
+            let run_dir = run_entry.path();
+            observed_runs.insert(run_dir.clone());
+            let watermark = automation_run_watermark(&run_dir)?;
+            let unchanged = runs
+                .get(&run_dir)
+                .is_some_and(|cached| cached.watermark == watermark);
+            if !unchanged {
+                match read_checkpoint(&run_dir) {
+                    Ok(Some(state)) => {
+                        let blueprint_path = blueprint_paths
+                            .entry(state.blueprint_id.clone())
+                            .or_insert_with(|| resolve_blueprint_path(&state.blueprint_id));
+                        let summary =
+                            run_summary_from_state(&run_dir, state, blueprint_path.as_deref());
+                        runs.insert(
+                            run_dir.clone(),
+                            CachedAutomationRunSummary { watermark, summary },
+                        );
+                    }
+                    Ok(None) => {
+                        runs.remove(&run_dir);
+                        continue;
+                    }
+                    Err(_) => return Err("automation run checkpoint could not be read".to_string()),
+                }
+            }
+
+            let Some(cached) = runs.get_mut(&run_dir) else {
+                continue;
+            };
+            if let Some(blueprint_id) = cached
+                .summary
+                .get("blueprint_id")
+                .and_then(serde_json::Value::as_str)
+            {
+                let blueprint_path = blueprint_paths
+                    .entry(blueprint_id.to_string())
+                    .or_insert_with(|| resolve_blueprint_path(blueprint_id));
+                cached.summary["blueprint_path"] = blueprint_path
+                    .as_ref()
+                    .map(|path| serde_json::Value::String(path.to_string_lossy().into_owned()))
+                    .unwrap_or(serde_json::Value::Null);
+            }
+        }
+    }
+    runs.retain(|run_dir, _| observed_runs.contains(run_dir));
+    Ok(runs)
+}
+
+fn refresh_automation_run_summary_root(root: PathBuf, cache: Arc<CachedAutomationRunRoot>) {
+    for retry in 0..=AUTOMATION_RUN_SUMMARY_MAX_CONFLICT_RETRIES {
+        let Some(refresh_guard) = cache.try_begin_refresh() else {
+            return;
+        };
+        let started_at = Instant::now();
+        let (scan_version, previous) = {
+            let mut state = cache
+                .state
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.last_refresh_attempt = Some(started_at);
+            (state.version, state.snapshot.clone())
+        };
+        #[cfg(test)]
+        cache
+            .scan_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        match scan_automation_run_summaries(&root, previous.as_deref(), &mut resolve_blueprint_path)
+        {
+            Ok(runs) => {
+                match cache.publish_scan(started_at, scan_version, runs) {
+                    Ok(snapshot)
+                        if snapshot.scanned_at.elapsed() <= AUTOMATION_RUN_SUMMARY_MAX_AGE =>
+                    {
+                        return;
+                    }
+                    Ok(_) | Err(AutomationRunSummaryPublishError::Expired) => {
+                        cache
+                            .state
+                            .write()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .last_refresh_failed = true;
+                        return;
+                    }
+                    Err(AutomationRunSummaryPublishError::VersionConflict) => {}
+                }
+                drop(refresh_guard);
+                if retry == AUTOMATION_RUN_SUMMARY_MAX_CONFLICT_RETRIES {
+                    cache
+                        .state
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .last_refresh_failed = true;
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10_u64 << retry));
+            }
+            Err(_) => {
+                cache
+                    .state
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .last_refresh_failed = true;
+                return;
+            }
+        }
+    }
+}
+
+fn start_automation_run_summary_reconciler() {
+    #[cfg(not(test))]
+    if AUTOMATION_RUN_SUMMARY_RECONCILER_STARTED
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_ok()
+    {
+        let spawned = std::thread::Builder::new()
+            .name("automation-run-summary-reconciler".to_string())
+            .spawn(|| loop {
+                std::thread::sleep(Duration::from_millis(250));
+                let roots = AUTOMATION_RUN_SUMMARY_CACHE
+                    .get_or_init(|| Mutex::new(HashMap::new()))
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .iter()
+                    .map(|(root, cache)| (root.clone(), Arc::clone(cache)))
+                    .collect::<Vec<_>>();
+                for (root, cache) in roots {
+                    let should_refresh = {
+                        let state = cache
+                            .state
+                            .read()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        state.snapshot.as_ref().is_some_and(|snapshot| {
+                            snapshot.scanned_at.elapsed()
+                                >= AUTOMATION_RUN_SUMMARY_RECONCILE_INTERVAL
+                                && (!state.last_refresh_failed
+                                    || state.last_refresh_attempt.is_none_or(|attempt| {
+                                        attempt.elapsed() >= Duration::from_secs(1)
+                                    }))
+                        })
+                    };
+                    if should_refresh {
+                        refresh_automation_run_summary_root(root, cache);
+                    }
+                }
+            });
+        if spawned.is_err() {
+            AUTOMATION_RUN_SUMMARY_RECONCILER_STARTED
+                .store(false, std::sync::atomic::Ordering::Release);
+            crate::utils::logging::log_debug(
+                "[automation] run-summary background reconciler could not start",
+            );
+        }
+    }
+}
+
+/// Captures the current complete run-summary snapshot for one Inbox request.
+pub(crate) fn automation_run_summary_snapshot_for_inbox(
+) -> Result<Arc<AutomationRunSummarySnapshot>, String> {
+    let root = wardian_core::paths::automation_runs_dir().ok_or("no wardian home")?;
+    automation_run_summary_snapshot_for_root(&root, resolve_blueprint_path)
+}
+
+/// Apply an app-owned run checkpoint change to the published snapshot. This
+/// also journals the change so a scan already in progress cannot overwrite it.
+pub(crate) fn update_automation_run_summary_cache(run_dir: &Path) {
+    let Some(root) = wardian_core::paths::automation_runs_dir() else {
+        return;
+    };
+    if !run_dir.starts_with(&root) {
+        return;
+    }
+    let Some(cache) = AUTOMATION_RUN_SUMMARY_CACHE.get().and_then(|caches| {
+        caches
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&root)
+            .cloned()
+    }) else {
+        return;
+    };
+
+    let summary = match read_checkpoint(run_dir) {
+        Ok(Some(state)) => {
+            let watermark = match automation_run_watermark(run_dir) {
+                Ok(watermark) => watermark,
+                Err(_) => return,
+            };
+            let blueprint_path = resolve_blueprint_path(&state.blueprint_id);
+            Some(CachedAutomationRunSummary {
+                watermark,
+                summary: run_summary_from_state(run_dir, state, blueprint_path.as_deref()),
+            })
+        }
+        Ok(None) => None,
+        Err(_) => return,
+    };
+    cache.record_run_update(run_dir.to_path_buf(), summary);
 }
 
 fn automation_list_runs_page_from_root<F>(
@@ -233,115 +759,45 @@ where
 
 fn automation_list_runs_page_from_root_matching<F, I>(
     root: &Path,
-    mut resolve_blueprint_path: F,
+    resolve_blueprint_path: F,
     offset: usize,
-    mut include: I,
+    include: I,
 ) -> Result<AutomationRunListResult, String>
 where
     F: FnMut(&str) -> Option<PathBuf>,
     I: FnMut(&serde_json::Value) -> bool,
 {
-    let requested_at = Instant::now();
-    let cache = AUTOMATION_RUN_SUMMARY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let root_cache = cache.entry(root.to_path_buf()).or_default();
-    let needs_scan = root_cache
-        .scanned_at
-        .is_none_or(|scanned_at| scanned_at < requested_at);
-    if needs_scan {
-        let mut blueprint_paths: HashMap<String, Option<PathBuf>> = HashMap::new();
-        let mut observed_runs = HashSet::new();
-        if root.exists() {
-            for bp in std::fs::read_dir(root)
-                .map_err(|e| e.to_string())?
-                .flatten()
-            {
-                if !bp.file_type().is_ok_and(|file_type| file_type.is_dir()) {
-                    continue;
-                }
-                for run in std::fs::read_dir(bp.path())
-                    .map_err(|e| e.to_string())?
-                    .flatten()
-                {
-                    let dir = run.path();
-                    if !run.file_type().is_ok_and(|file_type| file_type.is_dir()) {
-                        continue;
-                    }
-                    observed_runs.insert(dir.clone());
-                    let cached_is_terminal = root_cache.runs.get(&dir).is_some_and(|cached| {
-                        matches!(
-                            cached
-                                .summary
-                                .get("status")
-                                .and_then(serde_json::Value::as_str),
-                            Some("completed" | "failed")
-                        )
-                    });
-                    let watermark = (!cached_is_terminal).then(|| automation_run_watermark(&dir));
-                    if watermark.as_ref().is_some_and(|watermark| {
-                        !matches!(
-                            root_cache.runs.get(&dir),
-                            Some(cached) if &cached.watermark == watermark
-                        )
-                    }) {
-                        let Some(state) = read_checkpoint(&dir).ok().flatten() else {
-                            root_cache.runs.remove(&dir);
-                            continue;
-                        };
-                        let blueprint_path = blueprint_paths
-                            .entry(state.blueprint_id.clone())
-                            .or_insert_with(|| resolve_blueprint_path(&state.blueprint_id));
-                        let summary =
-                            run_summary_from_state(&dir, state, blueprint_path.as_deref());
-                        root_cache.runs.insert(
-                            dir.clone(),
-                            CachedAutomationRunSummary {
-                                watermark: watermark.expect("non-terminal runs have a watermark"),
-                                summary,
-                            },
-                        );
-                    }
+    let snapshot = automation_run_summary_snapshot_for_root(root, resolve_blueprint_path)?;
+    Ok(automation_run_summary_page_from_snapshot(
+        &snapshot,
+        offset,
+        MAX_AUTOMATION_RUNS,
+        include,
+    ))
+}
 
-                    let Some(cached) = root_cache.runs.get_mut(&dir) else {
-                        continue;
-                    };
-                    if let Some(blueprint_id) = cached
-                        .summary
-                        .get("blueprint_id")
-                        .and_then(serde_json::Value::as_str)
-                    {
-                        let blueprint_path = blueprint_paths
-                            .entry(blueprint_id.to_string())
-                            .or_insert_with(|| resolve_blueprint_path(blueprint_id));
-                        cached.summary["blueprint_path"] = blueprint_path
-                            .as_ref()
-                            .map(|path| {
-                                serde_json::Value::String(path.to_string_lossy().into_owned())
-                            })
-                            .unwrap_or(serde_json::Value::Null);
-                    }
-                }
-            }
-        }
-        root_cache.runs.retain(|dir, _| observed_runs.contains(dir));
-        root_cache.scanned_at = Some(Instant::now());
-    }
-
-    let mut retained = root_cache
+pub(crate) fn automation_run_summary_page_from_snapshot<I>(
+    snapshot: &AutomationRunSummarySnapshot,
+    offset: usize,
+    limit: usize,
+    mut include: I,
+) -> AutomationRunListResult
+where
+    I: FnMut(&serde_json::Value) -> bool,
+{
+    let mut retained = snapshot
         .runs
         .values()
         .filter(|cached| include(&cached.summary))
         .map(|cached| cached.summary.clone())
         .collect::<Vec<_>>();
     retained.sort_by(compare_run_summaries);
-    let page_end = offset.saturating_add(MAX_AUTOMATION_RUNS);
+    let page_end = offset.saturating_add(limit);
     let truncated = retained.len() > page_end;
     let mut runs = retained
         .into_iter()
         .skip(offset)
-        .take(MAX_AUTOMATION_RUNS)
+        .take(limit)
         .collect::<Vec<_>>();
     let worker_attention =
         wardian_core::temporary_workers::attention_counts_by_run().unwrap_or_default();
@@ -359,11 +815,11 @@ where
             .copied()
             .unwrap_or(0));
     }
-    Ok(AutomationRunListResult {
+    AutomationRunListResult {
         runs,
         truncated,
         next_offset: truncated.then_some(page_end),
-    })
+    }
 }
 
 fn compare_run_summaries(a: &serde_json::Value, b: &serde_json::Value) -> std::cmp::Ordering {
@@ -929,6 +1385,7 @@ pub async fn approve_automation_for_surface(
             &blueprint, &run_root, &node, &actor, note,
         )
         .map_err(|error| error.to_string())?;
+        update_automation_run_summary_cache(&run_root);
         let app_for_inbox = app.clone();
         let blueprint_for_inbox = blueprint.clone();
         let run_root_for_inbox = run_root.clone();
@@ -993,6 +1450,7 @@ pub async fn automation_cancel(
                 .map_err(|error| error.to_string())?;
             let (status, worker_cancellation_acknowledged) =
                 await_owned_worker_cancellation(&blueprint_id, &run_id, &run_root).await?;
+            update_automation_run_summary_cache(&run_root);
             return Ok(serde_json::json!({
                 "ok": true,
                 "status": status,
@@ -1006,6 +1464,7 @@ pub async fn automation_cancel(
         if state.status == RunStatus::AwaitingApproval {
             let state = wardian_core::engine::Engine::cancel_awaiting(&run_root)
                 .map_err(|error| error.to_string())?;
+            update_automation_run_summary_cache(&run_root);
             return Ok(serde_json::json!({ "ok": true, "status": state.status }));
         }
     }
@@ -1015,6 +1474,7 @@ pub async fn automation_cancel(
     std::fs::write(run_root.join("cancel.marker"), "cancelled").map_err(|e| e.to_string())?;
     let state = wardian_core::engine::Engine::cancel(&blueprint, &run_root)
         .map_err(|error| error.to_string())?;
+    update_automation_run_summary_cache(&run_root);
     Ok(serde_json::json!({ "ok": true, "status": state.status }))
 }
 
@@ -1503,21 +1963,290 @@ mod tests {
     }
 
     #[test]
-    fn automation_run_summary_cache_refreshes_changed_checkpoints() {
+    fn automation_run_summary_cache_reuses_fresh_snapshot_and_reconciles_changes() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("automation-runs");
         let run_root = root.join("wf").join("run-changing");
         let state = RunState::new("run-changing", "wf");
         write_checkpoint(&run_root, &state).unwrap();
+        let deleted_run_root = root.join("wf").join("run-deleted");
+        write_checkpoint(&deleted_run_root, &RunState::new("run-deleted", "wf")).unwrap();
+        let cache = automation_run_summary_root_cache(&root);
         let initial = automation_list_runs_page_from_root(&root, |_| None, 0).unwrap();
-        assert_eq!(initial.runs[0]["status"], "running");
+        assert!(initial
+            .runs
+            .iter()
+            .any(|run| run["run_id"] == "run-changing" && run["status"] == "running"));
+        let warm = automation_run_summary_snapshot_for_root(&root, |_| None).unwrap();
+        assert_eq!(
+            cache.scan_count.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
 
         let mut completed = state;
         completed.status = RunStatus::Completed;
         write_checkpoint(&run_root, &completed).unwrap();
+        refresh_automation_run_summary_root(root.clone(), Arc::clone(&cache));
         let refreshed = automation_list_runs_page_from_root(&root, |_| None, 0).unwrap();
 
-        assert_eq!(refreshed.runs[0]["status"], "completed");
+        assert!(refreshed
+            .runs
+            .iter()
+            .any(|run| run["run_id"] == "run-changing" && run["status"] == "completed"));
+        assert_eq!(
+            cache.scan_count.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+        std::fs::remove_dir_all(&deleted_run_root).unwrap();
+        refresh_automation_run_summary_root(root.clone(), Arc::clone(&cache));
+        let after_deletion = automation_list_runs_page_from_root(&root, |_| None, 0).unwrap();
+        assert!(!after_deletion
+            .runs
+            .iter()
+            .any(|run| run["run_id"] == "run-deleted"));
+        assert_eq!(
+            cache.scan_count.load(std::sync::atomic::Ordering::Relaxed),
+            3
+        );
+        assert!(warm
+            .runs
+            .values()
+            .any(|run| run.summary["status"] == "running"));
+    }
+
+    #[test]
+    fn automation_run_summary_snapshot_applies_app_owned_update_without_rescan() {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set(temp.path());
+        let run_root = wardian_core::paths::automation_run_dir("wf", "run-app-update").unwrap();
+        let mut state = RunState::new("run-app-update", "wf");
+        write_checkpoint(&run_root, &state).unwrap();
+        let snapshot = automation_run_summary_snapshot_for_inbox().unwrap();
+        let cache =
+            automation_run_summary_root_cache(&wardian_core::paths::automation_runs_dir().unwrap());
+        assert_eq!(
+            cache.scan_count.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+
+        state.status = RunStatus::Completed;
+        write_checkpoint(&run_root, &state).unwrap();
+        update_automation_run_summary_cache(&run_root);
+        let updated = automation_run_summary_page_from_snapshot(&snapshot, 0, 1, |_| true);
+
+        assert_eq!(updated.runs[0]["status"], "running");
+        let updated_snapshot = automation_run_summary_snapshot_for_inbox().unwrap();
+        let updated_page =
+            automation_run_summary_page_from_snapshot(&updated_snapshot, 0, 1, |_| true);
+        assert_eq!(updated_page.runs[0]["status"], "completed");
+        assert_eq!(
+            cache.scan_count.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[test]
+    fn automation_run_summary_page_limits_results_and_preserves_lookahead() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("automation-runs");
+        for index in 0..3 {
+            let run_id = format!("run-{index}");
+            let run_root = root.join("wf").join(&run_id);
+            let mut state = RunState::new(&run_id, "wf");
+            state.status = RunStatus::Completed;
+            write_checkpoint(&run_root, &state).unwrap();
+        }
+        let snapshot = automation_run_summary_snapshot_for_root(&root, |_| None).unwrap();
+
+        let page = automation_run_summary_page_from_snapshot(&snapshot, 0, 1, |run| {
+            run["status"] == "completed"
+        });
+
+        assert_eq!(page.runs.len(), 1);
+        assert!(page.truncated);
+        assert_eq!(page.next_offset, Some(1));
+    }
+
+    #[test]
+    fn automation_run_summary_repeated_inbox_reads_reuse_large_snapshot() {
+        const RUN_COUNT: usize = 2_957;
+        const LOOKAHEAD: usize = 2;
+        const WARM_READS: usize = 20;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("automation-runs");
+        for index in 0..RUN_COUNT {
+            let run_id = format!("run-{index:04}");
+            let run_root = root.join("wf").join(&run_id);
+            let mut state = RunState::new(&run_id, "wf");
+            if index < LOOKAHEAD {
+                state.status = RunStatus::Completed;
+            }
+            write_checkpoint(&run_root, &state).unwrap();
+            if index < LOOKAHEAD {
+                append_event(
+                    &run_root,
+                    &Event::new(index as u64, EventKind::RunCompleted),
+                )
+                .unwrap();
+            }
+        }
+
+        let cache = automation_run_summary_root_cache(&root);
+        let read_inbox_page = || {
+            let snapshot = automation_run_summary_snapshot_for_root(&root, |_| None).unwrap();
+            let page = automation_run_summary_page_from_snapshot(&snapshot, 0, LOOKAHEAD, |run| {
+                matches!(run["status"].as_str(), Some("completed" | "failed"))
+            });
+            assert_eq!(page.runs.len(), LOOKAHEAD);
+            for run in page.runs {
+                let run_root = run["path"].as_str().unwrap();
+                assert!(
+                    runs::automation_inbox_update_with_name("wf", Path::new(run_root)).is_some()
+                );
+            }
+        };
+
+        let cold_started = Instant::now();
+        read_inbox_page();
+        let cold_elapsed = cold_started.elapsed();
+        let warm_started = Instant::now();
+        for _ in 0..WARM_READS {
+            read_inbox_page();
+        }
+        let warm_elapsed = warm_started.elapsed();
+
+        assert_eq!(
+            cache.scan_count.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "repeated Inbox reads must reuse the cold snapshot"
+        );
+        println!(
+            "automation_inbox_perf_probe records={RUN_COUNT} lookahead={LOOKAHEAD} cold_ms={:.3} warm_reads={WARM_READS} warm_total_ms={:.3} warm_mean_ms={:.3} disk_scans=1",
+            cold_elapsed.as_secs_f64() * 1_000.0,
+            warm_elapsed.as_secs_f64() * 1_000.0,
+            warm_elapsed.as_secs_f64() * 1_000.0 / WARM_READS as f64,
+        );
+    }
+
+    #[test]
+    fn automation_run_summary_rejects_scan_that_races_with_app_update() {
+        let cache = CachedAutomationRunRoot::default();
+        let path = PathBuf::from("run");
+        let running = CachedAutomationRunSummary {
+            watermark: AutomationRunWatermark { state: None },
+            summary: serde_json::json!({ "run_id": "run", "status": "running" }),
+        };
+        let stale_scan = HashMap::from([(path.clone(), running.clone())]);
+        cache
+            .publish_scan(Instant::now(), 0, stale_scan)
+            .expect("initial scan should publish");
+
+        let completed = CachedAutomationRunSummary {
+            watermark: AutomationRunWatermark { state: None },
+            summary: serde_json::json!({ "run_id": "run", "status": "completed" }),
+        };
+        cache.record_run_update(path.clone(), Some(completed));
+
+        assert!(cache
+            .publish_scan(Instant::now(), 0, HashMap::from([(path.clone(), running)]),)
+            .is_err());
+        assert_eq!(
+            cache.current_snapshot().unwrap().runs[&path].summary["status"],
+            "completed"
+        );
+    }
+
+    #[test]
+    fn automation_run_summary_rejects_scan_that_exceeds_maximum_age() {
+        let cache = CachedAutomationRunRoot::default();
+        let path = PathBuf::from("run");
+        let baseline = CachedAutomationRunSummary {
+            watermark: AutomationRunWatermark { state: None },
+            summary: serde_json::json!({ "run_id": "run", "status": "running" }),
+        };
+        cache
+            .publish_scan(Instant::now(), 0, HashMap::from([(path.clone(), baseline)]))
+            .expect("initial scan should publish");
+
+        let delayed_started_at =
+            Instant::now() - AUTOMATION_RUN_SUMMARY_MAX_AGE - Duration::from_millis(1);
+        let delayed_result = cache.publish_scan(
+            delayed_started_at,
+            0,
+            HashMap::from([(
+                path.clone(),
+                CachedAutomationRunSummary {
+                    watermark: AutomationRunWatermark { state: None },
+                    summary: serde_json::json!({ "run_id": "run", "status": "completed" }),
+                },
+            )]),
+        );
+
+        assert!(matches!(
+            delayed_result,
+            Err(AutomationRunSummaryPublishError::Expired)
+        ));
+        assert_eq!(
+            cache.current_snapshot().unwrap().runs[&path].summary["status"],
+            "running",
+            "an expired scan must leave the last good snapshot intact"
+        );
+    }
+
+    #[test]
+    fn automation_run_summary_failed_stale_refresh_keeps_snapshot_and_returns_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("automation-runs");
+        let run_root = root.join("wf").join("run-stale");
+        write_checkpoint(&run_root, &RunState::new("run-stale", "wf")).unwrap();
+        let cache = automation_run_summary_root_cache(&root);
+        automation_run_summary_snapshot_for_root(&root, |_| None).unwrap();
+        let unreadable_run = root.join("wf").join("run-corrupt");
+        std::fs::create_dir_all(&unreadable_run).unwrap();
+        std::fs::write(unreadable_run.join("state.json"), "not valid json").unwrap();
+        refresh_automation_run_summary_root(root.clone(), Arc::clone(&cache));
+        assert_eq!(
+            automation_run_summary_snapshot_for_root(&root, |_| None)
+                .unwrap()
+                .runs
+                .len(),
+            1,
+            "a fresh last-good snapshot remains available after a failed refresh"
+        );
+
+        {
+            let mut state = cache
+                .state
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let snapshot = state.snapshot.as_ref().unwrap();
+            let version = snapshot._version;
+            let runs = Arc::clone(&snapshot.runs);
+            state.snapshot = Some(Arc::new(AutomationRunSummarySnapshot {
+                _version: version,
+                scanned_at: Instant::now()
+                    - AUTOMATION_RUN_SUMMARY_MAX_AGE
+                    - Duration::from_secs(1),
+                runs,
+            }));
+        }
+
+        let error = automation_run_summary_snapshot_for_root(&root, |_| None)
+            .err()
+            .expect("stale refresh failure should be reported");
+
+        assert_eq!(error, automation_run_summary_refresh_error());
+        let retained = cache.current_snapshot().unwrap();
+        assert_eq!(retained.runs.len(), 1);
+        assert_eq!(
+            retained.runs.values().next().unwrap().summary["status"],
+            "running"
+        );
+        assert_eq!(
+            cache.scan_count.load(std::sync::atomic::Ordering::Relaxed),
+            3
+        );
     }
 
     #[tokio::test]
