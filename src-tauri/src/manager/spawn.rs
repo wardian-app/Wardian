@@ -5740,7 +5740,7 @@ mod tests {
     #[tokio::test]
     async fn orphan_marked_python_server_does_not_block_restore_or_get_terminated() {
         use std::io::{Read, Write};
-        use std::net::{TcpListener, TcpStream};
+        use std::net::TcpStream;
         use std::process::{Child, Command, Stdio};
         use std::time::{Duration, Instant};
 
@@ -5775,48 +5775,64 @@ mod tests {
         wardian_core::db::update_agent_status(&config.session_id, "Headless", Some(424242))
             .expect("persist stale Headless status and PID");
 
-        let port = TcpListener::bind(("127.0.0.1", 0))
-            .expect("reserve local test port")
-            .local_addr()
-            .expect("read local test port")
-            .port();
-        let port_text = port.to_string();
+        let ready_path = _home.path().join("python-http-server.port");
+        let stderr_path = _home.path().join("python-http-server.stderr");
+        let stderr = std::fs::File::create(&stderr_path).expect("create Python stderr log");
+        const PYTHON_HTTP_SERVER: &str = concat!(
+            "from http.server import HTTPServer, SimpleHTTPRequestHandler\n",
+            "import os\n",
+            "server = HTTPServer(('127.0.0.1', 0), SimpleHTTPRequestHandler)\n",
+            "with open(os.environ['WARDIAN_TEST_READY_PATH'], 'w', encoding='ascii') as ready:\n",
+            "    ready.write(str(server.server_port))\n",
+            "    ready.flush()\n",
+            "server.serve_forever()\n",
+        );
         let mut server = OwnedTestServer(
             Command::new(if cfg!(windows) {
                 "python.exe"
             } else {
                 "python3"
             })
-            .args([
-                "-u",
-                "-m",
-                "http.server",
-                port_text.as_str(),
-                "--bind",
-                "127.0.0.1",
-            ])
+            .args(["-u", "-c", PYTHON_HTTP_SERVER])
             .env("WARDIAN_SESSION_ID", &config.session_id)
+            .env("WARDIAN_TEST_READY_PATH", &ready_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(stderr))
             .spawn()
             .expect("spawn isolated marked Python HTTP server"),
         );
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            assert!(
-                server.0.try_wait().expect("poll test server").is_none(),
-                "fixture server exited before startup"
-            );
-            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                break;
+        // Five seconds flaked on a loaded Windows CI runner; leave Python
+        // startup headroom while keeping this fixture wait finite and diagnosable.
+        const PYTHON_HTTP_SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+        let startup_started = Instant::now();
+        let deadline = startup_started + PYTHON_HTTP_SERVER_STARTUP_TIMEOUT;
+        let port = loop {
+            if let Some(status) = server.0.try_wait().expect("poll test server") {
+                let stderr = std::fs::read_to_string(&stderr_path)
+                    .unwrap_or_else(|error| format!("<could not read stderr: {error}>"));
+                panic!("fixture server exited before readiness ({status}); stderr:\n{stderr}");
             }
-            assert!(
-                Instant::now() < deadline,
-                "fixture server did not become ready"
-            );
+            let port = std::fs::read_to_string(&ready_path)
+                .ok()
+                .and_then(|value| value.trim().parse::<u16>().ok());
+            if let Some(port) = port {
+                if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                    break port;
+                }
+            }
+            if Instant::now() >= deadline {
+                let _ = server.0.kill();
+                let _ = server.0.wait();
+                let stderr = std::fs::read_to_string(&stderr_path)
+                    .unwrap_or_else(|error| format!("<could not read stderr: {error}>"));
+                panic!(
+                    "fixture server did not publish a bound port and accept TCP within {:?}; stderr:\n{stderr}",
+                    startup_started.elapsed()
+                );
+            }
             std::thread::sleep(Duration::from_millis(25));
-        }
+        };
 
         let persisted = wardian_core::db::get_all_agents()
             .expect("read persisted agents")
