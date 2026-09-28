@@ -840,6 +840,71 @@ fn startup_prompt_ready_for_reader(
         && startup_prompt_is_ready(provider, startup_prompt_pending, startup_screen)
 }
 
+/// How many times a reader re-resolves a screen it could not read, and how long
+/// it waits between attempts. Bounded so an unreadable OpenCode screen cannot hold a
+/// task open indefinitely, and slow enough that a provider still painting gets
+/// several chances to settle.
+const STARTUP_READINESS_RECHECK_ATTEMPTS: usize = 10;
+const STARTUP_READINESS_RECHECK_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(500);
+
+/// Whether the reader must re-resolve its startup screen later.
+///
+/// The reader only evaluates readiness when a chunk arrives. When the current
+/// screen cannot be resolved on the chunk that carried the ready prompt, that
+/// evaluation is lost, and a provider now sitting at its composer emits nothing
+/// further to trigger another. Startup then stays pending for the life of the
+/// session. This recheck is limited to OpenCode; other providers have distinct
+/// trust and attachment gates that this path does not own.
+fn startup_readiness_needs_recheck(
+    provider: &str,
+    startup_prompt_pending: bool,
+    screen_resolved: bool,
+) -> bool {
+    startup_prompt_pending && !screen_resolved && provider == "opencode"
+}
+
+/// Re-evaluate the current OpenCode screen after a chunk's snapshot failed.
+/// The runtime identity and normal composer predicate remain mandatory on
+/// every attempt; elapsed time alone cannot establish readiness.
+async fn wait_for_opencode_startup_screen(
+    broker: &crate::state::terminal_session::TerminalSessionBroker,
+    session_id: &str,
+    runtime_generation: u64,
+    attempts: usize,
+    interval: std::time::Duration,
+) -> bool {
+    for _ in 0..attempts {
+        tokio::time::sleep(interval).await;
+        let ready = broker
+            .snapshot(session_id)
+            .await
+            .ok()
+            .filter(|snapshot| snapshot.runtime_generation == runtime_generation)
+            .is_some_and(|snapshot| {
+                crate::control::provider_output_has_startup_ready_prompt(
+                    "opencode",
+                    &snapshot.visible_grid,
+                )
+            });
+        if ready {
+            return true;
+        }
+    }
+    false
+}
+
+/// Release the reader's startup-only title gate after its async recheck
+/// successfully published readiness.
+fn finish_startup_pending_after_recheck(
+    startup_prompt_pending: &mut bool,
+    recheck_published: &std::sync::atomic::AtomicBool,
+) {
+    if recheck_published.load(std::sync::atomic::Ordering::Acquire) {
+        *startup_prompt_pending = false;
+    }
+}
+
 fn finish_claude_trust_readiness(
     trust_state: &std::sync::atomic::AtomicU8,
     readiness_claimed: &std::sync::atomic::AtomicBool,
@@ -870,6 +935,56 @@ fn claim_startup_readiness(claimed: &std::sync::atomic::AtomicBool) -> bool {
             std::sync::atomic::Ordering::Acquire,
         )
         .is_ok()
+}
+
+/// A rejected delayed publication leaves the startup claim available for the
+/// reader or another current-runtime observation.
+fn finish_startup_readiness_claim(claimed: &std::sync::atomic::AtomicBool, published: bool) {
+    if !published {
+        claimed.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// A ready chunk may arrive while another startup publisher owns the claim.
+/// Recheck the current screen after that publisher finishes, including after
+/// a rejected publication, so the last chunk is not the only chance to ready.
+async fn retry_startup_readiness<Check, CheckFuture, Publish, PublishFuture>(
+    claimed: &std::sync::atomic::AtomicBool,
+    attempts: usize,
+    mut check_ready: Check,
+    mut publish: Publish,
+) -> bool
+where
+    Check: FnMut() -> CheckFuture,
+    CheckFuture: std::future::Future<Output = bool>,
+    Publish: FnMut() -> PublishFuture,
+    PublishFuture: std::future::Future<Output = bool>,
+{
+    let mut remaining = attempts;
+    let mut rechecks_after_handoff = 2;
+    while remaining > 0 {
+        remaining -= 1;
+        if !check_ready().await {
+            continue;
+        }
+        if !claim_startup_readiness(claimed) {
+            if rechecks_after_handoff > 0 {
+                rechecks_after_handoff -= 1;
+                remaining = attempts;
+            }
+            continue;
+        }
+        let published = publish().await;
+        finish_startup_readiness_claim(claimed, published);
+        if published {
+            return true;
+        }
+        if rechecks_after_handoff > 0 {
+            rechecks_after_handoff -= 1;
+            remaining = attempts;
+        }
+    }
+    false
 }
 
 impl AntigravityTranscriptTracker {
@@ -2845,6 +2960,11 @@ async fn spawn_agent_inner(
             (store, brief, expected_folder.clone(), memory_process_key)
         })));
     let startup_readiness_claimed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // One recheck task per reader, however many chunks fail to resolve.
+    let startup_readiness_recheck_started =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let startup_readiness_recheck_published =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let pi_exit_broker = pi_attachment
         .as_ref()
         .map(|_| app_state.native_delivery.clone());
@@ -2903,6 +3023,10 @@ async fn spawn_agent_inner(
                     break;
                 }
                 Ok(n) => {
+                    finish_startup_pending_after_recheck(
+                        &mut startup_prompt_pending,
+                        &startup_readiness_recheck_published,
+                    );
                     crate::utils::runtime_profile::record_event(
                         crate::utils::runtime_profile::RuntimeMetric::PtyRead,
                         n as u64,
@@ -2990,6 +3114,72 @@ async fn spawn_agent_inner(
                         trust_state,
                         startup_screen.as_deref(),
                     );
+                    // OpenCode can stop writing after its ready composer was
+                    // drawn. If this chunk could not resolve the current screen,
+                    // recheck that exact runtime without sending provider input.
+                    if startup_readiness_needs_recheck(
+                        &provider_name_for_pty,
+                        startup_prompt_pending,
+                        startup_screen.is_some(),
+                    ) && !startup_readiness_recheck_started
+                        .swap(true, std::sync::atomic::Ordering::AcqRel)
+                    {
+                        let recheck_broker = terminal_sessions.clone();
+                        let recheck_session = sid_for_pty.clone();
+                        let recheck_app = pty_app.clone();
+                        let recheck_status = current_status_clone.clone();
+                        let recheck_observation = startup_observation.clone();
+                        let recheck_claimed = startup_readiness_claimed.clone();
+                        let recheck_published = startup_readiness_recheck_published.clone();
+                        let recheck_memory_injection = pending_memory_injection.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let state = recheck_app.state::<AppState>();
+                            let published = retry_startup_readiness(
+                                &recheck_claimed,
+                                STARTUP_READINESS_RECHECK_ATTEMPTS,
+                                || wait_for_opencode_startup_screen(
+                                    &recheck_broker,
+                                    &recheck_session,
+                                    reader_runtime_generation,
+                                    1,
+                                    STARTUP_READINESS_RECHECK_INTERVAL,
+                                ),
+                                || crate::control::startup_readiness::
+                                    publish_startup_readiness_from_starting(
+                                        state.inner(),
+                                        &recheck_session,
+                                        &recheck_observation,
+                                        wardian_core::control::ProviderReadyEvidence::PromptDetected,
+                                        || async {
+                                            crate::control::startup_readiness::opencode_current_screen_is_ready(
+                                                state.inner(), &recheck_session,
+                                            ).await.unwrap_or(false)
+                                        },
+                                        |next_status| set_agent_status(
+                                            &recheck_app,
+                                            &recheck_session,
+                                            &recheck_status,
+                                            next_status,
+                                        ),
+                                    ),
+                            ).await;
+                            if published {
+                                if let Ok(mut pending) = recheck_memory_injection.lock() {
+                                    record_pending_memory_injection(
+                                        &mut pending,
+                                        &recheck_session,
+                                        "opencode",
+                                    );
+                                }
+                                recheck_published.store(true, std::sync::atomic::Ordering::Release);
+                                crate::control::spawn_agent_messaging_if_idle(
+                                    &recheck_app,
+                                    &recheck_session,
+                                    "Idle",
+                                );
+                            }
+                        });
+                    }
                     let assigned_claude_trust_prompt =
                         startup_screen.as_deref().is_some_and(|output| {
                             provider_name_for_pty == "claude"
@@ -2999,37 +3189,122 @@ async fn spawn_agent_inner(
                                 )
                         });
                     if startup_ready {
-                        startup_prompt_pending = false;
-                        if let Ok(mut pending) = pending_memory_injection.lock() {
-                            record_pending_memory_injection(
-                                &mut pending,
-                                &sid_for_pty,
-                                &provider_name_for_pty,
-                            );
+                        let claimed = !defer_codex_startup_readiness
+                            && claim_startup_readiness(&startup_readiness_claimed);
+                        if provider_name_for_pty != "opencode" {
+                            startup_prompt_pending = false;
+                            if let Ok(mut pending) = pending_memory_injection.lock() {
+                                record_pending_memory_injection(
+                                    &mut pending,
+                                    &sid_for_pty,
+                                    &provider_name_for_pty,
+                                );
+                            }
                         }
-                        if !defer_codex_startup_readiness
-                            && claim_startup_readiness(&startup_readiness_claimed)
-                        {
-                            set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, "Idle");
+                        if claimed {
                             let readiness_app = pty_app.clone();
                             let readiness_session_id = sid_for_pty.clone();
                             let observation = startup_observation.clone();
-                            tauri::async_runtime::spawn(async move {
-                                let state = readiness_app.state::<AppState>();
-                                crate::control::startup_readiness::publish_startup_readiness(
-                                    Some(&readiness_app),
-                                    state.inner(),
-                                    &readiness_session_id,
-                                    &observation,
-                                    wardian_core::control::ProviderReadyEvidence::PromptDetected,
-                                )
-                                .await;
-                                crate::control::spawn_agent_messaging_if_idle(
-                                    &readiness_app,
-                                    &readiness_session_id,
+                            if provider_name_for_pty == "opencode" {
+                                let readiness_status = current_status_clone.clone();
+                                let readiness_claimed = startup_readiness_claimed.clone();
+                                let readiness_published =
+                                    startup_readiness_recheck_published.clone();
+                                let readiness_memory_injection = pending_memory_injection.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let state = readiness_app.state::<AppState>();
+                                    let mut published = crate::control::startup_readiness::
+                                        publish_startup_readiness_from_starting(
+                                            state.inner(),
+                                            &readiness_session_id,
+                                            &observation,
+                                            wardian_core::control::ProviderReadyEvidence::PromptDetected,
+                                            || async {
+                                                crate::control::startup_readiness::opencode_current_screen_is_ready(
+                                                    state.inner(), &readiness_session_id,
+                                                ).await.unwrap_or(false)
+                                            },
+                                            |next_status| set_agent_status(
+                                                &readiness_app,
+                                                &readiness_session_id,
+                                                &readiness_status,
+                                                next_status,
+                                            ),
+                                        )
+                                        .await;
+                                    finish_startup_readiness_claim(&readiness_claimed, published);
+                                    if !published {
+                                        published = retry_startup_readiness(
+                                            &readiness_claimed,
+                                            STARTUP_READINESS_RECHECK_ATTEMPTS,
+                                            || wait_for_opencode_startup_screen(
+                                                &state.terminal_sessions,
+                                                &readiness_session_id,
+                                                observation.runtime_generation,
+                                                1,
+                                                STARTUP_READINESS_RECHECK_INTERVAL,
+                                            ),
+                                            || crate::control::startup_readiness::
+                                                publish_startup_readiness_from_starting(
+                                                    state.inner(),
+                                                    &readiness_session_id,
+                                                    &observation,
+                                                    wardian_core::control::ProviderReadyEvidence::PromptDetected,
+                                                    || async {
+                                                        crate::control::startup_readiness::opencode_current_screen_is_ready(
+                                                            state.inner(), &readiness_session_id,
+                                                        ).await.unwrap_or(false)
+                                                    },
+                                                    |next_status| set_agent_status(
+                                                        &readiness_app,
+                                                        &readiness_session_id,
+                                                        &readiness_status,
+                                                        next_status,
+                                                    ),
+                                                ),
+                                        ).await;
+                                    }
+                                    if published {
+                                        if let Ok(mut pending) = readiness_memory_injection.lock() {
+                                            record_pending_memory_injection(
+                                                &mut pending,
+                                                &readiness_session_id,
+                                                "opencode",
+                                            );
+                                        }
+                                        readiness_published
+                                            .store(true, std::sync::atomic::Ordering::Release);
+                                        crate::control::spawn_agent_messaging_if_idle(
+                                            &readiness_app,
+                                            &readiness_session_id,
+                                            "Idle",
+                                        );
+                                    }
+                                });
+                            } else {
+                                set_agent_status(
+                                    &pty_app,
+                                    &sid_for_pty,
+                                    &current_status_clone,
                                     "Idle",
                                 );
-                            });
+                                tauri::async_runtime::spawn(async move {
+                                    let state = readiness_app.state::<AppState>();
+                                    crate::control::startup_readiness::publish_startup_readiness(
+                                        Some(&readiness_app),
+                                        state.inner(),
+                                        &readiness_session_id,
+                                        &observation,
+                                        wardian_core::control::ProviderReadyEvidence::PromptDetected,
+                                    )
+                                    .await;
+                                    crate::control::spawn_agent_messaging_if_idle(
+                                        &readiness_app,
+                                        &readiness_session_id,
+                                        "Idle",
+                                    );
+                                });
+                            }
                         }
                     } else if claude_trust_reader_should_mark_action_needed(
                         trust_state,
@@ -6417,6 +6692,194 @@ mod tests {
             input_rx.try_recv().is_err(),
             "observing startup never submits input"
         );
+    }
+
+    /// #1456: the reader evaluates readiness only when a chunk arrives. If the
+    /// chunk carrying the ready prompt cannot resolve a screen, that evaluation
+    /// is lost and a provider parked at its composer sends nothing further, so
+    /// startup stays pending for the life of the session.
+    #[tokio::test]
+    async fn unresolvable_startup_screen_is_rechecked_instead_of_pinning_startup() {
+        let broker =
+            std::sync::Arc::new(crate::state::terminal_session::TerminalSessionBroker::default());
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(1);
+        let generation = broker
+            .start_or_replace_runtime(
+                "recheck",
+                crate::state::terminal_session::TerminalRuntimeHandles::new(input_tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry {
+                    cols: 120,
+                    rows: 24,
+                },
+            )
+            .await
+            .unwrap();
+
+        // The chunk that carries the ready composer is applied to the broker.
+        let ready = "[2J[HAsk anything...
+Build  mimo-v2.5-free
+ctrl+p commands";
+        let output_broker = broker.clone();
+        tokio::task::spawn_blocking(move || {
+            output_broker.process_output_blocking("recheck", generation, ready.as_bytes().to_vec())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        // The screen is genuinely ready now.
+        let settled = broker.snapshot("recheck").await.unwrap();
+        assert!(crate::control::provider_output_has_startup_ready_prompt(
+            "opencode",
+            &settled.visible_grid
+        ));
+
+        // The reader could not resolve it on that chunk, so its evaluation
+        // yields false and startup stays pending. This is the observed failure.
+        let mut startup_prompt_pending = true;
+        assert!(!startup_prompt_ready_for_reader(
+            "opencode",
+            startup_prompt_pending,
+            CLAUDE_TRUST_CONFIRMATION_NOT_STARTED,
+            None,
+        ));
+        assert!(startup_prompt_pending, "startup is still waiting");
+        assert!(startup_readiness_needs_recheck(
+            "opencode",
+            startup_prompt_pending,
+            false,
+        ));
+
+        // Exercise the actual bounded broker recheck, including the runtime
+        // identity guard, rather than merely rerunning the prompt predicate.
+        let interval = std::time::Duration::from_millis(1);
+        assert!(
+            wait_for_opencode_startup_screen(&broker, "recheck", generation, 1, interval).await,
+            "a settled current composer completes the lost evaluation"
+        );
+        assert!(
+            !wait_for_opencode_startup_screen(&broker, "missing", generation, 1, interval).await,
+            "a missing screen cannot authorize readiness"
+        );
+        assert!(
+            !wait_for_opencode_startup_screen(&broker, "recheck", generation + 1, 1, interval)
+                .await,
+            "a replaced runtime cannot authorize the old reader"
+        );
+        let output_broker = broker.clone();
+        tokio::task::spawn_blocking(move || {
+            output_broker.process_output_blocking(
+                "recheck",
+                generation,
+                b"\x1b[2J\x1b[HLoading session...".to_vec(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            !wait_for_opencode_startup_screen(&broker, "recheck", generation, 1, interval).await,
+            "an unready current screen cannot authorize readiness"
+        );
+        assert!(!startup_readiness_needs_recheck("claude", true, false));
+        assert!(!startup_readiness_needs_recheck("pi", true, false));
+
+        // The async publication wakes the reader's title gate on its next
+        // chunk; a failed publication must leave that gate in place.
+        let recheck_published = std::sync::atomic::AtomicBool::new(false);
+        finish_startup_pending_after_recheck(&mut startup_prompt_pending, &recheck_published);
+        assert!(startup_prompt_pending);
+        recheck_published.store(true, std::sync::atomic::Ordering::Release);
+        finish_startup_pending_after_recheck(&mut startup_prompt_pending, &recheck_published);
+        assert!(!startup_prompt_pending);
+
+        assert!(
+            input_rx.try_recv().is_err(),
+            "rechecking startup never submits input"
+        );
+    }
+
+    #[test]
+    fn rejected_startup_publication_releases_claim_for_current_runtime() {
+        let claimed = std::sync::atomic::AtomicBool::new(false);
+        assert!(claim_startup_readiness(&claimed));
+        assert!(!claim_startup_readiness(&claimed));
+        finish_startup_readiness_claim(&claimed, false);
+        assert!(claim_startup_readiness(&claimed));
+        finish_startup_readiness_claim(&claimed, true);
+        assert!(!claim_startup_readiness(&claimed));
+    }
+
+    #[tokio::test]
+    async fn ready_chunk_while_recheck_claimed_is_published_without_more_output() {
+        let broker = crate::state::terminal_session::TerminalSessionBroker::default();
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(1);
+        let generation = broker
+            .start_or_replace_runtime(
+                "handoff",
+                crate::state::terminal_session::TerminalRuntimeHandles::new(input_tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry {
+                    cols: 120,
+                    rows: 24,
+                },
+            )
+            .await
+            .unwrap();
+        let broker = std::sync::Arc::new(broker);
+        let output_broker = broker.clone();
+        tokio::task::spawn_blocking(move || {
+            output_broker.process_output_blocking(
+                "handoff",
+                generation,
+                b"\x1b[2J\x1b[HAsk anything...\r\nBuild  mimo-v2.5-free\r\nctrl+p commands"
+                    .to_vec(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let initial_sequence = broker.snapshot("handoff").await.unwrap().sequence_barrier;
+        let claimed = std::sync::atomic::AtomicBool::new(false);
+        let reader_observed = std::sync::atomic::AtomicBool::new(false);
+        let publications = std::sync::atomic::AtomicUsize::new(0);
+        assert!(
+            retry_startup_readiness(
+                &claimed,
+                1,
+                || wait_for_opencode_startup_screen(
+                    &broker,
+                    "handoff",
+                    generation,
+                    1,
+                    std::time::Duration::from_millis(1),
+                ),
+                || {
+                    let attempt = publications.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let claimed = &claimed;
+                    let reader_observed = &reader_observed;
+                    async move {
+                        if attempt == 0 {
+                            assert!(
+                                !claim_startup_readiness(claimed),
+                                "reader sees the last ready chunk while recheck owns the claim"
+                            );
+                            reader_observed.store(true, std::sync::atomic::Ordering::Release);
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                },
+            )
+            .await
+        );
+        assert!(reader_observed.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(publications.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            broker.snapshot("handoff").await.unwrap().sequence_barrier,
+            initial_sequence
+        );
+        assert!(input_rx.try_recv().is_err());
     }
 
     #[test]
