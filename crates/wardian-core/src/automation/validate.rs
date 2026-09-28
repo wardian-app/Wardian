@@ -64,6 +64,26 @@ impl ValidationReport {
     }
 }
 
+// Delivery preflight happens before tasks. Its inputs can only come from the
+// invocation or the persisted run identity, never a reviewer-selected target.
+fn validate_delivery_template(value: &str) -> Result<(), &'static str> {
+    if value.trim().is_empty() {
+        return Err("expected a nonempty delivery field");
+    }
+    let mut rest = value;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let end = after.find("}}").ok_or("unterminated interpolation")?;
+        let path = after[..end].trim();
+        validate_path(path)?;
+        if path != "run.id" && !path.starts_with("trigger.output.") {
+            return Err("delivery fields only support trigger.output values and reserved run.id");
+        }
+        rest = &after[end + 2..];
+    }
+    Ok(())
+}
+
 /// Validate a blueprint against the registry and the structural rules
 /// (DAG-only, declared ports, container parents). Returns every finding so the
 /// builder can surface them all; the engine refuses to run when `is_valid()` is
@@ -156,6 +176,20 @@ pub fn validate(blueprint: &Blueprint) -> ValidationReport {
 
         if node.r#type == "decision" {
             validate_decision_choices(&mut report, blueprint, node);
+        }
+
+        if node.r#type == "message_send" {
+            for key in ["recipient", "artifact_path"] {
+                if let Some(value) = node.fields.get(key).and_then(|v| v.as_str()) {
+                    if let Err(message) = validate_delivery_template(value) {
+                        report.diagnostics.push(Diagnostic::error(
+                            "invalid_delivery_template",
+                            format!("node `{}` field `{key}`: {message}", node.id),
+                            Some(&node.id),
+                        ));
+                    }
+                }
+            }
         }
 
         // Container parents must point at a loop node.

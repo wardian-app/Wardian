@@ -9,14 +9,18 @@ pub mod event;
 pub mod executor;
 pub mod graph;
 pub mod interpolate;
+pub mod message_artifact;
 pub mod state;
 pub mod store;
+
+#[cfg(test)]
+mod message_send_tests;
 
 pub use driver::Engine;
 pub use error::{EngineError, Result, StepError};
 pub use event::{Event, EventKind};
 pub use executor::{
-    AgentTaskRequest, ChosenPort, DecisionRequest, MemoryCommitRequest, MockExecutor,
-    NotifyRequest, ScriptRequest, ShellRequest, StepExecutor, StepOutput,
+    AgentTaskRequest, ChosenPort, DecisionRequest, MemoryCommitRequest, MessageSendRequest,
+    MockExecutor, NotifyRequest, ScriptRequest, ShellRequest, StepExecutor, StepOutput,
 };
 pub use state::{NodeStatus, RunState, RunStatus};

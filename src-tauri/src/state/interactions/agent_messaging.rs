@@ -203,6 +203,49 @@ impl InteractionState {
         Ok(admitted)
     }
 
+    pub(crate) async fn check_automation_recipient(
+        &self,
+        recipient: &str,
+    ) -> Result<(), AgentMessagingError> {
+        if self.deleted_sessions.lock().await.contains(recipient) {
+            return Err(AgentMessagingError::new(
+                "not_found",
+                "Recipient was deleted.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Host-only informational delivery. Serialized with deletion and all other
+    /// interaction mutations; canonical admission completes before cache updates.
+    pub(crate) async fn admit_host_automation_message(
+        &self,
+        run_id: &str,
+        node: &str,
+        recipient: &str,
+        message: &str,
+    ) -> Result<store::Admitted, AgentMessagingError> {
+        let _mutation = self.mutation_lock.lock().await;
+        if self.deleted_sessions.lock().await.contains(recipient) {
+            return Err(AgentMessagingError::new(
+                "not_found",
+                "Recipient was deleted.",
+            ));
+        }
+        let generation = self
+            .current_provider_input_generation(recipient)
+            .await
+            .unwrap_or(0);
+        let admitted = store::with_db(|conn| {
+            store::admit_host_automation_message(conn, run_id, node, recipient, message, generation)
+        })?;
+        self.records
+            .lock()
+            .await
+            .insert(admitted.record.id.clone(), admitted.record.clone());
+        Ok(admitted)
+    }
+
     /// Authorized v2 completion is atomic in storage and then updates both caches.
     pub async fn reply_agent_message(
         &self,

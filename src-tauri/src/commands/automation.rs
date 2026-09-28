@@ -776,7 +776,8 @@ pub async fn automation_resume(
         &provider,
     )
     .await;
-    let owner_id = format!("{}/{}", blueprint.id, run_id);
+    let resumed_state = wardian_core::engine::Engine::replay(&blueprint, &run_root)
+        .map_err(|error| error.to_string())?;
     let app_for_inbox = app.clone();
     let blueprint_for_inbox = blueprint.clone();
     let run_root_for_inbox = run_root.clone();
@@ -805,13 +806,13 @@ pub async fn automation_resume(
             };
         let exec = runs::live_executor_with_catalog_assignments_and_app(
             app,
+            &resumed_state,
             workspace,
             provider,
             bindings,
             assignments,
             agent_catalog,
-        )
-        .with_owner_id(owner_id);
+        );
         let exec = match memory_principal {
             Some(agent_id) => exec.with_memory_principal(agent_id),
             None => exec,
@@ -928,7 +929,6 @@ pub async fn approve_automation_for_surface(
             &blueprint, &run_root, &node, &actor, note,
         )
         .map_err(|error| error.to_string())?;
-        let owner_id = format!("{}/{}", blueprint.id, run_id);
         let app_for_inbox = app.clone();
         let blueprint_for_inbox = blueprint.clone();
         let run_root_for_inbox = run_root.clone();
@@ -937,13 +937,13 @@ pub async fn approve_automation_for_surface(
             let _headless_execution = headless_execution;
             let exec = runs::live_executor_with_catalog_assignments_and_app(
                 app,
+                &run_state,
                 workspace,
                 provider,
                 bindings,
                 assignments,
                 agent_catalog,
-            )
-            .with_owner_id(owner_id);
+            );
             let exec = match invocation.and_then(|value| value.memory_principal) {
                 Some(agent_id) => exec.with_memory_principal(agent_id),
                 None => exec,

@@ -389,6 +389,46 @@
       "version": 1
     },
     {
+      "id": "message_send",
+      "kind": "engine",
+      "category": "Action",
+      "label": "Send message",
+      "icon": "send",
+      "description": "Admit an exact UTF-8 workspace artifact as a host informational message. Requires the application host; no task or reply is created.",
+      "supported": true,
+      "fields": [
+        {
+          "id": "recipient",
+          "kind": "text",
+          "label": "Recipient",
+          "required": true,
+          "multiple": false,
+          "help": "One exact UUID or unambiguous exact agent name. No class or broadcast selectors. Must resolve before tasks start."
+        },
+        {
+          "id": "artifact_path",
+          "kind": "text",
+          "label": "Artifact path",
+          "required": true,
+          "multiple": false,
+          "help": "Workspace-relative UTF-8 file, at most 64 KiB. Use a run-specific directory such as .wardian-review/{{run.id}}/review.md; an existing artifact fails fresh-run preflight."
+        }
+      ],
+      "inputs": [
+        {
+          "id": "in",
+          "label": "In"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Out"
+        }
+      ],
+      "version": 1
+    },
+    {
       "id": "notify",
       "kind": "engine",
       "category": "State",

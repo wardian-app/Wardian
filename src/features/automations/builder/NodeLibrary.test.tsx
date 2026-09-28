@@ -22,7 +22,7 @@ describe('NodeLibrary', () => {
   it('renders rich registry details for node discovery', () => {
     render(<NodeLibrary mode="panel" onAdd={() => {}} />);
 
-    const task = screen.getByRole('button', { name: /task/i });
+    const task = cardByTitle('Task');
     expect(within(task).getByText(/Delegate work to an agent/i)).toBeVisible();
     expect(within(task).getByText(/Requires Agent, Prompt/i)).toBeVisible();
     expect(within(task).queryByText(/In In/i)).toBeNull();
