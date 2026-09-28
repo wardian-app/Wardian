@@ -338,10 +338,11 @@ provisional roster entry; a durable-state failure leaves that entry visible in
 `Error` behind the retained stop fence. Restored agents and other providers
 keep their existing synchronous publication path. A restored Codex runtime
 replaces its `Restoring` placeholder only after owner attachment succeeds. That
-publication reconciles the latest `Idle` or `Processing...` transition deferred
-during roster contention for the same attached runtime. A missing attachment,
-missing runtime generation, or later `Off` or `Action Needed` state does not
-become `Idle`.
+publication reconciles the latest accepted status transition for that exact
+attached runtime, including `Off`, `Error`, or `Action Needed` reserved before
+publication. With no accepted transition, the attached runtime becomes `Idle`.
+A missing attachment, missing runtime generation, or already committed terminal
+state does not become `Idle`.
 Queued status changes reserve an intent revision for the exact runtime status
 Arc after attachment admission. A newer accepted intent supersedes an older
 queue entry; rejected attempts do not. Value commits have a separate revision

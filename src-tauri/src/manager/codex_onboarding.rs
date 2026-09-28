@@ -132,19 +132,14 @@ pub(crate) async fn apply_deferred_status_transition(
     if !deferred_status_target_is_ready(state, session_id, current_status).await {
         return false;
     }
-    let Ok(mut status) = current_status.lock() else {
-        return false;
-    };
-    // A later approval, error, or exit status supersedes the queued update.
-    if state.status_intent_revision(session_id, current_status) != intent_revision
-        || *status != expected_status
-        || *status == next_status
-    {
-        return false;
-    }
-    *status = next_status.to_string();
-    state.commit_status_revision(session_id, current_status, next_status);
-    true
+    super::apply_admitted_status_transition(
+        state,
+        session_id,
+        current_status,
+        expected_status,
+        intent_revision,
+        next_status,
+    )
 }
 
 pub(crate) async fn deferred_status_target_is_ready(

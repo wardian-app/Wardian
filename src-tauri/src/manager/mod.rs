@@ -202,27 +202,40 @@ pub(crate) fn set_agent_status(
         }
         codex_onboarding::CodexStatusAdmission::Allowed => {}
     }
-    if let Ok(mut status) = current_status.lock() {
-        if app
-            .state::<AppState>()
-            .status_intent_revision(session_id, current_status)
-            != intent_revision
-            || *status != expected_status
-        {
-            return;
-        }
-        if *status != next_status {
-            *status = next_status.to_string();
-            app.state::<AppState>()
-                .commit_status_revision(session_id, current_status, next_status);
-            schedule_agent_status_observation(
-                app,
-                session_id,
-                current_status,
-                next_status.to_string(),
-            );
-        }
+    if apply_admitted_status_transition(
+        app.state::<AppState>().inner(),
+        session_id,
+        current_status,
+        &expected_status,
+        intent_revision,
+        next_status,
+    ) {
+        schedule_agent_status_observation(app, session_id, current_status, next_status.to_string());
     }
+}
+
+/// Commit an admitted status only while its exact runtime and intent still win.
+/// The caller schedules observation after a successful value change.
+pub(crate) fn apply_admitted_status_transition(
+    state: &AppState,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    expected_status: &str,
+    intent_revision: u64,
+    next_status: &str,
+) -> bool {
+    let Ok(mut status) = current_status.lock() else {
+        return false;
+    };
+    if state.status_intent_revision(session_id, current_status) != intent_revision
+        || *status != expected_status
+        || *status == next_status
+    {
+        return false;
+    }
+    *status = next_status.to_string();
+    state.commit_status_revision(session_id, current_status, next_status);
+    true
 }
 
 /// Persists and emits an already-current status. Runtime replacement uses this
@@ -267,77 +280,18 @@ fn schedule_agent_status_observation(
         // looking up the input generation so an old status Arc cannot publish
         // Ready into a replacement between identity validation and the write.
         let _lifecycle = state.lock_agent_lifecycle(&status_session_id).await;
-        let Some(status) = crate::control::codex_menu_status::constrain_publication(
+        let Some(status) = persist_status_observation(
             state.inner(),
             &status_session_id,
             &current_status,
             &status,
+            status_sequence,
+            &observed_at,
         )
         .await
         else {
             return;
         };
-        // Keep the map lock through the synchronous durable write. A runtime
-        // replacement must wait until this observation is either rejected or
-        // committed, which prevents an old Arc from winning the database race
-        // after the replacement installs its own status incarnation.
-        let agents = state.agents.lock().await;
-        let Some(agent) = agents.get(&status_session_id) else {
-            log_debug(&format!(
-                "[Wardian] Ignoring stale status '{}' for replaced session {}",
-                status, status_session_id
-            ));
-            return;
-        };
-        if !std::sync::Arc::ptr_eq(&agent.current_status, &current_status) {
-            log_debug(&format!(
-                "[Wardian] Ignoring stale status '{}' for replaced session {}",
-                status, status_session_id
-            ));
-            return;
-        }
-        {
-            // Keep the status value locked through the synchronous durable
-            // write and watch update. A newer transition cannot mutate this
-            // Arc until the older observation has finished its ordered side
-            // effects.
-            let Ok(current_status_value) = agent.current_status.lock() else {
-                return;
-            };
-            if *current_status_value != status {
-                log_debug(&format!(
-                    "[Wardian] Ignoring superseded status '{}' for session {}",
-                    status, status_session_id
-                ));
-                return;
-            }
-
-            // Keep the remote roster useful after the current runtime identity
-            // has been verified, even when the following durable write or a
-            // later remote read encounters another busy agent-state path.
-            state.set_remote_agent_status(&status_session_id, &status, status_sequence);
-
-            // Phase 2: Persist while the reporting runtime still owns the
-            // active agent slot. `update_agent_status` is synchronous, so no
-            // await can let a replacement interleave between the identity
-            // check and write.
-            let _ = wardian_core::db::update_agent_status(&status_session_id, &status, None);
-            if let Some(agent) = agents.get(&status_session_id) {
-                if let Ok(mut last_status_at) = agent.last_status_at.lock() {
-                    *last_status_at = Some(observed_at.clone());
-                }
-                if let Ok(mut watch_state) = agent.watch_state.lock() {
-                    watch_state.push_event(
-                        "status",
-                        serde_json::json!({
-                            "status": wardian_core::identity::normalize_status(&status),
-                            "observed_at": observed_at,
-                        }),
-                    );
-                }
-            }
-        }
-        drop(agents);
 
         // Provider-input readiness and UI events are asynchronous side
         // effects. Revalidate after each await so a late observation cannot
@@ -409,6 +363,71 @@ fn schedule_agent_status_observation(
         );
         crate::control::spawn_agent_messaging_if_idle(&status_app, &status_session_id, &status);
     });
+}
+
+/// Persist an observation for the current runtime while its lifecycle lock is held.
+/// The caller remains responsible for later readiness and UI side effects.
+pub(crate) async fn persist_status_observation(
+    state: &AppState,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    requested_status: &str,
+    status_sequence: u64,
+    observed_at: &str,
+) -> Option<String> {
+    let status = crate::control::codex_menu_status::constrain_publication(
+        state,
+        session_id,
+        current_status,
+        requested_status,
+    )
+    .await?;
+    // Keep the map lock through the synchronous durable write so replacement
+    // cannot publish a new runtime before this observation is resolved.
+    let agents = state.agents.lock().await;
+    let Some(agent) = agents.get(session_id) else {
+        log_debug(&format!(
+            "[Wardian] Ignoring stale status '{}' for replaced session {}",
+            status, session_id
+        ));
+        return None;
+    };
+    if !std::sync::Arc::ptr_eq(&agent.current_status, current_status) {
+        log_debug(&format!(
+            "[Wardian] Ignoring stale status '{}' for replaced session {}",
+            status, session_id
+        ));
+        return None;
+    }
+    {
+        // Hold the value lock through the write and watch update so a newer
+        // transition cannot change this Arc between validation and persistence.
+        let Ok(current_status_value) = agent.current_status.lock() else {
+            return None;
+        };
+        if *current_status_value != status {
+            log_debug(&format!(
+                "[Wardian] Ignoring superseded status '{}' for session {}",
+                status, session_id
+            ));
+            return None;
+        }
+        state.set_remote_agent_status(session_id, &status, status_sequence);
+        let _ = wardian_core::db::update_agent_status(session_id, &status, None);
+        if let Ok(mut last_status_at) = agent.last_status_at.lock() {
+            *last_status_at = Some(observed_at.to_string());
+        }
+        if let Ok(mut watch_state) = agent.watch_state.lock() {
+            watch_state.push_event(
+                "status",
+                serde_json::json!({
+                    "status": wardian_core::identity::normalize_status(&status),
+                    "observed_at": observed_at,
+                }),
+            );
+        }
+    }
+    Some(status)
 }
 
 pub(crate) async fn publish_telemetry_status_observation(

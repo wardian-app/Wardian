@@ -324,7 +324,7 @@ impl RestorePublication {
                         .filter(|value| {
                             matches!(
                                 wardian_core::identity::normalize_status(value).as_str(),
-                                "idle" | "processing"
+                                "idle" | "processing" | "action_required" | "off" | "error"
                             )
                         })
                         .unwrap_or_else(|| "Idle".to_string());
