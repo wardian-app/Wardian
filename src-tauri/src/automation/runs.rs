@@ -116,6 +116,7 @@ pub fn emit_automation_inbox_update_with_name(
     automation_name: &str,
     run_root: &Path,
 ) {
+    crate::commands::automation::update_automation_run_summary_cache(run_root);
     if let Some(update) = automation_inbox_update_with_name(automation_name, run_root) {
         let _ = app.emit(AUTOMATION_INBOX_UPDATED_EVENT, update);
     }

@@ -123,6 +123,7 @@ pub struct AppState {
     pub remote_inbox_runtime_cache: RwLock<Option<Vec<serde_json::Value>>>,
     pub remote_inbox_runtime_refreshing: std::sync::atomic::AtomicBool,
     pub remote_inbox_runtime_refreshed_at: std::sync::atomic::AtomicI64,
+    pub remote_inbox_runtime_refresh_failed: std::sync::atomic::AtomicBool,
     pub remote_inbox_runtime_generation: std::sync::atomic::AtomicU64,
     // Last frontend-reported effective theme. The frontend resolves "system"
     // before updating this so native PTY fallbacks can answer light/dark probes.
@@ -410,6 +411,11 @@ impl AppState {
             .clone()
     }
 
+    pub fn remote_inbox_runtime_refresh_failed(&self) -> bool {
+        self.remote_inbox_runtime_refresh_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub fn try_start_remote_inbox_runtime_refresh(&self) -> Option<u64> {
         const REFRESH_INTERVAL_MS: i64 = 5_000;
         let now = chrono::Utc::now().timestamp_millis();
@@ -444,10 +450,25 @@ impl AppState {
             == generation
         {
             *cached = Some(items);
+            self.remote_inbox_runtime_refresh_failed
+                .store(false, std::sync::atomic::Ordering::Release);
             self.remote_inbox_runtime_refreshed_at.store(
                 chrono::Utc::now().timestamp_millis(),
                 std::sync::atomic::Ordering::Release,
             );
+        }
+        self.remote_inbox_runtime_refreshing
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn fail_remote_inbox_runtime_refresh(&self, generation: u64) {
+        if self
+            .remote_inbox_runtime_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            == generation
+        {
+            self.remote_inbox_runtime_refresh_failed
+                .store(true, std::sync::atomic::Ordering::Release);
         }
         self.remote_inbox_runtime_refreshing
             .store(false, std::sync::atomic::Ordering::Release);
@@ -463,6 +484,8 @@ impl AppState {
         *cached = None;
         self.remote_inbox_runtime_refreshed_at
             .store(0, std::sync::atomic::Ordering::Release);
+        self.remote_inbox_runtime_refresh_failed
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -512,6 +535,7 @@ impl Default for AppState {
             remote_inbox_runtime_cache: RwLock::new(None),
             remote_inbox_runtime_refreshing: std::sync::atomic::AtomicBool::new(false),
             remote_inbox_runtime_refreshed_at: std::sync::atomic::AtomicI64::new(0),
+            remote_inbox_runtime_refresh_failed: std::sync::atomic::AtomicBool::new(false),
             remote_inbox_runtime_generation: std::sync::atomic::AtomicU64::new(0),
             terminal_theme: RwLock::new("dark".to_string()),
             terminal_sessions: Arc::new(TerminalSessionBroker::default()),
