@@ -1578,6 +1578,94 @@ async fn restore_retry_cancels_after_a_user_operation_replaces_error_status() {
 }
 
 #[tokio::test]
+async fn restore_retry_hands_its_exact_provider_spawn_lease_to_launch() {
+    let _environment = crate::utils::wardian_test_env_lock_async().await;
+    let _home = TestHome::new();
+    let config = AgentConfig {
+        session_id: uuid::Uuid::new_v4().to_string(),
+        provider: "mock".into(),
+        provider_config: ProviderConfig::Mock(Default::default()),
+        resume_session: Some(uuid::Uuid::new_v4().to_string()),
+        ..Default::default()
+    };
+    crate::manager::try_save_state_snapshot(std::slice::from_ref(&config))
+        .expect("persist selected config");
+    let saved: Vec<AgentConfig> = serde_json::from_slice(
+        &std::fs::read(_home.directory.path().join("settings/state.json"))
+            .expect("read selected config"),
+    )
+    .expect("decode selected config");
+    assert_eq!(
+        serde_json::to_value(&saved).unwrap(),
+        serde_json::to_value(std::slice::from_ref(&config)).unwrap(),
+        "retry requires the saved provider config to match the selected snapshot"
+    );
+    let now = chrono::Utc::now();
+    let previous = wardian_core::conversation_lease::ConversationLease {
+        agent_id: config.session_id.clone(),
+        provider: config.provider.clone(),
+        resume_session: config.resume_session.clone().unwrap(),
+        owner_kind: "agent_lifecycle".into(),
+        owner_id: uuid::Uuid::new_v4().to_string(),
+        acquisition_id: uuid::Uuid::new_v4().to_string(),
+        owner_node_id: None,
+        mode: "lifecycle_transition".into(),
+        started_at: now.to_rfc3339(),
+        heartbeat_at: now.to_rfc3339(),
+        expires_at: (now + chrono::Duration::minutes(5)).to_rfc3339(),
+    };
+    assert!(matches!(
+        wardian_core::conversation_lease::try_acquire_lease(previous.clone(), &now.to_rfc3339())
+            .expect("persist previous lifecycle owner"),
+        wardian_core::conversation_lease::ConversationLeaseAcquireOutcome::Acquired
+    ));
+    assert!(
+        crate::manager::spawn::provider_spawn_lease_for_launch(&config, None).is_err(),
+        "the first restore must wait for the previous lifecycle owner"
+    );
+
+    let state = AppState::new();
+    let expected_status = publish_error_placeholder(&state, &config).await;
+    let previous_owner = previous.owner();
+    let retry_config = config.clone();
+    let result = super::retry_once_after_lifecycle_lease_clear(
+        &state,
+        &config,
+        &expected_status,
+        move || async move {
+            wardian_core::conversation_lease::release_lease_owner_persisted(&previous_owner)
+                .expect("previous owner releases its exact lease");
+            true
+        },
+        || async { Some(()) },
+        move |publication, ()| async move {
+            let lease = crate::manager::spawn::acquire_restore_retry_spawn_lease(
+                std::slice::from_ref(&retry_config),
+                &retry_config,
+            )?
+            .expect("saved config still permits retry");
+            assert_eq!(lease.owner().owner_kind, "provider_spawn");
+            let owner = lease.owner().clone();
+            let mut inherited =
+                crate::manager::spawn::provider_spawn_lease_for_launch(&retry_config, Some(lease))?;
+            assert_eq!(inherited.owner(), &owner);
+            assert!(wardian_core::conversation_lease::load_leases_checked()?
+                .iter()
+                .any(|entry| entry.owner() == owner && entry.mode == "lifecycle_transition"));
+            inherited.release()?;
+            drop(publication);
+            Ok::<(), String>(())
+        },
+    )
+    .await
+    .expect("retry reclaim succeeds");
+    assert!(result.is_ok(), "retry lease handoff failed: {result:?}");
+    assert!(wardian_core::conversation_lease::load_leases_checked()
+        .expect("read released retry lease")
+        .is_empty());
+}
+
+#[tokio::test]
 async fn restore_retry_does_not_resurrect_a_cross_process_removed_agent() {
     let _environment = crate::utils::wardian_test_env_lock_async().await;
     let _home = TestHome::new();

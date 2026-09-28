@@ -1721,23 +1721,49 @@ fn validate_inherited_provider_spawn_lease(
     guard: &wardian_core::conversation_lease::PersistedConversationLeaseGuard,
 ) -> Result<(), String> {
     let now = chrono::Utc::now();
-    match wardian_core::conversation_lease::retarget_lifecycle_lease_persisted(
-        guard.owner(),
-        &config.session_id,
-        &config.provider,
-        provider_spawn_session_identity(config),
-        &now.to_rfc3339(),
-        &(now + PROVIDER_SPAWN_LEASE_DURATION).to_rfc3339(),
-    )? {
-        wardian_core::conversation_lease::ConversationLeaseRetargetOutcome::Retargeted => {}
-        wardian_core::conversation_lease::ConversationLeaseRetargetOutcome::Conflict(conflict) => {
-            return Err(format!(
-                "provider startup was withheld because saved conversation is leased by {} {} ({})",
-                conflict.owner_kind, conflict.owner_id, conflict.mode
-            ));
+    let now_rfc3339 = now.to_rfc3339();
+    if guard.owner().owner_kind == "provider_spawn" {
+        match wardian_core::conversation_lease::validate_provider_spawn_lease_persisted(
+            guard.owner(),
+            &config.session_id,
+            &config.provider,
+            provider_spawn_session_identity(config),
+            &now_rfc3339,
+        )? {
+            wardian_core::conversation_lease::ProviderSpawnLeaseValidationOutcome::Valid => {}
+            wardian_core::conversation_lease::ProviderSpawnLeaseValidationOutcome::Conflict(
+                conflict,
+            ) => {
+                return Err(format!(
+                    "provider startup was withheld because saved conversation is leased by {} {} ({})",
+                    conflict.owner_kind, conflict.owner_id, conflict.mode
+                ));
+            }
+            wardian_core::conversation_lease::ProviderSpawnLeaseValidationOutcome::NotActive => {
+                return Err("provider startup was withheld because its exact provider-spawn lease is no longer active for this agent and provider".to_string());
+            }
         }
-        wardian_core::conversation_lease::ConversationLeaseRetargetOutcome::NotActive => {
-            return Err("provider startup was withheld because its exact lifecycle lease is no longer active for this agent and provider".to_string());
+    } else {
+        match wardian_core::conversation_lease::retarget_lifecycle_lease_persisted(
+            guard.owner(),
+            &config.session_id,
+            &config.provider,
+            provider_spawn_session_identity(config),
+            &now_rfc3339,
+            &(now + PROVIDER_SPAWN_LEASE_DURATION).to_rfc3339(),
+        )? {
+            wardian_core::conversation_lease::ConversationLeaseRetargetOutcome::Retargeted => {}
+            wardian_core::conversation_lease::ConversationLeaseRetargetOutcome::Conflict(
+                conflict,
+            ) => {
+                return Err(format!(
+                    "provider startup was withheld because saved conversation is leased by {} {} ({})",
+                    conflict.owner_kind, conflict.owner_id, conflict.mode
+                ));
+            }
+            wardian_core::conversation_lease::ConversationLeaseRetargetOutcome::NotActive => {
+                return Err("provider startup was withheld because its exact lifecycle lease is no longer active for this agent and provider".to_string());
+            }
         }
     }
     check_provider_spawn_candidates(config)
