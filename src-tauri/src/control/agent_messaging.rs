@@ -283,6 +283,53 @@ async fn resolve_exact(state: &AppState, target: &str) -> Result<ResolvedRecipie
     }
 }
 
+/// Automation uses the same exact name/UUID resolver as managed messaging.
+/// Rechecking before admission plus the interaction deletion guard closes the
+/// gap between launch preflight and a later delivery.
+pub(crate) async fn resolve_automation_recipient(
+    state: &AppState,
+    target: &str,
+) -> Result<String, ControlError> {
+    let id = resolve_exact(state, target).await?.id;
+    state
+        .interactions
+        .check_automation_recipient(&id)
+        .await
+        .map_err(control_error)?;
+    Ok(id)
+}
+
+pub(crate) fn notify_information_admitted(
+    app: &AppHandle,
+    recipient: &str,
+    admitted: &store::Admitted,
+) {
+    let _ = app.emit("pair-activity-changed", ());
+    if !admitted.duplicate {
+        native::spawn_information(app, recipient);
+    }
+}
+
+pub(crate) async fn admit_automation_information(
+    state: &AppState,
+    run_id: &str,
+    node: &str,
+    recipient: &str,
+    message: &str,
+) -> Result<store::Admitted, ControlError> {
+    let id = resolve_automation_recipient(state, recipient).await?;
+    if id != recipient {
+        return Err(ControlError::not_found(
+            "Resolved automation recipient no longer exists.",
+        ));
+    }
+    state
+        .interactions
+        .admit_host_automation_message(run_id, node, &id, message)
+        .await
+        .map_err(control_error)
+}
+
 struct AdmissionInput<'a> {
     sender: &'a str,
     target: &'a str,
@@ -324,7 +371,9 @@ async fn admit(
         .await
         .map_err(control_error)?;
     if let Some(app) = app {
-        let _ = app.emit("pair-activity-changed", ());
+        if task {
+            let _ = app.emit("pair-activity-changed", ());
+        }
         if task && !admitted.duplicate {
             spawn_pending_tasks_with_request(
                 app,
@@ -333,8 +382,8 @@ async fn admit(
                 Some(generation),
                 Some(resolved.provider),
             );
-        } else if !task && !admitted.duplicate {
-            native::spawn_information(app, &recipient);
+        } else if !task {
+            notify_information_admitted(app, &recipient, &admitted);
         }
     }
     if task {

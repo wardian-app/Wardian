@@ -92,6 +92,58 @@ blueprints containing it fail validation with `unsupported_node_type`; this is
 intentional until durable child-run input, provenance, approval, cancellation,
 and restart semantics are implemented.
 
+## Delivering an Artifact as a Message
+
+Use `message_send` for host-owned informational delivery after a task writes its
+result. It does not create a task or require a reply. The application host must
+be available; a standalone headless executor cannot deliver messages.
+
+```yaml
+- id: deliver-review
+  type: message_send
+  fields:
+    recipient: '{{trigger.output.requesting_agent}}'
+    artifact_path: '.wardian-review/{{run.id}}/review.md'
+```
+
+`recipient` accepts one exact agent UUID or unambiguous exact name. Class and
+broadcast selectors are rejected. The canonical receipt records the resolved
+UUID as `recipient_id`. Preflight persists that UUID and the rendered artifact path
+in a `message_send_prepared` run event before review. Renaming or reassigning the
+original name cannot retarget delivery or resume; deletion of the bound agent
+fails closed. Use the same artifact path in the producing task's prompt.
+`run.id` is reserved, restored from the persisted run identity on replay and
+resume, and cannot be replaced by trigger or task output.
+
+Before tasks start, the engine checks host capability, resolves delivery fields
+and the recipient, and prepares the artifact directory. Delivery fields support
+literals, `trigger.output` values and `run.id`; task-output references are rejected.
+An existing artifact fails fresh-run preflight. Resume retains the run identity
+and artifact; use a run-specific directory to keep concurrent runs separate.
+
+The path must be workspace-relative, use forward slashes, and contain no traversal,
+links or reparse points. Delivery reads one regular UTF-8 file of at most 64 KiB.
+Missing, unreadable, invalid UTF-8, blank and oversized artifacts fail delivery.
+No newline, BOM, whitespace, template or shell transformation is applied to the
+body. The receipt contains `interaction_id`, `run_id`, `node`, `recipient_id`,
+`artifact_path`, `artifact_sha256`, `idempotency_key`, `delivery_state` and `duplicate`.
+The SHA256 covers the exact body bytes. Initial admission state is `stored`;
+success proves durable recipient-addressed admission, not consumption or reading.
+
+The canonical interaction store owns the message and host provenance. The run
+records a receipt, while the workspace retains the recoverable artifact. A stable
+run/node key makes identical replay return the original admission; changed body
+or resolved recipient conflicts. Do not place a changing recipient or body behind
+the same delivery node in a loop. Native information delivery uses existing
+durable claims after admission and does not schedule a task.
+
+Admission failure fails the run and prevents downstream success notifications;
+completed review output and its artifact remain. Crash recovery reconciles the
+same key and provenance before reporting the original receipt. An unreadable or
+missing artifact still fails even if an earlier admission exists; the error
+reports its ID when available. An unresolved storage outcome remains a failure.
+Failed runs are not automatically retried, and review verdicts do not gate delivery.
+
 ## Related References
 
 - [Triggers](./triggers.md)

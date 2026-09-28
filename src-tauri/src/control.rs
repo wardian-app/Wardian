@@ -9,7 +9,7 @@ pub(crate) use startup_readiness::{
 };
 
 use crate::manager;
-mod agent_messaging;
+pub(crate) mod agent_messaging;
 pub(crate) use agent_messaging::message_with_structured_reply_instruction;
 mod codex_background;
 mod headless_delivery;

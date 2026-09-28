@@ -45,12 +45,14 @@ fn run_cli(home: &Path, extra: &[&str]) -> Output {
 async fn serve_stream(
     mut stream: impl AsyncRead + AsyncWrite + Unpin,
     response: Option<&str>,
+    response_delay: Duration,
 ) -> Value {
     let mut request = String::new();
     BufReader::new(&mut stream)
         .read_line(&mut request)
         .await
         .unwrap();
+    tokio::time::sleep(response_delay).await;
     if let Some(response) = response {
         stream.write_all(response.as_bytes()).await.unwrap();
         stream.write_all(b"\n").await.unwrap();
@@ -60,13 +62,21 @@ async fn serve_stream(
         let mut closed = [0u8; 1];
         let _ = stream.read(&mut closed).await;
     } else {
-        // Exceed the CLI's 500 ms read timeout while keeping the endpoint open.
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Exceed the Inbox-specific deadline while keeping the endpoint open.
+        tokio::time::sleep(Duration::from_secs(11)).await;
     }
     serde_json::from_str(&request).unwrap()
 }
 
 fn spawn_endpoint(home: &Path, response: Option<&'static str>) -> thread::JoinHandle<Value> {
+    spawn_endpoint_after(home, response, Duration::ZERO)
+}
+
+fn spawn_endpoint_after(
+    home: &Path,
+    response: Option<&'static str>,
+    response_delay: Duration,
+) -> thread::JoinHandle<Value> {
     let home = home.to_path_buf();
     let (ready_tx, ready_rx) = mpsc::channel();
     let server = thread::spawn(move || {
@@ -76,7 +86,7 @@ fn spawn_endpoint(home: &Path, response: Option<&'static str>) -> thread::JoinHa
             .build()
             .unwrap();
         runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::time::timeout(Duration::from_secs(15), async {
                 #[cfg(windows)]
                 {
                     // Match the home-specific endpoint without changing the test
@@ -94,7 +104,7 @@ fn spawn_endpoint(home: &Path, response: Option<&'static str>) -> thread::JoinHa
                         .unwrap();
                     ready_tx.send(()).unwrap();
                     pipe.connect().await.unwrap();
-                    serve_stream(pipe, response).await
+                    serve_stream(pipe, response, response_delay).await
                 }
                 #[cfg(unix)]
                 {
@@ -103,7 +113,7 @@ fn spawn_endpoint(home: &Path, response: Option<&'static str>) -> thread::JoinHa
                         tokio::net::UnixListener::bind(home.join("run/control.sock")).unwrap();
                     ready_tx.send(()).unwrap();
                     let (stream, _) = listener.accept().await.unwrap();
-                    serve_stream(stream, response).await
+                    serve_stream(stream, response, response_delay).await
                 }
             })
             .await
@@ -202,6 +212,26 @@ fn empty_live_response_does_not_fall_back_to_available_disk_items() {
     let response: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["status_source"], "live");
     assert_eq!(response["items"], json!([]));
+}
+
+#[test]
+fn delayed_live_inbox_response_remains_live_instead_of_timing_out() {
+    let home = seed_home();
+    let server = spawn_endpoint_after(
+        home.path(),
+        Some(
+            r#"{"schema":1,"items":[{"id":"live-after-work"}],"truncated":false,"next_offset":null}"#,
+        ),
+        Duration::from_millis(800),
+    );
+    let output = run_cli(home.path(), &["--limit", "200"]);
+    let request = server.join().unwrap();
+    assert_eq!(request["command"], "inbox_list");
+    assert_eq!(request["limit"], 200);
+    assert!(output.status.success(), "{output:?}");
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["status_source"], "live");
+    assert_eq!(response["items"][0]["id"], "live-after-work");
 }
 
 #[test]

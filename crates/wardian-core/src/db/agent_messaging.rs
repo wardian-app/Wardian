@@ -108,6 +108,104 @@ pub fn admit_host_automation_task(
     )
 }
 
+/// Stable within a host run: content and recipient belong in the fingerprint,
+/// never in the key, so a changed replay conflicts instead of sending again.
+pub fn host_automation_message_key(node: &str) -> String {
+    format!("message_send:v1:{:x}", Sha256::digest(node.as_bytes()))
+}
+
+/// Trusted informational admission, with the same canonical claims as ordinary
+/// messages and separate host provenance. A lost receipt is reconciled read-only.
+pub fn admit_host_automation_message(
+    conn: &Connection,
+    run_id: &str,
+    node: &str,
+    recipient: &str,
+    message: &str,
+    generation: u64,
+) -> Result<Admitted> {
+    if run_id.trim().is_empty() || node.trim().is_empty() {
+        return Err(Error::new(
+            "invalid_host_provenance",
+            "Automation run and node are required.",
+        ));
+    }
+    let host = format!("host:automation:{run_id}");
+    let key = host_automation_message_key(node);
+    let result = admit_with_host(
+        conn,
+        Admission {
+            sender: &host,
+            recipient,
+            message,
+            idempotency_key: Some(&key),
+            task: false,
+            generation,
+        },
+        Some((run_id, node)),
+    );
+    match result {
+        Ok(admitted) => Ok(admitted),
+        Err(error) => {
+            // Never repeat admission on an uncertain storage result. A matching
+            // committed record is sufficient; absence preserves the failure.
+            match reconcile_host_automation_message(conn, run_id, node, Some((recipient, message)))?
+            {
+                Some(admitted) => Ok(admitted),
+                None => Err(error),
+            }
+        }
+    }
+}
+
+/// Read-only recovery evidence, including when the artifact no longer exists.
+/// With a body, also enforce the exact recipient/content fingerprint.
+pub fn reconcile_host_automation_message(
+    conn: &Connection,
+    run_id: &str,
+    node: &str,
+    expected: Option<(&str, &str)>,
+) -> Result<Option<Admitted>> {
+    let row: Option<(String, String, String)> = conn.query_row(
+        "SELECT interaction_id,fingerprint,owner FROM agent_message_delivery WHERE sender=?1 AND operation='send_message' AND idempotency_key=?2",
+        params![format!("host:automation:{run_id}"), host_automation_message_key(node)],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional()?;
+    let Some((id, fingerprint, owner)) = row else {
+        return Ok(None);
+    };
+    verify_host_provenance(conn, &id, (run_id, node))?;
+    if let Some((recipient, message)) = expected {
+        let expected = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&(recipient, message)).unwrap())
+        );
+        if fingerprint != expected {
+            return Err(Error::new(
+                "idempotency_conflict",
+                "Key already admitted a different target or body.",
+            ));
+        }
+    }
+    Ok(Some(Admitted {
+        record: load(conn, &id)?,
+        owner: delivery_owner(&owner),
+        delivery_state: owner,
+        duplicate: true,
+    }))
+}
+
+fn verify_host_provenance(conn: &Connection, id: &str, expected: (&str, &str)) -> Result<()> {
+    let provenance = host_automation_provenance(conn, id)?;
+    if !provenance.is_some_and(|p| p.run_id == expected.0 && p.node == expected.1) {
+        return Err(Error::new(
+            "invalid_host_provenance",
+            "Stored admission has different or missing host provenance.",
+        ));
+    }
+    Ok(())
+}
+
 /// Inspect trusted host attribution without manufacturing a registered sender.
 pub fn host_automation_provenance(
     conn: &Connection,
@@ -162,6 +260,9 @@ fn admit_with_host(
                     "idempotency_conflict",
                     "Key already admitted a different target or body.",
                 ));
+            }
+            if let Some(origin) = host {
+                verify_host_provenance(&tx, &id, origin)?;
             }
             let record = load(&tx, &id)?;
             return Ok(Admitted {

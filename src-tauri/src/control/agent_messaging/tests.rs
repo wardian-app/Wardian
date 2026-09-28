@@ -15,6 +15,139 @@ async fn agent(state: &AppState, id: &str, name: &str) {
     state.agents.lock().await.insert(id.into(), agent);
 }
 
+#[tokio::test]
+async fn automation_information_preserves_exact_name_uuid_and_recipient_binding() {
+    let _home = TestWardianHome::new_async().await;
+    let state = AppState::new();
+    let id = "0ce92914-cf18-4415-b02b-c14e1976b145";
+    agent(&state, id, "Wardian-Orchestrator").await;
+    agent(&state, "other", "Other").await;
+    assert_eq!(
+        resolve_automation_recipient(&state, "Wardian-Orchestrator")
+            .await
+            .unwrap(),
+        id
+    );
+    assert_eq!(resolve_automation_recipient(&state, id).await.unwrap(), id);
+    let body = "\u{feff}日本語\r\n'quoted' \"double\" `$() & | ;\r\nVerdict: blocked\r\n";
+    let first = admit_automation_information(&state, "run", "deliver", id, body)
+        .await
+        .unwrap();
+    let duplicate = admit_automation_information(&state, "run", "deliver", id, body)
+        .await
+        .unwrap();
+    assert!(duplicate.duplicate);
+    assert_eq!(duplicate.record.id, first.record.id);
+    assert!(
+        admit_automation_information(&state, "run", "deliver", "other", body)
+            .await
+            .is_err()
+    );
+    assert!(
+        admit_automation_information(&state, "run", "deliver", id, "changed")
+            .await
+            .is_err()
+    );
+    let page = receive(&state, id).await;
+    assert_eq!(page.messages.len(), 1);
+    assert_eq!(page.messages[0].message.as_bytes(), body.as_bytes());
+    assert_eq!(
+        page.messages[0].host_automation.as_ref().unwrap().run_id,
+        "run"
+    );
+    assert!(receive(&state, "other").await.messages.is_empty());
+    assert!(state
+        .interactions
+        .claim_agent_task(id, 0)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn automation_recipient_preflight_rejects_missing_ambiguous_selectors_and_deleted() {
+    let _home = TestWardianHome::new_async().await;
+    let state = AppState::new();
+    agent(&state, "one", "Duplicate").await;
+    agent(&state, "two", "Duplicate").await;
+    for target in [
+        "",
+        "missing",
+        "Duplicate",
+        "all",
+        "broadcast",
+        "*",
+        "class:Reviewer",
+        " one",
+    ] {
+        assert!(
+            resolve_automation_recipient(&state, target).await.is_err(),
+            "{target}"
+        );
+    }
+    state
+        .interactions
+        .delete_agent_durable_state("one")
+        .await
+        .unwrap();
+    // Roster snapshot may temporarily survive deletion. Both boundaries reject it.
+    assert!(resolve_automation_recipient(&state, "one").await.is_err());
+    assert!(
+        admit_automation_information(&state, "run", "deliver", "one", "body")
+            .await
+            .is_err()
+    );
+    assert!(
+        admit_automation_information(&state, "run", "deliver", "missing", "body")
+            .await
+            .is_err()
+    );
+    assert!(
+        store::with_db(|conn| store::reconcile_host_automation_message(
+            conn, "run", "deliver", None
+        ))
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[tokio::test]
+async fn automation_bound_uuid_survives_real_catalog_name_reassignment() {
+    let _home = TestWardianHome::new_async().await;
+    let state = AppState::new();
+    let a = "0ce92914-cf18-4415-b02b-c14e1976b145";
+    let b = "18972787-84fc-4e77-b49a-b7668184f692";
+    agent(&state, a, "Requester").await;
+    let bound = resolve_automation_recipient(&state, "Requester")
+        .await
+        .unwrap();
+    let config = { state.agents.lock().await.get(a).unwrap().config.clone() };
+    config.lock().unwrap().session_name = "Renamed".into();
+    agent(&state, b, "Requester").await;
+    assert_eq!(
+        resolve_automation_recipient(&state, "Requester")
+            .await
+            .unwrap(),
+        b
+    );
+    let admitted = admit_automation_information(&state, "run", "deliver", &bound, "review")
+        .await
+        .unwrap();
+    assert_eq!(admitted.record.target_session_ids, vec![a]);
+    assert!(receive(&state, b).await.messages.is_empty());
+    state
+        .interactions
+        .delete_agent_durable_state(a)
+        .await
+        .unwrap();
+    assert!(
+        admit_automation_information(&state, "run", "later", &bound, "review")
+            .await
+            .is_err()
+    );
+    assert!(receive(&state, b).await.messages.is_empty());
+}
+
 fn origin(id: &str) -> MessageOrigin {
     MessageOrigin::WardianAgent {
         session_id: id.into(),

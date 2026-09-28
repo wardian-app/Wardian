@@ -223,8 +223,10 @@ comma-separated and combine with `--unread`. A live app for the same
 `WARDIAN_HOME` supplies the assembled projection; when it is unavailable, the
 CLI reads persisted queue items, durable Inbox notifications, and workflow-run
 checkpoints for awaiting approvals and terminal outcomes. The command is
-read-only: it does not acknowledge, dismiss, or resolve an item. `--limit` is
-bounded to 200 items; `--offset` pages the bounded read projection. A partial
+read-only: it does not acknowledge, dismiss, or resolve an item. A live Inbox
+read has a ten-second response deadline; a timeout remains an error instead of
+returning persisted items. `--limit` is bounded to 200 items; `--offset` pages
+the bounded read projection. A partial
 source sets `truncated: true` and provides `next_offset`. Legacy queue items
 older than seven days are excluded, matching desktop Inbox hydration.
 

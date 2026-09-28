@@ -362,8 +362,10 @@ pub fn live_executor_with_catalog_and_app(
     .with_notification_app(app)
 }
 
+/// Construct a host executor only with durable run provenance.
 pub fn live_executor_with_catalog_assignments_and_app(
     app: tauri::AppHandle,
+    run_state: &RunState,
     workspace: PathBuf,
     default_provider: String,
     bindings: HashMap<String, String>,
@@ -380,6 +382,7 @@ pub fn live_executor_with_catalog_assignments_and_app(
         agent_catalog,
     )
     .with_notification_app(app)
+    .with_run_state(run_state)
 }
 
 fn invocation_path(run_root: &Path) -> PathBuf {
@@ -873,12 +876,10 @@ pub async fn drive_started_run_with_catalog_assignments_and_memory_principal(
                 return Err(message);
             }
         };
-    let blueprint_id = blueprint.id.clone();
-    let run_id = state.run_id.clone();
-    let owner_id = format!("{blueprint_id}/{run_id}");
     let exec = if let Some(app) = app {
         live_executor_with_catalog_assignments_and_app(
             app,
+            &state,
             workspace,
             default_provider,
             bindings,
@@ -894,8 +895,7 @@ pub async fn drive_started_run_with_catalog_assignments_and_memory_principal(
             agent_catalog,
         )
     }
-    .with_owner_id(owner_id)
-    .with_automation_origin(blueprint_id, run_id);
+    .with_run_state(&state);
     let exec = match memory_principal {
         Some(agent_id) => exec.with_memory_principal(agent_id),
         None => exec,
@@ -954,16 +954,12 @@ pub async fn drive_resume_with_catalog(
         &bindings,
         InvocationKind::Manual,
     );
-    let run_id = run_root
-        .file_name()
-        .and_then(|value| value.to_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| "resume".to_string());
-    let blueprint_id = blueprint.id.clone();
-    let owner_id = format!("{blueprint_id}/{run_id}");
+    // Provenance follows durable engine identity even if the run directory moved.
+    let resumed_state = Engine::replay(&blueprint, &run_root).map_err(|error| error.to_string())?;
     let exec = if let Some(app) = app {
         live_executor_with_catalog_assignments_and_app(
             app,
+            &resumed_state,
             workspace,
             default_provider,
             bindings,
@@ -979,8 +975,7 @@ pub async fn drive_resume_with_catalog(
             agent_catalog,
         )
     }
-    .with_owner_id(owner_id)
-    .with_automation_origin(blueprint_id, run_id);
+    .with_run_state(&resumed_state);
     let exec = match memory_principal {
         Some(agent_id) => exec.with_memory_principal(agent_id),
         None => exec,

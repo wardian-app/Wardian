@@ -6,6 +6,134 @@ fn database() -> Connection {
     conn
 }
 
+#[test]
+fn host_information_is_exact_idempotent_and_uses_existing_claims() {
+    let conn = database();
+    let body = "\u{feff}café 日本語\r\n' \" `$() & | ; {{run.id}}\r\nVerdict: revise\r\n";
+    let first =
+        admit_host_automation_message(&conn, "run", "deliver", "receiver", body, 7).unwrap();
+    assert!(!first.duplicate);
+    assert_eq!(first.delivery_state, "stored");
+    assert_eq!(first.record.kind, InteractionKind::Message);
+    assert_eq!(
+        first.record.trigger_policy,
+        InteractionTriggerPolicy::NotifyOnly
+    );
+    assert!(first.record.sender_session_id.is_none());
+    assert!(claim_next_task(&conn, "receiver", 7).unwrap().is_none());
+    let replay =
+        admit_host_automation_message(&conn, "run", "deliver", "receiver", body, 8).unwrap();
+    assert!(replay.duplicate);
+    assert_eq!(first.record.id, replay.record.id);
+    let claim = claim_information(&conn, "receiver", &first.record.id, 8)
+        .unwrap()
+        .unwrap();
+    assert!(claim_information(&conn, "receiver", &first.record.id, 8)
+        .unwrap()
+        .is_none());
+    let replay =
+        admit_host_automation_message(&conn, "run", "deliver", "receiver", body, 8).unwrap();
+    assert_eq!(replay.delivery_state, "dispatching");
+    release_before_write(&conn, &claim).unwrap();
+    let page = receive(&conn, "receiver", None, None, 100).unwrap();
+    assert_eq!(page.messages.len(), 1);
+    assert_eq!(page.messages[0].message.as_bytes(), body.as_bytes());
+    assert_eq!(
+        page.messages[0].host_automation.as_ref().unwrap().run_id,
+        "run"
+    );
+    assert_eq!(
+        page.messages[0].host_automation.as_ref().unwrap().node,
+        "deliver"
+    );
+    assert!(receive(&conn, "wrong-recipient", None, None, 100)
+        .unwrap()
+        .messages
+        .is_empty());
+    for (recipient, message) in [("other", body), ("receiver", "changed")] {
+        assert_eq!(
+            admit_host_automation_message(&conn, "run", "deliver", recipient, message, 8)
+                .err()
+                .unwrap()
+                .code,
+            "idempotency_conflict"
+        );
+    }
+}
+
+#[test]
+fn host_information_storage_failure_is_atomic_and_uncertain_receipt_reconciles() {
+    let conn = database();
+    conn.execute_batch("CREATE TRIGGER reject_message BEFORE INSERT ON agent_message_availability BEGIN SELECT RAISE(ABORT, 'storage failure'); END;").unwrap();
+    assert!(admit_host_automation_message(&conn, "run", "node", "receiver", "body", 0).is_err());
+    assert!(
+        reconcile_host_automation_message(&conn, "run", "node", None)
+            .unwrap()
+            .is_none()
+    );
+    for table in [
+        "interactions",
+        "agent_message_delivery",
+        "agent_message_host_tasks",
+    ] {
+        let count: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+    conn.execute_batch("DROP TRIGGER reject_message").unwrap();
+    let committed =
+        admit_host_automation_message(&conn, "run", "node", "receiver", "body", 0).unwrap();
+    let recovered =
+        reconcile_host_automation_message(&conn, "run", "node", Some(("receiver", "body")))
+            .unwrap()
+            .unwrap();
+    assert_eq!(committed.record.id, recovered.record.id);
+    assert!(recovered.duplicate);
+    conn.execute("DELETE FROM agent_message_host_tasks", [])
+        .unwrap();
+    assert!(reconcile_host_automation_message(&conn, "run", "node", None).is_err());
+    assert!(admit_host_automation_message(&conn, "run", "node", "receiver", "body", 0).is_err());
+    conn.execute("DROP TABLE agent_message_delivery", [])
+        .unwrap();
+    assert!(reconcile_host_automation_message(&conn, "run", "node", None).is_err());
+}
+
+#[test]
+fn concurrent_host_information_replays_admit_once() {
+    let conn = std::sync::Arc::new(std::sync::Mutex::new(database()));
+    let gate = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            let conn = conn.clone();
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                gate.wait();
+                // Production admission uses the same serialized database boundary.
+                let conn = conn.lock().unwrap();
+                admit_host_automation_message(&conn, "run", "node", "receiver", "body", 0).unwrap()
+            })
+        })
+        .collect();
+    let results: Vec<_> = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect();
+    assert_eq!(results.iter().filter(|result| !result.duplicate).count(), 1);
+    assert!(results
+        .iter()
+        .all(|result| result.record.id == results[0].record.id));
+    assert_eq!(
+        receive(&conn.lock().unwrap(), "receiver", None, None, 100)
+            .unwrap()
+            .messages
+            .len(),
+        1
+    );
+}
+
 fn admission<'a>(message: &'a str, task: bool) -> Admission<'a> {
     Admission {
         sender: "sender",

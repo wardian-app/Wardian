@@ -80,7 +80,27 @@ pub fn apply(g: &Graph, s: &mut RunState, ev: &Event) -> crate::engine::Result<(
             if let Some(blueprint_hash) = blueprint_hash {
                 s.blueprint_hash = Some(blueprint_hash.clone());
             }
+            s.normalize_legacy();
             s.set_trigger(runtime_trigger_output(trigger, &ev.ts));
+        }
+        EventKind::MessageSendPrepared {
+            node,
+            recipient_id,
+            artifact_path,
+        } => {
+            let binding = crate::engine::state::MessageDeliveryBinding {
+                recipient_id: recipient_id.clone(),
+                artifact_path: artifact_path.clone(),
+            };
+            if s.message_deliveries
+                .get(node)
+                .is_some_and(|previous| previous != &binding)
+            {
+                return Err(crate::engine::EngineError::InvalidState(
+                    "message_send binding cannot change within a run".into(),
+                ));
+            }
+            s.message_deliveries.insert(node.clone(), binding);
         }
         EventKind::NodeStarted { node } => s.set_node_status(node, NodeStatus::Running),
         EventKind::NodeCompleted { node, output } => {
