@@ -206,7 +206,7 @@ async fn restored_codex_preserves_newer_queued_processing_across_publication() {
         drop(roster);
         if deferred_before_publication {
             assert!(
-                !crate::manager::codex_onboarding::apply_deferred_status_transition(
+                crate::manager::codex_onboarding::apply_deferred_status_transition(
                     &state,
                     &config.session_id,
                     &status,
@@ -214,7 +214,8 @@ async fn restored_codex_preserves_newer_queued_processing_across_publication() {
                     processing_revision,
                     "Processing...",
                 )
-                .await,
+                .await
+                .is_none(),
                 "the placeholder still owns the roster"
             );
         }
@@ -227,7 +228,7 @@ async fn restored_codex_preserves_newer_queued_processing_across_publication() {
             .await;
         if !deferred_before_publication {
             assert!(
-                !crate::manager::codex_onboarding::apply_deferred_status_transition(
+                crate::manager::codex_onboarding::apply_deferred_status_transition(
                     &state,
                     &config.session_id,
                     &status,
@@ -235,7 +236,8 @@ async fn restored_codex_preserves_newer_queued_processing_across_publication() {
                     processing_revision,
                     "Processing...",
                 )
-                .await,
+                .await
+                .is_none(),
                 "publication must have applied the newer queued status"
             );
         }
@@ -359,7 +361,8 @@ async fn reserved_terminal_status_survives_restored_codex_publication() {
                         "Idle",
                         intent_revision,
                         terminal_status,
-                    ),
+                    )
+                    .is_some(),
                     "the terminal setter wins after publication"
                 );
             } else {
@@ -383,14 +386,15 @@ async fn reserved_terminal_status_survives_restored_codex_publication() {
                     "publication committed the terminal value before the setter resumed"
                 );
                 assert!(
-                    !crate::manager::apply_admitted_status_transition(
+                    crate::manager::apply_admitted_status_transition(
                         &state,
                         &config.session_id,
                         &status,
                         "Starting",
                         intent_revision,
                         terminal_status,
-                    ),
+                    )
+                    .is_none(),
                     "publication already committed the terminal intent"
                 );
             }
@@ -401,6 +405,7 @@ async fn reserved_terminal_status_survives_restored_codex_publication() {
             );
             let observed_at =
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let status_revision = state.status_revision(&config.session_id, &status);
             let status_sequence = state.next_status_observation_sequence(&config.session_id);
             let _lifecycle = state.lock_agent_lifecycle(&config.session_id).await;
             assert_eq!(
@@ -410,11 +415,12 @@ async fn reserved_terminal_status_survives_restored_codex_publication() {
                     &status,
                     terminal_status,
                     status_sequence,
+                    status_revision,
                     &observed_at,
                 )
                 .await
-                .as_deref(),
-                Some(terminal_status)
+                .map(|(status, _, _)| status),
+                Some(terminal_status.to_string())
             );
             drop(_lifecycle);
             assert_eq!(
@@ -546,7 +552,7 @@ async fn queued_processing_while_publication_waits_for_roster_wins() {
         state.reserve_status_intent(&config.session_id, &status, "Processing...");
     }
     drop(roster);
-    assert!(!deferred.await.expect("deferred Idle completed"));
+    assert!(deferred.await.expect("deferred Idle completed").is_none());
     published.await.expect("publication completed");
     assert_eq!(*status.lock().unwrap(), "Processing...");
 }
@@ -658,11 +664,14 @@ async fn queued_restored_codex_idle_does_not_replace_newer_action_needed() {
         .await;
     release.send(()).expect("run queued transition");
     let applied = queued.await.expect("queued transition completes");
-    if applied {
+    if applied.is_some() {
         wardian_core::db::update_agent_status(&config.session_id, "Idle", Some(4242))
             .expect("persist accepted deferred transition");
     }
-    assert!(!applied, "superseded Idle must not schedule persistence");
+    assert!(
+        applied.is_none(),
+        "superseded Idle must not schedule persistence"
+    );
     assert_eq!(*status.lock().unwrap(), "Action Needed");
     assert_eq!(
         state.agents.lock().await[&config.session_id]
@@ -756,6 +765,7 @@ async fn queued_idle_applies_when_attached_runtime_status_is_unchanged() {
             "Idle",
         )
         .await
+        .is_some()
     );
     assert_eq!(*status.lock().unwrap(), "Idle");
 }
@@ -829,7 +839,10 @@ async fn newer_queued_idle_wins_after_queued_processing_under_roster_contention(
         "Processing...",
     )
     .await;
-    assert!(!older_applied, "older queued Processing must be superseded");
+    assert!(
+        older_applied.is_none(),
+        "older queued Processing must be superseded"
+    );
     assert!(
         crate::manager::codex_onboarding::apply_deferred_status_transition(
             &state,
@@ -839,7 +852,8 @@ async fn newer_queued_idle_wins_after_queued_processing_under_roster_contention(
             revisions[1],
             "Idle",
         )
-        .await,
+        .await
+        .is_some(),
         "the later queued Idle must remain applicable after Processing"
     );
     assert_eq!(*status.lock().unwrap(), "Idle");
@@ -918,7 +932,8 @@ async fn old_runtime_status_intent_cannot_cancel_provisional_replacement_intent(
             new_revision,
             "Idle",
         )
-        .await,
+        .await
+        .is_some(),
         "a stale owner's intent cannot invalidate the new owner's queued status"
     );
     assert_eq!(*new_status.lock().unwrap(), "Idle");

@@ -634,9 +634,31 @@ impl InteractionState {
         state: ProviderInputReadiness,
         ready_evidence: Option<ProviderReadyEvidence>,
     ) -> ProviderInputState {
+        self.record_provider_input_status_observation_with_transition(
+            session_id,
+            status_sequence,
+            generation,
+            state,
+            ready_evidence,
+        )
+        .await
+        .0
+    }
+
+    pub async fn record_provider_input_status_observation_with_transition(
+        &self,
+        session_id: &str,
+        status_sequence: u64,
+        generation: u64,
+        state: ProviderInputReadiness,
+        ready_evidence: Option<ProviderReadyEvidence>,
+    ) -> (ProviderInputState, bool) {
         let _mutation = self.mutation_lock.lock().await;
         if self.deleted_sessions.lock().await.contains(session_id) {
-            return provider_input_state_record(session_id, generation, state, ready_evidence);
+            return (
+                provider_input_state_record(session_id, generation, state, ready_evidence),
+                false,
+            );
         }
         let mut observations = self.provider_status_observations.lock().await;
         if matches!(
@@ -644,15 +666,18 @@ impl InteractionState {
             Some(current) if status_sequence < current
         ) {
             if let Some(existing) = self.provider_inputs.lock().await.get(session_id).cloned() {
-                return existing;
+                return (existing, false);
             }
+            return (
+                provider_input_state_record(session_id, generation, state, ready_evidence),
+                false,
+            );
         } else {
             observations.insert(session_id.to_string(), status_sequence);
         }
 
         self.record_provider_input_state_inner(session_id, generation, state, ready_evidence)
             .await
-            .0
     }
 
     pub async fn provider_input_state(&self, session_id: &str) -> Option<ProviderInputState> {
