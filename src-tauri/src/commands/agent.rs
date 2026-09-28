@@ -3930,6 +3930,54 @@ struct ClearAgentLifecycle {
     heartbeat: Option<LifecycleLeaseHeartbeat>,
 }
 
+/// Records how long each New Session phase takes and logs one line when the
+/// clear finishes or aborts, so a slow clear names the phase that stalled.
+struct ClearPhaseTiming {
+    session_id: String,
+    provider: String,
+    started: std::time::Instant,
+    last: std::time::Instant,
+    phases: Vec<(&'static str, u128)>,
+}
+
+impl ClearPhaseTiming {
+    fn start(session_id: &str) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            session_id: session_id.to_string(),
+            provider: String::new(),
+            started: now,
+            last: now,
+            phases: Vec::new(),
+        }
+    }
+
+    fn mark(&mut self, phase: &'static str) {
+        let now = std::time::Instant::now();
+        self.phases
+            .push((phase, now.duration_since(self.last).as_millis()));
+        self.last = now;
+    }
+}
+
+impl Drop for ClearPhaseTiming {
+    fn drop(&mut self) {
+        let phases = self
+            .phases
+            .iter()
+            .map(|(phase, ms)| format!("{phase}_ms={ms}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        manager::log_debug(&format!(
+            "[WARDIAN] Clear timing provider={} session={} {} total_ms={}",
+            self.provider,
+            self.session_id,
+            phases,
+            self.started.elapsed().as_millis()
+        ));
+    }
+}
+
 async fn clear_agent_session_inner(
     session_id: String,
     reason: Option<String>,
@@ -3942,6 +3990,7 @@ async fn clear_agent_session_inner(
         "[WARDIAN] clear_agent_session called for session: {}",
         session_id
     ));
+    let mut timing = ClearPhaseTiming::start(&session_id);
     let lifecycle_lease = match lifecycle.lease {
         Some(lease) => lease,
         None => {
@@ -3949,16 +3998,18 @@ async fn clear_agent_session_inner(
                 .await?
         }
     };
+    timing.mark("lease");
     let mut lifecycle_heartbeat = lifecycle
         .heartbeat
         .unwrap_or_else(|| LifecycleLeaseHeartbeat::start(lifecycle_lease.owner().clone()));
     let _lifecycle_guard =
         acquire_agent_lifecycle_guard(&state, &session_id, lifecycle.guard).await;
+    timing.mark("guard");
     lifecycle_heartbeat.ensure_active("clear")?;
-    let codex_stops_before_preflight = lifecycle_config_for_session(&state, &session_id)
+    timing.provider = lifecycle_config_for_session(&state, &session_id)
         .await?
-        .provider
-        == "codex";
+        .provider;
+    let codex_stops_before_preflight = timing.provider == "codex";
     if codex_stops_before_preflight {
         stop_native_owner_with_before_capture(&state, &session_id, false, |agent| {
             hold_previous_provider_before_rotation(agent, &lifecycle_lease).map(|_| ())
@@ -3967,6 +4018,7 @@ async fn clear_agent_session_inner(
     } else {
         stop_native_owner(&state, &session_id, false).await?;
     }
+    timing.mark("stop_native");
     let original_config = {
         let agents = state.agents.lock().await;
         let agent = agents
@@ -3980,6 +4032,7 @@ async fn clear_agent_session_inner(
     crate::commands::chat::archive_agent_chat_events_until_stable_for_state(&state, &session_id)
         .await
         .map_err(|error| format!("Failed to acquire the closing provider log: {error}"))?;
+    timing.mark("drain");
     // Persist the closing evidence while the old runtime is intact, but leave
     // the archive open until the replacement runtime and metadata commit.
     let archive_snapshot = match archive_snapshot {
@@ -3988,10 +4041,13 @@ async fn clear_agent_session_inner(
             .await
             .map_err(|error| format!("Failed to capture the closing conversation: {error}"))?,
     };
+    timing.mark("snapshot");
     let pending_archive = prepare_conversation_boundary(archive_snapshot)
         .map_err(|error| format!("Failed to prepare the closing conversation: {error}"))?;
+    timing.mark("prepare");
     stage_conversation_boundary(&state, &pending_archive)
         .map_err(|error| format!("Failed to stage the closing conversation: {error}"))?;
+    timing.mark("stage");
 
     // Establish fresh identity before the remaining runtime transition. Codex
     // writers were joined above; a later failure retains config/status, not a live TUI.
@@ -4061,6 +4117,7 @@ async fn clear_agent_session_inner(
         let provider = config.provider.clone();
         manager::apply_provider_identity(&provider, &mut config, &new_provider_session_id)?;
     }
+    timing.mark("identity");
     lifecycle_heartbeat.ensure_active("clear")?;
 
     let (mut prepared, previous_hold_owner) = {
@@ -4111,6 +4168,7 @@ async fn clear_agent_session_inner(
         }
     }
     manager::terminate_active_agent_process(&mut prepared.termination);
+    timing.mark("terminate");
 
     let _ = app.emit(
         "agent-terminal-cleared",
@@ -4150,6 +4208,7 @@ async fn clear_agent_session_inner(
             return Err(error);
         }
     };
+    timing.mark("spawn");
     if let Err(error) = lifecycle_heartbeat.ensure_active("clear") {
         let error = new_active.stop_after_failure(error).await;
         let error = retain_uncertain_replacement_until_expiry(&unpublished_failure, error);
@@ -4208,6 +4267,7 @@ async fn clear_agent_session_inner(
     publication_disposition.commit();
     manager::terminate_active_agent_process(&mut displaced_agent);
     manager::publish_agent_status(&app, &session_id, &new_status_arc);
+    timing.mark("commit");
 
     // 9. Force a frontend refresh and terminal resize to clear glitches
     let _ = app.emit("agents-updated", ());
