@@ -734,9 +734,38 @@ pub async fn save_agent_interactions(
 #[tauri::command]
 pub async fn load_queue_items(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let _queue_guard = state.queue_io_lock.lock().await;
-    let items = crate::utils::queue::load_items();
+    let items = crate::utils::queue::load_items()
+        .into_iter()
+        .filter(|item| {
+            item["type"] != "agent_completed" || item["dismissed"].as_bool() != Some(true)
+        })
+        .collect::<Vec<_>>();
     *state.queue_loaded_snapshot.lock().await = Some(items.clone());
     Ok(serde_json::json!(items))
+}
+
+#[tauri::command]
+pub async fn dismiss_agent_completions(
+    ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let _queue_guard = state.queue_io_lock.lock().await;
+    let mut items = crate::utils::queue::load_items();
+    let mut changed = false;
+    for item in &mut items {
+        if ids.iter().any(|id| item["id"] == *id)
+            && item["type"] == "agent_completed"
+            && item["dismissed"].as_bool() != Some(true)
+        {
+            item["dismissed"] = serde_json::Value::Bool(true);
+            item["read"] = serde_json::Value::Bool(true);
+            changed = true;
+        }
+    }
+    if changed {
+        crate::utils::queue::save_items(&items)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]

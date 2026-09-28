@@ -250,6 +250,29 @@ npm run test:e2e:native:fast -- e2e-native/tests/antigravity-native.test.mjs
 
 The harness uses an isolated `WARDIAN_HOME` by default, so native E2E runs should not modify production `<wardian-home>` state.
 
+### Claude Inbox Stop-hook acceptance
+
+This one-turn probe verifies that an interactive Claude `Stop` event produces
+one durable canonical Inbox item, and that a workspace-defined Stop hook runs
+alongside Wardian's injected hook. It does not modify the user's Claude
+settings or copy authentication data. Select an explicitly preflighted model;
+`haiku` is the lowest-priced model in Anthropic's current public API lineup.
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_E2E_REAL_CLAUDE_INBOX = '1'
+$env:WARDIAN_E2E_CLAUDE_INBOX_MODEL = 'haiku'
+$env:WARDIAN_NATIVE_SKIP_BUILD = '1'
+$env:WARDIAN_NATIVE_APP = '<absolute-isolated-artifact-path>'
+node scripts/run-native-e2e-fast.mjs e2e-native/tests/claude-inbox-stop-real-native.test.mjs
+```
+
+The test refreshes the catalog before provider spawn, submits exactly one short
+prompt, correlates the provider-authored transcript with the hook's `prompt_id`,
+and checks the persisted response and event timestamp source. It writes private
+evidence under the isolated test home. Run provider probes serially.
+
 ### Real Provider PTY Rendering Lab
 
 Use the rendering lab when investigating issue #110 class failures: line wrapping, row bleed, stale terminal geometry after resize, resize/minimize/maximize lag, or whole-app slowdown with real provider PTYs. This suite is real-provider-only and defaults to Codex and Claude when `WARDIAN_E2E_RENDERING_PROVIDERS` is unset.

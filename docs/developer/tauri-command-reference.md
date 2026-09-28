@@ -75,6 +75,7 @@ evidence or queue the interaction.
 - `save_watchlist_prefs`
 - `load_queue_items`
 - `save_queue_items`
+- `dismiss_agent_completions`
 - `load_queue_preferences`
 - `save_queue_preferences`
 - `load_agent_interactions`
@@ -83,7 +84,7 @@ evidence or queue the interaction.
 
 The CLI `team` and `watchlist` commands read and write `watchlists/index.json` directly. They normalize the current v2 state shape and legacy flat watchlist arrays for reads, write canonical v2 JSON for mutations, and best-effort notify the running app when the local control endpoint is available. Team create/add/split operations also seed communication-topology edges while preserving existing seed-suppression tombstones.
 
-Legacy Queue commands persist the frontend completion projection and preferences for the active Wardian home; the user-facing surface is Inbox. Items should carry stable `evidence_id` and `evidence_source` fields when they are derived from provider runtime events, interaction-store events, or other live runtime evidence. Startup hydration may restore these items, but it must not create new completion or action-needed evidence.
+Legacy Queue commands persist the desktop Inbox projection and preferences for the active Wardian home. Provider completion items are backend-owned: full queue snapshots may update their read state but cannot delete or replace their canonical identity and response. `dismiss_agent_completions` records durable dismissal tombstones so a replayed provider event cannot restore a dismissed item. Startup hydration may restore these items, but it must not create new completion or action-needed evidence.
 
 ## Inbox (`commands/inbox.rs`)
 

@@ -111,6 +111,22 @@ pub fn merge_desktop_snapshot(
             merged.push(latest_item.clone());
             continue;
         };
+        // Provider completion records are written by the backend and can only
+        // be removed through the explicit dismissal command. A desktop full
+        // snapshot that omits one is stale or belongs to a client that has not
+        // observed it yet.
+        if latest_item.get("type").and_then(Value::as_str) == Some("agent_completed") {
+            let mut item = latest_item.clone();
+            if latest_item.get("dismissed").and_then(Value::as_bool) == Some(true) {
+                item["read"] = Value::Bool(true);
+            } else if let Some(incoming_item) = incoming_by_id.get(id) {
+                if incoming_item.get("read").and_then(Value::as_bool) == Some(true) {
+                    item["read"] = Value::Bool(true);
+                }
+            }
+            merged.push(item);
+            continue;
+        }
         if !base_ids.contains(id) {
             merged.push(latest_item.clone());
         } else if let Some(incoming_item) = incoming_by_id.get(id) {
@@ -180,6 +196,58 @@ mod tests {
         assert!(items[0].get("workflow_run_id").is_none());
         assert!(items[0].get("workflow_name").is_none());
         assert!(items[0].get("workflow_approval").is_none());
+    }
+
+    #[test]
+    fn stale_desktop_snapshot_preserves_canonical_backend_completion() {
+        let base = vec![serde_json::json!({ "id": "existing", "read": false })];
+        let incoming = base.clone();
+        let latest = vec![
+            serde_json::json!({ "id": "existing", "read": false }),
+            serde_json::json!({
+                "id": "agent-completed:agent-1:message-1",
+                "type": "agent_completed",
+                "evidence_id": "message-1",
+                "timestamp": 123,
+                "summary": "canonical preview",
+                "response_text": "full provider response",
+                "read": false
+            }),
+        ];
+
+        let merged = merge_desktop_snapshot(Some(&base), &incoming, &latest);
+
+        let completion = merged
+            .iter()
+            .find(|item| item["id"] == "agent-completed:agent-1:message-1")
+            .expect("completion survives stale desktop write");
+        assert_eq!(completion["timestamp"], 123);
+        assert_eq!(completion["summary"], "canonical preview");
+        assert_eq!(completion["response_text"], "full provider response");
+    }
+
+    #[test]
+    fn desktop_snapshot_cannot_remove_or_resurrect_a_dismissed_completion() {
+        let dismissed = serde_json::json!({
+            "id": "agent-completed:agent-1:message-1",
+            "type": "agent_completed",
+            "evidence_id": "message-1",
+            "read": true,
+            "dismissed": true
+        });
+        let stale_visible = serde_json::json!({
+            "id": dismissed["id"],
+            "type": "agent_completed",
+            "evidence_id": "message-1",
+            "read": false
+        });
+        let merged = merge_desktop_snapshot(
+            Some(std::slice::from_ref(&stale_visible)),
+            std::slice::from_ref(&stale_visible),
+            std::slice::from_ref(&dismissed),
+        );
+
+        assert_eq!(merged, vec![dismissed]);
     }
 
     #[test]

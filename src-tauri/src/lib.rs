@@ -720,6 +720,20 @@ pub fn run() {
                                 ));
                             }
 
+                            // Replay durable Claude completions before any
+                            // restored provider watcher starts. This includes
+                            // saved-Off agents, whose normal runtime has no
+                            // Claude watcher to scan the per-agent outbox.
+                            let startup_configs = pending_spawns
+                                .iter()
+                                .map(|(_, _, config, _)| config.clone())
+                                .collect::<Vec<_>>();
+                            manager::replay_claude_completion_outboxes(
+                                &app_handle,
+                                &startup_configs,
+                            )
+                            .await;
+
                             // Pass 2: spawn PTY agents with bounded concurrency,
                             // replacing each placeholder in place as its provider
                             // becomes ready. Each spawn costs seconds (stale-process
@@ -1147,6 +1161,7 @@ pub fn run() {
             commands::watchlist::load_watchlist_prefs,
             commands::watchlist::save_watchlist_prefs,
             commands::watchlist::load_queue_items,
+            commands::watchlist::dismiss_agent_completions,
             commands::watchlist::save_queue_items,
             commands::watchlist::load_queue_preferences,
             commands::watchlist::save_queue_preferences,
