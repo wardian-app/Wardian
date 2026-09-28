@@ -5,6 +5,7 @@ export type RunStatusKind = 'running' | 'awaiting_approval' | 'completed' | 'fai
 
 export type RunEvent = { seq: number; ts: string } & (
   | { kind: 'run_started'; run_id?: string; blueprint_hash?: string; blueprint_id: string; schema: number; trigger: unknown }
+  | { kind: 'message_send_prepared'; node: string; recipient_id: string; artifact_path: string }
   | { kind: 'node_started'; node: string }
   | { kind: 'node_completed'; node: string; output: unknown }
   | { kind: 'decision_completed'; node: string; output: unknown; port: string }
@@ -30,6 +31,7 @@ export interface RunState {
   status: RunStatusKind;
   nodes: Record<string, NodeStatusKind>;
   registry?: unknown;
+  message_deliveries?: Record<string, { recipient_id: string; artifact_path: string }>;
   loop_iter?: Record<string, number>;
   delivered?: Record<string, number[]>;
   skipped_edges?: number[];

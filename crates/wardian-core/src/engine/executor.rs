@@ -40,6 +40,14 @@ pub struct ScriptRequest {
     pub path: String,
 }
 
+/// Informational delivery of one exact workspace artifact by the host.
+#[derive(Debug, Clone)]
+pub struct MessageSendRequest {
+    pub node: String,
+    pub recipient: String,
+    pub artifact_path: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct NotifyRequest {
     pub node: String,
@@ -69,6 +77,22 @@ pub trait StepExecutor: Send + Sync {
     async fn run_decision(&self, req: DecisionRequest) -> Result<ChosenPort, StepError>;
     async fn run_shell(&self, req: ShellRequest) -> Result<StepOutput, StepError>;
     async fn run_script(&self, req: ScriptRequest) -> Result<StepOutput, StepError>;
+    /// Check delivery capability and launch-resolvable fields before any task runs.
+    /// `fresh` means no non-trigger node has started; an existing artifact is stale.
+    async fn preflight_message_send(
+        &self,
+        _req: MessageSendRequest,
+        _fresh: bool,
+    ) -> Result<String, StepError> {
+        Err(StepError::new(
+            "message_send requires host automation delivery",
+        ))
+    }
+    async fn message_send(&self, _req: MessageSendRequest) -> Result<StepOutput, StepError> {
+        Err(StepError::new(
+            "message_send requires host automation delivery",
+        ))
+    }
     async fn notify(&self, req: NotifyRequest) -> Result<(), StepError>;
     async fn memory_commit(&self, req: MemoryCommitRequest) -> Result<StepOutput, StepError>;
 }
@@ -163,6 +187,22 @@ impl StepExecutor for MockExecutor {
         self.record(format!("script:{}", req.node));
         self.check_fail(&req.node)?;
         Ok(StepOutput(serde_json::json!({"exit_code": 0})))
+    }
+
+    async fn preflight_message_send(
+        &self,
+        req: MessageSendRequest,
+        _fresh: bool,
+    ) -> Result<String, StepError> {
+        Ok(req.recipient)
+    }
+
+    async fn message_send(&self, req: MessageSendRequest) -> Result<StepOutput, StepError> {
+        self.record(format!("message_send:{}", req.node));
+        self.check_fail(&req.node)?;
+        Ok(StepOutput(
+            serde_json::json!({"recipient_id": req.recipient, "artifact_path": req.artifact_path}),
+        ))
     }
 
     async fn notify(&self, req: NotifyRequest) -> Result<(), StepError> {

@@ -20,6 +20,13 @@ pub enum NodeStatus {
     Skipped,
 }
 
+/// Immutable preflight resolution, owned by the run event log, not model output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageDeliveryBinding {
+    pub recipient_id: String,
+    pub artifact_path: String,
+}
+
 /// Full, serializable run state. `apply` is the only thing that mutates it in
 /// the pure core; the driver persists it as `state.json` after each event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,22 +50,26 @@ pub struct RunState {
     pub skipped_edges: BTreeSet<usize>,
     pub next_seq: u64,
     pub failure: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub message_deliveries: BTreeMap<String, MessageDeliveryBinding>,
 }
 
 impl RunState {
     pub fn new(run_id: impl Into<String>, blueprint_id: impl Into<String>) -> Self {
+        let run_id = run_id.into();
         Self {
-            run_id: run_id.into(),
+            run_id: run_id.clone(),
             blueprint_id: blueprint_id.into(),
             blueprint_hash: None,
             status: RunStatus::Running,
             nodes: BTreeMap::new(),
-            registry: serde_json::json!({ "nodes": {}, "trigger": { "output": {} }, "storage": {} }),
+            registry: serde_json::json!({ "nodes": {}, "trigger": { "output": {} }, "storage": {}, "run": {"id": run_id} }),
             loop_iter: BTreeMap::new(),
             delivered: BTreeMap::new(),
             skipped_edges: BTreeSet::new(),
             next_seq: 0,
             failure: None,
+            message_deliveries: BTreeMap::new(),
         }
     }
 
@@ -66,6 +77,7 @@ impl RunState {
     /// changing the meaning of an existing durable run.
     pub fn normalize_legacy(&mut self) {
         if let Some(registry) = self.registry.as_object_mut() {
+            registry.insert("run".into(), serde_json::json!({"id": self.run_id}));
             registry
                 .entry("storage")
                 .or_insert_with(|| serde_json::json!({}));
