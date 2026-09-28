@@ -16,6 +16,8 @@ pub(crate) const MAX_TOOL_REQUEST_ROOTS: usize = 1_024;
 const MAX_SEEN_GEMINI_MESSAGES: usize = 4_096;
 const MAX_NORMALIZATION_STATE_BYTES: usize = 1024 * 1024;
 pub(crate) const PROVIDER_RAW_LINE_METADATA_KEY: &str = "_wardian_provider_raw_line";
+pub(crate) const PROVIDER_LOG_ROW_OFFSET_METADATA_KEY: &str = "provider_log_row_offset";
+pub(crate) const PROVIDER_EVENT_ID_METADATA_KEY: &str = "provider_event_id";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct TranscriptNormalizationState {
@@ -48,6 +50,34 @@ impl Default for TranscriptNormalizationState {
 impl TranscriptNormalizationState {
     pub(crate) fn has_pending_events(&self) -> bool {
         !self.pending_events.is_empty()
+    }
+
+    pub(crate) fn pending_events(&self) -> &[AgentChatEvent] {
+        &self.pending_events
+    }
+
+    pub(crate) fn pending_events_mut(&mut self) -> &mut [AgentChatEvent] {
+        &mut self.pending_events
+    }
+
+    pub(crate) fn next_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+
+    pub(crate) fn attach_pending_row_offsets(&mut self, row_offsets: &[u64], first_sequence: u64) {
+        for event in &mut self.pending_events {
+            if event.metadata[PROVIDER_LOG_ROW_OFFSET_METADATA_KEY].is_number() {
+                continue;
+            }
+            if let Some(offset) = event
+                .sequence
+                .and_then(|sequence| sequence.checked_sub(first_sequence))
+                .and_then(|index| usize::try_from(index).ok())
+                .and_then(|index| row_offsets.get(index))
+            {
+                event.metadata[PROVIDER_LOG_ROW_OFFSET_METADATA_KEY] = json!(offset);
+            }
+        }
     }
 }
 
@@ -444,7 +474,7 @@ pub fn normalize_chat_line(
         Err(_) => return fallback_terminal_event(session_id, &provider, raw_line, sequence),
     };
 
-    match provider.as_str() {
+    let mut event = match provider.as_str() {
         "codex" => normalize_codex(session_id, &provider, &parsed, sequence),
         "claude" => normalize_claude(session_id, &provider, &parsed, sequence),
         "gemini" => normalize_gemini(session_id, &provider, &parsed, sequence),
@@ -453,7 +483,33 @@ pub fn normalize_chat_line(
         "pi" => normalize_pi(session_id, &provider, &parsed, sequence),
         "mock" => normalize_mock(session_id, &provider, &parsed, sequence),
         _ => normalize_fallback_json(session_id, &provider, &parsed, raw_line, sequence),
+    }?;
+    if let Some(provider_event_id) = provider_log_event_id(&provider, &parsed) {
+        event.metadata[PROVIDER_EVENT_ID_METADATA_KEY] = json!(provider_event_id);
     }
+    Some(event)
+}
+
+/// Returns identifiers tied to one provider log record. Turn and request IDs
+/// are intentionally excluded because they can identify several records.
+fn provider_log_event_id(provider: &str, parsed: &Value) -> Option<String> {
+    let value = match provider {
+        "pi" => super::pi::provenance::message_entry_id(parsed),
+        "claude" => parsed.get("uuid").and_then(value_to_string).or_else(|| {
+            (str_field(parsed, "type") == Some("assistant"))
+                .then(|| {
+                    content_array(parsed.get("message").unwrap_or(parsed))?
+                        .iter()
+                        .find(|item| str_field(item, "type") == Some("tool_use"))
+                        .and_then(|item| str_field(item, "id"))
+                        .map(str::to_string)
+                })
+                .flatten()
+        }),
+        _ => None,
+    }?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn normalize_pi(

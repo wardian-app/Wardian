@@ -5,6 +5,9 @@ use std::path::Path;
 use serde_json::Value;
 use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind};
 
+use crate::providers::chat_transcript::{
+    PROVIDER_EVENT_ID_METADATA_KEY, PROVIDER_LOG_ROW_OFFSET_METADATA_KEY,
+};
 use sha2::{Digest, Sha256};
 
 /// Codex emits an identity-less `event_msg` mirror and an identified completed
@@ -104,7 +107,7 @@ pub(crate) fn attach_native_legacy_aliases(
         // installed adapter does not yet root. Never infer an adapter mapping.
         let mut legacy = event.clone();
         legacy.turn_id = None;
-        let old_id = stable_provider_log_event_id(&legacy, path);
+        let old_id = legacy_provider_log_event_id(&legacy, path);
         *counts.entry(old_id.clone()).or_default() += 1;
         if event.turn_id.as_deref() == Some(native_id) {
             candidates.push((index, old_id));
@@ -119,7 +122,121 @@ pub(crate) fn attach_native_legacy_aliases(
 }
 
 pub(crate) fn stable_provider_log_event_id(event: &AgentChatEvent, path: &Path) -> String {
+    with_provider_log_row_identity(event, stable_provider_log_event_id_inner(event, path))
+}
+
+pub(crate) fn with_provider_log_row_identity(event: &AgentChatEvent, stable_id: String) -> String {
+    if let Some(provider_event_id) = provider_event_id(event) {
+        if event.turn_id.as_deref() == Some(provider_event_id) {
+            // The pre-offset identity already hashes this native per-event ID.
+            return stable_id;
+        }
+        let mut hash = Sha256::new();
+        hash.update(stable_id.as_bytes());
+        hash.update(b"\0provider-event-id-v1\0");
+        hash.update(provider_event_id.as_bytes());
+        return format!(
+            "{}:provider_log:{}",
+            event.session_id,
+            hash.finalize()
+                .iter()
+                .take(16)
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+    }
+    if !requires_provider_log_row_identity(event) {
+        return stable_id;
+    }
+    let Some(offset) = provider_log_row_offset(event) else {
+        return stable_id;
+    };
+    let mut hash = Sha256::new();
+    hash.update(stable_id.as_bytes());
+    hash.update(b"\0provider-log-row-offset-v1\0");
+    hash.update(offset.to_be_bytes());
+    format!(
+        "{}:provider_log:{}",
+        event.session_id,
+        hash.finalize()
+            .iter()
+            .take(16)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+/// Reconstructs the field-derived ID used before source-row identity was
+/// added. Callers may use it only where a native identity bridge proves the
+/// archived alias belongs to this observation.
+pub(crate) fn legacy_provider_log_event_id(event: &AgentChatEvent, path: &Path) -> String {
     stable_provider_log_event_id_inner(event, path)
+}
+
+pub(crate) fn requires_provider_log_row_identity(event: &AgentChatEvent) -> bool {
+    if is_codex_user_message_mirror(event) {
+        return false;
+    }
+    provider_event_id(event).is_none()
+}
+
+/// Only attach an old field-derived ID when that ID contains the native
+/// per-event identifier. A provider UUID stored only in metadata cannot make
+/// an otherwise shared legacy ID safe to alias.
+pub(crate) fn can_alias_legacy_provider_log_event_id(event: &AgentChatEvent) -> bool {
+    provider_event_id(event)
+        .zip(event.turn_id.as_deref())
+        .is_some_and(|(provider_event_id, turn_id)| provider_event_id == turn_id)
+}
+
+fn provider_event_id(event: &AgentChatEvent) -> Option<&str> {
+    event
+        .metadata
+        .get(PROVIDER_EVENT_ID_METADATA_KEY)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|event_id| !event_id.is_empty())
+}
+
+fn provider_log_row_offset(event: &AgentChatEvent) -> Option<u64> {
+    event
+        .metadata
+        .get(PROVIDER_LOG_ROW_OFFSET_METADATA_KEY)
+        .and_then(Value::as_u64)
+        .or(event.sequence)
+}
+
+/// Return absolute byte offsets for each physical source row.
+pub(crate) fn provider_log_row_offsets(content: &[u8], absolute_start_offset: u64) -> Vec<u64> {
+    let mut offsets = Vec::new();
+    let mut offset = absolute_start_offset;
+    for line in content.split_inclusive(|byte| *byte == b'\n') {
+        offsets.push(offset);
+        offset = offset.saturating_add(line.len() as u64);
+    }
+    offsets
+}
+
+/// Bind normalized events to their absolute byte position in the append-only
+/// provider source. Sequence numbers map normalizer rows across bounded batches.
+pub(crate) fn attach_provider_log_row_offsets(
+    events: &mut [AgentChatEvent],
+    row_offsets: &[u64],
+    first_sequence: u64,
+) {
+    for event in events {
+        if event.metadata[PROVIDER_LOG_ROW_OFFSET_METADATA_KEY].is_number() {
+            continue;
+        }
+        if let Some(offset) = event
+            .sequence
+            .and_then(|sequence| sequence.checked_sub(first_sequence))
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| row_offsets.get(index))
+        {
+            event.metadata[PROVIDER_LOG_ROW_OFFSET_METADATA_KEY] = serde_json::json!(offset);
+        }
+    }
 }
 
 fn stable_provider_log_event_id_inner(event: &AgentChatEvent, path: &Path) -> String {

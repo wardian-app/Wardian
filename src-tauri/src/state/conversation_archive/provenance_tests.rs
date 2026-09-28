@@ -551,24 +551,33 @@ fn pi_capture() -> (Vec<AgentChatEvent>, Vec<AgentChatEvent>) {
     );
     legacy.retain(|event| event.kind == AgentChatEventKind::Message);
     for event in &mut legacy {
-        // The base parser is the actual pre-#1167 parser. Remove the two
-        // repaired fields if this test is later run on the integrated adapter.
+        // Model IDs and metadata persisted before the provider-log identity
+        // migration, even though this helper uses today's normalizer.
         event.turn_id = None;
         event
             .metadata
             .as_object_mut()
             .unwrap()
             .remove("request_root_id");
+        for key in [
+            crate::providers::chat_transcript::PROVIDER_EVENT_ID_METADATA_KEY,
+            crate::providers::chat_transcript::PROVIDER_LOG_ROW_OFFSET_METADATA_KEY,
+        ] {
+            event.metadata.as_object_mut().unwrap().remove(key);
+        }
         event.metadata["provider_log"] = serde_json::json!(true);
         event.metadata["log_path"] = serde_json::json!(path);
-        event.id = native_identity::stable_provider_log_event_id(event, path);
+        event.id = native_identity::legacy_provider_log_event_id(event, path);
     }
     let mut current = legacy.clone();
     for event in &mut current {
         // Boundary stimulus: project #1167's envelope mapping from the real
         // retained record; this is not a claim to retest the Pi adapter.
         let row = &rows[event.sequence.unwrap() as usize - 1];
-        event.turn_id = Some(row["id"].as_str().unwrap().into());
+        let native_id = row["id"].as_str().unwrap();
+        event.turn_id = Some(native_id.into());
+        event.metadata[crate::providers::chat_transcript::PROVIDER_EVENT_ID_METADATA_KEY] =
+            serde_json::json!(native_id);
         if event.role == Some(AgentChatRole::User) {
             event.metadata["request_root_id"] = row["id"].clone();
         }
