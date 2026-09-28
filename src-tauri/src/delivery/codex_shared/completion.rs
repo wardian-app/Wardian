@@ -12,6 +12,10 @@ pub(super) struct TurnCompletions {
 }
 
 impl TurnCompletions {
+    pub(super) fn contains(&self, id: &str) -> bool {
+        self.turns.contains_key(id)
+    }
+
     pub(super) fn start(&mut self, id: &str) {
         self.turns
             .entry(id.to_owned())

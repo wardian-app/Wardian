@@ -80,8 +80,11 @@ async fn restore_with_owner(
         return false;
     }
     let status = match owner.borrow().activity() {
-        CodexTurnActivity::Idle(_) => "Idle",
-        CodexTurnActivity::Processing(_) => "Processing...",
+        CodexTurnActivity::Idle(_) | CodexTurnActivity::IdleWithoutTurn => "Idle",
+        CodexTurnActivity::ActionRequiredWithoutTurn => "Action Needed",
+        CodexTurnActivity::Processing(_) | CodexTurnActivity::ProcessingWithoutTurn => {
+            "Processing..."
+        }
         CodexTurnActivity::Pending | CodexTurnActivity::Closed | CodexTurnActivity::Stopped => {
             return false
         }

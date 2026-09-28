@@ -190,6 +190,11 @@ started from that terminal. During attachment, Wardian temporarily disables
 Codex's startup update check in the private config overlay so an update notice
 cannot block the terminal; the prior setting is restored afterward.
 
+On resume, Wardian also reads the current thread status without loading turn
+history. An idle thread clears stale `Processing` and releases queued follow-up
+delivery. Active threads remain busy, approval/input requests appear as
+`Action Needed`, and interruption requires an exact turn identity.
+
 The [agent messaging tools](./developer/agent-messaging-tools.md) separate
 information, follow-up tasks, and interruption. Delivery uses the shared
 local app-server connection. The local-daemon integration targets stable CLI
