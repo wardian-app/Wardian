@@ -76,6 +76,11 @@ const RENDERER_RESTORE_RETRY_MS = 1_000;
 // cap and flashes the lost-context placeholder. Terminals left unmounted past
 // this window still get their context reclaimed, preserving the leak fix.
 const RENDERER_DISPOSE_GRACE_MS = 30_000;
+// A provider that repaints after a geometry change does so within a few
+// hundred milliseconds. One that stays silent (an Ink prompt after a vertical-only
+// resize has nothing new to draw) would otherwise leave the presentation on the
+// old frame at the old size forever, so the broker's own frame settles it.
+const GEOMETRY_QUIET_SETTLE_MS = 1_000;
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
 
 type TitleHandlerRef = {
@@ -168,6 +173,7 @@ type TerminalSessionEntry = {
   snapshotStatus: "ready" | "pending" | "degraded";
   snapshotDegradation: "missing_formatted_state" | "invalid_formatted_state" | null;
   allowPendingKeyboard: boolean;
+  geometrySettleTimer?: ReturnType<typeof setTimeout> | null;
   onSnapshotStatusChange?: (status: "ready" | "pending" | "degraded", reason: TerminalSessionEntry["snapshotDegradation"]) => void;
 };
 
@@ -776,6 +782,7 @@ function disposeTerminalSession(sessionId: string) {
   }
 
   entry.disposed = true;
+  cancelGeometrySettle(entry);
   entry.outputReadyUnlisten?.();
   entry.terminalClearedUnlisten?.();
   cancelRendererDisposal(entry);
@@ -1087,11 +1094,15 @@ async function reportTerminalSize(
     return;
   }
 
+  // Only a geometry the broker does not already hold reaches the PTY. A forced
+  // same-size report (after a runtime replacement) is a no-op there: the
+  // provider gets no SIGWINCH and never repaints, so waiting for a repaint
+  // would strand the terminal in "pending" until unrelated output arrives.
+  const previousBrokerGeometry = entry.brokerState?.geometry ?? null;
   const enteringOwnerTransition = !entry.legacyMode &&
     entry.brokerState?.owner_presentation_id === entry.presentationId &&
     entry.brokerState.pending_activation === null &&
-    (entry.pendingForceResize || entry.brokerState.geometry.cols !== cols ||
-      entry.brokerState.geometry.rows !== rows);
+    (entry.brokerState.geometry.cols !== cols || entry.brokerState.geometry.rows !== rows);
   const previousStatus = entry.snapshotStatus;
   if (enteringOwnerTransition) {
     entry.pendingGeometry = true;
@@ -1120,7 +1131,13 @@ async function reportTerminalSize(
         cols,
         rows,
       );
-      if (result.decision.status !== "accepted" && enteringOwnerTransition) {
+      const unchangedByBroker = enteringOwnerTransition && !result.snapshot &&
+        previousBrokerGeometry !== null && result.geometry?.cols === previousBrokerGeometry.cols &&
+        result.geometry.rows === previousBrokerGeometry.rows;
+      if (enteringOwnerTransition &&
+          (result.decision.status !== "accepted" || unchangedByBroker)) {
+        // A rejected resize, or one the broker clamped back to the current
+        // canonical size, produces no PTY resize and therefore no repaint.
         entry.pendingGeometry = false;
         setSnapshotStatus(entry, previousStatus);
       }
@@ -1193,7 +1210,47 @@ function setSnapshotStatus(entry: TerminalSessionEntry, status: TerminalSessionE
     entry.snapshotDegradation = null;
     entry.allowPendingKeyboard = false;
   }
+  if (status === "pending") {
+    scheduleGeometrySettle(entry);
+  } else {
+    cancelGeometrySettle(entry);
+  }
   entry.onSnapshotStatusChange?.(status, entry.snapshotDegradation);
+}
+
+function cancelGeometrySettle(entry: TerminalSessionEntry) {
+  if (entry.geometrySettleTimer) {
+    clearTimeout(entry.geometrySettleTimer);
+  }
+  entry.geometrySettleTimer = null;
+}
+
+function scheduleGeometrySettle(entry: TerminalSessionEntry) {
+  cancelGeometrySettle(entry);
+  if (entry.legacyMode || entry.disposed) return;
+  entry.geometrySettleTimer = setTimeout(() => {
+    entry.geometrySettleTimer = null;
+    void settleQuietGeometry(entry);
+  }, GEOMETRY_QUIET_SETTLE_MS);
+}
+
+/**
+ * Ends a geometry transition the provider never repainted. The broker's parser
+ * already holds the terminal at the committed geometry, so its snapshot is the
+ * accurate frame; later provider output still applies on top. This reads state
+ * only: it sends nothing to the provider.
+ */
+async function settleQuietGeometry(entry: TerminalSessionEntry) {
+  const generation = entry.generation;
+  const stillPending = () => !entry.disposed && entry.snapshotStatus === "pending" &&
+    entry.pendingGeometry && entry.generation === generation;
+  if (!stillPending()) return;
+  try {
+    await entry.terminalClient.requestPresentationSnapshot(entry.presentationId, stillPending);
+  } catch {
+    // The presentation was unregistered or the runtime is transitioning. A
+    // later geometry transition arms a new settle.
+  }
 }
 
 function canEnablePendingKeyboard(entry: TerminalSessionEntry) {
@@ -3779,7 +3836,7 @@ export const AgentTerminal = memo(function AgentTerminal({
         </div>
       )}
       {rendererEvicted && rendererRestoreError && !initError && (
-        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-2 bg-surface px-4 text-center text-sm text-muted">
+        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-2 bg-[var(--color-wardian-bg)] px-4 text-center text-sm text-muted">
           <span>Terminal renderer failed to restore.</span>
           <button
             type="button"
@@ -3794,7 +3851,7 @@ export const AgentTerminal = memo(function AgentTerminal({
         </div>
       )}
       {snapshotStatus !== "ready" && !initError && (
-        <div data-testid="terminal-snapshot-status" className="absolute right-2 top-2 z-30 max-w-72 rounded bg-surface px-2 py-1 text-xs text-muted">
+        <div data-testid="terminal-snapshot-status" className="absolute right-2 top-2 z-30 max-w-72 rounded border border-wardian-border bg-[var(--color-wardian-card)] px-2 py-1 text-xs text-muted shadow">
           <span>{snapshotStatus === "pending" ? "Waiting for terminal repaint" :
             snapshotDegradation === "invalid_formatted_state" ? "Terminal formatting invalid" :
               "Terminal formatting unavailable"}</span>

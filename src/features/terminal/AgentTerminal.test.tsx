@@ -1186,6 +1186,60 @@ describe("AgentTerminal scrollback", () => {
     expect(screen.queryByTestId("terminal-snapshot-status")).toBeNull();
   });
 
+  it("settles a geometry change from the broker frame when the provider never repaints", async () => {
+    // An Ink-style prompt has nothing new to draw after a vertical-only resize,
+    // so no output follows the geometry event. Without a bound, the terminal
+    // stays letterboxed at the old size under "Waiting for terminal repaint".
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    const initial = { ...modernSnapshot(), terminal_state_base64: btoa("old frame") };
+    const settled = {
+      ...modernSnapshot(), snapshot_id: "settled", sequence_barrier: 1,
+      geometry: { cols: 100, rows: 30 }, terminal_state_base64: btoa("settled frame"),
+    };
+    const broker = modernBrokerState("pane-silent-provider");
+    let reads = 0;
+    mockListen.mockImplementation(async (name, handler) => {
+      listeners.set(name, handler as (event: { payload: unknown }) => void);
+      return () => listeners.delete(name);
+    });
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const presentationId = (args as { request?: { presentation_id?: string } } | undefined)?.request?.presentation_id ?? "pane-silent-provider";
+      if (command === "register_terminal_presentation") return {
+        ...modernRegistrationResult(presentationId), broker_state: broker, initial_snapshot: initial,
+      };
+      if (command === "subscribe_terminal_events") return { broker_state: broker, initial_snapshot: initial };
+      if (command === "read_terminal_events") return reads++ === 0 ? {
+        status: "events", runtime_generation: 1,
+        events: [{ sequence: 1, runtime_generation: 1, type: "geometry", geometry: { cols: 100, rows: 30 }, geometry_sequence: 1 }],
+        next_sequence: 1, latest_sequence: 1, recovery_snapshot: null,
+      } : modernCaughtUpBatch();
+      if (command === "request_terminal_snapshot") return settled;
+      if (command === "ack_terminal_events") return undefined;
+      if (command === "report_terminal_presentation_viewport") return modernRegistrationResult(presentationId).presentation;
+      if (command === "unregister_terminal_presentation") return broker;
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    render(<AgentTerminal sessionId="modern-agent" presentationId="pane-silent-provider" provider="claude" theme="dark" />);
+    await waitFor(() => expect(getLatestTerminalInstance().write).toHaveBeenCalledWith("old frame", expect.any(Function)));
+    const renderer = getLatestTerminalInstance();
+    const ready = listeners.get("terminal-session-events-ready");
+    if (!ready) throw new Error("expected broker event listener");
+    act(() => ready({ payload: { session_id: "modern-agent", runtime_generation: 1, latest_sequence: 1 } }));
+    await screen.findByText("Waiting for terminal repaint");
+    expect(mockInvoke).not.toHaveBeenCalledWith("request_terminal_snapshot", expect.anything());
+
+    await waitFor(() => expect(renderer.write).toHaveBeenCalledWith("settled frame", expect.any(Function)), {
+      timeout: 4000,
+    });
+    expect(renderer.cols).toBe(100);
+    expect(renderer.rows).toBe(30);
+    await waitFor(() => expect(screen.queryByTestId("terminal-snapshot-status")).toBeNull());
+    // Reading the frame is the whole recovery: nothing reaches the provider.
+    expect(mockInvoke).not.toHaveBeenCalledWith("send_terminal_presentation_input", expect.anything());
+  });
+
   it("keeps an owner pending without repaint output and revokes manual keyboard recovery on transfer", async () => {
     const listeners = new Map<string, (event: { payload: unknown }) => void>();
     const initial = { ...modernSnapshot(), terminal_state_base64: btoa("old owner frame") };
@@ -3501,6 +3555,87 @@ describe("AgentTerminal scrollback", () => {
     entry.brokerState!.geometry = { cols: 116, rows: 43 };
     entry.brokerState!.owner_presentation_id = "another-owner";
     expect(__terminalTesting.canSendTerminalInput(entry, "transferred lease")).toBe(false);
+  });
+
+  function ownerEntryForResize(
+    geometry: { cols: number; rows: number },
+    resize: ReturnType<typeof vi.fn>,
+    overrides: Record<string, unknown> = {},
+  ) {
+    const brokerState = { ...modernBrokerState("resize-owner"), geometry };
+    return {
+      sessionId: "modern-agent",
+      presentationId: "resize-owner",
+      generation: 1,
+      brokerState,
+      terminalClient: { reportViewport: vi.fn().mockResolvedValue(undefined), resize },
+      renderer: null,
+      lastReportedSize: null,
+      geometrySequence: 0,
+      applyingCanonicalGeometry: false,
+      pendingForceResize: false,
+      repaintRequestedForGeometry: false,
+      ownerGeometryTransitionSettled: false,
+      pendingGeometry: false,
+      snapshotStatus: "ready",
+      allowPendingKeyboard: false,
+      disposed: false,
+      frameGeometry: geometry,
+      frameGeneration: 1,
+      ...overrides,
+    } as unknown as Parameters<typeof __terminalTesting.reportTerminalSize>[0];
+  }
+
+  it("does not wait for a repaint after a forced resize the broker already holds", async () => {
+    // After New Session the owner re-reports its viewport with pendingForceResize.
+    // At an unchanged size the PTY gets no SIGWINCH, so an idle provider never
+    // repaints and "Waiting for terminal repaint" would never clear.
+    const resize = vi.fn().mockResolvedValue({
+      decision: { status: "accepted" },
+      geometry: { cols: 116, rows: 43 },
+      snapshot: null,
+    });
+    const entry = ownerEntryForResize({ cols: 116, rows: 43 }, resize, { pendingForceResize: true });
+    const statuses: string[] = [];
+    (entry as { onSnapshotStatusChange?: (status: string) => void }).onSnapshotStatusChange =
+      (status) => statuses.push(status);
+
+    await __terminalTesting.reportTerminalSize(entry, 116, 43, { force: true });
+
+    expect(resize).toHaveBeenCalledTimes(1);
+    expect(entry.pendingForceResize).toBe(false);
+    expect(entry.pendingGeometry).toBe(false);
+    expect(entry.snapshotStatus).toBe("ready");
+    expect(statuses).not.toContain("pending");
+  });
+
+  it("restores the prior status when the broker clamps a resize back to its current size", async () => {
+    const resize = vi.fn().mockResolvedValue({
+      decision: { status: "accepted" },
+      geometry: { cols: 500, rows: 200 },
+      snapshot: null,
+    });
+    const entry = ownerEntryForResize({ cols: 500, rows: 200 }, resize);
+
+    await __terminalTesting.reportTerminalSize(entry, 620, 240);
+
+    expect(resize).toHaveBeenCalledTimes(1);
+    expect(entry.pendingGeometry).toBe(false);
+    expect(entry.snapshotStatus).toBe("ready");
+  });
+
+  it("still waits for a repaint when the broker commits a new geometry", async () => {
+    const resize = vi.fn().mockResolvedValue({
+      decision: { status: "accepted" },
+      geometry: { cols: 116, rows: 43 },
+      snapshot: { ...modernSnapshot(), geometry: { cols: 116, rows: 43 } },
+    });
+    const entry = ownerEntryForResize({ cols: 80, rows: 24 }, resize);
+
+    await __terminalTesting.reportTerminalSize(entry, 116, 43);
+
+    expect(entry.pendingGeometry).toBe(true);
+    expect(entry.snapshotStatus).toBe("pending");
   });
 
   it("falls back to FitAddon when xterm cell internals are unavailable", () => {
