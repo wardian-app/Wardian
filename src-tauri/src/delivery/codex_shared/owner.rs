@@ -1,6 +1,7 @@
 use super::*;
 use crate::delivery::native_broker::NativeSessionSpec;
 use crate::providers::ProviderFactory;
+use std::future::Future;
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::{Child, Command};
@@ -30,10 +31,100 @@ pub(super) struct OwnerStartTimings {
     thread_seed: std::time::Duration,
     child_spawn: std::time::Duration,
     socket_wait: std::time::Duration,
+    socket_wait_diagnostic: Option<SocketWaitDiagnostic>,
     proxy_connect: std::time::Duration,
     initialize: std::time::Duration,
     launch_model: std::time::Duration,
     total: std::time::Duration,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SocketWaitOutcome {
+    Ready,
+    TimedOut,
+    ChildExited,
+    ChildStatusUnavailable,
+    Cancelled,
+}
+
+impl SocketWaitOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::TimedOut => "timed_out",
+            Self::ChildExited => "child_exited",
+            Self::ChildStatusUnavailable => "child_status_unavailable",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub(super) fn into_result(self) -> Result<(), CodexSharedError> {
+        match self {
+            Self::Ready => Ok(()),
+            Self::TimedOut => Err(CodexSharedError::unsupported(
+                "Codex local socket startup timed out",
+            )),
+            Self::ChildExited | Self::ChildStatusUnavailable => Err(CodexSharedError::unsupported(
+                "captured Codex daemon is no longer alive",
+            )),
+            Self::Cancelled => Err(CodexSharedError::unsupported(
+                "Codex owner startup cancelled",
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SocketPresence {
+    Present,
+    Missing,
+    Inaccessible,
+}
+
+impl SocketPresence {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Present => "present",
+            Self::Missing => "missing",
+            Self::Inaccessible => "inaccessible",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ChildLiveness {
+    Alive,
+    Exited,
+    Unavailable,
+}
+
+impl ChildLiveness {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Alive => "alive",
+            Self::Exited => "exited",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SocketWaitDiagnostic {
+    pub(super) elapsed: std::time::Duration,
+    pub(super) outcome: SocketWaitOutcome,
+    pub(super) socket_presence: SocketPresence,
+    pub(super) child_liveness: ChildLiveness,
+}
+
+impl SocketWaitDiagnostic {
+    pub(super) fn as_log_value(self) -> Value {
+        json!({
+            "elapsed_ms": self.elapsed.as_millis(),
+            "outcome": self.outcome.as_str(),
+            "socket_presence": self.socket_presence.as_str(),
+            "child_liveness": self.child_liveness.as_str(),
+        })
+    }
 }
 
 /// Time one fallible phase into `slot` without disturbing its result.
@@ -86,12 +177,24 @@ impl Drop for OwnerStartReport {
 }
 
 impl OwnerStartTimings {
+    pub(super) fn record_socket_wait(&mut self, diagnostic: SocketWaitDiagnostic) {
+        self.socket_wait = diagnostic.elapsed;
+        self.socket_wait_diagnostic = Some(diagnostic);
+    }
+
+    pub(super) fn socket_wait_diagnostic_value(&self) -> Value {
+        self.socket_wait_diagnostic
+            .map(SocketWaitDiagnostic::as_log_value)
+            .unwrap_or(Value::Null)
+    }
+
     fn log(&self, agent_id: &str) {
+        let socket_wait_diagnostic = self.socket_wait_diagnostic_value();
         crate::utils::logging::log_debug(&format!(
             "[Wardian] Codex owner start agent={agent_id} total_ms={} quiescent_ms={} \
 habitat_ms={} codex_home_ms={} compact_home_ms={} codex_projection_ms={} messaging_ms={} \
 socket_recovery_ms={} thread_seed_ms={} launch_config_ms={} child_spawn_ms={} socket_wait_ms={} \
-proxy_connect_ms={} initialize_ms={} launch_model_ms={}",
+socket_wait_diagnostic={} proxy_connect_ms={} initialize_ms={} launch_model_ms={}",
             self.total.as_millis(),
             self.quiescent.as_millis(),
             self.habitat_workspace.as_millis(),
@@ -104,6 +207,7 @@ proxy_connect_ms={} initialize_ms={} launch_model_ms={}",
             self.launch_config.as_millis(),
             self.child_spawn.as_millis(),
             self.socket_wait.as_millis(),
+            socket_wait_diagnostic,
             self.proxy_connect.as_millis(),
             self.initialize.as_millis(),
             self.launch_model.as_millis(),
@@ -372,18 +476,15 @@ impl CodexSharedOwner {
         let start = async {
             // A private socket must appear while our daemon is alive. No controller
             // RPC is retried, and a proxy handshake failure is final.
-            let socket_wait_at = std::time::Instant::now();
-            let wait_socket = wait_for_socket(
+            let socket_wait = observe_socket_wait(
                 &socket,
                 tokio::time::Instant::now() + STARTUP_TIMEOUT,
-                || attachment::child_alive(&mut child),
-            );
-            tokio::select! {
-                biased;
-                _ = &mut cancelled => return Err(CodexSharedError::unsupported("Codex owner startup cancelled")),
-                result = wait_socket => result?,
-            }
-            timings.socket_wait = socket_wait_at.elapsed();
+                async { let _ = (&mut cancelled).await; },
+                || observe_child_liveness(&mut child),
+            )
+            .await;
+            timings.record_socket_wait(socket_wait);
+            socket_wait.outcome.into_result()?;
             let mut proxy_command = Command::new(&program);
             proxy_command.args(&prefix_args).current_dir(&spec.workspace).env("CODEX_HOME", &codex_home);
             // Reuse the owner's complete prepared environment, including the
@@ -648,25 +749,67 @@ fn restore_launch_overlay(
     Ok(())
 }
 
-/// Wait only for the private socket path to appear while the captured child
-/// remains alive. Presence is not a handshake or attachment receipt. The caller
-/// owns cancellation and joined process cleanup; this never spawns or connects.
+/// Observe only the private socket startup boundary. The diagnostic carries no
+/// path or provider output; presence is not a handshake or attachment receipt.
+pub(super) async fn observe_socket_wait<C, F>(
+    socket: &std::path::Path,
+    deadline: tokio::time::Instant,
+    cancelled: C,
+    mut child_liveness: F,
+) -> SocketWaitDiagnostic
+where
+    C: Future<Output = ()>,
+    F: FnMut() -> ChildLiveness,
+{
+    let started = std::time::Instant::now();
+    let outcome = tokio::select! {
+        biased;
+        _ = cancelled => SocketWaitOutcome::Cancelled,
+        outcome = wait_for_socket(socket, deadline, &mut child_liveness) => outcome,
+    };
+    SocketWaitDiagnostic {
+        elapsed: started.elapsed(),
+        outcome,
+        socket_presence: socket_presence(socket),
+        child_liveness: child_liveness(),
+    }
+}
+
+/// Wait only for socket presence while the captured child remains alive.
 pub(super) async fn wait_for_socket(
     socket: &std::path::Path,
     deadline: tokio::time::Instant,
-    mut alive: impl FnMut() -> Result<(), CodexSharedError>,
-) -> Result<(), CodexSharedError> {
+    mut child_liveness: impl FnMut() -> ChildLiveness,
+) -> SocketWaitOutcome {
     loop {
-        alive()?;
-        if std::fs::symlink_metadata(socket).is_ok() {
-            return Ok(());
+        match child_liveness() {
+            ChildLiveness::Alive => {}
+            ChildLiveness::Exited => return SocketWaitOutcome::ChildExited,
+            ChildLiveness::Unavailable => return SocketWaitOutcome::ChildStatusUnavailable,
+        }
+        if socket_presence(socket) == SocketPresence::Present {
+            return SocketWaitOutcome::Ready;
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(CodexSharedError::unsupported(
-                "Codex local socket startup timed out",
-            ));
+            return SocketWaitOutcome::TimedOut;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn socket_presence(socket: &std::path::Path) -> SocketPresence {
+    match std::fs::symlink_metadata(socket) {
+        Ok(_) => SocketPresence::Present,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SocketPresence::Missing,
+        Err(_) => SocketPresence::Inaccessible,
+    }
+}
+
+fn observe_child_liveness(child: &mut Child) -> ChildLiveness {
+    match child.try_wait() {
+        Ok(None) => ChildLiveness::Alive,
+        Ok(Some(_)) => ChildLiveness::Exited,
+        Err(_) => ChildLiveness::Unavailable,
     }
 }
 
