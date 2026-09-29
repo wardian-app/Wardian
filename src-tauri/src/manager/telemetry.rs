@@ -719,6 +719,7 @@ struct TelemetryPassResult {
     provider_statuses: Vec<TelemetryProviderStatus>,
 }
 
+#[derive(Clone)]
 pub(crate) struct TelemetryProviderStatus {
     pub(crate) session_id: String,
     pub(crate) generation: u64,
@@ -1441,18 +1442,15 @@ fn collect_app_process_pids(
 
 /// Samples every agent and publishes the resulting status observations.
 ///
-/// Queue wakeups that a Ready transition earns are spawned as detached workers
-/// rather than awaited: delivery waits on lifecycle ownership and the provider,
-/// and the tick must never sit behind either.
+/// Anything that can wait on a lifecycle gate or the provider is handed to
+/// detached workers rather than awaited, so the tick never sits behind it.
 pub async fn get_all_metrics(state: &AppState, app: &tauri::AppHandle) -> Vec<AgentTelemetry> {
-    let (metrics, wake_sessions) = collect_agent_metrics(state).await;
-    for session_id in wake_sessions {
-        crate::control::spawn_agent_messaging_after_restore(app, &session_id);
-    }
+    let (metrics, follow_up) = collect_agent_metrics(state).await;
+    status::spawn_follow_up(app, follow_up);
     metrics
 }
 
-async fn collect_agent_metrics(state: &AppState) -> (Vec<AgentTelemetry>, Vec<String>) {
+async fn collect_agent_metrics(state: &AppState) -> (Vec<AgentTelemetry>, status::StatusFollowUp) {
     let mut snapshots: Vec<AgentSnapshot> = {
         let agents = state.agents.lock().await;
         agents
@@ -2089,10 +2087,10 @@ async fn collect_agent_metrics(state: &AppState) -> (Vec<AgentTelemetry>, Vec<St
     .await
     .unwrap_or_default();
     let mut result = result;
-    let wake_sessions =
+    let follow_up =
         apply_provider_status_observations(state, &result.provider_statuses, &mut result.metrics)
             .await;
-    (result.metrics, wake_sessions)
+    (result.metrics, follow_up)
 }
 
 pub(crate) fn commit_telemetry_status_observation(
