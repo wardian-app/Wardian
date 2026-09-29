@@ -94,8 +94,15 @@ pub(super) fn matching_record_index(
         );
     }
 
-    if current.metadata["provider_log"] == true && provenance::is_codex_user_message_mirror(current)
-    {
+    let is_codex_user_request = current.provider.eq_ignore_ascii_case("codex")
+        && current.kind == AgentChatEventKind::Message
+        && current.role == Some(AgentChatRole::User)
+        && current.source.as_deref() == Some("response_item")
+        && current.metadata["raw_type"] == "message"
+        && current.metadata["input_origin"] == "human_input"
+        && current.metadata["input_purpose"] == "request";
+    let is_codex_user_mirror = provenance::is_codex_user_message_mirror(current);
+    if current.metadata["provider_log"] == true && (is_codex_user_mirror || is_codex_user_request) {
         let exact_match = unique_match(
             records.iter().enumerate().filter_map(|(index, record)| {
                 record.event_refs.contains(&current.id).then_some(index)
@@ -128,6 +135,10 @@ pub(super) fn matching_record_index(
                 }),
                 &format!("Codex mirror narrative ownership for event {}", current.id),
             );
+        }
+
+        if !is_codex_user_mirror {
+            return Ok(None);
         }
 
         // A historical text-derived mirror ID may be present as an alias in

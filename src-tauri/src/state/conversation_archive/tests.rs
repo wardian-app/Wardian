@@ -68,7 +68,7 @@ fn codex_user_mirror_pair_has_one_narrative_across_same_and_separate_batches() {
     let context = archive_context("provider-session");
     let log_path = "<codex-provider-log>";
     let request_text = "Inspect the archive.";
-    let turn_a = normalize_chat_lines(
+    let mut turn_a = normalize_chat_lines(
         "agent-1",
         "codex",
         [
@@ -100,7 +100,10 @@ fn codex_user_mirror_pair_has_one_narrative_across_same_and_separate_batches() {
                 .unwrap()
                 .remove("provider_source");
             if event.role == Some(AgentChatRole::User) {
-                let turn = event.metadata["provider_turn_id"].as_str().unwrap();
+                let turn = event.metadata["provider_turn_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
                 let root = if event.source.as_deref() == Some("response_item") {
                     format!("wardian:input:{turn}")
                 } else {
@@ -108,6 +111,8 @@ fn codex_user_mirror_pair_has_one_narrative_across_same_and_separate_batches() {
                 };
                 event.metadata["request_root_id"] = serde_json::json!(root);
                 if event.source.as_deref() == Some("response_item") {
+                    event.metadata["legacy_event_ids"] =
+                        serde_json::json!([format!("legacy:response-item:{turn}")]);
                     // Real Wardian delivery echoes can lack the redundant
                     // digest while retaining the exact request bytes.
                     event
@@ -120,9 +125,19 @@ fn codex_user_mirror_pair_has_one_narrative_across_same_and_separate_batches() {
         }
         events
     };
+    turn_a.sort_by_key(|event| usize::from(event.source.as_deref() != Some("event_msg")));
+    let turn_a = decorate(turn_a);
+    let turn_a_mirror = turn_a
+        .iter()
+        .find(|event| event.source.as_deref() == Some("event_msg"))
+        .cloned()
+        .expect("Codex user mirror");
     archive
-        .append_chat_events_with_context(context.clone(), &decorate(turn_a))
+        .append_chat_events_with_context(context.clone(), &turn_a)
         .expect("append same-batch mirror pair");
+    archive
+        .append_chat_events_with_context(context.clone(), &[turn_a_mirror])
+        .expect("replay only the archived Codex user mirror");
 
     let mut state = TranscriptNormalizationState::default();
     let turn_b_request = normalize_chat_lines_with_state(
@@ -147,11 +162,11 @@ fn codex_user_mirror_pair_has_one_narrative_across_same_and_separate_batches() {
     )
     .expect("normalize second turn mirror in separate batch");
     archive
-        .append_chat_events_with_context(context.clone(), &decorate(turn_b_request))
-        .expect("append second turn request");
-    archive
         .append_chat_events_with_context(context.clone(), &decorate(turn_b_mirror))
-        .expect("append second turn mirror in separate batch");
+        .expect("append second turn mirror first");
+    archive
+        .append_chat_events_with_context(context.clone(), &decorate(turn_b_request))
+        .expect("append second turn request in separate batch");
 
     let conversation_id = archive
         .active_conversation_id_for_test("agent-1")
@@ -179,6 +194,14 @@ fn codex_user_mirror_pair_has_one_narrative_across_same_and_separate_batches() {
         .iter()
         .all(|record| record.text.as_deref() == Some(request_text)));
     for turn_id in ["provider-turn-a", "provider-turn-b"] {
+        let canonical_root = format!("wardian:input:{turn_id}");
+        let request_record = records
+            .iter()
+            .find(|record| record.request_root_id.as_deref() == Some(canonical_root.as_str()))
+            .expect("Wardian request root remains canonical");
+        assert_eq!(request_record.event_refs.len(), 2);
+    }
+    for turn_id in ["provider-turn-a", "provider-turn-b"] {
         let observations = events
             .iter()
             .filter(|event| event.metadata["provider_turn_id"] == turn_id)
@@ -201,6 +224,24 @@ fn codex_user_mirror_pair_has_one_narrative_across_same_and_separate_batches() {
             .expect("both provider observations share one narrative");
         assert_eq!(record.event_refs.len(), 2);
         assert_eq!(record.source_refs.len(), 2);
+        let request = observations
+            .iter()
+            .find(|event| event.source.as_deref() == Some("response_item"))
+            .expect("Codex response_item request");
+        let mirror = observations
+            .iter()
+            .find(|event| event.source.as_deref() == Some("event_msg"))
+            .expect("Codex event_msg mirror");
+        assert_eq!(
+            request.metadata["legacy_event_ids"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(mirror.metadata.get("legacy_event_ids").is_none());
+        assert!(request.metadata.get("provider_observation_ids").is_none());
+        assert!(mirror.metadata.get("provider_observation_ids").is_none());
         let linked_sources = sources
             .iter()
             .filter(|source| record.source_refs.contains(&source.source_id))

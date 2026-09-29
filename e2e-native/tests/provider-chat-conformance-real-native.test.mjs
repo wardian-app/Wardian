@@ -29,6 +29,7 @@ const HARNESS_SHA256 = createHash("sha256").update(await fs.readFile(import.meta
 // This suite never builds, changes provider auth, seeds provider logs, or uses mocks.
 const PROVIDERS = ["claude", "codex", "opencode", "antigravity", "pi"];
 const OPT_IN = "WARDIAN_E2E_REAL_CHAT_CONFORMANCE";
+const SINGLE_TURN_ENV = "WARDIAN_E2E_CHAT_SINGLE_TURN";
 const CASES = [
   "model-catalog",
   "model-choice-gating",
@@ -114,19 +115,35 @@ function assertArchiveRequestRoots(events, archive) {
     const pair = groups.find((group) => codexUserMirrorPair(group.request, request));
     if (pair) {
       pair.ids = [...new Set([...pair.ids, ...ids])];
+      pair.roots = [...new Set([...pair.roots, request.metadata?.request_root_id])];
+      pair.codexMirror = true;
+      if (request.source === "response_item") pair.request = request;
       continue;
     }
-    groups.push({ request, ids });
+    groups.push({ request, ids, roots: [request.metadata?.request_root_id], codexMirror: false });
   }
   const roots = groups.map(({ request }) => request.metadata?.request_root_id);
   assert.ok(roots.every((root) => typeof root === "string" && root.length > 0),
     "Native requests must retain an authoritative request root");
   assert.equal(new Set(roots).size, roots.length, "Each semantic native request must have a unique root");
-  for (const { request, ids } of groups) {
-    const records = archive.conversation.filter((row) => ids.every((id) => row.event_refs?.includes(id)));
-    assert.equal(records.length, 1, "Each native request must resolve to exactly one durable narrative record");
+  for (const { request, ids, roots: observedRoots, codexMirror } of groups) {
+    const records = archive.conversation.filter((row) => row.kind === "message" && row.role === "user"
+      && row.input_origin === "human_input" && row.input_purpose === "request"
+      && (ids.some((id) => row.event_refs?.includes(id)) || observedRoots.includes(row.request_root_id)));
+    assert.equal(records.length, 1,
+      "Each submitted native request must resolve to exactly one durable human narrative");
+    assert.ok(ids.every((id) => records[0].event_refs?.includes(id)),
+      "One durable narrative must retain every native request event reference");
+    if (request.provider === "codex" && (codexMirror || ids.length > 1)) {
+      assert.match(request.metadata.request_root_id, /^wardian:input:/,
+        "Codex mirror pairs must use the canonical Wardian submission root");
+    }
     assert.equal(records[0].request_root_id, request.metadata.request_root_id,
       "Native request root must match its durable narrative record");
+    if (request.provider === "codex" && (codexMirror || ids.length > 1)) {
+      assert.equal(new Set(records[0].source_refs || []).size, 2,
+        "The durable narrative must retain both provider source references");
+    }
   }
   return { rooted_requests: roots.length, durable_roots_match: true };
 }
@@ -149,7 +166,8 @@ function codexUserMirrorPair(first, second) {
     && typeof request.text === "string" && request.text.length > 0 && request.text === mirror.text
     && left.log_path && left.log_path === right.log_path
     && left.provider_turn_id && left.provider_turn_id === right.provider_turn_id
-    && left.request_root_id && left.request_root_id === right.request_root_id
+    && typeof left.request_root_id === "string" && left.request_root_id.length > 0
+    && typeof right.request_root_id === "string" && right.request_root_id.length > 0
     && ((left.provider_session_id == null && right.provider_session_id == null)
       || (left.provider_session_id != null && left.provider_session_id === right.provider_session_id));
 }
@@ -301,6 +319,25 @@ function selectedCatalogModel(catalog, provider, model) {
   return selected;
 }
 
+function singleTurnEnabled(env) {
+  return env[SINGLE_TURN_ENV] === "1";
+}
+
+function selectedCodexEffort(options, preferLow = false) {
+  if (preferLow && options.includes("low")) return "low";
+  return ["none", "minimal", "low", "medium", "high", "xhigh"].find((effort) => options.includes(effort));
+}
+
+test("chat conformance deterministic: single-turn selection is explicit", () => {
+  assert.equal(singleTurnEnabled({}), false);
+  assert.equal(singleTurnEnabled({ [SINGLE_TURN_ENV]: "true" }), false);
+  assert.equal(singleTurnEnabled({ [SINGLE_TURN_ENV]: "1" }), true);
+  assert.equal(selectedCodexEffort(["none", "minimal", "low", "high"]), "none");
+  assert.equal(selectedCodexEffort(["none", "minimal", "low", "high"], true), "low");
+  assert.equal(selectedCodexEffort(["minimal", "medium"], true), "minimal");
+  assert.equal(selectedCodexEffort([]), undefined);
+});
+
 test("chat conformance deterministic: failed catalog prevents spawn and submission", async () => {
   for (const catalog of [
     { provider: "codex", refresh_error: "refresh failed", models: [{ id: "selected" }] },
@@ -370,7 +407,8 @@ test("chat conformance deterministic: native request roots match durable narrati
     input_origin: "context_injection", input_purpose: "context",
   } };
   const archive = { conversation: [
-    { event_refs: [request.id], request_root_id: "request-root", input_origin: "human_input", input_purpose: "request" },
+    { kind: "message", role: "user", event_refs: [request.id], request_root_id: "request-root",
+      input_origin: "human_input", input_purpose: "request" },
     { event_refs: [context.id], request_root_id: null, input_origin: "context_injection", input_purpose: "context" },
   ] };
   assert.deepEqual(assertArchiveRequestRoots([request], archive), { rooted_requests: 1, durable_roots_match: true });
@@ -380,7 +418,8 @@ test("chat conformance deterministic: native request roots match durable narrati
     { event_refs: [contextWithoutRoot.id], input_origin: "context_injection", input_purpose: "context" },
   ] }), { observed_contexts: 1 });
   assert.throws(() => assertArchiveRequestRoots([request], { conversation: [
-    { event_refs: [request.id], request_root_id: "different-root" },
+    { kind: "message", role: "user", input_origin: "human_input", input_purpose: "request",
+      event_refs: [request.id], request_root_id: "different-root" },
   ] }), /must match its durable narrative/);
   assert.throws(() => assertContextArchiveProvenance([], [request], archive), /No provider-native context/);
   assert.throws(() => assertContextArchiveProvenance([{ ...context, metadata: {
@@ -396,19 +435,37 @@ test("chat conformance deterministic: Codex exact mirrors share one narrative an
       provider_turn_id: turn, request_root_id: root, provider_session_id: "codex-session", log_path: "codex.jsonl",
     },
   });
-  const first = [event("a-request", "turn-a", "response_item", "message", "root-a"),
-    event("a-mirror", "turn-a", "event_msg", "user_message", "root-a")];
-  const second = [event("b-request", "turn-b", "response_item", "message", "root-b"),
-    event("b-mirror", "turn-b", "event_msg", "user_message", "root-b")];
+  const first = [event("a-request", "turn-a", "response_item", "message", "wardian:input:turn-a"),
+    event("a-mirror", "turn-a", "event_msg", "user_message", "codex-message:turn-a")];
+  const second = [event("b-request", "turn-b", "response_item", "message", "wardian:input:turn-b"),
+    event("b-mirror", "turn-b", "event_msg", "user_message", "codex-message:turn-b")];
   const archive = { conversation: [
-    { event_refs: ["a-request", "a-mirror"], request_root_id: "root-a" },
-    { event_refs: ["b-request", "b-mirror"], request_root_id: "root-b" },
+    { kind: "message", role: "user", input_origin: "human_input", input_purpose: "request",
+      event_refs: ["a-request", "a-mirror"], source_refs: ["a-request-source", "a-mirror-source"],
+      request_root_id: "wardian:input:turn-a" },
+    { kind: "message", role: "user", input_origin: "human_input", input_purpose: "request",
+      event_refs: ["b-request", "b-mirror"], source_refs: ["b-request-source", "b-mirror-source"],
+      request_root_id: "wardian:input:turn-b" },
   ] };
   assert.equal(codexUserMirrorPair(...first), true);
+  assert.equal(codexUserMirrorPair(first[0], second[1]), false,
+    "Identical text on different native turns must remain separate");
   assert.equal(codexUserMirrorPair(first[0], { ...first[1], text: "different prompt" }), false);
   assert.deepEqual(assertArchiveRequestRoots([...first, ...second], archive), {
     rooted_requests: 2, durable_roots_match: true,
   });
+  assert.throws(() => assertArchiveRequestRoots(first, { conversation: [
+    { kind: "message", role: "user", input_origin: "human_input", input_purpose: "request",
+      event_refs: ["a-request"], source_refs: ["a-request-source"], request_root_id: "wardian:input:turn-a" },
+    { kind: "message", role: "user", input_origin: "human_input", input_purpose: "request",
+      event_refs: ["a-mirror"], source_refs: ["a-mirror-source"], request_root_id: "codex-message:turn-a" },
+  ] }), /exactly one durable human narrative/);
+  assert.throws(() => assertArchiveRequestRoots(first, { conversation: [
+    { ...archive.conversation[0], request_root_id: "codex-message:turn-a" },
+  ] }), /must match its durable narrative/);
+  assert.throws(() => assertArchiveRequestRoots(first, { conversation: [
+    { ...archive.conversation[0], source_refs: ["a-request-source"] },
+  ] }), /both provider source references/);
 });
 
 test("chat conformance deterministic: Codex model display matches configured ID case-insensitively", () => {
@@ -765,7 +822,7 @@ test("real provider chat conformance", { timeout: 3_600_000 }, async (t) => {
           report.provider_version = catalog.version;
           if (provider === "codex") {
             const supported = selected.effort_options || [];
-            selectedEffort = ["none", "minimal", "low", "medium", "high", "xhigh"].find((effort) => supported.includes(effort));
+            selectedEffort = selectedCodexEffort(supported, singleTurnEnabled(process.env));
             report.requested_effort = selectedEffort || null;
           }
           return { selected_model_present: true, model_count: catalog.models.length, source: catalog.source };
@@ -912,6 +969,19 @@ test("real provider chat conformance", { timeout: 3_600_000 }, async (t) => {
           return { tokens_reported: row.tokens_reported, total_tokens: row.total_tokens,
             cached_tokens: row.cached_tokens, limitation: "Positive accounting, not an invoice or exact tokenizer comparison" };
         }, provider === "antigravity" ? "Design exclusion: Antigravity token accounting is intentionally unsupported" : undefined);
+
+        if (singleTurnEnabled(process.env)) {
+          for (const [name, result] of Object.entries(report.cases)) {
+            if (result.status === "not_run") {
+              report.cases[name] = {
+                status: "untested",
+                reason: "Single-turn mode exits after initial-turn archive checks before any subsequent provider prompt",
+              };
+            }
+          }
+          await save();
+          return;
+        }
 
         const continuity = await check("pause-resume-continuity", async () => {
           const original = await agentConfig();

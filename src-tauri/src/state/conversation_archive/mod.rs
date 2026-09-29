@@ -56,6 +56,48 @@ fn codex_archive_mirror_pair(first: &AgentChatEvent, second: &AgentChatEvent) ->
         || provenance::codex_live_watch_observation_pair(first, second)
 }
 
+fn promote_codex_request_root_from_response_item(
+    record: &mut ConversationNarrativeRecord,
+    event: &AgentChatEvent,
+) -> bool {
+    if event.source.as_deref() != Some("response_item")
+        || event.metadata["input_origin"] != "human_input"
+        || event.metadata["input_purpose"] != "request"
+    {
+        return false;
+    }
+    let Some(request_root_id) = event
+        .metadata
+        .get("request_root_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    if record.request_root_id.as_deref() == Some(request_root_id) {
+        return false;
+    }
+    record.request_root_id = Some(request_root_id.to_string());
+    true
+}
+
+fn reconcile_codex_request_root_from_archived_mirror(
+    record: &mut ConversationNarrativeRecord,
+    events: &[AgentChatEvent],
+) -> bool {
+    let Some(request) = events.iter().find(|event| {
+        event.source.as_deref() == Some("response_item")
+            && event.metadata["input_origin"] == "human_input"
+            && event.metadata["input_purpose"] == "request"
+            && record.event_refs.contains(&event.id)
+            && events.iter().any(|mirror| {
+                record.event_refs.contains(&mirror.id) && codex_archive_mirror_pair(event, mirror)
+            })
+    }) else {
+        return false;
+    };
+    promote_codex_request_root_from_response_item(record, request)
+}
+
 fn refresh_codex_completion_narrative(
     record: &mut ConversationNarrativeRecord,
     event: &AgentChatEvent,
@@ -586,6 +628,9 @@ impl ConversationArchiveState {
             .collect::<Vec<_>>();
         provenance::refresh_records(&mut existing_records, &observed);
         for record in &mut existing_records {
+            reconcile_codex_request_root_from_archived_mirror(record, &existing_events);
+        }
+        for record in &mut existing_records {
             if !before_refresh_records.contains(record) {
                 materialize_record_text(&conversation_dir, record)?;
             }
@@ -672,6 +717,8 @@ impl ConversationArchiveState {
                     event,
                     &conversation_dir,
                 )?;
+                let request_root_promoted =
+                    promote_codex_request_root_from_response_item(&mut publication.record, event);
                 if !publication
                     .record
                     .event_refs
@@ -698,6 +745,7 @@ impl ConversationArchiveState {
                     .events
                     .push(event_record_for_jsonl(event, &publication.record));
                 if completion_refreshed
+                    || request_root_promoted
                     || !appended[publication_index].event_refs.contains(&event.id)
                 {
                     appended[publication_index] = publication.record.clone();
@@ -741,6 +789,20 @@ impl ConversationArchiveState {
                     event,
                     &conversation_dir,
                 )?;
+                if event.source.as_deref() == Some("response_item")
+                    && existing_events.iter().any(|archived| {
+                        codex_archive_mirror_pair(event, archived)
+                            && existing_records[record_index]
+                                .event_refs
+                                .iter()
+                                .any(|event_ref| event_ref == &archived.id)
+                    })
+                {
+                    record_changed |= promote_codex_request_root_from_response_item(
+                        &mut existing_records[record_index],
+                        event,
+                    );
+                }
                 if let Some(source_record) = source_record {
                     let source_repaired = append_source_if_needed(
                         &sources_path,

@@ -13,6 +13,53 @@ fn event(id: &str, provider: &str, root: Option<&str>) -> AgentChatEvent {
     }
 }
 
+fn canonical_event_refs(event_refs: &[String], events: &[AgentChatEvent]) -> HashSet<String> {
+    event_refs
+        .iter()
+        .map(|event_ref| {
+            let owners = events
+                .iter()
+                .filter(|event| {
+                    event.id == *event_ref
+                        || event.metadata["legacy_event_ids"]
+                            .as_array()
+                            .is_some_and(|aliases| {
+                                aliases
+                                    .iter()
+                                    .any(|alias| alias.as_str() == Some(event_ref))
+                            })
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                owners.len() <= 1,
+                "event reference alias has multiple owners"
+            );
+            owners
+                .first()
+                .map_or_else(|| event_ref.clone(), |event| event.id.clone())
+        })
+        .collect()
+}
+
+#[test]
+fn replay_event_refs_compare_observations_through_verified_legacy_aliases() {
+    let mut observation = event("current-event", "codex", Some("request-root"));
+    observation.metadata["legacy_event_ids"] = serde_json::json!(["legacy-event"]);
+    let events = [observation];
+    let original_refs = vec!["current-event".to_string()];
+    let replayed_refs = vec!["current-event".to_string(), "legacy-event".to_string()];
+    assert_eq!(
+        canonical_event_refs(&original_refs, &events),
+        canonical_event_refs(&replayed_refs, &events),
+        "verified aliases preserve the same represented provider observations"
+    );
+    assert_ne!(
+        canonical_event_refs(&original_refs, &events),
+        canonical_event_refs(&["unmapped-reference".to_string()], &events),
+        "unmapped references remain a durable mismatch"
+    );
+}
+
 #[test]
 fn same_id_native_capture_repairs_persisted_provenance() {
     let _guard = crate::utils::wardian_test_env_lock();
@@ -557,8 +604,8 @@ fn retained_codex_delivery_fixture_collapses_only_the_bound_provider_pair() {
     assert!(assistants.iter().any(|event| event.id == "watch-event-msg"));
 }
 
+#[cfg(feature = "retained-codex-replay")]
 #[test]
-#[ignore = "requires private retained Codex event archives"]
 fn retained_codex_logs_replay_to_one_canonical_archive_after_restart() {
     let (_guard, _temp) = isolate();
     let paths = std::env::var("WARDIAN_RETAINED_CODEX_EVENT_ARCHIVES")
@@ -775,7 +822,14 @@ fn retained_codex_logs_replay_to_one_canonical_archive_after_restart() {
                 "artifact_refs",
             ]
             .into_iter()
-            .find(|field| before_json.get(*field) != after_json.get(*field))
+            .find(|field| {
+                if *field == "event_refs" {
+                    canonical_event_refs(&before_record.event_refs, &events)
+                        != canonical_event_refs(&after_record.event_refs, &events)
+                } else {
+                    before_json.get(*field) != after_json.get(*field)
+                }
+            })
             .map(|field| (index, field));
             if first_difference.is_some() {
                 break;
