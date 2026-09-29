@@ -159,6 +159,17 @@ pub(super) struct StatusFollowUp {
 /// to: the gate holder's own changes are still revalidated against the
 /// observation's revisions, so a stale one is rejected as before.
 pub(super) fn spawn_follow_up(app: &tauri::AppHandle, follow_up: StatusFollowUp) {
+    if !follow_up.deferred.is_empty() {
+        crate::utils::logging::log_debug(&format!(
+            "[Wardian] Telemetry deferred status publication behind busy lifecycle gates: {}",
+            follow_up
+                .deferred
+                .iter()
+                .map(|observation| observation.session_id.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
     for session_id in follow_up.wake_sessions {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
