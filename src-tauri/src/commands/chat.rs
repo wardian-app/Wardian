@@ -513,14 +513,11 @@ async fn archive_agent_chat_events_for_state_with_stage(
     session_id: &str,
     lane: CaptureLane,
 ) -> Result<ArchiveCaptureResult, AgentChatTranscriptFailure> {
-    let snapshot = agent_archive_capture_snapshot(state, session_id)
-        .await
-        .map_err(|message| AgentChatTranscriptFailure {
-            stage: ChatTranscriptFailureStage::AgentSnapshot,
-            message,
-        })?;
-    // Lock order is global roster snapshot (above), policy gate, then the
-    // archive's per-agent gate. No caller may hold `state.agents` here.
+    // Lock order is policy gate, then the roster snapshot, then the archive's
+    // per-agent gate. The snapshot must follow the gate: a pass that waits for
+    // the gate through a lifecycle boundary would otherwise replay the old
+    // runtime's identity and logging setting after the archive rolled over.
+    // No caller may hold `state.agents` here.
     let policy_wait = std::time::Instant::now();
     let _policy_guard = match lane {
         CaptureLane::Background => {
@@ -533,11 +530,16 @@ async fn archive_agent_chat_events_for_state_with_stage(
     };
     if lane == CaptureLane::Lifecycle && policy_wait.elapsed() >= SLOW_LIFECYCLE_POLICY_WAIT {
         crate::manager::log_debug(&format!(
-            "[WARDIAN] Lifecycle archive drain for {} waited {} ms for the capture policy gate",
-            snapshot.session_id,
+            "[WARDIAN] Lifecycle archive drain for {session_id} waited {} ms for the capture policy gate",
             policy_wait.elapsed().as_millis()
         ));
     }
+    let snapshot = agent_archive_capture_snapshot(state, session_id)
+        .await
+        .map_err(|message| AgentChatTranscriptFailure {
+            stage: ChatTranscriptFailureStage::AgentSnapshot,
+            message,
+        })?;
     let global_conversation_logging = crate::utils::shell::load_shell_settings()
         .unwrap_or_default()
         .conversation_logging;

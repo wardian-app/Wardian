@@ -16,6 +16,7 @@ struct ClearInFlight<'state> {
     state: &'state AppState,
     session_id: String,
     started: std::time::Instant,
+    outcome_logged: bool,
 }
 
 impl<'state> ClearInFlight<'state> {
@@ -32,16 +33,37 @@ impl<'state> ClearInFlight<'state> {
             state,
             session_id: session_id.to_string(),
             started: std::time::Instant::now(),
+            outcome_logged: false,
         })
     }
 
-    fn elapsed_ms(&self) -> u128 {
-        self.started.elapsed().as_millis()
+    /// Writes the clear's outcome to the debug log.
+    fn log_outcome(&mut self, result: &Result<(), String>) {
+        self.outcome_logged = true;
+        let elapsed_ms = self.started.elapsed().as_millis();
+        match result {
+            Ok(()) => manager::log_debug(&format!(
+                "[WARDIAN] clear_agent_session finished for {} in {elapsed_ms} ms",
+                self.session_id
+            )),
+            Err(error) => manager::log_debug(&format!(
+                "[WARDIAN] clear_agent_session failed for {} after {elapsed_ms} ms: {error}",
+                self.session_id
+            )),
+        }
     }
 }
 
 impl Drop for ClearInFlight<'_> {
     fn drop(&mut self) {
+        if !self.outcome_logged {
+            // The command future was dropped before the clear returned.
+            manager::log_debug(&format!(
+                "[WARDIAN] clear_agent_session for {} was cancelled after {} ms",
+                self.session_id,
+                self.started.elapsed().as_millis()
+            ));
+        }
         self.state
             .clears_in_flight
             .lock()
@@ -56,7 +78,7 @@ pub(super) async fn run(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
-    let clear = match ClearInFlight::begin(state.inner(), &session_id) {
+    let mut clear = match ClearInFlight::begin(state.inner(), &session_id) {
         Ok(clear) => clear,
         Err(error) => {
             manager::log_debug(&format!(
@@ -74,16 +96,7 @@ pub(super) async fn run(
         ClearAgentLifecycle::default(),
     )
     .await;
-    match &result {
-        Ok(()) => manager::log_debug(&format!(
-            "[WARDIAN] clear_agent_session finished for {session_id} in {} ms",
-            clear.elapsed_ms()
-        )),
-        Err(error) => manager::log_debug(&format!(
-            "[WARDIAN] clear_agent_session failed for {session_id} after {} ms: {error}",
-            clear.elapsed_ms()
-        )),
-    }
+    clear.log_outcome(&result);
     result
 }
 
@@ -104,5 +117,24 @@ mod tests {
 
         drop(first);
         ClearInFlight::begin(&state, "agent-1").expect("claim is free after the first ends");
+    }
+
+    #[test]
+    fn a_clear_dropped_before_it_returns_is_logged_as_cancelled() {
+        let _env = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let _home = super::super::tests::WardianHomeGuard;
+        let state = AppState::new();
+
+        let mut finished = ClearInFlight::begin(&state, "agent-done").expect("claim");
+        finished.log_outcome(&Ok(()));
+        drop(finished);
+        drop(ClearInFlight::begin(&state, "agent-cancelled").expect("claim"));
+
+        let log = std::fs::read_to_string(temp.path().join("wardian_debug.log")).expect("log");
+        assert!(log.contains("clear_agent_session finished for agent-done"));
+        assert!(log.contains("clear_agent_session for agent-cancelled was cancelled"));
+        assert!(!log.contains("agent-done was cancelled"));
     }
 }
