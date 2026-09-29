@@ -16,12 +16,18 @@ pub(super) struct TelemetryPassTimings {
     pub(super) sys_refresh: Duration,
     pub(super) agent_count: usize,
     pub(super) slow_agents: Vec<TelemetrySlowAgent>,
-    /// Everything before the per-agent loop that is not the process refresh:
-    /// lease load, the user-message timestamp query, Codex index observation.
+    /// Everything from the start of the pass to the start of the per-agent loop
+    /// except the sysinfo refresh itself (`sys_refresh`): the lease load, the
+    /// user-message timestamp query, agent-root collection, the Codex index
+    /// observation, and the process-snapshot work that follows the sysinfo
+    /// refresh (on Windows that includes building the process markers from
+    /// every command line and environment block, session-root discovery, and
+    /// the inventory cache clone). It is a lump, not a single cost.
     pub(super) setup: Duration,
     /// The per-agent loop.
     pub(super) agents: Duration,
-    /// Provider log discovery and parsing, summed across agents.
+    /// The whole provider-log block, summed across agents: discovery and
+    /// parsing, and also the per-agent work guard and log-path lock waits.
     pub(super) log: Duration,
     /// Durable query-timestamp writes, summed across agents.
     pub(super) db: Duration,
@@ -132,6 +138,8 @@ mod tests {
             }
         }
 
-        assert!(total.get() >= Duration::from_millis(40));
+        // Two 20 ms phases; 30 ms tolerates coarse Windows timer granularity
+        // and still fails if the phase that exits early is not counted.
+        assert!(total.get() >= Duration::from_millis(30));
     }
 }

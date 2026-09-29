@@ -1448,13 +1448,13 @@ async fn collect_agent_metrics(state: &AppState) -> (Vec<AgentTelemetry>, status
     let pre_pass = collect_started.elapsed();
     let sys_metrics = state.system_metrics.clone();
     let result = tokio::task::spawn_blocking(move || {
+        let pass_started = std::time::Instant::now();
         let session_ids = snapshots
             .iter()
             .map(|snap| snap.session_id.clone())
             .collect::<Vec<_>>();
         let active_leases = wardian_core::conversation_lease::load_leases();
         let lease_now = chrono::Utc::now().to_rfc3339();
-        let pass_started = std::time::Instant::now();
         let mut results = Vec::new();
         let mut provider_statuses = Vec::new();
         let mut last_user_query_timestamps = latest_user_query_timestamps();
