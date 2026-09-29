@@ -13,8 +13,8 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 use wardian_core::conversations::{ConversationBoundaryReason, ConversationLoggingSetting};
 use wardian_core::models::{
-    AgentConfig, AgentSessionPersistence, AgentSessionPersistenceOverride, AgentTelemetry,
-    DeployedSkillRef, ProviderConfig,
+    AgentConfig, AgentSessionPersistence, AgentSessionPersistenceOverride, DeployedSkillRef,
+    ProviderConfig,
 };
 
 #[path = "agent_lifecycle.rs"]
@@ -2732,11 +2732,6 @@ pub async fn list_agents(state: State<'_, AppState>) -> Result<Vec<AgentConfig>,
     let agents = state.agents.lock().await;
     let order = state.agent_order.lock().await;
     Ok(manager::state_configs_snapshot(&agents, &order))
-}
-
-#[tauri::command]
-pub async fn list_agent_metrics(state: State<'_, AppState>) -> Result<Vec<AgentTelemetry>, String> {
-    Ok(manager::get_all_metrics(&state).await)
 }
 
 /// Permanently removes an agent and its Wardian-owned history.

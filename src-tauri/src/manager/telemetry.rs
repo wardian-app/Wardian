@@ -15,10 +15,11 @@ use super::opencode::{
 };
 use crate::providers::antigravity::AntigravityProvider;
 use crate::providers::pi::PiProvider;
-use wardian_core::control::{ProviderInputReadiness, ProviderReadyEvidence};
 
 mod status;
-use status::set_snapshot_status;
+#[cfg(test)]
+use status::apply_telemetry_provider_readiness;
+use status::{apply_provider_status_observations, set_snapshot_status};
 
 const TELEMETRY_SLOW_PASS_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -1438,7 +1439,20 @@ fn collect_app_process_pids(
     app_pids
 }
 
-pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
+/// Samples every agent and publishes the resulting status observations.
+///
+/// Queue wakeups that a Ready transition earns are spawned as detached workers
+/// rather than awaited: delivery waits on lifecycle ownership and the provider,
+/// and the tick must never sit behind either.
+pub async fn get_all_metrics(state: &AppState, app: &tauri::AppHandle) -> Vec<AgentTelemetry> {
+    let (metrics, wake_sessions) = collect_agent_metrics(state).await;
+    for session_id in wake_sessions {
+        crate::control::spawn_agent_messaging_after_restore(app, &session_id);
+    }
+    metrics
+}
+
+async fn collect_agent_metrics(state: &AppState) -> (Vec<AgentTelemetry>, Vec<String>) {
     let mut snapshots: Vec<AgentSnapshot> = {
         let agents = state.agents.lock().await;
         agents
@@ -2075,91 +2089,10 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
     .await
     .unwrap_or_default();
     let mut result = result;
-    apply_provider_status_observations(state, &result.provider_statuses, &mut result.metrics).await;
-    result.metrics
-}
-
-async fn apply_provider_status_observations(
-    state: &AppState,
-    observations: &[TelemetryProviderStatus],
-    metrics: &mut [AgentTelemetry],
-) {
-    for observation in observations {
-        let publication = super::publish_telemetry_status_observation(state, observation).await;
-        if publication.readiness.is_none()
-            || publication.current_status.as_deref() != Some(observation.status.as_str())
-        {
-            if let (Some(status), Some(metric)) = (
-                publication.current_status.as_ref(),
-                metrics
-                    .iter_mut()
-                    .find(|metric| metric.session_id == observation.session_id),
-            ) {
-                metric.current_status =
-                    telemetry_display_status(status, observation.active_execution_conflict);
-            }
-        }
-        if publication.readiness.is_none() {
-            continue;
-        }
-        let _ = apply_telemetry_provider_readiness(state, observation, &publication).await;
-    }
-}
-
-async fn apply_telemetry_provider_readiness(
-    state: &AppState,
-    observation: &TelemetryProviderStatus,
-    publication: &super::TelemetryStatusPublication,
-) -> bool {
-    let (Some(readiness), Some(status), Some(status_revision)) = (
-        publication.readiness,
-        publication.current_status.as_deref(),
-        publication.status_revision,
-    ) else {
-        return false;
-    };
-    let ready_evidence = (readiness == ProviderInputReadiness::Ready)
-        .then_some(ProviderReadyEvidence::ProviderEvent);
-    if !super::status_observation_belongs_to_current_agent(
-        state,
-        &observation.session_id,
-        &observation.current_status,
-        status,
-        status_revision,
-    )
-    .await
-    {
-        return false;
-    }
-    let (_, became_ready) = state
-        .interactions
-        .record_provider_input_status_observation_with_transition(
-            &observation.session_id,
-            status_revision,
-            observation.generation,
-            readiness,
-            ready_evidence,
-        )
-        .await;
-    if !became_ready
-        || !super::status_observation_belongs_to_current_agent(
-            state,
-            &observation.session_id,
-            &observation.current_status,
-            status,
-            status_revision,
-        )
-        .await
-    {
-        return false;
-    }
-    crate::control::dispatch_agent_messaging_from_status_observation(
-        None,
-        state,
-        &observation.session_id,
-    )
-    .await;
-    true
+    let wake_sessions =
+        apply_provider_status_observations(state, &result.provider_statuses, &mut result.metrics)
+            .await;
+    (result.metrics, wake_sessions)
 }
 
 pub(crate) fn commit_telemetry_status_observation(

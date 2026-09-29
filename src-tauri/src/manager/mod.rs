@@ -530,11 +530,41 @@ pub(crate) struct TelemetryStatusPublication {
     pub(crate) status_revision: Option<u64>,
 }
 
+/// How long the metrics tick waits for one agent's lifecycle gate.
+///
+/// The tick publishes every agent in sequence, so an unbounded wait behind one
+/// New Session, restart, or restore froze status updates for the whole fleet
+/// (observed: 400 s). A lifecycle operation that outlasts this budget replaces
+/// the runtime or moves its status revision, so the observation staged before
+/// it would be rejected as stale anyway; dropping it early loses nothing.
+const TELEMETRY_LIFECYCLE_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+
 pub(crate) async fn publish_telemetry_status_observation(
     state: &AppState,
     observation: &telemetry::TelemetryProviderStatus,
 ) -> TelemetryStatusPublication {
-    let _lifecycle = state.lock_agent_lifecycle(&observation.session_id).await;
+    let Ok(_lifecycle) = tokio::time::timeout(
+        TELEMETRY_LIFECYCLE_WAIT,
+        state.lock_agent_lifecycle(&observation.session_id),
+    )
+    .await
+    else {
+        let current_status = {
+            let agents = state.agents.lock().await;
+            agents.get(&observation.session_id).and_then(|agent| {
+                agent
+                    .current_status
+                    .lock()
+                    .ok()
+                    .map(|status| status.clone())
+            })
+        };
+        return TelemetryStatusPublication {
+            readiness: None,
+            current_status,
+            status_revision: None,
+        };
+    };
     let active_runtime = {
         let agents = state.agents.lock().await;
         agents.get(&observation.session_id).map(|agent| {

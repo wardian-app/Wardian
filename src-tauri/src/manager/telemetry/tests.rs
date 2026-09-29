@@ -348,6 +348,89 @@ fn discovers_session_roots_for_multiple_agents_from_one_process_marker_snapshot(
 }
 
 #[tokio::test]
+async fn telemetry_publication_does_not_wait_on_a_held_lifecycle_gate() {
+    let state = crate::state::AppState::new();
+    let session_id = "agent-1";
+    let agent = test_active_agent(session_id, "claude", "Processing...", Some(1234));
+    let snap = test_snapshot_from_agent(&agent, 0, &state);
+    state
+        .agents
+        .lock()
+        .await
+        .insert(session_id.to_string(), agent);
+    super::set_snapshot_status(&snap, "Idle");
+    let observation = snap.provider_status_observation(false);
+
+    // New Session, restart, and restore hold this gate for their whole run.
+    let _lifecycle = state.lock_agent_lifecycle(session_id).await;
+    let publication = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::manager::publish_telemetry_status_observation(&state, &observation),
+    )
+    .await
+    .expect("the metrics tick must not wait out a lifecycle operation");
+
+    assert_eq!(publication.readiness, None);
+    assert_eq!(publication.status_revision, None);
+    assert_eq!(
+        publication.current_status.as_deref(),
+        Some("Processing..."),
+        "a skipped observation reports the runtime's own status"
+    );
+    let agents = state.agents.lock().await;
+    assert_eq!(
+        *agents
+            .get(session_id)
+            .unwrap()
+            .current_status
+            .lock()
+            .unwrap(),
+        "Processing...",
+        "a skipped observation must not commit"
+    );
+}
+
+#[tokio::test]
+async fn ready_transition_is_reported_for_wakeup_instead_of_delivered_inline() {
+    let _home = crate::control::test_support::TestWardianHome::new_async().await;
+    let session_id = "agent-1";
+    wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+        session_id,
+        session_name: "test-agent",
+        description: "",
+        agent_class: "Coder",
+        provider: "claude",
+        workspace: None,
+        project: None,
+        is_off: false,
+        created_at: None,
+    })
+    .expect("insert isolated persisted agent");
+    let state = crate::state::AppState::new();
+    let agent = test_active_agent(session_id, "claude", "Processing...", Some(1234));
+    wardian_core::db::update_agent_status(session_id, "Processing...", Some(1234))
+        .expect("persist initial status");
+    let snap = test_snapshot_from_agent(&agent, 0, &state);
+    state
+        .agents
+        .lock()
+        .await
+        .insert(session_id.to_string(), agent);
+    super::set_snapshot_status(&snap, "Idle");
+    let observation = snap.provider_status_observation(false);
+    let mut metrics = Vec::new();
+
+    let wake_sessions = super::apply_provider_status_observations(
+        &state,
+        std::slice::from_ref(&observation),
+        &mut metrics,
+    )
+    .await;
+
+    assert_eq!(wake_sessions, vec![session_id.to_string()]);
+}
+
+#[tokio::test]
 async fn current_runtime_telemetry_status_commit_persists_and_records_watch_event() {
     let _home = crate::control::test_support::TestWardianHome::new_async().await;
     let session_id = "agent-1";

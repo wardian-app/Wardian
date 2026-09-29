@@ -327,7 +327,7 @@ async fn emit_metrics_tick(metrics_handle: tauri::AppHandle) {
         crate::utils::runtime_profile::RuntimeMetric::MetricsTick,
     );
     let state = metrics_handle.state::<AppState>();
-    let metrics = manager::get_all_metrics(&state).await;
+    let metrics = manager::get_all_metrics(&state, &metrics_handle).await;
     let app_metrics_started = std::time::Instant::now();
     let app_metrics = manager::get_app_metrics(&state).await;
     crate::utils::runtime_profile::record_wall_time(
@@ -987,7 +987,7 @@ pub fn run() {
             commands::agent::clone_agent,
             commands::agent::get_agent_clone_preview,
             commands::agent::list_agents,
-            commands::agent::list_agent_metrics,
+            commands::telemetry::list_agent_metrics,
             commands::agent::kill_agent,
             commands::agent::pause_agent,
             commands::agent::resume_agent,

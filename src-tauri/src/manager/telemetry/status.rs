@@ -1,4 +1,7 @@
-use super::AgentSnapshot;
+use super::{AgentSnapshot, TelemetryProviderStatus};
+use crate::state::AppState;
+use wardian_core::control::{ProviderInputReadiness, ProviderReadyEvidence};
+use wardian_core::models::AgentTelemetry;
 
 pub(super) fn set_snapshot_status(snap: &AgentSnapshot, next_status: &str) {
     if snap.provider == "codex"
@@ -127,4 +130,86 @@ pub(super) fn commit_snapshot_status_observation(
         )
     };
     Some((status.clone(), sequence, revision))
+}
+
+pub(super) async fn apply_provider_status_observations(
+    state: &AppState,
+    observations: &[TelemetryProviderStatus],
+    metrics: &mut [AgentTelemetry],
+) -> Vec<String> {
+    let mut wake_sessions = Vec::new();
+    for observation in observations {
+        let publication =
+            crate::manager::publish_telemetry_status_observation(state, observation).await;
+        if publication.readiness.is_none()
+            || publication.current_status.as_deref() != Some(observation.status.as_str())
+        {
+            if let (Some(status), Some(metric)) = (
+                publication.current_status.as_ref(),
+                metrics
+                    .iter_mut()
+                    .find(|metric| metric.session_id == observation.session_id),
+            ) {
+                metric.current_status =
+                    super::telemetry_display_status(status, observation.active_execution_conflict);
+            }
+        }
+        if publication.readiness.is_none() {
+            continue;
+        }
+        if apply_telemetry_provider_readiness(state, observation, &publication).await {
+            wake_sessions.push(observation.session_id.clone());
+        }
+    }
+    wake_sessions
+}
+
+/// Records the provider-input readiness a published status implies.
+///
+/// Returns whether the agent just became ready for queued work. The caller owns
+/// the wakeup, because delivering queued work is not bounded by telemetry.
+pub(super) async fn apply_telemetry_provider_readiness(
+    state: &AppState,
+    observation: &TelemetryProviderStatus,
+    publication: &crate::manager::TelemetryStatusPublication,
+) -> bool {
+    let (Some(readiness), Some(status), Some(status_revision)) = (
+        publication.readiness,
+        publication.current_status.as_deref(),
+        publication.status_revision,
+    ) else {
+        return false;
+    };
+    let ready_evidence = (readiness == ProviderInputReadiness::Ready)
+        .then_some(ProviderReadyEvidence::ProviderEvent);
+    if !crate::manager::status_observation_belongs_to_current_agent(
+        state,
+        &observation.session_id,
+        &observation.current_status,
+        status,
+        status_revision,
+    )
+    .await
+    {
+        return false;
+    }
+    let (_, became_ready) = state
+        .interactions
+        .record_provider_input_status_observation_with_transition(
+            &observation.session_id,
+            status_revision,
+            observation.generation,
+            readiness,
+            ready_evidence,
+        )
+        .await;
+    became_ready
+        && crate::manager::status_observation_belongs_to_current_agent(
+            state,
+            &observation.session_id,
+            &observation.current_status,
+            status,
+            status_revision,
+        )
+        .await
 }
