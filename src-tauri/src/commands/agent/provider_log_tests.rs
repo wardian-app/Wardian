@@ -324,3 +324,93 @@ async fn agent_logging_transition_excludes_provider_bytes_written_while_disabled
     assert!(text.contains(&"After agent re-enable"));
     assert!(!text.contains(&"SECRET_AGENT_DISABLED"));
 }
+
+#[tokio::test]
+async fn lifecycle_archive_drain_does_not_queue_behind_background_syncs() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let _guard = crate::utils::wardian_test_env_lock_async().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    std::env::set_var("WARDIAN_HOME", temp.path());
+    let _home = WardianHomeGuard;
+    wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
+        .expect("initialize isolated state database");
+    crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+        conversation_logging: ConversationLoggingSetting::Enabled,
+        ..Default::default()
+    })
+    .expect("save enabled global logging");
+    let log_path = temp.path().join("provider.jsonl");
+    std::fs::write(
+        &log_path,
+        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Closing turn\"}}\n",
+    )
+    .expect("write provider event");
+    let state = Arc::new(AppState::new());
+    let agent = make_test_agent();
+    {
+        let mut config = agent.config.lock().expect("agent config");
+        config.session_id = "agent-1".to_string();
+        config.session_name = "Agent One".to_string();
+        config.agent_class = "Coder".to_string();
+        config.provider = "codex".to_string();
+        config.reset_provider_config_for_provider();
+        config.folder = temp.path().to_string_lossy().to_string();
+        config.fresh_provider_session_id = Some("provider-session-1".to_string());
+    }
+    *agent.log_path.lock().expect("agent log path") = Some(log_path);
+    state
+        .agents
+        .lock()
+        .await
+        .insert("agent-1".to_string(), agent);
+    state.agent_order.lock().await.push("agent-1".to_string());
+
+    // A capture pass is running, and several best-effort syncs (the restore and
+    // status syncs a restart schedules for every agent) are already waiting.
+    let running_pass = state.conversation_capture_policy_lock.lock().await;
+    let finished = Arc::new(AtomicUsize::new(0));
+    let mut background = Vec::new();
+    for _ in 0..4 {
+        let state = state.clone();
+        let finished = finished.clone();
+        background.push(tokio::spawn(async move {
+            crate::commands::chat::archive_agent_chat_events_until_stable_for_state(
+                &state, "agent-1",
+            )
+            .await
+            .expect("background sync");
+            finished.fetch_add(1, Ordering::SeqCst)
+        }));
+    }
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    let lifecycle = {
+        let state = state.clone();
+        let finished = finished.clone();
+        tokio::spawn(async move {
+            crate::commands::chat::archive_agent_chat_events_until_stable_for_lifecycle(
+                &state, "agent-1",
+            )
+            .await
+            .expect("lifecycle drain");
+            finished.fetch_add(1, Ordering::SeqCst)
+        })
+    };
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+
+    drop(running_pass);
+    let lifecycle_position = lifecycle.await.expect("lifecycle task");
+    for task in background {
+        task.await.expect("background task");
+    }
+
+    assert_eq!(
+        lifecycle_position, 0,
+        "New Session's closing drain must finish before the queued background syncs"
+    );
+}

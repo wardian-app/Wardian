@@ -31,6 +31,7 @@ pub(crate) mod archive_identity;
 use archive_identity::stable_provider_log_event_id;
 
 const PROVIDER_LOG_TAIL_BYTES: u64 = 2 * 1024 * 1024;
+const SLOW_LIFECYCLE_POLICY_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[cfg(test)]
 #[path = "chat_antigravity_tests.rs"]
@@ -137,7 +138,9 @@ async fn load_agent_chat_transcript_inner(
         });
     }
 
-    let result = archive_agent_chat_events_for_state_with_stage(state, &session_id).await?;
+    let result =
+        archive_agent_chat_events_for_state_with_stage(state, &session_id, CaptureLane::Background)
+            .await?;
     let mut current_events = result.events;
     let mut archived_events = state
         .conversation_archive
@@ -490,14 +493,25 @@ pub(crate) async fn archive_agent_chat_events_for_state(
     state: &AppState,
     session_id: &str,
 ) -> Result<ArchiveCaptureResult, String> {
-    archive_agent_chat_events_for_state_with_stage(state, session_id)
+    archive_agent_chat_events_for_state_with_stage(state, session_id, CaptureLane::Background)
         .await
         .map_err(|failure| failure.message)
+}
+
+/// Which side of the capture policy gate a pass runs on. See
+/// [`crate::state::capture_policy_gate`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaptureLane {
+    /// Best-effort syncs (status, restore, Chat reads) stand aside for a boundary.
+    Background,
+    /// A lifecycle boundary that must not queue behind background syncs.
+    Lifecycle,
 }
 
 async fn archive_agent_chat_events_for_state_with_stage(
     state: &AppState,
     session_id: &str,
+    lane: CaptureLane,
 ) -> Result<ArchiveCaptureResult, AgentChatTranscriptFailure> {
     let snapshot = agent_archive_capture_snapshot(state, session_id)
         .await
@@ -507,7 +521,23 @@ async fn archive_agent_chat_events_for_state_with_stage(
         })?;
     // Lock order is global roster snapshot (above), policy gate, then the
     // archive's per-agent gate. No caller may hold `state.agents` here.
-    let _policy_guard = state.conversation_capture_policy_lock.lock().await;
+    let policy_wait = std::time::Instant::now();
+    let _policy_guard = match lane {
+        CaptureLane::Background => {
+            state
+                .conversation_capture_policy_lock
+                .lock_background()
+                .await
+        }
+        CaptureLane::Lifecycle => state.conversation_capture_policy_lock.lock().await,
+    };
+    if lane == CaptureLane::Lifecycle && policy_wait.elapsed() >= SLOW_LIFECYCLE_POLICY_WAIT {
+        crate::manager::log_debug(&format!(
+            "[WARDIAN] Lifecycle archive drain for {} waited {} ms for the capture policy gate",
+            snapshot.session_id,
+            policy_wait.elapsed().as_millis()
+        ));
+    }
     let global_conversation_logging = crate::utils::shell::load_shell_settings()
         .unwrap_or_default()
         .conversation_logging;
@@ -672,6 +702,32 @@ pub(crate) async fn archive_agent_chat_events_until_stable_for_state(
 ) -> Result<ArchiveCaptureResult, String> {
     loop {
         let result = archive_agent_chat_events_for_state(state, session_id).await?;
+        if !result.continue_immediately {
+            return Ok(result);
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Drains the closing provider log for a lifecycle boundary (New Session, fresh
+/// resume). Unlike the best-effort syncs above it does not queue behind them: it
+/// waits only for the pass already running, and background syncs stand aside
+/// until the whole drain finishes.
+pub(crate) async fn archive_agent_chat_events_until_stable_for_lifecycle(
+    state: &AppState,
+    session_id: &str,
+) -> Result<ArchiveCaptureResult, String> {
+    let _boundary = state
+        .conversation_capture_policy_lock
+        .begin_lifecycle_boundary();
+    loop {
+        let result = archive_agent_chat_events_for_state_with_stage(
+            state,
+            session_id,
+            CaptureLane::Lifecycle,
+        )
+        .await
+        .map_err(|failure| failure.message)?;
         if !result.continue_immediately {
             return Ok(result);
         }

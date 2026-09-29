@@ -21,6 +21,7 @@ use wardian_core::models::{
 mod agent_lifecycle;
 #[path = "agent_naming.rs"]
 mod agent_naming;
+mod clear_observability;
 mod codex_onboarding;
 #[path = "agent/config_persistence.rs"]
 mod config_persistence;
@@ -3091,7 +3092,7 @@ pub async fn resume_agent(
     let mut config = snapshot.config.clone();
     let fresh_pending_boundary =
         if starts_fresh {
-            crate::commands::chat::archive_agent_chat_events_until_stable_for_state(
+            crate::commands::chat::archive_agent_chat_events_until_stable_for_lifecycle(
                 &state,
                 &session_id,
             )
@@ -3912,15 +3913,7 @@ pub async fn clear_agent_session_with_reason(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
-    clear_agent_session_inner(
-        session_id,
-        reason,
-        state,
-        app,
-        None,
-        ClearAgentLifecycle::default(),
-    )
-    .await
+    clear_observability::run(session_id, reason, state, app).await
 }
 
 #[derive(Default)]
@@ -3977,9 +3970,12 @@ async fn clear_agent_session_inner(
     };
     lifecycle_heartbeat.ensure_active("clear")?;
     let boundary_reason = conversation_boundary_for_clear_reason(reason.as_deref());
-    crate::commands::chat::archive_agent_chat_events_until_stable_for_state(&state, &session_id)
-        .await
-        .map_err(|error| format!("Failed to acquire the closing provider log: {error}"))?;
+    crate::commands::chat::archive_agent_chat_events_until_stable_for_lifecycle(
+        &state,
+        &session_id,
+    )
+    .await
+    .map_err(|error| format!("Failed to acquire the closing provider log: {error}"))?;
     // Persist the closing evidence while the old runtime is intact, but leave
     // the archive open until the replacement runtime and metadata commit.
     let archive_snapshot = match archive_snapshot {

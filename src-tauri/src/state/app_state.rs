@@ -105,8 +105,11 @@ pub struct AppState {
     /// Orders provider-log policy observations before per-agent archive cursor
     /// commits. Callers must snapshot the global agent roster before taking
     /// this gate, then acquire per-agent archive locks only after it.
-    pub conversation_capture_policy_lock: Mutex<()>,
+    pub conversation_capture_policy_lock: crate::state::capture_policy_gate::CapturePolicyGate,
     pub conversation_archive: ConversationArchiveState,
+    /// Agents whose New Session is running, so a repeated request is refused
+    /// instead of queueing behind the first one.
+    pub clears_in_flight: std::sync::Mutex<std::collections::HashSet<String>>,
     // Serializes and coalesces per-turn change snapshots, one slot per workspace.
     pub change_snapshots: ChangeSnapshotRuntime,
     // Live-only remote-control authentication and ticket records.
@@ -526,8 +529,9 @@ impl Default for AppState {
             user_terminal: Mutex::new(None),
             interactions: InteractionState::default(),
             native_delivery: Arc::new(crate::delivery::native_broker::NativeDeliveryBroker::new()),
-            conversation_capture_policy_lock: Mutex::new(()),
+            conversation_capture_policy_lock: Default::default(),
             conversation_archive: ConversationArchiveState::default(),
+            clears_in_flight: Default::default(),
             change_snapshots: ChangeSnapshotRuntime::new(),
             remote_runtime: Mutex::new(crate::remote::models::RemoteRuntimeState::default()),
             remote_agent_roster_cache: RwLock::new(None),
