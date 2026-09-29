@@ -203,14 +203,15 @@ pub(super) fn spawn_follow_up(app: &tauri::AppHandle, follow_up: StatusFollowUp)
 }
 
 async fn live_agent_status(state: &AppState, session_id: &str) -> Option<String> {
-    let agents = state.agents.lock().await;
-    agents.get(session_id).and_then(|agent| {
-        agent
-            .current_status
-            .lock()
-            .ok()
-            .map(|status| status.clone())
-    })
+    // Read the item's status only after releasing the roster lock.
+    let current_status = state
+        .agents
+        .lock()
+        .await
+        .get(session_id)
+        .map(|agent| agent.current_status.clone())?;
+    let status = current_status.lock().ok().map(|status| status.clone());
+    status
 }
 
 pub(super) async fn apply_provider_status_observations(

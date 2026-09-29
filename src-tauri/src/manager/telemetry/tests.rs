@@ -453,12 +453,16 @@ async fn an_observation_without_a_staged_transition_is_not_deferred() {
     assert!(observation.transitions.is_empty());
 
     let _lifecycle = state.lock_agent_lifecycle(session_id).await;
-    let follow_up = super::apply_provider_status_observations(
-        &state,
-        std::slice::from_ref(&observation),
-        &mut [],
+    let follow_up = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        super::apply_provider_status_observations(
+            &state,
+            std::slice::from_ref(&observation),
+            &mut [],
+        ),
     )
-    .await;
+    .await
+    .expect("the metrics tick must not wait out a lifecycle operation");
 
     assert!(follow_up.deferred.is_empty());
 }
