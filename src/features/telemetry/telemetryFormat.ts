@@ -7,7 +7,7 @@
  * dash rather than as zero.
  */
 
-import type { ActiveTime, TelemetryGrain, TokenCounts } from "./telemetryTypes";
+import type { TelemetryGrain } from "./telemetryTypes";
 
 /** What is shown where a provider reported nothing. */
 export const UNREPORTED = "—";
@@ -32,18 +32,6 @@ export function formatDuration(ms: number): string {
 }
 
 /**
- * Total active time.
- *
- * The store keeps measured and inferred durations apart, because they really
- * are different quantities. They are summed for display: the distinction is
- * accurate but not actionable, and putting it on screen cost more attention
- * than it returned.
- */
-export function totalActiveMs(active: ActiveTime): number {
-  return active.measured_ms + active.clustered_ms;
-}
-
-/**
  * A count, abbreviated once it stops being readable in full.
  *
  * `null` is unknown and renders as a dash. Zero is a real answer and renders as
@@ -60,38 +48,6 @@ export function formatCount(value: number | null | undefined): string {
   return `${(value / 1_000_000_000).toFixed(1)}B`;
 }
 
-/** A signed line delta, so an unchanged file is visibly not a removal. */
-export function formatLineDelta(added: number, removed: number): string {
-  return `+${formatCount(added)} / -${formatCount(removed)}`;
-}
-
-/**
- * Share of the prompt that was served from cache, as a percentage.
- *
- * Measured against the whole prompt — fresh input, cache writes, and cache
- * reads — rather than against fresh input alone. Dividing by fresh input made
- * this a multiple rather than a share, and on claude, which sends almost
- * nothing as plain input, it reached 9,494x: a number whose only real content
- * was "claude barely uses plain input". As a share it is bounded and means the
- * same thing for every provider.
- *
- * `null` when nothing in the prompt was reported, which is not the same as a
- * prompt of zero tokens.
- */
-export function cacheReadRatio(tokens: TokenCounts): number | null {
-  const cached = tokens.cached_input_tokens;
-  if (cached === null) return null;
-  const prompt = cached + (tokens.input_tokens ?? 0) + (tokens.cache_write_tokens ?? 0);
-  if (prompt <= 0) return null;
-  return (100 * cached) / prompt;
-}
-
-/** A ratio as a multiplier, e.g. `8.8x`. */
-export function formatRatio(ratio: number | null): string {
-  if (ratio === null || !Number.isFinite(ratio)) return UNREPORTED;
-  return `${ratio.toFixed(1)}x`;
-}
-
 /** A percentage that stays a dash when the provider reported none. */
 export function formatPercent(value: number | null): string {
   if (value === null || !Number.isFinite(value)) return UNREPORTED;
@@ -106,22 +62,6 @@ export const HORIZON_LABELS: Record<string, string> = {
   month: "30 days",
   all: "All time",
 };
-
-/**
- * When a rate-limit window resets, relative to now.
- *
- * Rate limits are account-level gauges whose value is only meaningful alongside
- * when they clear, so this is shown next to the percentage rather than instead
- * of it.
- */
-export function formatResetsIn(resetsAt: string | null, now: number = Date.now()): string {
-  if (!resetsAt) return UNREPORTED;
-  const target = Date.parse(resetsAt);
-  if (!Number.isFinite(target)) return UNREPORTED;
-  const remaining = target - now;
-  if (remaining <= 0) return "now";
-  return formatDuration(remaining);
-}
 
 /** A bucket or interval timestamp, in the viewer's local time. */
 export function formatClock(iso: string): string {

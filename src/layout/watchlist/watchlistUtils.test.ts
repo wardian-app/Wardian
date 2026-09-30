@@ -1,8 +1,5 @@
 import { describe, it, expect } from "vitest";
 import {
-  reorderWithinList,
-  addAgentToList,
-  removeAgentFromList,
   filterAgents,
   getAgentsForList,
   createWatchlist,
@@ -28,41 +25,6 @@ import {
 } from "./watchlistUtils";
 import type { Watchlist, WatchlistEntry, WatchlistPrefs, WatchlistState } from "./types";
 import type { AgentConfig, AgentTelemetry } from "../../types";
-
-// ── reorderWithinList ──────────────────────────────────────────────────
-
-describe("reorderWithinList", () => {
-  const ids = ["a", "b", "c", "d"];
-
-  it("moves an item forward", () => {
-    expect(reorderWithinList(ids, 0, 2)).toEqual(["b", "c", "a", "d"]);
-  });
-
-  it("moves an item backward", () => {
-    expect(reorderWithinList(ids, 3, 1)).toEqual(["a", "d", "b", "c"]);
-  });
-
-  it("returns same array when from === to", () => {
-    expect(reorderWithinList(ids, 1, 1)).toEqual(ids);
-  });
-
-  it("returns same array for out-of-bounds fromIndex", () => {
-    expect(reorderWithinList(ids, -1, 2)).toEqual(ids);
-    expect(reorderWithinList(ids, 10, 2)).toEqual(ids);
-  });
-
-  it("returns same array for out-of-bounds toIndex", () => {
-    expect(reorderWithinList(ids, 0, -1)).toEqual(ids);
-    expect(reorderWithinList(ids, 0, 10)).toEqual(ids);
-  });
-
-  it("does not mutate the original array", () => {
-    const original = ["x", "y", "z"];
-    const copy = [...original];
-    reorderWithinList(original, 0, 2);
-    expect(original).toEqual(copy);
-  });
-});
 
 // ── team-aware watchlist state ─────────────────────────────────────────
 
@@ -472,48 +434,6 @@ describe("team mutations", () => {
       { type: "team", teamId: "team-1" },
       { type: "agent", agentId: "a" },
     ]);
-  });
-});
-
-// ── addAgentToList ─────────────────────────────────────────────────────
-
-describe("addAgentToList", () => {
-  const list: Watchlist = { id: "l1", name: "List 1", agentIds: ["a", "b"] };
-
-  it("adds a new agent to the end", () => {
-    const result = addAgentToList(list, "c");
-    expect(result.agentIds).toEqual(["a", "b", "c"]);
-  });
-
-  it("does not duplicate an existing agent", () => {
-    const result = addAgentToList(list, "a");
-    expect(result.agentIds).toEqual(["a", "b"]);
-    expect(result).toBe(list); // identity check — no new object
-  });
-
-  it("does not mutate the original list", () => {
-    addAgentToList(list, "c");
-    expect(list.agentIds).toEqual(["a", "b"]);
-  });
-});
-
-// ── removeAgentFromList ────────────────────────────────────────────────
-
-describe("removeAgentFromList", () => {
-  const list: Watchlist = { id: "l1", name: "List 1", agentIds: ["a", "b", "c"] };
-
-  it("removes an existing agent", () => {
-    expect(removeAgentFromList(list, "b").agentIds).toEqual(["a", "c"]);
-  });
-
-  it("returns unchanged list if agent not present", () => {
-    const result = removeAgentFromList(list, "z");
-    expect(result.agentIds).toEqual(["a", "b", "c"]);
-  });
-
-  it("does not mutate the original list", () => {
-    removeAgentFromList(list, "a");
-    expect(list.agentIds).toEqual(["a", "b", "c"]);
   });
 });
 
