@@ -164,6 +164,7 @@ pub fn load_app_settings_document() -> Result<AppSettingsDocument, String> {
     load_app_settings_document_from_path(&path)
 }
 
+#[cfg(test)]
 pub fn save_app_settings(settings: &AppSettings) -> Result<AppSettings, String> {
     let path = app_settings_path()?;
     save_app_settings_to_path(&path, settings)
@@ -242,6 +243,7 @@ fn load_app_settings_document_from_path(path: &Path) -> Result<AppSettingsDocume
     save_app_settings_document_to_path(path, &document)
 }
 
+#[cfg(test)]
 fn save_app_settings_to_path(path: &Path, settings: &AppSettings) -> Result<AppSettings, String> {
     let normalized = normalize_app_settings(settings.clone());
     let document = AppSettingsDocument {

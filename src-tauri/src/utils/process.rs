@@ -406,6 +406,7 @@ fn shell_command_target(arguments: &[String], wrappers: &[&str]) -> Option<Strin
 /// Matches a process executable or Node/shell command that directly launches
 /// the configured provider CLI. Environment markers alone are insufficient:
 /// child tools inherit them without owning the provider conversation.
+#[cfg(test)]
 pub fn is_wardian_provider_process_candidate(
     provider: &str,
     process_name: &str,
@@ -473,6 +474,7 @@ fn is_wardian_provider_process_candidate_args(
 /// Requires both a session association and a command that invokes the configured
 /// provider CLI. This is only a candidate signal; descendants may invoke the
 /// same CLI, so it must never authorize termination by itself.
+#[cfg(test)]
 pub fn is_wardian_provider_session_process_candidate(
     provider: &str,
     process_name: &str,

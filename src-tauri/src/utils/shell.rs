@@ -187,6 +187,7 @@ pub fn load_shell_settings_document() -> Result<ShellSettingsDocument, String> {
     load_shell_settings_document_from_path(&path)
 }
 
+#[cfg(test)]
 pub fn save_shell_settings(settings: &ShellSettings) -> Result<ShellSettings, String> {
     let path = shell_settings_path()?;
     save_shell_settings_to_path(&path, settings)
@@ -267,6 +268,7 @@ fn load_shell_settings_document_from_path(path: &Path) -> Result<ShellSettingsDo
     })
 }
 
+#[cfg(test)]
 fn save_shell_settings_to_path(
     path: &Path,
     settings: &ShellSettings,
@@ -608,6 +610,7 @@ fn validate_shell_settings(
     Ok(())
 }
 
+#[cfg(test)]
 pub fn build_shell_command_with_settings(
     command: &str,
     settings: &ShellSettings,

@@ -41,7 +41,6 @@ The live control protocol exposes CLI wrappers for the same worktree operations:
 - `submit_prompt_to_agent`
 - `send_binary_input_to_agent`
 - `inject_session_input`
-- `broadcast_input`
 - `resize_agent_terminal`
 - `read_agent_pty`
 
@@ -62,9 +61,7 @@ evidence or queue the interaction.
 - `list_agent_classes`
 - `create_agent_class`
 - `delete_agent_class`
-- `get_default_class_instruction`
 - `reset_class_to_default`
-- `reset_all_class_prompts`
 
 ## Watchlists (`commands/watchlist.rs`)
 
@@ -79,7 +76,6 @@ evidence or queue the interaction.
 - `save_queue_preferences`
 - `load_agent_interactions`
 - `save_agent_interactions`
-- `load_opencode_last_assistant_text`
 
 The CLI `team` and `watchlist` commands read and write `watchlists/index.json` directly. They normalize the current v2 state shape and legacy flat watchlist arrays for reads, write canonical v2 JSON for mutations, and best-effort notify the running app when the local control endpoint is available. Team create/add/split operations also seed communication-topology edges while preserving existing seed-suppression tombstones.
 
@@ -522,33 +518,9 @@ subscription's authorization provenance.
 
 Response: `null`.
 
-### `pick_file_resource`
+### Errors
 
-Opens the native picker and records a backend-owned grant for the exact selected
-canonical file. The grant does not authorize a sibling or parent directory.
-Picker grants are deduplicated by canonical target and bounded to 128 entries;
-dormant least-recently-used grants are evicted before a new grant is rejected.
-Deduplication does not widen an open subscription: each open retains the exact
-picker-selected pathname it used, including an alias spelling.
-
-```json
-{
-  "request": {
-    "title": "Open a file"
-  }
-}
-```
-
-```json
-{
-  "schema": 1,
-  "capability_id": "capability-uuid",
-  "canonical_path": "<absolute-workspace-path>/report.pdf"
-}
-```
-
-Cancel returns `null`. Resource-local failures use the same typed shape for all
-Files commands:
+Resource-local failures use the same typed shape for all Files commands:
 
 ```json
 {
@@ -566,7 +538,7 @@ Stable codes include `invalid_request`, `unauthorized_path`,
 `grant_store_unavailable`, `ticket_capacity_exceeded`, `invalid_ticket`,
 `unauthorized_ticket`,
 `expired_ticket`, `invalid_range`, and `range_not_satisfiable`.
-`grant_limit_reached` means all 128 exact picker grants are currently active;
+`grant_limit_reached` means all 128 exact file grants are currently active;
 closing an unused file makes a live grant evictable. The durable exact-path
 registry is also capped at 128 least-recently-used entries and contains no
 capability identifiers. `ticket_capacity_exceeded`
@@ -574,8 +546,8 @@ means immutable renderer snapshots have reached their bounded storage budget;
 closing the owning renderer lease or waiting for active expiry releases it.
 
 Debug builds additionally register `debug_grant_file_resource_for_e2e` and
-`debug_file_resource_stats` for the native harness. The former delegates to the
-same exact grant function as the native picker; the latter exposes aggregate
+`debug_file_resource_stats` for the native harness. The former records an exact
+file grant directly; the latter exposes aggregate
 ownership counts only. Both are compiled out of release builds and are not
 frontend application APIs.
 
@@ -587,7 +559,6 @@ Current telemetry commands:
 - `telemetry_dashboard`
 - `telemetry_fleet`
 - `telemetry_matrix`
-- `telemetry_series`
 - `telemetry_activity`
 - `telemetry_refresh`
 - `telemetry_agent_breakdown(session_id, from, to)`
@@ -658,10 +629,8 @@ automation system. Do not add new frontend behavior against those names.
 - `delete_library_entry`
 - `open_library_folder`
 - `deploy_skill`
-- `remove_deployed_skill`
 - `list_deployed_skills`
 - `list_deployed_skill_refs`
-- `list_skill_deployments`
 - `set_skill_deployments`
 - `remove_orphan_deployment`
 - `library_watch`
@@ -692,15 +661,11 @@ automation system. Do not add new frontend behavior against those names.
 - `reject_remote_pairing_request`
 - `revoke_remote_device`
 
-Debug builds also register `debug_create_remote_session` for native gateway
-tests. It is not registered in release builds.
-
 ## Git (`commands/git.rs`)
 
 - `git_status`
 - `git_init`
 - `git_clone_repository`
-- `git_current_branch`
 - `git_log`
 - `git_commit_changes`
 - `git_diff_file`
@@ -746,8 +711,6 @@ tests. It is not registered in release builds.
 - `git_stash_drop_all`
 - `git_fetch`
 - `git_push`
-- `git_create_worktree`
-- `git_remove_worktree`
 - `git_watch`
 - `git_unwatch`
 

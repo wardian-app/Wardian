@@ -63,12 +63,6 @@ pub struct CloseFileRendererLeaseRequestV1 {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct PickFileResourceRequestV1 {
-    pub title: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub struct PickFileResourceSaveTargetRequestV1 {
     pub title: Option<String>,
     pub default_name: Option<String>,
