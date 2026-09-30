@@ -1,6 +1,9 @@
 //! Read commands over the habitat telemetry store.
 //!
-//! Every command here answers from `telemetry_rollup_hourly` by way of
+//! The exception is [`list_agent_metrics`], which samples the live roster
+//! rather than the store.
+//!
+//! Every other command here answers from `telemetry_rollup_hourly` by way of
 //! [`wardian_core::telemetry::query`], so a horizon costs one row per hour per
 //! agent per model rather than a re-read of the provider logs.
 //!
@@ -14,7 +17,8 @@
 use crate::state::AppState;
 use chrono::Utc;
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
+use wardian_core::models::AgentTelemetry;
 use wardian_core::telemetry::attribution::token_reporting_agents;
 // Horizon resolution lives in the core so the CLI resolves "the last 24 hours"
 // the same way this does. Two independent implementations of the flooring rule
@@ -1017,6 +1021,18 @@ fn roster_providers() -> std::collections::HashMap<String, i64> {
             counts
         })
         .unwrap_or_default()
+}
+
+/// Sample every live agent's CPU, memory, and status.
+///
+/// Publishing the sampled statuses can make an agent ready for queued work, so
+/// the command needs the app handle to wake that agent's queue.
+#[tauri::command]
+pub async fn list_agent_metrics(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<Vec<AgentTelemetry>, String> {
+    Ok(crate::manager::get_all_metrics(&state, &app).await)
 }
 
 /// Read the Dashboard's saved column and window preferences.

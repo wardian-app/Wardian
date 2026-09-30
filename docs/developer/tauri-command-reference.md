@@ -17,7 +17,6 @@ This page documents the current command surface registered in `src-tauri/src/lib
 - `spawn_agent`
 - `get_generated_agent_name`
 - `list_agents`
-- `list_agent_metrics`
 - `kill_agent` (internal compatibility alias for forced agent deletion)
 - `pause_agent`
 - `resume_agent`
@@ -592,6 +591,8 @@ Current telemetry commands:
 - `telemetry_activity`
 - `telemetry_refresh`
 - `telemetry_agent_breakdown(session_id, from, to)`
+- `list_agent_metrics` (live CPU, memory, and status sample of the running
+  agents; the only command here that reads the roster rather than the store)
 
 `telemetry_agent_breakdown` accepts exact RFC 3339 `from` and `to` values with
 `from < to`. Its IPC argument keys are `session_id`, `from`, and `to`; the

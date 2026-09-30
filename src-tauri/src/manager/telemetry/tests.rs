@@ -347,6 +347,144 @@ fn discovers_session_roots_for_multiple_agents_from_one_process_marker_snapshot(
     assert_eq!(roots["session-b"], vec![20]);
 }
 
+/// A Processing agent whose provider log has just staged Idle, with a durable
+/// row so the transition can commit.
+async fn processing_agent_that_staged_idle(
+    state: &crate::state::AppState,
+    session_id: &str,
+) -> super::TelemetryProviderStatus {
+    wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+        session_id,
+        session_name: "test-agent",
+        description: "",
+        agent_class: "Coder",
+        provider: "claude",
+        workspace: None,
+        project: None,
+        is_off: false,
+        created_at: None,
+    })
+    .expect("insert isolated persisted agent");
+    let agent = test_active_agent(session_id, "claude", "Processing...", Some(1234));
+    wardian_core::db::update_agent_status(session_id, "Processing...", Some(1234))
+        .expect("persist initial status");
+    let snap = test_snapshot_from_agent(&agent, 0, state);
+    state
+        .agents
+        .lock()
+        .await
+        .insert(session_id.to_string(), agent);
+    super::set_snapshot_status(&snap, "Idle");
+    snap.provider_status_observation(false)
+}
+
+#[tokio::test]
+async fn a_held_lifecycle_gate_defers_the_observation_instead_of_stalling_or_losing_it() {
+    let _home = crate::control::test_support::TestWardianHome::new_async().await;
+    let session_id = "agent-1";
+    let state = crate::state::AppState::new();
+    let observation = processing_agent_that_staged_idle(&state, session_id).await;
+    let mut metrics = vec![super::AgentTelemetry {
+        session_id: session_id.to_string(),
+        cpu_usage: 0.0,
+        memory_mb: 0.0,
+        uptime_seconds: 0,
+        query_count: 0,
+        init_timestamp: None,
+        last_query_timestamp: None,
+        current_status: "Idle".to_string(),
+        log_path: None,
+    }];
+
+    // New Session, restart, restore, and even a notification hold this gate.
+    let lifecycle = state.lock_agent_lifecycle(session_id).await;
+    let follow_up = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        super::apply_provider_status_observations(
+            &state,
+            std::slice::from_ref(&observation),
+            &mut metrics,
+        ),
+    )
+    .await
+    .expect("the metrics tick must not wait out a lifecycle operation");
+
+    assert!(follow_up.wake_sessions.is_empty());
+    assert_eq!(follow_up.deferred.len(), 1);
+    assert_eq!(
+        metrics[0].current_status, "Processing...",
+        "a deferred observation shows the runtime's own status"
+    );
+    assert_eq!(
+        state
+            .agents
+            .lock()
+            .await
+            .get(session_id)
+            .map(|agent| agent.current_status.lock().unwrap().clone())
+            .as_deref(),
+        Some("Processing..."),
+        "a deferred observation must not commit while the gate is held"
+    );
+
+    // The staged transition survives: once the gate frees it publishes.
+    drop(lifecycle);
+    let publication =
+        crate::manager::publish_telemetry_status_observation(&state, &follow_up.deferred[0]).await;
+    assert_eq!(
+        publication.readiness,
+        Some(wardian_core::control::ProviderInputReadiness::Ready)
+    );
+    assert_eq!(publication.current_status.as_deref(), Some("Idle"));
+}
+
+#[tokio::test]
+async fn an_observation_without_a_staged_transition_is_not_deferred() {
+    let state = crate::state::AppState::new();
+    let session_id = "agent-1";
+    let agent = test_active_agent(session_id, "claude", "Processing...", Some(1234));
+    let snap = test_snapshot_from_agent(&agent, 0, &state);
+    state
+        .agents
+        .lock()
+        .await
+        .insert(session_id.to_string(), agent);
+    let observation = snap.provider_status_observation(false);
+    assert!(observation.transitions.is_empty());
+
+    let _lifecycle = state.lock_agent_lifecycle(session_id).await;
+    let follow_up = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        super::apply_provider_status_observations(
+            &state,
+            std::slice::from_ref(&observation),
+            &mut [],
+        ),
+    )
+    .await
+    .expect("the metrics tick must not wait out a lifecycle operation");
+
+    assert!(follow_up.deferred.is_empty());
+}
+
+#[tokio::test]
+async fn ready_transition_is_reported_for_wakeup_instead_of_delivered_inline() {
+    let _home = crate::control::test_support::TestWardianHome::new_async().await;
+    let session_id = "agent-1";
+    let state = crate::state::AppState::new();
+    let observation = processing_agent_that_staged_idle(&state, session_id).await;
+
+    let follow_up = super::apply_provider_status_observations(
+        &state,
+        std::slice::from_ref(&observation),
+        &mut [],
+    )
+    .await;
+
+    assert_eq!(follow_up.wake_sessions, vec![session_id.to_string()]);
+    assert!(follow_up.deferred.is_empty());
+}
+
 #[tokio::test]
 async fn current_runtime_telemetry_status_commit_persists_and_records_watch_event() {
     let _home = crate::control::test_support::TestWardianHome::new_async().await;

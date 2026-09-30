@@ -530,11 +530,23 @@ pub(crate) struct TelemetryStatusPublication {
     pub(crate) status_revision: Option<u64>,
 }
 
+/// Publishes one staged observation, waiting as long as it takes for the
+/// agent's lifecycle gate.
 pub(crate) async fn publish_telemetry_status_observation(
     state: &AppState,
     observation: &telemetry::TelemetryProviderStatus,
 ) -> TelemetryStatusPublication {
-    let _lifecycle = state.lock_agent_lifecycle(&observation.session_id).await;
+    let lifecycle = state.lock_agent_lifecycle(&observation.session_id).await;
+    publish_telemetry_status_observation_locked(state, observation, lifecycle).await
+}
+
+/// Publishes under a lifecycle gate the caller already holds, so a caller that
+/// cannot wait indefinitely can bound its own acquisition.
+pub(crate) async fn publish_telemetry_status_observation_locked(
+    state: &AppState,
+    observation: &telemetry::TelemetryProviderStatus,
+    _lifecycle: tokio::sync::OwnedMutexGuard<()>,
+) -> TelemetryStatusPublication {
     let active_runtime = {
         let agents = state.agents.lock().await;
         agents.get(&observation.session_id).map(|agent| {
