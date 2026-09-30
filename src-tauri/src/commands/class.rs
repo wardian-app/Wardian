@@ -49,12 +49,6 @@ pub async fn delete_agent_class(
 }
 
 #[tauri::command]
-pub async fn get_default_class_instruction(name: String, app: AppHandle) -> Result<String, String> {
-    manager::get_agent_class_default_instruction(&app, &name)
-        .ok_or_else(|| format!("Default instruction for '{}' not found", name))
-}
-
-#[tauri::command]
 pub async fn reset_class_to_default(name: String, _app: AppHandle) -> Result<(), String> {
     manager::log_debug(&format!(
         "[WARDIAN] reset_class_to_default called: {}",
@@ -64,26 +58,4 @@ pub async fn reset_class_to_default(name: String, _app: AppHandle) -> Result<(),
     let app_dir = crate::utils::fs::get_wardian_home()
         .ok_or_else(|| "Could not locate Wardian home directory".to_string())?;
     wardian_core::classes::restore_default_instruction(&app_dir, &name)
-}
-
-#[tauri::command]
-pub async fn reset_all_class_prompts(app: AppHandle) -> Result<(), String> {
-    manager::log_debug("[WARDIAN] reset_all_class_prompts called");
-
-    let all = manager::get_all_agent_classes(&app);
-    let app_dir =
-        crate::utils::fs::get_wardian_home().ok_or("Could not locate Wardian home directory")?;
-
-    for cls in all {
-        if cls.is_default {
-            if let Some(default_content) =
-                manager::get_agent_class_default_instruction(&app, &cls.name)
-            {
-                let agents_md_path = app_dir.join("classes").join(&cls.name).join("AGENTS.md");
-                let _ = std::fs::write(agents_md_path, default_content);
-            }
-        }
-    }
-
-    Ok(())
 }

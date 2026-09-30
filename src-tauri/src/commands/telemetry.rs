@@ -31,8 +31,7 @@ use wardian_core::telemetry::models::{
     ActiveTime, BreakdownRow, IntervalFact, LimitObservation, TelemetrySummary, TokenCounts,
 };
 use wardian_core::telemetry::query::{
-    activity_intervals, breakdown, grouped_breakdown, grouped_series, latest_limits, series,
-    summary, Dimension, SeriesPoint,
+    activity_intervals, breakdown, grouped_breakdown, latest_limits, summary, Dimension,
 };
 
 /// A breakdown row with the label a surface should actually print.
@@ -1126,25 +1125,6 @@ const MATRIX_ROW_LIMIT: usize = 40;
 
 /// Hard ceiling, so a caller cannot ask for an unbounded grid.
 const MATRIX_ROW_CAP: usize = 200;
-
-/// See [`telemetry_overview`] for why this is `(async)`.
-#[tauri::command(async)]
-pub fn telemetry_series(horizon: String, dimension: String) -> Result<Vec<SeriesPoint>, String> {
-    let horizon =
-        Horizon::parse(&horizon).ok_or_else(|| format!("unknown telemetry horizon: {horizon}"))?;
-    let dimension = Dimension::parse(&dimension)
-        .ok_or_else(|| format!("unknown telemetry dimension: {dimension}"))?;
-    let window = resolve_horizon(horizon, Utc::now());
-
-    wardian_core::db::get_db_conn(|conn| {
-        if dimension == Dimension::Agent {
-            Ok(grouped_series(conn, dimension, &window.from, &window.to)?)
-        } else {
-            Ok(series(conn, dimension, &window.from, &window.to)?)
-        }
-    })
-    .map_err(|error| format!("could not read telemetry series: {error}"))
-}
 
 /// See [`telemetry_overview`] for why this is `(async)`.
 #[tauri::command(async)]

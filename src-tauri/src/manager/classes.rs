@@ -222,10 +222,6 @@ fn init_bundled_automation_samples(app: &AppHandle, app_dir: &Path) {
     }
 }
 
-pub fn get_agent_class_default_instruction(_app: &AppHandle, class_name: &str) -> Option<String> {
-    wardian_core::classes::default_class_instruction(class_name).map(ToOwned::to_owned)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{seed_bundled_automation_sample, seed_bundled_common_skill};

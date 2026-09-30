@@ -218,37 +218,6 @@ pub async fn close_file_renderer_lease(
 }
 
 #[tauri::command]
-pub async fn pick_file_resource(
-    request: PickFileResourceRequestV1,
-    state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
-) -> Result<Option<UserFileGrantV1>, FileResourceErrorV1> {
-    let mut picker = app.dialog().file();
-    if let Some(title) = request.title {
-        picker = picker.set_title(title);
-    }
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    picker.pick_file(move |selected| {
-        let _ = sender.send(selected);
-    });
-    let selected = receiver
-        .await
-        .map_err(|_| resource_error("picker_unavailable", "native file picker did not respond"))?;
-    let Some(selected) = selected else {
-        return Ok(None);
-    };
-    let selected = selected.into_path().map_err(|cause| {
-        resource_error(
-            "unavailable_path",
-            format!("selected file is not a local filesystem path: {cause}"),
-        )
-    })?;
-    record_picked_file(&state.file_resources, &selected)
-        .await
-        .map(Some)
-}
-
-#[tauri::command]
 pub async fn pick_file_resource_save_target(
     request: PickFileResourceSaveTargetRequestV1,
     state: tauri::State<'_, AppState>,
