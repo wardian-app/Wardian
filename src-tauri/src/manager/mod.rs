@@ -18,15 +18,12 @@ pub(crate) mod telemetry;
 // All external callers (lib.rs, commands/*) continue to use
 // crate::manager::* exactly as before.
 
-pub use classes::{
-    get_agent_class_default_instruction, get_all_agent_classes, init_agent_classes, save_classes,
-};
+pub use classes::{get_all_agent_classes, init_agent_classes, save_classes};
 pub(crate) use codex_onboarding::{should_publish_provisionally, CodexAttachmentCompletion};
 pub use headless::{
     obtain_session_id, run_headless_with_options, HeadlessRunError, HeadlessRunErrorKind,
     HeadlessRunOptions, DEFAULT_HEADLESS_RUN_TIMEOUT,
 };
-pub(crate) use opencode::opencode_last_assistant_text;
 pub(crate) use session_identity::{
     apply_provider_identity, validate_config_for_launch, validate_session_values_for_launch,
 };

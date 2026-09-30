@@ -26,16 +26,6 @@ pub fn launcher_file_name() -> &'static str {
     }
 }
 
-pub fn install_cli_from_resources(_resources_dir: &Path) -> Result<InstallOutcome, String> {
-    let target_home = wardian_core::paths::wardian_home()
-        .ok_or_else(|| "Could not resolve Wardian home".to_string())?;
-    install_cli_from_resources_to_home_with_path_update(
-        _resources_dir,
-        &target_home,
-        ensure_cli_bin_on_path,
-    )
-}
-
 pub fn install_cli_from_resources_to_home(
     resources_dir: &Path,
     target_home: &Path,

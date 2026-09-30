@@ -234,10 +234,6 @@ export function deriveCurrentThought(
   return { thought: currentThought, status: effectiveStatus };
 }
 
-export function getStatusLabel(status: string): string {
-  return formatAgentStatusLabel(status);
-}
-
 /**
  * Classifies a JSON event from the agent stream for notification/state handling.
  */
@@ -397,17 +393,6 @@ export function classifyJsonEvent(data: Record<string, unknown>): JsonEventEffec
  * Returns the canonical lifecycle label for a Status field.
  */
 export function getAgentStatusLabel(status: string): string {
-  return formatAgentStatusLabel(status);
-}
-
-/**
- * Returns a short transient activity label. Keep this separate from Status so
- * equivalent agents read the same across Watchlist, Graph, and other surfaces.
- */
-export function getAgentActivityLabel(status: string, thought: string, maxLength: number = 40): string {
-  if (normalizeAgentStatus(status) === "Processing..." && thought.trim()) {
-    return thought.substring(0, maxLength);
-  }
   return formatAgentStatusLabel(status);
 }
 

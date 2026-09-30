@@ -472,12 +472,6 @@ pub async fn git_clone_repository(cwd: String, repository: String) -> Result<(),
     Ok(())
 }
 
-#[tauri::command]
-pub async fn git_current_branch(cwd: String) -> Result<String, String> {
-    let branch = run_git(&cwd, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-    Ok(branch.trim().to_string())
-}
-
 fn build_git_log_args(
     count: u32,
     revision: Option<&str>,
@@ -784,16 +778,6 @@ pub(crate) fn git_diff_numstat_for_cwd(
         ],
     )?;
     Ok(parse_git_numstat(&raw))
-}
-
-/// Return one numstat record per tracked path in the requested change set.
-/// Untracked paths are supplied by `git_status` and therefore have no counts.
-#[tauri::command]
-pub async fn git_diff_numstat(
-    cwd: String,
-    revision: Option<String>,
-) -> Result<Vec<GitNumstatEntry>, String> {
-    git_diff_numstat_for_cwd(&cwd, revision.as_deref())
 }
 
 #[tauri::command]
@@ -1262,17 +1246,6 @@ fn is_untracked_path(cwd: &str, path: &str) -> Result<bool, String> {
         .any(|line| line.starts_with("?? ") && parse_porcelain_path(&line[3..]) == path))
 }
 
-#[tauri::command]
-pub async fn git_create_worktree(cwd: String, path: String, branch: String) -> Result<(), String> {
-    create_worktree_with_build_caches(Path::new(&cwd), Path::new(&path), &branch)
-}
-
-#[tauri::command]
-pub async fn git_remove_worktree(cwd: String, path: String) -> Result<(), String> {
-    remove_worktree(Path::new(&cwd), Path::new(&path))?;
-    Ok(())
-}
-
 pub(crate) fn create_worktree_with_build_caches(
     workspace_path: &Path,
     worktree_path: &Path,
@@ -1306,10 +1279,6 @@ fn local_branch_exists(workspace: &str, branch: &str) -> Result<bool, String> {
     )?
     .trim()
     .is_empty())
-}
-
-pub(crate) fn remove_worktree(workspace_path: &Path, worktree_path: &Path) -> Result<(), String> {
-    remove_worktree_with_options(workspace_path, worktree_path, true)
 }
 
 pub(crate) fn remove_worktree_without_force(

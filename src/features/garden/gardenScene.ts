@@ -317,29 +317,6 @@ export function markVisited(
 }
 
 /**
- * Drop scene state for entities that no longer exist.
- *
- * Pins and exclusions are user intent and are kept — a deleted agent may come
- * back, and silently discarding a placement is worse than carrying a few stale
- * keys. Positions and visit timestamps are derived and are pruned.
- */
-export function pruneScene(scene: GardenScene, liveKeys: ReadonlySet<string>): GardenScene {
-  const positions: Record<string, GardenPosition> = {};
-  for (const [key, position] of Object.entries(scene.positions)) {
-    if (liveKeys.has(key)) positions[key] = position;
-  }
-  const position_districts: Record<string, string> = {};
-  for (const [key, districtId] of Object.entries(scene.position_districts)) {
-    if (liveKeys.has(key)) position_districts[key] = districtId;
-  }
-  const visited: Record<string, number> = {};
-  for (const [key, at] of Object.entries(scene.visited)) {
-    if (liveKeys.has(key)) visited[key] = at;
-  }
-  return { ...scene, positions, position_districts, visited };
-}
-
-/**
  * Whether two scenes are close enough that adopting the newer one would change
  * nothing a user could see.
  *

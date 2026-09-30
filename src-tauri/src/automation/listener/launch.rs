@@ -25,7 +25,6 @@ use wardian_core::models::InvocationKind;
 /// One listener fire, ready to become a run.
 #[derive(Debug, Clone)]
 pub struct ListenerFire {
-    pub listener_id: String,
     /// Stable identity of the *event*, not of the fire attempt. Two deliveries
     /// of the same webhook, or two replays of one debounced burst, share this
     /// value and therefore share a run.
@@ -656,7 +655,6 @@ edges:
         let mut payload = Map::new();
         payload.insert("paths".into(), serde_json::json!(["src/main.rs"]));
         ListenerFire {
-            listener_id: "l1".into(),
             event_identity: "burst-1".into(),
             payload,
         }
@@ -843,7 +841,6 @@ edges:
         activity.pending.insert(
             "a".to_string(),
             ListenerFire {
-                listener_id: "a".into(),
                 event_identity: "second".into(),
                 payload: Map::new(),
             },
@@ -865,7 +862,6 @@ edges:
         activity.pending.insert(
             "a".to_string(),
             ListenerFire {
-                listener_id: "a".into(),
                 event_identity: "queued-behind-the-lost-run".into(),
                 payload: Map::new(),
             },

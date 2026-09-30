@@ -1,32 +1,18 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  cacheReadRatio,
   measureHint,
   measureLabel,
   measureShortLabel,
   MEASURE_GROUPS,
   formatCount,
   formatDuration,
-  formatLineDelta,
   formatPercent,
-  formatRatio,
   formatBucketLabel,
   formatMeasureValue,
   cellIntensity,
-  formatResetsIn,
-  totalActiveMs,
   UNREPORTED,
 } from "./telemetryFormat";
-import type { TokenCounts } from "./telemetryTypes";
-
-const NO_TOKENS: TokenCounts = {
-  input_tokens: null,
-  cached_input_tokens: null,
-  cache_write_tokens: null,
-  output_tokens: null,
-  reasoning_tokens: null,
-};
 
 describe("formatDuration", () => {
   it("keeps a short real span distinguishable from no activity", () => {
@@ -49,16 +35,6 @@ describe("formatDuration", () => {
   });
 });
 
-describe("totalActiveMs", () => {
-  it("sums the two methods for display", () => {
-    // The store keeps measured and inferred durations apart because they are
-    // different quantities; the split is no longer surfaced, because it cost
-    // more attention than it returned.
-    expect(totalActiveMs({ measured_ms: 600_000, clustered_ms: 1_800_000 })).toBe(2_400_000);
-    expect(totalActiveMs({ measured_ms: 0, clustered_ms: 0 })).toBe(0);
-  });
-});
-
 describe("formatCount", () => {
   it("distinguishes an unreported measure from a reported zero", () => {
     // The whole reason token fields are nullable: antigravity reports nothing,
@@ -76,51 +52,6 @@ describe("formatCount", () => {
     expect(formatCount(3_100_000_000)).toBe("3.1B");
   });
 
-  it("formats line deltas with both directions visible", () => {
-    expect(formatLineDelta(5, 1)).toBe("+5 / -1");
-    expect(formatLineDelta(0, 0)).toBe("+0 / -0");
-  });
-});
-
-describe("cacheReadRatio", () => {
-  it("expresses cache reads as a share of the whole prompt", () => {
-    // Real figures from a codex session, with `input_tokens` already
-    // normalised to exclude cache reads at ingest. The share is only
-    // meaningful because of that normalisation.
-    const tokens: TokenCounts = {
-      ...NO_TOKENS,
-      input_tokens: 100_544,
-      cached_input_tokens: 730_880,
-    };
-    expect(formatPercent(cacheReadRatio(tokens))).toBe("88%");
-  });
-
-  it("stays bounded on a provider that sends almost nothing as plain input", () => {
-    // The real 400-turn claude session. Divided by fresh input alone this read
-    // 9,494x, which said nothing except that claude writes its prompt into the
-    // cache. As a share of the prompt it is a number anyone can compare.
-    const tokens: TokenCounts = {
-      ...NO_TOKENS,
-      input_tokens: 8_446,
-      cached_input_tokens: 80_194_623,
-      cache_write_tokens: 1_885_871,
-    };
-    expect(formatPercent(cacheReadRatio(tokens))).toBe("98%");
-  });
-
-  it("counts cache writes as part of the prompt they were read from", () => {
-    // A turn whose whole prompt was new: nothing was served from cache, so the
-    // hit rate is 0%, not undefined.
-    expect(
-      cacheReadRatio({ ...NO_TOKENS, input_tokens: 10, cache_write_tokens: 90, cached_input_tokens: 0 }),
-    ).toBe(0);
-  });
-
-  it("is unknown rather than zero when the prompt was never reported", () => {
-    expect(cacheReadRatio(NO_TOKENS)).toBeNull();
-    expect(cacheReadRatio({ ...NO_TOKENS, cached_input_tokens: 0 })).toBeNull();
-    expect(formatRatio(null)).toBe(UNREPORTED);
-  });
 });
 
 describe("formatPercent", () => {
@@ -129,23 +60,6 @@ describe("formatPercent", () => {
     expect(formatPercent(null)).toBe(UNREPORTED);
     expect(formatPercent(31.75)).toBe("32%");
     expect(formatPercent(0)).toBe("0%");
-  });
-});
-
-describe("formatResetsIn", () => {
-  const now = Date.parse("2026-08-13T18:00:00.000Z");
-
-  it("counts down to the reset", () => {
-    expect(formatResetsIn("2026-08-13T20:30:00.000Z", now)).toBe("2h 30m");
-  });
-
-  it("reports an elapsed window as clear rather than as negative time", () => {
-    expect(formatResetsIn("2026-08-13T17:00:00.000Z", now)).toBe("now");
-  });
-
-  it("stays blank when no reset was reported", () => {
-    expect(formatResetsIn(null, now)).toBe(UNREPORTED);
-    expect(formatResetsIn("not a timestamp", now)).toBe(UNREPORTED);
   });
 });
 
