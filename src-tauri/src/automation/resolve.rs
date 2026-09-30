@@ -66,26 +66,6 @@ pub fn choose_agent_route(input: AgentRouteInput) -> PlannedAgentRoute {
     }
 }
 
-/// Resolve a blueprint `agent` reference. `role:`/`class:`/`ephemeral` map to a
-/// fresh headless worker on `default_provider`; explicit names are marked as
-/// non-ephemeral so the executor can log the deferred live-routing behavior.
-/// A binding keyed by the role/class NAME overrides the provider this ref runs as.
-#[cfg(test)]
-pub fn resolve_agent(
-    agent_ref: &str,
-    workspace: &Path,
-    default_provider: &str,
-    bindings: &HashMap<String, String>,
-) -> ResolvedAgent {
-    resolve_agent_with_catalog(
-        agent_ref,
-        workspace,
-        default_provider,
-        bindings,
-        &HashMap::new(),
-    )
-}
-
 pub fn resolve_agent_with_catalog(
     agent_ref: &str,
     workspace: &Path,
@@ -170,7 +150,13 @@ mod tests {
 
     #[test]
     fn role_ref_resolves_to_ephemeral_headless_with_default_provider() {
-        let r = resolve_agent("role:Coder", Path::new("/ws"), "codex", &HashMap::new());
+        let r = resolve_agent_with_catalog(
+            "role:Coder",
+            Path::new("/ws"),
+            "codex",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(r.provider, "codex");
         assert!(r.is_ephemeral);
         assert!(r.session_id.is_empty());
@@ -179,14 +165,26 @@ mod tests {
     #[test]
     fn class_ref_is_ephemeral() {
         assert!(
-            resolve_agent("class:Reviewer", Path::new("/ws"), "codex", &HashMap::new())
-                .is_ephemeral
+            resolve_agent_with_catalog(
+                "class:Reviewer",
+                Path::new("/ws"),
+                "codex",
+                &HashMap::new(),
+                &HashMap::new()
+            )
+            .is_ephemeral
         );
     }
 
     #[test]
     fn explicit_name_is_not_ephemeral() {
-        let r = resolve_agent("Wardian-Codex", Path::new("/ws"), "codex", &HashMap::new());
+        let r = resolve_agent_with_catalog(
+            "Wardian-Codex",
+            Path::new("/ws"),
+            "codex",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert!(!r.is_ephemeral);
     }
 
@@ -195,9 +193,21 @@ mod tests {
         use std::collections::HashMap;
         let mut b = HashMap::new();
         b.insert("reasoning_gate".to_string(), "claude".to_string());
-        let r = resolve_agent("role:reasoning_gate", Path::new("/ws"), "codex", &b);
+        let r = resolve_agent_with_catalog(
+            "role:reasoning_gate",
+            Path::new("/ws"),
+            "codex",
+            &b,
+            &HashMap::new(),
+        );
         assert_eq!(r.provider, "claude"); // bound
-        let r2 = resolve_agent("role:other", Path::new("/ws"), "codex", &b);
+        let r2 = resolve_agent_with_catalog(
+            "role:other",
+            Path::new("/ws"),
+            "codex",
+            &b,
+            &HashMap::new(),
+        );
         assert_eq!(r2.provider, "codex"); // unbound -> default
     }
 

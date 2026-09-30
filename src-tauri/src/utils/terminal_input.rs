@@ -11,7 +11,6 @@ pub fn normalize_prompt_for_terminal_submit(prompt: &str) -> String {
 
 /// Payload and submit-key bytes a provider receives for `prompt`, so tests can
 /// assert the wire format without a terminal.
-#[cfg(test)]
 pub fn provider_submit_chunks(provider_name: &str, prompt: &str) -> Result<Vec<Vec<u8>>, String> {
     let normalized = normalize_prompt_for_terminal_submit(prompt);
     if normalized.is_empty() {

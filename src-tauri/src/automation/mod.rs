@@ -38,7 +38,6 @@ pub struct LiveStepExecutor {
 }
 
 impl LiveStepExecutor {
-    #[cfg(test)]
     pub fn new(
         runner: Arc<dyn AgentRunner>,
         workspace: PathBuf,
@@ -62,7 +61,6 @@ impl LiveStepExecutor {
         )
     }
 
-    #[cfg(test)]
     pub fn new_with_live_runner(
         runner: Arc<dyn AgentRunner>,
         live_runner: Option<Arc<dyn LiveAgentRunner>>,

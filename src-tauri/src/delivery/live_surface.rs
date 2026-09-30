@@ -238,7 +238,6 @@ impl std::fmt::Display for LiveSurfaceDeliveryError {
 impl std::error::Error for LiveSurfaceDeliveryError {}
 
 impl LiveSurfacePromptRequest {
-    #[cfg(test)]
     pub fn message(session_id: impl Into<String>, prompt: impl Into<String>) -> Self {
         Self {
             session_id: session_id.into(),

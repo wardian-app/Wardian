@@ -499,7 +499,6 @@ fn agent_binding_from_config(
 
 /// Drive a fresh manual run to completion or pause without an app handle, so
 /// tests exercise the same prepare and drive steps a scheduled run uses.
-#[cfg(test)]
 pub async fn drive_new_run(
     blueprint: Blueprint,
     run_id: String,
