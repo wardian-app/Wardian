@@ -598,7 +598,7 @@ mod tests {
             refresh_error: None,
         };
         assert_eq!(
-            crate::providers::codex_model_selection::resolve_live_selection(
+            crate::providers::codex_model_selection::resolve_live_selection_for_settings(
                 &catalog,
                 Some("gpt-5.6-sol"),
                 None,

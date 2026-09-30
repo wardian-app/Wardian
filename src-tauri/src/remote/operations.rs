@@ -716,15 +716,6 @@ fn sort_remote_queue_items(items: &mut Vec<serde_json::Value>) {
 const MAX_INBOX_SOURCE_ITEMS: usize = 200;
 const QUEUE_MAX_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
-pub async fn remote_queue_items_page(
-    state: &AppState,
-    offset: usize,
-) -> (Vec<serde_json::Value>, bool, Option<usize>) {
-    remote_inbox_list_page(state, offset, &[], &[], false, MAX_INBOX_SOURCE_ITEMS)
-        .await
-        .unwrap_or_default()
-}
-
 #[derive(Clone, Copy)]
 enum InboxSource {
     Notifications,
@@ -1662,27 +1653,6 @@ pub async fn remote_agent_terminal_snapshot(
         truncated: snapshot.output.truncated,
         omitted_bytes: snapshot.output.omitted_bytes,
     })
-}
-
-pub async fn remote_agent_terminal_raw_output(
-    state: &AppState,
-    session_id: &str,
-    tail_bytes: Option<usize>,
-) -> Result<String, String> {
-    let watch_state = {
-        let agents = state.agents.lock().await;
-        agents
-            .get(session_id)
-            .map(|agent| agent.watch_state.clone())
-            .ok_or_else(|| "agent_not_found".to_string())?
-    };
-    let snapshot = watch_state
-        .lock()
-        .map_err(|_| "watch_state_unavailable".to_string())?
-        .raw_snapshot_since(None, tail_bytes)
-        .map_err(|error| error.code().to_string())?;
-
-    Ok(snapshot.text)
 }
 
 pub fn validate_remote_agent_action(request: &RemoteAgentActionRequest) -> Result<(), String> {
@@ -3131,27 +3101,6 @@ mod tests {
         assert_eq!(snapshot.text, "gamma");
         assert!(snapshot.truncated);
         assert!(snapshot.omitted_bytes > 0);
-    }
-
-    #[tokio::test]
-    async fn remote_agent_terminal_raw_output_preserves_escape_sequences_without_draining() {
-        let state = AppState::new();
-        let agent = test_agent("agent-1", "CoderOne", "Coder", "Processing");
-        {
-            let mut watch = agent.watch_state.lock().expect("watch state");
-            watch.push_output(b"\x1b[31mred terminal\x1b[0m\nsecond line");
-        }
-        insert_agent(&state, agent).await;
-
-        let first = remote_agent_terminal_raw_output(&state, "agent-1", Some(4096))
-            .await
-            .expect("first raw terminal output");
-        let second = remote_agent_terminal_raw_output(&state, "agent-1", Some(4096))
-            .await
-            .expect("second raw terminal output");
-
-        assert_eq!(first, "\x1b[31mred terminal\x1b[0m\nsecond line");
-        assert_eq!(second, first);
     }
 
     #[tokio::test]
