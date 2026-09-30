@@ -252,9 +252,8 @@ export function agentRef(sessionId: string): EntityRef {
  * `Blueprint.id` is the canonical id because it survives a file rename and is
  * what run evidence is keyed by (`logs/automations/<blueprint_id>/<run_id>/`).
  * The library `entry_ref` is retained as `path` so the same unit can be
- * matched from either direction. Callers holding only an `entry_ref` must go
- * through `resolveAutomationRef`, which is why that function takes an index
- * rather than guessing.
+ * matched from either direction. A caller holding only an `entry_ref` must
+ * look up the blueprint first rather than minting a unit from the path.
  */
 export function automationRef(blueprintId: string, entryPath?: string): EntityRef {
   return {
@@ -290,7 +289,7 @@ export function libraryEntryRef(entryRef: string): EntityRef | null {
     case "classes":
       return { kind: "class", id: rest, source: "library", path: rest };
     case "automations":
-      // Caller must resolve to Blueprint.id — see resolveAutomationRef.
+      // Caller must resolve to Blueprint.id — see automationRef.
       return null;
     default:
       // `mcps` is stubbed in the backend and never has entries; unknown

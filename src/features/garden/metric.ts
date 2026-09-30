@@ -1,12 +1,11 @@
 /**
  * The Garden map's distance metric.
  *
- * Three components, each measuring a different kind of relatedness, composed
+ * Two components, each measuring a different kind of relatedness, composed
  * into one distance and then cut to a sparse k-nearest-neighbour graph:
  *
  * - `d_affil`  — weighted cosine over facet vectors (see `facets.ts`).
  * - `d_interact` — personalized-PageRank affinity over agent communication.
- * - `d_use`    — pointwise mutual information over co-use in the same thread.
  *
  * ## Why personalized PageRank rather than shortest path
  *
@@ -16,12 +15,6 @@
  * shows. PPR splits probability mass at high-degree nodes, so hub-mediated
  * adjacency is discounted automatically, while genuinely multiple independent
  * paths *do* register as closer.
- *
- * ## Why PMI rather than raw co-occurrence
- *
- * Raw co-occurrence counts just re-rank by popularity, which would make the
- * busiest agent "close to" everything. PMI normalizes by each entity's own
- * frequency, so it measures surprise rather than volume.
  *
  * ## Composition renormalizes over applicable terms
  *
