@@ -44,12 +44,10 @@ pub enum PlannedAgentRoute {
 
 #[derive(Debug, Clone)]
 pub struct AgentRouteInput {
-    pub agent_id: String,
     pub conversation: AgentConversationMode,
     pub busy_policy: BusyPolicy,
     pub is_live: bool,
     pub is_input_ready: bool,
-    pub has_resume_session: bool,
 }
 
 pub fn choose_agent_route(input: AgentRouteInput) -> PlannedAgentRoute {
@@ -72,6 +70,7 @@ pub fn choose_agent_route(input: AgentRouteInput) -> PlannedAgentRoute {
 /// fresh headless worker on `default_provider`; explicit names are marked as
 /// non-ephemeral so the executor can log the deferred live-routing behavior.
 /// A binding keyed by the role/class NAME overrides the provider this ref runs as.
+#[cfg(test)]
 pub fn resolve_agent(
     agent_ref: &str,
     workspace: &Path,
@@ -292,12 +291,10 @@ mod tests {
     #[test]
     fn busy_live_current_conversation_does_not_use_background_resume() {
         let route = choose_agent_route(AgentRouteInput {
-            agent_id: "agent-1".into(),
             conversation: AgentConversationMode::Current,
             busy_policy: BusyPolicy::Skip,
             is_live: true,
             is_input_ready: false,
-            has_resume_session: true,
         });
         assert_eq!(route, PlannedAgentRoute::SkippedBusy);
     }
@@ -305,12 +302,10 @@ mod tests {
     #[test]
     fn offline_current_conversation_uses_background_resume() {
         let route = choose_agent_route(AgentRouteInput {
-            agent_id: "agent-1".into(),
             conversation: AgentConversationMode::Current,
             busy_policy: BusyPolicy::Wait,
             is_live: false,
             is_input_ready: false,
-            has_resume_session: true,
         });
         assert_eq!(route, PlannedAgentRoute::BackgroundResume);
     }
@@ -318,12 +313,10 @@ mod tests {
     #[test]
     fn fresh_background_uses_profile_without_resume() {
         let route = choose_agent_route(AgentRouteInput {
-            agent_id: "agent-1".into(),
             conversation: AgentConversationMode::FreshBackground,
             busy_policy: BusyPolicy::Wait,
             is_live: true,
             is_input_ready: false,
-            has_resume_session: true,
         });
         assert_eq!(route, PlannedAgentRoute::BackgroundFresh);
     }

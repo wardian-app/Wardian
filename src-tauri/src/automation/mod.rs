@@ -38,6 +38,7 @@ pub struct LiveStepExecutor {
 }
 
 impl LiveStepExecutor {
+    #[cfg(test)]
     pub fn new(
         runner: Arc<dyn AgentRunner>,
         workspace: PathBuf,
@@ -61,6 +62,7 @@ impl LiveStepExecutor {
         )
     }
 
+    #[cfg(test)]
     pub fn new_with_live_runner(
         runner: Arc<dyn AgentRunner>,
         live_runner: Option<Arc<dyn LiveAgentRunner>>,
@@ -336,12 +338,10 @@ impl LiveStepExecutor {
         prompt: String,
     ) -> Result<String, StepError> {
         let route = resolve::choose_agent_route(AgentRouteInput {
-            agent_id: agent_id.to_string(),
             conversation,
             busy_policy,
             is_live: agent.is_live,
             is_input_ready: agent.is_input_ready,
-            has_resume_session: agent.resume_session.is_some(),
         });
 
         match route {
