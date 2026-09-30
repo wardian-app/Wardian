@@ -7,13 +7,10 @@ import {
   EXCLUDE_REPULSION,
   IGNORE_REPULSION,
   MAX_PPR_NODES,
-  buildCoUseIndex,
   buildNeighbourGraph,
   canonicalPairKey,
-  coUseDistance,
   crossKindOffset,
   distanceBetween,
-  explainDistance,
   interactionDistance,
   interactionWeight,
   personalizedPageRank,
@@ -149,35 +146,6 @@ describe("interactionWeight", () => {
   });
 });
 
-describe("coUseDistance", () => {
-  it("uses PMI so the busiest entity is not close to everything", () => {
-    // "busy" appears in every thread; "x" and "y" only ever appear together.
-    const windows = [
-      ["busy", "x", "y"],
-      ["busy", "p"],
-      ["busy", "q"],
-      ["busy", "r"],
-      ["busy", "s"],
-      ["busy", "t"],
-    ];
-    const index = buildCoUseIndex(windows);
-    const rareTogether = coUseDistance("x", "y", index)!;
-    const withBusy = coUseDistance("p", "busy", index)!;
-    expect(rareTogether).toBeLessThan(withBusy);
-  });
-
-  it("returns null for entities never seen in a window", () => {
-    const index = buildCoUseIndex([["a", "b"]]);
-    expect(coUseDistance("a", "unseen", index)).toBeNull();
-    expect(coUseDistance("a", "b", buildCoUseIndex([]))).toBeNull();
-  });
-
-  it("returns 1 for entities seen but never together", () => {
-    const index = buildCoUseIndex([["a"], ["b"]]);
-    expect(coUseDistance("a", "b", index)).toBe(1);
-  });
-});
-
 describe("distanceBetween", () => {
   it("scores shared-team agents closer than unrelated ones", () => {
     const a1 = facets(agentRef("a1"), ["team:t1", "path:d:/dev/ward", "path:d:/"]);
@@ -273,26 +241,6 @@ describe("distanceBetween", () => {
       distanceBetween(b, a, context).distance,
       12,
     );
-  });
-});
-
-describe("explainDistance", () => {
-  it("attributes the distance to named facets and offsets", () => {
-    const peers = Array.from({ length: 20 }, (_, i) =>
-      facets(agentRef(`p${i}`), ["team:t1", "path:d:/"]),
-    );
-    const a = facets(agentRef("a1"), ["team:t1", "skill:skills/kicad-review", "path:d:/"]);
-    const b = facets(libraryEntryRef("skills/kicad-review")!, [
-      "skill:skills/kicad-review",
-      "team:t1",
-      "path:d:/",
-    ]);
-    const explanation = explainDistance(a, b, contextFor([a, b, ...peers]));
-
-    expect(explanation.sharedFacets[0].token).toBe("skill:skills/kicad-review");
-    expect(explanation.offsets.map((offset) => offset.name)).toContain("cross-kind");
-    expect(explanation.a).toEqual(a.ref);
-    expect(explanation.b).toEqual(b.ref);
   });
 });
 

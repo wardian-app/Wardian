@@ -299,105 +299,11 @@ export function libraryEntryRef(entryRef: string): EntityRef | null {
   }
 }
 
-/**
- * Collapse a library automation `entry_ref` onto its `Blueprint.id`.
- *
- * `index` maps normalized library entry path -> blueprint id, built from
- * `automation_list_blueprints` (which returns `{ id, name, path }`). Unresolvable
- * refs return null: an automation whose blueprint failed to parse must not enter
- * the map under a second identity.
- */
-export function resolveAutomationRef(
-  entryRef: string,
-  index: ReadonlyMap<string, string>,
-): EntityRef | null {
-  const normalized = normalizeLibraryPath(entryRef);
-  const blueprintId = index.get(normalized);
-  if (!blueprintId) return null;
-  return automationRef(blueprintId, normalized);
-}
-
-/**
- * Build the index `resolveAutomationRef` needs from `automation_list_blueprints`
- * output. Blueprint `path` is an absolute file path while library `entry_ref`
- * is `automations/<file>.md`, so match on the trailing segment — the same
- * reconciliation `detail/AutomationDetail.tsx` performs, done once here instead
- * of ad hoc at each call site.
- */
-export function buildAutomationPathIndex(
-  blueprints: ReadonlyArray<{ id: string; path: string }>,
-): Map<string, string> {
-  const index = new Map<string, string>();
-  for (const blueprint of blueprints) {
-    const normalized = normalizeEntityPath(blueprint.path);
-    if (!normalized) continue;
-    const fileName = normalized.slice(normalized.lastIndexOf("/") + 1);
-    if (!fileName) continue;
-    index.set(`automations/${fileName}`, blueprint.id);
-  }
-  return index;
-}
-
-/**
- * Worktrees are the closest thing Wardian has to an enumerable workspace
- * entity: `AgentWorktreeSummary` carries a stable `id` plus `member_agent_ids`.
- * Prefer this over a raw normalized path wherever a worktree id is available.
- */
-export function worktreeRef(worktreeId: string, worktreeFolder?: string): EntityRef {
-  return {
-    kind: "worktree",
-    id: worktreeId,
-    source: "workspace",
-    path: normalizeEntityPath(worktreeFolder) ?? undefined,
-  };
-}
-
 /** Folders are identified by normalized absolute path — machine-local by nature. */
 export function folderRef(path: string): EntityRef | null {
   const normalized = normalizeEntityPath(path);
   if (!normalized) return null;
   return { kind: "folder", id: normalized, source: "workspace", path: normalized };
-}
-
-/** `ArtifactManifestV1.artifact_id` — opaque and backend-owned. */
-export function artifactRef(artifactId: string): EntityRef {
-  return { kind: "artifact", id: artifactId, source: "backend" };
-}
-
-/**
- * Bridge from the existing `fileResourceKey` scheme (`file:<identity>` /
- * `artifact:<id>`) so workbench surfaces can hand the Garden a key they
- * already hold.
- */
-export function fromFileResourceKey(key: string): EntityRef | null {
-  if (key.startsWith("artifact:")) {
-    const id = key.slice("artifact:".length);
-    return id ? artifactRef(id) : null;
-  }
-  if (key.startsWith("file:")) {
-    // A file is placed by its containing folder: individual files are admitted
-    // to the corpus only through lazy folder expansion, never as standalone
-    // map units (see facets.ts on the materialized-corpus rule).
-    const identity = key.slice("file:".length);
-    const normalized = normalizeEntityPath(identity);
-    if (!normalized) return null;
-    const separator = normalized.lastIndexOf("/");
-    if (separator <= 0) return folderRef(normalized);
-    return folderRef(normalized.slice(0, separator));
-  }
-  return null;
-}
-
-/**
- * Bridge from the legacy 2-kind `GardenEntityRef` (`garden.types.ts`), so
- * positions persisted under the old `unitKey` scheme keep resolving.
- */
-export function fromGardenUnitKey(key: string): EntityRef | null {
-  const parsed = parseEntityKey(key);
-  if (!parsed) return null;
-  if (parsed.kind === "agent") return agentRef(parsed.id);
-  if (parsed.kind === "automation") return automationRef(parsed.id);
-  return null;
 }
 
 /**
@@ -407,28 +313,4 @@ export function fromGardenUnitKey(key: string): EntityRef | null {
  */
 function normalizeLibraryPath(value: string): string {
   return value.trim().replace(/\\/g, "/").replace(/\/{2,}/g, "/").replace(/^\/+|\/+$/g, "").toLowerCase();
-}
-
-/** True when both refs denote the same canonical entity. */
-export function sameEntity(a: EntityRef, b: EntityRef): boolean {
-  return a.kind === b.kind && a.id === b.id;
-}
-
-/**
- * Deduplicate refs by canonical key, keeping the first occurrence but merging
- * in a `path` discovered later. Producers run in an arbitrary order, and the
- * one that knows the path is not always first.
- */
-export function dedupeRefs(refs: readonly EntityRef[]): EntityRef[] {
-  const byKey = new Map<string, EntityRef>();
-  for (const ref of refs) {
-    const key = entityKey(ref);
-    const existing = byKey.get(key);
-    if (!existing) {
-      byKey.set(key, ref);
-      continue;
-    }
-    if (!existing.path && ref.path) byKey.set(key, { ...existing, path: ref.path });
-  }
-  return [...byKey.values()];
 }
