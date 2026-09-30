@@ -214,27 +214,10 @@ pub fn load_codex_runtime_policy() -> Result<CodexRuntimePolicy, String> {
     load_shell_settings().map(|settings| settings.codex_runtime_policy)
 }
 
-pub fn build_shell_command(command: &str) -> Result<ShellLaunchSpec, String> {
-    let settings = load_shell_settings().unwrap_or_default();
-    let available = list_available_shells();
-    build_shell_command_with_settings(command, &settings, &available)
-}
-
 pub fn build_program_launch(program: &str, args: &[String]) -> Result<ShellLaunchSpec, String> {
     let settings = load_shell_settings().unwrap_or_default();
     let available = list_available_shells();
     build_program_launch_with_settings(program, args, &settings, &available)
-}
-
-pub fn build_copyable_program_command(
-    program: &str,
-    args: &[String],
-    cwd: &Path,
-    envs: &[(String, String)],
-) -> Result<String, String> {
-    let settings = load_shell_settings().unwrap_or_default();
-    let available = list_available_shells();
-    build_copyable_program_command_with_settings(program, args, cwd, envs, &settings, &available)
 }
 
 pub fn build_interactive_shell_launch() -> Result<InteractiveShellLaunchSpec, String> {

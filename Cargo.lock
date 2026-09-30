@@ -14,7 +14,6 @@ dependencies = [
  "dirs 5.0.1",
  "fs2",
  "futures-util",
- "hmac",
  "junction",
  "libc",
  "notify",

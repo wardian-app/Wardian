@@ -716,15 +716,6 @@ fn sort_remote_queue_items(items: &mut Vec<serde_json::Value>) {
 const MAX_INBOX_SOURCE_ITEMS: usize = 200;
 const QUEUE_MAX_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
-pub async fn remote_queue_items_page(
-    state: &AppState,
-    offset: usize,
-) -> (Vec<serde_json::Value>, bool, Option<usize>) {
-    remote_inbox_list_page(state, offset, &[], &[], false, MAX_INBOX_SOURCE_ITEMS)
-        .await
-        .unwrap_or_default()
-}
-
 #[derive(Clone, Copy)]
 enum InboxSource {
     Notifications,

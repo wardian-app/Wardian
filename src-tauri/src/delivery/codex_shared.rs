@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{broadcast, oneshot, watch, Mutex};
+#[cfg(test)]
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
@@ -56,6 +57,7 @@ impl std::fmt::Display for CodexSharedError {
 impl std::error::Error for CodexSharedError {}
 
 impl CodexSharedError {
+    #[cfg(test)]
     fn connection_pending(message: impl Into<String>) -> Self {
         Self {
             code: "connection_pending".into(),
@@ -95,9 +97,6 @@ pub struct CodexSharedReceipt {
     pub interruption_confirmed: bool,
     pub message_id: Option<String>,
 }
-
-pub type CodexPushReceipt = CodexSharedReceipt;
-pub type CodexInterruptReceipt = CodexSharedReceipt;
 
 const SETTINGS_NOTIFICATION_CAPACITY: usize = 32;
 
@@ -345,6 +344,7 @@ impl CodexSharedClient {
 
     /// Connect only to the caller's already-created IPv4 loopback endpoint.
     /// A token is supplied by that owner; it is never read from a global daemon.
+    #[cfg(test)]
     pub async fn connect(
         agent_id: String,
         generation: u64,
@@ -967,6 +967,7 @@ impl Drop for CodexSharedClient {
     }
 }
 
+#[cfg(test)]
 fn validate_endpoint(endpoint: &str) -> Result<(), CodexSharedError> {
     let Some(address) = endpoint.strip_prefix("ws://") else {
         return Err(CodexSharedError::unsupported(
