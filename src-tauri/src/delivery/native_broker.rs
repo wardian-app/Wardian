@@ -27,6 +27,13 @@ use crate::providers::{CodexProvider, PiProvider, ProviderFactory};
 
 mod codex;
 
+#[cfg(test)]
+pub(crate) fn codex_shared_error_for_test(
+    failure: super::codex_shared::CodexSharedError,
+) -> NativeBrokerError {
+    codex::shared_error(failure)
+}
+
 const SESSION_COMMAND_CAPACITY: usize = 64;
 const BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const PROTOCOL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);

@@ -3,6 +3,32 @@
 //! eligibility never means that a future release has passed provider acceptance.
 use super::CodexSharedError;
 
+/// Application additionalContext on turn/steer requires the stable capability floor.
+/// Earlier eligible owners retain idle tasks and information injection.
+pub(super) fn require_steer_version(version: Option<&str>) -> Result<(), CodexSharedError> {
+    let compatible = version.is_some_and(|version| {
+        supported_version(&format!("wardian/{version}")).is_ok()
+            && !version.split('+').next().unwrap_or_default().contains('-')
+            && version
+                .split('+')
+                .next()
+                .and_then(|core| {
+                    core.split('.')
+                        .map(str::parse::<u64>)
+                        .collect::<Result<Vec<_>, _>>()
+                        .ok()
+                })
+                .is_some_and(|numbers| {
+                    numbers.len() == 3 && (numbers[0], numbers[1], numbers[2]) >= (0, 159, 2)
+                })
+    });
+    if compatible {
+        Ok(())
+    } else {
+        Err(CodexSharedError::unsupported("active Codex task steering with application context requires stable CLI >=0.159.2; not written"))
+    }
+}
+
 pub(super) fn supported_version(user_agent: &str) -> Result<String, CodexSharedError> {
     let reject = || {
         CodexSharedError::unsupported(
@@ -58,6 +84,19 @@ pub(super) fn supported_version(user_agent: &str) -> Result<String, CodexSharedE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_task_floor_preserves_older_owner_eligibility() {
+        for version in ["0.154.0", "0.154.0-alpha.6", "0.159.1"] {
+            assert!(supported_version(&format!("wardian/{version}")).is_ok());
+            assert!(require_steer_version(Some(version)).is_err());
+        }
+        for version in ["0.159.2", "0.159.2+build.1", "0.160.0", "1.0.0"] {
+            assert!(require_steer_version(Some(version)).is_ok());
+        }
+        assert!(require_steer_version(Some("0.159.2-alpha.1")).is_err());
+        assert!(require_steer_version(None).is_err());
+    }
 
     #[test]
     fn only_the_exact_tested_alpha_is_eligible() {

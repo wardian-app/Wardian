@@ -1,7 +1,11 @@
 use std::collections::{HashMap, HashSet};
 mod agent_messaging;
+mod mailbox_wait;
+mod task_turns;
 
-use tokio::sync::Mutex;
+pub use mailbox_wait::AgentMailboxSignal;
+
+use tokio::sync::{watch, Mutex};
 use wardian_core::control::{
     DeliveryErrorDetail, DeliveryTransportKind, InboxNotificationDecision, InboxNotificationKind,
     InboxNotificationPayload, InteractionBodyRef, InteractionDeliveryAttemptRecord,
@@ -21,8 +25,9 @@ pub struct InteractionState {
     provider_generations: Mutex<HashMap<String, u64>>,
     provider_status_observations: Mutex<HashMap<String, u64>>,
     provider_inputs: Mutex<HashMap<String, ProviderInputState>>,
-    // Ephemeral long-poll wake revisions; canonical delivery remains in the DB.
-    agent_message_provider_revisions: Mutex<HashMap<String, u64>>,
+    // Retain senders (including deletion tombstones) so late subscribers see
+    // the current baseline even when no receiver existed during publication.
+    agent_mailboxes: Mutex<HashMap<String, watch::Sender<AgentMailboxSignal>>>,
 }
 
 impl InteractionState {
@@ -726,9 +731,20 @@ impl InteractionState {
     pub async fn clear_deleted_session(&self, session_id: &str) {
         let _mutation = self.mutation_lock.lock().await;
         self.deleted_sessions.lock().await.remove(session_id);
+        self.revive_agent_mailbox(session_id).await;
     }
 
     pub async fn hydrate_from_persistence(&self) {
+        // A new process cannot continue observing an old live turn. Captured
+        // terminal outcomes remain publishable without rerunning that turn.
+        if let Err(error) = wardian_core::db::agent_messaging::with_db(
+            wardian_core::db::agent_messaging::abandon_task_turn_observations,
+        ) {
+            crate::manager::log_debug(&format!("[WARDIAN] task observation recovery: {error}"));
+        }
+        if let Err(error) = self.recover_agent_task_results().await {
+            crate::manager::log_debug(&format!("[WARDIAN] task result recovery: {error}"));
+        }
         if let Ok(records) = wardian_core::db::list_interaction_records() {
             let mut current = self.records.lock().await;
             for record in records {
@@ -955,12 +971,9 @@ impl InteractionState {
             .lock()
             .await
             .remove(session_id);
-        self.agent_message_provider_revisions
-            .lock()
-            .await
-            .remove(session_id);
         self.provider_generations.lock().await.remove(session_id);
         self.provider_inputs.lock().await.remove(session_id);
+        self.mark_agent_mailbox_deleted(session_id).await;
         Ok(())
     }
 }

@@ -7,12 +7,10 @@ impl InteractionState {
     /// Snapshot provider deliveries for a single pending receive call. Revisions
     /// are process-local wake signals, not durable acknowledgement cursors.
     pub async fn agent_message_provider_revision(&self, recipient: &str) -> u64 {
-        self.agent_message_provider_revisions
-            .lock()
+        self.subscribe_agent_mailbox(recipient)
             .await
-            .get(recipient)
-            .copied()
-            .unwrap_or(0)
+            .borrow()
+            .provider_revision
     }
 
     /// Revalidate a previously claimed task after asynchronous owner startup.
@@ -69,7 +67,11 @@ impl InteractionState {
         claim: &store::TaskClaim,
     ) -> Result<(), AgentMessagingError> {
         let _mutation = self.mutation_lock.lock().await;
-        store::with_db(|conn| store::release_before_write(conn, claim))
+        store::with_db(|conn| store::release_before_write(conn, claim))?;
+        if let Some(recipient) = claim.record.target_session_ids.first() {
+            self.notify_agent_mailbox(recipient, false).await;
+        }
+        Ok(())
     }
 
     /// Serialize receiver claims with agent deletion so a stale authenticated
@@ -144,9 +146,7 @@ impl InteractionState {
             outcome,
             "provider_accepted" | "provider_visible" | "provider_completed"
         ) {
-            let mut revisions = self.agent_message_provider_revisions.lock().await;
-            let revision = revisions.entry(recipient.clone()).or_default();
-            *revision = revision.wrapping_add(1);
+            self.notify_agent_mailbox(recipient, true).await;
         }
         Ok(())
     }
@@ -165,11 +165,15 @@ impl InteractionState {
             ));
         }
         drop(deleted);
+        let recipient = admission.recipient;
         let admitted = store::with_db(|conn| store::admit(conn, admission))?;
         self.records
             .lock()
             .await
             .insert(admitted.record.id.clone(), admitted.record.clone());
+        if !admitted.duplicate {
+            self.notify_agent_mailbox(recipient, false).await;
+        }
         Ok(admitted)
     }
 
@@ -200,6 +204,9 @@ impl InteractionState {
             .lock()
             .await
             .insert(admitted.record.id.clone(), admitted.record.clone());
+        if !admitted.duplicate {
+            self.notify_agent_mailbox(recipient, false).await;
+        }
         Ok(admitted)
     }
 
@@ -243,6 +250,9 @@ impl InteractionState {
             .lock()
             .await
             .insert(admitted.record.id.clone(), admitted.record.clone());
+        if !admitted.duplicate {
+            self.notify_agent_mailbox(recipient, false).await;
+        }
         Ok(admitted)
     }
 
@@ -302,6 +312,13 @@ impl InteractionState {
         } else {
             store::with_db(|conn| store::reply(conn, sender, request_id, status, message))?
         };
+        self.cache_agent_reply(&replied).await;
+        Ok(replied)
+    }
+
+    /// Update projections and wake recipients only after the reply commits.
+    /// The caller holds mutation_lock, including automatic and recovered replies.
+    pub(super) async fn cache_agent_reply(&self, replied: &store::Replied) {
         let mut records = self.records.lock().await;
         records.insert(replied.task.id.clone(), replied.task.clone());
         records.insert(replied.record.id.clone(), replied.record.clone());
@@ -309,7 +326,11 @@ impl InteractionState {
         self.replies
             .lock()
             .await
-            .insert(request_id.into(), replied.reply.clone());
-        Ok(replied)
+            .insert(replied.reply.request_id.clone(), replied.reply.clone());
+        if !replied.duplicate {
+            for recipient in &replied.record.target_session_ids {
+                self.notify_agent_mailbox(recipient, false).await;
+            }
+        }
     }
 }

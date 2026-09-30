@@ -932,7 +932,10 @@ fn initialization_context(agent_id: &str, name: &str) -> String {
          Acknowledge only a previously returned receive batch using ack_cursor; preserve its cursor for later reads. \
          Never execute a delivered task twice if it also appears in receive_messages: correlate by request_id/message_id. \
          Use reply only for a canonical peer task with an explicit request_id, and preserve that exact request_id; \
-         ordinary assistant text or a transport admission receipt is not a correlated reply to that task. \
+         A canonical task dispatched to an exact native Codex turn automatically returns that turn's final result \
+         to its requester unless an explicit reply already completed it. Explicit reply is required for tasks \
+         acquired through receive_messages and providers without exact-turn completion support. \
+         A transport admission receipt is not a correlated reply to that task. \
          Complete ordinary input with an ordinary assistant response. Native interaction_id, message_id and \
          clientUserMessageId are diagnostic identities, not reply request IDs; never substitute them for request_id. \
          Timeouts do not authorize resending or uncertain replay. \
@@ -964,7 +967,8 @@ mod tests {
             "request_id",
             "ack_cursor",
             "not human requests",
-            "not a correlated reply",
+            "automatically returns that turn's final result",
+            "A transport admission receipt is not a correlated reply",
             "only for a canonical peer task with an explicit request_id",
             "Complete ordinary input with an ordinary assistant response",
             "never substitute them for request_id",

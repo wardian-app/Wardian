@@ -1,5 +1,38 @@
 use serde_json::Value;
 
+/// Recognize only the 0.159.2-proven rejection forms that establish that an
+/// exact-turn steer did not submit model input. Unknown errors remain uncertain.
+pub(super) fn stale_steer_rejection(method: &str, params: &Value, error: &Value) -> bool {
+    if method != "turn/steer" || error["code"].as_i64() != Some(-32600) {
+        return false;
+    }
+    let Some(expected) = params["expectedTurnId"].as_str().filter(|id| {
+        !id.is_empty()
+            && !id
+                .chars()
+                .any(|character| character == '`' || character.is_control())
+    }) else {
+        return false;
+    };
+    let Some(message) = error["message"].as_str() else {
+        return false;
+    };
+    if message == "no active turn to steer" {
+        return true;
+    }
+    let prefix = format!("expected active turn id `{expected}` but found `");
+    message
+        .strip_prefix(prefix.as_str())
+        .and_then(|found| found.strip_suffix('`'))
+        .is_some_and(|found| {
+            !found.is_empty()
+                && found != expected
+                && !found
+                    .chars()
+                    .any(|character| character == '`' || character.is_control())
+        })
+}
+
 /// Translate a known startup rejection without exposing arbitrary provider text,
 /// which can contain prompts, credentials, and local paths.
 pub(super) fn rejection_message(method: &str, error: &Value) -> &'static str {
@@ -24,6 +57,52 @@ pub(super) fn rejection_message(method: &str, error: &Value) -> &'static str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn stale_steer_rejection_requires_exact_observed_form_and_requested_turn() {
+        let params = json!({"expectedTurnId":"expected"});
+        for message in [
+            "no active turn to steer",
+            "expected active turn id `expected` but found `other`",
+        ] {
+            let error = json!({"code":-32600,"message":message});
+            assert!(stale_steer_rejection("turn/steer", &params, &error));
+            assert!(!stale_steer_rejection("turn/start", &params, &error));
+            assert!(!stale_steer_rejection(
+                "thread/inject_items",
+                &params,
+                &error
+            ));
+            assert!(!stale_steer_rejection("turn/steer", &json!({}), &error));
+            assert!(!stale_steer_rejection(
+                "turn/steer",
+                &json!({"expectedTurnId":""}),
+                &error
+            ));
+        }
+        for error in [
+            json!({"code":-32600,"message":"other rejection"}),
+            json!({"code":-32600,"message":"no active turn to steer "}),
+            json!({"code":-32600,"message":"prefix no active turn to steer"}),
+            json!({"code":-32600,"message":"expected active turn id `different` but found `other`"}),
+            json!({"code":-32600,"message":"expected active turn id `expected` but found `expected`"}),
+            json!({"code":-32600,"message":"expected active turn id `expected` but found ``"}),
+            json!({"code":-32600,"message":"expected active turn id `expected` but found `other` suffix"}),
+            json!({"code":-32600,"message":"expected active turn id `expected` but found `other`extra`"}),
+            json!({"code":-32600,"message":"expected active turn id `expected` but found `other\n`"}),
+            json!({"code":-32603,"message":"no active turn to steer"}),
+            json!({"code":"-32600","message":"no active turn to steer"}),
+            json!({"code":-32600.0,"message":"no active turn to steer"}),
+            json!({"code":-32600,"message":null}),
+            json!({"code":-32600}),
+            Value::Null,
+        ] {
+            assert!(
+                !stale_steer_rejection("turn/steer", &params, &error),
+                "{error}"
+            );
+        }
+    }
 
     #[test]
     fn paginated_history_failure_is_distinct_from_writer_conflict() {

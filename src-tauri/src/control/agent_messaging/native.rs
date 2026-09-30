@@ -6,6 +6,10 @@ use crate::delivery::native_broker::{
 };
 use wardian_core::conversation_lease::{ConversationLeaseOwner, PersistedConversationLeaseGuard};
 use wardian_core::native_transport::NativeDeliveryErrorCode;
+mod completion;
+use completion::{
+    bind_codex_task, observe_codex_task, publish_completion, spawn_codex_task_completion,
+};
 
 pub(super) fn spawn_information(app: &AppHandle, recipient: &str) {
     let app = app.clone();
@@ -192,6 +196,7 @@ pub(super) async fn interrupt(state: &AppState, target: &str) -> Result<Response
 }
 
 pub(super) async fn dispatch_attached_task_with_request(
+    app: Option<&AppHandle>,
     state: &AppState,
     info: &DeliveryTargetInfo,
     request_id: Option<&str>,
@@ -322,11 +327,41 @@ pub(super) async fn dispatch_attached_task_with_request(
     // The actor revalidates this generation before writing. No lifecycle lock
     // is held while waiting for native protocol acknowledgement.
     let result = match info.provider.as_str() {
-        "codex" => state
+        "codex" => match state
             .native_delivery
-            .codex_followup(&info.uuid, generation, &claim.record.id, &context)
+            .codex_completion_client(&info.uuid, generation)
             .await
-            .map(|receipt| receipt.delivery_state),
+        {
+            Ok(client) => {
+                let attempted = client.observations().borrow().activity();
+                match state
+                    .native_delivery
+                    .codex_followup(&info.uuid, generation, &claim.record.id, &context)
+                    .await
+                {
+                    Ok(receipt) => {
+                        let binding = bind_codex_task(state, &claim, &receipt).await?;
+                        spawn_codex_task_completion(
+                            app.cloned(),
+                            Arc::clone(&state.interactions),
+                            client,
+                            binding,
+                        );
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        if settle_codex_deferral(state, &claim, &client, &attempted, &error).await?
+                        {
+                            if let Some(app) = app {
+                                spawn_pending_tasks(app, &info.uuid);
+                            }
+                        }
+                        return Err(native_error(error, "native_followup_unavailable"));
+                    }
+                }
+            }
+            Err(error) => Err(error),
+        },
         "pi" => state
             .native_delivery
             .pi_followup(&info.uuid, generation, &claim.record.id, &context)
@@ -419,6 +454,34 @@ pub(super) async fn dispatch_attached_task_with_request(
     result
         .map(|_| ())
         .map_err(|error| native_error(error, "native_followup_unavailable"))
+}
+
+async fn settle_codex_deferral(
+    state: &AppState,
+    claim: &store::TaskClaim,
+    client: &crate::delivery::codex_shared::CodexSharedClient,
+    attempted: &crate::delivery::codex_shared::CodexTurnActivity,
+    error: &NativeBrokerError,
+) -> Result<bool, ControlError> {
+    settle(state, claim, Err(error.provider_boundary_crossed)).await?;
+    // An idle callback may have found no pending task while this claim was
+    // dispatching. Read after release commits so that consumed opportunity is
+    // restored; an activity change after this read sees the task already pending.
+    Ok(error.code == NativeDeliveryErrorCode::FailedBeforeSubmit
+        && !error.provider_boundary_crossed
+        && fresh_codex_activity(attempted, &client.observations().borrow().activity()))
+}
+
+fn fresh_codex_activity(
+    attempted: &crate::delivery::codex_shared::CodexTurnActivity,
+    current: &crate::delivery::codex_shared::CodexTurnActivity,
+) -> bool {
+    use crate::delivery::codex_shared::CodexTurnActivity;
+    match current {
+        CodexTurnActivity::Idle(_) | CodexTurnActivity::IdleWithoutTurn => true,
+        CodexTurnActivity::Processing(id) => !id.is_empty() && current != attempted,
+        _ => false,
+    }
 }
 
 async fn log_opencode_preclaim_stage(
@@ -584,6 +647,7 @@ pub(super) async fn dispatch_background(
         config: info.config.clone(),
     };
     let lease_lost = std::sync::atomic::AtomicBool::new(false);
+    let mut turn_owned = false;
     let result = {
         let run = async {
             state
@@ -630,17 +694,46 @@ pub(super) async fn dispatch_background(
                     provider_boundary_crossed: false,
                 });
             }
-            state
+            let client = state
                 .native_delivery
-                .run_codex_background(
-                    spec,
-                    &owner,
-                    Vec::new(),
-                    &task.record.id,
-                    &context,
-                    bounded_headless_delivery_timeout(None),
-                )
+                .codex_completion_client(&info.uuid, task.generation)
                 .await
+                .map_err(background_native_error)?;
+            heartbeat(&owner).map_err(|error| crate::delivery::codex_shared::CodexSharedError {
+                code: "lease_lost".into(),
+                message: error.to_string(),
+                provider_boundary_crossed: false,
+            })?;
+            let mut receipt = state
+                .native_delivery
+                .codex_followup(&info.uuid, task.generation, &task.record.id, &context)
+                .await
+                .map_err(background_native_error)?;
+            turn_owned = true;
+            let binding = bind_codex_task(state, &task, &receipt)
+                .await
+                .map_err(|error| crate::delivery::codex_shared::CodexSharedError {
+                    code: "task_binding_failed".into(),
+                    message: error.to_string(),
+                    provider_boundary_crossed: true,
+                })?;
+            let (reply, answer) = observe_codex_task(
+                &state.interactions,
+                &client,
+                &binding,
+                bounded_headless_delivery_timeout(None),
+            )
+            .await
+            .map_err(|error| crate::delivery::codex_shared::CodexSharedError {
+                code: "task_completion_unconfirmed".into(),
+                message: error.to_string(),
+                provider_boundary_crossed: true,
+            })?;
+            if let Some(reply) = &reply {
+                publish_completion(app, reply);
+            }
+            receipt.delivery_state = "provider_completed".into();
+            Ok((receipt, answer))
         };
         tokio::pin!(run);
         let mut renew = tokio::time::interval(Duration::from_secs(10));
@@ -675,7 +768,11 @@ pub(super) async fn dispatch_background(
             }
         }
     }
-    let publication = if result
+    let publication = if turn_owned {
+        // Binding and terminal publication own this claim now. Cleanup cannot
+        // settle it a second time or reinterpret an observation failure.
+        Ok(())
+    } else if result
         .as_ref()
         .is_err_and(|error| !error.provider_boundary_crossed)
     {
@@ -717,10 +814,42 @@ pub(super) async fn dispatch_background(
     })
 }
 
+fn background_native_error(
+    error: NativeBrokerError,
+) -> crate::delivery::codex_shared::CodexSharedError {
+    crate::delivery::codex_shared::CodexSharedError {
+        code: "native_followup_unavailable".into(),
+        message: error.message,
+        provider_boundary_crossed: error.provider_boundary_crossed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{opencode_admission_diagnostic_reason, OpenCodeDispatchDiagnosticReason};
     use wardian_core::native_transport::NativeDeliveryErrorCode;
+
+    #[test]
+    fn rejected_task_requires_a_fresh_usable_activity_boundary() {
+        use crate::delivery::codex_shared::CodexTurnActivity as Activity;
+        let attempted = Activity::Processing("old".into());
+        for current in [
+            Activity::IdleWithoutTurn,
+            Activity::Idle("old".into()),
+            Activity::Processing("new".into()),
+        ] {
+            assert!(super::fresh_codex_activity(&attempted, &current));
+        }
+        for current in [
+            attempted.clone(),
+            Activity::ProcessingWithoutTurn,
+            Activity::Pending,
+            Activity::Closed,
+            Activity::Processing(String::new()),
+        ] {
+            assert!(!super::fresh_codex_activity(&attempted, &current));
+        }
+    }
 
     #[test]
     fn opencode_admission_codes_map_to_bounded_diagnostic_reasons() {
