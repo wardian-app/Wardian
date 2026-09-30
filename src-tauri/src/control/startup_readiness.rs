@@ -353,7 +353,49 @@ fn opencode_has_restored_composer(lines: &[&str]) -> bool {
             line.contains("commands")
         }
     });
-    has_commands && footer_rows.iter().any(|line| line.contains("OpenCode"))
+    let legacy_footer = footer_rows.iter().any(|line| line.contains("OpenCode"));
+    // Current OpenCode places provider/model metadata inside the composer,
+    // while the commands footer contains only navigation controls. Narrow
+    // terminals can clip the agents label; require an empty padding row above
+    // the metadata instead of depending on that optional navigation label.
+    let model_row = border_index
+        .checked_sub(1)
+        .and_then(|index| lines.get(index));
+    let model_footer = model_row.is_some_and(|line| {
+        let fields = line.split('·').map(str::trim).collect::<Vec<_>>();
+        fields.len() == 3 && fields.iter().all(|field| !field.is_empty())
+    }) && border_index
+        .checked_sub(2)
+        .and_then(|index| lines.get(index))
+        .is_some_and(|line| line.is_empty());
+    has_commands && (legacy_footer || model_footer)
+}
+
+#[cfg(test)]
+#[test]
+fn restored_opencode_model_footer_is_ready_without_brand_text() {
+    let ready = "Previous response\n┃\n┃\n┃ Build · GPT-5.6 Luna OpenAI · high\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n<workspace-root>/project  tab  ctrl+p\nagents commands";
+    assert!(provider_output_has_startup_ready_prompt("opencode", ready));
+    let narrow = ready.replace("tab  ctrl+p\nagents commands", "12.0K (3 ctrl+p\ncommands");
+    assert!(provider_output_has_startup_ready_prompt(
+        "opencode", &narrow
+    ));
+    assert!(!provider_output_has_startup_ready_prompt(
+        "opencode",
+        &narrow.replace("┃\n┃ Build", "┃ draft\n┃ Build")
+    ));
+    assert!(!provider_output_has_startup_ready_prompt(
+        "opencode",
+        &format!("Loading session...\n{ready}")
+    ));
+    assert!(!provider_output_has_startup_ready_prompt(
+        "opencode",
+        &ready.replace('╹', " ")
+    ));
+    assert!(!provider_output_has_startup_ready_prompt(
+        "opencode",
+        &ready.replace("Build · GPT-5.6 Luna OpenAI · high", "Quoted commands")
+    ));
 }
 
 const CLAUDE_WORKSPACE_TRUST_QUESTION: &str =
