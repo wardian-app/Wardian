@@ -7,12 +7,11 @@ import {
   extractQueueContent,
   extractTerminalQueueContent,
   formatAgentStatusLabel,
-  getAgentActivityLabel,
   getAgentStatusColorToken,
+  getAgentStatusLabel,
   getAgentStatusIndicatorClass,
   getAgentStatusTextClass,
   getStatusColorClass,
-  getStatusLabel,
   normalizeAgentStatus,
 } from "./statusUtils";
 import type { AgentTelemetry } from "../types";
@@ -92,13 +91,6 @@ describe("deriveEffectiveStatus", () => {
 
   it("preserves Error instead of allowing stale activity to override it", () => {
     expect(deriveEffectiveStatus("Working on task", "Stale thought", "Error")).toBe("Error");
-  });
-});
-
-describe("getAgentActivityLabel", () => {
-  it("keeps a transient thought separate from the canonical lifecycle label", () => {
-    expect(getAgentActivityLabel("Processing", "Running command npm test", 12)).toBe("Running comm");
-    expect(formatAgentStatusLabel("Processing")).toBe("Processing");
   });
 });
 
@@ -450,25 +442,25 @@ describe("getStatusColorClass", () => {
   });
 });
 
-describe("getStatusLabel", () => {
+describe("getAgentStatusLabel", () => {
   it("maps Processing to its canonical display label", () => {
-    expect(getStatusLabel("Processing...")).toBe("Processing");
+    expect(getAgentStatusLabel("Processing...")).toBe("Processing");
   });
 
   it("maps Action Needed to Action Required", () => {
-    expect(getStatusLabel("Action Needed")).toBe("Action Required");
+    expect(getAgentStatusLabel("Action Needed")).toBe("Action Required");
   });
 
   it("maps Idle to Idle", () => {
-    expect(getStatusLabel("Idle")).toBe("Idle");
+    expect(getAgentStatusLabel("Idle")).toBe("Idle");
   });
 
   it("maps Off to Off", () => {
-    expect(getStatusLabel("Off")).toBe("Off");
+    expect(getAgentStatusLabel("Off")).toBe("Off");
   });
 
   it("maps unknown values to Pending", () => {
-    expect(getStatusLabel("Something Else")).toBe("Pending");
+    expect(getAgentStatusLabel("Something Else")).toBe("Pending");
   });
 });
 

@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AutomationMonitor } from './AutomationMonitor';
-import { buildActivities, buildMonitorModel } from './monitorModel';
+import { buildMonitorModel } from './monitorModel';
 import { formatAutomationTime } from './automationTime';
 import type { RunSummary } from '../run/runTypes';
 import type { AutomationSchedule, ListenerView } from '../../../types/automation';
@@ -1034,7 +1034,7 @@ describe('AutomationMonitor', () => {
       },
     ];
 
-    const activities = buildActivities(runs, schedules);
+    const activities = buildMonitorModel(runs, schedules).activities;
 
     expect(activities).toHaveLength(2);
     expect(activities.find((activity) => activity.name === 'Primary Schedule')?.latestRun?.run_id).toBe('run-primary');

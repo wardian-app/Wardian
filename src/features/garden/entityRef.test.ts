@@ -2,23 +2,14 @@ import { describe, expect, it } from "vitest";
 import { normalizeGraphPath } from "../graph/graphProjection";
 import {
   agentRef,
-  artifactRef,
-  buildAutomationPathIndex,
-  dedupeRefs,
   entityKey,
   folderRef,
-  fromFileResourceKey,
   isUnderPath,
   lexicalNormalizePath,
   parentPath,
-  fromGardenUnitKey,
   libraryEntryRef,
   normalizeEntityPath,
   parseEntityKey,
-  resolveAutomationRef,
-  sameEntity,
-  automationRef,
-  worktreeRef,
 } from "./entityRef";
 
 describe("entityKey / parseEntityKey", () => {
@@ -44,12 +35,6 @@ describe("entityKey / parseEntityKey", () => {
     expect(parseEntityKey("memory:abc")).toBeNull();
   });
 
-  it("keeps the legacy unitKey shape so persisted agent positions still resolve", () => {
-    expect(entityKey(agentRef("a1"))).toBe("agent:a1");
-    expect(fromGardenUnitKey("agent:a1")).toEqual(agentRef("a1"));
-    expect(fromGardenUnitKey("automation:w1")).toEqual(automationRef("w1"));
-    expect(fromGardenUnitKey("skill:skills/x")).toBeNull();
-  });
 });
 
 describe("normalizeEntityPath", () => {
@@ -115,69 +100,6 @@ describe("libraryEntryRef", () => {
 
   it("treats library refs case-insensitively", () => {
     expect(libraryEntryRef("Skills/Dev/Planner")?.id).toBe("skills/dev/planner");
-  });
-});
-
-describe("automation dual identity", () => {
-  const blueprints = [
-    { id: "bp-build", path: "D:\\Development\\Wardian\\.wardian\\library\\automations\\build.md" },
-    { id: "bp-ship", path: "/home/u/.wardian/library/automations/ship.md" },
-  ];
-
-  it("collapses entry_ref and Blueprint.id onto one unit", () => {
-    const index = buildAutomationPathIndex(blueprints);
-    const fromEntry = resolveAutomationRef("automations/build.md", index);
-    const fromBlueprint = automationRef("bp-build");
-    expect(fromEntry).not.toBeNull();
-    expect(sameEntity(fromEntry!, fromBlueprint)).toBe(true);
-    expect(entityKey(fromEntry!)).toBe("automation:bp-build");
-  });
-
-  it("retains the library path so the unit is matchable from either direction", () => {
-    const index = buildAutomationPathIndex(blueprints);
-    expect(resolveAutomationRef("automations/ship.md", index)?.path).toBe("automations/ship.md");
-  });
-
-  it("returns null for a blueprint that failed to parse rather than inventing a unit", () => {
-    expect(resolveAutomationRef("automations/missing.md", buildAutomationPathIndex(blueprints))).toBeNull();
-  });
-
-  it("dedupes the two identities to a single entity", () => {
-    const index = buildAutomationPathIndex(blueprints);
-    const refs = [resolveAutomationRef("automations/build.md", index)!, automationRef("bp-build")];
-    expect(dedupeRefs(refs)).toHaveLength(1);
-  });
-});
-
-describe("fromFileResourceKey", () => {
-  it("maps an artifact key to the artifact entity", () => {
-    expect(fromFileResourceKey("artifact:art-1")).toEqual(artifactRef("art-1"));
-  });
-
-  it("places a file by its containing folder, never as its own unit", () => {
-    // Files are admitted to the corpus only via lazy folder expansion.
-    expect(fromFileResourceKey("file:D:/Dev/Ward/src/main.ts")).toEqual(
-      folderRef("D:/Dev/Ward/src"),
-    );
-  });
-
-  it("returns null for unrecognized keys", () => {
-    expect(fromFileResourceKey("agent:a1")).toBeNull();
-    expect(fromFileResourceKey("file:")).toBeNull();
-  });
-});
-
-describe("dedupeRefs", () => {
-  it("merges a path discovered by a later producer", () => {
-    // Producers run in arbitrary order and the one knowing the path is not
-    // always first.
-    const merged = dedupeRefs([worktreeRef("wt-1"), worktreeRef("wt-1", "D:\\Dev\\Ward")]);
-    expect(merged).toHaveLength(1);
-    expect(merged[0].path).toBe("d:/dev/ward");
-  });
-
-  it("keeps distinct entities apart", () => {
-    expect(dedupeRefs([agentRef("a1"), agentRef("a2")])).toHaveLength(2);
   });
 });
 

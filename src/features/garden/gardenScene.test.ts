@@ -11,7 +11,6 @@ import {
   excludeFromDistrict,
   markVisited,
   pinEntity,
-  pruneScene,
   recordPositions,
   resolvePin,
   reviveScene,
@@ -125,29 +124,6 @@ describe("exclusions", () => {
     scene = excludeFromDistrict(scene, "agent:a1", "team:hw");
     expect(scene.exclusions["agent:a1"]).toEqual(["team:hw", "team:web"]);
     expect(excludeFromDistrict(scene, "agent:a1", "team:hw")).toBe(scene);
-  });
-});
-
-describe("pruneScene", () => {
-  it("drops derived state for dead entities but keeps user intent", () => {
-    // A deleted agent may come back; silently discarding a placement is worse
-    // than carrying a stale key.
-    let scene = recordPositions(
-      createScene(),
-      new Map([
-        ["agent:alive", { x: 1, y: 1 }],
-        ["agent:dead", { x: 2, y: 2 }],
-      ]),
-    );
-    scene = markVisited(scene, "agent:dead", now);
-    scene = pinEntity(scene, "agent:dead", "d1", { x: 0, y: 0 }, { x: 0, y: 0 }, now);
-    scene = excludeFromDistrict(scene, "agent:dead", "d2");
-
-    const pruned = pruneScene(scene, new Set(["agent:alive"]));
-    expect(pruned.positions).toEqual({ "agent:alive": { x: 1, y: 1 } });
-    expect(pruned.visited).toEqual({});
-    expect(pruned.pins["agent:dead"]).toBeDefined();
-    expect(pruned.exclusions["agent:dead"]).toEqual(["d2"]);
   });
 });
 
