@@ -833,7 +833,7 @@ fn validate_background_lease(
     Ok(())
 }
 
-pub(super) fn shared_error(failure: CodexSharedError) -> NativeBrokerError {
+pub(crate) fn shared_error(failure: CodexSharedError) -> NativeBrokerError {
     error(
         if failure.provider_boundary_crossed {
             NativeDeliveryErrorCode::SubmittedUnconfirmed
