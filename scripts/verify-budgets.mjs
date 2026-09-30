@@ -53,6 +53,14 @@ const PACKAGE_CONTRACT_FIELDS = [
   "eslintConfig",
   "prettier",
 ];
+const AUDITED_SECURITY_PIN_TRANSITIONS = [
+  {
+    path: ["overrides", "minimatch@10.2.5", "brace-expansion"],
+    from: "5.0.9",
+    to: "5.0.12",
+  },
+  { path: ["overrides", "undici"], from: "7.29.0", to: "7.29.1" },
+];
 const TRACKED_FILE_LINES = [
   "src-tauri/src/commands/agent.rs",
   "src-tauri/src/control.rs",
@@ -102,6 +110,44 @@ export function packageContract(manifestText) {
   return JSON.stringify(PACKAGE_CONTRACT_FIELDS.map((field) => [field, parsed?.[field] ?? null]));
 }
 
+function manifestValueAtPath(manifest, keys) {
+  return keys.reduce((value, key) => value?.[key], manifest);
+}
+
+function setManifestValueAtPath(manifest, keys, value) {
+  const parent = keys.slice(0, -1).reduce((current, key) => current?.[key], manifest);
+  if (parent && typeof parent === "object" && !Array.isArray(parent)) {
+    parent[keys.at(-1)] = value;
+  }
+}
+
+/**
+ * Compare dependency contracts while admitting only the exact audited
+ * base-to-head security pin updates above. All other contract fields remain
+ * byte-for-byte equivalent after JSON serialization.
+ */
+function packageContractsMatch(baseManifestText, headManifestText) {
+  let base;
+  let head;
+  try {
+    base = JSON.parse(baseManifestText);
+    head = JSON.parse(headManifestText);
+  } catch {
+    return false;
+  }
+  if (!base || typeof base !== "object" || Array.isArray(base)
+    || !head || typeof head !== "object" || Array.isArray(head)) return false;
+
+  const normalizedHead = JSON.parse(JSON.stringify(head));
+  for (const transition of AUDITED_SECURITY_PIN_TRANSITIONS) {
+    if (manifestValueAtPath(base, transition.path) === transition.from
+      && manifestValueAtPath(head, transition.path) === transition.to) {
+      setManifestValueAtPath(normalizedHead, transition.path, transition.from);
+    }
+  }
+  return packageContract(JSON.stringify(base)) === packageContract(JSON.stringify(normalizedHead));
+}
+
 /**
  * @param {string[]} changedFiles Paths differing from the base revision.
  * @param {{base?: string, head?: string}} [manifests] `package.json` text on
@@ -114,7 +160,7 @@ export function changedLintPolicyFiles(changedFiles, manifests) {
     if (!changed.has(file)) return false;
     if (file !== "package.json") return true;
     if (!manifests || manifests.base === undefined || manifests.head === undefined) return true;
-    return packageContract(manifests.base) !== packageContract(manifests.head);
+    return !packageContractsMatch(manifests.base, manifests.head);
   });
 }
 
@@ -252,13 +298,18 @@ function linkDependencies(root) {
  * be byte-identical: comparing the contract fields asks the question this check
  * actually cares about, and lets a script-only difference through.
  */
-function assertDependencyParity(root) {
+export function assertDependencyParity(baseManifestText, headManifestText) {
+  if (!packageContractsMatch(baseManifestText, headManifestText)) {
+    throw new Error("Debt budget gate cannot resolve base dependencies for package.json.");
+  }
+}
+
+function assertDependencyParityAtRoot(root) {
   for (const file of LINT_POLICY_FILES.slice(1)) {
-    const here = packageContract(readFileSync(path.join(REPO_ROOT, file), "utf8"));
-    const there = packageContract(readFileSync(path.join(root, file), "utf8"));
-    if (here !== there) {
-      throw new Error(`Debt budget gate cannot resolve base dependencies for ${file}.`);
-    }
+    assertDependencyParity(
+      readFileSync(path.join(root, file), "utf8"),
+      readFileSync(path.join(REPO_ROOT, file), "utf8"),
+    );
   }
 }
 
@@ -273,7 +324,7 @@ export function main(argv = process.argv.slice(2)) {
   const baseRoot = addBaseWorktree(base);
   let baseline;
   try {
-    assertDependencyParity(baseRoot);
+    assertDependencyParityAtRoot(baseRoot);
     linkDependencies(baseRoot);
     baseline = measure(baseRoot);
   }
