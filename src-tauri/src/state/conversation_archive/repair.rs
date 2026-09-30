@@ -1,9 +1,13 @@
-use std::{collections::HashSet, io, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+    path::Path,
+};
 
 use wardian_core::conversations::{
     append_index_upsert, append_jsonl_record, read_jsonl_records, write_json_atomic,
-    write_jsonl_atomic, ConversationNarrativeRecord, ConversationRecordKind,
-    ConversationSourceRecord, ConversationTurnRecord,
+    write_jsonl_atomic, ConversationInputOrigin, ConversationNarrativeRecord,
+    ConversationRecordKind, ConversationSourceRecord, ConversationTurnRecord,
 };
 use wardian_core::models::chat::AgentChatEvent;
 use wardian_core::models::chat::{AgentChatEventKind, AgentChatRole};
@@ -52,6 +56,288 @@ pub(super) fn matching_event_index(
         }),
         &format!("event identity {}", current.id),
     )
+}
+
+/// Collapse request narratives that an older archive recorded separately
+/// before both Codex user-input observations were available.
+pub(super) fn reconcile_codex_user_mirror_records(
+    records: &mut Vec<ConversationNarrativeRecord>,
+    events: &mut [AgentChatEvent],
+) -> io::Result<u64> {
+    let unique_sequences = records
+        .iter()
+        .map(|record| record.seq)
+        .collect::<HashSet<_>>();
+    if unique_sequences.len() != records.len() || unique_sequences.contains(&0) {
+        return Ok(0);
+    }
+
+    let mut event_owners = HashMap::<&str, Vec<usize>>::new();
+    for (record_index, record) in records.iter().enumerate() {
+        let mut seen = HashSet::new();
+        for event_ref in &record.event_refs {
+            if seen.insert(event_ref.as_str()) {
+                event_owners
+                    .entry(event_ref.as_str())
+                    .or_default()
+                    .push(record_index);
+            }
+        }
+    }
+
+    let mut requests_by_turn = HashMap::<&str, Vec<usize>>::new();
+    let mut mirrors_by_turn = HashMap::<&str, Vec<usize>>::new();
+    for (index, event) in events.iter().enumerate() {
+        let Some(turn_id) = event.metadata["provider_turn_id"].as_str() else {
+            continue;
+        };
+        let turn_id = turn_id.trim();
+        if turn_id.is_empty() {
+            continue;
+        }
+        match event.source.as_deref() {
+            Some("response_item") => requests_by_turn.entry(turn_id).or_default().push(index),
+            Some("event_msg") => mirrors_by_turn.entry(turn_id).or_default().push(index),
+            _ => {}
+        }
+    }
+
+    let candidate_merges = {
+        let unique_owner = |event: &AgentChatEvent| {
+            if event.id.trim().is_empty() {
+                return None;
+            }
+            let owners = event_owners.get(event.id.as_str())?;
+            (owners.len() == 1).then_some(owners[0])
+        };
+        let mut candidates = Vec::new();
+        for (turn_id, request_indices) in &requests_by_turn {
+            let Some(mirror_indices) = mirrors_by_turn.get(turn_id) else {
+                continue;
+            };
+            for &request_index in request_indices {
+                let request = &events[request_index];
+                let mut matching_mirrors = mirror_indices.iter().copied().filter(|&index| {
+                    crate::providers::chat_transcript::codex_user_mirror_pair(
+                        request,
+                        &events[index],
+                    )
+                });
+                let Some(mirror_index) = matching_mirrors.next() else {
+                    continue;
+                };
+                if matching_mirrors.next().is_some() {
+                    continue;
+                }
+                let mirror = &events[mirror_index];
+                let reverse_matches = request_indices
+                    .iter()
+                    .filter(|&&candidate_index| {
+                        crate::providers::chat_transcript::codex_user_mirror_pair(
+                            &events[candidate_index],
+                            mirror,
+                        )
+                    })
+                    .count();
+                if reverse_matches != 1 {
+                    continue;
+                }
+
+                let (Some(request_owner), Some(mirror_owner)) =
+                    (unique_owner(request), unique_owner(mirror))
+                else {
+                    continue;
+                };
+                if request_owner == mirror_owner
+                    || !is_codex_request_record_for(&records[request_owner], request)
+                    || !is_codex_request_record_for(&records[mirror_owner], mirror)
+                {
+                    continue;
+                }
+                candidates.push((request_owner, mirror_owner, mirror_index));
+            }
+        }
+        candidates
+    };
+
+    // A narrative that appears to own more than one native pair is ambiguous;
+    // leave every involved row intact instead of joining turns through text.
+    let mut owner_pair_counts = HashMap::<usize, usize>::new();
+    for &(request_owner, mirror_owner, _) in &candidate_merges {
+        *owner_pair_counts.entry(request_owner).or_default() += 1;
+        *owner_pair_counts.entry(mirror_owner).or_default() += 1;
+    }
+    let merges = candidate_merges
+        .into_iter()
+        .filter(|(request_owner, mirror_owner, _)| {
+            owner_pair_counts.get(request_owner) == Some(&1)
+                && owner_pair_counts.get(mirror_owner) == Some(&1)
+        })
+        .collect::<Vec<_>>();
+
+    let mut removed = Vec::with_capacity(merges.len());
+    for (request_owner, mirror_owner, mirror_event_index) in merges {
+        let duplicate = records[mirror_owner].clone();
+        mark_coalesced_narrative_sequence(&mut events[mirror_event_index], duplicate.seq)?;
+        let canonical = &mut records[request_owner];
+        if canonical.text.is_none() && duplicate.text.is_some() {
+            canonical.text.clone_from(&duplicate.text);
+            canonical.excerpt.clone_from(&duplicate.excerpt);
+        }
+        if canonical.turn_id.is_none() {
+            canonical.turn_id.clone_from(&duplicate.turn_id);
+        }
+        for (target, values) in [
+            (&mut canonical.event_refs, duplicate.event_refs),
+            (&mut canonical.source_refs, duplicate.source_refs),
+            (&mut canonical.artifact_refs, duplicate.artifact_refs),
+        ] {
+            for value in values {
+                if !target.contains(&value) {
+                    target.push(value);
+                }
+            }
+        }
+        removed.push(mirror_owner);
+    }
+
+    if removed.is_empty() {
+        return Ok(0);
+    }
+
+    removed.sort_unstable();
+    removed.dedup();
+    let removed_count = removed.len() as u64;
+    for index in removed.into_iter().rev() {
+        records.remove(index);
+    }
+    Ok(removed_count)
+}
+
+const COALESCED_NARRATIVE_SEQUENCES: &str = "wardian_archive_coalesced_narrative_sequences";
+
+fn mark_coalesced_narrative_sequence(event: &mut AgentChatEvent, sequence: u64) -> io::Result<()> {
+    let metadata = event.metadata.as_object_mut().ok_or_else(|| {
+        recoverable_recovery_error(format!(
+            "Codex mirror event {} has malformed metadata",
+            event.id
+        ))
+    })?;
+    let markers = metadata
+        .entry(COALESCED_NARRATIVE_SEQUENCES)
+        .or_insert_with(|| serde_json::json!([]));
+    let markers = markers.as_array_mut().ok_or_else(|| {
+        recoverable_recovery_error(format!(
+            "Codex mirror event {} has malformed coalesced sequence markers",
+            event.id
+        ))
+    })?;
+    if !markers
+        .iter()
+        .any(|marker| marker.as_u64() == Some(sequence))
+    {
+        markers.push(serde_json::json!(sequence));
+    }
+    Ok(())
+}
+
+fn verified_coalesced_narrative_sequences(
+    records: &[ConversationNarrativeRecord],
+    events: &[AgentChatEvent],
+) -> io::Result<HashSet<u64>> {
+    let mut retired = HashSet::new();
+    for mirror in events {
+        let Some(markers) = mirror.metadata.get(COALESCED_NARRATIVE_SEQUENCES) else {
+            continue;
+        };
+        let invalid = || {
+            recoverable_recovery_error(format!(
+                "coalesced sequence marker on event {} is not backed by one canonical Codex request pair",
+                mirror.id
+            ))
+        };
+        let Some(markers) = markers.as_array().filter(|markers| !markers.is_empty()) else {
+            return Err(invalid());
+        };
+        if !mirror.provider.eq_ignore_ascii_case("codex")
+            || mirror.metadata["provider_log"] != true
+            || mirror.kind != AgentChatEventKind::Message
+            || mirror.role != Some(AgentChatRole::User)
+            || mirror.source.as_deref() != Some("event_msg")
+        {
+            return Err(invalid());
+        }
+        let mut matching_requests = events.iter().filter(|request| {
+            request.source.as_deref() == Some("response_item")
+                && crate::providers::chat_transcript::codex_user_mirror_pair(request, mirror)
+        });
+        let Some(request) = matching_requests.next() else {
+            return Err(invalid());
+        };
+        if matching_requests.next().is_some()
+            || events
+                .iter()
+                .filter(|candidate| {
+                    candidate.source.as_deref() == Some("event_msg")
+                        && crate::providers::chat_transcript::codex_user_mirror_pair(
+                            request, candidate,
+                        )
+                })
+                .count()
+                != 1
+        {
+            return Err(invalid());
+        }
+        let request_owners = records
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| record.event_refs.contains(&request.id).then_some(index))
+            .collect::<Vec<_>>();
+        let mirror_owners = records
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| record.event_refs.contains(&mirror.id).then_some(index))
+            .collect::<Vec<_>>();
+        if request_owners.len() != 1
+            || mirror_owners.as_slice() != request_owners.as_slice()
+            || !is_codex_request_record_for(&records[request_owners[0]], request)
+        {
+            return Err(invalid());
+        }
+        for marker in markers {
+            let Some(sequence) = marker.as_u64().filter(|sequence| *sequence > 0) else {
+                return Err(invalid());
+            };
+            if !retired.insert(sequence) {
+                return Err(invalid());
+            }
+        }
+    }
+    if records.iter().any(|record| retired.contains(&record.seq)) {
+        return Err(recoverable_recovery_error(
+            "coalesced narrative sequence is still occupied by a record".to_string(),
+        ));
+    }
+    Ok(retired)
+}
+
+fn is_codex_request_record_for(
+    record: &ConversationNarrativeRecord,
+    event: &AgentChatEvent,
+) -> bool {
+    let Some(request_root_id) = event.metadata["request_root_id"].as_str() else {
+        return false;
+    };
+    record.kind == ConversationRecordKind::Message
+        && record.role.as_deref() == Some("user")
+        && record.input_origin == Some(ConversationInputOrigin::HumanInput)
+        && record.input_purpose.as_deref() == Some("request")
+        && record.request_root_id.as_deref() == Some(request_root_id)
+        && event
+            .text
+            .as_deref()
+            .zip(record.text.as_deref())
+            .is_none_or(|(event_text, record_text)| event_text == record_text)
 }
 
 pub(super) fn matching_record_index(
@@ -303,6 +589,19 @@ pub(super) fn recover_unlinked_observations(
             )));
         }
     }
+    let retired_sequences = verified_coalesced_narrative_sequences(records, events)?;
+    occupied_sequences.extend(retired_sequences.iter().copied());
+    if let Some(last_reserved_sequence) = records
+        .iter()
+        .map(|record| record.seq)
+        .chain(retired_sequences.iter().copied())
+        .max()
+    {
+        let next_available_sequence = last_reserved_sequence.checked_add(1).ok_or_else(|| {
+            recoverable_recovery_error("narrative sequence space is exhausted".to_string())
+        })?;
+        *next_seq = (*next_seq).max(next_available_sequence);
+    }
     let mut recovery_seq = first_missing_sequence(&occupied_sequences)?;
     let mut known_sources: Option<Vec<ConversationSourceRecord>> = None;
     let mut recovered_event_ids = HashSet::new();
@@ -483,6 +782,7 @@ pub(super) fn recover_unlinked_observations(
     if has_generated_history || !recovered.is_empty() {
         let mut all_sequences = records.iter().map(|record| record.seq).collect::<Vec<_>>();
         all_sequences.extend(recovered.iter().map(|observation| observation.record.seq));
+        all_sequences.extend(retired_sequences);
         validate_sequence_prefix(all_sequences)?;
     }
 
@@ -529,6 +829,7 @@ pub(super) fn publish_recovered_observations(
     conversation_path: &Path,
     sources_path: &Path,
     records: &mut Vec<ConversationNarrativeRecord>,
+    events: &[AgentChatEvent],
     observations: Vec<RecoveredObservation>,
 ) -> io::Result<usize> {
     let count = observations.len();
@@ -541,7 +842,13 @@ pub(super) fn publish_recovered_observations(
             .iter()
             .map(|observation| observation.record.clone()),
     );
-    validate_sequence_prefix(repaired_records.iter().map(|record| record.seq))?;
+    let retired_sequences = verified_coalesced_narrative_sequences(&repaired_records, events)?;
+    let mut all_sequences = repaired_records
+        .iter()
+        .map(|record| record.seq)
+        .collect::<Vec<_>>();
+    all_sequences.extend(retired_sequences);
+    validate_sequence_prefix(all_sequences)?;
 
     let mut cached_sources = None;
     for observation in &observations {

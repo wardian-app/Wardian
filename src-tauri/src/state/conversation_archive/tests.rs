@@ -252,6 +252,330 @@ fn codex_user_mirror_pair_has_one_narrative_across_same_and_separate_batches() {
 }
 
 #[test]
+fn codex_mirror_replay_preserves_generated_record_identity_before_next_append() {
+    let (_guard, _temp) = isolated_home();
+    let context = archive_context("provider-session");
+    let mut normalization = TranscriptNormalizationState::default();
+    let mut native_events = normalize_chat_lines_with_state(
+        "agent-1",
+        "codex",
+        [
+            r#"{"type":"turn_context","payload":{"turn_id":"provider-turn-sequence"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","id":"native-request-sequence","role":"user","content":[{"type":"input_text","text":"Inspect the archive."}],"internal_chat_message_metadata_passthrough":{"turn_id":"provider-turn-sequence","content_item_kinds":["user.text"]}}}"#,
+            r#"{"type":"event_msg","payload":{"type":"user_message","message":"Inspect the archive."}}"#,
+        ],
+        &mut normalization,
+        false,
+        true,
+    )
+    .expect("normalize Codex request and mirror");
+    for event in &mut native_events {
+        event.id = format!(
+            "{}:{}:{}",
+            event.session_id,
+            event.metadata["provider_turn_id"]
+                .as_str()
+                .expect("provider turn"),
+            event.source.as_deref().expect("provider source")
+        );
+        event.metadata["provider_log"] = serde_json::json!(true);
+        event.metadata["log_path"] = serde_json::json!("<codex-provider-log>");
+        if event.role == Some(AgentChatRole::User) {
+            let turn = event.metadata["provider_turn_id"]
+                .as_str()
+                .expect("provider turn");
+            let root = if event.source.as_deref() == Some("response_item") {
+                format!("wardian:input:{turn}")
+            } else {
+                format!("msg:{turn}")
+            };
+            event.metadata["request_root_id"] = serde_json::json!(root);
+        }
+    }
+
+    let archive = ConversationArchiveState::default();
+    archive
+        .append_chat_events_with_context(context.clone(), &native_events)
+        .expect("append native Codex pair");
+    archive
+        .append_delivered_input_with_context(context.clone(), "First local delivery", None)
+        .expect("append generated local delivery");
+
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation");
+    let directory =
+        agent_conversation_dir("agent-1", &conversation_id).expect("conversation directory");
+    let mut records: Vec<ConversationNarrativeRecord> =
+        read_jsonl_records(&directory.join("conversation.jsonl")).expect("read records");
+    let mut archived_events: Vec<AgentChatEvent> =
+        read_jsonl_records(&directory.join("events.jsonl")).expect("read events");
+    let request_event = archived_events
+        .iter()
+        .find(|event| event.source.as_deref() == Some("response_item"))
+        .expect("Codex request event")
+        .clone();
+    let mirror_event = archived_events
+        .iter()
+        .find(|event| event.source.as_deref() == Some("event_msg"))
+        .expect("Codex mirror event")
+        .clone();
+    let mut split_request = records
+        .iter()
+        .find(|record| record.role.as_deref() == Some("user"))
+        .expect("canonical request record")
+        .clone();
+    split_request.seq = 1;
+    split_request.request_root_id = request_event.metadata["request_root_id"]
+        .as_str()
+        .map(ToString::to_string);
+    split_request.event_refs = vec![request_event.id.clone()];
+    split_request.source_refs.clear();
+    let mut split_mirror = split_request.clone();
+    split_mirror.seq = 2;
+    split_mirror.request_root_id = mirror_event.metadata["request_root_id"]
+        .as_str()
+        .map(ToString::to_string);
+    split_mirror.event_refs = vec![mirror_event.id.clone()];
+    let mut generated_record = records
+        .iter()
+        .find(|record| {
+            record
+                .event_refs
+                .iter()
+                .any(|event_ref| event_ref.starts_with("generated:"))
+        })
+        .expect("generated delivery record")
+        .clone();
+    generated_record.seq = 3;
+    let generated_event_id = format!("generated:{conversation_id}:3");
+    generated_record.event_refs = vec![generated_event_id.clone()];
+    records = vec![split_request, split_mirror, generated_record.clone()];
+    records.sort_by_key(|record| record.seq);
+    let generated_event = archived_events
+        .iter_mut()
+        .find(|event| event.metadata["generated"] == true)
+        .expect("generated event");
+    generated_event.id = generated_event_id;
+    generated_event.sequence = Some(3);
+    generated_event.metadata["archive_record"] =
+        serde_json::to_value(&generated_record).expect("serialize generated record");
+    wardian_core::conversations::write_jsonl_atomic(
+        &directory.join("conversation.jsonl"),
+        &records,
+    )
+    .expect("seed split legacy narratives and later generated record");
+    wardian_core::conversations::write_jsonl_atomic(
+        &directory.join("events.jsonl"),
+        &archived_events,
+    )
+    .expect("seed matching generated event identity");
+    drop(archive);
+
+    let restarted = ConversationArchiveState::default();
+    restarted
+        .append_chat_events_with_context(context.clone(), &native_events)
+        .expect("replay Codex pair after restart");
+    let replayed_id = restarted
+        .active_conversation_id_for_test("agent-1")
+        .expect("restarted conversation");
+    let (_, replayed_records) = restarted.show(&replayed_id).expect("read replayed records");
+    let replayed_delivery = replayed_records
+        .iter()
+        .find(|record| record.text.as_deref() == Some("First local delivery"))
+        .expect("original generated delivery survives replay");
+    assert_eq!(replayed_delivery.seq, 3);
+    assert_eq!(
+        replayed_delivery.event_refs,
+        vec![format!("generated:{conversation_id}:3")]
+    );
+    let replayed_events = restarted
+        .chat_events_for_agent("agent-1")
+        .expect("read replayed events");
+    let original_generated_event_id = format!("generated:{conversation_id}:3");
+    let original_generated_event = replayed_events
+        .iter()
+        .find(|event| event.id == original_generated_event_id)
+        .expect("original generated event identity survives replay");
+    assert_eq!(original_generated_event.sequence, Some(3));
+    assert_eq!(
+        original_generated_event.metadata["archive_record"]["seq"],
+        3
+    );
+    assert_eq!(
+        original_generated_event.metadata["archive_record"]["event_refs"],
+        serde_json::json!([original_generated_event_id])
+    );
+
+    assert_eq!(
+        restarted
+            .append_delivered_input_with_context(context, "Second local delivery", None,)
+            .expect("append after restart"),
+        1,
+        "the later append must not collide with the existing generated event ID"
+    );
+    let (_, final_records) = restarted.show(&replayed_id).expect("read final records");
+    let next_delivery = final_records
+        .iter()
+        .find(|record| record.text.as_deref() == Some("Second local delivery"))
+        .expect("new local delivery is archived");
+    assert_eq!(next_delivery.seq, 4);
+    assert_eq!(
+        next_delivery.event_refs,
+        vec![format!("generated:{conversation_id}:4")]
+    );
+}
+
+#[test]
+fn provider_append_skips_retired_codex_mirror_tail_after_restart() {
+    let (_guard, _temp) = isolated_home();
+    let (context, native_events, conversation_id) =
+        seed_codex_archive_with_retired_mirror_tail("agent-provider-tail", "provider-tail");
+
+    let restarted = ConversationArchiveState::default();
+    let mut provider_event = chat_event(
+        "provider-response-after-retired-tail",
+        AgentChatEventKind::Message,
+        Some(AgentChatRole::Assistant),
+        Some("Provider response after restart."),
+    );
+    provider_event.session_id = context.agent_id.clone();
+    assert_eq!(
+        restarted
+            .append_chat_events_with_context(context.clone(), &[provider_event])
+            .expect("append provider response after restart"),
+        1
+    );
+
+    let (_, records) = restarted
+        .show(&conversation_id)
+        .expect("read provider append");
+    let provider_record = records
+        .iter()
+        .find(|record| record.text.as_deref() == Some("Provider response after restart."))
+        .expect("provider response is archived");
+    assert_eq!(provider_record.seq, 3);
+
+    restarted
+        .append_chat_events_with_context(context, &native_events)
+        .expect("replay Codex pair after provider append");
+    let (_, replayed_records) = restarted
+        .show(&conversation_id)
+        .expect("read replayed provider append");
+    assert!(replayed_records.iter().any(|record| {
+        record.text.as_deref() == Some("Provider response after restart.") && record.seq == 3
+    }));
+}
+
+#[test]
+fn generated_append_skips_retired_codex_mirror_tail_after_restart() {
+    let (_guard, _temp) = isolated_home();
+    let (context, native_events, conversation_id) =
+        seed_codex_archive_with_retired_mirror_tail("agent-generated-tail", "generated-tail");
+
+    let restarted = ConversationArchiveState::default();
+    assert_eq!(
+        restarted
+            .append_delivered_input_with_context(
+                context.clone(),
+                "Generated input after restart.",
+                None,
+            )
+            .expect("append generated input after restart"),
+        1
+    );
+
+    let (_, records) = restarted
+        .show(&conversation_id)
+        .expect("read generated append");
+    let generated_record = records
+        .iter()
+        .find(|record| record.text.as_deref() == Some("Generated input after restart."))
+        .expect("generated input is archived");
+    assert_eq!(generated_record.seq, 3);
+    assert_eq!(
+        generated_record.event_refs,
+        vec![format!("generated:{conversation_id}:3")]
+    );
+
+    restarted
+        .append_chat_events_with_context(context, &native_events)
+        .expect("replay Codex pair after generated append");
+    let (_, replayed_records) = restarted
+        .show(&conversation_id)
+        .expect("read replayed generated append");
+    assert!(replayed_records.iter().any(|record| {
+        record.text.as_deref() == Some("Generated input after restart.") && record.seq == 3
+    }));
+}
+
+fn seed_codex_archive_with_retired_mirror_tail(
+    agent_id: &str,
+    turn_id: &str,
+) -> (ConversationArchiveContext, Vec<AgentChatEvent>, String) {
+    let mut context = archive_context(&format!("session-{turn_id}"));
+    context.agent_id = agent_id.to_string();
+    let mut normalization = TranscriptNormalizationState::default();
+    let lines = [
+        format!(r#"{{"type":"turn_context","payload":{{"turn_id":"{turn_id}"}}}}"#),
+        format!(
+            r#"{{"type":"response_item","payload":{{"type":"message","id":"native-request-{turn_id}","role":"user","content":[{{"type":"input_text","text":"Request {turn_id}."}}],"internal_chat_message_metadata_passthrough":{{"turn_id":"{turn_id}","content_item_kinds":["user.text"]}}}}}}"#
+        ),
+        format!(
+            r#"{{"type":"event_msg","payload":{{"type":"user_message","message":"Request {turn_id}."}}}}"#
+        ),
+    ];
+    let mut native_events =
+        normalize_chat_lines_with_state(agent_id, "codex", lines, &mut normalization, false, true)
+            .expect("normalize Codex mirror pair");
+    for event in &mut native_events {
+        event.id = format!(
+            "{}:{}:{}",
+            event.session_id,
+            event.metadata["provider_turn_id"]
+                .as_str()
+                .expect("provider turn"),
+            event.source.as_deref().expect("provider source")
+        );
+        event.metadata["provider_log"] = serde_json::json!(true);
+        event.metadata["log_path"] = serde_json::json!("<codex-provider-log>");
+        if event.role == Some(AgentChatRole::User) {
+            let root = if event.source.as_deref() == Some("response_item") {
+                format!("wardian:input:{turn_id}")
+            } else {
+                format!("msg:{turn_id}")
+            };
+            event.metadata["request_root_id"] = serde_json::json!(root);
+        }
+    }
+
+    let archive = ConversationArchiveState::default();
+    archive
+        .append_chat_events_with_context(context.clone(), &native_events)
+        .expect("append Codex request pair");
+    let conversation_id = archive
+        .active_conversation_id_for_test(agent_id)
+        .expect("active conversation");
+    let directory =
+        agent_conversation_dir(agent_id, &conversation_id).expect("conversation directory");
+    let mut archived_events: Vec<AgentChatEvent> =
+        read_jsonl_records(&directory.join("events.jsonl")).expect("read archived events");
+    let mirror = archived_events
+        .iter_mut()
+        .find(|event| event.source.as_deref() == Some("event_msg"))
+        .expect("Codex user mirror");
+    mirror.metadata["wardian_archive_coalesced_narrative_sequences"] = serde_json::json!([2]);
+    wardian_core::conversations::write_jsonl_atomic(
+        &directory.join("events.jsonl"),
+        &archived_events,
+    )
+    .expect("seed retired mirror tail sequence");
+    drop(archive);
+
+    (context, native_events, conversation_id)
+}
+
+#[test]
 fn codex_completion_mirror_pair_has_one_narrative_across_batches() {
     let (_guard, _temp) = isolated_home();
     let archive = ConversationArchiveState::default();

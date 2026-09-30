@@ -15,7 +15,7 @@ use wardian_core::conversations::{
     ConversationManifest, ConversationNarrativeRecord, ConversationRecordKind,
     ConversationSourceRecord, ConversationSpeakerType, ConversationTurnRecord,
 };
-use wardian_core::models::chat::AgentChatEvent;
+use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatRole};
 
 pub(crate) mod provenance;
 mod records;
@@ -34,7 +34,8 @@ pub use records::{lifecycle_record, narrative_from_chat_event, narrative_from_de
 use repair::{
     append_source_if_needed, coalesce_batch_observations, is_bound_native_delivery,
     matching_event_index, matching_record_index, publish_recovered_observations,
-    rebuild_derived_projections, recover_unlinked_observations, PendingChatPublication,
+    rebuild_derived_projections, reconcile_codex_user_mirror_records,
+    recover_unlinked_observations, PendingChatPublication,
 };
 #[cfg(test)]
 use storage::new_conversation_id;
@@ -84,17 +85,26 @@ fn reconcile_codex_request_root_from_archived_mirror(
     record: &mut ConversationNarrativeRecord,
     events: &[AgentChatEvent],
 ) -> bool {
-    let Some(request) = events.iter().find(|event| {
-        event.source.as_deref() == Some("response_item")
+    let mut requests = events.iter().filter(|event| {
+        event.provider.eq_ignore_ascii_case("codex")
+            && event.kind == AgentChatEventKind::Message
+            && event.role == Some(AgentChatRole::User)
+            && event.metadata["provider_log"] == true
+            && event.source.as_deref() == Some("response_item")
+            && event.metadata["raw_type"] == "message"
             && event.metadata["input_origin"] == "human_input"
             && event.metadata["input_purpose"] == "request"
             && record.event_refs.contains(&event.id)
             && events.iter().any(|mirror| {
                 record.event_refs.contains(&mirror.id) && codex_archive_mirror_pair(event, mirror)
             })
-    }) else {
+    });
+    let Some(request) = requests.next() else {
         return false;
     };
+    if requests.next().is_some() {
+        return false;
+    }
     promote_codex_request_root_from_response_item(record, request)
 }
 
@@ -616,7 +626,7 @@ impl ConversationArchiveState {
         let events_refreshed = provenance::refresh_events(&mut existing_events, events)?;
         let delivered_refreshed =
             provenance::bind_delivered_inputs(&mut existing_events, &existing_records)?;
-        let events_refreshed = events_refreshed || delivered_refreshed;
+        let mut events_refreshed = events_refreshed || delivered_refreshed;
         let observed = existing_events
             .iter()
             .filter(|event| {
@@ -627,6 +637,8 @@ impl ConversationArchiveState {
             .cloned()
             .collect::<Vec<_>>();
         provenance::refresh_records(&mut existing_records, &observed);
+        reconcile_codex_user_mirror_records(&mut existing_records, &mut existing_events)?;
+        events_refreshed = events_refreshed || before_refresh_events != existing_events;
         for record in &mut existing_records {
             reconcile_codex_request_root_from_archived_mirror(record, &existing_events);
         }
@@ -680,6 +692,7 @@ impl ConversationArchiveState {
             &conversation_path,
             &sources_path,
             &mut existing_records,
+            &existing_events,
             recovered_observations,
         )?;
         if records_refreshed && recovered_count == 0 {
@@ -1199,6 +1212,7 @@ impl ConversationArchiveState {
             &conversation_path,
             &sources_path,
             &mut existing_records,
+            &existing_events,
             recovered_observations,
         )?;
         if !existing_records.is_empty()

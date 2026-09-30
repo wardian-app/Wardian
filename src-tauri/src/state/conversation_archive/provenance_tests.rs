@@ -42,6 +42,130 @@ fn canonical_event_refs(event_refs: &[String], events: &[AgentChatEvent]) -> Has
 }
 
 #[test]
+fn archived_codex_mirror_narratives_reconcile_without_crossing_turns() {
+    let pair = |turn: &str, seq: u64| {
+        let request = AgentChatEvent {
+            id: format!("response-item-{turn}"),
+            session_id: "agent-1".into(),
+            provider: "codex".into(),
+            kind: AgentChatEventKind::Message,
+            role: Some(AgentChatRole::User),
+            text: Some("same retained request".into()),
+            title: None,
+            status: None,
+            turn_id: None,
+            source: Some("response_item".into()),
+            command: None,
+            exit_code: None,
+            path: None,
+            language: None,
+            created_at: None,
+            sequence: Some(seq),
+            metadata: serde_json::json!({
+                "provider_log": true,
+                "log_path": "<codex-log>",
+                "raw_type": "message",
+                "input_origin": "human_input",
+                "input_purpose": "request",
+                "provider_turn_id": turn,
+                "request_root_id": format!("wardian:input:{turn}"),
+                "legacy_event_ids": [format!("response-alias-{turn}")],
+            }),
+        };
+        let mut mirror = request.clone();
+        mirror.id = format!("event-message-{turn}");
+        mirror.source = Some("event_msg".into());
+        mirror.sequence = Some(seq + 1);
+        mirror.metadata["raw_type"] = serde_json::json!("user_message");
+        mirror.metadata["request_root_id"] = serde_json::json!(format!("codex-message:{turn}"));
+        mirror.metadata["legacy_event_ids"] = serde_json::json!([format!("event-alias-{turn}")]);
+
+        let mut request_record =
+            narrative_from_chat_event(&request, seq).expect("request narrative");
+        request_record.event_refs = event_identity_ids(&request)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        request_record.source_refs = vec![format!("source-response-{turn}")];
+        let mut mirror_record =
+            narrative_from_chat_event(&mirror, seq + 1).expect("mirror narrative");
+        mirror_record.event_refs = event_identity_ids(&mirror)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        mirror_record.source_refs = vec![format!("source-event-{turn}")];
+        (request, mirror, request_record, mirror_record)
+    };
+
+    let (request_a, mirror_a, request_record_a, mirror_record_a) = pair("turn-a", 1);
+    let (request_b, mirror_b, request_record_b, mirror_record_b) = pair("turn-b", 3);
+    for (request, mirror) in [(&request_a, &mirror_a), (&request_b, &mirror_b)] {
+        let request_ids = event_identity_ids(request);
+        let mirror_ids = event_identity_ids(mirror);
+        assert!(!request_ids.iter().any(|id| mirror_ids.contains(id)));
+        assert!(crate::providers::chat_transcript::codex_user_mirror_pair(
+            request, mirror
+        ));
+    }
+
+    let mut events = [request_a, mirror_a, request_b, mirror_b];
+    let mut records = vec![
+        request_record_a,
+        mirror_record_a,
+        request_record_b,
+        mirror_record_b,
+    ];
+    provenance::refresh_records(&mut records, &events);
+    reconcile_codex_user_mirror_records(&mut records, &mut events)
+        .expect("coalesce verified request mirrors");
+
+    assert_eq!(
+        records.len(),
+        2,
+        "each native turn has one request narrative"
+    );
+    assert_eq!(
+        records.iter().map(|record| record.seq).collect::<Vec<_>>(),
+        vec![1, 3],
+        "coalescing preserves narrative sequence identity"
+    );
+    assert_eq!(
+        events[1].metadata["wardian_archive_coalesced_narrative_sequences"],
+        serde_json::json!([2])
+    );
+    assert_eq!(
+        events[3].metadata["wardian_archive_coalesced_narrative_sequences"],
+        serde_json::json!([4])
+    );
+    for turn in ["turn-a", "turn-b"] {
+        let request_id = format!("response-item-{turn}");
+        let mirror_id = format!("event-message-{turn}");
+        let request_root = format!("wardian:input:{turn}");
+        let mirror_root = format!("codex-message:{turn}");
+        let record = records
+            .iter()
+            .find(|record| record.request_root_id.as_deref() == Some(request_root.as_str()))
+            .expect("Wardian response-item root remains canonical");
+        assert_eq!(record.event_refs.len(), 4);
+        assert!(record.event_refs.contains(&request_id));
+        assert!(record.event_refs.contains(&mirror_id));
+        assert_eq!(record.source_refs.len(), 2);
+        assert!(record
+            .source_refs
+            .contains(&format!("source-response-{turn}")));
+        assert!(record.source_refs.contains(&format!("source-event-{turn}")));
+        assert_ne!(
+            record.request_root_id.as_deref(),
+            Some(mirror_root.as_str())
+        );
+    }
+
+    let canonical_records = records.clone();
+    reconcile_codex_user_mirror_records(&mut records, &mut events).expect("repeat coalescing");
+    assert_eq!(records, canonical_records, "reconciliation is idempotent");
+}
+
+#[test]
 fn replay_event_refs_compare_observations_through_verified_legacy_aliases() {
     let mut observation = event("current-event", "codex", Some("request-root"));
     observation.metadata["legacy_event_ids"] = serde_json::json!(["legacy-event"]);
@@ -676,6 +800,8 @@ fn retained_codex_logs_replay_to_one_canonical_archive_after_restart() {
         let conversation_id = archive
             .active_conversation_id_for_test(&agent_id)
             .expect("retained conversation");
+        let directory =
+            conversation_dir(&agent_id, &conversation_id).expect("retained conversation path");
         let (_, records) = archive
             .show(&conversation_id)
             .expect("read narrative records");
@@ -782,10 +908,88 @@ fn retained_codex_logs_replay_to_one_canonical_archive_after_restart() {
             .iter()
             .map(|record| (record.event_refs.len(), record.source_refs.len()))
             .collect::<Vec<_>>();
-        replays.push((context, agent_id, events, records, assistant_ref_counts));
+        let retained_conversation_path =
+            std::path::Path::new(path).with_file_name("conversation.jsonl");
+        let mut seeded_legacy_split = false;
+        if retained_conversation_path.is_file() {
+            let retained_records: Vec<ConversationNarrativeRecord> =
+                read_jsonl_records(&retained_conversation_path)
+                    .expect("read retained narrative archive");
+            let retained_user_requests = retained_records
+                .iter()
+                .filter(|record| {
+                    record.role.as_deref() == Some("user")
+                        && record.input_origin
+                            == Some(
+                                wardian_core::conversations::ConversationInputOrigin::HumanInput,
+                            )
+                        && record.input_purpose.as_deref() == Some("request")
+                })
+                .count();
+            if retained_user_requests > provider_turns.len() {
+                assert_eq!(
+                    retained_user_requests,
+                    provider_turns.len() + 1,
+                    "retained archive contains exactly one split request pair"
+                );
+                let mut reconciled_retained = retained_records.clone();
+                let mut reconciliation_events = events.clone();
+                provenance::refresh_records(&mut reconciled_retained, &events);
+                assert_eq!(
+                    reconcile_codex_user_mirror_records(
+                        &mut reconciled_retained,
+                        &mut reconciliation_events,
+                    )
+                    .expect("reconcile retained split request"),
+                    1,
+                    "the retained native pair uniquely owns two request narratives"
+                );
+                let retained_sequences = retained_records
+                    .iter()
+                    .map(|record| record.seq)
+                    .collect::<std::collections::HashSet<_>>();
+                assert!(reconciled_retained
+                    .iter()
+                    .all(|record| retained_sequences.contains(&record.seq)));
+                assert_eq!(reconciled_retained.len() + 1, retained_records.len());
+                std::fs::copy(
+                    &retained_conversation_path,
+                    directory.join("conversation.jsonl"),
+                )
+                .expect("seed the isolated archive with the retained split narratives");
+                for file_name in ["events.jsonl", "sources.jsonl"] {
+                    let retained_path = retained_conversation_path.with_file_name(file_name);
+                    if retained_path.is_file() {
+                        std::fs::copy(&retained_path, directory.join(file_name))
+                            .expect("seed the isolated archive with retained source records");
+                    }
+                }
+                seeded_legacy_split = true;
+            }
+        }
+        let provider_turn_count = provider_turns.len();
+        drop(provider_turns);
+        replays.push((
+            context,
+            agent_id,
+            events,
+            records,
+            assistant_ref_counts,
+            provider_turn_count,
+            seeded_legacy_split,
+        ));
     }
 
-    for (context, agent_id, events, before, assistant_ref_counts) in replays {
+    for (
+        context,
+        agent_id,
+        events,
+        before,
+        assistant_ref_counts,
+        provider_turn_count,
+        seeded_legacy_split,
+    ) in replays
+    {
         let restarted = ConversationArchiveState::default();
         restarted
             .append_chat_events_with_context(context, &events)
@@ -796,6 +1000,77 @@ fn retained_codex_logs_replay_to_one_canonical_archive_after_restart() {
         let (_, after) = restarted
             .show(&conversation_id)
             .expect("read replayed narrative records");
+        if seeded_legacy_split {
+            let canonical_users = after
+                .iter()
+                .filter(|record| {
+                    record.role.as_deref() == Some("user")
+                        && record.input_origin
+                            == Some(
+                                wardian_core::conversations::ConversationInputOrigin::HumanInput,
+                            )
+                        && record.input_purpose.as_deref() == Some("request")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(canonical_users.len(), provider_turn_count);
+            let replayed_events = restarted
+                .chat_events_for_agent(&agent_id)
+                .expect("read replayed provider events");
+            let mut occupied_sequences = after
+                .iter()
+                .map(|record| record.seq)
+                .collect::<std::collections::HashSet<_>>();
+            for event in &replayed_events {
+                if let Some(markers) =
+                    event.metadata["wardian_archive_coalesced_narrative_sequences"].as_array()
+                {
+                    occupied_sequences.extend(markers.iter().filter_map(serde_json::Value::as_u64));
+                }
+            }
+            let maximum_sequence = occupied_sequences.iter().copied().max().unwrap_or(0);
+            assert_eq!(
+                occupied_sequences,
+                (1..=maximum_sequence).collect(),
+                "verified coalesced sequences reserve only the gaps created by mirror repair"
+            );
+            for turn_id in events
+                .iter()
+                .filter(|event| {
+                    event.metadata["input_origin"] == "human_input"
+                        && event.metadata["input_purpose"] == "request"
+                })
+                .filter_map(|event| event.metadata["provider_turn_id"].as_str())
+                .collect::<std::collections::HashSet<_>>()
+            {
+                let observations = events
+                    .iter()
+                    .filter(|event| {
+                        event.metadata["provider_turn_id"].as_str() == Some(turn_id)
+                            && event.metadata["input_origin"] == "human_input"
+                            && event.metadata["input_purpose"] == "request"
+                    })
+                    .collect::<Vec<_>>();
+                let record = canonical_users
+                    .iter()
+                    .find(|record| {
+                        observations
+                            .iter()
+                            .all(|event| record.event_refs.contains(&event.id))
+                    })
+                    .expect("retained mirror pair has one narrative after restart");
+                assert!(record.source_refs.len() >= 2);
+                for event in &observations {
+                    if let Some(source) = source_record_from_chat_event(event, record.seq) {
+                        assert!(record.source_refs.contains(&source.source_id));
+                    }
+                }
+                assert!(record
+                    .request_root_id
+                    .as_deref()
+                    .is_some_and(|root| root.starts_with("wardian:input:")));
+            }
+            continue;
+        }
         let mut first_difference = None;
         let mut ignored_capture_times = 0;
         for (index, (before_record, after_record)) in before.iter().zip(&after).enumerate() {
