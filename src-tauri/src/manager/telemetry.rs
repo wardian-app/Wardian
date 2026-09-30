@@ -17,6 +17,7 @@ use crate::providers::antigravity::AntigravityProvider;
 use crate::providers::pi::PiProvider;
 use wardian_core::control::{ProviderInputReadiness, ProviderReadyEvidence};
 
+mod sampling;
 mod status;
 use status::set_snapshot_status;
 
@@ -1493,8 +1494,7 @@ pub async fn get_all_metrics(state: &AppState) -> Vec<AgentTelemetry> {
             .iter()
             .map(|snap| (snap.session_id.clone(), snap.process_id))
             .collect::<Vec<_>>();
-        let system_snapshot =
-            refresh_system_process_snapshot(&sys_metrics, &session_ids, &agent_roots);
+        let system_snapshot = sampling::sample_processes(sys_metrics, session_ids, agent_roots);
         let mut slow_agents = Vec::new();
         observe_codex_indexes();
 
