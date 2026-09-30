@@ -39,7 +39,7 @@ import {
   InboxSurface,
   SuspendedSurfaceRenderer,
   DEFAULT_GRAPH_SURFACE_STATE,
-  normalizeCoreViewSurfaceState,
+  normalizeGraphSurfaceState,
   resolveHeavySurfaceHiddenGraceMs,
 } from "./coreSurfaceDefinitions";
 
@@ -178,8 +178,7 @@ describe("core view surface definitions", () => {
       ok: false,
       error: "unsupported graph state version 2",
     });
-    expect(normalizeCoreViewSurfaceState({
-      surface_type: "graph",
+    expect(normalizeGraphSurfaceState({
       state_schema_version: 2,
       state: { future: true },
     })).toEqual(DEFAULT_GRAPH_SURFACE_STATE);

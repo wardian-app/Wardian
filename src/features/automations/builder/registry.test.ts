@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { nodeTypes, findNodeType, fieldTypeKinds } from './registry';
+import { nodeTypes, findNodeType } from './registry';
 
 describe('node registry', () => {
   it('loads node types from the generated schema', () => {
@@ -16,10 +16,6 @@ describe('node registry', () => {
   it('does not advertise unsupported runtime nodes in the Builder', () => {
     expect(nodeTypes().some((node) => node.id === 'sub_automation')).toBe(false);
     expect(findNodeType('sub_automation')).toMatchObject({ supported: false });
-  });
-  it('enumerates the closed field-type kinds', () => {
-    expect(fieldTypeKinds()).toContain('prompt');
-    expect(fieldTypeKinds()).toContain('branch_port');
   });
   it('creates memory commits with an invocation-owned principal', () => {
     const commit = findNodeType('memory_commit');

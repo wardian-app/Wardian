@@ -896,22 +896,6 @@ impl NativeDeliveryBroker {
         .await
     }
 
-    pub async fn supersede(
-        &self,
-        interaction_id: &str,
-    ) -> Result<NativeDeliveryRecord, NativeBrokerError> {
-        self.advance(
-            interaction_id,
-            NativeDeliveryPhase::Superseded,
-            NativeEvidenceSource::Caller,
-            None,
-            None,
-            Some("replaced by a new queued interaction".to_string()),
-            "supersede",
-        )
-        .await
-    }
-
     pub fn get(&self, interaction_id: &str) -> Result<NativeDeliveryRecord, NativeBrokerError> {
         wardian_core::db::native_delivery(interaction_id)
             .map_err(db_error)?
@@ -1186,17 +1170,6 @@ impl NativeDeliveryBroker {
             close_opencode_http_registration(previous).await;
         }
         Ok(())
-    }
-
-    /// A lifecycle registration is the only condition that routes an attached
-    /// OpenCode task away from the existing composer exception. A closed owner
-    /// stays registered until disposal so a lost transport leaves work pending.
-    pub async fn opencode_http_prepared(&self, target_agent_id: &str, generation: u64) -> bool {
-        !matches!(
-            self.opencode_http_eligibility(target_agent_id, generation)
-                .await,
-            OpenCodeHttpEligibility::Unsupported
-        )
     }
 
     /// Revalidate the owner and provider busy state before the canonical claim.

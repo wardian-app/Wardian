@@ -18,9 +18,11 @@ use crate::providers::pi::PiProvider;
 
 mod sampling;
 mod status;
+mod timings;
 #[cfg(test)]
 use status::apply_telemetry_provider_readiness;
 use status::{apply_provider_status_observations, set_snapshot_status};
+use timings::{PhaseClock, TelemetryPassTimings, TelemetrySlowAgent};
 
 const TELEMETRY_SLOW_PASS_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -1130,54 +1132,6 @@ fn refresh_system_process_snapshot(
     Some(snapshot)
 }
 
-#[derive(Debug, Clone)]
-struct TelemetrySlowAgent {
-    session_id: String,
-    provider: String,
-    duration: std::time::Duration,
-}
-
-#[derive(Debug, Clone)]
-struct TelemetryPassTimings {
-    total: std::time::Duration,
-    sys_refresh: std::time::Duration,
-    agent_count: usize,
-    slow_agents: Vec<TelemetrySlowAgent>,
-}
-
-impl TelemetryPassTimings {
-    fn slow_log_message(&self, threshold: std::time::Duration) -> Option<String> {
-        if self.total < threshold && self.sys_refresh < threshold && self.slow_agents.is_empty() {
-            return None;
-        }
-
-        let slow_agents = if self.slow_agents.is_empty() {
-            "none".to_string()
-        } else {
-            self.slow_agents
-                .iter()
-                .map(|agent| {
-                    format!(
-                        "{}:{}:{}ms",
-                        agent.session_id,
-                        agent.provider,
-                        agent.duration.as_millis()
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(",")
-        };
-
-        Some(format!(
-            "[Wardian] Slow telemetry pass total_ms={} sys_refresh_ms={} agent_count={} slow_agents={}",
-            self.total.as_millis(),
-            self.sys_refresh.as_millis(),
-            self.agent_count,
-            slow_agents
-        ))
-    }
-}
-
 fn set_snapshot_status_from_log(snap: &AgentSnapshot, next_status: &str, is_initial_replay: bool) {
     if is_initial_replay
         || super::should_suppress_interrupted_status(&snap.current_status, next_status)
@@ -1452,6 +1406,7 @@ pub async fn get_all_metrics(state: &AppState, app: &tauri::AppHandle) -> Vec<Ag
 }
 
 async fn collect_agent_metrics(state: &AppState) -> (Vec<AgentTelemetry>, status::StatusFollowUp) {
+    let collect_started = std::time::Instant::now();
     let mut snapshots: Vec<AgentSnapshot> = {
         let agents = state.agents.lock().await;
         agents
@@ -1490,15 +1445,16 @@ async fn collect_agent_metrics(state: &AppState) -> (Vec<AgentTelemetry>, status
             .unwrap_or(0);
     }
 
+    let pre_pass = collect_started.elapsed();
     let sys_metrics = state.system_metrics.clone();
     let result = tokio::task::spawn_blocking(move || {
+        let pass_started = std::time::Instant::now();
         let session_ids = snapshots
             .iter()
             .map(|snap| snap.session_id.clone())
             .collect::<Vec<_>>();
         let active_leases = wardian_core::conversation_lease::load_leases();
         let lease_now = chrono::Utc::now().to_rfc3339();
-        let pass_started = std::time::Instant::now();
         let mut results = Vec::new();
         let mut provider_statuses = Vec::new();
         let mut last_user_query_timestamps = latest_user_query_timestamps();
@@ -1509,6 +1465,8 @@ async fn collect_agent_metrics(state: &AppState) -> (Vec<AgentTelemetry>, status
         let system_snapshot = sampling::sample_processes(sys_metrics, session_ids, agent_roots);
         let mut slow_agents = Vec::new();
         observe_codex_indexes();
+        let loop_started = std::time::Instant::now();
+        let (log_total, db_total) = Default::default();
 
         for snap in &snapshots {
             let agent_started = std::time::Instant::now();
@@ -1589,6 +1547,7 @@ async fn collect_agent_metrics(state: &AppState) -> (Vec<AgentTelemetry>, status
                 should_run_provider_log_telemetry(&status_before_log_work, process_alive);
 
             if run_provider_log_work {
+                let _log_clock = PhaseClock::start(&log_total);
                 if let Some(_agent_work_guard) = try_begin_agent_telemetry_work(&snap.session_id) {
                     let mut log_path_lock = snap.log_path.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -2001,6 +1960,7 @@ async fn collect_agent_metrics(state: &AppState) -> (Vec<AgentTelemetry>, status
                 &snap.last_query_timestamp,
             );
             if let Some(timestamp) = last_query_timestamp.as_deref() {
+                let _db_clock = PhaseClock::start(&db_total);
                 let _ = wardian_core::db::update_agent_query_timestamp(&snap.session_id, timestamp);
             }
 
@@ -2067,12 +2027,19 @@ async fn collect_agent_metrics(state: &AppState) -> (Vec<AgentTelemetry>, status
                 });
             }
         }
+        let sys_refresh = system_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.sys_refresh)
+            .unwrap_or_default();
         let timings = TelemetryPassTimings {
             total: pass_started.elapsed(),
-            sys_refresh: system_snapshot
-                .as_ref()
-                .map(|snapshot| snapshot.sys_refresh)
-                .unwrap_or_default(),
+            sys_refresh,
+            setup: loop_started
+                .duration_since(pass_started)
+                .saturating_sub(sys_refresh),
+            agents: loop_started.elapsed(),
+            log: log_total.get(),
+            db: db_total.get(),
             agent_count: snapshots.len(),
             slow_agents,
         };
@@ -2087,9 +2054,19 @@ async fn collect_agent_metrics(state: &AppState) -> (Vec<AgentTelemetry>, status
     .await
     .unwrap_or_default();
     let mut result = result;
+    let publish_started = std::time::Instant::now();
     let follow_up =
         apply_provider_status_observations(state, &result.provider_statuses, &mut result.metrics)
             .await;
+    let publish = publish_started.elapsed();
+    if pre_pass.max(publish) >= TELEMETRY_SLOW_PASS_THRESHOLD {
+        crate::utils::logging::log_debug(&format!(
+            "[Wardian] Slow status publication pre_pass_ms={} publish_ms={} agent_count={}",
+            pre_pass.as_millis(),
+            publish.as_millis(),
+            result.metrics.len()
+        ));
+    }
     (result.metrics, follow_up)
 }
 

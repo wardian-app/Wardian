@@ -155,12 +155,6 @@ pub async fn list_inbox_notifications(
     list_inbox_notifications_for_state_with_offset(&state, offset.unwrap_or(0)).await
 }
 
-pub async fn list_inbox_notifications_for_state(
-    state: &AppState,
-) -> Result<InboxNotificationListResult, String> {
-    list_inbox_notifications_for_state_with_offset(state, 0).await
-}
-
 pub async fn list_inbox_notifications_for_state_with_offset(
     state: &AppState,
     offset: usize,

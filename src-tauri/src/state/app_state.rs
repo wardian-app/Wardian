@@ -77,12 +77,6 @@ pub struct AppState {
     pub delivery_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub status_observation_sequences: std::sync::Mutex<HashMap<String, u64>>,
     status_revisions: std::sync::Mutex<HashMap<String, StatusRevisionSession>>,
-    // Map of automation_id to a list of background trigger handles
-    pub automation_triggers: Mutex<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>,
-    // Map of automation_id to running execution handles
-    pub automation_runs: Mutex<HashMap<String, Vec<tauri::async_runtime::JoinHandle<()>>>>,
-    pub triggers_paused: std::sync::atomic::AtomicBool,
-    pub scheduler_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub automation_scheduler_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub automation_schedules_paused: std::sync::atomic::AtomicBool,
     // Active git repo watchers keyed by workspace path
@@ -520,10 +514,6 @@ impl Default for AppState {
             delivery_locks: Mutex::new(HashMap::new()),
             status_observation_sequences: std::sync::Mutex::new(HashMap::new()),
             status_revisions: std::sync::Mutex::new(HashMap::new()),
-            automation_triggers: Mutex::new(HashMap::new()),
-            automation_runs: Mutex::new(HashMap::new()),
-            triggers_paused: std::sync::atomic::AtomicBool::new(false),
-            scheduler_handle: Mutex::new(None),
             automation_scheduler_handle: Mutex::new(None),
             automation_schedules_paused: std::sync::atomic::AtomicBool::new(false),
             git_watchers: Mutex::new(HashMap::new()),

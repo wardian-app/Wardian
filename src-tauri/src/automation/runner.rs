@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -580,12 +579,14 @@ fn latest_terminal_status(snapshot: &crate::state::agent_watch::WatchSnapshot) -
 }
 
 /// Test double: scripted responses keyed by node id; records call order.
+#[cfg(test)]
 #[derive(Default)]
 pub struct FakeAgentRunner {
-    responses: HashMap<String, String>,
+    responses: std::collections::HashMap<String, String>,
     calls: Mutex<Vec<String>>,
 }
 
+#[cfg(test)]
 impl FakeAgentRunner {
     pub fn new() -> Self {
         Self::default()
@@ -601,6 +602,7 @@ impl FakeAgentRunner {
     }
 }
 
+#[cfg(test)]
 impl AgentRunner for FakeAgentRunner {
     fn run(&self, spec: AgentRunSpec) -> AgentRunFuture<'_> {
         Box::pin(async move {
@@ -619,12 +621,14 @@ impl AgentRunner for FakeAgentRunner {
 }
 
 /// Test double for active-agent execution.
+#[cfg(test)]
 #[derive(Default)]
 pub struct FakeLiveAgentRunner {
-    responses: HashMap<String, String>,
+    responses: std::collections::HashMap<String, String>,
     calls: Mutex<Vec<String>>,
 }
 
+#[cfg(test)]
 impl FakeLiveAgentRunner {
     pub fn new() -> Self {
         Self::default()
@@ -643,6 +647,7 @@ impl FakeLiveAgentRunner {
     }
 }
 
+#[cfg(test)]
 impl LiveAgentRunner for FakeLiveAgentRunner {
     fn run_live(&self, spec: LiveAgentRunSpec) -> LiveAgentRunFuture<'_> {
         Box::pin(async move {

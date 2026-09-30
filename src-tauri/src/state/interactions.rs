@@ -138,32 +138,6 @@ impl InteractionState {
         Ok(record)
     }
 
-    pub async fn create_message_durable_with_id(
-        &self,
-        id: String,
-        sender_session_id: Option<String>,
-        target_session_ids: Vec<String>,
-        body_ref: InteractionBodyRef,
-    ) -> Result<InteractionRecord, String> {
-        let _mutation = self.mutation_lock.lock().await;
-        let deleted_sessions = self.deleted_sessions.lock().await;
-        if let Some(target_session_id) = target_session_ids
-            .iter()
-            .find(|target| deleted_sessions.contains(*target))
-        {
-            return Err(format!("agent has been deleted: {target_session_id}"));
-        }
-        drop(deleted_sessions);
-        let record = message_record(id, sender_session_id, target_session_ids, body_ref);
-        wardian_core::db::upsert_interaction_record(&record)
-            .map_err(|error| format!("failed to persist interaction: {error}"))?;
-        self.records
-            .lock()
-            .await
-            .insert(record.id.clone(), record.clone());
-        Ok(record)
-    }
-
     /// Advances the durable lifecycle of one ordinary outbound message.
     ///
     /// A message has one target per interaction, so this state remains an
@@ -287,10 +261,6 @@ impl InteractionState {
         }
         records.insert(record.id.clone(), record.clone());
         Ok(record)
-    }
-
-    pub async fn inbox_notifications(&self, limit: usize) -> (Vec<InteractionRecord>, bool) {
-        self.inbox_notifications_page(0, limit).await
     }
 
     pub async fn inbox_notifications_page(

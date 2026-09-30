@@ -64,10 +64,6 @@ fn is_credential_header(name: &str, configured_signature: Option<&str>) -> bool 
         .any(|marker| lower.contains(marker))
 }
 
-fn now_ms() -> u64 {
-    chrono::Utc::now().timestamp_millis().max(0) as u64
-}
-
 fn header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
     headers
         .iter()
@@ -178,7 +174,6 @@ async fn receive(
 
     let delivery_id = webhook_rules::delivery_id(&pairs, &body);
     let fire = ListenerFire {
-        listener_id: listener.id.clone(),
         event_identity: delivery_id.clone(),
         payload: payload(&listener, &trigger, &delivery_id, &pairs, &body),
     };
@@ -272,12 +267,6 @@ pub async fn serve(
         }
     });
     Ok((handle, bound))
-}
-
-/// Timestamped rejection helper shared with the supervisor when a delivery is
-/// refused before a listener is identified.
-pub fn rejection_at() -> u64 {
-    now_ms()
 }
 
 #[cfg(test)]

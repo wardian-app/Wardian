@@ -1147,6 +1147,7 @@ fn slow_telemetry_report_only_formats_slow_passes() {
             provider: "codex".to_string(),
             duration: std::time::Duration::from_millis(620),
         }],
+        ..Default::default()
     };
 
     let message = report.slow_log_message(std::time::Duration::from_millis(500));
@@ -1161,6 +1162,7 @@ fn slow_telemetry_report_only_formats_slow_passes() {
         sys_refresh: std::time::Duration::from_millis(25),
         agent_count: 1,
         slow_agents: Vec::new(),
+        ..Default::default()
     }
     .slow_log_message(std::time::Duration::from_millis(500))
     .is_none());

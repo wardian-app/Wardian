@@ -101,9 +101,6 @@ pub struct CodexSharedReceipt {
     pub message_id: Option<String>,
 }
 
-pub type CodexPushReceipt = CodexSharedReceipt;
-pub type CodexInterruptReceipt = CodexSharedReceipt;
-
 const SETTINGS_NOTIFICATION_CAPACITY: usize = 32;
 
 /// The exact provider/thread/client identity captured before a settings write.

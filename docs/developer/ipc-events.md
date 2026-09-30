@@ -50,8 +50,6 @@ The Files IPC contract uses snake-case DTOs nested under `request`:
 - `close_file_renderer_lease` revokes the matching renderer lease and its
   tickets without closing the subscription.
 - `close_file_resource` releases one subscription.
-- `pick_file_resource` opens a native picker and returns an exact-file grant or
-  `null` when cancelled.
 
 For complete request and response JSON, see
 [Tauri Command Reference](./tauri-command-reference.md#files-resources-commandsfilesrs).

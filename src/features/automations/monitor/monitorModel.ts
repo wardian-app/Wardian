@@ -35,10 +35,6 @@ export interface AutomationMonitorModel {
 
 const SECTION_ORDER: ActivitySection[] = ['attention', 'running', 'scheduled', 'history'];
 
-export function buildActivities(runs: RunSummary[], schedules: AutomationSchedule[]): AutomationActivity[] {
-  return buildMonitorModel(runs, schedules).activities;
-}
-
 export function buildMonitorModel(runs: RunSummary[], schedules: AutomationSchedule[]): AutomationMonitorModel {
   const activities: AutomationActivity[] = [];
   const historyRuns: RunSummary[] = [];
