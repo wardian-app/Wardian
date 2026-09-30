@@ -103,10 +103,18 @@ pub struct AppState {
     /// remain generation-bound diagnostics behind this broker.
     pub native_delivery: Arc<crate::delivery::native_broker::NativeDeliveryBroker>,
     /// Orders provider-log policy observations before per-agent archive cursor
-    /// commits. Callers must snapshot the global agent roster before taking
-    /// this gate, then acquire per-agent archive locks only after it.
-    pub conversation_capture_policy_lock: Mutex<()>,
+    /// commits. It has two lanes: policy transitions and lifecycle boundaries
+    /// queue in order, while best-effort captures poll and stand aside for a
+    /// registered boundary (see `capture_policy_gate`). A capture snapshots its
+    /// agent after taking the gate; a policy transition snapshots the roster
+    /// before it. Per-agent archive locks come only after the gate, and no
+    /// holder of `state.agents` may wait for it.
+    pub conversation_capture_policy_lock: crate::state::capture_policy_gate::CapturePolicyGate,
     pub conversation_archive: ConversationArchiveState,
+    /// Agents whose New Session is running, so a repeated request is refused
+    /// instead of queueing behind the first one. A std mutex because the
+    /// claim's `Drop` cannot await; it is never held across an await.
+    pub clears_in_flight: std::sync::Mutex<std::collections::HashSet<String>>,
     // Serializes and coalesces per-turn change snapshots, one slot per workspace.
     pub change_snapshots: ChangeSnapshotRuntime,
     // Live-only remote-control authentication and ticket records.
@@ -526,8 +534,9 @@ impl Default for AppState {
             user_terminal: Mutex::new(None),
             interactions: InteractionState::default(),
             native_delivery: Arc::new(crate::delivery::native_broker::NativeDeliveryBroker::new()),
-            conversation_capture_policy_lock: Mutex::new(()),
+            conversation_capture_policy_lock: Default::default(),
             conversation_archive: ConversationArchiveState::default(),
+            clears_in_flight: Default::default(),
             change_snapshots: ChangeSnapshotRuntime::new(),
             remote_runtime: Mutex::new(crate::remote::models::RemoteRuntimeState::default()),
             remote_agent_roster_cache: RwLock::new(None),
