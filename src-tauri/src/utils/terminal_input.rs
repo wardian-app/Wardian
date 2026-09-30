@@ -9,6 +9,9 @@ pub fn normalize_prompt_for_terminal_submit(prompt: &str) -> String {
         .to_string()
 }
 
+/// Payload and submit-key bytes a provider receives for `prompt`, so tests can
+/// assert the wire format without a terminal.
+#[cfg(test)]
 pub fn provider_submit_chunks(provider_name: &str, prompt: &str) -> Result<Vec<Vec<u8>>, String> {
     let normalized = normalize_prompt_for_terminal_submit(prompt);
     if normalized.is_empty() {
@@ -20,65 +23,11 @@ pub fn provider_submit_chunks(provider_name: &str, prompt: &str) -> Result<Vec<V
     Ok(vec![plan.payload_bytes, plan.submit_key])
 }
 
-pub async fn submit_prompt_chunks_via_sender<S: TerminalInputSink + ?Sized>(
-    tx: &S,
-    provider_name: &str,
-    prompt: &str,
-) -> Result<(), String> {
-    submit_prompt_with_outcome_chunks_via_sender(tx, provider_name, prompt)
-        .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
-}
-
-pub async fn submit_prompt_with_outcome_chunks_via_sender<S: TerminalInputSink + ?Sized>(
-    tx: &S,
-    provider_name: &str,
-    prompt: &str,
-) -> Result<
-    crate::utils::delivery_transaction::TerminalDeliveryOutcome,
-    crate::utils::delivery_transaction::TerminalDeliveryError,
-> {
-    submit_prompt_with_outcome_chunks_via_sender_after_payload(
-        tx,
-        provider_name,
-        prompt,
-        || async { Ok(()) },
-    )
-    .await
-}
-
-pub async fn submit_prompt_with_outcome_chunks_via_sender_after_payload<S, F, Fut>(
-    tx: &S,
-    provider_name: &str,
-    prompt: &str,
-    on_payload_sent: F,
-) -> Result<
-    crate::utils::delivery_transaction::TerminalDeliveryOutcome,
-    crate::utils::delivery_transaction::TerminalDeliveryError,
->
-where
-    S: TerminalInputSink + ?Sized,
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<(), crate::utils::delivery_transaction::TerminalDeliveryError>>,
-{
-    submit_prompt_with_outcome_chunks_via_sender_after_payload_and_before_submit(
-        tx,
-        provider_name,
-        prompt,
-        on_payload_sent,
-        || async { Ok(()) },
-    )
-    .await
-}
-
-pub async fn submit_prompt_with_outcome_chunks_via_sender_after_payload_and_before_submit<
-    S,
-    F,
-    Fut,
-    G,
-    Gfut,
->(
+/// Submits `prompt` through the provider's delivery profile.
+///
+/// `on_payload_sent` runs after the payload bytes are written and
+/// `on_before_submit` immediately before the submit key.
+pub async fn submit_prompt_via_sender<S, F, Fut, G, Gfut>(
     tx: &S,
     provider_name: &str,
     prompt: &str,
@@ -96,8 +45,8 @@ where
     Gfut: Future<Output = Result<(), crate::utils::delivery_transaction::TerminalDeliveryError>>,
 {
     let normalized = normalize_prompt_for_terminal_submit(prompt);
+    let profile = crate::utils::delivery_profile::delivery_profile(provider_name);
     if normalized.is_empty() {
-        let profile = crate::utils::delivery_profile::delivery_profile(provider_name);
         return crate::utils::delivery_transaction::submit_terminal_transaction(
             tx,
             &profile,
@@ -106,7 +55,6 @@ where
         .await;
     }
 
-    let profile = crate::utils::delivery_profile::delivery_profile(provider_name);
     crate::utils::delivery_transaction::submit_terminal_transaction_with_hooks(
         tx,
         &profile,
@@ -117,86 +65,10 @@ where
     .await
 }
 
-pub async fn submit_prompt_via_sender<S: TerminalInputSink + ?Sized>(
-    tx: &S,
-    prompt: &str,
-    provider_name: &str,
-) -> Result<(), String> {
-    submit_prompt_chunks_via_sender(tx, provider_name, prompt).await
-}
-
-pub async fn submit_prompt_with_outcome_via_sender<S: TerminalInputSink + ?Sized>(
-    tx: &S,
-    prompt: &str,
-    provider_name: &str,
-) -> Result<
-    crate::utils::delivery_transaction::TerminalDeliveryOutcome,
-    crate::utils::delivery_transaction::TerminalDeliveryError,
-> {
-    submit_prompt_with_outcome_chunks_via_sender(tx, provider_name, prompt).await
-}
-
-pub async fn submit_prompt_with_outcome_via_sender_after_payload<S, F, Fut>(
-    tx: &S,
-    prompt: &str,
-    provider_name: &str,
-    on_payload_sent: F,
-) -> Result<
-    crate::utils::delivery_transaction::TerminalDeliveryOutcome,
-    crate::utils::delivery_transaction::TerminalDeliveryError,
->
-where
-    S: TerminalInputSink + ?Sized,
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<(), crate::utils::delivery_transaction::TerminalDeliveryError>>,
-{
-    submit_prompt_with_outcome_chunks_via_sender_after_payload(
-        tx,
-        provider_name,
-        prompt,
-        on_payload_sent,
-    )
-    .await
-}
-
-pub async fn submit_prompt_with_outcome_via_sender_after_payload_and_before_submit<
-    S,
-    F,
-    Fut,
-    G,
-    Gfut,
->(
-    tx: &S,
-    prompt: &str,
-    provider_name: &str,
-    on_payload_sent: F,
-    on_before_submit: G,
-) -> Result<
-    crate::utils::delivery_transaction::TerminalDeliveryOutcome,
-    crate::utils::delivery_transaction::TerminalDeliveryError,
->
-where
-    S: TerminalInputSink + ?Sized,
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<(), crate::utils::delivery_transaction::TerminalDeliveryError>>,
-    G: FnOnce() -> Gfut,
-    Gfut: Future<Output = Result<(), crate::utils::delivery_transaction::TerminalDeliveryError>>,
-{
-    submit_prompt_with_outcome_chunks_via_sender_after_payload_and_before_submit(
-        tx,
-        provider_name,
-        prompt,
-        on_payload_sent,
-        on_before_submit,
-    )
-    .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         normalize_prompt_for_terminal_submit, provider_submit_chunks, submit_prompt_via_sender,
-        submit_prompt_with_outcome_via_sender,
     };
 
     #[test]
@@ -211,9 +83,15 @@ mod tests {
     async fn submit_prompt_sends_text_then_submit_key() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
 
-        submit_prompt_via_sender(&tx, "hello\nworld", "gemini")
-            .await
-            .expect("submit prompt");
+        submit_prompt_via_sender(
+            &tx,
+            "gemini",
+            "hello\nworld",
+            || async { Ok(()) },
+            || async { Ok(()) },
+        )
+        .await
+        .expect("submit prompt");
 
         let first = rx.recv().await.expect("first payload");
         let second = rx.recv().await.expect("second payload");
@@ -226,9 +104,15 @@ mod tests {
     async fn submit_prompt_with_outcome_returns_terminal_delivery_outcome() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
 
-        let outcome = submit_prompt_with_outcome_via_sender(&tx, "hello", "gemini")
-            .await
-            .expect("submit prompt");
+        let outcome = submit_prompt_via_sender(
+            &tx,
+            "gemini",
+            "hello",
+            || async { Ok(()) },
+            || async { Ok(()) },
+        )
+        .await
+        .expect("submit prompt");
 
         assert_eq!(rx.recv().await.expect("payload"), b"hello".to_vec());
         assert_eq!(rx.recv().await.expect("submit key"), b"\r".to_vec());
