@@ -92,6 +92,12 @@ evidence do not create a root badge.
 
 In Terminal mode, click inside the terminal before typing. When the same agent terminal is visible elsewhere, the clicked presentation explicitly requests ownership; merely tabbing through the UI does not steal it. A **Mirror** remains read-only until ownership transfers. Reclaimed renderers restore and fit automatically when visible.
 
+During initial display, new and resumed terminal frames stay hidden while
+their geometry settles. A visible, mounted renderer retries the fit
+automatically, so temporary sizing instability does not require a window
+resize to reveal it. If restoring a reclaimed renderer fails, its recovery
+notice provides a **Retry** action.
+
 ## Arrange and Focus Agents
 
 - Drag card headers to reorder agents in Grid mode.
