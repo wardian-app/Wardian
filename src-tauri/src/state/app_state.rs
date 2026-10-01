@@ -92,7 +92,7 @@ pub struct AppState {
     // Single standalone terminal session for the human user.
     pub user_terminal: Mutex<Option<crate::state::UserTerminalSession>>,
     // Live-only structured ask/reply requests keyed by backend-owned request id.
-    pub interactions: InteractionState,
+    pub interactions: Arc<InteractionState>,
     /// Wardian-owned persistent provider-session actors. Provider identities
     /// remain generation-bound diagnostics behind this broker.
     pub native_delivery: Arc<crate::delivery::native_broker::NativeDeliveryBroker>,
@@ -522,7 +522,7 @@ impl Default for AppState {
             file_resources: FileResourceRuntime::default(),
             artifact_runtime: Arc::new(ArtifactRuntime::default()),
             user_terminal: Mutex::new(None),
-            interactions: InteractionState::default(),
+            interactions: Arc::new(InteractionState::default()),
             native_delivery: Arc::new(crate::delivery::native_broker::NativeDeliveryBroker::new()),
             conversation_capture_policy_lock: Default::default(),
             conversation_archive: ConversationArchiveState::default(),

@@ -54,6 +54,13 @@ only when its `parent_interaction_id` equals the saved ID. Check `reply_status`:
 `done`, `blocked`, or `failed`. Do not infer completion from Idle status,
 terminal text, an empty page, or an unrelated answer.
 
+Canonical tasks dispatched to an exact native Codex turn automatically return
+that turn's final result to the requester unless an explicit reply has already
+completed the task. Tasks acquired through receive, composer delivery, and
+providers without exact native completion support require explicit reply.
+Several tasks steered into one turn share its final result. Completion wakes
+an existing receive wait without starting a finished requester's turn.
+
 ```bash
 wardian message receive --cursor '<next-cursor>' --timeout-ms 60000
 wardian message receive --cursor '<next-cursor>' --ack-cursor '<consumed-page-ack-cursor>'
