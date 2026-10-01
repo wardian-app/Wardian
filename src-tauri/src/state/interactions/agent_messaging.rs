@@ -93,6 +93,21 @@ impl InteractionState {
         store::with_db(|conn| store::receive(conn, recipient, cursor, ack_cursor, limit))
     }
 
+    /// Check for mailbox activity without claiming messages or advancing cursors.
+    pub async fn has_unacknowledged_agent_messages(
+        &self,
+        recipient: &str,
+    ) -> Result<bool, AgentMessagingError> {
+        let _mutation = self.mutation_lock.lock().await;
+        if self.deleted_sessions.lock().await.contains(recipient) {
+            return Err(AgentMessagingError::new(
+                "unauthorized",
+                "Receiver was deleted.",
+            ));
+        }
+        store::with_db(|conn| store::has_unacknowledged_messages(conn, recipient))
+    }
+
     /// Claim while the caller owns the runtime lifecycle boundary. Generation
     /// selection and durable claim publication share the interaction mutation gate.
     pub async fn claim_agent_task(

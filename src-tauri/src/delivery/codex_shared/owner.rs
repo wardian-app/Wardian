@@ -919,10 +919,11 @@ fn append_runtime_context(
 fn initialization_context(agent_id: &str, name: &str) -> String {
     format!(
         "Wardian runtime identity: {}. \
-         The wardian MCP server exposes six messaging tools: \
+         The wardian MCP server exposes seven messaging tools: \
          list_agents() discovers available Wardian UUIDs, names and statuses; \
          send_message(target,message) delivers information without waking or interrupting; \
          followup_task(target,message) assigns work asynchronously and returns a request receipt; \
+         wait_agent(timeout_ms?) waits for mailbox activity, including completion replies, without reading or acknowledging the inbox; \
          receive_messages(cursor?,ack_cursor?,limit?,timeout_ms?) reads your inbox, including correlated replies; \
          reply(request_id,status,message) answers canonical peer tasks with status done, blocked or failed; \
          interrupt_agent(target) requests interruption of the observed active turn while retaining the session. \
@@ -935,6 +936,7 @@ fn initialization_context(agent_id: &str, name: &str) -> String {
          A canonical task dispatched to an exact native Codex turn automatically returns that turn's final result \
          to its requester unless an explicit reply already completed it. Explicit reply is required for tasks \
          acquired through receive_messages and providers without exact-turn completion support. \
+         If a task result is required, wait_agent reports mailbox activity and receive_messages reads the correlated reply. \
          A transport admission receipt is not a correlated reply to that task. \
          Complete ordinary input with an ordinary assistant response. Native interaction_id, message_id and \
          clientUserMessageId are diagnostic identities, not reply request IDs; never substitute them for request_id. \
@@ -956,6 +958,7 @@ mod tests {
             "send_message(",
             "followup_task(",
             "receive_messages(",
+            "wait_agent(",
             "reply(",
             "interrupt_agent(",
         ] {
@@ -966,6 +969,7 @@ mod tests {
             "Owned agent",
             "request_id",
             "ack_cursor",
+            "without reading or acknowledging the inbox",
             "not human requests",
             "automatically returns that turn's final result",
             "A transport admission receipt is not a correlated reply",

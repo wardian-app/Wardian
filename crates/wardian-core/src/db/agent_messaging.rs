@@ -622,6 +622,24 @@ fn issue_cursor(conn: &Connection, recipient: &str, sequence: i64) -> Result<Str
     Ok(token)
 }
 
+/// Check whether the recipient has available records beyond its acknowledged
+/// frontier without claiming an item or issuing a cursor.
+pub fn has_unacknowledged_messages(conn: &Connection, recipient: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM agent_message_availability a
+            LEFT JOIN agent_message_delivery d ON d.interaction_id=a.interaction_id
+            WHERE a.recipient=?1
+            AND a.sequence > COALESCE(
+                (SELECT sequence FROM agent_message_ack WHERE recipient=?1),0
+            )
+            AND (d.owner IS NULL OR d.owner IN ('stored','pending','receiver_available'))
+        )",
+        [recipient],
+        |row| row.get(0),
+    )?)
+}
+
 /// Read/claim a bounded page transactionally. Replaying its input cursor returns
 /// the same identities; a receiver claim never dispatches work. Only ack_cursor
 /// advances acknowledgement, bounded by a cursor this recipient was issued.
