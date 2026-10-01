@@ -377,6 +377,8 @@ export interface SkillFacetContext {
  * A previous revision also emitted the skill's own `skill:<id>` identity so a
  * skill *unit* would share a token with its agents and be pulled toward them.
  * That was a workaround for placing the skill at all; nothing needs it now.
+ *
+ * @internal Test support, no production caller: Garden tests build fixtures with it.
  */
 export function emitSkillFacets(
   ref: EntityRef,

@@ -1353,6 +1353,7 @@ export function terminalSessionClientFor(sessionId: string) {
   return client;
 }
 
+/** @internal Test support, no production caller: resets module state between tests. */
 export async function resetTerminalSessionClientsForTesting() {
   const clients = Array.from(terminalSessionClients.values());
   terminalSessionClients.clear();
@@ -1364,6 +1365,7 @@ export async function resetTerminalSessionClientsForTesting() {
   await Promise.all(clients.map((client) => client.destroy()));
 }
 
+/** @internal Test support, no production caller: test seam exposing internals to terminalSessionClient tests. */
 export const __terminalSessionClientTesting = {
   MAX_BATCHES_PER_TURN,
   MAX_BYTES_PER_BATCH,

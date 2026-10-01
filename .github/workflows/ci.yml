@@ -72,6 +72,9 @@ jobs:
       - name: Verify Dead Code
         # local-verify: frontend
         run: npm run check:deadcode
+      - name: Verify Production Dead Code
+        # local-verify: frontend
+        run: npm run check:deadcode:production
       - name: Verify Debt Budgets
         # local-verify: frontend
         run: npm run check:budgets

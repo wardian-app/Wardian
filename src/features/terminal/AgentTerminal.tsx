@@ -3912,6 +3912,7 @@ export const AgentTerminal = memo(function AgentTerminal({
   );
 });
 
+/** @internal Test support, no production caller: test seam exposing internals to AgentTerminal tests. */
 export const __terminalTesting = {
   applyBrokerSnapshot,
   canSendTerminalInput,
