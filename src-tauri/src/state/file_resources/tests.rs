@@ -3100,6 +3100,10 @@
         fs::write(&path, "first incarnation\n").expect("fixture");
         let config = agent_config("agent-a", temp.path());
         let runtime = test_runtime();
+        runtime
+            .inner
+            .watcher_refresh_enabled
+            .store(false, Ordering::Release);
         let first = runtime
             .open_agent_file("agent-a", &config, &path, None)
             .await
@@ -3122,19 +3126,57 @@
             .open_agent_file("agent-a", &config, &path, None)
             .await
             .expect("second open");
-        fs::write(&path, "unstable replacement\n").expect("unstable content");
+        let current_incarnation = runtime
+            .inner
+            .entries
+            .lock()
+            .await
+            .get(&second.resource_id)
+            .expect("second entry")
+            .incarnation_id;
 
+        // Drive the production refresh path explicitly so watcher timing cannot
+        // decide whether this snapshot has advanced before the stale callback.
+        fs::write(&path, "current incarnation refresh\n").expect("current content");
+        runtime
+            .refresh_if_stable(&second.resource_id, current_incarnation, 0)
+            .await;
+        let current_refresh = runtime
+            .snapshot(&second.resource_id)
+            .await
+            .expect("current refresh snapshot");
+        assert_eq!(current_refresh.revision, 2);
+        assert_ne!(
+            current_refresh.descriptor.content_hash,
+            second.descriptor.content_hash
+        );
+
+        fs::write(&path, "stale callback must not publish\n").expect("later content");
         runtime
             .refresh_if_stable(&second.resource_id, old_incarnation, 0)
             .await;
-        let current = runtime
+        let after_stale = runtime
             .snapshot(&second.resource_id)
             .await
-            .expect("current snapshot");
-        assert_eq!(current.revision, 1);
+            .expect("snapshot after stale callback");
+        assert_eq!(after_stale.revision, 2);
         assert_eq!(
-            current.descriptor.content_hash,
-            second.descriptor.content_hash
+            after_stale.descriptor.content_hash,
+            current_refresh.descriptor.content_hash
+        );
+
+        // The current incarnation must still be able to observe later content.
+        runtime
+            .refresh_if_stable(&second.resource_id, current_incarnation, 0)
+            .await;
+        let current_control = runtime
+            .snapshot(&second.resource_id)
+            .await
+            .expect("current-incarnation control snapshot");
+        assert_eq!(current_control.revision, 3);
+        assert_ne!(
+            current_control.descriptor.content_hash,
+            after_stale.descriptor.content_hash
         );
     }
 
