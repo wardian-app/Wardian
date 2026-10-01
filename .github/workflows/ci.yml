@@ -126,6 +126,12 @@ jobs:
       - name: Check Compilation
         # local-verify: backend
         run: cargo check --workspace
+      # Runs after `cargo check --workspace` so every dependency is already
+      # checked; only the visibility-rewritten copy of the workspace crates is
+      # compiled. Windows is the authoritative platform for the baseline.
+      - name: Verify Rust Dead Code
+        # local-verify: backend
+        run: npm run check:rust-deadcode
 
   backend-macos-acl:
     name: Backend (macOS - Codex Home ACL)

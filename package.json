@@ -28,6 +28,7 @@
     "lint": "eslint .",
     "verify:ci": "node scripts/verify-ci.mjs",
     "check:deadcode": "knip --include files,exports,types,nsExports,nsTypes",
+    "check:rust-deadcode": "node scripts/verify-rust-deadcode.mjs",
     "check:test-reachability": "node scripts/verify-test-reachability.mjs",
     "check:budgets": "node scripts/verify-budgets.mjs",
     "check:page-fixtures": "node scripts/verify-page-fixtures.mjs",

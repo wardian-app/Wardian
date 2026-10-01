@@ -1,0 +1,201 @@
+import path from 'node:path';
+import { describe, expect, it } from 'vitest';
+import {
+  analyzeSource,
+  collectReferences,
+  lexRust,
+  loadCrate,
+  productionCfgEnv,
+  publicItems,
+} from '../scripts/lib/rust-source.mjs';
+import {
+  compareWithBaseline,
+  deadCodeFindings,
+  readBaseline,
+  registeredCommands,
+  rewriteManifestPaths,
+  rewriteVisibility,
+  splitCfgGated,
+} from '../scripts/verify-rust-deadcode.mjs';
+
+const WINDOWS = productionCfgEnv('win32');
+const LINUX = productionCfgEnv('linux');
+const analyze = (source: string, env = WINDOWS) => analyzeSource(source, { testOnly: false, inactive: false }, env);
+
+/** The flags of the identifier `name` at its `occurrence`-th appearance. */
+function flagsOf(analysis: ReturnType<typeof analyze>, name: string, occurrence = 0) {
+  const indexes = analysis.tokens.values.flatMap((value, index) => (value === name ? [index] : []));
+  const index = indexes[occurrence];
+  return { testOnly: analysis.testOnly[index] === 1, inactive: analysis.inactive[index] === 1 };
+}
+
+describe('Rust source index', () => {
+  it('drops comments and keeps string bodies as single tokens', () => {
+    const tokens = lexRust([
+      '/// calls `ghost` in prose',
+      '/* nested /* ghost */ still comment */',
+      'let url = "http://x//ghost"; let raw = r#"ghost "quoted""#;',
+      "let c = '\"'; fn f<'a>(x: &'a str) { real(x) }",
+    ].join('\n'));
+    const identifiers = tokens.values.filter((_, index) => tokens.kinds[index] === 1);
+    expect(identifiers).not.toContain('ghost');
+    expect(identifiers).toContain('real');
+    expect(tokens.values).toContain('ghost "quoted"');
+  });
+
+  it('marks cfg(test), #[test], and other-platform regions', () => {
+    const analysis = analyze([
+      'fn prod() { shared() }',
+      '#[cfg(test)] mod tests { fn t() { shared() } }',
+      '#[tokio::test(flavor = "multi_thread")] async fn async_case() { shared() }',
+      '#[cfg(unix)] fn unix_only() { shared() }',
+      '#[cfg(all(test, windows))] fn windows_test() { shared() }',
+      '#[cfg(not(test))] fn not_test() { shared() }',
+    ].join('\n'));
+    expect(flagsOf(analysis, 'shared', 0)).toEqual({ testOnly: false, inactive: false });
+    expect(flagsOf(analysis, 'shared', 1)).toEqual({ testOnly: true, inactive: true });
+    expect(flagsOf(analysis, 'shared', 2)).toEqual({ testOnly: true, inactive: true });
+    expect(flagsOf(analysis, 'shared', 3)).toEqual({ testOnly: false, inactive: true });
+    expect(flagsOf(analysis, 'shared', 4)).toEqual({ testOnly: true, inactive: true });
+    expect(flagsOf(analysis, 'shared', 5)).toEqual({ testOnly: false, inactive: false });
+    expect(flagsOf(analyze('#[cfg(unix)] fn u() { shared() }', LINUX), 'shared')).toEqual({ testOnly: false, inactive: false });
+  });
+
+  it('ends a cfg field region at its comma, not at the end of the struct', () => {
+    const analysis = analyze('struct S { #[cfg(test)] hook: Hook, live: Live }');
+    expect(flagsOf(analysis, 'Hook').testOnly).toBe(true);
+    expect(flagsOf(analysis, 'Live').testOnly).toBe(false);
+  });
+
+  it('counts references but not definitions, use declarations, or prose', () => {
+    const analysis = analyze([
+      'use crate::db::{target, other};',
+      'pub fn target() {}',
+      '#[serde(default = "crate::defaults::target")] struct S;',
+      'fn caller() { println!("{target}"); let _ = "target"; }',
+    ].join('\n'));
+    const references = collectReferences(analysis, new Set(['target']));
+    // One from the serde attribute string, one from the inline format argument.
+    expect(references).toHaveLength(2);
+  });
+
+  it('lists pub items but not restricted or test-only ones', () => {
+    const items = publicItems(analyze([
+      'pub fn a() {}',
+      'pub(crate) fn b() {}',
+      'pub const fn c() {}',
+      'pub const D: u8 = 1;',
+      'pub struct E;',
+      'impl E { pub async fn f(&self) {} }',
+      '#[cfg(test)] pub fn g() {}',
+      'pub mod h {}',
+    ].join('\n')));
+    expect(items.map((item) => `${item.kind} ${item.name}`)).toEqual([
+      'fn a', 'fn c', 'const D', 'struct E', 'fn f',
+    ]);
+  });
+
+  it('follows mod, #[path], and include! the way rustc resolves files', () => {
+    const root = path.resolve('/ws/src/lib.rs');
+    const files: Record<string, string> = {
+      [root]: 'mod a;\n#[path = "custom/b_impl.rs"] mod b;\n#[cfg(test)] mod tests;\ninclude!("inc.rs");',
+      [path.resolve('/ws/src/a.rs')]: 'mod child;',
+      [path.resolve('/ws/src/a/child.rs')]: 'pub fn from_child() {}',
+      [path.resolve('/ws/src/custom/b_impl.rs')]: 'mod nested;',
+      [path.resolve('/ws/src/custom/nested.rs')]: 'pub fn nested() {}',
+      [path.resolve('/ws/src/tests.rs')]: 'fn helper() {}',
+      [path.resolve('/ws/src/inc.rs')]: 'pub fn included() {}',
+    };
+    const crate = loadCrate(root, WINDOWS, (file: string) => {
+      const text = files[path.resolve(file)];
+      if (text === undefined) throw new Error(`unexpected read: ${file}`);
+      return text;
+    }, (file: string) => files[path.resolve(file)] !== undefined);
+    expect(crate.unresolved).toEqual([]);
+    expect([...crate.files.keys()].map((file) => path.relative(path.resolve('/ws/src'), file).split(path.sep).join('/')).sort())
+      .toEqual(['a.rs', 'a/child.rs', 'custom/b_impl.rs', 'custom/nested.rs', 'inc.rs', 'lib.rs', 'tests.rs']);
+    expect(crate.files.get(path.resolve('/ws/src/tests.rs'))?.testOnly[0]).toBe(1);
+    expect(crate.files.get(path.resolve('/ws/src/a/child.rs'))?.testOnly[0]).toBe(0);
+  });
+});
+
+describe('Rust dead-code gate', () => {
+  it('rewrites pub items to crate visibility and keeps named entry points public', () => {
+    const source = 'pub fn run() {}\npub async fn other() {}\npub struct S { pub field: u8 }\npub(super) fn kept() {}\npub use a::b;';
+    expect(rewriteVisibility(source, ['run'])).toBe(
+      'pub fn run() {}\npub(crate) async fn other() {}\npub(crate) struct S { pub field: u8 }\npub(super) fn kept() {}\npub(crate) use a::b;',
+    );
+  });
+
+  it('points manifest paths outside the copied tree back at the checkout', () => {
+    const manifestDir = path.resolve('/ws');
+    const copied = path.join(manifestDir, 'src-tauri');
+    const text = 'portable-pty = { path = "vendor/portable-pty" }\napp = { path = "src-tauri" }';
+    const rewritten = rewriteManifestPaths(text, manifestDir, (resolved: string) => resolved.startsWith(copied));
+    expect(rewritten).toContain(`path = "${path.join(manifestDir, 'vendor', 'portable-pty').split(path.sep).join('/')}"`);
+    expect(rewritten).toContain('path = "src-tauri"');
+  });
+
+  it('turns a rustc dead_code diagnostic into one finding per item with its parent type', () => {
+    const findings = deadCodeFindings({
+      message: 'methods `open` and `close` are never used',
+      code: { code: 'dead_code' },
+      spans: [
+        { is_primary: false, label: 'methods in this implementation', file_name: 'src-tauri/src/a.rs', line_start: 3, text: [{ text: 'impl<T> Store<T> {', highlight_start: 1, highlight_end: 17 }] },
+        { is_primary: true, label: null, file_name: 'src-tauri/src/a.rs', line_start: 4, text: [{ text: '    pub(crate) fn open(&self) {}', highlight_start: 19, highlight_end: 23 }] },
+        { is_primary: true, label: null, file_name: 'src-tauri/src/a.rs', line_start: 9, text: [{ text: '    pub(crate) fn close(&self) {}', highlight_start: 19, highlight_end: 24 }] },
+      ],
+    }, (file: string) => file);
+    expect(findings.map((finding) => [finding.key, finding.kind, finding.line])).toEqual([
+      ['src-tauri/src/a.rs::Store.open', 'method', 4],
+      ['src-tauri/src/a.rs::Store.close', 'method', 9],
+    ]);
+    expect(deadCodeFindings({ message: 'unused import', code: { code: 'unused_imports' }, spans: [] }, (file: string) => file)).toEqual([]);
+  });
+
+  it('sets aside a finding only when compiled-out code names it and its type', () => {
+    const analysis = analyze([
+      '#[cfg(unix)] fn unix_caller(store: &Store) { store.open(); free_helper(); }',
+      '#[cfg(unix)] fn unrelated(other: &Other) { other.close(); }',
+    ].join('\n'));
+    const finding = (key: string, name: string, parent?: string) => ({ key, file: 'a.rs', line: 1, name, parent, kind: 'method', source: 'rustc' });
+    const { kept, gated } = splitCfgGated([
+      finding('a.rs::Store.open', 'open', 'Store'),
+      finding('a.rs::Store.close', 'close', 'Store'),
+      finding('a.rs::free_helper', 'free_helper'),
+    ], [analysis]);
+    expect(gated.map((item) => item.key)).toEqual(['a.rs::Store.open', 'a.rs::free_helper']);
+    expect(kept.map((item) => item.key)).toEqual(['a.rs::Store.close']);
+  });
+
+  it('reads tauri::generate_handler! entries, skipping cfg attributes', () => {
+    expect(registeredCommands([
+      '.invoke_handler(tauri::generate_handler![',
+      '  commands::a::first,',
+      '  #[cfg(debug_assertions)]',
+      '  commands::debug::debug_second,',
+      '  third',
+      '])',
+    ].join('\n'))).toEqual(['first', 'debug_second', 'third']);
+  });
+
+  it('fails new findings and stale entries, but not entries this platform cannot observe', () => {
+    const baseline = readBaseline(JSON.stringify({
+      groups: [{ reason: 'Held only for Drop.', entries: ['a.rs::kept', 'a.rs::gone', 'win.rs::windows_only'] }],
+    }));
+    const findings = [
+      { key: 'a.rs::kept', file: 'a.rs', line: 1, name: 'kept', kind: 'fn', source: 'rustc' },
+      { key: 'b.rs::new_item', file: 'b.rs', line: 2, name: 'new_item', kind: 'fn', source: 'rustc' },
+    ];
+    const result = compareWithBaseline(findings, baseline, (entry: string) => !entry.startsWith('win.rs'));
+    expect(result.added.map((finding) => finding.key)).toEqual(['b.rs::new_item']);
+    expect(result.stale).toEqual(['a.rs::gone']);
+  });
+
+  it('rejects a baseline group without a reason or with a duplicate entry', () => {
+    expect(() => readBaseline(JSON.stringify({ groups: [{ reason: '', entries: ['x'] }] }))).toThrow('needs a reason');
+    expect(() => readBaseline(JSON.stringify({
+      groups: [{ reason: 'First stated reason.', entries: ['x'] }, { reason: 'Second stated reason.', entries: ['x'] }],
+    }))).toThrow('duplicate baseline entry');
+  });
+});

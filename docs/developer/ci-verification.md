@@ -45,3 +45,69 @@ A local pass does not complete PR delivery. Follow [Pull Request
 Delivery](./pull-requests.md) to monitor hosted checks on the latest published
 commit, resolve failures, and verify that all applicable checks have finished
 successfully before declaring the task complete.
+
+## Rust dead code
+
+`npm run check:rust-deadcode` fails when Rust production code contains an item
+that no production code uses. It is the Rust counterpart of
+`check:deadcode` (knip). It runs in the Windows backend job and in
+`verify:ci -- --only backend`. Tests never count as callers: an item that only
+tests call is dead in production. `telemetry::maintain` (#1082) had tests and
+no production caller.
+
+The script runs three checks:
+
+| Check | Scope | Method |
+| --- | --- | --- |
+| rustc | The `src-tauri` library | The script copies the workspace under `<cargo-target-dir>/rust-deadcode/`. In the copy, every `pub` item in `src-tauri/src` becomes `pub(crate)`, except the functions that `main.rs` calls (`run`). Then it runs `cargo check --workspace --lib` without `cfg(test)`. Each `dead_code` warning that rustc then reports is a finding. |
+| Token search | Shared library crates (`wardian-core`) | A `pub` item is dead when no production code in any workspace crate names it. Definitions, `use` declarations, comments, `#[cfg(test)]` code, tests, examples, and other dead items do not count. |
+| Commands | `tauri::generate_handler!` | Every registered command must be invoked by name from non-test frontend code or Rust production code. A `debug_*` command can also be invoked from `e2e/`, `e2e-native/`, or `scripts/`. |
+
+The script never writes to the checkout. It updates the copy in place and
+rewrites only files whose content changed, so cargo reuses its incremental
+state. When nothing changed, a run takes a few seconds. After a change to
+`src-tauri` or `wardian-core`, the script checks the copy's crates again.
+
+**Platform.** CI runs the check on Windows, and the baseline is recorded on
+Windows. rustc cannot see a caller that the current platform compiles out,
+such as `#[cfg(unix)]` code on Windows. If compiled-out code names a reported
+item, the check sets that item aside. For a method, field, or variant, the
+compiled-out code must also name the item's type. `--verbose` lists the items
+set aside. A baseline entry whose item this platform compiles out is never
+reported as stale. On Linux or macOS, the check can report `#[cfg(unix)]`
+items that the Windows CI run does not see.
+
+### When the check fails
+
+The output names each item and the exact baseline entry it would need. Do one
+of the following:
+
+1. Delete the item. This is the expected fix for code that nothing calls.
+2. Call the item from production code, if a call is missing. A cleanup or
+   retention function with no caller is often a missing call.
+3. Keep a test-only helper next to the tests that use it. Put it inside the
+   test module (`#[cfg(test)] mod tests { ... }`), or in a test-support module
+   declared once as `#[cfg(test)] mod test_support;`. Do not add
+   `#[cfg(test)]` to the function itself. `check:budgets` counts a
+   `#[cfg(test)]` attribute directly on a `fn` in production files as a
+   test seam, and fails when that count rises.
+4. Add the entry to `scripts/rust-deadcode-baseline.json`. Use this option
+   only when the item must stay and none of the options above applies, for
+   example a field that holds a resource until `Drop`. Add the entry to the
+   group whose reason matches, or add a new group with a one-line reason. The
+   reviewer must accept the reason.
+
+`#[allow(dead_code)]` also silences rustc. Prefer the baseline, because the
+baseline keeps each kept item and its reason in one reviewed file.
+
+### Shrinking the baseline
+
+When you delete or start calling a baselined item, the check fails until you
+remove its entry. Remove the entry by hand, or run:
+
+```sh
+npm run check:rust-deadcode -- --prune
+```
+
+`--prune` removes only entries that match no finding on this platform. It
+never adds entries.

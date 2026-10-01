@@ -120,6 +120,7 @@ describe('CI verification contract', () => {
       'cargo test --workspace --all-targets -- --test-threads=1',
       'cargo test --workspace --doc -- --test-threads=1',
       'cargo check --workspace',
+      'npm run check:rust-deadcode',
       'npm run docs:check-llms',
       'npm run docs:build',
     ]);
@@ -132,6 +133,7 @@ describe('CI verification contract', () => {
       'cargo test --workspace --all-targets -- --test-threads=1',
       'cargo test --workspace --doc -- --test-threads=1',
       'cargo check --workspace',
+      'npm run check:rust-deadcode',
     ]);
   });
 });
