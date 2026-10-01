@@ -718,6 +718,334 @@ describe("AgentTerminal scrollback", () => {
     });
   });
 
+  it.each([
+    { duration: "within the reveal budget", exhaustBudget: false },
+    { duration: "beyond the reveal budget", exhaustBudget: true },
+  ])("reveals a restored mounted frame after fit metrics settle $duration without another observer event", async ({ exhaustBudget }) => {
+    const registrationGate = deferred<ReturnType<typeof modernRegistrationResult>>();
+    const presentationId = `pane-restored-fit-settle-${exhaustBudget ? "long" : "brief"}`;
+    const snapshot = { ...modernSnapshot(), terminal_state_base64: btoa("restored canonical frame") };
+    mockInvoke.mockImplementation(async (command: string) => {
+      if (command === "register_terminal_presentation") return registrationGate.promise;
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: modernSnapshot() };
+      }
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult(presentationId).presentation;
+      }
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    const resizeObserved = vi.fn();
+    const resizeDelivered = vi.fn();
+    const intersectionObserved = vi.spyOn(IntersectionObserver.prototype, "observe");
+    const OriginalResizeObserver = globalThis.ResizeObserver;
+    // Real ResizeObserver delivers an initial observation even if bounds never
+    // change. Include that recovery path rather than using setup.ts's no-op.
+    globalThis.ResizeObserver = class {
+      constructor(private callback: ResizeObserverCallback) {}
+      observe(target: Element) {
+        resizeObserved(target);
+        queueMicrotask(() => {
+          resizeDelivered();
+          this.callback([{ target } as ResizeObserverEntry], this as unknown as ResizeObserver);
+        });
+      }
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+
+    try {
+      render(<AgentTerminal sessionId="modern-agent" presentationId={presentationId} provider="codex" theme="dark" />);
+      await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+        "register_terminal_presentation", expect.anything(),
+      ));
+      const host = screen.getByTestId("agent-terminal-host");
+      const renderer = getLatestTerminalInstance() as {
+        write: ReturnType<typeof vi.fn>;
+        cols: number;
+        rows: number;
+      };
+      let unstable = true;
+      let revealFlushes = 0;
+      renderer.write.mockImplementation((_data: string, callback?: () => void) => {
+        if (_data === "") {
+          revealFlushes += 1;
+          // Simulate cell/fit metrics settling across xterm's actual write
+          // barrier. The outer host stays 900x600, so no new bounds event is
+          // implied. Keep term.onResize and the broker callbacks untouched.
+          if (unstable && (exhaustBudget || revealFlushes === 1)) {
+            fitDimensions = { cols: fitDimensions.cols === 80 ? 81 : 80, rows: 24 };
+          }
+        }
+        callback?.();
+      });
+      const registration = modernRegistrationResult(presentationId);
+      registration.initial_snapshot = snapshot;
+      vi.useFakeTimers();
+      await act(async () => {
+        registrationGate.resolve(registration);
+        await vi.advanceTimersByTimeAsync(20);
+      });
+      expect(resizeObserved).toHaveBeenCalledWith(host);
+      expect(resizeDelivered).toHaveBeenCalledTimes(1);
+      // Attach AND the initial ResizeObserver-triggered fit RAF have completed.
+      expect(revealFlushes).toBeGreaterThanOrEqual(exhaustBudget ? 6 : 2);
+      expect(renderer.write).toHaveBeenCalledWith("restored canonical frame", expect.any(Function));
+      expect(host.isConnected).toBe(true);
+      expect(screen.queryByTestId("terminal-snapshot-status")).toBeNull();
+      expect(screen.queryByText("Terminal renderer failed to restore.")).toBeNull();
+      if (exhaustBudget) expect(host).toHaveStyle({ visibility: "hidden" });
+
+      await act(async () => {
+        unstable = false;
+        fitDimensions = { cols: 80, rows: 24 };
+        // Give any component-owned retry time to run. No resize, intersection,
+        // prop change, focus, or broker notification is emitted after settling.
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(resizeDelivered).toHaveBeenCalledTimes(1);
+      expect(intersectionObserved).toHaveBeenCalledTimes(1);
+      expect(screen.queryByTestId("terminal-snapshot-status")).toBeNull();
+      expect(screen.queryByText("Terminal renderer failed to restore.")).toBeNull();
+      expect(getLatestTerminalInstance()).toBe(renderer);
+      expect(host).toHaveStyle({ visibility: "visible" });
+      expect(window.__wardianTerminalDebug?.snapshot(presentationId)?.renderer?.ready).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      globalThis.ResizeObserver = OriginalResizeObserver;
+      intersectionObserved.mockRestore();
+    }
+  });
+
+  async function mountUnstableRestoredFrame(presentationId: string) {
+    const registrationGate = deferred<ReturnType<typeof modernRegistrationResult>>();
+    const props = { sessionId: "modern-agent", presentationId, provider: "codex", theme: "dark" as const };
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "register_terminal_presentation") return registrationGate.promise;
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: modernSnapshot() };
+      }
+      if (command === "update_terminal_presentation") {
+        const request = (args as { request: { visibility: "visible" | "hidden"; render_state: "mounted" | "suspended" } }).request;
+        const result = modernRegistrationResult(presentationId);
+        return { ...result, presentation: { ...result.presentation, visibility: request.visibility, render_state: request.render_state } };
+      }
+      if (command === "request_terminal_snapshot") return modernSnapshot();
+      if (command === "report_terminal_presentation_viewport") return modernRegistrationResult(presentationId).presentation;
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      return null;
+    });
+    const view = render(<AgentTerminal {...props} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(mockInvoke).toHaveBeenCalledWith("register_terminal_presentation", expect.anything());
+    const renderer = getLatestTerminalInstance() as { write: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> };
+    let unstable = true;
+    renderer.write.mockImplementation((data: string, callback?: () => void) => {
+      if (data === "" && unstable) {
+        fitDimensions = { cols: fitDimensions.cols === 80 ? 81 : 80, rows: 24 };
+      }
+      callback?.();
+    });
+    const registration = modernRegistrationResult(presentationId);
+    registration.initial_snapshot = { ...modernSnapshot(), terminal_state_base64: btoa("restored frame") };
+    await act(async () => {
+      registrationGate.resolve(registration);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const host = screen.getByTestId("agent-terminal-host");
+    expect(host).toHaveStyle({ visibility: "hidden" });
+    return { view, props, renderer, host, settle: () => { unstable = false; fitDimensions = { cols: 80, rows: 24 }; } };
+  }
+
+  it.each(["hidden", "suspended", "unmounted", "disconnected"] as const)(
+    "cancels delayed restored-frame reveal after becoming %s",
+    async (transition) => {
+      vi.useFakeTimers();
+      try {
+        const { view, props, renderer, host, settle } = await mountUnstableRestoredFrame(`pane-reveal-${transition}`);
+        settle();
+        if (transition === "unmounted") view.unmount();
+        else if (transition === "disconnected") host.remove();
+        else view.rerender(<AgentTerminal {...props} visibility={transition === "hidden" ? "hidden" : "visible"} renderState={transition === "suspended" ? "suspended" : "mounted"} />);
+        await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+        const writes = renderer.write.mock.calls.length;
+        await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+        expect(renderer.write).toHaveBeenCalledTimes(writes);
+        expect(host).toHaveStyle({ visibility: "hidden" });
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("cancels a superseded reveal timer when a fresh stable reveal succeeds", async () => {
+    vi.useFakeTimers();
+    try {
+      const { view, props, renderer, host, settle } = await mountUnstableRestoredFrame("pane-reveal-superseded");
+      settle();
+      view.rerender(<AgentTerminal {...props} isMaximized />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(host).toHaveStyle({ visibility: "visible" });
+      const writes = renderer.write.mock.calls.length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(renderer.write).toHaveBeenCalledTimes(writes);
+      expect(host).toHaveStyle({ visibility: "visible" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels delayed restored-frame reveal when physical intersection is lost", async () => {
+    vi.useFakeTimers();
+    let notifyIntersection: (intersecting: boolean) => void = () => undefined;
+    vi.stubGlobal("IntersectionObserver", class {
+      constructor(private callback: IntersectionObserverCallback) {}
+      observe(target: Element) {
+        notifyIntersection = (isIntersecting) => this.callback(
+          [{ isIntersecting, target } as IntersectionObserverEntry], this as unknown as IntersectionObserver,
+        );
+        notifyIntersection(true);
+      }
+      unobserve() {}
+      disconnect() {}
+    });
+    try {
+      const { renderer, host, settle } = await mountUnstableRestoredFrame("pane-reveal-nonintersecting");
+      settle();
+      act(() => notifyIntersection(false));
+      const writes = renderer.write.mock.calls.length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(renderer.write).toHaveBeenCalledTimes(writes);
+      expect(host).toHaveStyle({ visibility: "hidden" });
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["current", "hidden", "replaced"] as const)("guards a delayed reveal write completing while its renderer is %s", async (lifecycle) => {
+    vi.useFakeTimers();
+    try {
+      const { view, props, renderer, host, settle } = await mountUnstableRestoredFrame(`pane-reveal-write-${lifecycle}`);
+      settle();
+      let completeWrite: (() => void) | undefined;
+      renderer.write.mockImplementation((_data: string, callback?: () => void) => { completeWrite = callback; });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(completeWrite).toBeTypeOf("function");
+      expect(host).toHaveStyle({ visibility: "hidden" });
+      if (lifecycle !== "replaced") {
+        if (lifecycle === "hidden") view.rerender(<AgentTerminal {...props} visibility="hidden" />);
+        await act(async () => { completeWrite?.(); await vi.advanceTimersByTimeAsync(1_000); });
+        expect(host).toHaveStyle({ visibility: lifecycle === "current" ? "visible" : "hidden" });
+        expect(window.__wardianTerminalDebug?.snapshot(props.presentationId)?.renderer?.ready).toBe(lifecycle === "current");
+        return;
+      }
+      view.rerender(<AgentTerminal {...props} renderState="suspended" />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      view.rerender(<AgentTerminal {...props} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      const replacement = getLatestTerminalInstance();
+      expect(replacement).not.toBe(renderer);
+      expect(host).toHaveStyle({ visibility: "visible" });
+      const replacementWrites = replacement.write.mock.calls.length;
+      await act(async () => { completeWrite?.(); await vi.advanceTimersByTimeAsync(1_000); });
+      expect(renderer.dispose).toHaveBeenCalledTimes(1);
+      expect(replacement.write).toHaveBeenCalledTimes(replacementWrites);
+      expect(host).toHaveStyle({ visibility: "visible" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps explicit restored-renderer rollback exclusive from delayed reveal retries", async () => {
+    vi.useFakeTimers();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const { host, settle } = await mountUnstableRestoredFrame("pane-reveal-restore-rollback");
+      settle();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(host).toHaveStyle({ visibility: "visible" });
+      const createTerminal = mockTerminal.getMockImplementation()!;
+      mockTerminal.mockImplementationOnce(function MockRestoringTerminal(options?: ConstructorParameters<typeof Terminal>[0]) {
+        const terminal = Reflect.construct(createTerminal, [options]) as Terminal;
+        terminal.write = vi.fn((data: string | Uint8Array, callback?: () => void) => {
+          if (data === "") fitDimensions = { cols: fitDimensions.cols === 80 ? 81 : 80, rows: 24 };
+          callback?.();
+        });
+        return terminal;
+      });
+      await act(async () => {
+        for (let index = 0; index < 24; index += 1) {
+          terminalRendererBudget.acquire("xterm", `reveal-rollback-other-${index}`, () => undefined);
+        }
+        terminalRendererBudget.release("xterm", "reveal-rollback-other-0");
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByText("Terminal renderer failed to restore.")).toBeInTheDocument();
+      const restored = getLatestTerminalInstance();
+      expect(restored.dispose).toHaveBeenCalledTimes(1);
+      const writes = restored.write.mock.calls.length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(mockTerminal).toHaveBeenCalledTimes(2);
+      expect(restored.write).toHaveBeenCalledTimes(writes);
+      expect(host).toHaveStyle({ visibility: "hidden" });
+    } finally {
+      consoleError.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps retrying an eligible renderer when fit proposals are temporarily unavailable", async () => {
+    vi.useFakeTimers();
+    try {
+      const { renderer, host, settle } = await mountUnstableRestoredFrame("pane-reveal-null-proposal");
+      const fitAddon = mockFitAddon.mock.results[mockFitAddon.mock.results.length - 1]?.value as { proposeDimensions: ReturnType<typeof vi.fn> };
+      fitAddon.proposeDimensions.mockReturnValue(null);
+      const writes = renderer.write.mock.calls.length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+      expect(renderer.write).toHaveBeenCalledTimes(writes);
+      expect(host).toHaveStyle({ visibility: "hidden" });
+      expect(vi.getTimerCount()).toBe(1);
+      settle();
+      fitAddon.proposeDimensions.mockImplementation(() => fitDimensions);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(host).toHaveStyle({ visibility: "visible" });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("throttles reveal retries through five seconds of instability and stops after a stable reveal", async () => {
+    vi.useFakeTimers();
+    try {
+      const { renderer, host, settle } = await mountUnstableRestoredFrame("pane-reveal-long-settle");
+      const writes = renderer.write.mock.calls.length;
+      expect(vi.getTimerCount()).toBe(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(999); });
+      expect(renderer.write).toHaveBeenCalledTimes(writes);
+      await act(async () => { await vi.advanceTimersByTimeAsync(4_001); });
+      expect(renderer.write).toHaveBeenCalledTimes(writes + 15);
+      expect(host).toHaveStyle({ visibility: "hidden" });
+      expect(vi.getTimerCount()).toBe(1);
+      settle();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(host).toHaveStyle({ visibility: "visible" });
+      expect(vi.getTimerCount()).toBe(0);
+      const settledWrites = renderer.write.mock.calls.length;
+      expect(settledWrites).toBeGreaterThan(writes + 15);
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      expect(renderer.write).toHaveBeenCalledTimes(settledWrites);
+      expect(host).toHaveStyle({ visibility: "visible" });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reveals a late source-sized mirror when a scrollbar shrinks the content box", async () => {
     const registrationGate = deferred<ReturnType<typeof modernRegistrationResult>>();
     const geometry = { cols: 102, rows: 31 };
