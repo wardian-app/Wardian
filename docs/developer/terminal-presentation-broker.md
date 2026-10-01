@@ -301,8 +301,12 @@ inside the client's serialized registration transaction. Suspending,
 replacing, hiding, or changing the renderer invalidates the reveal generation,
 so stale font, snapshot, or intersection continuations cannot reveal a newer
 renderer. Resize observation schedules at most one animation-frame fit and
-does no work when measured pixels are unchanged. Timer expiry is never used as
-evidence that terminal geometry has settled.
+skips unchanged pixels for an already-ready renderer. If fit metrics are not
+ready or keep changing across the write barrier, an eligible hidden renderer
+retries at a throttled cadence even without another observer notification.
+Only one retry can be pending; invalidation and teardown cancel it, and each
+attempt checks the presentation generation and renderer identity again. Timer
+expiry is never used as evidence that terminal geometry has settled.
 
 Graph and Garden have a separate 30-second heavy-child grace through their
 surface render policy. Neither grace weakens broker ownership or changes PTY
