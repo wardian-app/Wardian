@@ -213,24 +213,9 @@ pub fn workbench_backup_path_for_home(home: &Path) -> PathBuf {
     home.join("settings").join("workbench.backup.json")
 }
 
-/// `<wardian-home>/library`.
-pub fn library_dir_for_home(home: &Path) -> PathBuf {
-    home.join("library")
-}
-
 /// `<wardian-home>/library/library.json` — tags/stars metadata index.
 pub fn library_metadata_path_for_home(home: &Path) -> PathBuf {
     home.join("library").join("library.json")
-}
-
-/// `<wardian-home>/classes`.
-pub fn classes_dir_for_home(home: &Path) -> PathBuf {
-    home.join("classes")
-}
-
-/// `<wardian-home>/common`.
-pub fn common_dir_for_home(home: &Path) -> PathBuf {
-    home.join("common")
 }
 
 #[cfg(test)]

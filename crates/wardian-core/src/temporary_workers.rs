@@ -65,10 +65,6 @@ impl TemporaryWorkerState {
         matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
     }
 
-    pub fn needs_attention(self) -> bool {
-        matches!(self, Self::Waiting | Self::Failed | Self::Unknown)
-    }
-
     fn as_str(self) -> &'static str {
         match self {
             Self::Requested => "requested",
@@ -711,20 +707,6 @@ fn list_for_root_with_conn(
         .query_map(params![root_agent_id, observed_at], record_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(records)
-}
-
-pub fn attention_count_for_run(
-    blueprint_id: &str,
-    run_id: &str,
-) -> Result<u32, Box<dyn std::error::Error>> {
-    crate::db::get_db_conn(|conn| {
-        Ok(conn.query_row(
-            "SELECT COUNT(*) FROM temporary_workers WHERE blueprint_id = ?1 AND run_id = ?2
-             AND (state IN ('waiting', 'unknown') OR (state = 'failed' AND detail_retained_until > ?3))",
-            params![blueprint_id, run_id, now()],
-            |row| row.get(0),
-        )?)
-    })
 }
 
 pub fn attention_counts_by_run(

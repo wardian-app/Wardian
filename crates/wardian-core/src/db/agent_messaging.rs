@@ -571,11 +571,6 @@ pub(super) fn delete_references(
     Ok(())
 }
 
-/// Identify the v2 reply transaction boundary for legacy CLI reply compatibility.
-pub fn is_task(conn: &Connection, id: &str) -> Result<bool> {
-    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM agent_message_delivery WHERE interaction_id=?1 AND operation='followup_task')", [id], |row| row.get(0))?)
-}
-
 fn cursor_sequence(conn: &Connection, recipient: &str, token: &str) -> Result<i64> {
     if !token.starts_with("am1_") || token.len() != 36 {
         return Err(Error::new(

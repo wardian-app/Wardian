@@ -766,39 +766,6 @@ pub fn list_user_message_timestamp_records_with_conn(
     rows.collect()
 }
 
-pub fn list_recent_interaction_records(
-    limit: usize,
-) -> Result<Vec<InteractionRecord>, Box<dyn std::error::Error>> {
-    list_recent_interaction_records_page(limit, 0)
-}
-
-pub fn list_recent_interaction_records_page(
-    limit: usize,
-    offset: usize,
-) -> Result<Vec<InteractionRecord>, Box<dyn std::error::Error>> {
-    get_db_conn(|conn| {
-        Ok(list_recent_interaction_records_page_with_conn(
-            conn, limit, offset,
-        )?)
-    })
-}
-
-pub fn list_recent_interaction_records_page_with_conn(
-    conn: &Connection,
-    limit: usize,
-    offset: usize,
-) -> rusqlite::Result<Vec<InteractionRecord>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, kind, sender_session_id, target_session_ids, status, trigger_policy,
-            body_ref, parent_interaction_id, created_at, updated_at, completed_at
-         FROM interactions
-         ORDER BY created_at DESC, id DESC
-         LIMIT ?1 OFFSET ?2",
-    )?;
-    let rows = stmt.query_map([limit as i64, offset as i64], row_to_interaction_record)?;
-    rows.collect()
-}
-
 /// Lists interaction records newer than `since`, newest first.
 pub fn list_recent_interaction_records_since_page(
     limit: usize,
@@ -1431,24 +1398,6 @@ pub fn native_delivery_by_idempotency(
         )
         .optional()
         .map_err(Into::into)
-    })
-}
-
-pub fn list_native_deliveries_for_target(
-    target_agent_id: &str,
-    limit: usize,
-) -> Result<Vec<NativeDeliveryRecord>, Box<dyn std::error::Error>> {
-    get_db_conn(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT record_json FROM native_deliveries
-             WHERE target_agent_id = ?1
-             ORDER BY created_at DESC, interaction_id DESC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![target_agent_id, limit as i64], |row| {
-            let json: String = row.get(0)?;
-            serde_json::from_str(&json).map_err(to_sql_error)
-        })?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     })
 }
 
