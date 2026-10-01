@@ -21,12 +21,14 @@ use tokio_tungstenite::WebSocketStream;
 
 mod completion;
 mod diagnostics;
+mod final_items;
 mod launch_config;
 mod launch_model;
 mod owner;
 mod proxy;
 #[cfg(test)]
 mod startup_tests;
+mod task_delivery;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod version;
@@ -91,13 +93,13 @@ pub struct CodexSharedReceipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_version: Option<String>,
     pub provider_turn_id: Option<String>,
+    /// Exact task admission operation. Information injection has no admission mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_mode: Option<String>,
     pub delivery_state: String,
     pub interruption_confirmed: bool,
     pub message_id: Option<String>,
 }
-
-pub type CodexPushReceipt = CodexSharedReceipt;
-pub type CodexInterruptReceipt = CodexSharedReceipt;
 
 const SETTINGS_NOTIFICATION_CAPACITY: usize = 32;
 
@@ -151,29 +153,72 @@ impl CodexSettingsNotification {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThreadRuntimeStatus {
+    Active,
+    ActionRequired,
+    Idle,
+}
+
+fn thread_runtime_status(status: &Value) -> Option<ThreadRuntimeStatus> {
+    match status["type"].as_str()? {
+        "idle" => Some(ThreadRuntimeStatus::Idle),
+        "active" => {
+            let waiting_for_user = status["activeFlags"].as_array().is_some_and(|flags| {
+                flags.iter().any(|flag| {
+                    matches!(
+                        flag.as_str(),
+                        Some("waitingOnApproval" | "waitingOnUserInput")
+                    )
+                })
+            });
+            Some(if waiting_for_user {
+                ThreadRuntimeStatus::ActionRequired
+            } else {
+                ThreadRuntimeStatus::Active
+            })
+        }
+        _ => None,
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Observation {
     provider_version: Option<String>,
     thread_id: Option<String>,
+    thread_runtime_status: Option<ThreadRuntimeStatus>,
     active_turn: Option<String>,
+    idle_reconciled_turn: Option<String>,
     completed_turn: Option<(String, String)>,
+    turn_answers: HashMap<String, final_items::CompletedMessages>,
     closed: bool,
     stopped: bool,
-    answer: String,
     completions: completion::TurnCompletions,
 }
 
-/// Activity is derived only from the bound owner's native turn lifecycle.
+/// Activity comes from the bound owner's runtime status, with exact turn events
+/// retaining their turn identity for receipt and interrupt operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CodexTurnActivity {
     Pending,
     Processing(String),
+    ProcessingWithoutTurn,
     Idle(String),
+    IdleWithoutTurn,
+    ActionRequiredWithoutTurn,
     Closed,
     Stopped,
 }
 
 impl Observation {
+    fn has_terminal_evidence(&self, turn_id: &str) -> bool {
+        self.completions.contains(turn_id)
+            && self
+                .completions
+                .subscribe(turn_id)
+                .is_ok_and(|result| result.borrow().is_some())
+    }
+
     /// An intentional close must not turn a healthy session red. Preserve an
     /// already-observed unexpected disconnect so later cleanup cannot mask it.
     fn stop(&mut self) {
@@ -186,15 +231,37 @@ impl Observation {
         self.closed = true;
         self.completions.close();
     }
+
+    fn set_thread_runtime_status(&mut self, status: ThreadRuntimeStatus) {
+        match status {
+            ThreadRuntimeStatus::Idle => {
+                if let Some(turn_id) = self.active_turn.take() {
+                    self.idle_reconciled_turn = Some(turn_id);
+                }
+            }
+            ThreadRuntimeStatus::Active | ThreadRuntimeStatus::ActionRequired => {
+                self.completed_turn = None;
+                self.idle_reconciled_turn = None;
+            }
+        }
+        self.thread_runtime_status = Some(status);
+    }
+
     pub(crate) fn activity(&self) -> CodexTurnActivity {
         if self.stopped {
             CodexTurnActivity::Stopped
         } else if self.closed {
             CodexTurnActivity::Closed
+        } else if self.thread_runtime_status == Some(ThreadRuntimeStatus::ActionRequired) {
+            CodexTurnActivity::ActionRequiredWithoutTurn
         } else if let Some(id) = &self.active_turn {
             CodexTurnActivity::Processing(id.clone())
+        } else if self.thread_runtime_status == Some(ThreadRuntimeStatus::Active) {
+            CodexTurnActivity::ProcessingWithoutTurn
         } else if let Some((id, _)) = &self.completed_turn {
             CodexTurnActivity::Idle(id.clone())
+        } else if self.thread_runtime_status == Some(ThreadRuntimeStatus::Idle) {
+            CodexTurnActivity::IdleWithoutTurn
         } else {
             // An empty idle server is not proof that its TUI is ready for input.
             CodexTurnActivity::Pending
@@ -207,30 +274,57 @@ impl Observation {
         if params["threadId"].as_str() != self.thread_id.as_deref() || self.thread_id.is_none() {
             return;
         }
-        if value["method"] == "item/agentMessage/delta"
-            && params["turnId"].as_str() == self.active_turn.as_deref()
-        {
-            if let Some(delta) = params["delta"].as_str() {
-                self.answer.push_str(delta);
+        if value["method"] == "thread/status/changed" {
+            if let Some(status) = thread_runtime_status(&params["status"]) {
+                self.set_thread_runtime_status(status);
             }
+            return;
+        }
+        if value["method"] == "item/completed" {
+            if let Some(turn_id) = params["turnId"].as_str() {
+                if self.has_terminal_evidence(turn_id) {
+                    return;
+                }
+                self.turn_answers
+                    .entry(turn_id.to_owned())
+                    .or_default()
+                    .observe(&params["item"]);
+            }
+            return;
         }
         let Some(turn_id) = params["turn"]["id"].as_str() else {
             return;
         };
         match value["method"].as_str() {
             Some("turn/started") => {
-                self.completions.start(turn_id);
-                self.active_turn = Some(turn_id.to_owned());
-                self.answer.clear();
-            }
-            Some("turn/completed") => {
-                if self.active_turn.as_deref() != Some(turn_id) {
+                if self.has_terminal_evidence(turn_id) {
                     return;
                 }
+                self.completions.start(turn_id);
+                self.completed_turn = None;
+                self.set_thread_runtime_status(ThreadRuntimeStatus::Active);
+                self.active_turn = Some(turn_id.to_owned());
+                self.turn_answers.entry(turn_id.to_owned()).or_default();
+            }
+            Some("turn/completed") => {
+                let was_active = self.active_turn.as_deref() == Some(turn_id);
                 if let Some(status) = params["turn"]["status"].as_str() {
-                    self.active_turn = None;
-                    self.completed_turn = Some((turn_id.to_owned(), status.to_owned()));
-                    self.completions.finish(turn_id, status, &self.answer);
+                    if was_active {
+                        self.active_turn = None;
+                        self.set_thread_runtime_status(ThreadRuntimeStatus::Idle);
+                    }
+                    let belongs_to_visible_lifecycle =
+                        was_active || self.idle_reconciled_turn.as_deref() == Some(turn_id);
+                    if belongs_to_visible_lifecycle {
+                        self.completed_turn = Some((turn_id.to_owned(), status.to_owned()));
+                        self.idle_reconciled_turn = None;
+                    }
+                    let answer = self
+                        .turn_answers
+                        .remove(turn_id)
+                        .unwrap_or_default()
+                        .answer();
+                    self.completions.finish(turn_id, status, &answer);
                 }
             }
             _ => {}
@@ -356,7 +450,10 @@ impl CodexSharedClient {
                                 if let Some(reply) = replies.lock().unwrap().remove(id) {
                                     // An admitted RPC can precede turn/started. It
                                     // establishes a completion slot, never activity.
-                                    if let Some(id) = value["result"]["turn"]["id"].as_str() {
+                                    if let Some(id) = value["result"]["turn"]["id"]
+                                        .as_str()
+                                        .or_else(|| value["result"]["turnId"].as_str())
+                                    {
                                         observations
                                             .send_modify(|state| state.completions.start(id));
                                     }
@@ -509,16 +606,10 @@ impl CodexSharedClient {
         }
         self.observation.send_modify(|state| {
             state.thread_id = Some(id.to_owned());
-            state.active_turn = thread["turns"].as_array().and_then(|turns| {
-                turns
-                    .iter()
-                    .rev()
-                    .find(|turn| turn["status"] == "inProgress")
-                    .and_then(|turn| turn["id"].as_str())
-                    .map(str::to_owned)
-            });
-            if let Some(id) = &state.active_turn {
-                state.completions.start(id);
+            state.completed_turn = None;
+            state.thread_runtime_status = None;
+            if let Some(status) = thread_runtime_status(&thread["status"]) {
+                state.set_thread_runtime_status(status);
             }
         });
         Ok(id.to_owned())
@@ -667,6 +758,18 @@ impl CodexSharedClient {
         params: Value,
         timeout: Option<Duration>,
     ) -> Result<Value, CodexSharedError> {
+        self.request_with_activity(method, params, timeout, None)
+            .await
+    }
+
+    /// Recheck task activity after waiting for the writer, before any provider write.
+    async fn request_with_activity(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Option<Duration>,
+        expected_activity: Option<&CodexTurnActivity>,
+    ) -> Result<Value, CodexSharedError> {
         if self.observation.borrow().closed {
             return Err(CodexSharedError::unsupported(
                 "provider connection is closed",
@@ -677,21 +780,31 @@ impl CodexSharedClient {
         self.pending.lock().unwrap().insert(id.clone(), tx);
         let payload = json!({"id":id,"method":method,"params":params});
         let deadline = tokio::time::Instant::now() + timeout.unwrap_or(STARTUP_TIMEOUT);
-        if !matches!(
-            tokio::time::timeout_at(deadline, async {
-                self.writer
-                    .lock()
-                    .await
-                    .send(Message::Text(payload.to_string().into()))
-                    .await
-            })
-            .await,
-            Ok(Ok(()))
-        ) {
+        let written = tokio::time::timeout_at(deadline, async {
+            let mut writer = self.writer.lock().await;
+            if expected_activity
+                .is_some_and(|expected| self.observation.borrow().activity() != *expected)
+            {
+                return Err(CodexSharedError {
+                    code: "task_activity_deferred".into(),
+                    message: "Codex task activity changed before write; not replayed".into(),
+                    provider_boundary_crossed: false,
+                });
+            }
+            writer
+                .send(Message::Text(payload.to_string().into()))
+                .await
+                .map_err(|_| {
+                    CodexSharedError::uncertain("provider request write failed; not replayed")
+                })
+        })
+        .await;
+        if !matches!(written, Ok(Ok(()))) {
             self.pending.lock().unwrap().remove(&id);
-            return Err(CodexSharedError::uncertain(
-                "provider request write failed; not replayed",
-            ));
+            return Err(match written {
+                Ok(Err(error)) => error,
+                _ => CodexSharedError::uncertain("provider request write timed out; not replayed"),
+            });
         }
         let result = if timeout.is_some() {
             tokio::time::timeout_at(deadline, rx).await.map_err(|_| {
@@ -704,6 +817,15 @@ impl CodexSharedClient {
         let value =
             result?.map_err(|_| CodexSharedError::uncertain("provider reply channel ended"))??;
         if let Some(error) = value.get("error") {
+            if value.get("result").is_none()
+                && diagnostics::stale_steer_rejection(method, &payload["params"], error)
+            {
+                return Err(CodexSharedError {
+                    code: "stale_turn_rejected".into(),
+                    message: "Codex rejected steering because the requested turn is no longer active; not replayed".into(),
+                    provider_boundary_crossed: false,
+                });
+            }
             return Err(CodexSharedError {
                 code: "provider_rejected".into(),
                 message: diagnostics::rejection_message(method, error).into(),
@@ -730,6 +852,7 @@ impl CodexSharedClient {
                 .clone()
                 .ok_or_else(|| CodexSharedError::unsupported("owner thread unbound"))?,
             provider_turn_id: observation.active_turn.clone(),
+            admission_mode: None,
             delivery_state: state.into(),
             interruption_confirmed: false,
             message_id: None,
@@ -780,21 +903,10 @@ impl CodexSharedClient {
         message_id: &str,
         context: &str,
     ) -> Result<CodexSharedReceipt, CodexSharedError> {
-        let mut receipt = self.receipt("provider_accepted")?;
-        let result = self
-            .request(
-                "turn/start",
-                json!({"threadId":receipt.provider_session_id,
-            "input":[], "toolOutput":{"name":"wardian_task_delivery","namespace":"wardian",
-                "output":context}}),
-            )
-            .await?;
-        receipt.provider_turn_id = result["turn"]["id"].as_str().map(str::to_owned);
-        receipt.message_id = Some(message_id.to_owned());
-        Ok(receipt)
+        self.admit_task(message_id, context).await
     }
 
-    /// Observe the exact admitted turn, including a completion received before its RPC reply.
+    /// Observe exact terminal status and completed-item final text, including completion before acknowledgement.
     pub async fn wait_for_turn(
         &self,
         turn_id: &str,
@@ -814,6 +926,16 @@ impl CodexSharedClient {
         })
         .await
         .map_err(|_| CodexSharedError::uncertain("turn completion timed out; not replayed"))?
+    }
+
+    /// Return the exact turn's authoritative final item text and unchanged terminal status.
+    /// Commentary, tools and streaming deltas never contribute to automatic replies.
+    pub async fn wait_for_final_result(
+        &self,
+        turn_id: &str,
+        timeout: Duration,
+    ) -> Result<(String, String), CodexSharedError> {
+        self.wait_for_turn(turn_id, timeout).await
     }
 
     /// Never substitutes Escape or process termination for an exact native interrupt.
@@ -836,6 +958,9 @@ impl CodexSharedClient {
         let Some(turn_id) = receipt.provider_turn_id.clone() else {
             return Ok(receipt);
         };
+        if self.observation.borrow().active_turn.as_deref() != Some(turn_id.as_str()) {
+            return self.receipt("no_active_turn");
+        }
         self.request(
             "turn/interrupt",
             json!({"threadId":receipt.provider_session_id,"turnId":turn_id}),
@@ -925,6 +1050,184 @@ mod tests {
         unexpected.close();
         unexpected.stop(); // cleanup must preserve the original failure
         assert_eq!(unexpected.activity(), CodexTurnActivity::Closed);
+    }
+
+    #[tokio::test]
+    async fn resumed_idle_status_is_observed_without_loading_turn_history() {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let request: Value =
+                    serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap())
+                        .unwrap();
+                assert_eq!(request["method"], "thread/resume");
+                assert_eq!(request["params"]["excludeTurns"], true);
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "id": request["id"],
+                            "result": {
+                                "thread": {
+                                    "id": "owned",
+                                    "canAcceptDirectInput": true,
+                                    "status": {"type": "idle"},
+                                    "turns": []
+                                }
+                            }
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    socket.next().await,
+                    Some(Ok(Message::Close(_))) | None
+                ));
+            });
+
+            let client =
+                CodexSharedClient::connect("wardian-id".into(), 7, &endpoint, "test-owned-token")
+                    .await
+                    .unwrap();
+            let response = client
+                .resume_metadata(json!({"threadId": "owned"}))
+                .await
+                .unwrap();
+            assert_eq!(response["thread"]["turns"], json!([]));
+            client.bind(&response).unwrap();
+
+            assert_eq!(
+                client.observation.borrow().activity(),
+                CodexTurnActivity::IdleWithoutTurn,
+                "the live idle status must reconcile a prior Busy observation"
+            );
+            assert!(client
+                .receipt("reconciled")
+                .unwrap()
+                .provider_turn_id
+                .is_none());
+
+            client.close().await;
+            server.await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn resumed_active_status_needs_an_exact_turn_event_before_interrupt() {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+            let (bound_tx, bound_rx) = oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let request: Value =
+                    serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap())
+                        .unwrap();
+                assert_eq!(request["method"], "thread/resume");
+                assert_eq!(request["params"]["excludeTurns"], true);
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "id": request["id"],
+                            "result": {
+                                "thread": {
+                                    "id": "owned",
+                                    "canAcceptDirectInput": true,
+                                    "status": {"type": "active", "activeFlags": []},
+                                    "turns": []
+                                }
+                            }
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+                bound_rx.await.unwrap();
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "method": "turn/started",
+                            "params": {"threadId": "owned", "turn": {"id": "active-turn"}}
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+                let interrupt: Value =
+                    serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap())
+                        .unwrap();
+                assert_eq!(interrupt["method"], "turn/interrupt");
+                assert_eq!(
+                    interrupt["params"],
+                    json!({"threadId": "owned", "turnId": "active-turn"})
+                );
+                for value in [
+                    json!({"id": interrupt["id"], "result": {}}),
+                    json!({
+                        "method": "turn/completed",
+                        "params": {
+                            "threadId": "owned",
+                            "turn": {"id": "active-turn", "status": "interrupted"}
+                        }
+                    }),
+                ] {
+                    socket
+                        .send(Message::Text(value.to_string().into()))
+                        .await
+                        .unwrap();
+                }
+                assert!(matches!(
+                    socket.next().await,
+                    Some(Ok(Message::Close(_))) | None
+                ));
+            });
+
+            let client =
+                CodexSharedClient::connect("wardian-id".into(), 7, &endpoint, "test-owned-token")
+                    .await
+                    .unwrap();
+            let response = client
+                .resume_metadata(json!({"threadId": "owned"}))
+                .await
+                .unwrap();
+            client.bind(&response).unwrap();
+            assert_eq!(
+                client.observation.borrow().activity(),
+                CodexTurnActivity::ProcessingWithoutTurn
+            );
+            assert!(client
+                .receipt("active-without-id")
+                .unwrap()
+                .provider_turn_id
+                .is_none());
+
+            let mut observations = client.observations();
+            bound_tx.send(()).unwrap();
+            loop {
+                let activity = observations.borrow_and_update().activity();
+                if activity == CodexTurnActivity::Processing("active-turn".into()) {
+                    break;
+                }
+                observations.changed().await.unwrap();
+            }
+            let receipt = client.interrupt().await.unwrap();
+            assert_eq!(receipt.provider_turn_id.as_deref(), Some("active-turn"));
+            assert!(receipt.interruption_confirmed);
+
+            client.close().await;
+            server.await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1034,7 +1337,7 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let endpoint = format!("ws://{}", listener.local_addr().unwrap());
             let (advance_tx, advance_rx) = oneshot::channel();
-            let frame = json!({"schema_version":1,"kind":"task","interaction_id":"task-id","body":"  literal\nUnicode λ\t  ","request_id":"task-id"}).to_string();
+            let frame = json!({"schema_version":1,"sender":"peer","recipient":"wardian-id","kind":"task","interaction_id":"task-id","body":"  literal\nUnicode λ\t  ","request_id":"task-id"}).to_string();
             let expected_frame = frame.clone();
             let server = tokio::spawn(async move {
                 let (stream, _) = listener.accept().await.unwrap();
@@ -1047,16 +1350,16 @@ mod tests {
                 advance_rx.await.unwrap();
                 for value in [
                     json!({"method":"turn/started","params":{"threadId":"owned","turn":{"id":"late"}}}),
-                    json!({"method":"item/agentMessage/delta","params":{"threadId":"owned","turnId":"late","delta":"exact answer"}}),
+                    json!({"method":"item/completed","params":{"threadId":"owned","turnId":"late","item":{"id":"answer","type":"agentMessage","phase":"final_answer","text":"exact answer"}}}),
                     json!({"method":"turn/completed","params":{"threadId":"owned","turn":{"id":"late","status":"completed"}}}),
                 ] { socket.send(Message::Text(value.to_string().into())).await.unwrap(); }
                 let _ = socket.next().await;
             });
             let client = CodexSharedClient::connect("wardian-id".into(), 7, &endpoint, "test-owned-token").await.unwrap();
-            client.bind(&json!({"thread":{"id":"owned","canAcceptDirectInput":true,"turns":[]}})).unwrap();
+            client.bind(&json!({"thread":{"id":"owned","canAcceptDirectInput":true,"status":{"type":"idle"},"turns":[]}})).unwrap();
             let receipt = client.followup("task-id", &frame).await.unwrap();
             assert_eq!(receipt.provider_turn_id.as_deref(), Some("late"));
-            assert_eq!(client.observation.borrow().activity(), CodexTurnActivity::Pending);
+            assert_eq!(client.observation.borrow().activity(), CodexTurnActivity::IdleWithoutTurn);
             assert!(client.receipt("observed").unwrap().provider_turn_id.is_none());
             let completed = client.observation.borrow().completions.subscribe("late").unwrap();
             assert!(completed.borrow().is_none());
@@ -1153,16 +1456,121 @@ mod tests {
         );
         assert!(state.active_turn.is_none());
         state.observe(
+            &json!({"method":"turn/started","params":{"threadId":"owned","turn":{"id":"old"}}}),
+        );
+        state.observe(&json!({
+            "method":"item/completed",
+            "params":{"threadId":"owned","turnId":"old","item":{"id":"old-item","type":"agentMessage","text":"old answer"}}
+        }));
+        state.observe(
             &json!({"method":"turn/started","params":{"threadId":"owned","turn":{"id":"current"}}}),
         );
+        state.observe(&json!({
+            "method":"item/completed",
+            "params":{"threadId":"owned","turnId":"current","item":{"id":"current-item","type":"agentMessage","text":"current answer"}}
+        }));
         state.observe(&json!({"method":"turn/completed","params":{"threadId":"owned","turn":{"id":"old","status":"interrupted"}}}));
+        assert_eq!(
+            state.completions.subscribe("old").unwrap().borrow().clone(),
+            Some(Ok(("interrupted".into(), "old answer".into())))
+        );
         assert_eq!(state.active_turn.as_deref(), Some("current"));
+        assert_eq!(
+            state.activity(),
+            CodexTurnActivity::Processing("current".into())
+        );
         state.observe(&json!({"method":"turn/completed","params":{"threadId":"owned","turn":{"id":"current","status":"interrupted"}}}));
         assert!(state.active_turn.is_none());
         assert_eq!(
             state.completed_turn,
             Some(("current".into(), "interrupted".into()))
         );
+        assert_eq!(
+            state
+                .completions
+                .subscribe("current")
+                .unwrap()
+                .borrow()
+                .clone(),
+            Some(Ok(("interrupted".into(), "current answer".into())))
+        );
+    }
+
+    #[test]
+    fn idle_thread_status_clears_active_identity_but_keeps_late_completion_exact() {
+        let mut state = Observation {
+            thread_id: Some("owned".into()),
+            ..Default::default()
+        };
+        state.observe(
+            &json!({"method":"turn/started","params":{"threadId":"owned","turn":{"id":"current"}}}),
+        );
+        assert_eq!(
+            state.activity(),
+            CodexTurnActivity::Processing("current".into())
+        );
+
+        state.observe(&json!({
+            "method":"thread/status/changed",
+            "params":{"threadId":"owned","status":{"type":"idle"}}
+        }));
+        assert!(state.active_turn.is_none());
+        assert_eq!(state.activity(), CodexTurnActivity::IdleWithoutTurn);
+
+        state.observe(&json!({
+            "method":"turn/completed",
+            "params":{"threadId":"owned","turn":{"id":"current","status":"completed"}}
+        }));
+        assert_eq!(
+            state.completed_turn,
+            Some(("current".into(), "completed".into()))
+        );
+        assert_eq!(
+            state
+                .completions
+                .subscribe("current")
+                .unwrap()
+                .borrow()
+                .clone(),
+            Some(Ok(("completed".into(), String::new())))
+        );
+    }
+
+    #[test]
+    fn status_only_active_then_idle_retires_the_previous_completion() {
+        let mut state = Observation {
+            thread_id: Some("owned".into()),
+            ..Default::default()
+        };
+        state.observe(
+            &json!({"method":"turn/started","params":{"threadId":"owned","turn":{"id":"previous"}}}),
+        );
+        state.observe(&json!({
+            "method":"turn/completed",
+            "params":{"threadId":"owned","turn":{"id":"previous","status":"completed"}}
+        }));
+        assert_eq!(state.activity(), CodexTurnActivity::Idle("previous".into()));
+
+        state.observe(&json!({
+            "method":"thread/status/changed",
+            "params":{"threadId":"owned","status":{"type":"active","activeFlags":[]}}
+        }));
+        assert!(state.completed_turn.is_none());
+        assert_eq!(state.activity(), CodexTurnActivity::ProcessingWithoutTurn);
+
+        state.observe(&json!({
+            "method":"thread/status/changed",
+            "params":{"threadId":"owned","status":{"type":"idle"}}
+        }));
+        assert!(state.completed_turn.is_none());
+        assert_eq!(state.activity(), CodexTurnActivity::IdleWithoutTurn);
+
+        state.observe(&json!({
+            "method":"turn/completed",
+            "params":{"threadId":"owned","turn":{"id":"previous","status":"completed"}}
+        }));
+        assert!(state.completed_turn.is_none());
+        assert_eq!(state.activity(), CodexTurnActivity::IdleWithoutTurn);
     }
 
     #[tokio::test]

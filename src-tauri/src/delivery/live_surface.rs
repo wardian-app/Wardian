@@ -219,7 +219,6 @@ pub struct LiveSurfacePromptRequest {
 
 #[derive(Debug, Clone)]
 pub struct LiveSurfacePromptResult {
-    pub interaction_id: String,
     pub detail: wardian_core::control::DeliveryDetail,
 }
 
@@ -706,10 +705,10 @@ pub async fn submit_live_surface_prompt(
             .as_ref()
             .map(|ticket| ticket as &dyn crate::utils::delivery_transaction::TerminalInputSink)
             .unwrap_or(&input);
-        match crate::utils::terminal_input::submit_prompt_with_outcome_via_sender_after_payload_and_before_submit(
+        match crate::utils::terminal_input::submit_prompt_via_sender(
             sender,
-            &request.prompt,
             &provider,
+            &request.prompt,
             move || async move {
                 if let Some(detail) = payload_sent_detail {
                     persist_live_surface_delivery_detail(
@@ -964,10 +963,7 @@ pub async fn submit_live_surface_prompt(
         .await;
     }
 
-    Ok(LiveSurfacePromptResult {
-        interaction_id,
-        detail,
-    })
+    Ok(LiveSurfacePromptResult { detail })
 }
 
 async fn persist_live_surface_delivery_detail(

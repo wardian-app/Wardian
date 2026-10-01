@@ -96,6 +96,8 @@ pub(crate) fn defer_status_transition(
     app: &AppHandle,
     session_id: &str,
     current_status: &Arc<std::sync::Mutex<String>>,
+    expected_status: String,
+    intent_revision: u64,
     next_status: String,
 ) {
     let app = app.clone();
@@ -103,32 +105,66 @@ pub(crate) fn defer_status_transition(
     let current_status = current_status.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        let allowed = {
-            let agents = state.agents.lock().await;
-            agents.get(&session_id).is_some_and(|agent| {
-                Arc::ptr_eq(&agent.current_status, &current_status)
-                    && codex_attachment_is_ready(agent)
-            })
+        let Some((status_sequence, status_revision)) = apply_deferred_status_transition(
+            state.inner(),
+            &session_id,
+            &current_status,
+            &expected_status,
+            intent_revision,
+            &next_status,
+        )
+        .await
+        else {
+            return;
         };
-        if !allowed {
-            return;
-        }
-        if let Ok(mut status) = current_status.lock() {
-            if *status == next_status {
-                return;
-            }
-            *status = next_status.clone();
-        } else {
-            return;
-        }
-        super::schedule_agent_status_observation(&app, &session_id, &current_status, next_status);
+        super::schedule_agent_status_observation(
+            &app,
+            &session_id,
+            &current_status,
+            next_status,
+            status_sequence,
+            status_revision,
+        );
     });
+}
+
+pub(crate) async fn apply_deferred_status_transition(
+    state: &AppState,
+    session_id: &str,
+    current_status: &Arc<std::sync::Mutex<String>>,
+    expected_status: &str,
+    intent_revision: u64,
+    next_status: &str,
+) -> Option<(u64, u64)> {
+    if !deferred_status_target_is_ready(state, session_id, current_status).await {
+        return None;
+    }
+    super::apply_admitted_status_transition(
+        state,
+        session_id,
+        current_status,
+        expected_status,
+        intent_revision,
+        next_status,
+    )
+}
+
+pub(crate) async fn deferred_status_target_is_ready(
+    state: &AppState,
+    session_id: &str,
+    current_status: &Arc<std::sync::Mutex<String>>,
+) -> bool {
+    let agents = state.agents.lock().await;
+    agents.get(session_id).is_some_and(|agent| {
+        Arc::ptr_eq(&agent.current_status, current_status) && codex_attachment_is_ready(agent)
+    })
 }
 
 pub(crate) fn defer_status_publication(
     app: &AppHandle,
     session_id: &str,
     current_status: &Arc<std::sync::Mutex<String>>,
+    expected_revision: u64,
 ) {
     let app = app.clone();
     let session_id = session_id.to_string();
@@ -145,10 +181,29 @@ pub(crate) fn defer_status_publication(
         if !allowed {
             return;
         }
-        let Ok(status) = current_status.lock().map(|status| status.clone()) else {
+        let Ok(status) = current_status.lock() else {
             return;
         };
-        super::schedule_agent_status_observation(&app, &session_id, &current_status, status);
+        if state.status_revision(&session_id, &current_status) != expected_revision {
+            return;
+        }
+        if state
+            .status_intent_status(&session_id, &current_status)
+            .is_some_and(|intent_status| intent_status != status.as_str())
+        {
+            return;
+        }
+        let status_value = status.clone();
+        let status_sequence = state.next_status_observation_sequence(&session_id);
+        drop(status);
+        super::schedule_agent_status_observation(
+            &app,
+            &session_id,
+            &current_status,
+            status_value,
+            status_sequence,
+            expected_revision,
+        );
     });
 }
 

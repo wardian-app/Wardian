@@ -1,4 +1,5 @@
 pub mod listener;
+mod message_send;
 pub mod ops;
 pub mod output;
 pub mod resolve;
@@ -15,8 +16,8 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use wardian_core::engine::{
-    AgentTaskRequest, ChosenPort, DecisionRequest, MemoryCommitRequest, NotifyRequest,
-    ScriptRequest, ShellRequest, StepError, StepExecutor, StepOutput,
+    AgentTaskRequest, ChosenPort, DecisionRequest, MemoryCommitRequest, MessageSendRequest,
+    NotifyRequest, ScriptRequest, ShellRequest, StepError, StepExecutor, StepOutput,
 };
 use wardian_core::models::{AutomationAssignments, AutomationRoleAssignment, InvocationKind};
 
@@ -111,6 +112,12 @@ impl LiveStepExecutor {
     pub fn with_owner_id(mut self, owner_id: String) -> Self {
         self.owner_id = owner_id;
         self
+    }
+
+    /// Apply trusted provenance from durable state in every start/continuation path.
+    pub fn with_run_state(self, state: &wardian_core::engine::RunState) -> Self {
+        self.with_owner_id(format!("{}/{}", state.blueprint_id, state.run_id))
+            .with_automation_origin(state.blueprint_id.clone(), state.run_id.clone())
     }
 
     pub fn with_automation_origin(mut self, blueprint_id: String, run_id: String) -> Self {
@@ -329,12 +336,10 @@ impl LiveStepExecutor {
         prompt: String,
     ) -> Result<String, StepError> {
         let route = resolve::choose_agent_route(AgentRouteInput {
-            agent_id: agent_id.to_string(),
             conversation,
             busy_policy,
             is_live: agent.is_live,
             is_input_ready: agent.is_input_ready,
-            has_resume_session: agent.resume_session.is_some(),
         });
 
         match route {
@@ -668,6 +673,29 @@ impl StepExecutor for LiveStepExecutor {
         Self: 'async_trait,
     {
         Box::pin(async move { ops::notify(self.notification_app.as_ref(), &req) })
+    }
+
+    fn preflight_message_send<'life0, 'async_trait>(
+        &'life0 self,
+        req: MessageSendRequest,
+        fresh: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<String, StepError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.preflight_information(req, fresh).await })
+    }
+
+    fn message_send<'life0, 'async_trait>(
+        &'life0 self,
+        req: MessageSendRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<StepOutput, StepError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.send_information(req).await })
     }
 
     fn memory_commit<'life0, 'async_trait>(

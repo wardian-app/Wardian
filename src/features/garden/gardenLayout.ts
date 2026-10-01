@@ -48,7 +48,6 @@ import {
   DEFAULT_METRIC_WEIGHTS,
   buildNeighbourGraph,
   symmetrizeGraph,
-  type CoUseIndex,
   type MetricContext,
   type MetricWeights,
   type PprMatrix,
@@ -98,7 +97,6 @@ export interface LayoutInput {
   reachTiers?: DistrictReachTiers;
   /** Interaction affinity, agent subgraph only. */
   ppr?: PprMatrix;
-  coUse?: CoUseIndex;
   ignoredPairs?: ReadonlySet<string>;
   suppressedSeedPairs?: ReadonlySet<string>;
   weights?: MetricWeights;
@@ -181,7 +179,6 @@ export function layoutGarden(input: LayoutInput): LayoutResult {
     weights: input.weights ?? DEFAULT_METRIC_WEIGHTS,
     sceneWeights: anchorWeights,
     ppr: input.ppr,
-    coUse: input.coUse,
     ignoredPairs: input.ignoredPairs,
     suppressedSeedPairs: input.suppressedSeedPairs,
     districtOf,

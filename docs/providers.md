@@ -190,6 +190,11 @@ started from that terminal. During attachment, Wardian temporarily disables
 Codex's startup update check in the private config overlay so an update notice
 cannot block the terminal; the prior setting is restored afterward.
 
+On resume, Wardian also reads the current thread status without loading turn
+history. An idle thread clears stale `Processing` and releases queued follow-up
+delivery. Active threads remain busy, approval/input requests appear as
+`Action Needed`, and interruption requires an exact turn identity.
+
 The [agent messaging tools](./developer/agent-messaging-tools.md) separate
 information, follow-up tasks, and interruption. Delivery uses the shared
 local app-server connection. The local-daemon integration targets stable CLI
@@ -269,8 +274,11 @@ the owning process must release the lock. Restore failures are also recorded in
 `<wardian-home>/wardian_debug.log`.
 
 If Wardian reports `withheld provider restore to avoid a duplicate writer`,
-read the detailed error in `wardian_debug.log` before retrying. The summary
-can accompany several restore failures; only a detail such as `matching
+read the detailed error in `wardian_debug.log`. For a conflict with a resume
+operation or an earlier restore, Wardian waits for that exact lease to clear or
+expire, then makes one automatic restore attempt if the saved agent remains on
+and unchanged and no provider process candidate exists. If the error remains,
+a detail such as `matching
 provider process candidate already exists (PID ...)` identifies a possible
 competing process. Check whether that PID still exists. Keep the conversation
 history and leases intact while investigating the cause.

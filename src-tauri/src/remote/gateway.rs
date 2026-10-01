@@ -623,7 +623,13 @@ async fn load_remote_queue(
         require_audited_remote_session(&ctx, &headers, &origin, "roster_read", "load_queue")
             .await?;
     let state = ctx.app.state::<crate::state::AppState>();
-    let items = crate::remote::operations::remote_queue_items_for_app(&ctx.app, &state).await;
+    let items = crate::remote::operations::remote_queue_items_for_app(&ctx.app, &state)
+        .await
+        .map_err(|_| {
+            RemoteGatewayError::service_unavailable(
+                crate::remote::operations::REMOTE_AUTOMATION_INBOX_UNAVAILABLE,
+            )
+        })?;
     audit_gateway_event(
         &session,
         &origin,
@@ -632,25 +638,38 @@ async fn load_remote_queue(
     Ok(Json(serde_json::json!({ "items": items })))
 }
 
+type RemoteInboxActionExecutor<R> = fn(
+    AppHandle<R>,
+    RemoteInboxActionRequest,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'static>,
+>;
+
 async fn run_inbox_action(
     State(ctx): State<RemoteGatewayContext>,
     headers: HeaderMap,
     Json(request): Json<RemoteInboxActionRequest>,
 ) -> Result<Json<serde_json::Value>, RemoteGatewayError> {
+    run_inbox_action_with_executor(ctx, headers, request, execute_remote_inbox_action).await
+}
+
+async fn run_inbox_action_with_executor<R: Runtime>(
+    ctx: RemoteGatewayContext<R>,
+    headers: HeaderMap,
+    request: RemoteInboxActionRequest,
+    execute: RemoteInboxActionExecutor<R>,
+) -> Result<Json<serde_json::Value>, RemoteGatewayError> {
     let action = request.action.clone();
     let target = request.item_id.clone().unwrap_or_else(|| "all".to_string());
     let (origin, session) = authorize_inbox_action(&ctx, &headers, &action).await?;
-    let state = ctx.app.state::<crate::state::AppState>();
-    if let Err(_error) =
-        crate::remote::operations::apply_remote_inbox_action(&state, &ctx.app, request).await
-    {
+    if let Err(error) = execute(ctx.app.clone(), request).await {
         audit_gateway_event(
             &session,
             &origin,
             GatewayAuditEvent::rejected("inbox_action", &action, "inbox_action_failed")
                 .target("inbox", &target),
         );
-        return Err(RemoteGatewayError::bad_request("inbox_action_failed"));
+        return Err(remote_inbox_action_gateway_error(&error));
     }
     audit_gateway_event(
         &session,
@@ -659,6 +678,16 @@ async fn run_inbox_action(
     );
     let _ = ctx.app.emit("inbox-updated", ());
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+fn remote_inbox_action_gateway_error(error: &str) -> RemoteGatewayError {
+    if error == crate::remote::operations::REMOTE_AUTOMATION_INBOX_UNAVAILABLE {
+        RemoteGatewayError::service_unavailable(
+            crate::remote::operations::REMOTE_AUTOMATION_INBOX_UNAVAILABLE,
+        )
+    } else {
+        RemoteGatewayError::bad_request("inbox_action_failed")
+    }
 }
 
 async fn load_remote_watchlists(
@@ -940,6 +969,16 @@ async fn run_agent_action(
             .target("agent", &request.target),
     );
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+fn execute_remote_inbox_action(
+    app: AppHandle,
+    request: RemoteInboxActionRequest,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'static>> {
+    Box::pin(async move {
+        let state = app.state::<crate::state::AppState>();
+        crate::remote::operations::apply_remote_inbox_action(&state, &app, request).await
+    })
 }
 
 async fn require_agent_action_specific_rate_limit(
@@ -2106,6 +2145,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inbox_action_exposes_automation_projection_unavailability() {
+        let temp = tempfile::tempdir().expect("temp home");
+        let _home = WardianHomeEnvGuard::set_async(temp.path()).await;
+        crate::remote::storage::save_remote_config_at(temp.path(), &config())
+            .expect("remote config");
+        let app = tauri::test::mock_app();
+        app.manage(AppState::new());
+        let state = app.state::<AppState>();
+        let session = {
+            let mut runtime = state.remote_runtime.lock().await;
+            crate::remote::auth::create_session(
+                &mut runtime,
+                "device-1",
+                chrono::Utc::now().timestamp_millis(),
+            )
+        };
+        let ctx = RemoteGatewayContext {
+            app: app.handle().clone(),
+            config: config(),
+        };
+
+        let unavailable = run_inbox_action_with_executor(
+            ctx.clone(),
+            action_headers(&session),
+            RemoteInboxActionRequest {
+                action: "mark_all_read".to_string(),
+                item_id: None,
+                choice: None,
+            },
+            reject_inbox_action_projection_unavailable,
+        )
+        .await
+        .expect_err("failed run-index refresh should reject the action");
+        assert_eq!(unavailable.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            unavailable.code,
+            crate::remote::operations::REMOTE_AUTOMATION_INBOX_UNAVAILABLE
+        );
+
+        state.set_remote_inbox_runtime_items(0, Vec::new());
+        let generic = run_inbox_action_with_executor(
+            ctx,
+            action_headers(&session),
+            RemoteInboxActionRequest {
+                action: "mark_read".to_string(),
+                item_id: Some("missing-item".to_string()),
+                choice: None,
+            },
+            reject_inbox_action_generically,
+        )
+        .await
+        .expect_err("unknown Inbox item should retain generic action failure");
+        assert_eq!(generic.status, StatusCode::BAD_REQUEST);
+        assert_eq!(generic.code, "inbox_action_failed");
+    }
+
+    #[tokio::test]
     async fn remote_chat_snapshot_failure_returns_a_sanitized_stage_code() {
         let _guard = crate::utils::wardian_test_env_lock_async().await;
         let temp = tempfile::tempdir().expect("temp home");
@@ -2434,6 +2530,24 @@ mod tests {
             HeaderValue::from_str(&session.csrf_nonce).expect("csrf header"),
         );
         headers
+    }
+
+    fn reject_inbox_action_projection_unavailable<R: Runtime>(
+        _app: AppHandle<R>,
+        _request: RemoteInboxActionRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'static>>
+    {
+        Box::pin(async {
+            Err(crate::remote::operations::REMOTE_AUTOMATION_INBOX_UNAVAILABLE.to_string())
+        })
+    }
+
+    fn reject_inbox_action_generically<R: Runtime>(
+        _app: AppHandle<R>,
+        _request: RemoteInboxActionRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'static>>
+    {
+        Box::pin(async { Err("inbox_item_not_found".to_string()) })
     }
 
     #[test]

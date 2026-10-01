@@ -37,10 +37,13 @@ provider delivery path, so the tool does not return a duplicate body or
 acknowledge its consumption. The timeout flag remains false.
 
 Reply takes `request_id`, `status` (`done`, `blocked`, or `failed`), and
-`message`. The request determines the destination. A generic message or an
-agent's final prose does not, by itself, complete a correlated request.
+`message`. The request determines the destination. A committed explicit reply
+suppresses automatic final-result publication. Canonical tasks dispatched to
+an exact native Codex turn return that turn's final result to their requester
+automatically. Manual receive, composer delivery, and providers without an
+exact native completion boundary still require explicit `reply`.
 
-Only an assigned task with an explicit `request_id` requires MCP `reply`.
+Only an assigned task with an explicit `request_id` may use MCP `reply`.
 An ordinary human chat message completes through the agent's assistant
 response. Its delivery interaction ID is not a task request ID. Informational
 peer messages do not create an obligation to start a turn or reply.
@@ -73,10 +76,39 @@ dispatch opportunity after the agent roster and startup lifecycle become ready.
 They do not replay a task whose delivery is uncertain.
 
 For an attached Codex session, Wardian validates its native owner and runtime
-generation, then sends `turn/start` with a structured `wardian_task_delivery`
-item on the existing thread. No terminal paste or Return key is involved.
-Provider acceptance and task completion are recorded separately. The recipient
-completes the task using `reply` with the original request ID.
+generation. An observed idle owner receives `turn/start` with a structured
+`wardian_task_delivery` item on the existing thread. An active owner with an
+exact turn ID receives `turn/steer`, fenced by `expectedTurnId`, with literal
+peer text as input and separate host routing metadata in `additionalContext`.
+Structured steering requires stable Codex 0.159.2 or newer; older supported
+versions retain idle and information delivery. No terminal paste or Return key
+is involved. Acceptance persists an exact request/claim/generation/thread/turn
+binding before a completion observer can publish a result.
+
+An exact completed turn returns its final assistant item as `done`. Commentary
+is excluded. When a model omits message phases, the last completed assistant
+item with an unknown phase supplies the compatibility result. An interrupted
+turn returns an attributed Wardian `blocked` notice; a failed turn returns
+`failed`. Missing final text or output exceeding the 64 KiB reply limit returns
+an attributed `blocked` notice. Unknown outcomes and lost observations remain
+uncertain and are never replayed. Several tasks accepted into the same active
+turn each return its shared final result to their own requester.
+
+A recognized stale-turn rejection or a writer-fence activity change confirms
+that no task was admitted. Its claim is released before current activity is
+read for another dispatch opportunity, so an idle callback consumed while the
+claim was held cannot strand the task. Other provider errors or lost
+acknowledgements retain uncertainty and cannot trigger that recovery.
+
+Terminal evidence is persisted before reply publication. Startup and receive
+recover already captured outcomes after a failed reply write without rerunning
+provider work. Startup marks bindings with lost observation continuity uncertain;
+historical or manually received tasks are never inferred from transcripts.
+
+Receive waits on recipient mailbox signals after committed admissions,
+replies, and provider-context delivery. It retains its original deadline and
+cursor acknowledgement rules. Completion wakes an existing mailbox wait; it
+does not start a finished requester's turn.
 
 Information and replies use the same canonical interaction store. A capable
 Codex session can receive them through `thread/inject_items` as

@@ -1,6 +1,9 @@
 //! Read commands over the habitat telemetry store.
 //!
-//! Every command here answers from `telemetry_rollup_hourly` by way of
+//! The exception is [`list_agent_metrics`], which samples the live roster
+//! rather than the store.
+//!
+//! Every other command here answers from `telemetry_rollup_hourly` by way of
 //! [`wardian_core::telemetry::query`], so a horizon costs one row per hour per
 //! agent per model rather than a re-read of the provider logs.
 //!
@@ -14,7 +17,8 @@
 use crate::state::AppState;
 use chrono::Utc;
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
+use wardian_core::models::AgentTelemetry;
 use wardian_core::telemetry::attribution::token_reporting_agents;
 // Horizon resolution lives in the core so the CLI resolves "the last 24 hours"
 // the same way this does. Two independent implementations of the flooring rule
@@ -27,8 +31,7 @@ use wardian_core::telemetry::models::{
     ActiveTime, BreakdownRow, IntervalFact, LimitObservation, TelemetrySummary, TokenCounts,
 };
 use wardian_core::telemetry::query::{
-    activity_intervals, breakdown, grouped_breakdown, grouped_series, latest_limits, series,
-    summary, Dimension, SeriesPoint,
+    activity_intervals, breakdown, grouped_breakdown, latest_limits, summary, Dimension,
 };
 
 /// A breakdown row with the label a surface should actually print.
@@ -1019,6 +1022,18 @@ fn roster_providers() -> std::collections::HashMap<String, i64> {
         .unwrap_or_default()
 }
 
+/// Sample every live agent's CPU, memory, and status.
+///
+/// Publishing the sampled statuses can make an agent ready for queued work, so
+/// the command needs the app handle to wake that agent's queue.
+#[tauri::command]
+pub async fn list_agent_metrics(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<Vec<AgentTelemetry>, String> {
+    Ok(crate::manager::get_all_metrics(&state, &app).await)
+}
+
 /// Read the Dashboard's saved column and window preferences.
 ///
 /// Deliberately untyped at this boundary, and stored the same way the watchlist
@@ -1110,25 +1125,6 @@ const MATRIX_ROW_LIMIT: usize = 40;
 
 /// Hard ceiling, so a caller cannot ask for an unbounded grid.
 const MATRIX_ROW_CAP: usize = 200;
-
-/// See [`telemetry_overview`] for why this is `(async)`.
-#[tauri::command(async)]
-pub fn telemetry_series(horizon: String, dimension: String) -> Result<Vec<SeriesPoint>, String> {
-    let horizon =
-        Horizon::parse(&horizon).ok_or_else(|| format!("unknown telemetry horizon: {horizon}"))?;
-    let dimension = Dimension::parse(&dimension)
-        .ok_or_else(|| format!("unknown telemetry dimension: {dimension}"))?;
-    let window = resolve_horizon(horizon, Utc::now());
-
-    wardian_core::db::get_db_conn(|conn| {
-        if dimension == Dimension::Agent {
-            Ok(grouped_series(conn, dimension, &window.from, &window.to)?)
-        } else {
-            Ok(series(conn, dimension, &window.from, &window.to)?)
-        }
-    })
-    .map_err(|error| format!("could not read telemetry series: {error}"))
-}
 
 /// See [`telemetry_overview`] for why this is `(async)`.
 #[tauri::command(async)]

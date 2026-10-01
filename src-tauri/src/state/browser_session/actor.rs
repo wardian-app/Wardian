@@ -717,15 +717,6 @@ impl BrowserSession {
         }
     }
 
-    /// Scrolls the page itself rather than an element.
-    pub async fn scroll_page(&self, delta_x: f64, delta_y: f64) -> Result<(), BrowserError> {
-        self.evaluate(&format!(
-            "window.scrollBy({{ left: {delta_x}, top: {delta_y}, behavior: 'instant' }})"
-        ))
-        .await?;
-        Ok(())
-    }
-
     /// Captures a PNG and writes it to `path`.
     pub async fn screenshot(&self, path: &PathBuf, full_page: bool) -> Result<(), BrowserError> {
         let result = self
@@ -1615,18 +1606,6 @@ impl BrowserSession {
         }
         self.connection
             .call_session(&self.cdp_session().await, "Input.dispatchKeyEvent", params)
-            .await?;
-        Ok(())
-    }
-
-    /// Inserts text as if typed, bypassing per-key synthesis.
-    pub async fn insert_text(&self, text: &str) -> Result<(), BrowserError> {
-        self.connection
-            .call_session(
-                &self.cdp_session().await,
-                "Input.insertText",
-                json!({ "text": text }),
-            )
             .await?;
         Ok(())
     }

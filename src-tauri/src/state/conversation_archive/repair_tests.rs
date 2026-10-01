@@ -768,6 +768,65 @@ fn projection_repair_does_not_consume_new_generated_input() {
     );
 }
 
+#[test]
+fn source_check_reuses_cached_rows_without_rereading_the_file() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let sources_path = temp.path().join("sources.jsonl");
+    // A cached snapshot must answer every later check in the same append; the
+    // unparseable file proves the check never reads it again.
+    std::fs::write(&sources_path, b"{not json\n").expect("write unreadable sources");
+    let published = source_row("agent-1:published");
+    let mut cached = Some(vec![published.clone()]);
+
+    let appended =
+        super::repair::append_source_if_needed(&sources_path, &mut cached, &published, true)
+            .expect("cached source rows answer without reading sources.jsonl");
+
+    assert!(!appended);
+    assert_eq!(cached, Some(vec![published]));
+}
+
+#[test]
+fn first_source_check_loads_rows_once_and_appends_new_source() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let sources_path = temp.path().join("sources.jsonl");
+    let published = source_row("agent-1:published");
+    write_jsonl_atomic(&sources_path, std::slice::from_ref(&published)).expect("write sources");
+    let mut cached = None;
+
+    let appended =
+        super::repair::append_source_if_needed(&sources_path, &mut cached, &published, true)
+            .expect("check published source");
+    assert!(!appended);
+    assert_eq!(cached.as_deref(), Some(std::slice::from_ref(&published)));
+
+    let fresh = source_row("agent-1:fresh");
+    let appended = super::repair::append_source_if_needed(&sources_path, &mut cached, &fresh, true)
+        .expect("append new source");
+    assert!(appended);
+    let on_disk: Vec<ConversationSourceRecord> =
+        read_jsonl_records(&sources_path).expect("read sources");
+    assert_eq!(on_disk, vec![published.clone(), fresh.clone()]);
+    assert_eq!(cached, Some(vec![published, fresh]));
+}
+
+fn source_row(source_id: &str) -> ConversationSourceRecord {
+    ConversationSourceRecord {
+        schema: 1,
+        source_id: source_id.to_string(),
+        provider: "codex".to_string(),
+        provider_session_id: Some("session-one".to_string()),
+        source_kind: "provider_log".to_string(),
+        source_path: None,
+        cursor: None,
+        offset: None,
+        row_id: None,
+        provider_event_type: None,
+        hash: None,
+        artifact_ref: None,
+    }
+}
+
 fn archive_context() -> ConversationArchiveContext {
     ConversationArchiveContext {
         agent_id: "agent-1".to_string(),

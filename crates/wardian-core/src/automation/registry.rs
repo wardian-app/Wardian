@@ -268,6 +268,25 @@ fn build_registry() -> Vec<NodeTypeDef> {
             version: 1,
         },
         NodeTypeDef {
+            id: "message_send".into(),
+            kind: NodeKind::Engine,
+            category: "Action".into(),
+            label: "Send message".into(),
+            icon: "send".into(),
+            description: "Admit an exact UTF-8 workspace artifact as a host informational message. Requires the application host; no task or reply is created.".into(),
+            supported: true,
+            fields: vec![
+                FieldDef::new("recipient", FieldType::Text, "Recipient").required()
+                    .help("One exact UUID or unambiguous exact agent name. No class or broadcast selectors. Must resolve before tasks start."),
+                FieldDef::new("artifact_path", FieldType::Text, "Artifact path").required()
+                    .help("Workspace-relative UTF-8 file, at most 64 KiB. Use a run-specific directory such as .wardian-review/{{run.id}}/review.md; an existing artifact fails fresh-run preflight."),
+            ],
+            inputs: default_in(),
+            outputs: default_out(),
+            outputs_from_field: None,
+            version: 1,
+        },
+        NodeTypeDef {
             id: "notify".into(),
             kind: NodeKind::Engine,
             category: "State".into(),

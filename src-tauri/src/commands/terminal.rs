@@ -28,11 +28,6 @@ pub struct WindowsConptyRuntimeDiagnostics {
     pub bare_load_error: Option<String>,
 }
 
-#[tauri::command]
-pub fn get_terminal_runtime_diagnostics() -> TerminalRuntimeDiagnostics {
-    build_terminal_runtime_diagnostics()
-}
-
 pub(crate) fn log_terminal_runtime_diagnostics_once() {
     static LOGGED: OnceLock<()> = OnceLock::new();
     if LOGGED.set(()).is_err() {
@@ -334,25 +329,6 @@ pub async fn submit_prompt_to_agent(
     }
 
     Ok(detail)
-}
-
-#[tauri::command]
-pub async fn broadcast_input(input: String, state: State<'_, AppState>) -> Result<(), String> {
-    let session_ids = state
-        .agents
-        .lock()
-        .await
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-    for session_id in session_ids {
-        let _delivery_guard = state.lock_agent_delivery(&session_id).await;
-        let _ = state
-            .terminal_sessions
-            .send_privileged_input(&session_id, input.clone().into_bytes())
-            .await;
-    }
-    Ok(())
 }
 
 #[tauri::command]
@@ -885,8 +861,10 @@ mod tests {
         let submit = tokio::spawn(async move {
             crate::utils::terminal_input::submit_prompt_via_sender(
                 &tx,
-                "Check composer injection",
                 "codex",
+                "Check composer injection",
+                || async { Ok(()) },
+                || async { Ok(()) },
             )
             .await
         });

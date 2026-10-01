@@ -131,13 +131,26 @@ async fn handle_in_state(
             }
             // Snapshot before the first read, so a native claim already in flight
             // cannot settle between an empty read and registration unnoticed.
-            let provider_revision = state
-                .interactions
-                .agent_message_provider_revision(&sender)
-                .await;
+            let mut mailbox = state.interactions.subscribe_agent_mailbox(&sender).await;
+            let provider_revision = mailbox.borrow().provider_revision;
             let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout);
             loop {
+                // Mark the snapshot seen before reading. A commit during the
+                // read remains unseen, so changed() cannot miss its wake.
+                mailbox.borrow_and_update();
                 authenticate(state, &sender).await?;
+                let recovered = state
+                    .interactions
+                    .recover_agent_task_results()
+                    .await
+                    .map_err(control_error)?;
+                if let Some(app) = app {
+                    for reply in recovered {
+                        for recipient in &reply.record.target_session_ids {
+                            native::spawn_information(app, recipient);
+                        }
+                    }
+                }
                 let mut page = state
                     .interactions
                     .receive_agent_messages(
@@ -148,13 +161,7 @@ async fn handle_in_state(
                     )
                     .await
                     .map_err(control_error)?;
-                if timeout > 0
-                    && state
-                        .interactions
-                        .agent_message_provider_revision(&sender)
-                        .await
-                        != provider_revision
-                {
+                if timeout > 0 && mailbox.borrow().provider_revision != provider_revision {
                     page.wake_reason = Some("provider_context_available".into());
                 }
                 if !page.messages.is_empty() || page.wake_reason.is_some() || timeout == 0 {
@@ -166,10 +173,14 @@ async fn handle_in_state(
                 }
                 // Wait owns no roster, lifecycle or database lock. Timeout affects
                 // this receive call only, never a task or delivery claim.
-                tokio::time::sleep_until(
-                    deadline.min(tokio::time::Instant::now() + Duration::from_millis(25)),
-                )
-                .await;
+                if tokio::time::timeout_at(deadline, mailbox.changed())
+                    .await
+                    .is_err()
+                {
+                    // Re-read once at the deadline so a concurrent durable
+                    // commit takes precedence over an empty timeout response.
+                    continue;
+                }
             }
         }
     }
@@ -283,6 +294,53 @@ async fn resolve_exact(state: &AppState, target: &str) -> Result<ResolvedRecipie
     }
 }
 
+/// Automation uses the same exact name/UUID resolver as managed messaging.
+/// Rechecking before admission plus the interaction deletion guard closes the
+/// gap between launch preflight and a later delivery.
+pub(crate) async fn resolve_automation_recipient(
+    state: &AppState,
+    target: &str,
+) -> Result<String, ControlError> {
+    let id = resolve_exact(state, target).await?.id;
+    state
+        .interactions
+        .check_automation_recipient(&id)
+        .await
+        .map_err(control_error)?;
+    Ok(id)
+}
+
+pub(crate) fn notify_information_admitted(
+    app: &AppHandle,
+    recipient: &str,
+    admitted: &store::Admitted,
+) {
+    let _ = app.emit("pair-activity-changed", ());
+    if !admitted.duplicate {
+        native::spawn_information(app, recipient);
+    }
+}
+
+pub(crate) async fn admit_automation_information(
+    state: &AppState,
+    run_id: &str,
+    node: &str,
+    recipient: &str,
+    message: &str,
+) -> Result<store::Admitted, ControlError> {
+    let id = resolve_automation_recipient(state, recipient).await?;
+    if id != recipient {
+        return Err(ControlError::not_found(
+            "Resolved automation recipient no longer exists.",
+        ));
+    }
+    state
+        .interactions
+        .admit_host_automation_message(run_id, node, &id, message)
+        .await
+        .map_err(control_error)
+}
+
 struct AdmissionInput<'a> {
     sender: &'a str,
     target: &'a str,
@@ -324,7 +382,9 @@ async fn admit(
         .await
         .map_err(control_error)?;
     if let Some(app) = app {
-        let _ = app.emit("pair-activity-changed", ());
+        if task {
+            let _ = app.emit("pair-activity-changed", ());
+        }
         if task && !admitted.duplicate {
             spawn_pending_tasks_with_request(
                 app,
@@ -333,8 +393,8 @@ async fn admit(
                 Some(generation),
                 Some(resolved.provider),
             );
-        } else if !task && !admitted.duplicate {
-            native::spawn_information(app, &recipient);
+        } else if !task {
+            notify_information_admitted(app, &recipient, &admitted);
         }
     }
     if task {
@@ -751,7 +811,7 @@ async fn dispatch_one_with_request(
     .await;
     match route {
         TaskDispatchRoute::Native => {
-            return native::dispatch_attached_task_with_request(state, &info, request_id).await
+            return native::dispatch_attached_task_with_request(app, state, &info, request_id).await
         }
         TaskDispatchRoute::Background => return dispatch_background_task(app, state, &info).await,
         TaskDispatchRoute::Surface => {}

@@ -17,7 +17,7 @@ use crate::utils::fs::*;
 use crate::utils::logging::{log_debug, log_terminal_trace_bytes, log_terminal_trace_note};
 use crate::utils::PtyUtf8Decoder;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Read, Seek, Write};
 use tauri::{AppHandle, Emitter, Manager};
 use wardian_core::control::{ProviderInputReadiness, WatchTranscriptMessage};
@@ -32,8 +32,8 @@ use super::codex_onboarding::{
 use super::codex_terminal_theme::CodexTerminalThemeProbeResponder;
 
 use super::claude::{
-    claude_log_paths, claude_permission_hook_matches_session, claude_project_dir_name,
-    discover_claude_log_for_session_name,
+    claude_accepted_sessions, claude_log_paths, claude_permission_hook_matches_session,
+    claude_project_dir_name, discover_claude_log_for_session_name,
 };
 use super::codex::{codex_provider_session_is_excluded, codex_session_file_path};
 use super::opencode::{
@@ -66,6 +66,41 @@ const CLAUDE_TRUST_SELECTION_SETTLE_INTERVAL: std::time::Duration =
 const CLAUDE_TRUST_SELECTION_POLL_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(50);
 const CLAUDE_TRUST_SELECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn complete_jsonl_record(pending: &mut String, fragment: &str) -> Option<String> {
+    pending.push_str(fragment);
+    pending.ends_with('\n').then(|| std::mem::take(pending))
+}
+
+pub(crate) fn claude_stop_event_message(
+    event: &serde_json::Value,
+    accepted_sessions: &[String],
+) -> Option<WatchTranscriptMessage> {
+    if event.get("hook_event_name").and_then(|v| v.as_str()) != Some("Stop")
+        || !accepted_sessions
+            .iter()
+            .any(|session_id| claude_permission_hook_matches_session(event, session_id))
+    {
+        return None;
+    }
+    let prompt_id = event
+        .get("prompt_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| uuid::Uuid::parse_str(value).is_ok())?;
+    let text = event
+        .get("last_assistant_message")
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.trim().is_empty())?;
+    Some(WatchTranscriptMessage {
+        role: "assistant".to_string(),
+        text: text.to_string(),
+        provider: "claude".to_string(),
+        turn_id: Some(prompt_id.to_string()),
+        source: Some("claude_stop_hook".to_string()),
+        provider_provenance: None,
+    })
+}
 
 fn interactive_provider_launch_cwd(
     provider: &str,
@@ -840,6 +875,71 @@ fn startup_prompt_ready_for_reader(
         && startup_prompt_is_ready(provider, startup_prompt_pending, startup_screen)
 }
 
+/// How many times a reader re-resolves a screen it could not read, and how long
+/// it waits between attempts. Bounded so an unreadable OpenCode screen cannot hold a
+/// task open indefinitely, and slow enough that a provider still painting gets
+/// several chances to settle.
+const STARTUP_READINESS_RECHECK_ATTEMPTS: usize = 10;
+const STARTUP_READINESS_RECHECK_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(500);
+
+/// Whether the reader must re-resolve its startup screen later.
+///
+/// The reader only evaluates readiness when a chunk arrives. When the current
+/// screen cannot be resolved on the chunk that carried the ready prompt, that
+/// evaluation is lost, and a provider now sitting at its composer emits nothing
+/// further to trigger another. Startup then stays pending for the life of the
+/// session. This recheck is limited to OpenCode; other providers have distinct
+/// trust and attachment gates that this path does not own.
+fn startup_readiness_needs_recheck(
+    provider: &str,
+    startup_prompt_pending: bool,
+    screen_resolved: bool,
+) -> bool {
+    startup_prompt_pending && !screen_resolved && provider == "opencode"
+}
+
+/// Re-evaluate the current OpenCode screen after a chunk's snapshot failed.
+/// The runtime identity and normal composer predicate remain mandatory on
+/// every attempt; elapsed time alone cannot establish readiness.
+async fn wait_for_opencode_startup_screen(
+    broker: &crate::state::terminal_session::TerminalSessionBroker,
+    session_id: &str,
+    runtime_generation: u64,
+    attempts: usize,
+    interval: std::time::Duration,
+) -> bool {
+    for _ in 0..attempts {
+        tokio::time::sleep(interval).await;
+        let ready = broker
+            .snapshot(session_id)
+            .await
+            .ok()
+            .filter(|snapshot| snapshot.runtime_generation == runtime_generation)
+            .is_some_and(|snapshot| {
+                crate::control::provider_output_has_startup_ready_prompt(
+                    "opencode",
+                    &snapshot.visible_grid,
+                )
+            });
+        if ready {
+            return true;
+        }
+    }
+    false
+}
+
+/// Release the reader's startup-only title gate after its async recheck
+/// successfully published readiness.
+fn finish_startup_pending_after_recheck(
+    startup_prompt_pending: &mut bool,
+    recheck_published: &std::sync::atomic::AtomicBool,
+) {
+    if recheck_published.load(std::sync::atomic::Ordering::Acquire) {
+        *startup_prompt_pending = false;
+    }
+}
+
 fn finish_claude_trust_readiness(
     trust_state: &std::sync::atomic::AtomicU8,
     readiness_claimed: &std::sync::atomic::AtomicBool,
@@ -870,6 +970,56 @@ fn claim_startup_readiness(claimed: &std::sync::atomic::AtomicBool) -> bool {
             std::sync::atomic::Ordering::Acquire,
         )
         .is_ok()
+}
+
+/// A rejected delayed publication leaves the startup claim available for the
+/// reader or another current-runtime observation.
+fn finish_startup_readiness_claim(claimed: &std::sync::atomic::AtomicBool, published: bool) {
+    if !published {
+        claimed.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// A ready chunk may arrive while another startup publisher owns the claim.
+/// Recheck the current screen after that publisher finishes, including after
+/// a rejected publication, so the last chunk is not the only chance to ready.
+async fn retry_startup_readiness<Check, CheckFuture, Publish, PublishFuture>(
+    claimed: &std::sync::atomic::AtomicBool,
+    attempts: usize,
+    mut check_ready: Check,
+    mut publish: Publish,
+) -> bool
+where
+    Check: FnMut() -> CheckFuture,
+    CheckFuture: std::future::Future<Output = bool>,
+    Publish: FnMut() -> PublishFuture,
+    PublishFuture: std::future::Future<Output = bool>,
+{
+    let mut remaining = attempts;
+    let mut rechecks_after_handoff = 2;
+    while remaining > 0 {
+        remaining -= 1;
+        if !check_ready().await {
+            continue;
+        }
+        if !claim_startup_readiness(claimed) {
+            if rechecks_after_handoff > 0 {
+                rechecks_after_handoff -= 1;
+                remaining = attempts;
+            }
+            continue;
+        }
+        let published = publish().await;
+        finish_startup_readiness_claim(claimed, published);
+        if published {
+            return true;
+        }
+        if rechecks_after_handoff > 0 {
+            rechecks_after_handoff -= 1;
+            remaining = attempts;
+        }
+    }
+    false
 }
 
 impl AntigravityTranscriptTracker {
@@ -1541,7 +1691,18 @@ fn provider_spawn_session_identity(config: &AgentConfig) -> &str {
 fn acquire_provider_spawn_lease(
     config: &AgentConfig,
 ) -> Result<wardian_core::conversation_lease::PersistedConversationLeaseGuard, String> {
-    let now = chrono::Utc::now();
+    acquire_provider_spawn_lease_with_candidate_check_at(
+        config,
+        chrono::Utc::now(),
+        check_provider_spawn_candidates,
+    )
+}
+
+fn acquire_provider_spawn_lease_with_candidate_check_at(
+    config: &AgentConfig,
+    now: chrono::DateTime<chrono::Utc>,
+    check_candidates: impl FnOnce(&AgentConfig) -> Result<(), String>,
+) -> Result<wardian_core::conversation_lease::PersistedConversationLeaseGuard, String> {
     let now_rfc3339 = now.to_rfc3339();
     let lease = wardian_core::conversation_lease::ConversationLease {
         agent_id: config.session_id.clone(),
@@ -1561,7 +1722,7 @@ fn acquire_provider_spawn_lease(
         Ok(wardian_core::conversation_lease::ConversationLeaseAcquireOutcome::Acquired) => {
             let guard =
                 wardian_core::conversation_lease::PersistedConversationLeaseGuard::new(&lease);
-            check_provider_spawn_candidates(config)?;
+            check_candidates(config)?;
             Ok(guard)
         }
         Ok(wardian_core::conversation_lease::ConversationLeaseAcquireOutcome::Conflict(
@@ -1595,23 +1756,49 @@ fn validate_inherited_provider_spawn_lease(
     guard: &wardian_core::conversation_lease::PersistedConversationLeaseGuard,
 ) -> Result<(), String> {
     let now = chrono::Utc::now();
-    match wardian_core::conversation_lease::retarget_lifecycle_lease_persisted(
-        guard.owner(),
-        &config.session_id,
-        &config.provider,
-        provider_spawn_session_identity(config),
-        &now.to_rfc3339(),
-        &(now + PROVIDER_SPAWN_LEASE_DURATION).to_rfc3339(),
-    )? {
-        wardian_core::conversation_lease::ConversationLeaseRetargetOutcome::Retargeted => {}
-        wardian_core::conversation_lease::ConversationLeaseRetargetOutcome::Conflict(conflict) => {
-            return Err(format!(
-                "provider startup was withheld because saved conversation is leased by {} {} ({})",
-                conflict.owner_kind, conflict.owner_id, conflict.mode
-            ));
+    let now_rfc3339 = now.to_rfc3339();
+    if guard.owner().owner_kind == "provider_spawn" {
+        match wardian_core::conversation_lease::validate_provider_spawn_lease_persisted(
+            guard.owner(),
+            &config.session_id,
+            &config.provider,
+            provider_spawn_session_identity(config),
+            &now_rfc3339,
+        )? {
+            wardian_core::conversation_lease::ProviderSpawnLeaseValidationOutcome::Valid => {}
+            wardian_core::conversation_lease::ProviderSpawnLeaseValidationOutcome::Conflict(
+                conflict,
+            ) => {
+                return Err(format!(
+                    "provider startup was withheld because saved conversation is leased by {} {} ({})",
+                    conflict.owner_kind, conflict.owner_id, conflict.mode
+                ));
+            }
+            wardian_core::conversation_lease::ProviderSpawnLeaseValidationOutcome::NotActive => {
+                return Err("provider startup was withheld because its exact provider-spawn lease is no longer active for this agent and provider".to_string());
+            }
         }
-        wardian_core::conversation_lease::ConversationLeaseRetargetOutcome::NotActive => {
-            return Err("provider startup was withheld because its exact lifecycle lease is no longer active for this agent and provider".to_string());
+    } else {
+        match wardian_core::conversation_lease::retarget_lifecycle_lease_persisted(
+            guard.owner(),
+            &config.session_id,
+            &config.provider,
+            provider_spawn_session_identity(config),
+            &now_rfc3339,
+            &(now + PROVIDER_SPAWN_LEASE_DURATION).to_rfc3339(),
+        )? {
+            wardian_core::conversation_lease::ConversationLeaseRetargetOutcome::Retargeted => {}
+            wardian_core::conversation_lease::ConversationLeaseRetargetOutcome::Conflict(
+                conflict,
+            ) => {
+                return Err(format!(
+                    "provider startup was withheld because saved conversation is leased by {} {} ({})",
+                    conflict.owner_kind, conflict.owner_id, conflict.mode
+                ));
+            }
+            wardian_core::conversation_lease::ConversationLeaseRetargetOutcome::NotActive => {
+                return Err("provider startup was withheld because its exact lifecycle lease is no longer active for this agent and provider".to_string());
+            }
         }
     }
     check_provider_spawn_candidates(config)
@@ -1628,6 +1815,99 @@ pub(crate) fn provider_spawn_lease_for_launch(
         }
         None => acquire_provider_spawn_lease(config),
     }
+}
+
+/// Revalidate the saved roster entry and acquire the ordinary provider lease
+/// while the cross-process roster barrier prevents remove, pause, or config
+/// persistence from interleaving between those operations.
+pub(crate) fn acquire_restore_retry_spawn_lease(
+    expected_saved_configs: &[AgentConfig],
+    launch_config: &AgentConfig,
+) -> Result<Option<wardian_core::conversation_lease::PersistedConversationLeaseGuard>, String> {
+    let _roster = wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Agent roster barrier is unavailable".to_string())?;
+    let home =
+        super::get_wardian_home().ok_or_else(|| "Could not locate Wardian home".to_string())?;
+    let state_path = home.join("settings").join("state.json");
+    let state_json = std::fs::read_to_string(state_path).map_err(|error| error.to_string())?;
+    let saved_configs =
+        serde_json::from_str::<Vec<AgentConfig>>(&state_json).map_err(|error| error.to_string())?;
+    let Some(current_saved_config) = saved_configs
+        .iter()
+        .find(|config| config.session_id == launch_config.session_id)
+    else {
+        return Ok(None);
+    };
+    let saved_configs_match = expected_saved_configs.iter().any(|expected| {
+        if expected.session_id != launch_config.session_id {
+            return false;
+        }
+        match (
+            serde_json::to_value(current_saved_config),
+            serde_json::to_value(expected),
+        ) {
+            (Ok(current), Ok(expected)) => current == expected,
+            _ => false,
+        }
+    });
+    if current_saved_config.is_off || !saved_configs_match {
+        return Ok(None);
+    }
+
+    provider_spawn_lease_for_launch(launch_config, None).map(Some)
+}
+
+/// Persist a successful delayed restore only while its saved configuration is
+/// still one of the exact snapshots selected before the retry began.
+pub(crate) fn persist_restore_retry_config_if_unchanged(
+    expected_saved_configs: &[AgentConfig],
+    restored_config: &AgentConfig,
+) -> Result<bool, String> {
+    let _roster = wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Agent roster barrier is unavailable".to_string())?;
+    let home =
+        super::get_wardian_home().ok_or_else(|| "Could not locate Wardian home".to_string())?;
+    let state_path = home.join("settings").join("state.json");
+    let state_json = std::fs::read_to_string(&state_path).map_err(|error| error.to_string())?;
+    let mut saved_configs =
+        serde_json::from_str::<Vec<AgentConfig>>(&state_json).map_err(|error| error.to_string())?;
+    let Some(current_saved_config) = saved_configs
+        .iter_mut()
+        .find(|config| config.session_id == restored_config.session_id)
+    else {
+        return Ok(false);
+    };
+    let saved_configs_match = expected_saved_configs.iter().any(|expected| {
+        if expected.session_id != restored_config.session_id {
+            return false;
+        }
+        match (
+            serde_json::to_value(&*current_saved_config),
+            serde_json::to_value(expected),
+        ) {
+            (Ok(current), Ok(expected)) => current == expected,
+            _ => false,
+        }
+    });
+    if current_saved_config.is_off || !saved_configs_match {
+        return Ok(false);
+    }
+    if matches!(
+        (
+            serde_json::to_value(&*current_saved_config),
+            serde_json::to_value(restored_config),
+        ),
+        (Ok(current), Ok(restored)) if current == restored
+    ) {
+        return Ok(true);
+    }
+
+    *current_saved_config = restored_config.clone();
+    wardian_core::conversations::write_json_atomic(&state_path, &saved_configs)
+        .map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 async fn prepare_codex_owner_after_reservation<T, F, Fut>(
@@ -2741,6 +3021,11 @@ async fn spawn_agent_inner(
             (store, brief, expected_folder.clone(), memory_process_key)
         })));
     let startup_readiness_claimed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // One recheck task per reader, however many chunks fail to resolve.
+    let startup_readiness_recheck_started =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let startup_readiness_recheck_published =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let pi_exit_broker = pi_attachment
         .as_ref()
         .map(|_| app_state.native_delivery.clone());
@@ -2799,6 +3084,10 @@ async fn spawn_agent_inner(
                     break;
                 }
                 Ok(n) => {
+                    finish_startup_pending_after_recheck(
+                        &mut startup_prompt_pending,
+                        &startup_readiness_recheck_published,
+                    );
                     crate::utils::runtime_profile::record_event(
                         crate::utils::runtime_profile::RuntimeMetric::PtyRead,
                         n as u64,
@@ -2886,6 +3175,72 @@ async fn spawn_agent_inner(
                         trust_state,
                         startup_screen.as_deref(),
                     );
+                    // OpenCode can stop writing after its ready composer was
+                    // drawn. If this chunk could not resolve the current screen,
+                    // recheck that exact runtime without sending provider input.
+                    if startup_readiness_needs_recheck(
+                        &provider_name_for_pty,
+                        startup_prompt_pending,
+                        startup_screen.is_some(),
+                    ) && !startup_readiness_recheck_started
+                        .swap(true, std::sync::atomic::Ordering::AcqRel)
+                    {
+                        let recheck_broker = terminal_sessions.clone();
+                        let recheck_session = sid_for_pty.clone();
+                        let recheck_app = pty_app.clone();
+                        let recheck_status = current_status_clone.clone();
+                        let recheck_observation = startup_observation.clone();
+                        let recheck_claimed = startup_readiness_claimed.clone();
+                        let recheck_published = startup_readiness_recheck_published.clone();
+                        let recheck_memory_injection = pending_memory_injection.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let state = recheck_app.state::<AppState>();
+                            let published = retry_startup_readiness(
+                                &recheck_claimed,
+                                STARTUP_READINESS_RECHECK_ATTEMPTS,
+                                || wait_for_opencode_startup_screen(
+                                    &recheck_broker,
+                                    &recheck_session,
+                                    reader_runtime_generation,
+                                    1,
+                                    STARTUP_READINESS_RECHECK_INTERVAL,
+                                ),
+                                || crate::control::startup_readiness::
+                                    publish_startup_readiness_from_starting(
+                                        state.inner(),
+                                        &recheck_session,
+                                        &recheck_observation,
+                                        wardian_core::control::ProviderReadyEvidence::PromptDetected,
+                                        || async {
+                                            crate::control::startup_readiness::opencode_current_screen_is_ready(
+                                                state.inner(), &recheck_session,
+                                            ).await.unwrap_or(false)
+                                        },
+                                        |next_status| set_agent_status(
+                                            &recheck_app,
+                                            &recheck_session,
+                                            &recheck_status,
+                                            next_status,
+                                        ),
+                                    ),
+                            ).await;
+                            if published {
+                                if let Ok(mut pending) = recheck_memory_injection.lock() {
+                                    record_pending_memory_injection(
+                                        &mut pending,
+                                        &recheck_session,
+                                        "opencode",
+                                    );
+                                }
+                                recheck_published.store(true, std::sync::atomic::Ordering::Release);
+                                crate::control::spawn_agent_messaging_if_idle(
+                                    &recheck_app,
+                                    &recheck_session,
+                                    "Idle",
+                                );
+                            }
+                        });
+                    }
                     let assigned_claude_trust_prompt =
                         startup_screen.as_deref().is_some_and(|output| {
                             provider_name_for_pty == "claude"
@@ -2895,37 +3250,122 @@ async fn spawn_agent_inner(
                                 )
                         });
                     if startup_ready {
-                        startup_prompt_pending = false;
-                        if let Ok(mut pending) = pending_memory_injection.lock() {
-                            record_pending_memory_injection(
-                                &mut pending,
-                                &sid_for_pty,
-                                &provider_name_for_pty,
-                            );
+                        let claimed = !defer_codex_startup_readiness
+                            && claim_startup_readiness(&startup_readiness_claimed);
+                        if provider_name_for_pty != "opencode" {
+                            startup_prompt_pending = false;
+                            if let Ok(mut pending) = pending_memory_injection.lock() {
+                                record_pending_memory_injection(
+                                    &mut pending,
+                                    &sid_for_pty,
+                                    &provider_name_for_pty,
+                                );
+                            }
                         }
-                        if !defer_codex_startup_readiness
-                            && claim_startup_readiness(&startup_readiness_claimed)
-                        {
-                            set_agent_status(&pty_app, &sid_for_pty, &current_status_clone, "Idle");
+                        if claimed {
                             let readiness_app = pty_app.clone();
                             let readiness_session_id = sid_for_pty.clone();
                             let observation = startup_observation.clone();
-                            tauri::async_runtime::spawn(async move {
-                                let state = readiness_app.state::<AppState>();
-                                crate::control::startup_readiness::publish_startup_readiness(
-                                    Some(&readiness_app),
-                                    state.inner(),
-                                    &readiness_session_id,
-                                    &observation,
-                                    wardian_core::control::ProviderReadyEvidence::PromptDetected,
-                                )
-                                .await;
-                                crate::control::spawn_agent_messaging_if_idle(
-                                    &readiness_app,
-                                    &readiness_session_id,
+                            if provider_name_for_pty == "opencode" {
+                                let readiness_status = current_status_clone.clone();
+                                let readiness_claimed = startup_readiness_claimed.clone();
+                                let readiness_published =
+                                    startup_readiness_recheck_published.clone();
+                                let readiness_memory_injection = pending_memory_injection.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let state = readiness_app.state::<AppState>();
+                                    let mut published = crate::control::startup_readiness::
+                                        publish_startup_readiness_from_starting(
+                                            state.inner(),
+                                            &readiness_session_id,
+                                            &observation,
+                                            wardian_core::control::ProviderReadyEvidence::PromptDetected,
+                                            || async {
+                                                crate::control::startup_readiness::opencode_current_screen_is_ready(
+                                                    state.inner(), &readiness_session_id,
+                                                ).await.unwrap_or(false)
+                                            },
+                                            |next_status| set_agent_status(
+                                                &readiness_app,
+                                                &readiness_session_id,
+                                                &readiness_status,
+                                                next_status,
+                                            ),
+                                        )
+                                        .await;
+                                    finish_startup_readiness_claim(&readiness_claimed, published);
+                                    if !published {
+                                        published = retry_startup_readiness(
+                                            &readiness_claimed,
+                                            STARTUP_READINESS_RECHECK_ATTEMPTS,
+                                            || wait_for_opencode_startup_screen(
+                                                &state.terminal_sessions,
+                                                &readiness_session_id,
+                                                observation.runtime_generation,
+                                                1,
+                                                STARTUP_READINESS_RECHECK_INTERVAL,
+                                            ),
+                                            || crate::control::startup_readiness::
+                                                publish_startup_readiness_from_starting(
+                                                    state.inner(),
+                                                    &readiness_session_id,
+                                                    &observation,
+                                                    wardian_core::control::ProviderReadyEvidence::PromptDetected,
+                                                    || async {
+                                                        crate::control::startup_readiness::opencode_current_screen_is_ready(
+                                                            state.inner(), &readiness_session_id,
+                                                        ).await.unwrap_or(false)
+                                                    },
+                                                    |next_status| set_agent_status(
+                                                        &readiness_app,
+                                                        &readiness_session_id,
+                                                        &readiness_status,
+                                                        next_status,
+                                                    ),
+                                                ),
+                                        ).await;
+                                    }
+                                    if published {
+                                        if let Ok(mut pending) = readiness_memory_injection.lock() {
+                                            record_pending_memory_injection(
+                                                &mut pending,
+                                                &readiness_session_id,
+                                                "opencode",
+                                            );
+                                        }
+                                        readiness_published
+                                            .store(true, std::sync::atomic::Ordering::Release);
+                                        crate::control::spawn_agent_messaging_if_idle(
+                                            &readiness_app,
+                                            &readiness_session_id,
+                                            "Idle",
+                                        );
+                                    }
+                                });
+                            } else {
+                                set_agent_status(
+                                    &pty_app,
+                                    &sid_for_pty,
+                                    &current_status_clone,
                                     "Idle",
                                 );
-                            });
+                                tauri::async_runtime::spawn(async move {
+                                    let state = readiness_app.state::<AppState>();
+                                    crate::control::startup_readiness::publish_startup_readiness(
+                                        Some(&readiness_app),
+                                        state.inner(),
+                                        &readiness_session_id,
+                                        &observation,
+                                        wardian_core::control::ProviderReadyEvidence::PromptDetected,
+                                    )
+                                    .await;
+                                    crate::control::spawn_agent_messaging_if_idle(
+                                        &readiness_app,
+                                        &readiness_session_id,
+                                        "Idle",
+                                    );
+                                });
+                            }
                         }
                     } else if claude_trust_reader_should_mark_action_needed(
                         trust_state,
@@ -3697,12 +4137,16 @@ async fn spawn_agent_inner(
         let watcher_watch_state = watch_state.clone();
         let watcher_skip_existing_log = is_restored;
         let hook_event_log = claude_hook.as_ref().map(|hook| hook.event_log_path.clone());
+        let hook_completion_event_dir = claude_hook
+            .as_ref()
+            .map(|hook| hook.completion_event_dir.clone());
         let waiting_for_permission = std::sync::Arc::new(std::sync::Mutex::new(false));
         let log_waiting_for_permission = waiting_for_permission.clone();
 
         std::thread::spawn(move || {
             let mut offset: u64 = 0;
             let mut positioned_initial_log = !watcher_skip_existing_log;
+            let mut pending_provider_line = String::new();
             loop {
                 let current = watcher_current_status
                     .lock()
@@ -3763,6 +4207,7 @@ async fn spawn_agent_inner(
                             if metadata.len() < offset {
                                 offset = 0;
                                 positioned_initial_log = true;
+                                pending_provider_line.clear();
                             }
                             if !positioned_initial_log {
                                 offset = metadata.len();
@@ -3783,14 +4228,19 @@ async fn spawn_agent_inner(
                                     read as u64,
                                 );
                                 offset += read as u64;
-                                if let Some(message) =
-                                    extract_transcript_message("claude", line.trim())
-                                {
+                                let Some(record) =
+                                    complete_jsonl_record(&mut pending_provider_line, &line)
+                                else {
+                                    break;
+                                };
+                                let raw_line = record.trim();
+                                let message = extract_transcript_message("claude", raw_line);
+                                if let Some(message) = message {
                                     if let Ok(mut watch_state) = watcher_watch_state.lock() {
-                                        watch_state.push_transcript(message);
+                                        watch_state.push_transcript(message.clone());
                                     }
                                 }
-                                if let Some(event) = watcher_provider.parse_output(line.trim()) {
+                                if let Some(event) = watcher_provider.parse_output(raw_line) {
                                     let mut waiting = log_waiting_for_permission
                                         .lock()
                                         .unwrap_or_else(|e| e.into_inner());
@@ -3880,31 +4330,15 @@ async fn spawn_agent_inner(
         if let Some(hook_event_log) = hook_event_log {
             let hook_app = app.clone();
             let hook_session = config.session_id.clone();
-            let hook_accepted_sessions = {
-                let mut sessions = vec![config.session_id.clone()];
-                if let Some(resume_session) = config
-                    .resume_session
-                    .as_ref()
-                    .map(|sid| sid.trim())
-                    .filter(|sid| !sid.is_empty() && *sid != config.session_id)
-                {
-                    sessions.push(resume_session.to_string());
-                }
-                if let Some(fresh_provider_session_id) = config
-                    .fresh_provider_session_id
-                    .as_ref()
-                    .map(|sid| sid.trim())
-                    .filter(|sid| !sid.is_empty() && *sid != config.session_id)
-                {
-                    sessions.push(fresh_provider_session_id.to_string());
-                }
-                sessions
-            };
+            let hook_runtime_generation = runtime_generation;
+            let hook_completion_event_dir = hook_completion_event_dir.clone();
+            let hook_accepted_sessions = claude_accepted_sessions(&config);
             let hook_current_status = current_status.clone();
             let hook_waiting_for_permission = waiting_for_permission.clone();
 
             std::thread::spawn(move || {
                 let mut offset = 0;
+                let mut pending_completion_events = HashSet::new();
                 loop {
                     let current = hook_current_status
                         .lock()
@@ -3973,6 +4407,67 @@ async fn spawn_agent_inner(
                                         }),
                                     );
                                 }
+                            }
+                        }
+                    }
+
+                    if let Some(completion_event_dir) = hook_completion_event_dir.as_ref() {
+                        if let Ok(events) = std::fs::read_dir(completion_event_dir) {
+                            for entry in events.flatten() {
+                                let event_path = entry.path();
+                                if event_path.extension().and_then(|ext| ext.to_str())
+                                    != Some("json")
+                                {
+                                    continue;
+                                }
+                                let Ok(contents) = std::fs::read_to_string(&event_path) else {
+                                    continue;
+                                };
+                                let Ok(parsed) =
+                                    serde_json::from_str::<serde_json::Value>(&contents)
+                                else {
+                                    let _ = std::fs::rename(
+                                        &event_path,
+                                        event_path.with_extension("invalid"),
+                                    );
+                                    log_debug("[Wardian] Quarantined malformed Claude Stop hook outbox record");
+                                    continue;
+                                };
+                                if parsed.get("hook_event_name").and_then(|v| v.as_str())
+                                    != Some("Stop")
+                                {
+                                    let _ = std::fs::rename(
+                                        &event_path,
+                                        event_path.with_extension("ignored"),
+                                    );
+                                    continue;
+                                }
+                                if !hook_accepted_sessions.iter().any(|session_id| {
+                                    claude_permission_hook_matches_session(&parsed, session_id)
+                                }) {
+                                    continue;
+                                }
+                                let Some(message) =
+                                    claude_stop_event_message(&parsed, &hook_accepted_sessions)
+                                else {
+                                    let _ = std::fs::rename(
+                                        &event_path,
+                                        event_path.with_extension("ignored"),
+                                    );
+                                    log_debug("[Wardian] Ignored Claude Stop hook outbox record without prompt identity or assistant text");
+                                    continue;
+                                };
+                                let evidence_id = message.turn_id.as_deref().unwrap_or_default();
+                                if !pending_completion_events.insert(evidence_id.to_string()) {
+                                    continue;
+                                }
+                                super::emit_agent_turn_completed_with_message(
+                                    &hook_app,
+                                    &hook_session,
+                                    hook_runtime_generation,
+                                    Some(message),
+                                    event_path,
+                                );
                             }
                         }
                     }
@@ -4454,6 +4949,48 @@ mod tests {
     use wardian_core::models::{AgentProvider, CodexProviderConfig, ProviderConfig};
 
     #[test]
+    fn claude_jsonl_reader_waits_for_the_complete_record() {
+        let mut pending = String::new();
+        assert_eq!(complete_jsonl_record(&mut pending, r#"{"type":"res"#), None);
+        assert_eq!(
+            complete_jsonl_record(&mut pending, "ult\"}\n"),
+            Some(r#"{"type":"result"}"#.to_string() + "\n")
+        );
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn claude_stop_hook_accepts_only_successful_session_bound_assistant_turns() {
+        let event = serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": "claude-session",
+            "prompt_id": "00000000-0000-0000-0000-000000000001",
+            "last_assistant_message": "  completed response  "
+        });
+        let accepted = vec!["claude-session".to_string()];
+        let message = claude_stop_event_message(&event, &accepted).expect("valid Stop event");
+        assert_eq!(message.role, "assistant");
+        assert_eq!(message.provider, "claude");
+        assert_eq!(message.text, "  completed response  ");
+        assert_eq!(
+            message.turn_id.as_deref(),
+            Some("00000000-0000-0000-0000-000000000001")
+        );
+
+        let mut failure = event.clone();
+        failure["hook_event_name"] = serde_json::Value::String("StopFailure".to_string());
+        assert!(claude_stop_event_message(&failure, &accepted).is_none());
+        assert!(claude_stop_event_message(&event, &["different-session".to_string()]).is_none());
+
+        let mut invalid_id = event.clone();
+        invalid_id["prompt_id"] = serde_json::Value::String("not-a-uuid".to_string());
+        assert!(claude_stop_event_message(&invalid_id, &accepted).is_none());
+        let mut empty_response = event;
+        empty_response["last_assistant_message"] = serde_json::Value::String("  ".to_string());
+        assert!(claude_stop_event_message(&empty_response, &accepted).is_none());
+    }
+
+    #[test]
     fn pi_restore_keeps_the_saved_project_directory() {
         let dir = tempfile::tempdir().expect("test directory");
         let workspace = dir.path().join("workspace");
@@ -4625,6 +5162,247 @@ mod tests {
         wardian_core::conversation_lease::try_acquire_lease(background_lease.clone(), &now_rfc3339)
             .expect("background lease after launch reservation release");
         assert!(acquire_provider_spawn_lease(&config).is_err());
+    }
+
+    #[test]
+    fn provider_spawn_candidate_still_blocks_after_lease_acquisition() {
+        let _home = crate::control::test_support::TestWardianHome::new();
+        let config = AgentConfig {
+            session_id: "candidate-blocked-agent".into(),
+            provider: "codex".into(),
+            resume_session: Some("candidate-blocked-session".into()),
+            ..Default::default()
+        };
+        let candidate_check_ran = std::sync::atomic::AtomicBool::new(false);
+
+        let error = acquire_provider_spawn_lease_with_candidate_check_at(
+            &config,
+            chrono::Utc::now(),
+            |checked_config| {
+                assert_eq!(checked_config.session_id, config.session_id);
+                candidate_check_ran.store(true, std::sync::atomic::Ordering::Release);
+                Err("provider startup was withheld because a matching provider process candidate already exists (PID 42)".into())
+            },
+        )
+        .expect_err("a process candidate must still block launch");
+
+        assert!(error.contains("process candidate already exists"));
+        assert!(candidate_check_ran.load(std::sync::atomic::Ordering::Acquire));
+        assert!(
+            wardian_core::conversation_lease::load_leases_checked()
+                .expect("read lease store")
+                .is_empty(),
+            "failed candidate validation releases its temporary spawn lease"
+        );
+    }
+
+    async fn failed_restore_placeholder(
+        state: &crate::state::AppState,
+        config: &AgentConfig,
+    ) -> std::sync::Arc<std::sync::Mutex<String>> {
+        let publication =
+            crate::startup_restore::RestorePublication::begin(state, &config.session_id)
+                .await
+                .expect("initial restore claim");
+        let status = publication
+            .publish(
+                state,
+                crate::restored_agent_without_process(
+                    config.clone(),
+                    "Error",
+                    "provider restore was withheld".into(),
+                    None,
+                    None,
+                ),
+            )
+            .await;
+        drop(publication);
+        status
+    }
+
+    fn lifecycle_restore_lease(
+        config: &AgentConfig,
+        now: chrono::DateTime<chrono::Utc>,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> wardian_core::conversation_lease::ConversationLease {
+        wardian_core::conversation_lease::ConversationLease {
+            agent_id: config.session_id.clone(),
+            provider: config.provider.clone(),
+            resume_session: config.resume_session.clone().unwrap_or_default(),
+            owner_kind: "agent_lifecycle".into(),
+            owner_id: "resume:restore-retry-fixture".into(),
+            acquisition_id: "restore-retry-acquisition".into(),
+            owner_node_id: None,
+            mode: "lifecycle_transition".into(),
+            started_at: now.to_rfc3339(),
+            heartbeat_at: now.to_rfc3339(),
+            expires_at: expires_at.to_rfc3339(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restore_retry_acquires_spawn_lease_after_previous_restore_owner_releases() {
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
+        let config = AgentConfig {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            provider: "mock".into(),
+            resume_session: Some(uuid::Uuid::new_v4().to_string()),
+            ..Default::default()
+        };
+        let now = chrono::Utc::now();
+        let expires_at = now + chrono::Duration::seconds(60);
+        let mut initial_lease = lifecycle_restore_lease(&config, now, expires_at);
+        initial_lease.owner_kind = "provider_spawn".into();
+        initial_lease.owner_id = "81884:stale-restore-attempt".into();
+        wardian_core::conversation_lease::try_acquire_lease(
+            initial_lease.clone(),
+            &now.to_rfc3339(),
+        )
+        .expect("persist initial lifecycle lease");
+        let spawn_error = acquire_provider_spawn_lease_with_candidate_check_at(
+            &config,
+            now,
+            check_provider_spawn_candidates,
+        )
+        .expect_err("the active lifecycle lease must block the first restore attempt");
+        let retry_lease = crate::startup_restore::retryable_lifecycle_restore_lease(
+            &config,
+            &spawn_error,
+            &[initial_lease],
+        )
+        .expect("active lifecycle lease schedules the retry");
+        let state = std::sync::Arc::new(crate::state::AppState::new());
+        let expected_status = failed_restore_placeholder(&state, &config).await;
+        assert_eq!(*expected_status.lock().unwrap(), "Error");
+        let expected_config = config.clone();
+        let task_config = config.clone();
+        let task_state = state.clone();
+        let retry_now = now + chrono::Duration::milliseconds(1);
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_task = attempts.clone();
+        let task_status = expected_status.clone();
+        let retry = tokio::spawn(async move {
+            crate::startup_restore::retry_once_after_lifecycle_lease_clear(
+                &task_state,
+                &expected_config,
+                &task_status,
+                move || async move {
+                    wardian_core::conversation_lease::release_lease_owner_persisted(
+                        &retry_lease.owner(),
+                    )
+                    .expect("release the previous lifecycle operation");
+                    true
+                },
+                || async { Some(()) },
+                move |publication, ()| async move {
+                    attempts_for_task.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    let acquired = acquire_provider_spawn_lease_with_candidate_check_at(
+                        &task_config,
+                        retry_now,
+                        check_provider_spawn_candidates,
+                    );
+                    drop(publication);
+                    acquired.map(drop)
+                },
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        assert!(retry.await.unwrap().expect("retry attempt").is_ok());
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
+        let leases =
+            wardian_core::conversation_lease::load_leases_checked().expect("read lease store");
+        assert!(wardian_core::conversation_lease::find_active_conflict(
+            &leases,
+            &config.session_id,
+            config.resume_session.as_deref().unwrap_or_default(),
+            &retry_now.to_rfc3339(),
+        )
+        .is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restore_retry_candidate_check_still_blocks_after_the_wait() {
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
+        let config = AgentConfig {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            provider: "mock".into(),
+            resume_session: Some(uuid::Uuid::new_v4().to_string()),
+            ..Default::default()
+        };
+        let now = chrono::Utc::now();
+        let expires_at = now + chrono::Duration::seconds(60);
+        let initial_lease = lifecycle_restore_lease(&config, now, expires_at);
+        wardian_core::conversation_lease::try_acquire_lease(
+            initial_lease.clone(),
+            &now.to_rfc3339(),
+        )
+        .expect("persist initial lifecycle lease");
+        let spawn_error = format!(
+            "provider startup was withheld because conversation {} is leased by {} {} ({})",
+            config.session_id, initial_lease.owner_kind, initial_lease.owner_id, initial_lease.mode
+        );
+        let retry_lease = crate::startup_restore::retryable_lifecycle_restore_lease(
+            &config,
+            &spawn_error,
+            &[initial_lease],
+        )
+        .expect("active lifecycle lease schedules the retry");
+        let state = std::sync::Arc::new(crate::state::AppState::new());
+        let expected_status = failed_restore_placeholder(&state, &config).await;
+        let expected_config = config.clone();
+        let task_config = config.clone();
+        let task_state = state.clone();
+        let retry_now = now + chrono::Duration::milliseconds(1);
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_task = attempts.clone();
+        let task_status = expected_status.clone();
+        let retry = tokio::spawn(async move {
+            crate::startup_restore::retry_once_after_lifecycle_lease_clear(
+                &task_state,
+                &expected_config,
+                &task_status,
+                move || async move {
+                    wardian_core::conversation_lease::release_lease_owner_persisted(
+                        &retry_lease.owner(),
+                    )
+                    .expect("release the previous lifecycle operation");
+                    true
+                },
+                || async { Some(()) },
+                move |publication, ()| async move {
+                    attempts_for_task.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    let error = acquire_provider_spawn_lease_with_candidate_check_at(
+                        &task_config,
+                        retry_now,
+                        |_| {
+                            Err("provider startup was withheld because a matching provider process candidate already exists (PID 42)".into())
+                        },
+                    )
+                    .expect_err("the candidate check must still block launch");
+                    drop(publication);
+                    error
+                },
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        let error = retry.await.unwrap().expect("retry attempt");
+        assert!(error.contains("process candidate already exists"));
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
+        let leases =
+            wardian_core::conversation_lease::load_leases_checked().expect("read lease store");
+        assert!(wardian_core::conversation_lease::find_active_conflict(
+            &leases,
+            &config.session_id,
+            config.resume_session.as_deref().unwrap_or_default(),
+            &retry_now.to_rfc3339(),
+        )
+        .is_none());
     }
 
     #[tokio::test]
@@ -5120,7 +5898,7 @@ mod tests {
     #[tokio::test]
     async fn orphan_marked_python_server_does_not_block_restore_or_get_terminated() {
         use std::io::{Read, Write};
-        use std::net::{TcpListener, TcpStream};
+        use std::net::TcpStream;
         use std::process::{Child, Command, Stdio};
         use std::time::{Duration, Instant};
 
@@ -5155,48 +5933,64 @@ mod tests {
         wardian_core::db::update_agent_status(&config.session_id, "Headless", Some(424242))
             .expect("persist stale Headless status and PID");
 
-        let port = TcpListener::bind(("127.0.0.1", 0))
-            .expect("reserve local test port")
-            .local_addr()
-            .expect("read local test port")
-            .port();
-        let port_text = port.to_string();
+        let ready_path = _home.path().join("python-http-server.port");
+        let stderr_path = _home.path().join("python-http-server.stderr");
+        let stderr = std::fs::File::create(&stderr_path).expect("create Python stderr log");
+        const PYTHON_HTTP_SERVER: &str = concat!(
+            "from http.server import HTTPServer, SimpleHTTPRequestHandler\n",
+            "import os\n",
+            "server = HTTPServer(('127.0.0.1', 0), SimpleHTTPRequestHandler)\n",
+            "with open(os.environ['WARDIAN_TEST_READY_PATH'], 'w', encoding='ascii') as ready:\n",
+            "    ready.write(str(server.server_port))\n",
+            "    ready.flush()\n",
+            "server.serve_forever()\n",
+        );
         let mut server = OwnedTestServer(
             Command::new(if cfg!(windows) {
                 "python.exe"
             } else {
                 "python3"
             })
-            .args([
-                "-u",
-                "-m",
-                "http.server",
-                port_text.as_str(),
-                "--bind",
-                "127.0.0.1",
-            ])
+            .args(["-u", "-c", PYTHON_HTTP_SERVER])
             .env("WARDIAN_SESSION_ID", &config.session_id)
+            .env("WARDIAN_TEST_READY_PATH", &ready_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(stderr))
             .spawn()
             .expect("spawn isolated marked Python HTTP server"),
         );
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            assert!(
-                server.0.try_wait().expect("poll test server").is_none(),
-                "fixture server exited before startup"
-            );
-            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                break;
+        // Five seconds flaked on a loaded Windows CI runner; leave Python
+        // startup headroom while keeping this fixture wait finite and diagnosable.
+        const PYTHON_HTTP_SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+        let startup_started = Instant::now();
+        let deadline = startup_started + PYTHON_HTTP_SERVER_STARTUP_TIMEOUT;
+        let port = loop {
+            if let Some(status) = server.0.try_wait().expect("poll test server") {
+                let stderr = std::fs::read_to_string(&stderr_path)
+                    .unwrap_or_else(|error| format!("<could not read stderr: {error}>"));
+                panic!("fixture server exited before readiness ({status}); stderr:\n{stderr}");
             }
-            assert!(
-                Instant::now() < deadline,
-                "fixture server did not become ready"
-            );
+            let port = std::fs::read_to_string(&ready_path)
+                .ok()
+                .and_then(|value| value.trim().parse::<u16>().ok());
+            if let Some(port) = port {
+                if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                    break port;
+                }
+            }
+            if Instant::now() >= deadline {
+                let _ = server.0.kill();
+                let _ = server.0.wait();
+                let stderr = std::fs::read_to_string(&stderr_path)
+                    .unwrap_or_else(|error| format!("<could not read stderr: {error}>"));
+                panic!(
+                    "fixture server did not publish a bound port and accept TCP within {:?}; stderr:\n{stderr}",
+                    startup_started.elapsed()
+                );
+            }
             std::thread::sleep(Duration::from_millis(25));
-        }
+        };
 
         let persisted = wardian_core::db::get_all_agents()
             .expect("read persisted agents")
@@ -6072,6 +6866,194 @@ mod tests {
             input_rx.try_recv().is_err(),
             "observing startup never submits input"
         );
+    }
+
+    /// #1456: the reader evaluates readiness only when a chunk arrives. If the
+    /// chunk carrying the ready prompt cannot resolve a screen, that evaluation
+    /// is lost and a provider parked at its composer sends nothing further, so
+    /// startup stays pending for the life of the session.
+    #[tokio::test]
+    async fn unresolvable_startup_screen_is_rechecked_instead_of_pinning_startup() {
+        let broker =
+            std::sync::Arc::new(crate::state::terminal_session::TerminalSessionBroker::default());
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(1);
+        let generation = broker
+            .start_or_replace_runtime(
+                "recheck",
+                crate::state::terminal_session::TerminalRuntimeHandles::new(input_tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry {
+                    cols: 120,
+                    rows: 24,
+                },
+            )
+            .await
+            .unwrap();
+
+        // The chunk that carries the ready composer is applied to the broker.
+        let ready = "[2J[HAsk anything...
+Build  mimo-v2.5-free
+ctrl+p commands";
+        let output_broker = broker.clone();
+        tokio::task::spawn_blocking(move || {
+            output_broker.process_output_blocking("recheck", generation, ready.as_bytes().to_vec())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        // The screen is genuinely ready now.
+        let settled = broker.snapshot("recheck").await.unwrap();
+        assert!(crate::control::provider_output_has_startup_ready_prompt(
+            "opencode",
+            &settled.visible_grid
+        ));
+
+        // The reader could not resolve it on that chunk, so its evaluation
+        // yields false and startup stays pending. This is the observed failure.
+        let mut startup_prompt_pending = true;
+        assert!(!startup_prompt_ready_for_reader(
+            "opencode",
+            startup_prompt_pending,
+            CLAUDE_TRUST_CONFIRMATION_NOT_STARTED,
+            None,
+        ));
+        assert!(startup_prompt_pending, "startup is still waiting");
+        assert!(startup_readiness_needs_recheck(
+            "opencode",
+            startup_prompt_pending,
+            false,
+        ));
+
+        // Exercise the actual bounded broker recheck, including the runtime
+        // identity guard, rather than merely rerunning the prompt predicate.
+        let interval = std::time::Duration::from_millis(1);
+        assert!(
+            wait_for_opencode_startup_screen(&broker, "recheck", generation, 1, interval).await,
+            "a settled current composer completes the lost evaluation"
+        );
+        assert!(
+            !wait_for_opencode_startup_screen(&broker, "missing", generation, 1, interval).await,
+            "a missing screen cannot authorize readiness"
+        );
+        assert!(
+            !wait_for_opencode_startup_screen(&broker, "recheck", generation + 1, 1, interval)
+                .await,
+            "a replaced runtime cannot authorize the old reader"
+        );
+        let output_broker = broker.clone();
+        tokio::task::spawn_blocking(move || {
+            output_broker.process_output_blocking(
+                "recheck",
+                generation,
+                b"\x1b[2J\x1b[HLoading session...".to_vec(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            !wait_for_opencode_startup_screen(&broker, "recheck", generation, 1, interval).await,
+            "an unready current screen cannot authorize readiness"
+        );
+        assert!(!startup_readiness_needs_recheck("claude", true, false));
+        assert!(!startup_readiness_needs_recheck("pi", true, false));
+
+        // The async publication wakes the reader's title gate on its next
+        // chunk; a failed publication must leave that gate in place.
+        let recheck_published = std::sync::atomic::AtomicBool::new(false);
+        finish_startup_pending_after_recheck(&mut startup_prompt_pending, &recheck_published);
+        assert!(startup_prompt_pending);
+        recheck_published.store(true, std::sync::atomic::Ordering::Release);
+        finish_startup_pending_after_recheck(&mut startup_prompt_pending, &recheck_published);
+        assert!(!startup_prompt_pending);
+
+        assert!(
+            input_rx.try_recv().is_err(),
+            "rechecking startup never submits input"
+        );
+    }
+
+    #[test]
+    fn rejected_startup_publication_releases_claim_for_current_runtime() {
+        let claimed = std::sync::atomic::AtomicBool::new(false);
+        assert!(claim_startup_readiness(&claimed));
+        assert!(!claim_startup_readiness(&claimed));
+        finish_startup_readiness_claim(&claimed, false);
+        assert!(claim_startup_readiness(&claimed));
+        finish_startup_readiness_claim(&claimed, true);
+        assert!(!claim_startup_readiness(&claimed));
+    }
+
+    #[tokio::test]
+    async fn ready_chunk_while_recheck_claimed_is_published_without_more_output() {
+        let broker = crate::state::terminal_session::TerminalSessionBroker::default();
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(1);
+        let generation = broker
+            .start_or_replace_runtime(
+                "handoff",
+                crate::state::terminal_session::TerminalRuntimeHandles::new(input_tx, |_| Ok(())),
+                wardian_core::models::TerminalGeometry {
+                    cols: 120,
+                    rows: 24,
+                },
+            )
+            .await
+            .unwrap();
+        let broker = std::sync::Arc::new(broker);
+        let output_broker = broker.clone();
+        tokio::task::spawn_blocking(move || {
+            output_broker.process_output_blocking(
+                "handoff",
+                generation,
+                b"\x1b[2J\x1b[HAsk anything...\r\nBuild  mimo-v2.5-free\r\nctrl+p commands"
+                    .to_vec(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let initial_sequence = broker.snapshot("handoff").await.unwrap().sequence_barrier;
+        let claimed = std::sync::atomic::AtomicBool::new(false);
+        let reader_observed = std::sync::atomic::AtomicBool::new(false);
+        let publications = std::sync::atomic::AtomicUsize::new(0);
+        assert!(
+            retry_startup_readiness(
+                &claimed,
+                1,
+                || wait_for_opencode_startup_screen(
+                    &broker,
+                    "handoff",
+                    generation,
+                    1,
+                    std::time::Duration::from_millis(1),
+                ),
+                || {
+                    let attempt = publications.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let claimed = &claimed;
+                    let reader_observed = &reader_observed;
+                    async move {
+                        if attempt == 0 {
+                            assert!(
+                                !claim_startup_readiness(claimed),
+                                "reader sees the last ready chunk while recheck owns the claim"
+                            );
+                            reader_observed.store(true, std::sync::atomic::Ordering::Release);
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                },
+            )
+            .await
+        );
+        assert!(reader_observed.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(publications.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            broker.snapshot("handoff").await.unwrap().sequence_barrier,
+            initial_sequence
+        );
+        assert!(input_rx.try_recv().is_err());
     }
 
     #[test]

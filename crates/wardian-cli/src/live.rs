@@ -20,6 +20,7 @@ use wardian_core::control::{
 use wardian_core::identity::AgentIdentity;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_millis(500);
+const CONTROL_INBOX_TIMEOUT: Duration = Duration::from_secs(10);
 const CONTROL_GIT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTROL_DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(15);
 const CONTROL_MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -855,10 +856,10 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         ControlOperation::AgentDoctor => CONTROL_DIAGNOSTIC_TIMEOUT,
         ControlOperation::ConversationList
         | ControlOperation::ConversationShow
-        | ControlOperation::InboxList
         | ControlOperation::ArtifactShow
         | ControlOperation::ArtifactReviewShow
         | ControlOperation::WatchlistsChanged => CONTROL_TIMEOUT,
+        ControlOperation::InboxList => CONTROL_INBOX_TIMEOUT,
         ControlOperation::AgentDelete
         | ControlOperation::AgentRename
         | ControlOperation::AgentRestart
@@ -1530,6 +1531,15 @@ mod tests {
             operation_timeout(&ControlOperation::ConversationShow),
             CONTROL_TIMEOUT
         );
+    }
+
+    #[test]
+    fn inbox_list_has_a_bounded_deadline_for_assembled_live_pages() {
+        assert_eq!(
+            operation_timeout(&ControlOperation::InboxList),
+            CONTROL_INBOX_TIMEOUT
+        );
+        assert!(CONTROL_INBOX_TIMEOUT > CONTROL_TIMEOUT);
     }
 
     #[test]

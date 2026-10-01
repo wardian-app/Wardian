@@ -9,7 +9,7 @@ use crate::state::interactions::InteractionState;
 use crate::state::terminal_session::TerminalSessionBroker;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 use tokio::sync::Mutex;
 
 pub struct LibraryWatchRegistration {
@@ -22,6 +22,39 @@ pub struct LibraryWatchRegistration {
 pub struct ExplorerWatchRegistration {
     pub watcher: notify::RecommendedWatcher,
     pub ref_count: usize,
+}
+
+#[derive(Default)]
+struct StatusRevisionSession {
+    high_water: u64,
+    by_arc: HashMap<usize, StatusArcRevision>,
+}
+
+struct StatusArcRevision {
+    owner: Weak<std::sync::Mutex<String>>,
+    intent_revision: u64,
+    intent_status: String,
+    committed_revision: u64,
+}
+
+impl StatusRevisionSession {
+    fn current(&self, status: &Arc<std::sync::Mutex<String>>) -> Option<&StatusArcRevision> {
+        self.by_arc
+            .get(&(Arc::as_ptr(status) as usize))
+            .filter(|entry| {
+                entry
+                    .owner
+                    .upgrade()
+                    .is_some_and(|owner| Arc::ptr_eq(&owner, status))
+            })
+    }
+
+    fn next(&mut self) -> u64 {
+        self.by_arc
+            .retain(|_, entry| entry.owner.strong_count() > 0);
+        self.high_water += 1;
+        self.high_water
+    }
 }
 
 pub struct AppState {
@@ -43,12 +76,7 @@ pub struct AppState {
     pub agent_lifecycle_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub delivery_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub status_observation_sequences: std::sync::Mutex<HashMap<String, u64>>,
-    // Map of automation_id to a list of background trigger handles
-    pub automation_triggers: Mutex<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>,
-    // Map of automation_id to running execution handles
-    pub automation_runs: Mutex<HashMap<String, Vec<tauri::async_runtime::JoinHandle<()>>>>,
-    pub triggers_paused: std::sync::atomic::AtomicBool,
-    pub scheduler_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    status_revisions: std::sync::Mutex<HashMap<String, StatusRevisionSession>>,
     pub automation_scheduler_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub automation_schedules_paused: std::sync::atomic::AtomicBool,
     // Active git repo watchers keyed by workspace path
@@ -64,15 +92,23 @@ pub struct AppState {
     // Single standalone terminal session for the human user.
     pub user_terminal: Mutex<Option<crate::state::UserTerminalSession>>,
     // Live-only structured ask/reply requests keyed by backend-owned request id.
-    pub interactions: InteractionState,
+    pub interactions: Arc<InteractionState>,
     /// Wardian-owned persistent provider-session actors. Provider identities
     /// remain generation-bound diagnostics behind this broker.
     pub native_delivery: Arc<crate::delivery::native_broker::NativeDeliveryBroker>,
     /// Orders provider-log policy observations before per-agent archive cursor
-    /// commits. Callers must snapshot the global agent roster before taking
-    /// this gate, then acquire per-agent archive locks only after it.
-    pub conversation_capture_policy_lock: Mutex<()>,
+    /// commits. It has two lanes: policy transitions and lifecycle boundaries
+    /// queue in order, while best-effort captures poll and stand aside for a
+    /// registered boundary (see `capture_policy_gate`). A capture snapshots its
+    /// agent after taking the gate; a policy transition snapshots the roster
+    /// before it. Per-agent archive locks come only after the gate, and no
+    /// holder of `state.agents` may wait for it.
+    pub conversation_capture_policy_lock: crate::state::capture_policy_gate::CapturePolicyGate,
     pub conversation_archive: ConversationArchiveState,
+    /// Agents whose New Session is running, so a repeated request is refused
+    /// instead of queueing behind the first one. A std mutex because the
+    /// claim's `Drop` cannot await; it is never held across an await.
+    pub clears_in_flight: std::sync::Mutex<std::collections::HashSet<String>>,
     // Serializes and coalesces per-turn change snapshots, one slot per workspace.
     pub change_snapshots: ChangeSnapshotRuntime,
     // Live-only remote-control authentication and ticket records.
@@ -89,6 +125,7 @@ pub struct AppState {
     pub remote_inbox_runtime_cache: RwLock<Option<Vec<serde_json::Value>>>,
     pub remote_inbox_runtime_refreshing: std::sync::atomic::AtomicBool,
     pub remote_inbox_runtime_refreshed_at: std::sync::atomic::AtomicI64,
+    pub remote_inbox_runtime_refresh_failed: std::sync::atomic::AtomicBool,
     pub remote_inbox_runtime_generation: std::sync::atomic::AtomicU64,
     // Last frontend-reported effective theme. The frontend resolves "system"
     // before updating this so native PTY fallbacks can answer light/dark probes.
@@ -186,6 +223,9 @@ impl AppState {
         if let Ok(mut sequences) = self.status_observation_sequences.lock() {
             sequences.remove(target_session_id);
         }
+        if let Ok(mut revisions) = self.status_revisions.lock() {
+            revisions.remove(target_session_id);
+        }
         self.remote_agent_status_cache
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -206,6 +246,104 @@ impl AppState {
         };
         let next = sequences.get(target_session_id).copied().unwrap_or(0) + 1;
         sequences.insert(target_session_id.to_string(), next);
+        next
+    }
+
+    /// Reserves an accepted status attempt for the exact runtime status Arc.
+    /// Hold that Arc's value lock while reserving, so attempts have one order.
+    pub fn reserve_status_intent(
+        &self,
+        session_id: &str,
+        current_status: &Arc<std::sync::Mutex<String>>,
+        requested_status: &str,
+    ) -> u64 {
+        let mut revisions = self
+            .status_revisions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let session = revisions.entry(session_id.to_string()).or_default();
+        let next = session.next();
+        let entry = session
+            .by_arc
+            .entry(Arc::as_ptr(current_status) as usize)
+            .or_insert_with(|| StatusArcRevision {
+                owner: Arc::downgrade(current_status),
+                intent_revision: 0,
+                intent_status: String::new(),
+                committed_revision: 0,
+            });
+        entry.owner = Arc::downgrade(current_status);
+        entry.intent_revision = next;
+        entry.intent_status = requested_status.to_string();
+        next
+    }
+
+    /// Returns the latest accepted status attempt for the exact runtime Arc.
+    pub fn status_intent_revision(
+        &self,
+        session_id: &str,
+        current_status: &Arc<std::sync::Mutex<String>>,
+    ) -> u64 {
+        self.status_revisions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(session_id)
+            .and_then(|session| session.current(current_status))
+            .map(|entry| entry.intent_revision)
+            .unwrap_or(0)
+    }
+
+    /// Returns the target of the latest accepted status attempt for this Arc.
+    pub fn status_intent_status(
+        &self,
+        session_id: &str,
+        current_status: &Arc<std::sync::Mutex<String>>,
+    ) -> Option<String> {
+        self.status_revisions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(session_id)
+            .and_then(|session| session.current(current_status))
+            .map(|entry| entry.intent_status.clone())
+    }
+
+    /// Returns the last committed status-value revision for this runtime Arc.
+    pub fn status_revision(
+        &self,
+        session_id: &str,
+        current_status: &Arc<std::sync::Mutex<String>>,
+    ) -> u64 {
+        self.status_revisions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(session_id)
+            .and_then(|session| session.current(current_status))
+            .map(|entry| entry.committed_revision)
+            .unwrap_or(0)
+    }
+
+    /// Records a value mutation; call while holding the exact status Arc lock.
+    pub fn commit_status_revision(
+        &self,
+        session_id: &str,
+        current_status: &Arc<std::sync::Mutex<String>>,
+        committed_status: &str,
+    ) -> u64 {
+        let mut revisions = self
+            .status_revisions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let session = revisions.entry(session_id.to_string()).or_default();
+        let next = session.next();
+        session.by_arc.insert(
+            Arc::as_ptr(current_status) as usize,
+            StatusArcRevision {
+                owner: Arc::downgrade(current_status),
+                intent_revision: next,
+                intent_status: committed_status.to_string(),
+                committed_revision: next,
+            },
+        );
         next
     }
 
@@ -275,6 +413,11 @@ impl AppState {
             .clone()
     }
 
+    pub fn remote_inbox_runtime_refresh_failed(&self) -> bool {
+        self.remote_inbox_runtime_refresh_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub fn try_start_remote_inbox_runtime_refresh(&self) -> Option<u64> {
         const REFRESH_INTERVAL_MS: i64 = 5_000;
         let now = chrono::Utc::now().timestamp_millis();
@@ -309,10 +452,25 @@ impl AppState {
             == generation
         {
             *cached = Some(items);
+            self.remote_inbox_runtime_refresh_failed
+                .store(false, std::sync::atomic::Ordering::Release);
             self.remote_inbox_runtime_refreshed_at.store(
                 chrono::Utc::now().timestamp_millis(),
                 std::sync::atomic::Ordering::Release,
             );
+        }
+        self.remote_inbox_runtime_refreshing
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn fail_remote_inbox_runtime_refresh(&self, generation: u64) {
+        if self
+            .remote_inbox_runtime_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            == generation
+        {
+            self.remote_inbox_runtime_refresh_failed
+                .store(true, std::sync::atomic::Ordering::Release);
         }
         self.remote_inbox_runtime_refreshing
             .store(false, std::sync::atomic::Ordering::Release);
@@ -328,6 +486,8 @@ impl AppState {
         *cached = None;
         self.remote_inbox_runtime_refreshed_at
             .store(0, std::sync::atomic::Ordering::Release);
+        self.remote_inbox_runtime_refresh_failed
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -353,10 +513,7 @@ impl Default for AppState {
             agent_lifecycle_locks: Mutex::new(HashMap::new()),
             delivery_locks: Mutex::new(HashMap::new()),
             status_observation_sequences: std::sync::Mutex::new(HashMap::new()),
-            automation_triggers: Mutex::new(HashMap::new()),
-            automation_runs: Mutex::new(HashMap::new()),
-            triggers_paused: std::sync::atomic::AtomicBool::new(false),
-            scheduler_handle: Mutex::new(None),
+            status_revisions: std::sync::Mutex::new(HashMap::new()),
             automation_scheduler_handle: Mutex::new(None),
             automation_schedules_paused: std::sync::atomic::AtomicBool::new(false),
             git_watchers: Mutex::new(HashMap::new()),
@@ -365,10 +522,11 @@ impl Default for AppState {
             file_resources: FileResourceRuntime::default(),
             artifact_runtime: Arc::new(ArtifactRuntime::default()),
             user_terminal: Mutex::new(None),
-            interactions: InteractionState::default(),
+            interactions: Arc::new(InteractionState::default()),
             native_delivery: Arc::new(crate::delivery::native_broker::NativeDeliveryBroker::new()),
-            conversation_capture_policy_lock: Mutex::new(()),
+            conversation_capture_policy_lock: Default::default(),
             conversation_archive: ConversationArchiveState::default(),
+            clears_in_flight: Default::default(),
             change_snapshots: ChangeSnapshotRuntime::new(),
             remote_runtime: Mutex::new(crate::remote::models::RemoteRuntimeState::default()),
             remote_agent_roster_cache: RwLock::new(None),
@@ -376,6 +534,7 @@ impl Default for AppState {
             remote_inbox_runtime_cache: RwLock::new(None),
             remote_inbox_runtime_refreshing: std::sync::atomic::AtomicBool::new(false),
             remote_inbox_runtime_refreshed_at: std::sync::atomic::AtomicI64::new(0),
+            remote_inbox_runtime_refresh_failed: std::sync::atomic::AtomicBool::new(false),
             remote_inbox_runtime_generation: std::sync::atomic::AtomicU64::new(0),
             terminal_theme: RwLock::new("dark".to_string()),
             terminal_sessions: Arc::new(TerminalSessionBroker::default()),

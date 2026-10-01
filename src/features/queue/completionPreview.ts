@@ -5,6 +5,58 @@ export type AgentCompletionPreview = {
   evidence_id: string;
 };
 
+type CompletionInput = {
+  session_id: string;
+  agent?: { session_name: string };
+  agent_name?: string;
+  summary?: string;
+  evidence_id?: string;
+  inbox_persisted?: boolean;
+};
+
+export type AgentCompletionProjection =
+  | { kind: "ignore" }
+  | { kind: "transcript"; session_id: string; agent_name: string }
+  | {
+      kind: "flush" | "persisted";
+      session_id: string;
+      agent_name: string;
+      summary: string;
+      evidence_id: string;
+    };
+
+/** Chooses the queue path for one explicit provider completion event. */
+export function resolveAgentCompletionProjection(
+  completion: CompletionInput,
+): AgentCompletionProjection {
+  const agentName = completion.agent?.session_name.trim() || completion.agent_name?.trim();
+  if (!agentName || completion.inbox_persisted === false) return { kind: "ignore" };
+
+  const summary = completion.summary?.trim();
+  const evidenceId = completion.evidence_id?.trim();
+  if (completion.inbox_persisted === true) {
+    return summary && evidenceId
+      ? {
+          kind: "persisted",
+          session_id: completion.session_id,
+          agent_name: agentName,
+          summary,
+          evidence_id: evidenceId,
+        }
+      : { kind: "ignore" };
+  }
+  if (summary && evidenceId) {
+    return {
+      kind: "flush",
+      session_id: completion.session_id,
+      agent_name: agentName,
+      summary,
+      evidence_id: evidenceId,
+    };
+  }
+  return { kind: "transcript", session_id: completion.session_id, agent_name: agentName };
+}
+
 const PROVIDER_CONTROL_COMMANDS = new Set([
   "/login",
   "/logout",

@@ -1,4 +1,5 @@
 use crate::providers::claude::{classify_claude_user_event, ClaudeUserEventKind};
+use wardian_core::models::AgentConfig;
 
 /// Converts a workspace absolute path into Claude Code's project directory name.
 /// Claude replaces each of `:`, `\`, `/`, `.` with `-`.
@@ -111,6 +112,30 @@ pub(crate) fn claude_permission_hook_matches_session(
         .and_then(|path| std::path::Path::new(path).file_stem())
         .and_then(|stem| stem.to_str())
         .is_some_and(|stem| stem == session_id)
+}
+
+/// Returns the Wardian and provider session identities accepted in Claude hook records.
+/// Fresh Claude launches use `session_id` when no provider-specific identity is set.
+pub(crate) fn claude_accepted_sessions(config: &AgentConfig) -> Vec<String> {
+    let mut sessions = Vec::with_capacity(3);
+    for session_id in [
+        Some(config.session_id.as_str()),
+        config.resume_session.as_deref(),
+        config.fresh_provider_session_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let session_id = if session_id == config.session_id {
+            session_id
+        } else {
+            session_id.trim()
+        };
+        if !session_id.is_empty() && !sessions.iter().any(|accepted| accepted == session_id) {
+            sessions.push(session_id.to_string());
+        }
+    }
+    sessions
 }
 
 pub(crate) fn claude_status_from_log(lines: &[serde_json::Value]) -> Option<String> {

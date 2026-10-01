@@ -184,7 +184,8 @@ Click inside a terminal, or focus it and press `Enter` or `Space`, to explicitly
 Mirrors keep the owner's terminal grid and fit it into their pane. A narrow pane
 may scale the grid down or let you pan across it. After an owner resize, **Waiting
 for terminal repaint** means Wardian is keeping the last accurate frame until
-the provider draws at the new size. The owner can choose **Enable keyboard
+the provider draws at the new size, or for about one second if the provider
+stays silent, after which it shows the terminal's current frame. The owner can choose **Enable keyboard
 input** to prompt a stalled provider, but keys may affect a prompt that is not
 yet visible. Mouse input stays disabled during this state. **Terminal formatting
 unavailable** or **Terminal formatting invalid** identifies a degraded

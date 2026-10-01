@@ -14,6 +14,10 @@ In spawn, custom clone, and agent configuration forms, Wardian lists the support
 
 Wardian does not install provider accounts, complete browser sign-in, create provider billing, or repair shell startup files. Do those steps in a normal terminal before spawning an agent.
 
+### Resumed terminal readiness
+
+Wardian waits for the provider's current editor before releasing its startup lease. Pi's resumed editor can show its workspace and model footer after the startup banner has scrolled away. OpenCode's resumed editor can show model and provider details without a product name in the commands footer. Those editor frames establish readiness; a loading screen, incomplete frame, or transcript text alone does not.
+
 ## Credential and Session Identity Safety
 
 Wardian keeps its stable agent UUID separate from the provider's conversation identifier. Claude and Pi receive distinct caller-owned provider IDs. Codex creates a distinct local rollout UUID and resumes it exactly, OpenCode binds the exact `ses_...` ID returned by its current run, and Antigravity records only the workspace mapping proven to have changed after the first real user prompt. Structured initialization events can confirm that bound ID, but they cannot replace it.

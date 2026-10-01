@@ -456,7 +456,14 @@ function captureLibraryChangedListener() {
 function captureQueueAgentListeners() {
   let jsonListener: EventCallback<{ session_id: string; data: Record<string, unknown> }> | null = null;
   let statusListener: EventCallback<{ session_id: string; current_status: string }> | null = null;
-  let turnCompletionListener: EventCallback<{ session_id: string }> | null = null;
+  type TurnCompletionPayload = {
+    session_id: string;
+    agent_name?: string;
+    summary?: string;
+    evidence_id?: string;
+    inbox_persisted?: boolean;
+  };
+  let turnCompletionListener: EventCallback<TurnCompletionPayload> | null = null;
   mockListen.mockImplementation((eventName, handler) => {
     if (eventName === "agent-json-event") {
       jsonListener = handler as EventCallback<{ session_id: string; data: Record<string, unknown> }>;
@@ -465,7 +472,7 @@ function captureQueueAgentListeners() {
       statusListener = handler as EventCallback<{ session_id: string; current_status: string }>;
     }
     if (eventName === "agent-turn-completed") {
-      turnCompletionListener = handler as EventCallback<{ session_id: string }>;
+      turnCompletionListener = handler as EventCallback<TurnCompletionPayload>;
     }
     return Promise.resolve(() => {});
   });
@@ -476,7 +483,7 @@ function captureQueueAgentListeners() {
     emitStatus(payload: { session_id: string; current_status: string }) {
       statusListener?.({ event: "agent-status-updated", id: 0, payload });
     },
-    emitTurnCompletion(payload: { session_id: string }) {
+    emitTurnCompletion(payload: TurnCompletionPayload) {
       turnCompletionListener?.({ event: "agent-turn-completed", id: 0, payload });
     },
   };
@@ -3350,6 +3357,33 @@ describe("Sidebar Navigation", () => {
       const loads = mockInvoke.mock.calls.filter(([command]) => command === "load_change_review").length;
       expect(loads).toBeGreaterThan(initialLoads);
     });
+  });
+
+  it("projects a persisted Claude completion without rereading its transcript", async () => {
+    setupDefaultMocks(sampleAgents, defaultClasses);
+    const { emitTurnCompletion } = captureQueueAgentListeners();
+
+    render(<App />);
+    await screen.findByTestId("terminal-agent-1");
+
+    await act(async () => {
+      emitTurnCompletion({
+        session_id: "agent-1",
+        agent_name: "Alpha",
+        summary: "Claude finished this turn.",
+        evidence_id: "message-7",
+        inbox_persisted: true,
+      });
+    });
+
+    await waitFor(() => {
+      expect(useQueueStore.getState().items).toContainEqual(expect.objectContaining({
+        id: "agent-completed:agent-1:message-7",
+        summary: "Claude finished this turn.",
+        evidence_id: "message-7",
+      }));
+    });
+    expect(mockInvoke.mock.calls.some(([command]) => command === "load_agent_chat_transcript")).toBe(false);
   });
 
   it("shows the selected agent source-control change count on the activity rail", async () => {

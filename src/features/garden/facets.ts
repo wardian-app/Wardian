@@ -41,7 +41,7 @@
 
 import type { AgentConfig } from "../../types";
 import type { EntityRef } from "./entityRef";
-import { entityKey, normalizeEntityPath } from "./entityRef";
+import { normalizeEntityPath } from "./entityRef";
 
 /**
  * Facet classes. The prefix of every token, and the key for the semantic prior
@@ -164,19 +164,6 @@ export function admit(corpus: FacetCorpus, facets: GardenEntityFacets): void {
   }
 }
 
-/**
- * Retract an entity. Tokens whose count reaches zero are deleted so the map
- * does not accumulate dead facets across a long session.
- */
-export function retract(corpus: FacetCorpus, facets: GardenEntityFacets): void {
-  corpus.entityCount = Math.max(0, corpus.entityCount - 1);
-  for (const token of facets.tokens) {
-    const next = (corpus.df.get(token) ?? 0) - 1;
-    if (next <= 0) corpus.df.delete(token);
-    else corpus.df.set(token, next);
-  }
-}
-
 export function buildCorpus(entities: readonly GardenEntityFacets[]): FacetCorpus {
   const corpus = createCorpus();
   for (const entity of entities) admit(corpus, entity);
@@ -272,33 +259,6 @@ function norm(vector: FacetVector): number {
   let sum = 0;
   for (const weight of vector.values()) sum += weight * weight;
   return Math.sqrt(sum);
-}
-
-/**
- * Per-token contributions to `cosine(a, b)`, largest first.
- *
- * Cosine decomposes linearly over shared tokens, so explanation is nearly
- * free. That is a hard requirement, not a nicety: a map whose distances cannot
- * be explained is a lava lamp, and it is the reason to reject UMAP/t-SNE style
- * embeddings on top of their nondeterminism.
- */
-export function cosineContributions(
-  a: FacetVector,
-  b: FacetVector,
-): Array<{ token: FacetToken; contribution: number }> {
-  if (a.size === 0 || b.size === 0) return [];
-  const denominator = norm(a) * norm(b);
-  if (denominator === 0) return [];
-  const contributions: Array<{ token: FacetToken; contribution: number }> = [];
-  const [shorter, longer] = a.size <= b.size ? [a, b] : [b, a];
-  for (const [token, weight] of shorter) {
-    const other = longer.get(token);
-    if (other === undefined) continue;
-    contributions.push({ token, contribution: (weight * other) / denominator });
-  }
-  return contributions.sort(
-    (l, r) => r.contribution - l.contribution || l.token.localeCompare(r.token),
-  );
 }
 
 // --- Emitters -------------------------------------------------------------
@@ -472,24 +432,6 @@ export function emitAutomationFacets(
 }
 
 /**
- * Facets for an artifact.
- *
- * Artifacts are the best-behaved entity on the map: `ArtifactManifestV1.origin`
- * names the producing agent and provider, so a new artifact lands adjacent to
- * its producer immediately with no cold start.
- */
-export function emitArtifactFacets(
-  ref: EntityRef,
-  origin: { agentId: string; provider?: string },
-  canonicalPath?: string,
-): GardenEntityFacets {
-  const tokens: FacetToken[] = [`origin:agent:${origin.agentId}`];
-  if (origin.provider) tokens.push(`provider:${origin.provider.toLowerCase()}`);
-  tokens.push(...pathAncestorFacets(canonicalPath));
-  return { ref, tokens: dedupeTokens(tokens), excludes: [] };
-}
-
-/**
  * Library paths get their own ancestor chain, section-qualified so the same
  * folder name in two sections cannot collide — the same reason
  * `libraryListUtils.folderKey` is section-qualified.
@@ -533,61 +475,4 @@ export function withPlacement(
 
 function dedupeTokens(tokens: readonly FacetToken[]): FacetToken[] {
   return [...new Set(tokens)].sort();
-}
-
-/**
- * Tokens whose IDF shifted enough to matter after a corpus change, given the
- * tolerance `epsilon`. Callers use this to compute the dirty set instead of
- * invalidating every distance.
- */
-export function perturbedTokens(
-  before: FacetCorpus,
-  after: FacetCorpus,
-  changed: readonly FacetToken[],
-  epsilon = 0.05,
-): Set<FacetToken> {
-  const dirty = new Set<FacetToken>();
-  for (const token of changed) {
-    const facetClass = facetClassOf(token);
-    if (!facetClass) continue;
-    const delta = Math.abs(idf(after, token) - idf(before, token)) * FACET_KAPPA[facetClass];
-    if (delta > epsilon) dirty.add(token);
-  }
-  return dirty;
-}
-
-/** Index from facet token to the entities carrying it — the dirty-set frontier. */
-export function buildInvertedIndex(
-  entities: readonly GardenEntityFacets[],
-): Map<FacetToken, string[]> {
-  const index = new Map<FacetToken, string[]>();
-  for (const entity of entities) {
-    const key = entityKey(entity.ref);
-    for (const token of entity.tokens) {
-      const holders = index.get(token);
-      if (holders) holders.push(key);
-      else index.set(token, [key]);
-    }
-  }
-  return index;
-}
-
-/**
- * Entities whose distances must be recomputed after inserting `inserted`.
- *
- * Only entities sharing a *meaningfully perturbed* facet are dirty, which for
- * a new agent is its team, folder siblings, and class peers — tens of
- * entities, not the whole map.
- */
-export function dirtySet(
-  inserted: GardenEntityFacets,
-  index: ReadonlyMap<FacetToken, string[]>,
-  perturbed: ReadonlySet<FacetToken>,
-): Set<string> {
-  const dirty = new Set<string>([entityKey(inserted.ref)]);
-  for (const token of inserted.tokens) {
-    if (!perturbed.has(token)) continue;
-    for (const holder of index.get(token) ?? []) dirty.add(holder);
-  }
-  return dirty;
 }

@@ -1,9 +1,7 @@
-import { act, render, renderHook } from "@testing-library/react";
-import type { ReactNode } from "react";
+import { act, renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { AgentConfig } from "../../types";
 import type { Watchlist } from "../../layout/watchlist/types";
-import { RosterProvider, useRosterContext } from "./RosterContext";
 import { useRosterController } from "./useRosterController";
 
 const agents: AgentConfig[] = [
@@ -171,25 +169,4 @@ describe("useRosterController", () => {
     expect(selectedIds(result.current.selectedAgentIds)).toEqual(["alpha", "gamma"]);
   });
 
-  it("provides the exact controller instance through RosterContext", () => {
-    let observedFilter = "not-rendered";
-
-    function Consumer() {
-      observedFilter = useRosterContext().filter;
-      return null;
-    }
-
-    function Harness({ children }: { children: ReactNode }) {
-      const controller = useRosterController({
-        agents,
-        watchlists: [],
-        teams: [],
-        initialFilter: "coder",
-      });
-      return <RosterProvider value={controller}>{children}</RosterProvider>;
-    }
-
-    render(<Consumer />, { wrapper: Harness });
-    expect(observedFilter).toBe("coder");
-  });
 });

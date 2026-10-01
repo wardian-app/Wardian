@@ -87,12 +87,6 @@ export type AnalyticsSurfaceState = Readonly<{
 export type DashboardSurfaceState = Readonly<{
   prefs: DashboardPrefs;
 }>;
-export type CoreViewSurfaceState =
-  | EmptyCoreViewSurfaceState
-  | GraphSurfaceState
-  | GardenSurfaceState
-  | AnalyticsSurfaceState
-  | DashboardSurfaceState;
 export type SurfaceVisibility = "visible" | "hidden";
 /** Transient roster navigation intent, not persisted surface state. */
 export type AgentRevealRequest = Readonly<{
@@ -377,20 +371,6 @@ export const CORE_VIEW_SURFACE_DEFINITIONS: readonly SurfaceDefinition[] = Objec
   GRAPH_SURFACE_DEFINITION,
   GARDEN_SURFACE_DEFINITION,
 ]);
-
-export function normalizeCoreViewSurfaceState(
-  surface: Pick<WorkbenchSurfaceV1, "surface_type" | "state" | "state_schema_version">,
-): CoreViewSurfaceState {
-  if (surface.surface_type === "graph") return normalizeGraphSurfaceState(surface);
-  if (surface.surface_type === "garden") return normalizeGardenSurfaceState(surface);
-  if (surface.surface_type === "analytics") return coerceAnalyticsState(surface.state);
-  const definition = CORE_VIEW_SURFACE_DEFINITIONS.find(
-    (candidate) => candidate.type === surface.surface_type,
-  );
-  if (!definition) return EMPTY_STATE;
-  const restored = definition.restore_state(surface.state, surface.state_schema_version);
-  return restored.ok ? restored.state as CoreViewSurfaceState : EMPTY_STATE;
-}
 
 export function normalizeGraphSurfaceState(
   surface: Pick<WorkbenchSurfaceV1, "state" | "state_schema_version">,

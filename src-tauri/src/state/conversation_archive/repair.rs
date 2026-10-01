@@ -348,8 +348,7 @@ pub(super) fn recover_unlinked_observations(
             {
                 record.source_refs.push(source.source_id.clone());
             }
-            let known =
-                known_sources.get_or_insert(read_jsonl_records(&directory.join("sources.jsonl"))?);
+            let known = cached_source_rows(&mut known_sources, &directory.join("sources.jsonl"))?;
             if !source_row_is_published(known, source)? {
                 known.push(source.clone());
             }
@@ -551,6 +550,19 @@ pub(super) fn rebuild_derived_projections(
     Ok(())
 }
 
+/// Reads `sources.jsonl` only the first time an append needs it. Passing the
+/// read to `Option::get_or_insert` would evaluate it on every call and discard
+/// the result, re-parsing the whole file once per captured event.
+fn cached_source_rows<'a>(
+    cached: &'a mut Option<Vec<ConversationSourceRecord>>,
+    path: &Path,
+) -> io::Result<&'a mut Vec<ConversationSourceRecord>> {
+    if cached.is_none() {
+        *cached = Some(read_jsonl_records(path)?);
+    }
+    Ok(cached.get_or_insert_with(Vec::new))
+}
+
 pub(super) fn append_source_if_needed(
     path: &Path,
     cached: &mut Option<Vec<ConversationSourceRecord>>,
@@ -558,7 +570,7 @@ pub(super) fn append_source_if_needed(
     repair_existing: bool,
 ) -> io::Result<bool> {
     if repair_existing {
-        let sources = cached.get_or_insert(read_jsonl_records(path)?);
+        let sources = cached_source_rows(cached, path)?;
         if source_row_is_published(sources, source)? {
             return Ok(false);
         }
