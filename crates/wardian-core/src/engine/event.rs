@@ -43,6 +43,11 @@ pub enum EventKind {
         schema: u32,
         trigger: serde_json::Value,
     },
+    MessageSendPrepared {
+        node: String,
+        recipient_id: String,
+        artifact_path: String,
+    },
     NodeStarted {
         node: String,
     },

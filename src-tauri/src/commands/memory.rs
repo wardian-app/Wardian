@@ -4,7 +4,7 @@ use tauri::Manager;
 use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogKind, MessageDialogResult};
 use wardian_core::memory::{
     MemoryActor, MemoryMaintenancePlan, MemoryMaintenancePreview, MemoryMaintenanceReceipt,
-    MemoryRecord, MemoryStore, RecallResult, MAX_PLAN_BYTES,
+    MemoryRecord, MemoryStore, MAX_PLAN_BYTES,
 };
 
 const MEMORY_MAINTENANCE_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -39,16 +39,6 @@ pub async fn memory_get(memory_id: String) -> Result<MemoryRecord, String> {
 pub async fn memory_history(memory_id: String) -> Result<Vec<MemoryRecord>, String> {
     MemoryStore::from_default_home()
         .and_then(|store| store.history(&MemoryActor::Operator, &memory_id))
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-pub async fn memory_recall(
-    agent_id: String,
-    workspace: Option<String>,
-) -> Result<RecallResult, String> {
-    MemoryStore::from_default_home()
-        .and_then(|store| store.recall(&MemoryActor::Operator, &agent_id, workspace.as_deref()))
         .map_err(|error| error.to_string())
 }
 

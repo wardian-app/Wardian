@@ -23,11 +23,11 @@ fn definition(name: &str) -> Value {
             json!({"target":target,"message":message}), vec!["target", "message"],
         ),
         "followup_task" => (
-            "Assign a task to one Wardian agent and return its request receipt without waiting for a reply. Starting an inactive receiver can take time. If your assignment requires its result, wait with receive_messages until the correlated reply arrives or the caller's deadline expires; do not finish merely because early inbox polls are empty.",
+            "Assign a task to one Wardian agent and return its request receipt without waiting for a reply. Exact native Codex task turns automatically return their final result unless an explicit reply already completed the task; other delivery paths require explicit reply. Starting an inactive receiver can take time. If your assignment requires its result, wait with receive_messages until the correlated reply arrives or the caller's deadline expires; do not finish merely because early inbox polls are empty.",
             json!({"target":target,"message":message}), vec!["target", "message"],
         ),
         "receive_messages" => (
-            "Receive information, tasks and replies addressed to this managed Wardian agent. Reuse the returned cursor; ack_cursor acknowledges a previously returned batch. When waiting for assigned work, use timeout_ms=60000 and repeat within the caller's deadline. A timeout means no message arrived during that wait, not that the task failed. It does not cancel tasks or authorize resending them.",
+            "Receive information, tasks and replies addressed to this managed Wardian agent. A bounded timeout waits for mailbox activity, including automatic task results, without starting an idle agent. Reuse the returned cursor; ack_cursor acknowledges a previously returned batch. When waiting for assigned work, use timeout_ms=60000 and repeat within the caller's deadline. A timeout means no message arrived during that wait, not that the task failed. It does not cancel tasks or authorize resending them.",
             json!({
                 "cursor":{"type":"string","minLength":1},
                 "ack_cursor":{"type":"string","minLength":1},
@@ -36,7 +36,7 @@ fn definition(name: &str) -> Value {
             }), vec![],
         ),
         "reply" => (
-            "Reply to a Wardian task request as its authorized recipient. The request determines the destination; ordinary messages and assistant completion do not complete the request.",
+            "Reply to a Wardian task request as its authorized recipient. The request determines the destination. A committed explicit reply suppresses automatic native Codex final-result fallback; manual receive and unsupported provider delivery require this tool. Ordinary messages do not complete a request.",
             json!({"request_id":{"type":"string","minLength":1},"status":{"type":"string","enum":["done","blocked","failed"]},"message":message}), vec!["request_id","status","message"],
         ),
         "interrupt_agent" => (

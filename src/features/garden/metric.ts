@@ -1,12 +1,11 @@
 /**
  * The Garden map's distance metric.
  *
- * Three components, each measuring a different kind of relatedness, composed
+ * Two components, each measuring a different kind of relatedness, composed
  * into one distance and then cut to a sparse k-nearest-neighbour graph:
  *
  * - `d_affil`  — weighted cosine over facet vectors (see `facets.ts`).
  * - `d_interact` — personalized-PageRank affinity over agent communication.
- * - `d_use`    — pointwise mutual information over co-use in the same thread.
  *
  * ## Why personalized PageRank rather than shortest path
  *
@@ -16,12 +15,6 @@
  * shows. PPR splits probability mass at high-degree nodes, so hub-mediated
  * adjacency is discounted automatically, while genuinely multiple independent
  * paths *do* register as closer.
- *
- * ## Why PMI rather than raw co-occurrence
- *
- * Raw co-occurrence counts just re-rank by popularity, which would make the
- * busiest agent "close to" everything. PMI normalizes by each entity's own
- * frequency, so it measures surprise rather than volume.
  *
  * ## Composition renormalizes over applicable terms
  *
@@ -41,8 +34,8 @@
  */
 
 import type { FacetCorpus, FacetToken, FacetVector, GardenEntityFacets } from "./facets";
-import { cosine, cosineContributions, facetVector } from "./facets";
-import { entityKey, type EntityKind, type EntityRef } from "./entityRef";
+import { cosine, facetVector } from "./facets";
+import { entityKey, type EntityKind } from "./entityRef";
 
 /**
  * Bumping this invalidates persisted layouts. The scene records the version it
@@ -55,13 +48,11 @@ export const METRIC_VERSION = 1;
 export interface MetricWeights {
   affil: number;
   interact: number;
-  use: number;
 }
 
 export const DEFAULT_METRIC_WEIGHTS: MetricWeights = {
   affil: 1.0,
   interact: 0.8,
-  use: 0.5,
 };
 
 /**
@@ -274,62 +265,6 @@ export function interactionDistance(a: string, b: string, ppr: PprMatrix): numbe
   return clamp01(distance);
 }
 
-// --- Co-use PMI -----------------------------------------------------------
-
-export interface CoUseIndex {
-  windowCount: number;
-  /** Windows containing each entity. */
-  occurrences: ReadonlyMap<string, number>;
-  /** Windows containing both entities, keyed by canonical pair. */
-  coOccurrences: ReadonlyMap<string, number>;
-}
-
-/**
- * Build the co-use index from usage windows.
- *
- * A window should be one *thread* (`InteractionRecord.parent_interaction_id`
- * chains), not a time bin. Time bins fuse unrelated concurrent activity across
- * a large roster; a thread is a real unit of work.
- */
-export function buildCoUseIndex(windows: ReadonlyArray<readonly string[]>): CoUseIndex {
-  const occurrences = new Map<string, number>();
-  const coOccurrences = new Map<string, number>();
-  let windowCount = 0;
-
-  for (const window of windows) {
-    const members = [...new Set(window)].sort();
-    if (members.length === 0) continue;
-    windowCount += 1;
-    for (const member of members) {
-      occurrences.set(member, (occurrences.get(member) ?? 0) + 1);
-    }
-    for (let i = 0; i < members.length; i += 1) {
-      for (let j = i + 1; j < members.length; j += 1) {
-        const key = `${members[i]} ${members[j]}`;
-        coOccurrences.set(key, (coOccurrences.get(key) ?? 0) + 1);
-      }
-    }
-  }
-  return { windowCount, occurrences, coOccurrences };
-}
-
-export function coUseDistance(a: string, b: string, index: CoUseIndex): number | null {
-  if (index.windowCount === 0) return null;
-  const countA = index.occurrences.get(a);
-  const countB = index.occurrences.get(b);
-  if (!countA || !countB) return null; // Term does not apply to unseen entities.
-
-  const [left, right] = a <= b ? [a, b] : [b, a];
-  const together = index.coOccurrences.get(`${left} ${right}`) ?? 0;
-  if (together === 0) return 1;
-
-  const pJoint = together / index.windowCount;
-  const pA = countA / index.windowCount;
-  const pB = countB / index.windowCount;
-  const pmi = Math.log(pJoint / (pA * pB));
-  return clamp01(1 / (1 + Math.max(0, pmi)));
-}
-
 // --- Composition ----------------------------------------------------------
 
 export interface MetricContext {
@@ -338,7 +273,6 @@ export interface MetricContext {
   /** Decayed weights for `scene_anchor:*` tokens, keyed by token. */
   sceneWeights?: ReadonlyMap<FacetToken, number>;
   ppr?: PprMatrix;
-  coUse?: CoUseIndex;
   /** Canonical `a b` keys (sorted) from `topology.ignored_pairs`. */
   ignoredPairs?: ReadonlySet<string>;
   /** Canonical keys from `topology.suppressed_seed_pairs`. */
@@ -353,7 +287,7 @@ export function canonicalPairKey(a: string, b: string): string {
 }
 
 export interface DistanceTerm {
-  name: "affil" | "interact" | "use";
+  name: "affil" | "interact";
   distance: number;
   weight: number;
 }
@@ -413,12 +347,6 @@ export function distanceBetween(
       terms.push({ name: "interact", distance: interact, weight: context.weights.interact });
     }
   }
-  if (context.coUse) {
-    const use = coUseDistance(keyA, keyB, context.coUse);
-    if (use !== null) {
-      terms.push({ name: "use", distance: use, weight: context.weights.use });
-    }
-  }
 
   const totalWeight = terms.reduce((sum, term) => sum + term.weight, 0);
   const weighted =
@@ -457,38 +385,6 @@ function exclusionPenalty(
   const aRejectsB = districtB !== undefined && a.excludes.includes(districtB);
   const bRejectsA = districtA !== undefined && b.excludes.includes(districtA);
   return aRejectsB || bRejectsA ? EXCLUDE_REPULSION : 0;
-}
-
-// --- Explanation ----------------------------------------------------------
-
-export interface DistanceExplanation extends DistanceResult {
-  a: EntityRef;
-  b: EntityRef;
-  /** Shared facets, largest contribution first. */
-  sharedFacets: Array<{ token: FacetToken; contribution: number }>;
-}
-
-/**
- * Full, human-readable derivation of one distance.
- *
- * Backs `garden explain <a> <b>`. Cosine decomposes linearly over shared
- * tokens, so this costs one extra pass rather than a separate model — which is
- * the reason the metric is built from explainable parts in the first place.
- */
-export function explainDistance(
-  a: GardenEntityFacets,
-  b: GardenEntityFacets,
-  context: MetricContext,
-): DistanceExplanation {
-  const result = distanceBetween(a, b, context);
-  const vectorA = facetVector(a, context.corpus, context.sceneWeights);
-  const vectorB = facetVector(b, context.corpus, context.sceneWeights);
-  return {
-    ...result,
-    a: a.ref,
-    b: b.ref,
-    sharedFacets: cosineContributions(vectorA, vectorB),
-  };
 }
 
 // --- Sparse neighbour graph ----------------------------------------------

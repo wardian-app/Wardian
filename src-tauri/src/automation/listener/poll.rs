@@ -237,7 +237,6 @@ async fn poll_once(app: &AppHandle, listener: AutomationListener, trigger: WebPo
                 return;
             }
             let fire = ListenerFire {
-                listener_id: listener.id.clone(),
                 // The fingerprint is the event identity, so "fire on change"
                 // and "never run the same change twice" are one property.
                 event_identity: observed.clone(),

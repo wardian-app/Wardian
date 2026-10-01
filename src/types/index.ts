@@ -378,6 +378,10 @@ export interface QueueItem {
     error?: string;
     // shared
     summary?: string;
+    /** Full provider-authored final response for durable completion records. */
+    response_text?: string;
+    /** Source used to preserve the completion's event time across outbox replay. */
+    timestamp_source?: "hook_outbox_mtime" | "processing_time_fallback";
     provider_choice_sent?: string;
     provider_choice_pending?: string;
     provider_question?: ProviderQuestion;

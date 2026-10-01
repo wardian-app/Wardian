@@ -220,7 +220,6 @@ pub fn arm(
         debounce_loop(rx, debounce, |paths, rescan| {
             let window_end_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
             let fire = ListenerFire {
-                listener_id: listener.id.clone(),
                 event_identity: burst_identity(window_end_ms, &paths, rescan),
                 payload: payload(&listener, &watch_root, &paths, rescan),
             };

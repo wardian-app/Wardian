@@ -190,13 +190,27 @@ committed geometry before the provider has repainted. Desktop clients consume
 its sequence barrier but retain the last accurate fitted frame. They stop
 writing later output to that old-width xterm. Once ordered post-geometry output
 arrives, the desktop feed requests one fresh snapshot for all presentations,
-sizes each xterm to its source grid, and resumes replay. If the provider emits
-no output, the old frame remains visible with a pending status. Input is gated
-through the transition; the acknowledged owner may explicitly enable keyboard
-input to prompt recovery, with a warning that keys may affect an unseen prompt.
-Mouse coordinates and binary input remain gated. A lease transfer revokes that
-manual keyboard allowance. No timer retries or synthetic provider input are
-issued.
+sizes each xterm to its source grid, and resumes replay. While the provider has
+not repainted, the old frame remains visible with a pending status. Input is
+gated through the transition; the acknowledged owner may explicitly enable
+keyboard input to prompt recovery, with a warning that keys may affect an unseen
+prompt. Mouse coordinates and binary input remain gated. A lease transfer
+revokes that manual keyboard allowance.
+
+Pending is bounded. A provider that has nothing new to draw after a resize (an
+Ink prompt after a vertical-only change) never repaints, so after one second
+without output the presentation reads one snapshot for itself and replays it.
+The broker parser already holds the terminal at the committed geometry, so that
+frame is accurate, and later provider output still applies on top of it. The
+settle reads state only. It sends no input and never retries against the
+provider.
+
+The pending status applies only when the broker actually changes the PTY size,
+because only a size change makes the provider repaint. A forced viewport report
+at the geometry the broker already holds (the owner re-reporting after a runtime
+replacement such as New Session) and a resize the broker clamps back to its
+current size produce no snapshot and no repaint, so the owner keeps its ready
+status instead of waiting for output an idle provider will never send.
 
 The first owner resize is an exception for ordinary typed text: once the
 reported viewport equals the broker's committed geometry, the owner can type
@@ -287,8 +301,12 @@ inside the client's serialized registration transaction. Suspending,
 replacing, hiding, or changing the renderer invalidates the reveal generation,
 so stale font, snapshot, or intersection continuations cannot reveal a newer
 renderer. Resize observation schedules at most one animation-frame fit and
-does no work when measured pixels are unchanged. Timer expiry is never used as
-evidence that terminal geometry has settled.
+skips unchanged pixels for an already-ready renderer. If fit metrics are not
+ready or keep changing across the write barrier, an eligible hidden renderer
+retries at a throttled cadence even without another observer notification.
+Only one retry can be pending; invalidation and teardown cancel it, and each
+attempt checks the presentation generation and renderer identity again. Timer
+expiry is never used as evidence that terminal geometry has settled.
 
 Graph and Garden have a separate 30-second heavy-child grace through their
 surface render policy. Neither grace weakens broker ownership or changes PTY

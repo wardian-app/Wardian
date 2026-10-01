@@ -177,46 +177,6 @@ export function flattenDisplayItems(items: WatchlistDisplayItem[]): AgentConfig[
   return items.flatMap((item) => (item.type === "team" ? item.agents : [item.agent]));
 }
 
-/**
- * Reorders items within a list by moving an item from one index to another.
- * Returns a new array with the reordered items.
- */
-export function reorderWithinList(
-  agentIds: string[],
-  fromIndex: number,
-  toIndex: number,
-): string[] {
-  if (
-    fromIndex < 0 ||
-    fromIndex >= agentIds.length ||
-    toIndex < 0 ||
-    toIndex >= agentIds.length ||
-    fromIndex === toIndex
-  ) {
-    return agentIds;
-  }
-  const result = [...agentIds];
-  const [moved] = result.splice(fromIndex, 1);
-  result.splice(toIndex, 0, moved);
-  return result;
-}
-
-/**
- * Adds an agent to a watchlist if not already present.
- * Returns a new watchlist with the agent appended.
- */
-export function addAgentToList(list: Watchlist, agentId: string): Watchlist {
-  const entries = getWatchlistEntries(list);
-  if (entries.some((entry) => entry.type === "agent" && entry.agentId === agentId)) {
-    return list;
-  }
-  return {
-    ...list,
-    agentIds: list.agentIds ? [...list.agentIds, agentId] : undefined,
-    entries: [...entries, { type: "agent", agentId }],
-  };
-}
-
 export function addAgentsToList(
   list: Watchlist,
   agentIds: string[],
@@ -233,17 +193,6 @@ export function addAgentsToList(
   }
   const entries = normalizeWatchlistEntries(next, teams);
   return { ...list, agentIds: entries.filter((entry) => entry.type === "agent").map((entry) => entry.agentId), entries };
-}
-
-/**
- * Removes an agent from a watchlist.
- * Returns a new watchlist without the agent.
- */
-export function removeAgentFromList(
-  list: Watchlist,
-  agentId: string,
-): Watchlist {
-  return removeAgentsFromList(list, [agentId]);
 }
 
 export function removeAgentsFromList(

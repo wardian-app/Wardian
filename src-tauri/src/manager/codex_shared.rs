@@ -1,4 +1,5 @@
 //! A failed PTY attachment must release only its own provider generation.
+use crate::delivery::codex_shared::CodexTurnActivity;
 use crate::delivery::native_broker::NativeDeliveryBroker;
 use std::sync::Arc;
 
@@ -95,7 +96,6 @@ pub(super) fn observe_turn_activity(
     current_status: Arc<std::sync::Mutex<String>>,
     mut observations: tokio::sync::watch::Receiver<crate::delivery::codex_shared::Observation>,
 ) {
-    use crate::delivery::codex_shared::CodexTurnActivity;
     tauri::async_runtime::spawn(async move {
         let mut previous = CodexTurnActivity::Pending;
         loop {
@@ -104,11 +104,11 @@ pub(super) fn observe_turn_activity(
                 break;
             }
             if activity != previous {
-                match &activity {
-                    CodexTurnActivity::Processing(_) => {
-                        super::set_agent_status(&app, &agent_id, &current_status, "Processing...");
+                match codex_activity_status_update(&activity) {
+                    Some(CodexActivityStatusUpdate::Set(status)) => {
+                        super::set_agent_status(&app, &agent_id, &current_status, status);
                     }
-                    CodexTurnActivity::Idle(_) => {
+                    Some(CodexActivityStatusUpdate::TurnCompleted) => {
                         super::apply_agent_status_event(
                             &app,
                             &agent_id,
@@ -116,12 +116,15 @@ pub(super) fn observe_turn_activity(
                             &current_status,
                         );
                     }
-                    CodexTurnActivity::Closed => {
-                        super::set_agent_status(&app, &agent_id, &current_status, "Error");
-                        break;
-                    }
-                    CodexTurnActivity::Stopped => break,
-                    CodexTurnActivity::Pending => {}
+                    None => match &activity {
+                        CodexTurnActivity::Closed => {
+                            super::set_agent_status(&app, &agent_id, &current_status, "Error");
+                            break;
+                        }
+                        CodexTurnActivity::Stopped => break,
+                        CodexTurnActivity::Pending => {}
+                        _ => unreachable!("every live activity has a status transition"),
+                    },
                 }
                 previous = activity;
             }
@@ -130,6 +133,26 @@ pub(super) fn observe_turn_activity(
             }
         }
     });
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CodexActivityStatusUpdate {
+    Set(&'static str),
+    TurnCompleted,
+}
+
+fn codex_activity_status_update(activity: &CodexTurnActivity) -> Option<CodexActivityStatusUpdate> {
+    match activity {
+        CodexTurnActivity::Processing(_) | CodexTurnActivity::ProcessingWithoutTurn => {
+            Some(CodexActivityStatusUpdate::Set("Processing..."))
+        }
+        CodexTurnActivity::ActionRequiredWithoutTurn => {
+            Some(CodexActivityStatusUpdate::Set("Action Needed"))
+        }
+        CodexTurnActivity::Idle(_) => Some(CodexActivityStatusUpdate::TurnCompleted),
+        CodexTurnActivity::IdleWithoutTurn => Some(CodexActivityStatusUpdate::Set("Idle")),
+        CodexTurnActivity::Pending | CodexTurnActivity::Closed | CodexTurnActivity::Stopped => None,
+    }
 }
 
 pub(super) struct CodexAttachGuard {
@@ -325,6 +348,18 @@ impl Drop for CodexAttachGuard {
 mod tests {
     use super::*;
     use wardian_core::models::{AgentConfig, AgentSessionPersistenceOverride};
+
+    #[test]
+    fn status_only_idle_reconciles_without_a_synthetic_completion_event() {
+        assert_eq!(
+            codex_activity_status_update(&CodexTurnActivity::IdleWithoutTurn),
+            Some(CodexActivityStatusUpdate::Set("Idle"))
+        );
+        assert_eq!(
+            codex_activity_status_update(&CodexTurnActivity::Idle("turn".into())),
+            Some(CodexActivityStatusUpdate::TurnCompleted)
+        );
+    }
 
     #[test]
     fn background_native_capture_retains_resume_continuity_and_explicit_fresh() {

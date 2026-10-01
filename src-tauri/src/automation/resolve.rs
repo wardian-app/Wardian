@@ -44,12 +44,10 @@ pub enum PlannedAgentRoute {
 
 #[derive(Debug, Clone)]
 pub struct AgentRouteInput {
-    pub agent_id: String,
     pub conversation: AgentConversationMode,
     pub busy_policy: BusyPolicy,
     pub is_live: bool,
     pub is_input_ready: bool,
-    pub has_resume_session: bool,
 }
 
 pub fn choose_agent_route(input: AgentRouteInput) -> PlannedAgentRoute {
@@ -66,25 +64,6 @@ pub fn choose_agent_route(input: AgentRouteInput) -> PlannedAgentRoute {
             BusyPolicy::Fail => PlannedAgentRoute::FailedBusy,
         },
     }
-}
-
-/// Resolve a blueprint `agent` reference. `role:`/`class:`/`ephemeral` map to a
-/// fresh headless worker on `default_provider`; explicit names are marked as
-/// non-ephemeral so the executor can log the deferred live-routing behavior.
-/// A binding keyed by the role/class NAME overrides the provider this ref runs as.
-pub fn resolve_agent(
-    agent_ref: &str,
-    workspace: &Path,
-    default_provider: &str,
-    bindings: &HashMap<String, String>,
-) -> ResolvedAgent {
-    resolve_agent_with_catalog(
-        agent_ref,
-        workspace,
-        default_provider,
-        bindings,
-        &HashMap::new(),
-    )
 }
 
 pub fn resolve_agent_with_catalog(
@@ -171,7 +150,13 @@ mod tests {
 
     #[test]
     fn role_ref_resolves_to_ephemeral_headless_with_default_provider() {
-        let r = resolve_agent("role:Coder", Path::new("/ws"), "codex", &HashMap::new());
+        let r = resolve_agent_with_catalog(
+            "role:Coder",
+            Path::new("/ws"),
+            "codex",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(r.provider, "codex");
         assert!(r.is_ephemeral);
         assert!(r.session_id.is_empty());
@@ -180,14 +165,26 @@ mod tests {
     #[test]
     fn class_ref_is_ephemeral() {
         assert!(
-            resolve_agent("class:Reviewer", Path::new("/ws"), "codex", &HashMap::new())
-                .is_ephemeral
+            resolve_agent_with_catalog(
+                "class:Reviewer",
+                Path::new("/ws"),
+                "codex",
+                &HashMap::new(),
+                &HashMap::new()
+            )
+            .is_ephemeral
         );
     }
 
     #[test]
     fn explicit_name_is_not_ephemeral() {
-        let r = resolve_agent("Wardian-Codex", Path::new("/ws"), "codex", &HashMap::new());
+        let r = resolve_agent_with_catalog(
+            "Wardian-Codex",
+            Path::new("/ws"),
+            "codex",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert!(!r.is_ephemeral);
     }
 
@@ -196,9 +193,21 @@ mod tests {
         use std::collections::HashMap;
         let mut b = HashMap::new();
         b.insert("reasoning_gate".to_string(), "claude".to_string());
-        let r = resolve_agent("role:reasoning_gate", Path::new("/ws"), "codex", &b);
+        let r = resolve_agent_with_catalog(
+            "role:reasoning_gate",
+            Path::new("/ws"),
+            "codex",
+            &b,
+            &HashMap::new(),
+        );
         assert_eq!(r.provider, "claude"); // bound
-        let r2 = resolve_agent("role:other", Path::new("/ws"), "codex", &b);
+        let r2 = resolve_agent_with_catalog(
+            "role:other",
+            Path::new("/ws"),
+            "codex",
+            &b,
+            &HashMap::new(),
+        );
         assert_eq!(r2.provider, "codex"); // unbound -> default
     }
 
@@ -292,12 +301,10 @@ mod tests {
     #[test]
     fn busy_live_current_conversation_does_not_use_background_resume() {
         let route = choose_agent_route(AgentRouteInput {
-            agent_id: "agent-1".into(),
             conversation: AgentConversationMode::Current,
             busy_policy: BusyPolicy::Skip,
             is_live: true,
             is_input_ready: false,
-            has_resume_session: true,
         });
         assert_eq!(route, PlannedAgentRoute::SkippedBusy);
     }
@@ -305,12 +312,10 @@ mod tests {
     #[test]
     fn offline_current_conversation_uses_background_resume() {
         let route = choose_agent_route(AgentRouteInput {
-            agent_id: "agent-1".into(),
             conversation: AgentConversationMode::Current,
             busy_policy: BusyPolicy::Wait,
             is_live: false,
             is_input_ready: false,
-            has_resume_session: true,
         });
         assert_eq!(route, PlannedAgentRoute::BackgroundResume);
     }
@@ -318,12 +323,10 @@ mod tests {
     #[test]
     fn fresh_background_uses_profile_without_resume() {
         let route = choose_agent_route(AgentRouteInput {
-            agent_id: "agent-1".into(),
             conversation: AgentConversationMode::FreshBackground,
             busy_policy: BusyPolicy::Wait,
             is_live: true,
             is_input_ready: false,
-            has_resume_session: true,
         });
         assert_eq!(route, PlannedAgentRoute::BackgroundFresh);
     }

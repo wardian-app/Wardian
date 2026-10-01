@@ -1,7 +1,11 @@
 use std::collections::{HashMap, HashSet};
 mod agent_messaging;
+mod mailbox_wait;
+mod task_turns;
 
-use tokio::sync::Mutex;
+pub use mailbox_wait::AgentMailboxSignal;
+
+use tokio::sync::{watch, Mutex};
 use wardian_core::control::{
     DeliveryErrorDetail, DeliveryTransportKind, InboxNotificationDecision, InboxNotificationKind,
     InboxNotificationPayload, InteractionBodyRef, InteractionDeliveryAttemptRecord,
@@ -21,8 +25,9 @@ pub struct InteractionState {
     provider_generations: Mutex<HashMap<String, u64>>,
     provider_status_observations: Mutex<HashMap<String, u64>>,
     provider_inputs: Mutex<HashMap<String, ProviderInputState>>,
-    // Ephemeral long-poll wake revisions; canonical delivery remains in the DB.
-    agent_message_provider_revisions: Mutex<HashMap<String, u64>>,
+    // Retain senders (including deletion tombstones) so late subscribers see
+    // the current baseline even when no receiver existed during publication.
+    agent_mailboxes: Mutex<HashMap<String, watch::Sender<AgentMailboxSignal>>>,
 }
 
 impl InteractionState {
@@ -124,32 +129,6 @@ impl InteractionState {
             target_session_ids,
             body_ref,
         );
-        wardian_core::db::upsert_interaction_record(&record)
-            .map_err(|error| format!("failed to persist interaction: {error}"))?;
-        self.records
-            .lock()
-            .await
-            .insert(record.id.clone(), record.clone());
-        Ok(record)
-    }
-
-    pub async fn create_message_durable_with_id(
-        &self,
-        id: String,
-        sender_session_id: Option<String>,
-        target_session_ids: Vec<String>,
-        body_ref: InteractionBodyRef,
-    ) -> Result<InteractionRecord, String> {
-        let _mutation = self.mutation_lock.lock().await;
-        let deleted_sessions = self.deleted_sessions.lock().await;
-        if let Some(target_session_id) = target_session_ids
-            .iter()
-            .find(|target| deleted_sessions.contains(*target))
-        {
-            return Err(format!("agent has been deleted: {target_session_id}"));
-        }
-        drop(deleted_sessions);
-        let record = message_record(id, sender_session_id, target_session_ids, body_ref);
         wardian_core::db::upsert_interaction_record(&record)
             .map_err(|error| format!("failed to persist interaction: {error}"))?;
         self.records
@@ -282,10 +261,6 @@ impl InteractionState {
         }
         records.insert(record.id.clone(), record.clone());
         Ok(record)
-    }
-
-    pub async fn inbox_notifications(&self, limit: usize) -> (Vec<InteractionRecord>, bool) {
-        self.inbox_notifications_page(0, limit).await
     }
 
     pub async fn inbox_notifications_page(
@@ -634,9 +609,31 @@ impl InteractionState {
         state: ProviderInputReadiness,
         ready_evidence: Option<ProviderReadyEvidence>,
     ) -> ProviderInputState {
+        self.record_provider_input_status_observation_with_transition(
+            session_id,
+            status_sequence,
+            generation,
+            state,
+            ready_evidence,
+        )
+        .await
+        .0
+    }
+
+    pub async fn record_provider_input_status_observation_with_transition(
+        &self,
+        session_id: &str,
+        status_sequence: u64,
+        generation: u64,
+        state: ProviderInputReadiness,
+        ready_evidence: Option<ProviderReadyEvidence>,
+    ) -> (ProviderInputState, bool) {
         let _mutation = self.mutation_lock.lock().await;
         if self.deleted_sessions.lock().await.contains(session_id) {
-            return provider_input_state_record(session_id, generation, state, ready_evidence);
+            return (
+                provider_input_state_record(session_id, generation, state, ready_evidence),
+                false,
+            );
         }
         let mut observations = self.provider_status_observations.lock().await;
         if matches!(
@@ -644,15 +641,18 @@ impl InteractionState {
             Some(current) if status_sequence < current
         ) {
             if let Some(existing) = self.provider_inputs.lock().await.get(session_id).cloned() {
-                return existing;
+                return (existing, false);
             }
+            return (
+                provider_input_state_record(session_id, generation, state, ready_evidence),
+                false,
+            );
         } else {
             observations.insert(session_id.to_string(), status_sequence);
         }
 
         self.record_provider_input_state_inner(session_id, generation, state, ready_evidence)
             .await
-            .0
     }
 
     pub async fn provider_input_state(&self, session_id: &str) -> Option<ProviderInputState> {
@@ -701,9 +701,20 @@ impl InteractionState {
     pub async fn clear_deleted_session(&self, session_id: &str) {
         let _mutation = self.mutation_lock.lock().await;
         self.deleted_sessions.lock().await.remove(session_id);
+        self.revive_agent_mailbox(session_id).await;
     }
 
     pub async fn hydrate_from_persistence(&self) {
+        // A new process cannot continue observing an old live turn. Captured
+        // terminal outcomes remain publishable without rerunning that turn.
+        if let Err(error) = wardian_core::db::agent_messaging::with_db(
+            wardian_core::db::agent_messaging::abandon_task_turn_observations,
+        ) {
+            crate::manager::log_debug(&format!("[WARDIAN] task observation recovery: {error}"));
+        }
+        if let Err(error) = self.recover_agent_task_results().await {
+            crate::manager::log_debug(&format!("[WARDIAN] task result recovery: {error}"));
+        }
         if let Ok(records) = wardian_core::db::list_interaction_records() {
             let mut current = self.records.lock().await;
             for record in records {
@@ -930,12 +941,9 @@ impl InteractionState {
             .lock()
             .await
             .remove(session_id);
-        self.agent_message_provider_revisions
-            .lock()
-            .await
-            .remove(session_id);
         self.provider_generations.lock().await.remove(session_id);
         self.provider_inputs.lock().await.remove(session_id);
+        self.mark_agent_mailbox_deleted(session_id).await;
         Ok(())
     }
 }

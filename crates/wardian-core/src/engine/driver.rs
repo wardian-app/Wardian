@@ -571,6 +571,30 @@ fn emit(
     Ok(())
 }
 
+fn message_send_request(node: &Node, state: &RunState) -> Result<MessageSendRequest, StepError> {
+    if let Some(binding) = state.message_deliveries.get(&node.id) {
+        return Ok(MessageSendRequest {
+            node: node.id.clone(),
+            recipient: binding.recipient_id.clone(),
+            artifact_path: binding.artifact_path.clone(),
+        });
+    }
+    let field = |key: &str| {
+        let raw = node
+            .fields
+            .get(key)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| StepError::new(format!("missing message_send field `{key}`")))?;
+        resolve(raw, &state.registry)
+            .map_err(|path| StepError::new(format!("unresolved {{{{{path}}}}}")))
+    };
+    Ok(MessageSendRequest {
+        node: node.id.clone(),
+        recipient: field("recipient")?,
+        artifact_path: field("artifact_path")?,
+    })
+}
+
 /// The main loop: advance loops, finalize, then dispatch each runnable node.
 async fn drive(
     g: &Graph<'_>,
@@ -578,6 +602,68 @@ async fn drive(
     run_root: &Path,
     exec: &dyn StepExecutor,
 ) -> crate::engine::Result<()> {
+    s.normalize_legacy();
+    if s.status == RunStatus::Running {
+        let fresh = !g
+            .blueprint()
+            .nodes
+            .iter()
+            .any(|node| node.r#type != "manual_trigger" && s.node_status(&node.id).is_some());
+        for node in g
+            .blueprint()
+            .nodes
+            .iter()
+            .filter(|node| node.r#type == "message_send")
+        {
+            if matches!(
+                s.node_status(&node.id),
+                Some(NodeStatus::Completed | NodeStatus::Skipped)
+            ) {
+                continue;
+            }
+            let result = match message_send_request(node, s) {
+                Ok(req) => match exec.preflight_message_send(req.clone(), fresh).await {
+                    Ok(recipient_id) => {
+                        if s.message_deliveries
+                            .get(&node.id)
+                            .is_some_and(|binding| binding.recipient_id != recipient_id)
+                        {
+                            Err(StepError::new(
+                                "bound message_send recipient no longer exists",
+                            ))
+                        } else {
+                            if !s.message_deliveries.contains_key(&node.id) {
+                                emit(
+                                    run_root,
+                                    g,
+                                    s,
+                                    EventKind::MessageSendPrepared {
+                                        node: node.id.clone(),
+                                        recipient_id,
+                                        artifact_path: req.artifact_path,
+                                    },
+                                )?;
+                            }
+                            Ok(())
+                        }
+                    }
+                    Err(err) => Err(err),
+                },
+                Err(err) => Err(err),
+            };
+            if let Err(err) = result {
+                emit(
+                    run_root,
+                    g,
+                    s,
+                    EventKind::RunFailed {
+                        error: format!("message_send preflight `{}`: {err}", node.id),
+                    },
+                )?;
+                return Ok(());
+            }
+        }
+    }
     loop {
         if cancellation_requested(run_root)? {
             match s.status {
@@ -1088,6 +1174,9 @@ async fn run_side_effect(
             })
             .await?
             .0,
+        )),
+        "message_send" => Ok(ExecutedStep::output(
+            exec.message_send(message_send_request(node, s)?).await?.0,
         )),
         "notify" => {
             let message = f("message")?;

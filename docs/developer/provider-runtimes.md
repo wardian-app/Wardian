@@ -12,7 +12,7 @@ This document captures the practical runtime differences between Wardian's suppo
 - `inherit_fresh` clones the selected agent's runtime configuration and scoped read context, but writes automation artifacts under an automation-run session ID and clears provider resume state.
 - Automation-spawned fresh runs skip interactive startup prompts. The automation node prompt is the first provider input.
 - Regular visible agents use the global `Regular agent sessions` setting unless the agent config sets `session_persistence` to `fresh` or `resume`. The agent-level `default` value inherits the global setting.
-- The regular-agent context menu **New Session** action archives the closing provider log before forcing a fresh provider launch. It clears both the backend PTY output buffer and frontend terminal scrollback cache while retaining the Wardian agent, habitat, and saved history. If the archive cannot be updated safely, replacement stops and Wardian shows the failure detail.
+- The regular-agent context menu **New Session** action archives the closing provider log before forcing a fresh provider launch. It clears both the backend PTY output buffer and frontend terminal scrollback cache while retaining the Wardian agent, habitat, and saved history. If the archive cannot be updated safely, replacement stops and Wardian shows the failure detail. A repeated request while a New Session is running for the same agent is refused at once with an explanatory message, and every outcome (finished, failed, or refused) is written to `<wardian-home>/wardian_debug.log`.
 - Claude provider-log archive ownership prefers the exact raw-line observation ID. A legacy alias can recover an older row only when no exact owner exists; multiple alias owners fail closed, preserving their distinct history rows and source positions instead of joining them by matching prompt text. Other providers retain their provider-specific alias reconciliation.
 - Provider delivery profiles are responsible for translating Wardian input into the provider's native submit behavior, including short prompts, pasted multiline prompts, long prompts, slash-command-shaped text, and inputs that already end with a newline.
 - Delivery recognizers must fail closed. If Wardian cannot recognize that a provider prompt is ready, that a paste bracket has settled, or that a command was submitted, it should avoid sending more input instead of guessing and corrupting the provider TUI state.
@@ -112,7 +112,7 @@ Antigravity runs directly in the real target workspace. Wardian does not use a p
 - Wardian passes common, class, and agent include roots as repeated `--add-dir <absolute-path>` flags.
 - The provider adapter intentionally stays separate from Gemini even though Antigravity stores runtime files under `~/.gemini/antigravity-cli`.
 - Hidden Wardian roots are projected through visible temp paths before they are passed to `agy`. If a projected root contains `.agents/skills`, Wardian materializes that root and follows deployed skill links so Antigravity sees real skill directories instead of junctions or symlinks back into hidden storage.
-- `deploy_skill` and `remove_deployed_skill` refresh live Antigravity projections after the canonical Wardian skill tree changes. The library skill watcher also refreshes projections after skill-file changes while it is active. Agent restart remains the full rebuild path for projections.
+- `deploy_skill` refreshes live Antigravity projections after the canonical Wardian skill tree changes. The library skill watcher also refreshes projections after skill-file changes while it is active. Agent restart remains the full rebuild path for projections.
 
 ### Session and telemetry behavior
 
@@ -336,7 +336,17 @@ identity, then promotes readiness to `Ready`. Attachment cancellation or a
 stale generation disposes the exact native owner and removes only the current
 provisional roster entry; a durable-state failure leaves that entry visible in
 `Error` behind the retained stop fence. Restored agents and other providers
-keep their existing synchronous publication path.
+keep their existing synchronous publication path. A restored Codex runtime
+replaces its `Restoring` placeholder only after owner attachment succeeds. That
+publication reconciles the latest accepted status transition for that exact
+attached runtime, including `Off`, `Error`, or `Action Needed` reserved before
+publication. With no accepted transition, the attached runtime becomes `Idle`.
+A missing attachment, missing runtime generation, or already committed terminal
+state does not become `Idle`.
+Queued status changes reserve an intent revision for the exact runtime status
+Arc after attachment admission. A newer accepted intent supersedes an older
+queue entry; rejected attempts do not. Value commits have a separate revision
+so a same-value status report does not invalidate an already staged observation.
 
 #### Shared thread index
 

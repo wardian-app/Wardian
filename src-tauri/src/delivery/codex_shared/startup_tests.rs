@@ -9,12 +9,13 @@ async fn socket_wait_stays_pending_until_the_path_appears() {
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("control.sock");
     let checks = std::cell::Cell::new(0);
-    let waiting = owner::wait_for_socket(
+    let waiting = owner::observe_socket_wait(
         &socket,
         tokio::time::Instant::now() + Duration::from_secs(60),
+        std::future::pending(),
         || {
             checks.set(checks.get() + 1);
-            Ok(())
+            owner::ChildLiveness::Alive
         },
     );
     tokio::pin!(waiting);
@@ -27,11 +28,19 @@ async fn socket_wait_stays_pending_until_the_path_appears() {
     // A plain file deliberately exercises presence only, not socket validity,
     // proxy connection, initialize, or native TUI attachment.
     std::fs::write(&socket, b"presence fixture").unwrap();
-    tokio::time::timeout(Duration::from_secs(3), waiting)
+    let diagnostic = tokio::time::timeout(Duration::from_secs(3), waiting)
         .await
-        .unwrap()
         .unwrap();
     assert!(checks.get() >= 2);
+    assert_eq!(diagnostic.outcome, owner::SocketWaitOutcome::Ready);
+    assert_eq!(diagnostic.socket_presence, owner::SocketPresence::Present);
+    assert_eq!(diagnostic.child_liveness, owner::ChildLiveness::Alive);
+    let mut timings = owner::OwnerStartTimings::default();
+    timings.record_socket_wait(diagnostic);
+    let log_value = timings.socket_wait_diagnostic_value();
+    assert_eq!(log_value["outcome"], "ready");
+    assert_eq!(log_value["socket_presence"], "present");
+    assert_eq!(log_value["child_liveness"], "alive");
     assert_eq!(std::fs::read(&socket).unwrap(), b"presence fixture");
 }
 
@@ -43,14 +52,15 @@ async fn socket_wait_checks_child_exit_before_accepting_a_present_path() {
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("control.sock");
     let alive = std::cell::Cell::new(true);
-    let waiting = owner::wait_for_socket(
+    let waiting = owner::observe_socket_wait(
         &socket,
         tokio::time::Instant::now() + Duration::from_secs(60),
+        std::future::pending(),
         || {
             if alive.get() {
-                Ok(())
+                owner::ChildLiveness::Alive
             } else {
-                Err(CodexSharedError::unsupported("captured child exited"))
+                owner::ChildLiveness::Exited
             }
         },
     );
@@ -62,33 +72,58 @@ async fn socket_wait_checks_child_exit_before_accepting_a_present_path() {
     );
     std::fs::write(&socket, b"presence fixture").unwrap();
     alive.set(false);
-    let error = tokio::time::timeout(Duration::from_secs(3), waiting)
+    let diagnostic = tokio::time::timeout(Duration::from_secs(3), waiting)
         .await
-        .unwrap()
-        .unwrap_err();
-    assert_eq!(error.message, "captured child exited");
+        .unwrap();
+    assert_eq!(diagnostic.outcome, owner::SocketWaitOutcome::ChildExited);
+    assert_eq!(diagnostic.socket_presence, owner::SocketPresence::Present);
+    assert_eq!(diagnostic.child_liveness, owner::ChildLiveness::Exited);
+    let mut timings = owner::OwnerStartTimings::default();
+    timings.record_socket_wait(diagnostic);
+    let log_value = timings.socket_wait_diagnostic_value();
+    assert_eq!(log_value["outcome"], "child_exited");
+    assert_eq!(log_value["socket_presence"], "present");
+    assert_eq!(log_value["child_liveness"], "exited");
+    let error = diagnostic.outcome.into_result().unwrap_err();
+    assert_eq!(error.message, "captured Codex daemon is no longer alive");
     assert!(!error.provider_boundary_crossed);
     assert!(socket.exists());
 }
 
 #[tokio::test]
-async fn socket_wait_rejects_a_missing_path_at_its_deadline() {
+async fn socket_wait_timeout_records_elapsed_and_bounded_diagnostic() {
     let directory = tempfile::tempdir().unwrap();
-    let socket = directory.path().join("control.sock");
+    let socket = directory.path().join("private-control.sock");
     let checks = std::cell::Cell::new(0);
-    let error = tokio::time::timeout(
-        Duration::from_secs(3),
-        owner::wait_for_socket(&socket, tokio::time::Instant::now(), || {
+    let diagnostic = owner::observe_socket_wait(
+        &socket,
+        tokio::time::Instant::now(),
+        std::future::pending(),
+        || {
             checks.set(checks.get() + 1);
-            Ok(())
-        }),
+            owner::ChildLiveness::Alive
+        },
     )
-    .await
-    .unwrap()
-    .unwrap_err();
-    assert_eq!(error.message, "Codex local socket startup timed out");
-    assert_eq!(checks.get(), 1);
-    assert!(!error.provider_boundary_crossed);
+    .await;
+    assert_eq!(diagnostic.outcome, owner::SocketWaitOutcome::TimedOut);
+    assert_eq!(diagnostic.socket_presence, owner::SocketPresence::Missing);
+    assert_eq!(diagnostic.child_liveness, owner::ChildLiveness::Alive);
+    assert_eq!(checks.get(), 2);
+    let mut timings = owner::OwnerStartTimings::default();
+    timings.record_socket_wait(diagnostic);
+    let log_value = timings.socket_wait_diagnostic_value();
+    assert_eq!(log_value["outcome"], "timed_out");
+    assert_eq!(log_value["socket_presence"], "missing");
+    assert_eq!(log_value["child_liveness"], "alive");
+    assert_eq!(
+        log_value["elapsed_ms"].as_u64().unwrap() as u128,
+        diagnostic.elapsed.as_millis()
+    );
+    assert_eq!(
+        diagnostic.outcome.into_result().unwrap_err().message,
+        "Codex local socket startup timed out"
+    );
+    assert!(!log_value.to_string().contains("private-control.sock"));
     assert!(!socket.exists());
 }
 
@@ -101,20 +136,27 @@ async fn socket_wait_yields_to_caller_cancellation_without_advancing_startup() {
     let socket = directory.path().join("control.sock");
     let checks = std::cell::Cell::new(0);
     let advanced = std::cell::Cell::new(false);
-    let (cancel, mut cancelled) = oneshot::channel::<()>();
+    let (cancel, cancelled) = oneshot::channel::<()>();
     {
         let startup = async {
-            owner::wait_for_socket(
+            let diagnostic = owner::observe_socket_wait(
                 &socket,
                 tokio::time::Instant::now() + Duration::from_secs(60),
+                async {
+                    let _ = cancelled.await;
+                },
                 || {
                     checks.set(checks.get() + 1);
-                    Ok(())
+                    owner::ChildLiveness::Alive
                 },
             )
-            .await?;
-            advanced.set(true);
-            Ok::<(), CodexSharedError>(())
+            .await;
+            let mut timings = owner::OwnerStartTimings::default();
+            timings.record_socket_wait(diagnostic);
+            if diagnostic.outcome == owner::SocketWaitOutcome::Ready {
+                advanced.set(true);
+            }
+            (diagnostic, timings.socket_wait_diagnostic_value())
         };
         tokio::pin!(startup);
         assert!(
@@ -123,15 +165,17 @@ async fn socket_wait_yields_to_caller_cancellation_without_advancing_startup() {
                 .is_pending()
         );
         cancel.send(()).unwrap();
-        // Match the owner's biased cancellation boundary. No helper-owned
-        // process or task needs cleanup; owner process joining is tested elsewhere.
-        tokio::select! {
-            biased;
-            result = &mut cancelled => result.unwrap(),
-            result = &mut startup => panic!("socket wait advanced after cancellation: {result:?}"),
-        }
+        let (diagnostic, log_value) = tokio::time::timeout(Duration::from_secs(3), startup)
+            .await
+            .unwrap();
+        assert_eq!(diagnostic.outcome, owner::SocketWaitOutcome::Cancelled);
+        assert_eq!(diagnostic.socket_presence, owner::SocketPresence::Missing);
+        assert_eq!(diagnostic.child_liveness, owner::ChildLiveness::Alive);
+        assert_eq!(log_value["outcome"], "cancelled");
+        assert_eq!(log_value["socket_presence"], "missing");
+        assert_eq!(log_value["child_liveness"], "alive");
     }
-    assert_eq!(checks.get(), 1);
+    assert_eq!(checks.get(), 2);
     assert!(!advanced.get());
     assert!(!socket.exists());
 }

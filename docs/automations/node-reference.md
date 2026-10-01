@@ -165,6 +165,24 @@ Validate and atomically commit structured agent-memory changes.
 
 Outgoing ports: out
 
+## Send message
+
+- **id:** `message_send`
+- **kind:** engine
+- **category:** Action
+- **version:** 1
+
+Admit an exact UTF-8 workspace artifact as a host informational message. Requires the application host; no task or reply is created.
+
+### Fields
+
+- `recipient` — Recipient [text (required)]
+  Help: One exact UUID or unambiguous exact agent name. No class or broadcast selectors. Must resolve before tasks start.
+- `artifact_path` — Artifact path [text (required)]
+  Help: Workspace-relative UTF-8 file, at most 64 KiB. Use a run-specific directory such as .wardian-review/&#123;&#123;run.id&#125;&#125;/review.md; an existing artifact fails fresh-run preflight.
+
+Outgoing ports: out
+
 ## Notify
 
 - **id:** `notify`

@@ -18,6 +18,21 @@ function resetStore() {
   });
 }
 
+function completionItem(sessionId: string, agentName: string, summary: string, evidenceId: string): QueueItem {
+  return {
+    id: `agent-completed:${sessionId}:${evidenceId}`,
+    type: "agent_completed",
+    timestamp: 123,
+    read: false,
+    agent_session_id: sessionId,
+    agent_name: agentName,
+    summary,
+    response_text: summary,
+    evidence_id: evidenceId,
+    evidence_source: "provider_runtime",
+  };
+}
+
 describe("useQueueStore - preferences", () => {
   beforeEach(() => {
     resetStore();
@@ -564,6 +579,67 @@ describe("useQueueStore - automation completion", () => {
   });
 });
 
+describe("useQueueStore - persisted agent completion", () => {
+  beforeEach(() => {
+    resetStore();
+    mockInvoke.mockResolvedValue([]);
+  });
+
+  it("projects the canonical backend-persisted completion once without rewriting it", () => {
+    useQueueStore.setState({ _agentBuffers: { "agent-1": "intermediate output" } });
+    const queueWritesBefore = mockInvoke.mock.calls.filter(([command]) => command === "save_queue_items").length;
+    const item: QueueItem = {
+      id: "agent-completed:agent-1:prompt-7",
+      type: "agent_completed",
+      timestamp: 123,
+      read: false,
+      agent_session_id: "agent-1",
+      agent_name: "Claude",
+      summary: "The response is complete.",
+      response_text: "The exact provider response.",
+      evidence_id: "prompt-7",
+      evidence_source: "provider_runtime",
+    };
+
+    useQueueStore.getState().applyPersistedAgentCompletion(item);
+    useQueueStore.getState().applyPersistedAgentCompletion(item);
+
+    const { items, _agentBuffers } = useQueueStore.getState();
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      id: "agent-completed:agent-1:prompt-7",
+      type: "agent_completed",
+      agent_session_id: "agent-1",
+      agent_name: "Claude",
+      summary: "The response is complete.",
+      timestamp: 123,
+      response_text: "The exact provider response.",
+      evidence_id: "prompt-7",
+      evidence_source: "provider_runtime",
+    });
+    expect(_agentBuffers["agent-1"]).toBe("");
+    expect(mockInvoke.mock.calls.filter(([command]) => command === "save_queue_items")).toHaveLength(queueWritesBefore);
+
+    useQueueStore.setState({
+      items: [{
+        id: "legacy-agent-completion",
+        type: "agent_completed",
+        timestamp: Date.now(),
+        read: false,
+        agent_session_id: "agent-1",
+        agent_name: "Claude",
+        summary: "The response is complete.",
+        evidence_id: "legacy-message-id",
+        evidence_source: "provider_runtime",
+      }],
+    });
+    useQueueStore.getState().applyPersistedAgentCompletion(item);
+    expect(useQueueStore.getState().items).toHaveLength(2);
+    expect(useQueueStore.getState().items.find((current) => current.id === "legacy-agent-completion")?.evidence_id)
+      .toBe("legacy-message-id");
+  });
+});
+
 describe("useQueueStore - persistence", () => {
   beforeEach(() => {
     resetStore();
@@ -762,6 +838,46 @@ describe("useQueueStore - persistence", () => {
     await reload;
 
     expect(useQueueStore.getState().items[0]).toEqual(expect.objectContaining({ read: true }));
+  });
+
+  it("does not accept a queue snapshot when an agent completion arrives during hydration", async () => {
+    const olderItem: QueueItem = {
+      id: "older-persisted-item",
+      type: "agent_completed",
+      timestamp: Date.now() - 1_000,
+      read: false,
+      agent_session_id: "older-agent",
+      agent_name: "Older Agent",
+      summary: "Previously persisted item",
+    };
+    let resolveNotifications!: (value: ReturnType<typeof notificationPage>) => void;
+    const pendingNotifications = new Promise<ReturnType<typeof notificationPage>>((resolve) => {
+      resolveNotifications = resolve;
+    });
+    mockInvoke.mockImplementation((command) => {
+      if (command === "load_queue_items") return Promise.resolve([olderItem]);
+      if (command === "list_inbox_notifications") return pendingNotifications.then((page) => page);
+      return Promise.resolve([]);
+    });
+
+    const loading = useQueueStore.getState().loadItems();
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("list_inbox_notifications", undefined));
+    useQueueStore.getState().applyPersistedAgentCompletion(completionItem(
+      "claude-session",
+      "Claude",
+      "The current turn completed.",
+      "claude-message-1",
+    ));
+    resolveNotifications(notificationPage([]));
+    await loading;
+
+    const completion = useQueueStore.getState().items.find((item) => item.type === "agent_completed");
+    expect(completion).toEqual(expect.objectContaining({ agent_session_id: "claude-session" }));
+    expect(useQueueStore.getState().items).not.toContainEqual(olderItem);
+    useQueueStore.getState().dismissItem(completion!.id);
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("save_queue_items", expect.objectContaining({
+      items: expect.not.arrayContaining([expect.objectContaining({ id: olderItem.id })]),
+    })));
   });
 
   it("keeps durable update notifications unread until their local acknowledgement is persisted", async () => {

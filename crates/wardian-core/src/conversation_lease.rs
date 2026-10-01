@@ -122,6 +122,13 @@ pub enum ConversationLeaseRetargetOutcome {
     NotActive,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderSpawnLeaseValidationOutcome {
+    Valid,
+    Conflict(Box<ConversationLease>),
+    NotActive,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ConversationLeaseFile {
     #[serde(default = "default_schema")]
@@ -560,6 +567,50 @@ pub fn retarget_lifecycle_lease_persisted(
     Ok(ConversationLeaseRetargetOutcome::Retargeted)
 }
 
+/// Validates an exact active provider-spawn acquisition without retargeting or
+/// extending it. A competing owner of the agent or provider session keeps the
+/// inherited reservation from crossing the launch boundary.
+pub fn validate_provider_spawn_lease_persisted(
+    owner: &ConversationLeaseOwner,
+    agent_id: &str,
+    provider: &str,
+    resume_session: &str,
+    now_rfc3339: &str,
+) -> Result<ProviderSpawnLeaseValidationOutcome, String> {
+    let now = parse_rfc3339_utc(now_rfc3339)
+        .ok_or_else(|| "invalid conversation lease validation time".to_string())?;
+    let _process_guard = LEASE_FILE_LOCK
+        .lock()
+        .map_err(|_| "conversation lease lock poisoned".to_string())?;
+    let _file_guard = acquire_lease_file_lock()?;
+    let leases = load_leases_checked()?;
+    let Some(owned_index) = leases
+        .iter()
+        .position(|lease| lease_matches_owner(lease, owner))
+    else {
+        return Ok(ProviderSpawnLeaseValidationOutcome::NotActive);
+    };
+    let owned = &leases[owned_index];
+    if owner.owner_kind != "provider_spawn"
+        || owned.mode != "lifecycle_transition"
+        || owned.agent_id != agent_id
+        || owned.provider != provider
+        || owned.resume_session != resume_session
+        || !parse_rfc3339_utc(&owned.expires_at).is_some_and(|end| end > now)
+    {
+        return Ok(ProviderSpawnLeaseValidationOutcome::NotActive);
+    }
+    if let Some(conflict) = leases.iter().enumerate().find_map(|(index, lease)| {
+        (index != owned_index && lease_conflicts(lease, agent_id, resume_session, now))
+            .then_some(lease)
+    }) {
+        return Ok(ProviderSpawnLeaseValidationOutcome::Conflict(Box::new(
+            conflict.clone(),
+        )));
+    }
+    Ok(ProviderSpawnLeaseValidationOutcome::Valid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -826,6 +877,139 @@ mod tests {
             find_active_conflict(&leases, "agent-1", "other-session", "2026-06-01T00:08:00Z")
                 .is_some()
         );
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn provider_spawn_validation_requires_the_exact_active_lease() {
+        let _guard = crate::tests::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDIAN_HOME", dir.path());
+        let now = chrono::Utc::now();
+        let now_text = now.to_rfc3339();
+        let mut spawn = lease("agent-1", "resume-1");
+        spawn.owner_kind = "provider_spawn".into();
+        spawn.owner_id = "spawn-1".into();
+        spawn.acquisition_id = "spawn-acquisition".into();
+        spawn.mode = "lifecycle_transition".into();
+        spawn.heartbeat_at = now_text.clone();
+        spawn.expires_at = (now + chrono::Duration::minutes(5)).to_rfc3339();
+        let owner = spawn.owner();
+        acquire_lease(spawn.clone(), &now_text).unwrap();
+
+        assert_eq!(
+            validate_provider_spawn_lease_persisted(
+                &owner, "agent-1", "gemini", "resume-1", &now_text,
+            )
+            .unwrap(),
+            ProviderSpawnLeaseValidationOutcome::Valid
+        );
+
+        let mut wrong_owner_kind = owner.clone();
+        wrong_owner_kind.owner_kind = "agent_lifecycle".into();
+        let mut wrong_owner_id = owner.clone();
+        wrong_owner_id.owner_id = "reused-owner".into();
+        let mut wrong_acquisition = owner.clone();
+        wrong_acquisition.acquisition_id = "reused-acquisition".into();
+        let expired_check_time = (now + chrono::Duration::minutes(6)).to_rfc3339();
+        for (candidate_owner, agent_id, provider, resume_session, check_time) in [
+            (
+                &wrong_owner_kind,
+                "agent-1",
+                "gemini",
+                "resume-1",
+                now_text.as_str(),
+            ),
+            (
+                &wrong_owner_id,
+                "agent-1",
+                "gemini",
+                "resume-1",
+                now_text.as_str(),
+            ),
+            (
+                &wrong_acquisition,
+                "agent-1",
+                "gemini",
+                "resume-1",
+                now_text.as_str(),
+            ),
+            (&owner, "agent-2", "gemini", "resume-1", now_text.as_str()),
+            (&owner, "agent-1", "codex", "resume-1", now_text.as_str()),
+            (&owner, "agent-1", "gemini", "resume-2", now_text.as_str()),
+            (
+                &owner,
+                "agent-1",
+                "gemini",
+                "resume-1",
+                expired_check_time.as_str(),
+            ),
+        ] {
+            assert_eq!(
+                validate_provider_spawn_lease_persisted(
+                    candidate_owner,
+                    agent_id,
+                    provider,
+                    resume_session,
+                    check_time,
+                )
+                .unwrap(),
+                ProviderSpawnLeaseValidationOutcome::NotActive
+            );
+        }
+        assert_eq!(load_leases_checked().unwrap(), vec![spawn.clone()]);
+        release_lease_owner_persisted(&owner).unwrap();
+        let mut wrong_mode = spawn;
+        wrong_mode.mode = "background_resume".into();
+        acquire_lease(wrong_mode, &now_text).unwrap();
+        assert_eq!(
+            validate_provider_spawn_lease_persisted(
+                &owner, "agent-1", "gemini", "resume-1", &now_text,
+            )
+            .unwrap(),
+            ProviderSpawnLeaseValidationOutcome::NotActive
+        );
+        std::env::remove_var("WARDIAN_HOME");
+    }
+
+    #[test]
+    fn provider_spawn_validation_rejects_an_active_conflicting_owner() {
+        let _guard = crate::tests::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDIAN_HOME", dir.path());
+        let now = chrono::Utc::now();
+        let now_text = now.to_rfc3339();
+        let mut spawn = lease("agent-1", "resume-1");
+        spawn.owner_kind = "provider_spawn".into();
+        spawn.owner_id = "spawn-1".into();
+        spawn.acquisition_id = "spawn-acquisition".into();
+        spawn.mode = "lifecycle_transition".into();
+        spawn.heartbeat_at = now_text.clone();
+        spawn.expires_at = (now + chrono::Duration::minutes(5)).to_rfc3339();
+        let owner = spawn.owner();
+        acquire_lease(spawn, &now_text).unwrap();
+
+        let mut conflict = lease("agent-2", "resume-1");
+        conflict.owner_id = "other-owner".into();
+        conflict.acquisition_id = "other-acquisition".into();
+        conflict.heartbeat_at = now_text.clone();
+        conflict.expires_at = (now + chrono::Duration::minutes(5)).to_rfc3339();
+        let mut leases = load_leases_checked().unwrap();
+        leases.push(conflict);
+        save_leases(&leases).unwrap();
+
+        assert!(matches!(
+            validate_provider_spawn_lease_persisted(
+                &owner,
+                "agent-1",
+                "gemini",
+                "resume-1",
+                &now_text,
+            )
+            .unwrap(),
+            ProviderSpawnLeaseValidationOutcome::Conflict(conflict)
+                if conflict.owner_id == "other-owner"
+        ));
         std::env::remove_var("WARDIAN_HOME");
     }
 

@@ -7,7 +7,6 @@ fn initial_log_replay_does_not_record_status_transition() {
     super::set_snapshot_status_from_log(&snap, "Idle", true);
 
     assert_eq!(*snap.current_status.lock().unwrap(), "Off");
-    assert!(snap.last_status_at.lock().unwrap().is_none());
     let snapshot = snap
         .watch_state
         .lock()
@@ -23,22 +22,15 @@ fn live_log_update_records_status_transition() {
 
     super::set_snapshot_status_from_log(&snap, "Idle", false);
 
-    assert_eq!(*snap.current_status.lock().unwrap(), "Idle");
-    assert!(snap.last_status_at.lock().unwrap().is_some());
+    assert_eq!(*snap.current_status.lock().unwrap(), "Processing...");
+    assert_eq!(snap.telemetry_status(), "Idle");
     let snapshot = snap
         .watch_state
         .lock()
         .unwrap()
         .snapshot_since(None, None)
         .unwrap();
-    assert_eq!(snapshot.events.len(), 1);
-    assert_eq!(
-        snapshot.events[0]
-            .payload
-            .get("status")
-            .and_then(|value| value.as_str()),
-        Some("idle")
-    );
+    assert!(snapshot.events.is_empty());
 }
 
 #[test]
@@ -52,9 +44,10 @@ fn opencode_starting_ignores_retained_log_status_until_composer_ready() {
     // the startup fence must not write a captured Starting value back.
     *snap.current_status.lock().unwrap() = "Processing...".to_string();
     super::set_snapshot_status_from_log(&snap, "Idle", false);
+    assert_eq!(*snap.current_status.lock().unwrap(), "Processing...");
     assert_eq!(
-        *snap.current_status.lock().unwrap(),
+        snap.telemetry_status(),
         "Idle",
-        "normal turn completion remains observable after startup"
+        "normal turn completion remains staged after startup"
     );
 }

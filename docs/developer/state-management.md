@@ -20,7 +20,9 @@ Located in `src-tauri/src/state/app_state.rs`, the `AppState` is managed as a Ta
 - **`conversation_archive: ConversationArchiveState`**: Owns per-agent archive
   serialization and durable provider-log acquisition cursors. The adjacent
   **`conversation_capture_policy_lock`** serializes global and per-agent logging
-  boundaries before callers enter an archive's per-agent gate. The internal
+  boundaries before callers enter an archive's per-agent gate. A lifecycle
+  boundary (New Session, fresh resume) registers with that gate and passes ahead
+  of best-effort syncs, which poll and stand aside instead of queueing. The internal
   design record `docs/specs/2026-09-09-provider-log-forward-acquisition.md`
   defines the bounded cursor, continuity, and privacy contract.
 

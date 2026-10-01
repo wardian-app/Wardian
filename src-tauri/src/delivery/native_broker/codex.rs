@@ -443,6 +443,22 @@ impl NativeDeliveryBroker {
             .map_err(shared_error)
     }
 
+    /// Clone the current generation's exact client without retaining AppState or
+    /// a registry lock while waiting for the admitted turn's final result.
+    /// This never creates an owner or follows a replacement generation.
+    pub async fn codex_completion_client(
+        &self,
+        agent_id: &str,
+        generation: u64,
+    ) -> Result<Arc<crate::delivery::codex_shared::CodexSharedClient>, NativeBrokerError> {
+        Ok(self
+            .shared_codex(agent_id, generation)
+            .await
+            .map_err(shared_error)?
+            .client
+            .clone())
+    }
+
     /// Apply one model/effort pair through the already-owned Codex client.
     /// Recheck the exact owner after every awaited operation before exposing
     /// either acceptance or rejection to the caller.
@@ -646,7 +662,7 @@ impl NativeDeliveryBroker {
             let turn_id = receipt.provider_turn_id.as_deref().ok_or_else(|| {
                 CodexSharedError::uncertain("native followup returned no turn identity")
             })?;
-            let (status, answer) = client.wait_for_turn(turn_id, timeout).await?;
+            let (status, answer) = client.wait_for_final_result(turn_id, timeout).await?;
             if status != "completed" {
                 return Err(CodexSharedError {
                     code: "provider_turn_failed".into(),
@@ -817,10 +833,15 @@ fn validate_background_lease(
     Ok(())
 }
 
-pub(super) fn shared_error(failure: CodexSharedError) -> NativeBrokerError {
+pub(crate) fn shared_error(failure: CodexSharedError) -> NativeBrokerError {
     error(
         if failure.provider_boundary_crossed {
             NativeDeliveryErrorCode::SubmittedUnconfirmed
+        } else if matches!(
+            failure.code.as_str(),
+            "stale_turn_rejected" | "task_activity_deferred"
+        ) {
+            NativeDeliveryErrorCode::FailedBeforeSubmit
         } else {
             NativeDeliveryErrorCode::CapabilityUnavailable
         },
@@ -840,6 +861,50 @@ mod lifecycle_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proven_stale_steer_maps_to_failed_before_submit_only_without_crossed_boundary() {
+        for (code, crossed, expected) in [
+            (
+                "stale_turn_rejected",
+                false,
+                NativeDeliveryErrorCode::FailedBeforeSubmit,
+            ),
+            (
+                "stale_turn_rejected",
+                true,
+                NativeDeliveryErrorCode::SubmittedUnconfirmed,
+            ),
+            (
+                "task_activity_deferred",
+                false,
+                NativeDeliveryErrorCode::FailedBeforeSubmit,
+            ),
+            (
+                "task_activity_deferred",
+                true,
+                NativeDeliveryErrorCode::SubmittedUnconfirmed,
+            ),
+            (
+                "provider_rejected",
+                true,
+                NativeDeliveryErrorCode::SubmittedUnconfirmed,
+            ),
+            (
+                "unsupported",
+                false,
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+            ),
+        ] {
+            let mapped = shared_error(CodexSharedError {
+                code: code.into(),
+                message: "safe diagnostic".into(),
+                provider_boundary_crossed: crossed,
+            });
+            assert_eq!(mapped.code, expected);
+            assert_eq!(mapped.provider_boundary_crossed, crossed);
+        }
+    }
 
     #[tokio::test]
     async fn app_shutdown_fences_startup_still_waiting_to_register() {

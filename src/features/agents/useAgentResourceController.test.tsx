@@ -46,7 +46,13 @@ type ListenerPayloads = {
   "agent-metrics": AgentTelemetry[];
   "app-metrics": AppTelemetry;
   "agent-status-updated": AgentStatusUpdate;
-  "agent-turn-completed": { session_id: string };
+  "agent-turn-completed": {
+    session_id: string;
+    agent_name?: string;
+    summary?: string;
+    evidence_id?: string;
+    inbox_persisted?: boolean;
+  };
 };
 
 let agents: AgentConfig[];
@@ -385,11 +391,21 @@ describe("useAgentResourceController", () => {
     const { result } = renderHook(() => useAgentResourceController({ on_agent_turn_completed }));
     await waitFor(() => expect(result.current.agents).toHaveLength(2));
 
-    act(() => emit("agent-turn-completed", { session_id: "agent-1" }));
+    act(() => emit("agent-turn-completed", {
+      session_id: "agent-1",
+      agent_name: "Alpha",
+      summary: "Completed response",
+      evidence_id: "message-7",
+      inbox_persisted: true,
+    }));
 
     expect(on_agent_turn_completed).toHaveBeenCalledWith({
       session_id: "agent-1",
       agent: expect.objectContaining({ session_name: "Alpha" }),
+      agent_name: "Alpha",
+      summary: "Completed response",
+      evidence_id: "message-7",
+      inbox_persisted: true,
     });
   });
 

@@ -1,4 +1,4 @@
-//! V2 delivery metadata references canonical interactions; no payload is stored here.
+//! V2 canonical delivery metadata and the task-turn terminal outbox.
 use crate::agent_messaging::{
     AgentMessage, AgentMessagePage, AgentMessagingError as Error, TaskDeliveryOwner,
     MAX_MESSAGE_BYTES,
@@ -12,9 +12,15 @@ use sha2::{Digest, Sha256};
 
 type Result<T> = std::result::Result<T, Error>;
 mod provider_claims;
+mod task_turns;
 pub use provider_claims::{
     claim_information, information_highwater, message_context, next_pending_task_id, owns_claim,
     pending_information, release_before_write,
+};
+pub use task_turns::{
+    abandon_task_turn_observations, bind_task_turn, mark_task_turn_uncertain,
+    pending_task_turn_bindings, publish_task_turn_outcome, record_task_turn_outcome,
+    recover_task_turn_outcomes, TaskTurnBinding,
 };
 
 /// Availability is append-only and never backfilled from legacy interactions.
@@ -37,7 +43,8 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         interaction_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, node TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS agent_message_ack (
         recipient TEXT PRIMARY KEY, sequence INTEGER NOT NULL DEFAULT 0);",
-    )
+    )?;
+    task_turns::migrate(conn)
 }
 
 /// Run against Wardian's existing serialized database connection.
@@ -108,6 +115,104 @@ pub fn admit_host_automation_task(
     )
 }
 
+/// Stable within a host run: content and recipient belong in the fingerprint,
+/// never in the key, so a changed replay conflicts instead of sending again.
+pub fn host_automation_message_key(node: &str) -> String {
+    format!("message_send:v1:{:x}", Sha256::digest(node.as_bytes()))
+}
+
+/// Trusted informational admission, with the same canonical claims as ordinary
+/// messages and separate host provenance. A lost receipt is reconciled read-only.
+pub fn admit_host_automation_message(
+    conn: &Connection,
+    run_id: &str,
+    node: &str,
+    recipient: &str,
+    message: &str,
+    generation: u64,
+) -> Result<Admitted> {
+    if run_id.trim().is_empty() || node.trim().is_empty() {
+        return Err(Error::new(
+            "invalid_host_provenance",
+            "Automation run and node are required.",
+        ));
+    }
+    let host = format!("host:automation:{run_id}");
+    let key = host_automation_message_key(node);
+    let result = admit_with_host(
+        conn,
+        Admission {
+            sender: &host,
+            recipient,
+            message,
+            idempotency_key: Some(&key),
+            task: false,
+            generation,
+        },
+        Some((run_id, node)),
+    );
+    match result {
+        Ok(admitted) => Ok(admitted),
+        Err(error) => {
+            // Never repeat admission on an uncertain storage result. A matching
+            // committed record is sufficient; absence preserves the failure.
+            match reconcile_host_automation_message(conn, run_id, node, Some((recipient, message)))?
+            {
+                Some(admitted) => Ok(admitted),
+                None => Err(error),
+            }
+        }
+    }
+}
+
+/// Read-only recovery evidence, including when the artifact no longer exists.
+/// With a body, also enforce the exact recipient/content fingerprint.
+pub fn reconcile_host_automation_message(
+    conn: &Connection,
+    run_id: &str,
+    node: &str,
+    expected: Option<(&str, &str)>,
+) -> Result<Option<Admitted>> {
+    let row: Option<(String, String, String)> = conn.query_row(
+        "SELECT interaction_id,fingerprint,owner FROM agent_message_delivery WHERE sender=?1 AND operation='send_message' AND idempotency_key=?2",
+        params![format!("host:automation:{run_id}"), host_automation_message_key(node)],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional()?;
+    let Some((id, fingerprint, owner)) = row else {
+        return Ok(None);
+    };
+    verify_host_provenance(conn, &id, (run_id, node))?;
+    if let Some((recipient, message)) = expected {
+        let expected = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&(recipient, message)).unwrap())
+        );
+        if fingerprint != expected {
+            return Err(Error::new(
+                "idempotency_conflict",
+                "Key already admitted a different target or body.",
+            ));
+        }
+    }
+    Ok(Some(Admitted {
+        record: load(conn, &id)?,
+        owner: delivery_owner(&owner),
+        delivery_state: owner,
+        duplicate: true,
+    }))
+}
+
+fn verify_host_provenance(conn: &Connection, id: &str, expected: (&str, &str)) -> Result<()> {
+    let provenance = host_automation_provenance(conn, id)?;
+    if !provenance.is_some_and(|p| p.run_id == expected.0 && p.node == expected.1) {
+        return Err(Error::new(
+            "invalid_host_provenance",
+            "Stored admission has different or missing host provenance.",
+        ));
+    }
+    Ok(())
+}
+
 /// Inspect trusted host attribution without manufacturing a registered sender.
 pub fn host_automation_provenance(
     conn: &Connection,
@@ -162,6 +267,9 @@ fn admit_with_host(
                     "idempotency_conflict",
                     "Key already admitted a different target or body.",
                 ));
+            }
+            if let Some(origin) = host {
+                verify_host_provenance(&tx, &id, origin)?;
             }
             let record = load(&tx, &id)?;
             return Ok(Admitted {
@@ -274,15 +382,29 @@ fn reply_with_claim(
 ) -> Result<Replied> {
     validate_message(message)?;
     let tx = conn.unchecked_transaction()?;
+    let replied = reply_in_transaction(&tx, sender, request_id, status, message, claim)?;
+    tx.commit()?;
+    Ok(replied)
+}
+
+/// Shared atomic write path: callers own the transaction, including outbox settlement.
+fn reply_in_transaction(
+    tx: &Connection,
+    sender: &str,
+    request_id: &str,
+    status: ReplyStatus,
+    message: &str,
+    claim: Option<&TaskClaim>,
+) -> Result<Replied> {
     if let Some(claim) = claim {
-        if !owns_claim(&tx, claim)? {
+        if !owns_claim(tx, claim)? {
             return Err(Error::new(
                 "stale_claim",
                 "Startup failure no longer owns this task.",
             ));
         }
     }
-    let mut task = load(&tx, request_id)?;
+    let mut task = load(tx, request_id)?;
     if task.kind != InteractionKind::Task || task.target_session_ids != [sender] {
         return Err(Error::new(
             "unauthorized",
@@ -312,7 +434,7 @@ fn reply_with_claim(
             [request_id],
             |row| row.get(0),
         )?;
-        let record = load(&tx, &id)?;
+        let record = load(tx, &id)?;
         let reply = StructuredReply {
             request_id: request_id.into(),
             status,
@@ -332,7 +454,7 @@ fn reply_with_claim(
         return Err(Error::new("conflicting_reply", "Task is already terminal."));
     }
     let recipient = task.sender_session_id.clone();
-    if recipient.is_none() && host_automation_provenance(&tx, request_id)?.is_none() {
+    if recipient.is_none() && host_automation_provenance(tx, request_id)?.is_none() {
         return Err(Error::new(
             "invalid_task",
             "Task has no requester or trusted host provenance.",
@@ -365,17 +487,16 @@ fn reply_with_claim(
         source_session_id: Some(sender.into()),
         replied_at: now,
     };
-    super::upsert_interaction_record_with_conn(&tx, &task)?;
-    super::upsert_interaction_record_with_conn(&tx, &record)?;
-    super::upsert_structured_reply_with_conn(&tx, &reply)?;
+    super::upsert_interaction_record_with_conn(tx, &task)?;
+    super::upsert_interaction_record_with_conn(tx, &record)?;
+    super::upsert_structured_reply_with_conn(tx, &reply)?;
     if let Some(recipient) = recipient {
         tx.execute("INSERT INTO agent_message_delivery(interaction_id,sender,recipient,operation,fingerprint,owner,generation) VALUES(?1,?2,?3,'reply','','stored',0)", params![record.id, sender, recipient])?;
-        make_available(&tx, &recipient, &record.id)?;
+        make_available(tx, &recipient, &record.id)?;
     }
     if let Some(claim) = claim {
-        finish_claim(&tx, claim, "failed_before_submit")?;
+        finish_claim(tx, claim, "failed_before_submit")?;
     }
-    tx.commit()?;
     Ok(Replied {
         task,
         record,
@@ -407,7 +528,17 @@ pub(super) fn delete_references(
     recipient: &str,
     interaction_ids: &[String],
 ) -> rusqlite::Result<()> {
+    // Delete by identities before delivery metadata disappears, including host tasks.
+    conn.execute(
+        "DELETE FROM agent_message_task_turns WHERE recipient=?1 OR request_id IN (
+            SELECT interaction_id FROM agent_message_delivery WHERE sender=?1 OR recipient=?1)",
+        [recipient],
+    )?;
     for id in interaction_ids {
+        conn.execute(
+            "DELETE FROM agent_message_task_turns WHERE request_id=?1",
+            [id],
+        )?;
         conn.execute(
             "DELETE FROM agent_message_host_tasks WHERE interaction_id=?1",
             [id],

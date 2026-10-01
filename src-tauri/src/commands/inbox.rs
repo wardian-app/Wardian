@@ -1,11 +1,14 @@
-use crate::{automation::runs, state::AppState};
+use crate::{
+    automation::runs, commands::automation::AutomationRunSummarySnapshot, state::AppState,
+};
 use serde::Serialize;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use wardian_core::control::{
     InboxNotificationDecision, InboxNotificationKind, InboxNotificationPayload, InteractionBodyRef,
     InteractionStatus,
 };
-use wardian_core::limits::MAX_INBOX_NOTIFICATIONS;
+use wardian_core::limits::{MAX_AUTOMATION_RUNS, MAX_INBOX_NOTIFICATIONS};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct InboxNotificationDto {
@@ -62,20 +65,45 @@ pub async fn list_automation_inbox_terminal_runs_page(
         .map_err(|error| format!("automation terminal inbox task failed: {error}"))?
 }
 
+pub(crate) async fn list_automation_inbox_terminal_runs_page_from_snapshot(
+    snapshot: Arc<AutomationRunSummarySnapshot>,
+    offset: usize,
+    limit: usize,
+) -> Result<(Vec<runs::AutomationInboxUpdate>, bool), String> {
+    tokio::task::spawn_blocking(move || {
+        list_automation_inbox_terminal_runs_page_blocking_from_snapshot(&snapshot, offset, limit)
+    })
+    .await
+    .map_err(|error| format!("automation terminal inbox task failed: {error}"))?
+}
+
 fn list_automation_inbox_terminal_runs_page_blocking(
     offset: usize,
+) -> Result<(Vec<runs::AutomationInboxUpdate>, bool), String> {
+    let snapshot = crate::commands::automation::automation_run_summary_snapshot_for_inbox()?;
+    list_automation_inbox_terminal_runs_page_blocking_from_snapshot(
+        &snapshot,
+        offset,
+        MAX_AUTOMATION_RUNS,
+    )
+}
+
+fn list_automation_inbox_terminal_runs_page_blocking_from_snapshot(
+    snapshot: &AutomationRunSummarySnapshot,
+    offset: usize,
+    limit: usize,
 ) -> Result<(Vec<runs::AutomationInboxUpdate>, bool), String> {
     let profile = crate::utils::runtime_profile::RuntimeProfileSpan::start(
         crate::utils::runtime_profile::RuntimeMetric::InboxTerminalScan,
     );
     let mut updates = Vec::new();
     let mut automation_names = std::collections::HashMap::new();
-    let (runs, truncated) = automation_inbox_run_page(offset, |run| {
+    let (runs, truncated) = automation_inbox_run_page(snapshot, offset, limit, |run| {
         matches!(
             run.get("status").and_then(serde_json::Value::as_str),
             Some("completed" | "failed")
         )
-    })?;
+    });
     for run in runs {
         let Some(run_root) = run.get("path").and_then(serde_json::Value::as_str) else {
             continue;
@@ -125,12 +153,6 @@ pub async fn list_inbox_notifications(
     offset: Option<usize>,
 ) -> Result<InboxNotificationListResult, String> {
     list_inbox_notifications_for_state_with_offset(&state, offset.unwrap_or(0)).await
-}
-
-pub async fn list_inbox_notifications_for_state(
-    state: &AppState,
-) -> Result<InboxNotificationListResult, String> {
-    list_inbox_notifications_for_state_with_offset(state, 0).await
 }
 
 pub async fn list_inbox_notifications_for_state_with_offset(
@@ -238,15 +260,40 @@ pub async fn list_automation_inbox_approvals_page(
         .map_err(|error| format!("automation approval inbox task failed: {error}"))?
 }
 
+pub(crate) async fn list_automation_inbox_approvals_page_from_snapshot(
+    snapshot: Arc<AutomationRunSummarySnapshot>,
+    offset: usize,
+    limit: usize,
+) -> Result<(Vec<AutomationInboxApprovalDto>, bool), String> {
+    tokio::task::spawn_blocking(move || {
+        list_automation_inbox_approvals_page_blocking_from_snapshot(&snapshot, offset, limit)
+    })
+    .await
+    .map_err(|error| format!("automation approval inbox task failed: {error}"))?
+}
+
 fn list_automation_inbox_approvals_page_blocking(
     offset: usize,
+) -> Result<(Vec<AutomationInboxApprovalDto>, bool), String> {
+    let snapshot = crate::commands::automation::automation_run_summary_snapshot_for_inbox()?;
+    list_automation_inbox_approvals_page_blocking_from_snapshot(
+        &snapshot,
+        offset,
+        MAX_AUTOMATION_RUNS,
+    )
+}
+
+fn list_automation_inbox_approvals_page_blocking_from_snapshot(
+    snapshot: &AutomationRunSummarySnapshot,
+    offset: usize,
+    limit: usize,
 ) -> Result<(Vec<AutomationInboxApprovalDto>, bool), String> {
     let profile = crate::utils::runtime_profile::RuntimeProfileSpan::start(
         crate::utils::runtime_profile::RuntimeMetric::InboxApprovalScan,
     );
-    let (runs, truncated) = automation_inbox_run_page(offset, |run| {
+    let (runs, truncated) = automation_inbox_run_page(snapshot, offset, limit, |run| {
         run.get("status").and_then(serde_json::Value::as_str) == Some("awaiting_approval")
-    })?;
+    });
     let mut approvals = Vec::new();
     for run in runs {
         let Some(blueprint_id) = run.get("blueprint_id").and_then(serde_json::Value::as_str) else {
@@ -330,17 +377,21 @@ fn list_automation_inbox_approvals_blocking() -> Result<Vec<AutomationInboxAppro
 /// approvals and terminal outcomes reachable when other automation states are
 /// interleaved with them.
 fn automation_inbox_run_page<F>(
+    snapshot: &AutomationRunSummarySnapshot,
     offset: usize,
+    limit: usize,
     mut include: F,
-) -> Result<(Vec<serde_json::Value>, bool), String>
+) -> (Vec<serde_json::Value>, bool)
 where
     F: FnMut(&serde_json::Value) -> bool,
 {
-    let page =
-        crate::commands::automation::automation_list_runs_matching_blocking(offset, |run| {
-            include(run)
-        })?;
-    Ok((page.runs, page.truncated))
+    let page = crate::commands::automation::automation_run_summary_page_from_snapshot(
+        snapshot,
+        offset,
+        limit,
+        |run| include(run),
+    );
+    (page.runs, page.truncated)
 }
 
 fn notification_payload(
