@@ -29,12 +29,16 @@ checks. Tests never count as callers in any of them.
    applies to the whole app library. The analysis is transitive and resolves
    types.
 2. **Token search on shared library crates.** rustc cannot see across the
-   `wardian-core` boundary. A `pub` item in that crate is dead when production
-   code in no workspace crate names it. The search excludes the item's own
-   definition, `use` declarations, comments, test-only code, and other dead
-   items, and it repeats until no more items become dead. The script finds
-   test-only code by following `mod`, `#[path]`, and `include!` from each
-   crate root, and by evaluating `cfg` attributes.
+   `wardian-core` boundary. Every item in that crate is a node in a name
+   graph. Production code in another crate, and crate code outside any item
+   (trait impls, macro bodies), are roots. A name used inside an item is an
+   edge from that item. An item whose name no root reaches is dead, so chains
+   and cycles of items that only call each other are dead as a whole.
+   Definitions, `impl` headers, `use` declarations, comments, and test-only
+   code are not references. The script finds test-only code by following
+   `mod`, `#[path]`, and `include!` from each crate root, and by evaluating
+   `cfg` attributes. A predicate it cannot evaluate, such as a cargo feature,
+   counts as possibly enabled.
 3. **Tauri commands.** Every command in `generate_handler!` must be invoked by
    name from production code. `debug_*` commands can be invoked from the E2E
    suites or scripts instead.
@@ -70,7 +74,7 @@ must also name the item's type.
   called only from tests fails too, which is the `maintain` failure mode.
 - **Positive**: The first run found unwired cleanup and retention paths, such
   as `db::prune_events`. #1536 tracks them, so they were not deleted silently.
-- **Negative**: The baseline starts at 109 entries. Most are app or core code
+- **Negative**: The baseline starts at 118 entries. Most are app or core code
   that only tests call. It shrinks as that code is deleted or moved into test
   modules.
 - **Negative**: Each CI run rechecks the copy of `wardian-core` and the app

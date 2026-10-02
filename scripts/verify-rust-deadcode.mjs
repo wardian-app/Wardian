@@ -15,9 +15,8 @@
  *    code compiled out on this platform (for example `#[cfg(unix)]` on
  *    Windows) is set aside as a cfg-gated caller rather than reported.
  * 2. Shared library crates (token search). `wardian-core` is consumed by the
- *    app and the CLI, so rustc cannot see across it. A `pub` item there is
- *    dead when no production code in any workspace crate names it outside its
- *    own definition, `use` declarations, and other dead items.
+ *    app and the CLI, so rustc cannot see across it. An item there is dead
+ *    when production code cannot reach it by name (see unreachableItems).
  * 3. Tauri commands. Every command registered in `generate_handler!` must be
  *    invoked by name from production code. `debug_*` commands exist for the
  *    native E2E suite and may be invoked only from e2e, e2e-native, or scripts.
@@ -35,7 +34,7 @@
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
@@ -45,11 +44,11 @@ import {
   PUNCT,
   STR,
   collectReferences,
+  definedItems,
   inactiveRegionAt,
   lexRust,
   loadCrate,
   productionCfgEnv,
-  publicItems,
 } from "./lib/rust-source.mjs";
 
 const REPO_ROOT = process.cwd();
@@ -213,15 +212,45 @@ function externalRoots(pkg, libName) {
   return [...roots];
 }
 
+/**
+ * Resolve a repository-relative path inside the copy, or undefined when it
+ * would land anywhere else (absolute, `..` traversal, or through a link that
+ * leaves the copy). Every write and delete in the copy goes through this.
+ */
+export function pathInsideCopy(copyRoot, file) {
+  if (typeof file !== "string" || file.length === 0 || path.isAbsolute(file) || /^[A-Za-z]:/.test(file)) return undefined;
+  const root = path.resolve(copyRoot);
+  const target = path.resolve(root, file);
+  const offset = path.relative(root, target);
+  if (offset === "" || offset.startsWith("..") || path.isAbsolute(offset)) return undefined;
+  // The deepest existing ancestor must also resolve inside the copy, so a
+  // junction or symlink inside the copy cannot redirect the operation.
+  if (!existsSync(root)) return target;
+  let existing = path.dirname(target);
+  while (existing.length > root.length && !existsSync(existing)) existing = path.dirname(existing);
+  const realRoot = realpathSync(root);
+  const realExisting = realpathSync(existing);
+  const realOffset = path.relative(realRoot, realExisting);
+  if (realOffset.startsWith("..") || path.isAbsolute(realOffset)) return undefined;
+  return target;
+}
+
 function syncCopy(copyRoot, files, transform) {
   mkdirSync(copyRoot, { recursive: true });
   const ledgerPath = path.join(copyRoot, ".rust-deadcode-files.json");
-  const previous = existsSync(ledgerPath) ? JSON.parse(readFileSync(ledgerPath, "utf8")) : [];
+  let previous = [];
+  try {
+    const parsed = existsSync(ledgerPath) ? JSON.parse(readFileSync(ledgerPath, "utf8")) : [];
+    if (Array.isArray(parsed)) previous = parsed;
+  } catch {
+    // A corrupt ledger only means stale copy files may survive one run.
+  }
   let written = 0;
   for (const file of files) {
+    const destination = pathInsideCopy(copyRoot, file);
+    if (!destination) throw new Error(`refusing to copy a path outside the copy: ${file}`);
     const source = readFileSync(path.join(REPO_ROOT, file));
     const content = transform(file, source);
-    const destination = path.join(copyRoot, file);
     if (existsSync(destination)) {
       const current = readFileSync(destination);
       if (Buffer.isBuffer(content) ? current.equals(content) : current.toString("utf8") === content) continue;
@@ -232,7 +261,9 @@ function syncCopy(copyRoot, files, transform) {
   }
   const keep = new Set(files);
   for (const file of previous) {
-    if (!keep.has(file)) rmSync(path.join(copyRoot, file), { force: true });
+    if (keep.has(file)) continue;
+    const stale = pathInsideCopy(copyRoot, file);
+    if (stale) rmSync(stale, { force: true });
   }
   writeFileSync(ledgerPath, JSON.stringify(files));
   return written;
@@ -397,47 +428,86 @@ function regionNames(analysis, [start, end], name) {
 // ---------------------------------------------------------------------------
 // Check 2: shared library crates through token search
 
+/**
+ * Items of one library crate that production code cannot reach by name.
+ *
+ * Every item of the crate (any visibility) is a node. A reference from
+ * production code outside the crate, or from crate code outside any node
+ * (trait impls, macro bodies), is a root. A reference inside a node is an
+ * edge from that node. Items whose name no root reaches are dead, so a chain
+ * or cycle of items that only call each other is dead as a whole.
+ *
+ * @param {Map<string, object>} libraryFiles analyses of the crate's production files
+ * @param {Map<string, object>} allFiles analyses of every production file in the workspace
+ */
+export function unreachableItems(libraryFiles, allFiles) {
+  const structure = new Map();
+  const nodes = [];
+  for (const [file, analysis] of libraryFiles) {
+    const defined = definedItems(analysis);
+    structure.set(file, defined);
+    for (const item of defined.items) nodes.push({ ...item, file });
+  }
+  const names = new Set(nodes.map((node) => node.name));
+  const nodesByName = new Map();
+  const nodesByFile = new Map();
+  for (const node of nodes) {
+    node.edges = new Set();
+    if (!nodesByName.has(node.name)) nodesByName.set(node.name, []);
+    nodesByName.get(node.name).push(node);
+    if (!nodesByFile.has(node.file)) nodesByFile.set(node.file, []);
+    nodesByFile.get(node.file).push(node);
+  }
+
+  const roots = new Set();
+  for (const [file, analysis] of allFiles) {
+    if (libraryFiles.has(file)) continue;
+    for (const reference of collectReferences(analysis, names)) if (!reference.testOnly) roots.add(reference.name);
+  }
+  for (const [file, analysis] of libraryFiles) {
+    const { implHeaders } = structure.get(file);
+    const fileNodes = (nodesByFile.get(file) ?? []).sort((left, right) => left.start - right.start);
+    const references = collectReferences(analysis, names)
+      .filter((reference) => !reference.testOnly)
+      .filter((reference) => !implHeaders.some(([start, end]) => reference.index >= start && reference.index < end))
+      .sort((left, right) => left.index - right.index);
+    // Nodes nest (a fn inside a fn), so the innermost open node owns a reference.
+    const open = [];
+    let next = 0;
+    for (const reference of references) {
+      while (next < fileNodes.length && fileNodes[next].start <= reference.index) {
+        const node = fileNodes[next];
+        next += 1;
+        while (open.length > 0 && open.at(-1).end <= node.start) open.pop();
+        open.push(node);
+      }
+      while (open.length > 0 && open.at(-1).end <= reference.index) open.pop();
+      const owner = open.at(-1);
+      if (owner) owner.edges.add(reference.name);
+      else roots.add(reference.name);
+    }
+  }
+
+  const live = new Set();
+  const queue = [...roots];
+  while (queue.length > 0) {
+    const name = queue.pop();
+    if (live.has(name)) continue;
+    live.add(name);
+    for (const node of nodesByName.get(name) ?? []) {
+      for (const target of node.edges) if (!live.has(target)) queue.push(target);
+    }
+  }
+  return nodes.filter((node) => !live.has(node.name)).map(({ edges: _edges, ...node }) => node);
+}
+
 function sharedLibraryFindings(workspace) {
   const app = workspace.packages.find((pkg) => pkg.name === APP_PACKAGE);
   const shared = workspace.packages.filter((pkg) => pkg !== app && pkg.lib);
-  const productionFiles = [...workspace.files.keys()];
   const findings = [];
   for (const pkg of shared) {
-    const items = [];
-    for (const file of pkg.files) {
-      const analysis = workspace.files.get(file);
-      for (const item of publicItems(analysis)) items.push({ ...item, file });
-    }
-    const names = new Set(items.map((item) => item.name));
-    const references = [];
-    for (const file of productionFiles) {
-      for (const reference of collectReferences(workspace.files.get(file), names)) {
-        if (!reference.testOnly) references.push({ ...reference, file });
-      }
-    }
-    // A reference inside an item that is itself dead is not a use. Iterate
-    // until no further item loses its last reference.
-    const dead = new Set();
-    for (let changed = true; changed;) {
-      changed = false;
-      for (const item of items) {
-        if (dead.has(item)) continue;
-        const used = references.some(
-          (reference) =>
-            reference.name === item.name
-            && !(reference.file === item.file && reference.index >= item.start && reference.index < item.end)
-            && !items.some(
-              (other) => dead.has(other) && other.file === reference.file
-                && reference.index >= other.start && reference.index < other.end,
-            ),
-        );
-        if (!used) {
-          dead.add(item);
-          changed = true;
-        }
-      }
-    }
-    for (const item of dead) {
+    const libraryFiles = new Map([...pkg.files].map((file) => [file, workspace.files.get(file)]));
+    for (const item of unreachableItems(libraryFiles, workspace.files)) {
       const file = relative(item.file);
       findings.push({ key: `${file}::${item.name}`, file, line: item.line, name: item.name, kind: item.kind, source: pkg.name });
     }

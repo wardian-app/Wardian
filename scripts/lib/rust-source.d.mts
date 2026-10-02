@@ -30,12 +30,13 @@ export interface Reference {
   inactive: boolean;
 }
 
-export interface PublicItem {
+export interface DefinedItem {
   name: string;
   kind: string;
   line: number;
   start: number;
   end: number;
+  visibility: 'pub' | 'restricted' | 'private';
 }
 
 export function lexRust(source: string): Tokens;
@@ -54,4 +55,8 @@ export function loadCrate(
   exists?: (file: string) => boolean,
 ): { files: Map<string, SourceAnalysis>; unresolved: string[] };
 export function collectReferences(analysis: SourceAnalysis, names: Set<string>): Reference[];
-export function publicItems(analysis: SourceAnalysis): PublicItem[];
+export function definedItems(analysis: SourceAnalysis): {
+  items: DefinedItem[];
+  implHeaders: Array<[number, number]>;
+  opaque: Array<[number, number]>;
+};

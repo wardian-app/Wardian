@@ -1,4 +1,4 @@
-import type { SourceAnalysis } from './lib/rust-source.mjs';
+import type { DefinedItem, SourceAnalysis } from './lib/rust-source.mjs';
 
 export interface Finding {
   key: string;
@@ -35,5 +35,10 @@ export function deadCodeFindings(
   toRepoPath: (fileName: string) => string,
 ): Finding[];
 export function splitCfgGated(findings: Finding[], analyses: SourceAnalysis[]): { kept: Finding[]; gated: Finding[] };
+export function pathInsideCopy(copyRoot: string, file: string): string | undefined;
+export function unreachableItems(
+  libraryFiles: Map<string, SourceAnalysis>,
+  allFiles: Map<string, SourceAnalysis>,
+): Array<DefinedItem & { file: string }>;
 export function registeredCommands(libSource: string): string[];
 export function main(argv?: string[]): number;

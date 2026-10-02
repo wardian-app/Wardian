@@ -4,18 +4,20 @@ import {
   analyzeSource,
   collectReferences,
   lexRust,
+  definedItems,
   loadCrate,
   productionCfgEnv,
-  publicItems,
 } from '../scripts/lib/rust-source.mjs';
 import {
   compareWithBaseline,
   deadCodeFindings,
+  pathInsideCopy,
   readBaseline,
   registeredCommands,
   rewriteManifestPaths,
   rewriteVisibility,
   splitCfgGated,
+  unreachableItems,
 } from '../scripts/verify-rust-deadcode.mjs';
 
 const WINDOWS = productionCfgEnv('win32');
@@ -79,20 +81,26 @@ describe('Rust source index', () => {
     expect(references).toHaveLength(2);
   });
 
-  it('lists pub items but not restricted or test-only ones', () => {
-    const items = publicItems(analyze([
+  it('lists items with their visibility, skipping test-only code and trait bodies', () => {
+    const { items } = definedItems(analyze([
       'pub fn a() {}',
       'pub(crate) fn b() {}',
       'pub const fn c() {}',
       'pub const D: u8 = 1;',
-      'pub struct E;',
-      'impl E { pub async fn f(&self) {} }',
+      'struct E<const N: usize>;',
+      'impl E<1> { pub async fn f(&self) {} }',
+      'impl Display for E<1> { fn fmt(&self) {} }',
       '#[cfg(test)] pub fn g() {}',
-      'pub mod h {}',
+      'fn takes(x: impl Fn(u8) -> u8) {}',
     ].join('\n')));
-    expect(items.map((item) => `${item.kind} ${item.name}`)).toEqual([
-      'fn a', 'fn c', 'const D', 'struct E', 'fn f',
+    expect(items.map((item) => `${item.visibility} ${item.kind} ${item.name}`)).toEqual([
+      'pub fn a', 'restricted fn b', 'pub fn c', 'pub const D', 'private struct E', 'pub fn f', 'private fn takes',
     ]);
+  });
+
+  it('treats unknown cfg predicates as unknown, not compiled out', () => {
+    const analysis = analyze('#[cfg(feature = "never-enabled")] fn caller() { orphan() }');
+    expect(flagsOf(analysis, 'orphan')).toEqual({ testOnly: false, inactive: false });
   });
 
   it('follows mod, #[path], and include! the way rustc resolves files', () => {
@@ -166,6 +174,37 @@ describe('Rust dead-code gate', () => {
     ], [analysis]);
     expect(gated.map((item) => item.key)).toEqual(['a.rs::Store.open', 'a.rs::free_helper']);
     expect(kept.map((item) => item.key)).toEqual(['a.rs::Store.close']);
+  });
+
+  it('finds library items that production cannot reach, including chains and cycles', () => {
+    const library = new Map([[path.resolve('/ws/core/lib.rs'), analyze([
+      'pub fn used() { helper() }',
+      'fn helper() {}',
+      'pub fn orphan() {}',
+      'fn dead_private_caller() { orphan() }',
+      'pub fn ping() { pong() }',
+      'pub fn pong() { ping() }',
+      'pub struct Shown;',
+      'impl Shown { pub fn only_self() -> Shown { Shown } }',
+      'impl std::fmt::Display for Shown { fn fmt(&self) { via_trait() } }',
+      'fn via_trait() {}',
+      'pub fn test_only() {}',
+      '#[cfg(test)] mod tests { fn t() { super::test_only() } }',
+    ].join('\n'))]]);
+    const consumer = new Map([[path.resolve('/ws/app/main.rs'), analyze('fn main() { core::used(); }')]]);
+    const dead = unreachableItems(library, new Map([...library, ...consumer]));
+    expect(dead.map((item) => item.name).sort()).toEqual([
+      'Shown', 'dead_private_caller', 'only_self', 'orphan', 'ping', 'pong', 'test_only',
+    ]);
+  });
+
+  it('keeps every copy write and delete inside the copy', () => {
+    const root = path.resolve('target-test-copy-root');
+    expect(pathInsideCopy(root, 'src-tauri/src/lib.rs')).toBe(path.join(root, 'src-tauri', 'src', 'lib.rs'));
+    expect(pathInsideCopy(root, '../../../Cargo.toml')).toBeUndefined();
+    expect(pathInsideCopy(root, path.resolve('/elsewhere/file.rs'))).toBeUndefined();
+    expect(pathInsideCopy(root, 'C:/elsewhere/file.rs')).toBeUndefined();
+    expect(pathInsideCopy(root, '')).toBeUndefined();
   });
 
   it('reads tauri::generate_handler! entries, skipping cfg attributes', () => {

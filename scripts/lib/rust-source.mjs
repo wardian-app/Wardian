@@ -285,7 +285,13 @@ export function evalCfg(expr, env) {
 
 const PLATFORM_OS = { win32: "windows", linux: "linux", darwin: "macos" };
 
-/** cfg environment of a non-test production build on `platform`. */
+/**
+ * cfg environment of a non-test production build on `platform`.
+ *
+ * Only the predicates the gate can prove are answered; anything else (cargo
+ * features, target_arch, custom cfgs) is unknown, so code behind it is never
+ * treated as compiled out.
+ */
 export function productionCfgEnv(platform = process.platform) {
   const windows = platform === "win32";
   return {
@@ -294,12 +300,12 @@ export function productionCfgEnv(platform = process.platform) {
       if (name === "debug_assertions") return true;
       if (name === "windows") return windows;
       if (name === "unix") return !windows;
-      return false;
+      return undefined;
     },
     kv(name, value) {
       if (name === "target_os") return value === (PLATFORM_OS[platform] ?? platform);
       if (name === "target_family") return value === (windows ? "windows" : "unix");
-      return false;
+      return undefined;
     },
   };
 }
@@ -593,34 +599,77 @@ export function collectReferences(analysis, names) {
   return found;
 }
 
+const NODE_KEYWORDS = new Set(["fn", "struct", "enum", "trait", "type", "const", "static", "union"]);
+/** Tokens after which `impl` starts an item rather than an `impl Trait` type. */
+const ITEM_BOUNDARY = new Set(["}", ";", "{", "]", "unsafe", "default"]);
+const NAME_FOLLOWERS = {
+  fn: new Set(["(", "<"]),
+  struct: new Set(["{", "<", "(", ";", "where"]),
+  enum: new Set(["{", "<", "where"]),
+  union: new Set(["{", "<", "where"]),
+  trait: new Set(["{", "<", ":", "where"]),
+  type: new Set(["=", "<", ":", ";", "where"]),
+  const: new Set([":"]),
+  static: new Set([":"]),
+};
+const FN_QUALIFIERS = new Set(["fn", "unsafe", "async", "extern"]);
+
+function within(ranges, index) {
+  return ranges.some(([start, end]) => index >= start && index < end);
+}
+
 /**
- * `pub` items (not `pub(crate)` and friends) defined outside test-only code.
+ * The item structure the name graph needs.
  *
- * @returns {Array<{ name: string, kind: string, line: number, start: number, end: number }>}
+ * - `items`: every fn, struct, enum, trait, type alias, const, static, and
+ *   union outside test-only code and outside trait bodies or trait impls, with
+ *   its token extent and visibility (`pub`, `restricted` for `pub(..)`, or
+ *   `private`).
+ * - `implHeaders`: `impl ... {` headers. A type named there (`impl Foo`) is
+ *   not a use of it.
+ * - `opaque`: bodies of `trait` definitions and `impl Trait for Type`. Their
+ *   methods are reached through the trait, not by name, so the names they use
+ *   count as used.
  */
-export function publicItems(analysis) {
+export function definedItems(analysis) {
   const { tokens, match, testOnly } = analysis;
+  const { kinds, values } = tokens;
+  const implHeaders = [];
+  const opaque = [];
+  for (let index = 0; index < tokens.count; index += 1) {
+    if (kinds[index] !== IDENT) continue;
+    if (values[index] === "impl" && (index === 0 || ITEM_BOUNDARY.has(values[index - 1]))) {
+      let cursor = index + 1;
+      let isTraitImpl = false;
+      while (cursor < tokens.count && values[cursor] !== "{" && values[cursor] !== ";") {
+        if ((values[cursor] === "(" || values[cursor] === "[") && match[cursor] > cursor) cursor = match[cursor];
+        else if (values[cursor] === "for" && kinds[cursor] === IDENT && values[cursor + 1] !== "<") isTraitImpl = true;
+        cursor += 1;
+      }
+      implHeaders.push([index, cursor]);
+      if (isTraitImpl && values[cursor] === "{" && match[cursor] > cursor) opaque.push([cursor, match[cursor] + 1]);
+    } else if (values[index] === "trait" && kinds[index + 1] === IDENT) {
+      let cursor = index + 2;
+      while (cursor < tokens.count && values[cursor] !== "{" && values[cursor] !== ";") cursor += 1;
+      if (values[cursor] === "{" && match[cursor] > cursor) opaque.push([cursor, match[cursor] + 1]);
+    }
+  }
+
   const items = [];
   for (let index = 0; index < tokens.count; index += 1) {
-    if (tokens.values[index] !== "pub" || tokens.kinds[index] !== IDENT || testOnly[index]) continue;
-    if (tokens.values[index + 1] === "(") continue;
-    let cursor = index + 1;
-    for (;;) {
-      const value = tokens.values[cursor];
-      if (value === "async" || value === "unsafe" || value === "default" || tokens.kinds[cursor] === STR) cursor += 1;
-      else if (value === "extern" && tokens.kinds[cursor + 1] === STR) cursor += 1;
-      else if (value === "const" && ["fn", "unsafe", "async", "extern"].includes(tokens.values[cursor + 1])) cursor += 1;
-      else break;
-    }
-    const kind = tokens.values[cursor];
-    if (!DEFINITION_KEYWORDS.has(kind) || kind === "mod" || tokens.kinds[cursor + 1] !== IDENT) continue;
-    items.push({
-      name: tokens.values[cursor + 1],
-      kind,
-      line: tokens.lines[cursor + 1],
-      start: index,
-      end: itemEnd(tokens, match, index),
-    });
+    const kind = values[index];
+    if (kinds[index] !== IDENT || !NODE_KEYWORDS.has(kind) || kinds[index + 1] !== IDENT || testOnly[index]) continue;
+    const name = values[index + 1];
+    if (name === "_" || (kind === "const" && FN_QUALIFIERS.has(name))) continue;
+    if (!NAME_FOLLOWERS[kind].has(values[index + 2])) continue;
+    if ((kind === "const" || kind === "static") && (values[index - 1] === "<" || values[index - 1] === ",")) continue;
+    if (within(opaque, index)) continue;
+    let back = index - 1;
+    while (back >= 0 && (["async", "unsafe", "const", "extern", "default"].includes(values[back]) || kinds[back] === STR)) back -= 1;
+    let visibility = "private";
+    if (values[back] === "pub") visibility = "pub";
+    else if (values[back] === ")" && match[back] > 0 && values[match[back] - 1] === "pub") visibility = "restricted";
+    items.push({ name, kind, line: tokens.lines[index + 1], start: index, end: itemEnd(tokens, match, index), visibility });
   }
-  return items;
+  return { items, implHeaders, opaque };
 }
