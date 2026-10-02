@@ -1664,6 +1664,11 @@ pub(crate) fn interactive_provider_launch(
 }
 
 pub(crate) fn apply_terminal_identity_env(cmd: &mut CommandBuilder) {
+    // A real interactive PTY owns its color capabilities. Automation hosts'
+    // log-output preferences must not alter restored provider presentation.
+    for key in ["NO_COLOR", "NODE_DISABLE_COLORS", "FORCE_COLOR"] {
+        cmd.env_remove(key);
+    }
     cmd.env("COLORTERM", "truecolor");
     cmd.env("TERM", "xterm-256color");
     if let Some(home) = crate::utils::fs::get_wardian_home() {
@@ -2114,6 +2119,34 @@ mod tests {
             Some(value) => std::env::set_var("ComSpec", value),
             None => std::env::remove_var("ComSpec"),
         }
+    }
+
+    #[test]
+    fn terminal_identity_ignores_launcher_color_suppression() {
+        let mut cmd = CommandBuilder::new("provider");
+        cmd.env("NO_COLOR", "1");
+        cmd.env("NODE_DISABLE_COLORS", "1");
+        cmd.env("FORCE_COLOR", "0");
+        cmd.env("PROVIDER_TEST_SETTING", "preserved");
+        apply_terminal_identity_env(&mut cmd);
+        for key in ["NO_COLOR", "NODE_DISABLE_COLORS", "FORCE_COLOR"] {
+            assert!(
+                cmd.get_env(key).is_none(),
+                "launcher flag {key} leaked into interactive PTY"
+            );
+        }
+        assert_eq!(
+            cmd.get_env("TERM"),
+            Some(std::ffi::OsStr::new("xterm-256color"))
+        );
+        assert_eq!(
+            cmd.get_env("COLORTERM"),
+            Some(std::ffi::OsStr::new("truecolor"))
+        );
+        assert_eq!(
+            cmd.get_env("PROVIDER_TEST_SETTING"),
+            Some(std::ffi::OsStr::new("preserved"))
+        );
     }
 
     #[test]

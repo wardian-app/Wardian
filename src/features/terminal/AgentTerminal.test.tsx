@@ -2290,7 +2290,13 @@ describe("AgentTerminal scrollback", () => {
     assertFocusIsPassiveBeforeExplicitActivation,
   );
 
-  it("keeps an Agents terminal hidden until its unowned session is activated and fitted", async () => {
+  it.each([false, true])("activates an unowned Agents terminal after registration (deferred=%s)", async (deferredRegistration) => {
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    let registrations = 0;
+    mockListen.mockImplementation(async (name, handler) => {
+      listeners.set(name, handler as (event: { payload: unknown }) => void);
+      return () => listeners.delete(name);
+    });
     const activationAck = deferred<{
       decision: {
         status: "accepted";
@@ -2306,6 +2312,8 @@ describe("AgentTerminal scrollback", () => {
       const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
       const presentationId = request?.presentation_id ?? "agents-pane";
       if (command === "register_terminal_presentation") {
+        registrations += 1;
+        if (deferredRegistration && registrations === 1) throw new Error("SessionNotFound");
         return modernRegistrationResult(presentationId);
       }
       if (command === "subscribe_terminal_events") {
@@ -2348,6 +2356,15 @@ describe("AgentTerminal scrollback", () => {
       />,
     );
 
+    if (deferredRegistration) {
+      await waitFor(() => expect(registrations).toBe(1));
+      await act(async () => {
+        listeners.get("terminal-session-lifecycle")?.({ payload: {
+          session_id: "modern-agent", runtime_generation: 1, lifecycle: "runtime_replaced",
+        } });
+      });
+    }
+
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
       "ack_terminal_activation",
       expect.anything(),
@@ -2369,8 +2386,12 @@ describe("AgentTerminal scrollback", () => {
     await waitFor(() => {
       expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" });
     });
-    const latestFitAddon = mockFitAddon.mock.results[mockFitAddon.mock.results.length - 1]?.value;
-    expect(latestFitAddon.proposeDimensions).toHaveBeenCalled();
+    if (deferredRegistration) {
+      expect(mockInvoke).toHaveBeenCalledWith("report_terminal_presentation_viewport", expect.anything());
+    } else {
+      const fitAddon = mockFitAddon.mock.results[mockFitAddon.mock.results.length - 1]?.value;
+      expect(fitAddon.proposeDimensions).toHaveBeenCalled();
+    }
   });
 
   it("keeps an unowned presentation on its snapshot grid with canonical fit", async () => {

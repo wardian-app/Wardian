@@ -12,6 +12,22 @@ Wardian utilizes the `portable-pty` crate to provide a consistent PTY interface 
 - **Master**: The control end of the PTY, used for reading output and writing input.
 - **Slave**: The application end, where the selected runtime shell hosts the provider command.
 
+### Launch-independent terminal presentation
+
+Interactive provider PTYs use Wardian's terminal capabilities, regardless of
+whether the desktop was started by a user or an automation shell. Wardian clears
+the launcher's `NO_COLOR`, `NODE_DISABLE_COLORS`, and `FORCE_COLOR` overrides before
+setting `TERM=xterm-256color` and `COLORTERM=truecolor`. Other provider environment
+values remain intact; explicit provider command-line options still apply.
+
+The first visible, mounted, interactive Agents or Workbench terminal claims an
+unowned runtime and reports its viewport before revealing it. A restored
+terminal repeats this handshake when registration initially precedes its PTY.
+Recovery reports the current pane dimensions before requesting ownership, and
+checks again when queued activation runs that no owner has appeared.
+Read-only, hidden, and suspended views stay passive,
+and a second view cannot automatically take an existing owner's lease.
+
 ## 🛡️ Process Integrity (Windows Job Objects)
 To prevent orphaned provider and console-host processes when Wardian crashes or is force-closed, the Windows implementation uses **Job Objects** via the `win32job` crate.
 
