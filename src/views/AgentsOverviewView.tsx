@@ -390,10 +390,13 @@ export const AgentsOverviewView: React.FC<AgentsOverviewViewProps> = ({
   }, [containerRef, surfaceVisibility, visibleAgentIdKey]);
 
   useEffect(() => {
+    // No agents means nothing to focus yet, not a decision to forget the saved
+    // focus: before the roster loads, persisting null would lose it for good.
+    if (overviewLayout.focusedAgentId === null && layoutAgents.length === 0) return;
     if (overviewLayout.focusedAgentId !== focusedAgentId) {
       onFocusedAgentChange(overviewLayout.focusedAgentId);
     }
-  }, [focusedAgentId, onFocusedAgentChange, overviewLayout.focusedAgentId]);
+  }, [focusedAgentId, layoutAgents.length, onFocusedAgentChange, overviewLayout.focusedAgentId]);
 
   useEffect(() => {
     const visibleIds = new Set(visibleAgentIdKey ? visibleAgentIdKey.split('\0') : []);

@@ -6,6 +6,7 @@ import {
   excludeFromDistrict,
   markVisited,
   pinEntity,
+  pruneScene,
   reviveScene,
   scenesConverged,
   unpinEntity,
@@ -40,8 +41,14 @@ interface GardenStoreState {
   unpin: (entityKey: string) => void;
   exclude: (entityKey: string, districtId: string) => void;
   visit: (entityKey: string) => void;
-  /** Adopt the scene a layout pass returned (district cells, warm-start seeds). */
-  adoptScene: (scene: GardenScene) => void;
+  /**
+   * Adopt the scene a layout pass returned (district cells, warm-start seeds).
+   *
+   * With `liveKeys`, derived state for every other entity is pruned as it is
+   * written. Pass only a set from `authoritativeLiveKeys`, and null otherwise:
+   * a partial set would discard the saved positions of everything it omits.
+   */
+  adoptScene: (scene: GardenScene, liveKeys?: ReadonlySet<string> | null) => void;
   reset: () => void;
 }
 
@@ -77,8 +84,21 @@ export const useGardenStore = create<GardenStoreState>()(
       // storage for sub-pixel changes. Keeping the existing reference when the
       // two scenes are materially the same makes the write-back idempotent,
       // which is what stops a relayout from provoking another one.
-      adoptScene: (scene) =>
-        set((state) => (scenesConverged(state.scene, scene) ? state : { scene })),
+      //
+      // Pruning rides on the same write rather than a timer: this is where the
+      // scene is next saved anyway, and the caller only supplies `liveKeys` once
+      // every entity source has loaded. It touches no pin or exclusion, so it
+      // cannot provoke a relayout either.
+      adoptScene: (scene, liveKeys = null) =>
+        set((state) => {
+          const incoming = liveKeys ? pruneScene(scene, liveKeys) : scene;
+          if (!scenesConverged(state.scene, incoming)) return { scene: incoming };
+          // A converged pass still owes the stored scene its pruning: `visited`
+          // is outside the convergence test, so a dead key's timestamp would
+          // otherwise survive every pass.
+          const stored = liveKeys ? pruneScene(state.scene, liveKeys) : state.scene;
+          return stored === state.scene ? state : { scene: stored };
+        }),
       reset: () =>
         set((state) => ({
           scene: createScene(),

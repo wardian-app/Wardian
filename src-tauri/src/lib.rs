@@ -731,6 +731,10 @@ pub fn run() {
                                 ));
                             }
 
+                            // Pass 1 has put every saved agent on the roster, so
+                            // a roster listed from here on is complete.
+                            commands::agent_roster::mark_agent_roster_restored(&app_handle);
+
                             // Replay durable Claude completions before any
                             // restored provider watcher starts. This includes
                             // saved-Off agents, whose normal runtime has no
@@ -937,6 +941,15 @@ pub fn run() {
                         }
                     }
                 }
+                // With no saved roster there is nothing to restore. A roster that
+                // exists but could not be read or parsed stays unvouched: its
+                // agents may still exist, so their absence proves nothing.
+                // Idempotent after the pass-1 mark above.
+                if commands::agent_roster::saved_roster_absent(
+                    manager::get_wardian_home().as_deref(),
+                ) {
+                    commands::agent_roster::mark_agent_roster_restored(&app_handle);
+                }
                 for recovered in recovered_replacements {
                     if let Some(intent) = recovered.session_close_intent {
                         if let Err(error) = crate::automation::session_close::invoke_matching(
@@ -998,6 +1011,7 @@ pub fn run() {
             commands::agent::clone_agent,
             commands::agent::get_agent_clone_preview,
             commands::agent::list_agents,
+            commands::agent_roster::agent_roster_restored,
             commands::telemetry::list_agent_metrics,
             commands::agent::kill_agent,
             commands::agent::pause_agent,
