@@ -896,15 +896,26 @@ fn active_claude_completion(
 /// Replays durable Claude Stop records before saved providers are launched.
 /// This covers intentionally Off agents, which have no process watcher to
 /// discover an outbox record left by an interrupted persistence attempt.
-pub(crate) async fn replay_claude_completion_outboxes(app: &AppHandle, configs: &[AgentConfig]) {
+/// Startup already holds each publication's lifecycle claim; replay borrows
+/// those claims and never tries to acquire the same non-reentrant gate again.
+pub(crate) async fn replay_claude_completion_outboxes<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    publications: &[&crate::startup_restore::RestorePublication],
+) {
     let Some(home) = get_wardian_home() else {
         return;
     };
     let state = app.state::<AppState>();
-    for saved_config in configs.iter().filter(|config| config.provider == "claude") {
+    for publication in publications {
+        let Some(config) = publication.current_config(&state).await else {
+            continue;
+        };
+        if config.provider != "claude" {
+            continue;
+        }
         let completion_dir = home
             .join("agents")
-            .join(&saved_config.session_id)
+            .join(&config.session_id)
             .join("claude")
             .join("turn-completions");
         let Ok(entries) = std::fs::read_dir(&completion_dir) else {
@@ -935,37 +946,19 @@ pub(crate) async fn replay_claude_completion_outboxes(app: &AppHandle, configs: 
                 continue;
             }
 
-            let lifecycle_guard = state.lock_agent_lifecycle(&saved_config.session_id).await;
-            let current_config = {
-                let agents = state.agents.lock().await;
-                agents
-                    .get(&saved_config.session_id)
-                    .and_then(|agent| agent.config.lock().ok().map(|config| config.clone()))
-            };
-            let Some(config) = current_config else {
-                drop(lifecycle_guard);
-                continue;
-            };
-            if config.provider != "claude" {
-                drop(lifecycle_guard);
-                continue;
-            }
             let accepted_sessions = claude::claude_accepted_sessions(&config);
             let session_matches = accepted_sessions.iter().any(|session_id| {
                 claude::claude_permission_hook_matches_session(&event, session_id)
             });
             if !session_matches {
-                drop(lifecycle_guard);
                 continue;
             }
             let Some(message) = claude_completion_message_for_config(&config, &event) else {
                 let _ = std::fs::rename(&outbox_path, outbox_path.with_extension("ignored"));
-                drop(lifecycle_guard);
                 log_debug("[Wardian] Ignored Claude Stop hook outbox record without prompt identity or assistant text during startup replay");
                 continue;
             };
             let Some(evidence_id) = message.turn_id.as_deref() else {
-                drop(lifecycle_guard);
                 continue;
             };
             let item_id = format!("agent-completed:{}:{evidence_id}", config.session_id);
@@ -990,7 +983,6 @@ pub(crate) async fn replay_claude_completion_outboxes(app: &AppHandle, configs: 
                         config.session_id
                     ));
                     drop(queue_guard);
-                    drop(lifecycle_guard);
                     continue;
                 }
             }
@@ -1006,7 +998,6 @@ pub(crate) async fn replay_claude_completion_outboxes(app: &AppHandle, configs: 
                 }
             }
             drop(queue_guard);
-            drop(lifecycle_guard);
             if active_item.is_some() {
                 let _ = app.emit("inbox-updated", ());
             }

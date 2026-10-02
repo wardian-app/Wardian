@@ -724,13 +724,13 @@ pub fn run() {
                             // restored provider watcher starts. This includes
                             // saved-Off agents, whose normal runtime has no
                             // Claude watcher to scan the per-agent outbox.
-                            let startup_configs = pending_spawns
+                            let startup_publications = pending_spawns
                                 .iter()
-                                .map(|(_, _, config, _)| config.clone())
+                                .map(|(publication, _, _, _)| publication)
                                 .collect::<Vec<_>>();
                             manager::replay_claude_completion_outboxes(
                                 &app_handle,
-                                &startup_configs,
+                                &startup_publications,
                             )
                             .await;
 
