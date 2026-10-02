@@ -12,3 +12,10 @@ external console window.
 Do not replace this vendored crate with the registry version unless the upstream
 crate exposes equivalent behavior or Wardian has another Windows PTY window
 policy.
+
+Windows `CommandBuilder::set_windows_job` duplicates a supplied job handle.
+When present, ConPTY creates the child suspended, assigns the job before any
+provider code executes, then resumes its main thread. Assignment or resume
+failure terminates the suspended child and returns a launch error. Builders
+without a job preserve the existing creation flags. The retained job belongs
+to Wardian's runtime, allowing verified tree stop during Claude rotation.

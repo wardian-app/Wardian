@@ -21,7 +21,15 @@ To prevent orphaned provider and console-host processes when Wardian crashes or 
 4. Provider shells, CLIs, ConPTY console hosts, and descendants inherit the job from process creation time.
 5. When the Wardian process terminates, the job object is closed by the OS, which automatically kills all processes assigned to it.
 
-Per-agent process-tree termination is still used for normal UI actions such as kill, pause, resume, and clear. Per-agent Job Objects are only a fallback if app-level supervision cannot be installed, because post-spawn assignment is inherently less reliable than inheriting the app-level job at creation time.
+New Windows Claude PTY runtimes also have a dedicated non-breakaway job. Their
+main thread is suspended until assignment succeeds, closing the post-launch
+descendant race. Fresh resume and clear reject new job members, retain and join
+the current members' handles, and verify the direct child and empty job before
+releasing their newly created prior-session hold. Other
+providers continue to use process-tree termination, with per-agent fallback
+jobs if app-level supervision cannot be installed. Legacy runtimes do not gain
+an exit receipt from post-launch assignment. See
+[Verified Windows Claude Process Stop](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-10-02-claude-process-containment.md).
 
 At startup, Wardian restores an agent as headless only while an unexpired background execution lease protects its conversation. Before starting an interactive provider process, it checks persisted leases under the cross-process lease lock and acquires a lifecycle transition lease. In particular, Codex's app-server owner starts before its PTY child, so the candidate scan must finish before that owner starts; a later scan would mistake Wardian's own owner for a duplicate. For a Codex provider process with a valid `WARDIAN_SESSION_ID`, that explicit identity takes precedence over incidental agent IDs in its launch arguments, while an explicit resume of another session still counts as a candidate. Unmarked or malformed processes use the conservative command-line fallback. Unreadable or semantically invalid lease data blocks that spawn until inspected. A persisted headless status or `WARDIAN_SESSION_ID` marker alone does not establish a live provider: descendants such as a marked Python server must not prevent restore.
 
