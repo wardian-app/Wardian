@@ -2,6 +2,18 @@
 
 Wardian is built to handle multiple simultaneous, long-running agent sessions with strict resource and process isolation.
 
+## Desktop ownership
+
+Before changing home state or restoring providers, the desktop retains an
+exclusive OS lock at `<wardian-home>/runtime/desktop-owner.lock`. A second
+cooperating desktop using the same home exits with a diagnostic. Quit the old
+desktop before launching its replacement, or use a distinct `WARDIAN_HOME` for
+an independent instance. CLI and headless execution still use conversation
+leases. Do not delete the lock file: a crash releases its OS lock automatically.
+Legacy versions without this protocol must be closed explicitly. This lock
+does not prove provider exit or release prior-provider holds. See
+[Desktop Home Ownership](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-10-02-desktop-home-ownership.md).
+
 ## 🌉 Cross-Platform PTY Layer
 Wardian utilizes the `portable-pty` crate to provide a consistent PTY interface across different operating systems.
 

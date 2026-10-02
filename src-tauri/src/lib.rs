@@ -378,6 +378,17 @@ pub fn run() {
     }
 
     crate::utils::fs::ensure_process_wardian_home_env();
+    let _desktop_owner = match crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| "Could not resolve Wardian home".to_string())
+        .and_then(|home| crate::utils::desktop_owner::DesktopOwner::acquire(&home))
+    {
+        Ok(owner) => owner,
+        Err(error) => {
+            eprintln!("Wardian desktop startup withheld: {error}");
+            crate::utils::logging::log_debug(&format!("Wardian desktop startup withheld: {error}"));
+            return;
+        }
+    };
     crate::utils::runtime_profile::start_reporter();
 
     crate::utils::migration::migrate_home_layout();
