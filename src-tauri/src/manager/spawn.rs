@@ -2736,6 +2736,12 @@ async fn spawn_agent_inner(
 
     // The transition lease acquired before native owner preparation remains
     // held through PTY creation and publication.
+    #[cfg(windows)]
+    let contained_job = if config.provider == "claude" {
+        Some(crate::utils::process::RuntimeProcessJob::prepare(&mut cmd)?)
+    } else {
+        None
+    };
     let child_result = pair.slave.spawn_command(cmd);
     let child = match child_result {
         Ok(child) => child,
@@ -2816,7 +2822,9 @@ async fn spawn_agent_inner(
 
     #[cfg(windows)]
     let job_object = {
-        if app_process_supervisor_active() {
+        if contained_job.is_some() {
+            contained_job
+        } else if app_process_supervisor_active() {
             None
         } else if let Ok(job) = create_kill_on_close_job("agent fallback") {
             if let Some(pid) = process_id {
@@ -2827,7 +2835,7 @@ async fn spawn_agent_inner(
                     ));
                 }
             }
-            Some(job)
+            Some(crate::utils::process::RuntimeProcessJob::fallback(job))
         } else {
             None
         }

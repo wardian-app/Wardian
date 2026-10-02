@@ -53,7 +53,7 @@ describe("macOS window integration", () => {
 
   it("restarts from the native runtime instead of the browser-side process plugin", () => {
     expect(settingsCommands).toContain("pub fn restart_app(app: tauri::AppHandle)");
-    expect(settingsCommands).toContain("app.restart();");
+    expect(settingsCommands).toContain("app.request_restart();");
     expect(appRuntime).toContain("commands::settings::restart_app,");
     expect(appRuntime).not.toContain("tauri_plugin_process::init()");
     expect(capabilities).not.toContain("process:allow-restart");
