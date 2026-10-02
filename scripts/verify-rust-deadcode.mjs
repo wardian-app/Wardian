@@ -451,8 +451,9 @@ export function unreachableItems(libraryFiles, allFiles) {
   const names = new Set(nodes.map((node) => node.name));
   const nodesByName = new Map();
   const nodesByFile = new Map();
+  const edges = new Map();
   for (const node of nodes) {
-    node.edges = new Set();
+    edges.set(node, new Set());
     if (!nodesByName.has(node.name)) nodesByName.set(node.name, []);
     nodesByName.get(node.name).push(node);
     if (!nodesByFile.has(node.file)) nodesByFile.set(node.file, []);
@@ -483,7 +484,7 @@ export function unreachableItems(libraryFiles, allFiles) {
       }
       while (open.length > 0 && open.at(-1).end <= reference.index) open.pop();
       const owner = open.at(-1);
-      if (owner) owner.edges.add(reference.name);
+      if (owner) edges.get(owner).add(reference.name);
       else roots.add(reference.name);
     }
   }
@@ -495,10 +496,10 @@ export function unreachableItems(libraryFiles, allFiles) {
     if (live.has(name)) continue;
     live.add(name);
     for (const node of nodesByName.get(name) ?? []) {
-      for (const target of node.edges) if (!live.has(target)) queue.push(target);
+      for (const target of edges.get(node)) if (!live.has(target)) queue.push(target);
     }
   }
-  return nodes.filter((node) => !live.has(node.name)).map(({ edges: _edges, ...node }) => node);
+  return nodes.filter((node) => !live.has(node.name));
 }
 
 function sharedLibraryFindings(workspace) {
