@@ -251,8 +251,28 @@ function resolveInsideCopy(copyRoot, file) {
   return target;
 }
 
-function syncCopy(copyRoot, files, transform) {
+/**
+ * Create `<target-dir>/rust-deadcode/<hash>` and prove it is a plain
+ * directory where it claims to be. A link or junction at either component
+ * could point the copy at the checkout, so it fails the run instead.
+ */
+export function prepareCopyRoot(targetDirectory, hash) {
+  const base = path.join(path.resolve(targetDirectory), "rust-deadcode");
+  const copyRoot = path.join(base, hash);
   mkdirSync(copyRoot, { recursive: true });
+  for (const directory of [base, copyRoot]) {
+    if (isLink(directory) || !lstatSync(directory).isDirectory()) {
+      throw new Error(`refusing to use ${directory}: it is a link, not a directory`);
+    }
+  }
+  const expected = path.join(realpathSync(targetDirectory), "rust-deadcode", hash);
+  const actual = realpathSync(copyRoot);
+  const same = process.platform === "win32" ? expected.toLowerCase() === actual.toLowerCase() : expected === actual;
+  if (!same) throw new Error(`refusing to use ${copyRoot}: it resolves to ${actual}`);
+  return copyRoot;
+}
+
+function syncCopy(copyRoot, files, transform) {
   const ledgerPath = pathInsideCopy(copyRoot, ".rust-deadcode-files.json");
   if (!ledgerPath) throw new Error(`refusing to use a linked ledger in ${copyRoot}`);
   let previous = [];
@@ -341,7 +361,7 @@ function runRustcPass(metadata, workspace, options) {
   const isCopied = (resolved) =>
     copiedRoots.some((dir) => resolved === dir || resolved.startsWith(dir + path.sep));
   const hash = createHash("sha1").update(workspaceRoot).digest("hex").slice(0, 12);
-  const copyRoot = path.join(metadata.target_directory, "rust-deadcode", hash);
+  const copyRoot = prepareCopyRoot(metadata.target_directory, hash);
 
   const files = listCopiedFiles(memberDirs);
   const libRoot = libDir + path.sep;

@@ -14,6 +14,7 @@ import {
   compareWithBaseline,
   deadCodeFindings,
   pathInsideCopy,
+  prepareCopyRoot,
   readBaseline,
   registeredCommands,
   rewriteManifestPaths,
@@ -229,6 +230,19 @@ describe('Rust dead-code gate', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a copy root that is a link or junction to another directory', () => {
+    const targetDir = mkdtempSync(path.join(os.tmpdir(), 'rust-deadcode-target-'));
+    const checkout = mkdtempSync(path.join(os.tmpdir(), 'rust-deadcode-checkout-'));
+    try {
+      expect(prepareCopyRoot(targetDir, 'plain')).toBe(path.join(path.resolve(targetDir), 'rust-deadcode', 'plain'));
+      symlinkSync(checkout, path.join(targetDir, 'rust-deadcode', 'linked'), 'junction');
+      expect(() => prepareCopyRoot(targetDir, 'linked')).toThrow('refusing to use');
+    } finally {
+      rmSync(targetDir, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
     }
   });
 

@@ -35,6 +35,7 @@ export function deadCodeFindings(
   toRepoPath: (fileName: string) => string,
 ): Finding[];
 export function splitCfgGated(findings: Finding[], analyses: SourceAnalysis[]): { kept: Finding[]; gated: Finding[] };
+export function prepareCopyRoot(targetDirectory: string, hash: string): string;
 export function pathInsideCopy(copyRoot: string, file: string): string | undefined;
 export function unreachableItems(
   libraryFiles: Map<string, SourceAnalysis>,
