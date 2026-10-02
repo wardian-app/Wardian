@@ -41,19 +41,12 @@ pub fn validate_gateway_bind_config(config: &RemoteGatewayConfig) -> Result<(), 
 
 pub fn spawn_remote_gateway(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
+        let state = app.state::<crate::state::AppState>();
+        let _config_guard = state.remote_gateway_config_lock.lock().await;
         let Some(config) = crate::remote::storage::load_remote_config().ok().flatten() else {
             return;
         };
-        spawn_remote_gateway_for_config(app, config);
-    });
-}
-
-pub fn spawn_remote_gateway_for_config(app: AppHandle, config: RemoteGatewayConfig) {
-    if !config.enabled {
-        return;
-    }
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) = run_remote_gateway(app, config).await {
+        if let Err(error) = configure_remote_gateway(app.clone(), config).await {
             crate::utils::logging::log_debug(&format!(
                 "[Wardian] remote gateway unavailable: {error}"
             ));
@@ -61,16 +54,24 @@ pub fn spawn_remote_gateway_for_config(app: AppHandle, config: RemoteGatewayConf
     });
 }
 
-async fn run_remote_gateway(app: AppHandle, config: RemoteGatewayConfig) -> Result<(), String> {
-    validate_gateway_bind_config(&config)?;
-    let addr = loopback_socket_addr(&config.loopback_host, config.loopback_port)?;
-    let router = remote_router(app, config);
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|error| error.to_string())?;
-    axum::serve(listener, router)
-        .await
-        .map_err(|error| error.to_string())
+/// Caller holds `remote_gateway_config_lock` through persistence and binding.
+pub async fn configure_remote_gateway(
+    app: AppHandle,
+    config: RemoteGatewayConfig,
+) -> Result<(), String> {
+    if config.enabled {
+        validate_gateway_bind_config(&config)?;
+    }
+    let state = app.state::<crate::state::AppState>();
+    // Disabled settings still close the running listener, even if their saved
+    // bind host is invalid. It is never used for a bind in that case.
+    let addr = if config.enabled {
+        loopback_socket_addr(&config.loopback_host, config.loopback_port)?
+    } else {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+    };
+    let router = remote_router(app.clone(), config.clone());
+    state.remote_listener.configure(config, addr, router).await
 }
 
 fn loopback_socket_addr(host: &str, port: u16) -> Result<SocketAddr, String> {

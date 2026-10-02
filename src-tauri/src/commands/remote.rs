@@ -73,13 +73,15 @@ pub async fn load_remote_setup_check() -> Result<RemoteSetupCheckResult, String>
 }
 
 #[tauri::command]
-pub fn save_remote_gateway_config(
+pub async fn save_remote_gateway_config(
     app: tauri::AppHandle,
     config: RemoteGatewayConfig,
 ) -> Result<RemoteGatewayConfig, String> {
-    save_remote_gateway_config_with_starter(config, move |config| {
-        crate::remote::gateway::spawn_remote_gateway_for_config(app.clone(), config);
-    })
+    let state = app.state::<crate::state::AppState>();
+    let _config_guard = state.remote_gateway_config_lock.lock().await;
+    let saved = save_remote_gateway_config_with_starter(config, |_| {})?;
+    crate::remote::gateway::configure_remote_gateway(app.clone(), saved.clone()).await?;
+    Ok(saved)
 }
 
 fn save_remote_gateway_config_with_starter(
@@ -88,9 +90,7 @@ fn save_remote_gateway_config_with_starter(
 ) -> Result<RemoteGatewayConfig, String> {
     let config = canonicalized_remote_gateway_config(&config)?;
     let saved = crate::remote::storage::save_remote_config(&config)?;
-    if saved.enabled {
-        start_gateway(saved.clone());
-    }
+    start_gateway(saved.clone());
     Ok(saved)
 }
 
@@ -486,16 +486,18 @@ mod tests {
     }
 
     #[test]
-    fn saving_disabled_config_does_not_request_gateway_start() {
+    fn saving_disabled_config_requests_gateway_stop() {
         with_temp_wardian_home(|| {
             let mut disabled = enabled_config("https://wardian.tailnet.ts.net", "127.0.0.1");
             disabled.enabled = false;
             let mut started = Vec::new();
 
-            save_remote_gateway_config_with_starter(disabled, |config| started.push(config))
-                .expect("save disabled config");
+            save_remote_gateway_config_with_starter(disabled.clone(), |config| {
+                started.push(config)
+            })
+            .expect("save disabled config");
 
-            assert!(started.is_empty());
+            assert_eq!(started, vec![disabled]);
         });
     }
 

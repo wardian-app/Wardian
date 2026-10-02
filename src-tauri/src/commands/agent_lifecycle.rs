@@ -1,6 +1,37 @@
 //! Per-agent lifecycle exclusion and awaited native-owner shutdown.
 use crate::state::AppState;
 
+/// Fence the previous conversation before stop. Only a later verified runtime
+/// receipt or explicit recovery may release this exact hold acquisition.
+pub(super) fn hold_previous_provider_before_rotation(
+    agent: &crate::state::ActiveAgent,
+    lease: &wardian_core::conversation_lease::PersistedConversationLeaseGuard,
+) -> Result<Option<wardian_core::conversation_lease::ConversationLeaseOwner>, String> {
+    let config = agent.config.lock().unwrap().clone();
+    let Some(previous_session) = config
+        .resume_session
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    if !super::agent_has_running_process(agent) {
+        return Ok(None);
+    }
+    let owner = wardian_core::conversation_lease::hold_previous_provider_session_persisted(
+        lease.owner(),
+        &config.session_id,
+        &config.provider,
+        previous_session,
+        &chrono::Utc::now().to_rfc3339(),
+    )?;
+    crate::manager::log_debug(&format!(
+        "[WARDIAN] Prior provider session held pending verified exit for {}: acquisition {}",
+        config.session_id, owner.acquisition_id
+    ));
+    Ok(Some(owner))
+}
+
 #[cfg(test)]
 #[path = "agent/lifecycle_tests.rs"]
 mod tests;
