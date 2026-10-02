@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -240,6 +240,16 @@ describe('Rust dead-code gate', () => {
       expect(prepareCopyRoot(targetDir, 'plain')).toBe(path.join(path.resolve(targetDir), 'rust-deadcode', 'plain'));
       symlinkSync(checkout, path.join(targetDir, 'rust-deadcode', 'linked'), 'junction');
       expect(() => prepareCopyRoot(targetDir, 'linked')).toThrow('refusing to use');
+
+      // A linked parent is refused before its absent child is created in it.
+      const otherTarget = mkdtempSync(path.join(os.tmpdir(), 'rust-deadcode-target-'));
+      try {
+        symlinkSync(checkout, path.join(otherTarget, 'rust-deadcode'), 'junction');
+        expect(() => prepareCopyRoot(otherTarget, 'absent')).toThrow('refusing to use');
+        expect(readdirSync(checkout)).toEqual([]);
+      } finally {
+        rmSync(otherTarget, { recursive: true, force: true });
+      }
     } finally {
       rmSync(targetDir, { recursive: true, force: true });
       rmSync(checkout, { recursive: true, force: true });

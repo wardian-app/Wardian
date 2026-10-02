@@ -259,8 +259,11 @@ function resolveInsideCopy(copyRoot, file) {
 export function prepareCopyRoot(targetDirectory, hash) {
   const base = path.join(path.resolve(targetDirectory), "rust-deadcode");
   const copyRoot = path.join(base, hash);
-  mkdirSync(copyRoot, { recursive: true });
+  mkdirSync(path.resolve(targetDirectory), { recursive: true });
+  // One component at a time: a linked component is refused before anything
+  // is created through it.
   for (const directory of [base, copyRoot]) {
+    if (!existsSync(directory) && !isLink(directory)) mkdirSync(directory);
     if (isLink(directory) || !lstatSync(directory).isDirectory()) {
       throw new Error(`refusing to use ${directory}: it is a link, not a directory`);
     }
