@@ -39,7 +39,7 @@ The live control protocol exposes CLI wrappers for the same worktree operations:
 
 - `agent_roster_restored`
 
-Returns `true` once startup restoration has published every saved agent. Until then, `list_agents` answers with part of the roster and nothing in that answer says so. The flag is monotonic: read it before `list_agents`, never after, and a `true` vouches for the list that follows. The backend emits `agents-updated` when the flag is set. Consumers that treat an agent's absence as deletion, such as Garden scene pruning, must wait for it.
+Returns `true` once startup restoration has published every saved agent, or once the backend has confirmed that no saved roster exists. If the saved roster exists but cannot be read or parsed, the flag stays `false` for the session. Until the flag is set, `list_agents` answers with part of the roster and nothing in that answer says so. The flag is monotonic: read it before `list_agents`, never after, and a `true` vouches for the list that follows. The backend emits `agents-updated` when the flag is set. Consumers that treat an agent's absence as deletion, such as Garden scene pruning, must wait for it.
 
 ## Terminal (`commands/terminal.rs`)
 

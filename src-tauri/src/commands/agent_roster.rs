@@ -8,6 +8,10 @@
 //! Garden pruning saved positions for agents that no longer exist — would
 //! destroy state for every agent not yet restored.
 //!
+//! It is set after restoration has published every saved agent, or when the
+//! home has no saved roster at all. A saved roster that cannot be read or
+//! parsed leaves it unset for the session, because its agents may still exist.
+//!
 //! The flag is monotonic. A caller that reads `true` *before* listing agents is
 //! guaranteed a complete roster from that list, because every saved agent was
 //! already published when the flag was set.
@@ -38,6 +42,22 @@ pub(crate) fn mark_agent_roster_restored(app: &AppHandle) {
     }
 }
 
+/// Whether the Wardian home is known and has no saved roster to restore.
+///
+/// Only a confirmed absence lets startup vouch for the roster without
+/// restoring it. An unresolved home, or a `settings/state.json` that exists but
+/// could not be read or parsed, is a failure: the agents it records may still
+/// exist, and treating them as deleted would discard their saved state.
+pub(crate) fn saved_roster_absent(wardian_home: Option<&std::path::Path>) -> bool {
+    let Some(home) = wardian_home else {
+        return false;
+    };
+    matches!(
+        std::fs::symlink_metadata(home.join("settings/state.json")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
 fn roster_restored(state: &AppState) -> bool {
     state.agent_roster_restored.load(Ordering::Acquire)
 }
@@ -63,5 +83,31 @@ mod tests {
         // mark must not emit a redundant refresh.
         assert!(!mark_restored(&state), "a repeated mark is a no-op");
         assert!(roster_restored(&state));
+    }
+
+    #[test]
+    fn only_a_confirmed_absent_saved_roster_vouches_without_restoring() {
+        let home = tempfile::tempdir().expect("temp home");
+        assert!(
+            saved_roster_absent(Some(home.path())),
+            "a home with no saved roster has nothing left to restore"
+        );
+
+        // A saved roster that startup failed to parse still records agents
+        // that may exist; its failure must not authorize pruning them.
+        let settings = home.path().join("settings");
+        std::fs::create_dir_all(&settings).expect("settings dir");
+        std::fs::write(settings.join("state.json"), "not json").expect("malformed roster");
+        assert!(!saved_roster_absent(Some(home.path())));
+
+        // An unreadable entry in place of the file is not an absence either.
+        std::fs::remove_file(settings.join("state.json")).expect("remove roster");
+        std::fs::create_dir(settings.join("state.json")).expect("unreadable roster");
+        assert!(!saved_roster_absent(Some(home.path())));
+
+        assert!(
+            !saved_roster_absent(None),
+            "an unresolved home cannot confirm anything"
+        );
     }
 }

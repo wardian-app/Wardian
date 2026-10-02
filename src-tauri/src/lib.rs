@@ -941,9 +941,15 @@ pub fn run() {
                         }
                     }
                 }
-                // No saved roster, or one that could not be read: nothing is
-                // left to restore. Idempotent after the pass-1 mark above.
-                commands::agent_roster::mark_agent_roster_restored(&app_handle);
+                // With no saved roster there is nothing to restore. A roster that
+                // exists but could not be read or parsed stays unvouched: its
+                // agents may still exist, so their absence proves nothing.
+                // Idempotent after the pass-1 mark above.
+                if commands::agent_roster::saved_roster_absent(
+                    manager::get_wardian_home().as_deref(),
+                ) {
+                    commands::agent_roster::mark_agent_roster_restored(&app_handle);
+                }
                 for recovered in recovered_replacements {
                     if let Some(intent) = recovered.session_close_intent {
                         if let Err(error) = crate::automation::session_close::invoke_matching(
