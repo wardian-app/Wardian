@@ -278,3 +278,10 @@ current camera, and file-activity range in Workbench state. These are view prefe
 not copies of agent configuration, memory, file contents, or automation truth.
 Camera saves settle after a zoom or pan gesture; leaving the surface flushes
 the latest position.
+
+When an agent is deleted, the scene drops its settled position and visit time
+the next time the layout is saved. Manual placements and district exclusions
+are kept, so an agent that returns lands where you put it. The Garden prunes
+only after Wardian has finished restoring the full agent roster and the latest
+roster load succeeded. An agent hidden by the active watchlist still exists,
+so its saved position is kept.

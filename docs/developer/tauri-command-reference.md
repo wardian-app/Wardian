@@ -35,6 +35,12 @@ Worktree commands update agent config only. UI callers that move an agent betwee
 
 The live control protocol exposes CLI wrappers for the same worktree operations: `agent_worktree_list`, `agent_worktree_enable`, `agent_worktree_join`, and `agent_worktree_disable`. Unlike the raw Tauri worktree commands, the control mutation handlers call `clear_agent_session` after moving an agent workspace so CLI behavior matches the GUI flow.
 
+## Agent Roster (`commands/agent_roster.rs`)
+
+- `agent_roster_restored`
+
+Returns `true` once startup restoration has published every saved agent. Until then, `list_agents` answers with part of the roster and nothing in that answer says so. The flag is monotonic: read it before `list_agents`, never after, and a `true` vouches for the list that follows. The backend emits `agents-updated` when the flag is set. Consumers that treat an agent's absence as deletion, such as Garden scene pruning, must wait for it.
+
 ## Terminal (`commands/terminal.rs`)
 
 - `send_input_to_agent`

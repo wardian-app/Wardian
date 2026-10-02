@@ -62,12 +62,14 @@ vi.mock("../features/garden/GardenCanvas", () => ({
 
 import { GardenView } from "./GardenView";
 import { useGardenStore } from "../store/useGardenStore";
+import { resetAgentRosterStore, useAgentRosterStore } from "../features/agents/useAgentRosterStore";
 import type { AgentConfig } from "../types";
 import type { AgentTeam } from "../layout/watchlist/types";
 import { COMMONS_DISTRICT_ID, MAX_DISTRICT_RADIUS } from "../features/garden/districts";
 
 beforeEach(() => {
   useGardenStore.getState().reset();
+  resetAgentRosterStore();
   canvasRenders.count = 0;
   gardenAutomationSpy.mockReset();
   gardenAutomationSpy.mockReturnValue({
@@ -466,6 +468,90 @@ describe("GardenView", () => {
     expect(useGardenStore.getState().scene.positions).toEqual(settled);
     // One render per tick, with no extra commits from a write-back cascade.
     expect(canvasRenders.count).toBe(rendersAfterMount + 6);
+  });
+
+  describe("pruning state for agents that no longer exist", () => {
+    const shown = [{ session_id: "a1", session_name: "Alpha" } as AgentConfig];
+
+    // a1 is on the map; a2 exists but is outside the active watchlist; gone
+    // was deleted. Only gone's derived state may ever be pruned.
+    function seedScene() {
+      useGardenStore.setState((state) => ({
+        scene: {
+          ...state.scene,
+          pins: { "agent:gone": { district_id: COMMONS_DISTRICT_ID, dx: 1, dy: 2, placed_at_ms: 1 } },
+          exclusions: { "agent:gone": ["team:web"] },
+          positions: { "agent:a2": { x: 5, y: 6 }, "agent:gone": { x: 7, y: 8 } },
+          position_districts: { "agent:a2": COMMONS_DISTRICT_ID, "agent:gone": COMMONS_DISTRICT_ID },
+          visited: { "agent:a2": 10, "agent:gone": 20 },
+        },
+      }));
+    }
+
+    function renderShown() {
+      return render(
+        <GardenView
+          filteredAgents={shown}
+          telemetry={{}} teams={[]} activeList={null} interactions={{}}
+          selectedAgentIds={new Set()} offAgentIds={new Set()}
+          onSelectionChange={vi.fn()} onOpenAgent={vi.fn()}
+        />,
+      );
+    }
+
+    it.each([
+      ["has not loaded", { status: "unloaded" as const, session_ids: [] }],
+      ["is still loading or restoring", { status: "loading" as const, session_ids: ["a1", "a2"] }],
+      ["failed to load", { status: "failed" as const, session_ids: ["a1", "a2"] }],
+      ["loaded empty", { status: "loaded" as const, session_ids: [] }],
+    ])("prunes nothing while the roster %s", (_label, roster) => {
+      seedScene();
+      useAgentRosterStore.setState(roster);
+      renderShown();
+
+      const scene = useGardenStore.getState().scene;
+      expect(scene.positions["agent:gone"]).toEqual({ x: 7, y: 8 });
+      expect(scene.position_districts["agent:gone"]).toBe(COMMONS_DISTRICT_ID);
+      expect(scene.visited["agent:gone"]).toBe(20);
+    });
+
+    it("prunes against the full roster, not the watchlist-filtered agents it draws", () => {
+      seedScene();
+      useAgentRosterStore.setState({ status: "loaded", session_ids: ["a1", "a2"] });
+      renderShown();
+
+      const scene = useGardenStore.getState().scene;
+      expect(scene.positions["agent:gone"]).toBeUndefined();
+      expect(scene.position_districts["agent:gone"]).toBeUndefined();
+      expect(scene.visited["agent:gone"]).toBeUndefined();
+      // Filtered out is not deleted.
+      expect(scene.positions["agent:a2"]).toEqual({ x: 5, y: 6 });
+      expect(scene.visited["agent:a2"]).toBe(10);
+      expect(scene.positions["agent:a1"]).toBeDefined();
+      // User intent outlives the agent.
+      expect(scene.pins["agent:gone"]).toBeDefined();
+      expect(scene.exclusions["agent:gone"]).toEqual(["team:web"]);
+    });
+
+    it("prunes when authority arrives later, without laying anything out again", () => {
+      seedScene();
+      useAgentRosterStore.setState({ status: "loading", session_ids: [] });
+      renderShown();
+      const settled = useGardenStore.getState().scene.positions["agent:a1"];
+      const rendersBefore = canvasRenders.count;
+      expect(useGardenStore.getState().scene.positions["agent:gone"]).toBeDefined();
+
+      act(() => {
+        useAgentRosterStore.setState({ status: "loaded", session_ids: ["a1", "a2"] });
+      });
+
+      const scene = useGardenStore.getState().scene;
+      expect(scene.positions["agent:gone"]).toBeUndefined();
+      expect(scene.positions["agent:a1"]).toEqual(settled);
+      // At most one render per store update (roster, then the pruned scene);
+      // a layout pass would add more.
+      expect(canvasRenders.count).toBeLessThanOrEqual(rendersBefore + 2);
+    });
   });
 
   it("restores and publishes the registered unit selection", () => {

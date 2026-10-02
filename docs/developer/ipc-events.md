@@ -329,7 +329,7 @@ down and rebuild its own watcher each time it fired.
 
 ### `agents-updated`
 
-Emitted whenever the global agent roster changes (spawned, renamed, killed). Signals the UI to refresh its list via `list_agents`.
+Emitted whenever the global agent roster changes (spawned, renamed, killed). Signals the UI to refresh its list via `list_agents`. Also emitted once when startup restoration finishes and `agent_roster_restored` becomes `true`, so every window takes one refresh that the backend vouches for as complete.
 
 ## AgentConfig Provider Config
 

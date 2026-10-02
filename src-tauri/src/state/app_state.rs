@@ -72,6 +72,9 @@ pub struct AppState {
     pub agents: Mutex<HashMap<String, ActiveAgent>>,
     pub system_metrics: Arc<Mutex<sysinfo::System>>,
     pub agent_order: Mutex<Vec<String>>,
+    // Set once startup restoration has published every saved agent. Until
+    // then `agents` holds only part of the roster; see `commands::agent_roster`.
+    pub agent_roster_restored: std::sync::atomic::AtomicBool,
     pub agent_name_reservations: Mutex<HashSet<String>>,
     pub agent_lifecycle_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub delivery_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -509,6 +512,7 @@ impl Default for AppState {
             agents: Mutex::new(HashMap::new()),
             system_metrics: Arc::new(Mutex::new(sys)),
             agent_order: Mutex::new(Vec::new()),
+            agent_roster_restored: std::sync::atomic::AtomicBool::new(false),
             agent_name_reservations: Mutex::new(HashSet::new()),
             agent_lifecycle_locks: Mutex::new(HashMap::new()),
             delivery_locks: Mutex::new(HashMap::new()),
