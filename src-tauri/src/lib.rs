@@ -1249,6 +1249,11 @@ pub fn run() {
         ) {
             let state = app_handle.state::<AppState>();
             tauri::async_runtime::block_on(async {
+                if let Err(error) = state.remote_listener.shutdown().await {
+                    crate::utils::logging::log_debug(&format!(
+                        "Remote gateway exit cleanup: {error}"
+                    ));
+                }
                 state.file_resources.close_all().await;
                 // Headless browsers are child processes; leaving them running
                 // after the app quits would strand them with no owner.
