@@ -1,3 +1,5 @@
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -196,6 +198,38 @@ describe('Rust dead-code gate', () => {
     expect(dead.map((item) => item.name).sort()).toEqual([
       'Shown', 'dead_private_caller', 'only_self', 'orphan', 'ping', 'pong', 'test_only',
     ]);
+  });
+
+  it('tells braced const-generic arguments from item bodies', () => {
+    const root = path.resolve('/ws/core/lib.rs');
+    const consumer = new Map([[path.resolve('/ws/app/main.rs'), analyze('fn main() { core::S::<1>; }')]]);
+    const library = new Map([[root, analyze([
+      'pub struct S<const N: usize>;',
+      'impl std::fmt::Display for S<{ 1 }> { fn fmt(&self) { helper() } }',
+      'fn helper() {}',
+      'pub struct Dead<const N: usize = { 1 }> { field: Field }',
+      'pub struct Field;',
+    ].join('\n'))]]);
+    const dead = unreachableItems(library, new Map([...library, ...consumer]));
+    expect(dead.map((item) => item.name).sort()).toEqual(['Dead', 'Field']);
+  });
+
+  it('refuses a linked file inside the copy', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'rust-deadcode-copy-'));
+    const outside = mkdtempSync(path.join(os.tmpdir(), 'rust-deadcode-outside-'));
+    try {
+      writeFileSync(path.join(outside, 'Cargo.toml'), 'outside');
+      try {
+        symlinkSync(path.join(outside, 'Cargo.toml'), path.join(root, 'Cargo.toml'), 'file');
+      } catch {
+        return; // Creating file links needs a privilege some Windows hosts lack.
+      }
+      expect(pathInsideCopy(root, 'Cargo.toml')).toBeUndefined();
+      expect(pathInsideCopy(root, 'src/lib.rs')).toBe(path.join(root, 'src', 'lib.rs'));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it('keeps every copy write and delete inside the copy', () => {

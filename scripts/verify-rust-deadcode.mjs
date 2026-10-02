@@ -34,7 +34,7 @@
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
@@ -218,6 +218,22 @@ function externalRoots(pkg, libName) {
  * leaves the copy). Every write and delete in the copy goes through this.
  */
 export function pathInsideCopy(copyRoot, file) {
+  const target = resolveInsideCopy(copyRoot, file);
+  // A link as the final component would redirect a write or a read; the
+  // copy never creates links, so refuse one outright.
+  if (target && isLink(target)) return undefined;
+  return target;
+}
+
+function isLink(file) {
+  try {
+    return lstatSync(file).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function resolveInsideCopy(copyRoot, file) {
   if (typeof file !== "string" || file.length === 0 || path.isAbsolute(file) || /^[A-Za-z]:/.test(file)) return undefined;
   const root = path.resolve(copyRoot);
   const target = path.resolve(root, file);
@@ -237,7 +253,8 @@ export function pathInsideCopy(copyRoot, file) {
 
 function syncCopy(copyRoot, files, transform) {
   mkdirSync(copyRoot, { recursive: true });
-  const ledgerPath = path.join(copyRoot, ".rust-deadcode-files.json");
+  const ledgerPath = pathInsideCopy(copyRoot, ".rust-deadcode-files.json");
+  if (!ledgerPath) throw new Error(`refusing to use a linked ledger in ${copyRoot}`);
   let previous = [];
   try {
     const parsed = existsSync(ledgerPath) ? JSON.parse(readFileSync(ledgerPath, "utf8")) : [];
@@ -262,7 +279,8 @@ function syncCopy(copyRoot, files, transform) {
   const keep = new Set(files);
   for (const file of previous) {
     if (keep.has(file)) continue;
-    const stale = pathInsideCopy(copyRoot, file);
+    // A stale link inside the copy is removed itself; rmSync never follows it.
+    const stale = resolveInsideCopy(copyRoot, file);
     if (stale) rmSync(stale, { force: true });
   }
   writeFileSync(ledgerPath, JSON.stringify(files));

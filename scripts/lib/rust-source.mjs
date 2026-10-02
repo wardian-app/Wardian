@@ -332,6 +332,24 @@ const ITEM_QUALIFIERS = new Set(["pub", "async", "unsafe", "default", "crate", "
  * End (exclusive) of the item, field, statement, or arm that starts at
  * `start`, skipping any further outer attributes first.
  */
+/** Angle-bracket depth after the token at `index` (`->` and `=>` are not brackets). */
+function trackAngles(tokens, index, depth) {
+  const value = tokens.values[index];
+  if (value === "<") return depth + 1;
+  if (value === ">" && tokens.values[index - 1] !== "-" && tokens.values[index - 1] !== "=") return Math.max(0, depth - 1);
+  return depth;
+}
+
+/**
+ * Whether the `{` at `index` opens an expression inside a header, such as a
+ * braced const-generic argument (`S<{ 1 }>`, `<const N: usize = { 1 }>`) or
+ * an initialiser (`= { .. };`), rather than the item's body.
+ */
+function isExpressionBrace(tokens, index, angles) {
+  const previous = tokens.values[index - 1];
+  return previous === "<" || previous === "=" || (previous === "," && angles > 0);
+}
+
 export function itemEnd(tokens, match, start, limit = tokens.count) {
   let cursor = start;
   while (cursor < limit && tokens.values[cursor] === "#" && tokens.values[cursor + 1] === "[" && match[cursor + 1] > 0) {
@@ -347,10 +365,12 @@ export function itemEnd(tokens, match, start, limit = tokens.count) {
     else break;
   }
   const commaEnds = !ITEM_KEYWORDS.has(tokens.values[probe]);
+  let angles = 0;
   for (let index = cursor; index < limit; index += 1) {
     if (tokens.kinds[index] !== PUNCT) continue;
     const value = tokens.values[index];
-    if (value === "(" || value === "[") {
+    angles = trackAngles(tokens, index, angles);
+    if (value === "(" || value === "[" || (value === "{" && isExpressionBrace(tokens, index, angles))) {
       if (match[index] < 0) return index;
       index = match[index];
     } else if (value === "{") {
@@ -641,16 +661,28 @@ export function definedItems(analysis) {
     if (values[index] === "impl" && (index === 0 || ITEM_BOUNDARY.has(values[index - 1]))) {
       let cursor = index + 1;
       let isTraitImpl = false;
-      while (cursor < tokens.count && values[cursor] !== "{" && values[cursor] !== ";") {
-        if ((values[cursor] === "(" || values[cursor] === "[") && match[cursor] > cursor) cursor = match[cursor];
-        else if (values[cursor] === "for" && kinds[cursor] === IDENT && values[cursor + 1] !== "<") isTraitImpl = true;
+      let angles = 0;
+      while (cursor < tokens.count && values[cursor] !== ";") {
+        angles = trackAngles(tokens, cursor, angles);
+        if (values[cursor] === "{" && !isExpressionBrace(tokens, cursor, angles)) break;
+        if ((values[cursor] === "(" || values[cursor] === "[" || values[cursor] === "{") && match[cursor] > cursor) {
+          cursor = match[cursor];
+        } else if (values[cursor] === "for" && kinds[cursor] === IDENT && values[cursor + 1] !== "<") {
+          isTraitImpl = true;
+        }
         cursor += 1;
       }
       implHeaders.push([index, cursor]);
       if (isTraitImpl && values[cursor] === "{" && match[cursor] > cursor) opaque.push([cursor, match[cursor] + 1]);
     } else if (values[index] === "trait" && kinds[index + 1] === IDENT) {
       let cursor = index + 2;
-      while (cursor < tokens.count && values[cursor] !== "{" && values[cursor] !== ";") cursor += 1;
+      let angles = 0;
+      while (cursor < tokens.count && values[cursor] !== ";") {
+        angles = trackAngles(tokens, cursor, angles);
+        if (values[cursor] === "{" && !isExpressionBrace(tokens, cursor, angles)) break;
+        if ((values[cursor] === "(" || values[cursor] === "[" || values[cursor] === "{") && match[cursor] > cursor) cursor = match[cursor];
+        cursor += 1;
+      }
       if (values[cursor] === "{" && match[cursor] > cursor) opaque.push([cursor, match[cursor] + 1]);
     }
   }
