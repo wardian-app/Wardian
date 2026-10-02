@@ -31,6 +31,12 @@ agent wait for its restoration to finish. Once a save succeeds, later resume
 actions use the saved settings, including the choice to start a fresh provider
 conversation. This also applies to paused agents.
 
+Interactive terminals use the same color capabilities when Wardian is opened
+manually or by automation. The first visible terminal fits an unowned session
+to its pane automatically, including when the session finishes restoring after
+the view opens. A second view of an already owned session remains a mirror of
+that owner's terminal geometry.
+
 ### Open an Agent from Another View
 
 When **Graph** or **Inbox** uses **Open Agent**, Wardian first

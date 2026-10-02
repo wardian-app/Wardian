@@ -567,9 +567,9 @@ test("remote gateway authenticates broker ownership transitions across desktop a
   assert.equal(result.agent.session_name, sessionName);
 
   await waitForWorkbenchReady(session.driver);
-  // Agents auto-owns an otherwise unowned runtime for click-free first paint.
-  // This test establishes its own explicit Agent Session desktop owner before
-  // handing the lease to the authenticated remote client.
+  // The first Agents or Agent Session view auto-owns an unowned runtime.
+  // Establish the desktop viewport before handing its lease to the
+  // authenticated remote client.
   await closeWorkbenchSurface(session.driver, "agents-overview");
   await openWorkbenchSurface(session.driver, "agent-session", sessionId);
   const desktopSurface = await waitFor("desktop agent presentation", 30000, async () => {
@@ -602,9 +602,11 @@ test("remote gateway authenticates broker ownership transitions across desktop a
         observed_lease_epoch: 0,
       },
     });
-    return { ok: value.presentation.presentation_id === desktopPresentationId, value };
+    return { ok: value.presentation.presentation_id === desktopPresentationId &&
+      value.broker_state.owner_presentation_id === desktopPresentationId &&
+      value.broker_state.pending_activation === null, value };
   });
-  assert.equal(desktopRegistered.value.broker_state.owner_presentation_id, null);
+  assert.equal(desktopRegistered.value.broker_state.owner_presentation_id, desktopPresentationId);
   assert.equal(desktopRegistered.value.broker_state.pending_activation, null);
 
   const desktopBegin = await invokeTauri(session.driver, "begin_terminal_activation", {

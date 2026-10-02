@@ -32,7 +32,7 @@ pub struct ActiveAgent {
     pub log_path: Arc<Mutex<Option<PathBuf>>>,
     pub log_last_modified: Arc<Mutex<Option<std::time::SystemTime>>>,
     #[cfg(windows)]
-    pub job_object: Option<win32job::Job>,
+    pub job_object: Option<crate::utils::process::RuntimeProcessJob>,
 }
 
 impl Drop for ActiveAgent {
@@ -44,7 +44,12 @@ impl Drop for ActiveAgent {
         // needed on Windows where ConPTY doesn't propagate termination.
         #[cfg(windows)]
         {
-            if let Some(pid) = self.process_id.take() {
+            if let Some(pid) = self.process_id.take().filter(|_| {
+                !self
+                    .job_object
+                    .as_ref()
+                    .is_some_and(|job| job.contained_from_launch())
+            }) {
                 let _ = crate::utils::process::force_kill_process_tree(pid);
             }
         }

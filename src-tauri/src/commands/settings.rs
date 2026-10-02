@@ -605,7 +605,7 @@ pub fn get_update_eligibility() -> UpdateEligibility {
 
 #[tauri::command]
 pub fn restart_app(app: tauri::AppHandle) {
-    app.restart();
+    app.request_restart();
 }
 
 pub fn update_plugins_enabled_for_current_build() -> bool {
@@ -696,7 +696,8 @@ async fn install_update_with_windows_handoff_impl(
     let installer_path = windows_update_installer_path(&update.version);
     write_windows_update_installer(&installer_path, &bytes)?;
     spawn_windows_update_handoff(std::process::id(), &installer_path)?;
-    std::process::exit(0);
+    app.exit(0);
+    Ok(())
 }
 
 #[tauri::command]
