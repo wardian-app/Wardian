@@ -378,6 +378,17 @@ pub fn run() {
     }
 
     crate::utils::fs::ensure_process_wardian_home_env();
+    let _desktop_owner = match crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| "Could not resolve Wardian home".to_string())
+        .and_then(|home| crate::utils::desktop_owner::DesktopOwner::acquire(&home))
+    {
+        Ok(owner) => owner,
+        Err(error) => {
+            eprintln!("Wardian desktop startup withheld: {error}");
+            crate::utils::logging::log_debug(&format!("Wardian desktop startup withheld: {error}"));
+            return;
+        }
+    };
     crate::utils::runtime_profile::start_reporter();
 
     crate::utils::migration::migrate_home_layout();
@@ -724,13 +735,13 @@ pub fn run() {
                             // restored provider watcher starts. This includes
                             // saved-Off agents, whose normal runtime has no
                             // Claude watcher to scan the per-agent outbox.
-                            let startup_configs = pending_spawns
+                            let startup_publications = pending_spawns
                                 .iter()
-                                .map(|(_, _, config, _)| config.clone())
+                                .map(|(publication, _, _, _)| publication)
                                 .collect::<Vec<_>>();
                             manager::replay_claude_completion_outboxes(
                                 &app_handle,
-                                &startup_configs,
+                                &startup_publications,
                             )
                             .await;
 
@@ -1249,6 +1260,11 @@ pub fn run() {
         ) {
             let state = app_handle.state::<AppState>();
             tauri::async_runtime::block_on(async {
+                if let Err(error) = state.remote_listener.shutdown().await {
+                    crate::utils::logging::log_debug(&format!(
+                        "Remote gateway exit cleanup: {error}"
+                    ));
+                }
                 state.file_resources.close_all().await;
                 // Headless browsers are child processes; leaving them running
                 // after the app quits would strand them with no owner.

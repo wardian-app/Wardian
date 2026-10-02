@@ -5,6 +5,116 @@ use std::task::Poll;
 use tauri::Manager;
 use wardian_core::models::{AgentConfig, AgentSessionPersistenceOverride, ProviderConfig};
 
+#[tokio::test(flavor = "current_thread")]
+async fn startup_replays_pending_claude_completions_while_restore_claims_remain_held() {
+    let _environment = crate::utils::wardian_test_env_lock_async().await;
+    let home = TestHome::new();
+    let app = tauri::test::mock_app();
+    app.manage(AppState::new());
+    let state = app.state::<AppState>();
+    let mut configs = Vec::new();
+    let mut publications = Vec::new();
+    let mut outboxes = Vec::new();
+    for is_off in [false, true] {
+        let config = AgentConfig {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            session_name: format!("claude-{is_off}"),
+            provider: "claude".into(),
+            resume_session: Some(uuid::Uuid::new_v4().to_string()),
+            is_off,
+            ..Default::default()
+        };
+        let publication = RestorePublication::begin(&state, &config.session_id)
+            .await
+            .expect("restore claim");
+        publication
+            .publish(
+                &state,
+                crate::restored_agent_without_process(
+                    config.clone(),
+                    "Restoring",
+                    String::new(),
+                    None,
+                    None,
+                ),
+            )
+            .await;
+        let directory = home
+            .directory
+            .path()
+            .join("agents")
+            .join(&config.session_id)
+            .join("claude/turn-completions");
+        std::fs::create_dir_all(&directory).unwrap();
+        let event = serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": config.resume_session,
+            "prompt_id": uuid::Uuid::new_v4().to_string(),
+            "last_assistant_message": "completion survived an interrupted shutdown",
+        });
+        let path = directory.join("pending.json");
+        std::fs::write(&path, serde_json::to_vec(&event).unwrap()).unwrap();
+        outboxes.push((path, event));
+        configs.push(config);
+        publications.push(publication);
+    }
+    // Startup owns every lifecycle claim until provider publication. Replay
+    // must not acquire a claim again before the provider-spawn pass can run.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        crate::manager::replay_claude_completion_outboxes(
+            app.handle(),
+            &publications.iter().collect::<Vec<_>>(),
+        ),
+    )
+    .await
+    .expect("pending completion replay must not deadlock startup");
+    let items = crate::utils::queue::load_items();
+    assert_eq!(items.len(), 2);
+    for (path, event) in &outboxes {
+        assert!(!path.exists(), "persisted completion must be acknowledged");
+        assert!(items
+            .iter()
+            .any(|item| item["evidence_id"] == event["prompt_id"]
+                && item["response_text"] == event["last_assistant_message"]));
+        // A repeated durable Stop event must not duplicate its Inbox item.
+        std::fs::write(path, serde_json::to_vec(event).unwrap()).unwrap();
+    }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        crate::manager::replay_claude_completion_outboxes(
+            app.handle(),
+            &publications.iter().collect::<Vec<_>>(),
+        ),
+    )
+    .await
+    .expect("duplicate completion replay must finish");
+    assert_eq!(crate::utils::queue::load_items(), items);
+    for (publication, config) in publications.into_iter().zip(configs) {
+        assert!(state
+            .try_lock_agent_lifecycle(&config.session_id)
+            .await
+            .is_none());
+        publication
+            .publish(
+                &state,
+                crate::restored_agent_without_process(
+                    config.clone(),
+                    if config.is_off { "Off" } else { "Starting" },
+                    String::new(),
+                    None,
+                    None,
+                ),
+            )
+            .await;
+        drop(publication);
+        assert!(state
+            .try_lock_agent_lifecycle(&config.session_id)
+            .await
+            .is_some());
+    }
+}
+
 #[tokio::test]
 async fn cancelled_startup_restore_publication_marks_spawn_failed_and_keeps_placeholder() {
     let state = std::sync::Arc::new(AppState::new());

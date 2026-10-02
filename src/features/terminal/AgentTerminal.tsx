@@ -3361,6 +3361,29 @@ export const AgentTerminal = memo(function AgentTerminal({
             }
             synchronizeReplacementGeometry();
             const lifecycle = presentationLifecycleRef.current;
+            if (autoActivateWhenUnowned && result.broker_state.owner_presentation_id === null &&
+                lifecycle.visibility === "visible" && lifecycle.renderState === "mounted" &&
+                lifecycle.requestedInteraction === "interactive") {
+              // A startup placeholder may register before its PTY exists. The
+              // registration retry must finish the same viewport/ownership
+              // handshake as an immediately available runtime.
+              invalidateRendererReveal();
+              void (async () => {
+                if (!terminalRef.current) return;
+                const dimensions = proposeTerminalDimensions(renderer, {
+                  container: terminalRef.current, useRenderedRowGeometry: false,
+                });
+                if (!dimensions) return;
+                await session.terminalClient.reportViewport(presentationId,
+                  Math.max(MIN_TERMINAL_COLS, dimensions.cols),
+                  Math.max(MIN_TERMINAL_ROWS, dimensions.rows));
+                if (!isMounted || session.disposed) return;
+                await session.terminalClient.activateWhenUnowned(presentationId);
+                if (isMounted && terminalRef.current) {
+                  await prepareRendererForReveal(session, terminalRef.current);
+                }
+              })().catch(error => console.warn("Failed to activate restored terminal", error));
+            }
             if (
               lifecycle.renderState === "mounted" &&
               result.presentation.requires_resync &&
@@ -3497,11 +3520,11 @@ export const AgentTerminal = memo(function AgentTerminal({
             lifecycleBeforeActivation.requestedInteraction === "interactive" &&
             currentBrokerState.owner_presentation_id === null
           ) {
-            const activation = await session.terminalClient.activate(presentationId);
+            const activation = await session.terminalClient.activateWhenUnowned(presentationId);
             if (!isMounted) {
               return;
             }
-            if (activation.ack) {
+            if (activation?.ack) {
               session.brokerState = activation.ack.broker_state;
               currentBrokerState = activation.ack.broker_state;
             }
@@ -3656,11 +3679,11 @@ export const AgentTerminal = memo(function AgentTerminal({
         requestedInteraction === "interactive" &&
         entry.brokerState.owner_presentation_id === null
       ) {
-        const activation = await entry.terminalClient.activate(presentationId);
+        const activation = await entry.terminalClient.activateWhenUnowned(presentationId);
         if (cancelled) {
           return;
         }
-        if (activation.ack) {
+        if (activation?.ack) {
           entry.brokerState = activation.ack.broker_state;
         }
       }

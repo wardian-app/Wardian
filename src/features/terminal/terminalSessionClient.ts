@@ -371,6 +371,16 @@ export class TerminalSessionClient {
     return this.#serialize(() => this.#activatePresentation(presentationId, binding));
   }
 
+  /** Claims a recovered startup runtime only if no presentation owns it when the queued work runs. */
+  async activateWhenUnowned(presentationId: string) {
+    const binding = this.#requiredPresentation(presentationId);
+    return this.#serialize(async () => {
+      const state = this.#requiredBrokerState();
+      if (state.owner_presentation_id !== null || state.pending_activation !== null) return null;
+      return this.#activatePresentation(presentationId, binding);
+    });
+  }
+
   async resyncOwner(presentationId: string) {
     const binding = this.#requiredPresentation(presentationId);
     return this.#serialize(async () => {
