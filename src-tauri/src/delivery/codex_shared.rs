@@ -28,6 +28,7 @@ mod owner;
 mod proxy;
 #[cfg(test)]
 mod startup_tests;
+mod stderr_capture;
 mod task_delivery;
 #[cfg(test)]
 pub(crate) mod test_support;
