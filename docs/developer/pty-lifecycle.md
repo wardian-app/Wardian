@@ -2,6 +2,18 @@
 
 Wardian is built to handle multiple simultaneous, long-running agent sessions with strict resource and process isolation.
 
+## Desktop ownership
+
+Before changing home state or restoring providers, the desktop retains an
+exclusive OS lock at `<wardian-home>/runtime/desktop-owner.lock`. A second
+cooperating desktop using the same home exits with a diagnostic. Quit the old
+desktop before launching its replacement, or use a distinct `WARDIAN_HOME` for
+an independent instance. CLI and headless execution still use conversation
+leases. Do not delete the lock file: a crash releases its OS lock automatically.
+Legacy versions without this protocol must be closed explicitly. This lock
+does not prove provider exit or release prior-provider holds. See
+[Desktop Home Ownership](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-10-02-desktop-home-ownership.md).
+
 ## 🌉 Cross-Platform PTY Layer
 Wardian utilizes the `portable-pty` crate to provide a consistent PTY interface across different operating systems.
 
@@ -12,6 +24,22 @@ Wardian utilizes the `portable-pty` crate to provide a consistent PTY interface 
 - **Master**: The control end of the PTY, used for reading output and writing input.
 - **Slave**: The application end, where the selected runtime shell hosts the provider command.
 
+### Launch-independent terminal presentation
+
+Interactive provider PTYs use Wardian's terminal capabilities, regardless of
+whether the desktop was started by a user or an automation shell. Wardian clears
+the launcher's `NO_COLOR`, `NODE_DISABLE_COLORS`, and `FORCE_COLOR` overrides before
+setting `TERM=xterm-256color` and `COLORTERM=truecolor`. Other provider environment
+values remain intact; explicit provider command-line options still apply.
+
+The first visible, mounted, interactive Agents or Workbench terminal claims an
+unowned runtime and reports its viewport before revealing it. A restored
+terminal repeats this handshake when registration initially precedes its PTY.
+Recovery reports the current pane dimensions before requesting ownership, and
+checks again when queued activation runs that no owner has appeared.
+Read-only, hidden, and suspended views stay passive,
+and a second view cannot automatically take an existing owner's lease.
+
 ## 🛡️ Process Integrity (Windows Job Objects)
 To prevent orphaned provider and console-host processes when Wardian crashes or is force-closed, the Windows implementation uses **Job Objects** via the `win32job` crate.
 
@@ -21,7 +49,15 @@ To prevent orphaned provider and console-host processes when Wardian crashes or 
 4. Provider shells, CLIs, ConPTY console hosts, and descendants inherit the job from process creation time.
 5. When the Wardian process terminates, the job object is closed by the OS, which automatically kills all processes assigned to it.
 
-Per-agent process-tree termination is still used for normal UI actions such as kill, pause, resume, and clear. Per-agent Job Objects are only a fallback if app-level supervision cannot be installed, because post-spawn assignment is inherently less reliable than inheriting the app-level job at creation time.
+New Windows Claude PTY runtimes also have a dedicated non-breakaway job. Their
+main thread is suspended until assignment succeeds, closing the post-launch
+descendant race. Fresh resume and clear reject new job members, retain and join
+the current members' handles, and verify the direct child and empty job before
+releasing their newly created prior-session hold. Other
+providers continue to use process-tree termination, with per-agent fallback
+jobs if app-level supervision cannot be installed. Legacy runtimes do not gain
+an exit receipt from post-launch assignment. See
+[Verified Windows Claude Process Stop](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-10-02-claude-process-containment.md).
 
 At startup, Wardian restores an agent as headless only while an unexpired background execution lease protects its conversation. Before starting an interactive provider process, it checks persisted leases under the cross-process lease lock and acquires a lifecycle transition lease. In particular, Codex's app-server owner starts before its PTY child, so the candidate scan must finish before that owner starts; a later scan would mistake Wardian's own owner for a duplicate. For a Codex provider process with a valid `WARDIAN_SESSION_ID`, that explicit identity takes precedence over incidental agent IDs in its launch arguments, while an explicit resume of another session still counts as a candidate. Unmarked or malformed processes use the conservative command-line fallback. Unreadable or semantically invalid lease data blocks that spawn until inspected. A persisted headless status or `WARDIAN_SESSION_ID` marker alone does not establish a live provider: descendants such as a marked Python server must not prevent restore.
 

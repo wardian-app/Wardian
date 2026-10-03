@@ -15,10 +15,12 @@ use std::{mem, ptr};
 use winapi::shared::minwindef::DWORD;
 use winapi::shared::winerror::{HRESULT, S_OK};
 use winapi::um::handleapi::*;
+use winapi::um::jobapi2::AssignProcessToJobObject;
 use winapi::um::processthreadsapi::*;
+use winapi::um::synchapi::WaitForSingleObject;
 use winapi::um::winbase::{
-    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, STARTF_USESHOWWINDOW,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
+    STARTF_USESHOWWINDOW, STARTF_USESTDHANDLES, STARTUPINFOEXW, WAIT_OBJECT_0,
 };
 use winapi::um::wincon::COORD;
 use winapi::um::winnt::HANDLE;
@@ -34,6 +36,19 @@ pub const PSEUDOCONSOLE_PASSTHROUGH_MODE: DWORD = 0x8;
 
 fn conpty_child_process_creation_flags() -> DWORD {
     EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT
+}
+
+fn stop_failed_suspended_launch(process: HANDLE) -> String {
+    if unsafe { TerminateProcess(process, 1) } == 0 {
+        return format!(
+            "; suspended-child termination failed: {}",
+            IoError::last_os_error()
+        );
+    }
+    if unsafe { WaitForSingleObject(process, 5000) } != WAIT_OBJECT_0 {
+        return "; suspended-child exit was not observed".into();
+    }
+    String::new()
 }
 
 shared_library!(ConPtyFuncs,
@@ -76,10 +91,7 @@ fn bundled_conpty_path_from_exe_dir(exe_dir: &Path) -> PathBuf {
 }
 
 fn bundled_openconsole_path_from_exe_dir(exe_dir: &Path) -> PathBuf {
-    exe_dir
-        .join("conpty")
-        .join("x64")
-        .join("OpenConsole.exe")
+    exe_dir.join("conpty").join("x64").join("OpenConsole.exe")
 }
 
 fn load_conpty() -> ConPtyLoad {
@@ -243,7 +255,12 @@ impl PsuedoCon {
                 ptr::null_mut(),
                 ptr::null_mut(),
                 0,
-                conpty_child_process_creation_flags(),
+                conpty_child_process_creation_flags()
+                    | if cmd.windows_job.is_some() {
+                        CREATE_SUSPENDED
+                    } else {
+                        0
+                    },
                 cmd.environment_block().as_mut_slice().as_mut_ptr() as *mut _,
                 cwd.as_ref()
                     .map(|c| c.as_slice().as_ptr())
@@ -266,8 +283,26 @@ impl PsuedoCon {
 
         // Make sure we close out the thread handle so we don't leak it;
         // we do this simply by making it owned
-        let _main_thread = unsafe { OwnedHandle::from_raw_handle(pi.hThread as _) };
+        let main_thread = unsafe { OwnedHandle::from_raw_handle(pi.hThread as _) };
         let proc = unsafe { OwnedHandle::from_raw_handle(pi.hProcess as _) };
+
+        if let Some(job) = cmd.windows_job.as_ref() {
+            // The child cannot create descendants until assignment succeeds.
+            // Failure terminates the suspended child; never resume uncontained.
+            let assigned =
+                unsafe { AssignProcessToJobObject(job.0.as_raw_handle() as _, pi.hProcess) };
+            let assignment_error = (assigned == 0).then(IoError::last_os_error);
+            if let Some(error) = assignment_error {
+                let cleanup = stop_failed_suspended_launch(pi.hProcess);
+                bail!("PTY job assignment failed: {}{}", error, cleanup);
+            }
+            if unsafe { ResumeThread(pi.hThread) } == u32::MAX {
+                let error = IoError::last_os_error();
+                let cleanup = stop_failed_suspended_launch(pi.hProcess);
+                bail!("PTY thread resume failed: {}{}", error, cleanup);
+            }
+        }
+        drop(main_thread);
 
         Ok(WinChild {
             proc: Mutex::new(proc),

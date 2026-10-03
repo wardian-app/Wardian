@@ -4,6 +4,26 @@ The authenticated remote API is served by `src-tauri/src/remote/gateway.rs`.
 Handlers return machine-readable error codes while keeping internal errors out
 of remote responses.
 
+## Listener ownership and shutdown
+
+The desktop runtime owns one `RemoteListener`. Startup and settings persistence
+share a configuration gate; repeated saves of the same running configuration
+reuse its listener. Changed settings stop and join the previous server before
+binding the replacement. Disabling remote access also stops the listener.
+Settings saves await binding and return an error if another process owns the
+port. Wardian never kills or adopts an unrelated port owner.
+
+Exit fences late listener starts, requests graceful server shutdown, and joins
+the listener task. Shutdown allows two seconds for HTTP connections to drain,
+then aborts and joins the server task. Restart uses Tauri's `request_restart`,
+and the Windows installer handoff uses `exit`, so both run the exit cleanup hook
+before the process ends. The installer still waits for the old process to exit.
+An already running older Wardian must exit before a replacement can bind its
+port; this listener owner does not authorize cross-process termination.
+
+Backend tests bind real loopback sockets to verify repeated and concurrent
+saves, configuration replacement, disable, shutdown, and foreign-port refusal.
+
 ## Agent chat transcript errors
 
 `GET /remote/api/agents/{session_id}/chat` returns HTTP 400 when transcript

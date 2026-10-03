@@ -315,12 +315,6 @@ export * from "./remote";
 export * from "./files";
 export * from "./browser";
 
-export interface AgentOutputPayload {
-    session_id: string;
-    text: string;
-    stream: "stdout" | "stderr";
-}
-
 export interface AgentJsonEvent {
     session_id: string;
     data: unknown;

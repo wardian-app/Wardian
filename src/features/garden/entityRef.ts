@@ -87,7 +87,11 @@ export function entityKey(ref: EntityRef): string {
   return `${ref.kind}:${ref.id}`;
 }
 
-/** Inverse of `entityKey`. Returns null for malformed or unknown-kind keys. */
+/**
+ * Inverse of `entityKey`. Returns null for malformed or unknown-kind keys.
+ *
+ * @internal Test support, no production caller: Garden tests decode keys with it.
+ */
 export function parseEntityKey(key: string): { kind: EntityKind; id: string } | null {
   const separator = key.indexOf(":");
   if (separator <= 0) return null;
@@ -272,6 +276,8 @@ export function automationRef(blueprintId: string, entryPath?: string): EntityRe
  * Automations are the exception and are rejected here: they must be constructed
  * via `automationRef` so they collapse onto `Blueprint.id`. Returning null forces
  * the caller to resolve rather than silently minting a duplicate unit.
+ *
+ * @internal Test support, no production caller: Garden tests build fixtures with it.
  */
 export function libraryEntryRef(entryRef: string): EntityRef | null {
   const normalized = normalizeLibraryPath(entryRef);
@@ -298,7 +304,11 @@ export function libraryEntryRef(entryRef: string): EntityRef | null {
   }
 }
 
-/** Folders are identified by normalized absolute path — machine-local by nature. */
+/**
+ * Folders are identified by normalized absolute path — machine-local by nature.
+ *
+ * @internal Test support, no production caller: Garden tests build fixtures with it.
+ */
 export function folderRef(path: string): EntityRef | null {
   const normalized = normalizeEntityPath(path);
   if (!normalized) return null;

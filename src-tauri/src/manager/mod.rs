@@ -64,7 +64,17 @@ pub fn terminate_active_agent_process(agent: &mut ActiveAgent) {
     // etc.) become orphaned and taskkill /T can no longer enumerate them via parent PID.
     #[cfg(windows)]
     {
-        if let Some(pid) = agent.process_id {
+        if let Some(job) = agent
+            .job_object
+            .as_ref()
+            .filter(|job| job.contained_from_launch())
+        {
+            if let Err(error) = job.terminate() {
+                log_debug(&format!(
+                    "[Wardian] Contained provider stop failed: {error}"
+                ));
+            }
+        } else if let Some(pid) = agent.process_id {
             if let Err(err) = force_kill_process_tree(pid) {
                 let sid = agent.config.lock().unwrap().session_id.clone();
                 log_debug(&format!(
@@ -105,6 +115,49 @@ pub fn terminate_active_agent_process(agent: &mut ActiveAgent) {
 
     let _ = agent.memory_capability.take();
     agent.process_id = None;
+}
+
+/// Release a newly created prior-session hold only after exact runtime-tree
+/// exit is observed. Legacy and uncontained runtimes keep their durable fence.
+pub(crate) async fn terminate_rotated_agent_process(
+    agent: &mut ActiveAgent,
+    hold: Option<&wardian_core::conversation_lease::ConversationLeaseOwner>,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    if agent
+        .job_object
+        .as_ref()
+        .is_some_and(|job| job.contained_from_launch())
+        && agent.child_process.is_some()
+        && agent.background_processes.is_empty()
+    {
+        let job = agent.job_object.take().expect("contained job checked");
+        let mut child = agent.child_process.take().expect("child handle checked");
+        // The retained job and child handles are the only termination authority.
+        // Do not use a PID again after beginning stop or across an await.
+        agent.process_id = None;
+        agent.memory_capability.take();
+        clear_agent_interrupted(&agent.current_status);
+        match job.stop_and_join(child.as_mut()).await {
+            Ok(()) => {
+                if let Some(hold) = hold {
+                    wardian_core::conversation_lease::release_lease_owner_persisted(hold)?;
+                }
+                return Ok(());
+            }
+            Err(error) => {
+                log_debug(&format!(
+                    "[Wardian] Previous provider hold retained: {error}"
+                ));
+                // Dropping the job still requests tree termination, but failure
+                // or timeout is not an exit receipt and must retain the hold.
+                return Ok(());
+            }
+        }
+    }
+    let _ = hold;
+    terminate_active_agent_process(agent);
+    Ok(())
 }
 
 fn interrupted_status_arcs() -> &'static std::sync::Mutex<HashSet<usize>> {
@@ -896,15 +949,26 @@ fn active_claude_completion(
 /// Replays durable Claude Stop records before saved providers are launched.
 /// This covers intentionally Off agents, which have no process watcher to
 /// discover an outbox record left by an interrupted persistence attempt.
-pub(crate) async fn replay_claude_completion_outboxes(app: &AppHandle, configs: &[AgentConfig]) {
+/// Startup already holds each publication's lifecycle claim; replay borrows
+/// those claims and never tries to acquire the same non-reentrant gate again.
+pub(crate) async fn replay_claude_completion_outboxes<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    publications: &[&crate::startup_restore::RestorePublication],
+) {
     let Some(home) = get_wardian_home() else {
         return;
     };
     let state = app.state::<AppState>();
-    for saved_config in configs.iter().filter(|config| config.provider == "claude") {
+    for publication in publications {
+        let Some(config) = publication.current_config(&state).await else {
+            continue;
+        };
+        if config.provider != "claude" {
+            continue;
+        }
         let completion_dir = home
             .join("agents")
-            .join(&saved_config.session_id)
+            .join(&config.session_id)
             .join("claude")
             .join("turn-completions");
         let Ok(entries) = std::fs::read_dir(&completion_dir) else {
@@ -935,37 +999,19 @@ pub(crate) async fn replay_claude_completion_outboxes(app: &AppHandle, configs: 
                 continue;
             }
 
-            let lifecycle_guard = state.lock_agent_lifecycle(&saved_config.session_id).await;
-            let current_config = {
-                let agents = state.agents.lock().await;
-                agents
-                    .get(&saved_config.session_id)
-                    .and_then(|agent| agent.config.lock().ok().map(|config| config.clone()))
-            };
-            let Some(config) = current_config else {
-                drop(lifecycle_guard);
-                continue;
-            };
-            if config.provider != "claude" {
-                drop(lifecycle_guard);
-                continue;
-            }
             let accepted_sessions = claude::claude_accepted_sessions(&config);
             let session_matches = accepted_sessions.iter().any(|session_id| {
                 claude::claude_permission_hook_matches_session(&event, session_id)
             });
             if !session_matches {
-                drop(lifecycle_guard);
                 continue;
             }
             let Some(message) = claude_completion_message_for_config(&config, &event) else {
                 let _ = std::fs::rename(&outbox_path, outbox_path.with_extension("ignored"));
-                drop(lifecycle_guard);
                 log_debug("[Wardian] Ignored Claude Stop hook outbox record without prompt identity or assistant text during startup replay");
                 continue;
             };
             let Some(evidence_id) = message.turn_id.as_deref() else {
-                drop(lifecycle_guard);
                 continue;
             };
             let item_id = format!("agent-completed:{}:{evidence_id}", config.session_id);
@@ -990,7 +1036,6 @@ pub(crate) async fn replay_claude_completion_outboxes(app: &AppHandle, configs: 
                         config.session_id
                     ));
                     drop(queue_guard);
-                    drop(lifecycle_guard);
                     continue;
                 }
             }
@@ -1006,7 +1051,6 @@ pub(crate) async fn replay_claude_completion_outboxes(app: &AppHandle, configs: 
                 }
             }
             drop(queue_guard);
-            drop(lifecycle_guard);
             if active_item.is_some() {
                 let _ = app.emit("inbox-updated", ());
             }
@@ -1673,6 +1717,11 @@ pub(crate) fn interactive_provider_launch(
 }
 
 pub(crate) fn apply_terminal_identity_env(cmd: &mut CommandBuilder) {
+    // A real interactive PTY owns its color capabilities. Automation hosts'
+    // log-output preferences must not alter restored provider presentation.
+    for key in ["NO_COLOR", "NODE_DISABLE_COLORS", "FORCE_COLOR"] {
+        cmd.env_remove(key);
+    }
     cmd.env("COLORTERM", "truecolor");
     cmd.env("TERM", "xterm-256color");
     if let Some(home) = crate::utils::fs::get_wardian_home() {
@@ -2123,6 +2172,34 @@ mod tests {
             Some(value) => std::env::set_var("ComSpec", value),
             None => std::env::remove_var("ComSpec"),
         }
+    }
+
+    #[test]
+    fn terminal_identity_ignores_launcher_color_suppression() {
+        let mut cmd = CommandBuilder::new("provider");
+        cmd.env("NO_COLOR", "1");
+        cmd.env("NODE_DISABLE_COLORS", "1");
+        cmd.env("FORCE_COLOR", "0");
+        cmd.env("PROVIDER_TEST_SETTING", "preserved");
+        apply_terminal_identity_env(&mut cmd);
+        for key in ["NO_COLOR", "NODE_DISABLE_COLORS", "FORCE_COLOR"] {
+            assert!(
+                cmd.get_env(key).is_none(),
+                "launcher flag {key} leaked into interactive PTY"
+            );
+        }
+        assert_eq!(
+            cmd.get_env("TERM"),
+            Some(std::ffi::OsStr::new("xterm-256color"))
+        );
+        assert_eq!(
+            cmd.get_env("COLORTERM"),
+            Some(std::ffi::OsStr::new("truecolor"))
+        );
+        assert_eq!(
+            cmd.get_env("PROVIDER_TEST_SETTING"),
+            Some(std::ffi::OsStr::new("preserved"))
+        );
     }
 
     #[test]
@@ -2717,6 +2794,133 @@ mod tests {
             #[cfg(windows)]
             job_object: None,
         }
+    }
+
+    #[cfg(windows)]
+    #[derive(Debug)]
+    struct UnobservedChild {
+        child: Box<dyn portable_pty::Child + Send + Sync>,
+        fail_wait: bool,
+    }
+
+    #[cfg(windows)]
+    impl portable_pty::ChildKiller for UnobservedChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.child.kill()
+        }
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            self.child.clone_killer()
+        }
+    }
+    #[cfg(windows)]
+    impl portable_pty::Child for UnobservedChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            if self.fail_wait {
+                Err(std::io::Error::other("exit status unavailable"))
+            } else {
+                Ok(None)
+            }
+        }
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            self.child.wait()
+        }
+        fn process_id(&self) -> Option<u32> {
+            self.child.process_id()
+        }
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            self.child.as_raw_handle()
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn verified_claude_tree_stop_releases_only_the_exact_hold() {
+        use std::os::windows::io::AsRawHandle;
+        use wardian_core::conversation_lease::{
+            load_leases_checked, save_leases, ConversationLease,
+        };
+        let _env_guard = crate::utils::wardian_test_env_lock_async().await;
+        struct RestoreEnv(Option<std::ffi::OsString>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("WARDIAN_HOME", value),
+                    None => std::env::remove_var("WARDIAN_HOME"),
+                }
+            }
+        }
+        let _restore = RestoreEnv(std::env::var_os("WARDIAN_HOME"));
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let hold = ConversationLease {
+            agent_id: "test-agent".into(),
+            provider: "claude".into(),
+            resume_session: "old-session".into(),
+            owner_kind: "prior_provider_hold".into(),
+            owner_id: "prior-owner".into(),
+            acquisition_id: "first-acquisition".into(),
+            owner_node_id: None,
+            mode: "uncertain_previous_provider".into(),
+            started_at: "2026-10-02T00:00:00Z".into(),
+            heartbeat_at: "2026-10-02T00:00:00Z".into(),
+            expires_at: "9999-12-31T23:59:59Z".into(),
+        };
+        let mut later = hold.clone();
+        later.acquisition_id = "later-acquisition".into();
+        save_leases(&[hold.clone(), later.clone()]).unwrap();
+        let (job, child, _pair, descendant) =
+            crate::utils::process::test_contained_pty_tree(temp.path()).await;
+        let mut agent = test_active_agent("Idle");
+        {
+            let mut config = agent.config.lock().unwrap();
+            config.session_id = hold.agent_id.clone();
+            config.provider = "claude".into();
+            config.resume_session = Some(hold.resume_session.clone());
+        }
+        agent.process_id = child.process_id();
+        agent.child_process = Some(child);
+        agent.job_object = Some(job);
+        super::terminate_rotated_agent_process(&mut agent, Some(&hold.owner()))
+            .await
+            .unwrap();
+        assert_eq!(load_leases_checked().unwrap(), vec![later.clone()]);
+        assert_eq!(
+            unsafe {
+                winapi::um::synchapi::WaitForSingleObject(descendant.as_raw_handle() as _, 0)
+            },
+            winapi::um::winbase::WAIT_OBJECT_0
+        );
+        assert!(agent.child_process.is_none());
+        assert!(agent.process_id.is_none());
+        let _rebound = std::net::TcpListener::bind(_pair.listening_addr).unwrap();
+        // A job kill request with failed observation must not free the later
+        // acquisition, even though Windows was asked to stop its process tree.
+        for fail_wait in [true, false] {
+            let fixture = tempfile::tempdir().unwrap();
+            let (job, child, _pair, _descendant) =
+                crate::utils::process::test_contained_pty_tree(fixture.path()).await;
+            agent.process_id = child.process_id();
+            agent.child_process = Some(Box::new(UnobservedChild { child, fail_wait }));
+            agent.job_object = Some(job);
+            if fail_wait {
+                super::terminate_rotated_agent_process(&mut agent, Some(&later.owner()))
+                    .await
+                    .unwrap();
+            } else {
+                assert!(tokio::time::timeout(
+                    std::time::Duration::from_millis(25),
+                    super::terminate_rotated_agent_process(&mut agent, Some(&later.owner()))
+                )
+                .await
+                .is_err());
+            }
+            assert_eq!(load_leases_checked().unwrap(), vec![later.clone()]);
+        }
+        // A missing legacy runtime handle cannot produce an exit receipt.
+        super::terminate_rotated_agent_process(&mut agent, Some(&later.owner()))
+            .await
+            .unwrap();
+        assert_eq!(load_leases_checked().unwrap(), vec![later]);
     }
 
     #[test]

@@ -6,11 +6,13 @@ import { RING_ARRANGEMENT } from "./ringLattice";
 import {
   GARDEN_SCENE_SCHEMA,
   anchoredDistrict,
+  authoritativeLiveKeys,
   createScene,
   driftFor,
   excludeFromDistrict,
   markVisited,
   pinEntity,
+  pruneScene,
   recordPositions,
   resolvePin,
   reviveScene,
@@ -208,5 +210,94 @@ describe("reviveScene", () => {
     const revived = reviveScene(JSON.parse(JSON.stringify(stale)));
     expect(revived.needsRederive).toBe(true);
     expect(revived.scene.pins["agent:a1"]).toMatchObject({ dx: 9, dy: 9 });
+  });
+});
+
+describe("pruning", () => {
+  function sceneWithLiveAndDead() {
+    let scene = pinEntity(createScene(), "agent:dead", "team:hw", { x: 3, y: 4 }, { x: 0, y: 0 }, now);
+    scene = excludeFromDistrict(scene, "agent:dead", "team:web");
+    scene = recordPositions(
+      scene,
+      new Map([
+        ["agent:live", { x: 1, y: 2 }],
+        ["agent:dead", { x: 5, y: 6 }],
+      ]),
+      new Map([
+        ["agent:live", "team:hw"],
+        ["agent:dead", "team:hw"],
+      ]),
+    );
+    scene = markVisited(scene, "agent:live", now);
+    return markVisited(scene, "agent:dead", now);
+  }
+
+  it("drops derived state for dead keys and leaves live keys untouched", () => {
+    const scene = sceneWithLiveAndDead();
+    const pruned = pruneScene(scene, new Set(["agent:live"]));
+
+    expect(pruned.positions).toEqual({ "agent:live": { x: 1, y: 2 } });
+    expect(pruned.position_districts).toEqual({ "agent:live": "team:hw" });
+    expect(pruned.visited).toEqual({ "agent:live": now });
+  });
+
+  it("keeps pins and exclusions, which are user intent, by identity", () => {
+    // A deleted agent may come back. Identity matters too: the layout depends
+    // on pins and exclusions, so a new reference would lay the map out again.
+    const scene = sceneWithLiveAndDead();
+    const pruned = pruneScene(scene, new Set(["agent:live"]));
+
+    expect(pruned.pins).toBe(scene.pins);
+    expect(pruned.exclusions).toBe(scene.exclusions);
+    expect(pruned.pins["agent:dead"]).toBeDefined();
+    expect(pruned.exclusions["agent:dead"]).toEqual(["team:web"]);
+    expect(pruned.districts).toBe(scene.districts);
+  });
+
+  it("is idempotent, and returns the same scene when nothing is stale", () => {
+    const live = new Set(["agent:live"]);
+    const once = pruneScene(sceneWithLiveAndDead(), live);
+    expect(pruneScene(once, live)).toBe(once);
+  });
+
+  it("does not mutate the scene it was given", () => {
+    const scene = sceneWithLiveAndDead();
+    const before = JSON.parse(JSON.stringify(scene));
+    pruneScene(scene, new Set(["agent:live"]));
+    expect(scene).toEqual(before);
+  });
+});
+
+describe("authoritative live keys", () => {
+  const roster = { kind: "agent", status: "loaded" as const, ids: ["a1", "a2"], complete: true };
+
+  it("keys every id of every loaded, complete source", () => {
+    expect(authoritativeLiveKeys([
+      roster,
+      { kind: "automation", status: "loaded", ids: ["w1"], complete: true },
+    ])).toEqual(new Set(["agent:a1", "agent:a2", "automation:w1"]));
+  });
+
+  it.each([
+    ["unloaded", { ...roster, status: "unloaded" as const, ids: [] }],
+    ["loading", { ...roster, status: "loading" as const }],
+    ["failed", { ...roster, status: "failed" as const }],
+    ["partial", { ...roster, complete: false }],
+    ["empty", { ...roster, ids: [] }],
+  ])("refuses a %s source", (_label, source) => {
+    expect(authoritativeLiveKeys([source])).toBeNull();
+  });
+
+  it("refuses when any one source is not authoritative", () => {
+    // Pruning against the keys of the sources that did load would treat every
+    // entity of the one that did not as deleted.
+    expect(authoritativeLiveKeys([
+      roster,
+      { kind: "automation", status: "loading", ids: [], complete: true },
+    ])).toBeNull();
+  });
+
+  it("refuses when there are no sources at all", () => {
+    expect(authoritativeLiveKeys([])).toBeNull();
   });
 });

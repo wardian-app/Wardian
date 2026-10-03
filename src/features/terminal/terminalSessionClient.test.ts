@@ -137,6 +137,59 @@ describe("TerminalSessionClient", () => {
     await resetTerminalSessionClientsForTesting();
   });
 
+  it("does not automatically activate a recovered mirror over an existing owner", async () => {
+    const state = { ...brokerState(), owner_presentation_id: "pane-existing" };
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === "register_terminal_presentation") {
+        return { ...registeredResult("pane-recovered"), broker_state: state };
+      }
+      if (command === "subscribe_terminal_events") return { broker_state: state, initial_snapshot: snapshot() };
+      if (command === "read_terminal_events") return eventsBatch([], 0);
+      return undefined;
+    });
+    const client = terminalSessionClientFor("agent-1");
+    await client.registerPresentation(registration("pane-recovered"), {
+      applySnapshot: () => undefined, applyEvents: () => undefined,
+    });
+    expect(await client.activateWhenUnowned("pane-recovered")).toBeNull();
+    expect(tauri.invoke).not.toHaveBeenCalledWith("begin_terminal_activation", expect.anything());
+  });
+
+  it("lets only the first queued automatic activation claim an unowned runtime", async () => {
+    const state = { ...brokerState(), owner_presentation_id: null as string | null };
+    tauri.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      if (command === "register_terminal_presentation") {
+        return { ...registeredResult(request?.presentation_id ?? "missing"), broker_state: state };
+      }
+      if (command === "subscribe_terminal_events") return { broker_state: state, initial_snapshot: snapshot() };
+      if (command === "begin_terminal_activation") return {
+        decision: { status: "accepted", reason: null, runtime_generation: 1,
+          lease_epoch: 1, owner_presentation_id: null },
+        activation_id: "automatic-first", snapshot: snapshot(), sequence_barrier: 0,
+      };
+      if (command === "ack_terminal_activation") return {
+        decision: { status: "accepted", reason: null, runtime_generation: 1,
+          lease_epoch: 1, owner_presentation_id: request?.presentation_id },
+        broker_state: { ...state, lease_epoch: 1, owner_presentation_id: request?.presentation_id },
+        snapshot: snapshot(),
+      };
+      if (command === "read_terminal_events") return eventsBatch([], 0);
+      return undefined;
+    });
+    const client = terminalSessionClientFor("agent-1");
+    const callbacks = { applySnapshot: () => undefined, applyEvents: () => undefined };
+    await client.registerPresentation(registration("pane-first"), callbacks);
+    await client.registerPresentation(registration("pane-second"), callbacks);
+    const results = await Promise.all([
+      client.activateWhenUnowned("pane-first"), client.activateWhenUnowned("pane-second"),
+    ]);
+    expect(results[0]?.ack?.decision.status).toBe("accepted");
+    expect(results[1]).toBeNull();
+    expect(client.brokerState?.owner_presentation_id).toBe("pane-first");
+    expect(tauri.invoke.mock.calls.filter(([command]) => command === "begin_terminal_activation")).toHaveLength(1);
+  });
+
   it("shares exactly one desktop consumer across independent presentations", async () => {
     const snapshotsA: string[] = [];
     const snapshotsB: string[] = [];

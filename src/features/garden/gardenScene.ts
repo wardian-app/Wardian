@@ -31,6 +31,13 @@
  * active Wardian home. This module is deliberately I/O-free and fully
  * serializable so that lands as a storage swap rather than a rewrite; the
  * current caller still persists through the existing browser-side store.
+ *
+ * ## Pruning
+ *
+ * Derived state for entities that no longer exist is dropped when a layout pass
+ * is written back, and only against a live set every entity source has vouched
+ * for (`authoritativeLiveKeys`, `pruneScene`). User intent — pins and
+ * exclusions — is never pruned.
  */
 
 import type { GardenPosition } from "./garden.types";
@@ -314,6 +321,89 @@ export function markVisited(
   now: number = Date.now(),
 ): GardenScene {
   return { ...scene, visited: { ...scene.visited, [entityKey]: now } };
+}
+
+/** Load state of one source of Garden entities, as its owner reports it. */
+export type GardenEntitySourceStatus = "unloaded" | "loading" | "loaded" | "failed";
+
+/** One canonical source of the entities the layout places, e.g. the agent roster. */
+export interface GardenEntitySource {
+  /** Key prefix of the entities this source vouches for, e.g. `agent`. */
+  kind: string;
+  status: GardenEntitySourceStatus;
+  /** Every id the source returned on its last successful load. */
+  ids: readonly string[];
+  /**
+   * False when the source returned only part of its records: one page of a
+   * paginated listing, or a filtered view such as the active watchlist.
+   */
+  complete: boolean;
+}
+
+/**
+ * The set of entity keys that may be used to prune a scene, or null when there
+ * is no such set yet.
+ *
+ * Pruning deletes the warm-start position of every key it does not see, so the
+ * set it is given is a claim that *nothing else exists*. Only a source that has
+ * finished loading, succeeded, and returned all of its records can make that
+ * claim, and only when every source the layout draws from can make it at once.
+ * Anything less — a roster still loading at startup, a fetch that failed, one
+ * page of a listing, the watchlist-filtered agents the map happens to show —
+ * would discard the saved arrangement of everything it does not mention, which
+ * is the one failure that loses user-visible work.
+ *
+ * An empty result is refused as well. A source that reports success with no
+ * records cannot be told apart from one that answered before its own state had
+ * loaded, and the cost of waiting is only a few stale keys until something
+ * exists again.
+ */
+export function authoritativeLiveKeys(
+  sources: readonly GardenEntitySource[],
+): ReadonlySet<string> | null {
+  if (sources.length === 0) return null;
+  const keys = new Set<string>();
+  for (const source of sources) {
+    if (source.status !== "loaded" || !source.complete) return null;
+    for (const id of source.ids) keys.add(`${source.kind}:${id}`);
+  }
+  return keys.size > 0 ? keys : null;
+}
+
+/**
+ * Drop scene state for entities that no longer exist.
+ *
+ * Pins and exclusions are user intent and are kept — a deleted agent may come
+ * back, and silently discarding a placement is worse than carrying a few stale
+ * keys. Positions, their district frames, and visit timestamps are derived and
+ * are pruned.
+ *
+ * `liveKeys` must come from `authoritativeLiveKeys`; see there for why.
+ *
+ * Returns the same scene object when nothing is stale, so pruning is idempotent
+ * and an already-clean scene publishes no new reference. Pins and exclusions
+ * keep their identity either way: they are what the layout depends on, and
+ * pruning must never be the reason a live entity is laid out again.
+ */
+export function pruneScene(scene: GardenScene, liveKeys: ReadonlySet<string>): GardenScene {
+  const positions = keepLive(scene.positions, liveKeys);
+  const position_districts = keepLive(scene.position_districts, liveKeys);
+  const visited = keepLive(scene.visited, liveKeys);
+  if (
+    positions === scene.positions
+    && position_districts === scene.position_districts
+    && visited === scene.visited
+  ) {
+    return scene;
+  }
+  return { ...scene, positions, position_districts, visited };
+}
+
+/** The record restricted to live keys, or the record itself when all are live. */
+function keepLive<T>(record: Record<string, T>, liveKeys: ReadonlySet<string>): Record<string, T> {
+  const entries = Object.entries(record);
+  const live = entries.filter(([key]) => liveKeys.has(key));
+  return live.length === entries.length ? record : Object.fromEntries(live);
 }
 
 /**

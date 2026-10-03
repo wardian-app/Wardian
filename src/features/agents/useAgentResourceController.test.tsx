@@ -12,6 +12,7 @@ import type {
 } from "../../types";
 import { useAgentResourceController } from "./useAgentResourceController";
 import { useAgentTelemetryStore } from "./useAgentTelemetryStore";
+import { useAgentRosterStore } from "./useAgentRosterStore";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -56,6 +57,8 @@ type ListenerPayloads = {
 };
 
 let agents: AgentConfig[];
+/** What the backend answers to `agent_roster_restored`; a throwing value rejects. */
+let roster_restored: boolean | Error;
 let listeners: Map<keyof ListenerPayloads, EventCallback<unknown>>;
 let unlisteners: Map<keyof ListenerPayloads, ReturnType<typeof vi.fn>>;
 
@@ -88,6 +91,7 @@ beforeEach(() => {
   mockInvoke.mockReset();
   mockListen.mockReset();
   agents = [alpha, beta];
+  roster_restored = true;
   listeners = new Map();
   unlisteners = new Map();
   mockListen.mockImplementation((event, callback) => {
@@ -100,6 +104,9 @@ beforeEach(() => {
   mockInvoke.mockImplementation(async (command, args) => {
     const command_args = args as Record<string, unknown> | undefined;
     switch (command) {
+      case "agent_roster_restored":
+        if (roster_restored instanceof Error) throw roster_restored;
+        return roster_restored;
       case "list_agents":
         return agents;
       case "rename_agent":
@@ -485,7 +492,14 @@ describe("useAgentResourceController", () => {
     const first = new Promise<AgentConfig[]>((resolve) => {
       resolve_first = resolve;
     });
-    mockInvoke.mockImplementationOnce(() => first).mockResolvedValueOnce([beta]);
+    // Routed by command: each load first asks whether the backend roster is
+    // complete, so call order alone no longer identifies the list request.
+    let list_calls = 0;
+    mockInvoke.mockImplementation(async (command) => {
+      if (command !== "list_agents") return null;
+      list_calls += 1;
+      return list_calls === 1 ? first : [beta];
+    });
 
     const { result } = renderHook(() => useAgentResourceController());
     let first_refresh!: Promise<readonly AgentConfig[]>;
@@ -494,6 +508,7 @@ describe("useAgentResourceController", () => {
       first_refresh = result.current.refresh_agents();
       second_refresh = result.current.refresh_agents();
     });
+    await waitFor(() => expect(list_calls).toBe(1));
     expect(mockInvoke.mock.calls.filter(([command]) => command === "list_agents")).toHaveLength(1);
 
     await act(async () => {
@@ -503,6 +518,87 @@ describe("useAgentResourceController", () => {
     });
     expect(mockInvoke.mock.calls.filter(([command]) => command === "list_agents")).toHaveLength(2);
     expect(result.current.agents.map((agent) => agent.session_id)).toEqual(["agent-2"]);
+  });
+
+  it("vouches for the roster only once the backend has finished restoring it", async () => {
+    // Startup restoration publishes saved agents one at a time; a list taken
+    // before it finishes is a successful answer that is still missing agents.
+    roster_restored = false;
+    agents = [alpha];
+    const { result } = renderHook(() => useAgentResourceController());
+    await waitFor(() => expect(result.current.agents).toHaveLength(1));
+    expect(useAgentRosterStore.getState().status).toBe("loading");
+
+    roster_restored = true;
+    agents = [alpha, beta];
+    await act(async () => {
+      await result.current.refresh_agents();
+    });
+    expect(useAgentRosterStore.getState()).toEqual({
+      status: "loaded",
+      session_ids: ["agent-1", "agent-2"],
+    });
+  });
+
+  it("asks whether the roster is restored before listing, and only until it is", async () => {
+    const { result } = renderHook(() => useAgentResourceController());
+    await waitFor(() => expect(useAgentRosterStore.getState().status).toBe("loaded"));
+    await act(async () => {
+      await result.current.refresh_agents();
+    });
+    const commands = mockInvoke.mock.calls
+      .map(([command]) => command)
+      .filter((command) => command === "agent_roster_restored" || command === "list_agents");
+    // Read before the first list, never after it, and never again once true.
+    expect(commands).toEqual(["agent_roster_restored", "list_agents", "list_agents"]);
+  });
+
+  it("loads the roster without vouching for it when the restoration check fails", async () => {
+    roster_restored = new Error("command not available");
+    const { result } = renderHook(() => useAgentResourceController());
+    await waitFor(() => expect(result.current.agents).toHaveLength(2));
+    expect(useAgentRosterStore.getState().status).toBe("loading");
+  });
+
+  it("marks the roster failed when listing fails, even after it had loaded", async () => {
+    const reported = vi.fn();
+    const { result } = renderHook(() => useAgentResourceController({ on_error: reported }));
+    await waitFor(() => expect(useAgentRosterStore.getState().status).toBe("loaded"));
+
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "list_agents") throw new Error("backend unavailable");
+      return command === "agent_roster_restored" ? true : null;
+    });
+    await act(async () => {
+      await result.current.refresh_agents();
+    });
+    // The agents already shown stay shown; only their authority is withdrawn.
+    expect(result.current.agents).toHaveLength(2);
+    expect(useAgentRosterStore.getState().status).toBe("failed");
+    expect(reported).toHaveBeenCalledWith("list_agents", expect.any(Error));
+  });
+
+  it("starts each mount unloaded rather than inheriting a previous roster", async () => {
+    const first = renderHook(() => useAgentResourceController());
+    await waitFor(() => expect(useAgentRosterStore.getState().status).toBe("loaded"));
+    first.unmount();
+
+    let release!: (value: AgentConfig[]) => void;
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === "list_agents") return new Promise<AgentConfig[]>((resolve) => { release = resolve; });
+      return command === "agent_roster_restored" ? true : null;
+    });
+    renderHook(() => useAgentResourceController());
+    // In flight: the previous mount's roster must not count as this one's.
+    expect(useAgentRosterStore.getState().status).toBe("loading");
+    await waitFor(() => expect(release).toBeDefined());
+    await act(async () => {
+      release([beta]);
+    });
+    await waitFor(() => expect(useAgentRosterStore.getState()).toEqual({
+      status: "loaded",
+      session_ids: ["agent-2"],
+    }));
   });
 
   it("merges an authoritative agent config without reordering the shared roster", async () => {

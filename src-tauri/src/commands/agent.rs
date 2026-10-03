@@ -39,8 +39,8 @@ pub use settings::{
 mod provider_log_tests;
 mod removal;
 use agent_lifecycle::{
-    acquire_agent_lifecycle_guard, lock_agent_lifecycle, lock_rename_mutation, stop_native_owner,
-    stop_native_owner_with_before_capture, PendingRuntime,
+    acquire_agent_lifecycle_guard, hold_previous_provider_before_rotation, lock_agent_lifecycle,
+    lock_rename_mutation, stop_native_owner, stop_native_owner_with_before_capture, PendingRuntime,
 };
 use agent_naming::{
     generated_agent_name, persisted_agent_session_names, resolve_requested_spawn_session_name,
@@ -443,38 +443,6 @@ async fn acquire_agent_lifecycle_transition_lease_for_session(
 ) -> Result<wardian_core::conversation_lease::PersistedConversationLeaseGuard, String> {
     let config = lifecycle_config_for_session(state, session_id).await?;
     acquire_agent_lifecycle_transition_lease(&config, operation)
-}
-
-/// Preserve a possibly live old conversation before a fresh-session stop.
-/// No process-table observation here can prove provider exit, so the hold is
-/// durable and requires explicit repair after exit is verified.
-fn hold_previous_provider_before_rotation(
-    agent: &ActiveAgent,
-    lease: &wardian_core::conversation_lease::PersistedConversationLeaseGuard,
-) -> Result<Option<wardian_core::conversation_lease::ConversationLeaseOwner>, String> {
-    let config = agent.config.lock().unwrap().clone();
-    let Some(previous_session) = config
-        .resume_session
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return Ok(None);
-    };
-    if !agent_has_running_process(agent) {
-        return Ok(None);
-    }
-    let owner = wardian_core::conversation_lease::hold_previous_provider_session_persisted(
-        lease.owner(),
-        &config.session_id,
-        &config.provider,
-        previous_session,
-        &chrono::Utc::now().to_rfc3339(),
-    )?;
-    manager::log_debug(&format!(
-        "[WARDIAN] Prior provider session held pending verified exit for {}: acquisition {}",
-        config.session_id, owner.acquisition_id
-    ));
-    Ok(Some(owner))
 }
 
 struct PreparedAgentClear {
@@ -3173,15 +3141,20 @@ pub async fn resume_agent(
     }
     let pending = PendingRuntime::prepare(&config, &state.terminal_sessions)?;
     lifecycle_heartbeat.ensure_active("resume")?;
-    let mut old_runtime = {
+    let (mut old_runtime, previous_hold_owner) = {
         let mut agents = state.agents.lock().await;
         let agent = agents
             .get_mut(&session_id)
             .ok_or_else(|| format!("Agent {} not found", session_id))?;
-        if starts_fresh && !codex_stops_before_preflight {
-            hold_previous_provider_before_rotation(agent, &lifecycle_lease)?;
-        }
-        take_agent_runtime_for_termination(agent)
+        let previous_hold_owner = if starts_fresh && !codex_stops_before_preflight {
+            hold_previous_provider_before_rotation(agent, &lifecycle_lease)?
+        } else {
+            None
+        };
+        (
+            take_agent_runtime_for_termination(agent),
+            previous_hold_owner,
+        )
     };
     if let Some(runtime_generation) = old_runtime.runtime_generation {
         if let Err(error) = state
@@ -3194,7 +3167,8 @@ pub async fn resume_agent(
             ));
         }
     }
-    manager::terminate_active_agent_process(&mut old_runtime);
+    manager::terminate_rotated_agent_process(&mut old_runtime, previous_hold_owner.as_ref())
+        .await?;
     let mut publication_disposition = manager::SpawnPublicationDisposition::new();
     let unpublished_failure = publication_disposition.failure_signal();
     let mut new_active = match spawn_replacement_under_lifecycle_lease(
@@ -4101,7 +4075,11 @@ async fn clear_agent_session_inner(
             ));
         }
     }
-    manager::terminate_active_agent_process(&mut prepared.termination);
+    manager::terminate_rotated_agent_process(
+        &mut prepared.termination,
+        previous_hold_owner.as_ref(),
+    )
+    .await?;
 
     let _ = app.emit(
         "agent-terminal-cleared",

@@ -371,6 +371,16 @@ export class TerminalSessionClient {
     return this.#serialize(() => this.#activatePresentation(presentationId, binding));
   }
 
+  /** Claims a recovered startup runtime only if no presentation owns it when the queued work runs. */
+  async activateWhenUnowned(presentationId: string) {
+    const binding = this.#requiredPresentation(presentationId);
+    return this.#serialize(async () => {
+      const state = this.#requiredBrokerState();
+      if (state.owner_presentation_id !== null || state.pending_activation !== null) return null;
+      return this.#activatePresentation(presentationId, binding);
+    });
+  }
+
   async resyncOwner(presentationId: string) {
     const binding = this.#requiredPresentation(presentationId);
     return this.#serialize(async () => {
@@ -1353,6 +1363,7 @@ export function terminalSessionClientFor(sessionId: string) {
   return client;
 }
 
+/** @internal Test support, no production caller: resets module state between tests. */
 export async function resetTerminalSessionClientsForTesting() {
   const clients = Array.from(terminalSessionClients.values());
   terminalSessionClients.clear();
@@ -1364,6 +1375,7 @@ export async function resetTerminalSessionClientsForTesting() {
   await Promise.all(clients.map((client) => client.destroy()));
 }
 
+/** @internal Test support, no production caller: test seam exposing internals to terminalSessionClient tests. */
 export const __terminalSessionClientTesting = {
   MAX_BATCHES_PER_TURN,
   MAX_BYTES_PER_BATCH,

@@ -6,6 +6,376 @@ static APP_PROCESS_SUPERVISOR: OnceLock<AppProcessSupervisor> = OnceLock::new();
 #[cfg(windows)]
 static APP_PROCESS_SUPERVISOR_ERROR: OnceLock<String> = OnceLock::new();
 
+/// A retained job distinguishes containment established before the provider
+/// runs from the older best-effort, post-launch fallback assignment.
+#[cfg(windows)]
+pub struct RuntimeProcessJob {
+    job: win32job::Job,
+    contained_from_launch: bool,
+}
+
+#[cfg(all(test, windows))]
+pub(crate) struct TestPty {
+    pub(crate) listening_addr: std::net::SocketAddr,
+    pair: Option<portable_pty::PtyPair>,
+    reader: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(all(test, windows))]
+impl Drop for TestPty {
+    fn drop(&mut self) {
+        self.pair.take();
+        if let Some(reader) = self.reader.take() {
+            reader.join().unwrap();
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+pub(crate) async fn test_contained_pty_tree(
+    temp: &std::path::Path,
+) -> (
+    RuntimeProcessJob,
+    Box<dyn portable_pty::Child + Send + Sync>,
+    TestPty,
+    std::os::windows::io::OwnedHandle,
+) {
+    use std::os::windows::io::FromRawHandle;
+    let marker = temp.join("descendant-pid");
+    let port_marker = temp.join("descendant-port");
+    let pair = portable_pty::native_pty_system()
+        .openpty(portable_pty::PtySize::default())
+        .unwrap();
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let mut writer = pair.master.take_writer().unwrap();
+    let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = output.clone();
+    let reader = std::thread::spawn(move || {
+        let mut buf = [0; 4096];
+        let mut pending = Vec::new();
+        while let Ok(count) = reader.read(&mut buf) {
+            if count == 0 {
+                break;
+            }
+            let mut captured = captured.lock().unwrap();
+            captured.extend_from_slice(&buf[..count]);
+            if captured.len() > 4096 {
+                let excess = captured.len() - 4096;
+                captured.drain(..excess);
+            }
+            drop(captured);
+            pending.extend_from_slice(&buf[..count]);
+            if pending.windows(4).any(|bytes| bytes == b"\x1b[6n") {
+                use std::io::Write;
+                let _ = writer.write_all(b"\x1b[1;1R");
+                pending.clear();
+            } else if pending.len() > 8 {
+                let excess = pending.len() - 8;
+                pending.drain(..excess);
+            }
+        }
+    });
+    let mut pty = TestPty {
+        listening_addr: "127.0.0.1:0".parse().unwrap(),
+        pair: Some(pair),
+        reader: Some(reader),
+    };
+    let mut cmd = portable_pty::CommandBuilder::new("powershell.exe");
+    use base64::Engine;
+    let descendant_program = "$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0); $listener.Start(); [IO.File]::WriteAllText($env:WARDIAN_TEST_CHILD_PORT, [string]$listener.LocalEndpoint.Port); Start-Sleep -Seconds 120";
+    let encoded = base64::engine::general_purpose::STANDARD.encode(
+        descendant_program
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
+    cmd.args(["-NoProfile", "-Command", "$child = Start-Process -WindowStyle Hidden -FilePath powershell.exe -ArgumentList '-NoProfile', '-EncodedCommand', $env:WARDIAN_TEST_CHILD_PROGRAM -PassThru; [IO.File]::WriteAllText($env:WARDIAN_TEST_CHILD_PID, [string]$child.Id); Start-Sleep -Seconds 120"]);
+    cmd.env("WARDIAN_TEST_CHILD_PID", &marker);
+    cmd.env("WARDIAN_TEST_CHILD_PORT", &port_marker);
+    cmd.env("WARDIAN_TEST_CHILD_PROGRAM", encoded);
+    let job = RuntimeProcessJob::prepare(&mut cmd).unwrap();
+    let mut child = pty.pair.as_mut().unwrap().slave.spawn_command(cmd).unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    let pid: u32 = loop {
+        if let Some(pid) = std::fs::read_to_string(&marker)
+            .ok()
+            .and_then(|value| value.parse().ok())
+        {
+            break pid;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "descendant did not start: child={:?}, output={:?}",
+            child.try_wait(),
+            String::from_utf8_lossy(&output.lock().unwrap())
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    };
+    let handle = unsafe {
+        winapi::um::processthreadsapi::OpenProcess(
+            winapi::um::winnt::SYNCHRONIZE | winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid,
+        )
+    };
+    assert!(!handle.is_null());
+    let descendant = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle as _) };
+    let mut contained = 0;
+    assert_ne!(
+        unsafe {
+            winapi::um::jobapi::IsProcessInJob(handle, job.job.handle() as _, &mut contained)
+        },
+        0
+    );
+    assert_ne!(contained, 0);
+    assert!(job.active_processes().unwrap() >= 2);
+    loop {
+        if let Some(port) = std::fs::read_to_string(&port_marker)
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok())
+        {
+            pty.listening_addr.set_port(port);
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "descendant listener did not start"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    (job, child, pty, descendant)
+}
+
+#[cfg(windows)]
+impl RuntimeProcessJob {
+    pub(crate) fn fallback(job: win32job::Job) -> Self {
+        Self {
+            job,
+            contained_from_launch: false,
+        }
+    }
+
+    pub(crate) fn contained_from_launch(&self) -> bool {
+        self.contained_from_launch
+    }
+
+    /// Windows creates the PTY child suspended, assigns this non-breakaway job,
+    /// then resumes its thread. Assignment/resume failure fails the spawn.
+    pub(crate) fn prepare(cmd: &mut portable_pty::CommandBuilder) -> Result<Self, String> {
+        use std::os::windows::io::BorrowedHandle;
+        let job = create_kill_on_close_job("Claude runtime")?;
+        // SAFETY: job owns a valid handle throughout this call. The builder
+        // duplicates it, so no borrowed handle survives beyond this call.
+        let borrowed = unsafe { BorrowedHandle::borrow_raw(job.handle() as _) };
+        cmd.set_windows_job(borrowed)
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            job,
+            contained_from_launch: true,
+        })
+    }
+
+    /// Seal process creation, retain member handles, and wait for their kernel
+    /// termination as well as job emptiness. Cancellation drops the job, but produces
+    /// no receipt and therefore cannot release a persisted conversation hold.
+    pub(crate) async fn stop_and_join(
+        &self,
+        child: &mut (dyn portable_pty::Child + Send),
+    ) -> Result<(), String> {
+        if !self.contained_from_launch {
+            return Err("Provider tree was not contained before launch".into());
+        }
+        self.seal_process_creation()?;
+        let members = self.member_handles()?;
+        self.terminate()?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let child_exited = child
+                .try_wait()
+                .map_err(|error| error.to_string())?
+                .is_some();
+            use std::os::windows::io::AsRawHandle;
+            let mut members_exited = true;
+            for member in &members {
+                match unsafe {
+                    winapi::um::synchapi::WaitForSingleObject(member.as_raw_handle() as _, 0)
+                } {
+                    winapi::um::winbase::WAIT_OBJECT_0 => {}
+                    winapi::shared::winerror::WAIT_TIMEOUT => members_exited = false,
+                    _ => {
+                        return Err(format!(
+                            "Provider member wait failed: {}",
+                            std::io::Error::last_os_error()
+                        ))
+                    }
+                }
+            }
+            if child_exited && members_exited && self.active_processes()? == 0 {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("Provider tree exit was not verified before the deadline".into());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    fn seal_process_creation(&self) -> Result<(), String> {
+        use winapi::um::{
+            jobapi2::{QueryInformationJobObject, SetInformationJobObject},
+            winnt::{
+                JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+            },
+        };
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of_val(&limits) as u32;
+        if unsafe {
+            QueryInformationJobObject(
+                self.job.handle() as _,
+                JobObjectExtendedLimitInformation,
+                &mut limits as *mut _ as _,
+                size,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        limits.BasicLimitInformation.ActiveProcessLimit = 0;
+        if unsafe {
+            SetInformationJobObject(
+                self.job.handle() as _,
+                JobObjectExtendedLimitInformation,
+                &mut limits as *mut _ as _,
+                size,
+            )
+        } == 0
+        {
+            return Err(format!(
+                "Provider creation fence failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if unsafe {
+            QueryInformationJobObject(
+                self.job.handle() as _,
+                JobObjectExtendedLimitInformation,
+                &mut limits as *mut _ as _,
+                size,
+                std::ptr::null_mut(),
+            )
+        } == 0
+            || limits.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_ACTIVE_PROCESS == 0
+            || limits.BasicLimitInformation.ActiveProcessLimit != 0
+        {
+            return Err("Provider creation fence could not be verified".into());
+        }
+        Ok(())
+    }
+
+    fn member_handles(&self) -> Result<Vec<std::os::windows::io::OwnedHandle>, String> {
+        use std::os::windows::io::FromRawHandle;
+        use winapi::um::{
+            jobapi2::QueryInformationJobObject,
+            winnt::{JobObjectBasicProcessIdList, JOBOBJECT_BASIC_PROCESS_ID_LIST},
+        };
+        let mut capacity = 16usize;
+        loop {
+            // Pointer-sized storage provides alignment for the variable PID array.
+            let bytes = 8 + capacity * std::mem::size_of::<usize>();
+            let mut storage = vec![0usize; bytes.div_ceil(std::mem::size_of::<usize>())];
+            let list = storage.as_mut_ptr() as *mut JOBOBJECT_BASIC_PROCESS_ID_LIST;
+            let result = unsafe {
+                QueryInformationJobObject(
+                    self.job.handle() as _,
+                    JobObjectBasicProcessIdList,
+                    list as _,
+                    bytes as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            if result == 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(234) && capacity < 65536 {
+                    capacity = (capacity * 2)
+                        .max(unsafe { (*list).NumberOfAssignedProcesses } as usize)
+                        .min(65536);
+                    continue;
+                }
+                return Err(format!("Provider member enumeration failed: {error}"));
+            }
+            let count = unsafe { (*list).NumberOfProcessIdsInList } as usize;
+            if count > capacity || count != unsafe { (*list).NumberOfAssignedProcesses } as usize {
+                return Err("Provider member enumeration was incomplete".into());
+            }
+            let ids = unsafe { std::slice::from_raw_parts((*list).ProcessIdList.as_ptr(), count) };
+            let mut members = Vec::with_capacity(count);
+            for &pid in ids {
+                let pid = u32::try_from(pid).map_err(|_| "Invalid provider member PID")?;
+                let raw = unsafe {
+                    winapi::um::processthreadsapi::OpenProcess(
+                        winapi::um::winnt::SYNCHRONIZE
+                            | winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION,
+                        0,
+                        pid,
+                    )
+                };
+                if raw.is_null() {
+                    return Err(format!(
+                        "Provider member handle failed: {}",
+                        std::io::Error::last_os_error()
+                    ));
+                }
+                let member =
+                    unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(raw as _) };
+                let mut contained = 0;
+                if unsafe {
+                    winapi::um::jobapi::IsProcessInJob(raw, self.job.handle() as _, &mut contained)
+                } == 0
+                    || contained == 0
+                {
+                    return Err("Provider member identity could not be verified".into());
+                }
+                members.push(member);
+            }
+            return Ok(members);
+        }
+    }
+
+    pub(crate) fn terminate(&self) -> Result<(), String> {
+        if unsafe { winapi::um::jobapi2::TerminateJobObject(self.job.handle() as _, 1) } == 0 {
+            return Err(format!(
+                "Provider job termination failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+
+    fn active_processes(&self) -> Result<u32, String> {
+        use winapi::um::{
+            jobapi2::QueryInformationJobObject,
+            winnt::{JobObjectBasicAccountingInformation, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION},
+        };
+        let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            QueryInformationJobObject(
+                self.job.handle() as _,
+                JobObjectBasicAccountingInformation,
+                &mut info as *mut _ as _,
+                std::mem::size_of_val(&info) as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        if result == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(info.ActiveProcesses)
+    }
+}
+
 pub(crate) fn windows_create_no_window_flag() -> u32 {
     0x0800_0000
 }
@@ -663,6 +1033,91 @@ mod tests {
     };
 
     const SESSION_ID: &str = "019d331a-0500-7592-969f-8f437886f42b";
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn contained_pty_stop_joins_descendants_and_preserves_foreign_process() {
+        use std::os::windows::io::AsRawHandle;
+        let temp = tempfile::tempdir().unwrap();
+        let mut outside = new_silent_std_command("powershell.exe");
+        outside.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 120"]);
+        let mut outside = TestChildCleanup(outside.spawn().unwrap());
+        let (job, mut child, _pair, descendant) = super::test_contained_pty_tree(temp.path()).await;
+        job.stop_and_join(child.as_mut()).await.unwrap();
+        assert_eq!(job.active_processes().unwrap(), 0);
+        assert_eq!(
+            unsafe {
+                winapi::um::synchapi::WaitForSingleObject(descendant.as_raw_handle() as _, 0)
+            },
+            winapi::um::winbase::WAIT_OBJECT_0
+        );
+        assert!(outside.0.try_wait().unwrap().is_none());
+        let _rebound = std::net::TcpListener::bind(_pair.listening_addr).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn sealed_live_job_rejects_new_pty_members_before_execution() {
+        use std::os::windows::io::BorrowedHandle;
+        let temp = tempfile::tempdir().unwrap();
+        let (job, mut child, _pair, _descendant) =
+            super::test_contained_pty_tree(temp.path()).await;
+        job.seal_process_creation().unwrap();
+        assert!(job.active_processes().unwrap() >= 2);
+        let marker = temp.path().join("unexpected-new-member");
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize::default())
+            .unwrap();
+        let mut cmd = portable_pty::CommandBuilder::new("powershell.exe");
+        cmd.args([
+            "-NoProfile",
+            "-Command",
+            "[IO.File]::WriteAllText($env:WARDIAN_TEST_MARKER, 'unexpected')",
+        ]);
+        cmd.env("WARDIAN_TEST_MARKER", &marker);
+        // SAFETY: the retained job lives through spawn; the builder duplicates it.
+        cmd.set_windows_job(unsafe { BorrowedHandle::borrow_raw(job.job.handle() as _) })
+            .unwrap();
+        assert!(pair.slave.spawn_command(cmd).is_err());
+        assert!(!marker.exists());
+        job.stop_and_join(child.as_mut()).await.unwrap();
+    }
+
+    #[cfg(windows)]
+    struct TestChildCleanup(std::process::Child);
+    #[cfg(windows)]
+    impl Drop for TestChildCleanup {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_job_assignment_never_runs_the_pty_child() {
+        use std::os::windows::io::AsHandle;
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("unexpected-provider-start");
+        let invalid_job = std::fs::File::create(temp.path().join("file-not-job")).unwrap();
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize::default())
+            .unwrap();
+        let mut cmd = portable_pty::CommandBuilder::new("powershell.exe");
+        cmd.args([
+            "-NoProfile",
+            "-Command",
+            "[IO.File]::WriteAllText($env:WARDIAN_TEST_START_MARKER, 'started')",
+        ]);
+        cmd.env("WARDIAN_TEST_START_MARKER", &marker);
+        cmd.set_windows_job(invalid_job.as_handle()).unwrap();
+        let error = match pair.slave.spawn_command(cmd) {
+            Ok(_) => panic!("file cannot be a job"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("PTY job assignment failed"));
+        assert!(!marker.exists());
+    }
 
     #[test]
     fn identifies_provider_in_nested_windows_cmd_payload() {
