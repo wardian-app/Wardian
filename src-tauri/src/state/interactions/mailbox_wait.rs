@@ -133,6 +133,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn signal_after_subscription_survives_initial_snapshot_read() {
+        let state = InteractionState::default();
+        let mut receiver = state.subscribe_agent_mailbox("recipient").await;
+        let published = state.notify_agent_mailbox("recipient", false).await;
+
+        assert_eq!(*receiver.borrow(), published);
+        assert!(receiver.has_changed().unwrap());
+        assert_eq!(changed(&mut receiver).await, published);
+    }
+
+    #[tokio::test]
     async fn simultaneous_waiters_each_observe_the_same_signal() {
         let state = InteractionState::default();
         let mut first = state.subscribe_agent_mailbox("recipient").await;

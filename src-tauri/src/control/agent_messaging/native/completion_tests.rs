@@ -311,6 +311,26 @@ async fn receive(
     Ok(page)
 }
 
+async fn wait_agent(
+    state: &AppState,
+    recipient: &str,
+    timeout_ms: u64,
+) -> Result<bool, ControlError> {
+    let response = handle_in_state(
+        None,
+        state,
+        Request::WaitAgent {
+            timeout_ms: Some(timeout_ms),
+        },
+        origin(recipient),
+    )
+    .await?;
+    let Response::WaitAgent { timed_out } = response else {
+        panic!("wait-agent response")
+    };
+    Ok(timed_out)
+}
+
 /// With uncontended fixture locks and synchronous DB reads, the first Pending
 /// registers the actual mailbox/turn wait before the test publishes any event.
 async fn assert_pending<F: Future>(mut future: Pin<&mut F>) {
@@ -378,15 +398,17 @@ async fn automatic_final_wakes_concurrent_waiters_without_ack_or_timeout_settlem
             {
                 let first = receive(&fixture.state, REQUESTER, 60_000, None, None);
                 let second = receive(&fixture.state, REQUESTER, 60_000, None, None);
+                let waiter = wait_agent(&fixture.state, REQUESTER, 60_000);
                 let observer = observe_codex_task(
                     &fixture.state.interactions,
                     &fixture.client,
                     &binding,
                     WAIT,
                 );
-                tokio::pin!(first, second, observer);
+                tokio::pin!(first, second, waiter, observer);
                 assert_pending(first.as_mut()).await;
                 assert_pending(second.as_mut()).await;
+                assert_pending(waiter.as_mut()).await;
                 assert_pending(observer.as_mut()).await;
                 fixture
                     .peer
@@ -407,6 +429,7 @@ async fn automatic_final_wakes_concurrent_waiters_without_ack_or_timeout_settlem
                 assert_pending(observer.as_mut()).await;
                 assert_pending(first.as_mut()).await;
                 assert_pending(second.as_mut()).await;
+                assert_pending(waiter.as_mut()).await;
                 assert!(fixture
                     .state
                     .interactions
@@ -414,14 +437,20 @@ async fn automatic_final_wakes_concurrent_waiters_without_ack_or_timeout_settlem
                     .await
                     .is_none());
                 fixture.peer.complete(THREAD, "bound", FINAL).await;
-                let (observed, first, second) = tokio::join!(observer, first, second);
+                let (observed, first, second, timed_out) =
+                    tokio::join!(observer, first, second, waiter);
                 assert_eq!(observed.unwrap().1, FINAL);
+                assert!(!timed_out.unwrap(), "completion releases wait_agent");
                 let first = first.unwrap();
                 let second = second.unwrap();
                 assert_reply(&first, &binding.request_id, ReplyStatus::Done, FINAL);
                 assert_eq!(first.messages, second.messages);
                 assert_eq!(first.next_cursor, second.next_cursor);
                 assert_eq!(first.ack_cursor, second.ack_cursor);
+                assert!(
+                    !wait_agent(&fixture.state, REQUESTER, 60_000).await.unwrap(),
+                    "already available completion releases a later wait"
+                );
                 let replay = receive(&fixture.state, REQUESTER, 0, None, None)
                     .await
                     .unwrap();
@@ -466,8 +495,10 @@ async fn exact_completion_before_ack_is_available_to_late_coordinator_observer()
             let binding = fixture.task("early", true).await;
             {
                 let wait = receive(&fixture.state, REQUESTER, 60_000, None, None);
-                tokio::pin!(wait);
+                let mailbox_wait = wait_agent(&fixture.state, REQUESTER, 60_000);
+                tokio::pin!(wait, mailbox_wait);
                 assert_pending(wait.as_mut()).await;
+                assert_pending(mailbox_wait.as_mut()).await;
                 let observed = observe_codex_task(
                     &fixture.state.interactions,
                     &fixture.client,
@@ -685,8 +716,10 @@ async fn information_admission_wakes_existing_receive_without_starting_provider(
         Box::pin(async move {
             {
                 let wait = receive(&fixture.state, REQUESTER, 60_000, None, None);
-                tokio::pin!(wait);
+                let mailbox_wait = wait_agent(&fixture.state, REQUESTER, 60_000);
+                tokio::pin!(wait, mailbox_wait);
                 assert_pending(wait.as_mut()).await;
+                assert_pending(mailbox_wait.as_mut()).await;
                 let response = handle_in_state(
                     None,
                     &fixture.state,
@@ -702,7 +735,9 @@ async fn information_admission_wakes_existing_receive_without_starting_provider(
                 let Response::SendMessage { interaction_id, .. } = response else {
                     panic!("information response")
                 };
-                let page = wait.await.unwrap();
+                let (page, timed_out) = tokio::join!(wait, mailbox_wait);
+                let page = page.unwrap();
+                assert!(!timed_out.unwrap(), "information releases wait_agent");
                 assert!(!page.timed_out);
                 assert!(
                     page.wake_reason.is_none(),

@@ -62,6 +62,7 @@ fn validate_receipt(request: &AgentMessagingRequest, value: &serde_json::Value) 
             AgentMessagingRequest::ReceiveMessages { .. },
             AgentMessagingResponse::ReceiveMessages { .. },
         )
+        | (AgentMessagingRequest::WaitAgent { .. }, AgentMessagingResponse::WaitAgent { .. })
         | (AgentMessagingRequest::ListAgents, AgentMessagingResponse::ListAgents { .. })
         | (
             AgentMessagingRequest::InterruptAgent { .. },
