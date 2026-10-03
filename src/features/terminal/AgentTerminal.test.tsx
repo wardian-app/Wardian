@@ -4030,6 +4030,8 @@ describe("AgentTerminal scrollback", () => {
       pendingGeometry: false,
       snapshotStatus: "ready",
       allowPendingKeyboard: false,
+      geometrySettleEpoch: 0,
+      presentationBindingEpoch: 0,
       disposed: false,
       frameGeometry: { cols: 116, rows: 43 },
       frameGeneration: 1,
@@ -4097,6 +4099,8 @@ describe("AgentTerminal scrollback", () => {
       pendingGeometry: false,
       snapshotStatus: "ready",
       allowPendingKeyboard: false,
+      geometrySettleEpoch: 0,
+      presentationBindingEpoch: 0,
       disposed: false,
       frameGeometry: geometry,
       frameGeneration: 1,
@@ -4140,6 +4144,225 @@ describe("AgentTerminal scrollback", () => {
     expect(resize).toHaveBeenCalledTimes(1);
     expect(entry.pendingGeometry).toBe(false);
     expect(entry.snapshotStatus).toBe("ready");
+  });
+
+  it("keeps a prior pending transition recoverable after a rejected resize", async () => {
+    vi.useFakeTimers();
+    const resize = vi.fn().mockResolvedValue({ decision: { status: "rejected" } });
+    const requestPresentationSnapshot = vi.fn().mockResolvedValue(undefined);
+    const entry = ownerEntryForResize({ cols: 80, rows: 24 }, resize, {
+      pendingGeometry: true,
+      snapshotStatus: "pending",
+      terminalClient: {
+        reportViewport: vi.fn().mockResolvedValue(undefined),
+        resize,
+        requestPresentationSnapshot,
+      },
+    });
+
+    try {
+      await __terminalTesting.reportTerminalSize(entry, 116, 43);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(entry.snapshotStatus).toBe("pending");
+      expect(entry.pendingGeometry).toBe(true);
+      expect(requestPresentationSnapshot).toHaveBeenCalledWith(
+        "resize-owner",
+        expect.any(Function),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries transient geometry snapshot failures three times at most", async () => {
+    vi.useFakeTimers();
+    const resize = vi.fn().mockResolvedValue({
+      decision: { status: "accepted" },
+      geometry: { cols: 116, rows: 43 },
+      snapshot: null,
+    });
+    const requestPresentationSnapshot = vi.fn().mockRejectedValue(new Error("snapshot unavailable"));
+    const entry = ownerEntryForResize({ cols: 80, rows: 24 }, resize, {
+      terminalClient: {
+        reportViewport: vi.fn().mockResolvedValue(undefined),
+        resize,
+        requestPresentationSnapshot,
+      },
+    });
+
+    try {
+      await __terminalTesting.reportTerminalSize(entry, 116, 43);
+      await vi.advanceTimersByTimeAsync(1_750);
+
+      expect(requestPresentationSnapshot).toHaveBeenCalledTimes(3);
+      expect(entry.pendingGeometry).toBe(true);
+      expect(entry.snapshotStatus).toBe("pending");
+      expect(entry.allowPendingKeyboard).toBe(false);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("invalidates an in-flight geometry snapshot when the lease changes", async () => {
+    vi.useFakeTimers();
+    let firstShouldApplySnapshot: (() => boolean) | undefined;
+    let finishFirstSnapshot: (() => void) | undefined;
+    let secondShouldApplySnapshot: (() => boolean) | undefined;
+    const resize = vi.fn().mockResolvedValue({
+      decision: { status: "accepted" },
+      geometry: { cols: 116, rows: 43 },
+      snapshot: null,
+    });
+    const requestPresentationSnapshot = vi.fn()
+      .mockImplementationOnce((_presentationId: string, shouldApply: () => boolean) => {
+        firstShouldApplySnapshot = shouldApply;
+        return new Promise<void>((resolve) => {
+          finishFirstSnapshot = resolve;
+        });
+      })
+      .mockImplementationOnce((_presentationId: string, shouldApply: () => boolean) => {
+        secondShouldApplySnapshot = shouldApply;
+        return Promise.resolve(undefined);
+      });
+    const entry = ownerEntryForResize({ cols: 80, rows: 24 }, resize, {
+      terminalClient: {
+        reportViewport: vi.fn().mockResolvedValue(undefined),
+        resize,
+        requestPresentationSnapshot,
+      },
+    });
+
+    try {
+      await __terminalTesting.reportTerminalSize(entry, 116, 43);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(requestPresentationSnapshot).toHaveBeenCalledTimes(1);
+      expect(firstShouldApplySnapshot?.()).toBe(true);
+
+      __terminalTesting.setEntryBrokerState(entry, {
+        ...entry.brokerState!,
+        lease_epoch: entry.brokerState!.lease_epoch + 1,
+        owner_presentation_id: "another-owner",
+      });
+
+      expect(firstShouldApplySnapshot?.()).toBe(false);
+      finishFirstSnapshot?.();
+      await Promise.resolve();
+      expect(entry.pendingGeometry).toBe(true);
+      expect(entry.snapshotStatus).toBe("pending");
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(requestPresentationSnapshot).toHaveBeenCalledTimes(2);
+      expect(secondShouldApplySnapshot?.()).toBe(true);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("invalidates a quiet-settle snapshot when its presentation binding is replaced", async () => {
+    vi.useFakeTimers();
+    let shouldApplySnapshot: (() => boolean) | undefined;
+    let finishSnapshot: (() => void) | undefined;
+    const resize = vi.fn().mockResolvedValue({
+      decision: { status: "accepted" },
+      geometry: { cols: 116, rows: 43 },
+      snapshot: null,
+    });
+    const requestPresentationSnapshot = vi.fn((_presentationId: string, shouldApply: () => boolean) => {
+      shouldApplySnapshot = shouldApply;
+      return new Promise<void>((resolve) => {
+        finishSnapshot = resolve;
+      });
+    });
+    const entry = ownerEntryForResize({ cols: 80, rows: 24 }, resize, {
+      terminalClient: {
+        reportViewport: vi.fn().mockResolvedValue(undefined),
+        resize,
+        requestPresentationSnapshot,
+      },
+    });
+
+    try {
+      await __terminalTesting.reportTerminalSize(entry, 116, 43);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(shouldApplySnapshot?.()).toBe(true);
+
+      entry.presentationBindingEpoch += 1;
+      __terminalTesting.invalidateGeometrySettle(entry);
+
+      expect(shouldApplySnapshot?.()).toBe(false);
+      finishSnapshot?.();
+      await Promise.resolve();
+      expect(entry.pendingGeometry).toBe(true);
+      expect(entry.snapshotStatus).toBe("pending");
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a scheduled quiet-settle timer when its session is disposed", async () => {
+    vi.useFakeTimers();
+    const resize = vi.fn().mockResolvedValue({
+      decision: { status: "accepted" },
+      geometry: { cols: 116, rows: 43 },
+      snapshot: null,
+    });
+    const requestPresentationSnapshot = vi.fn().mockResolvedValue(undefined);
+    const entry = ownerEntryForResize({ cols: 80, rows: 24 }, resize, {
+      terminalClient: {
+        reportViewport: vi.fn().mockResolvedValue(undefined),
+        resize,
+        requestPresentationSnapshot,
+      },
+    });
+
+    try {
+      await __terminalTesting.reportTerminalSize(entry, 116, 43);
+      expect(entry.geometrySettleTimer).not.toBeNull();
+
+      entry.disposed = true;
+      __terminalTesting.cancelGeometrySettle(entry);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(requestPresentationSnapshot).not.toHaveBeenCalled();
+      expect(entry.geometrySettleTimer).toBeNull();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not roll back pending geometry when an in-flight rejected resize loses its lease", async () => {
+    vi.useFakeTimers();
+    let rejectResize: ((result: { decision: { status: "rejected" } }) => void) | undefined;
+    const resize = vi.fn(() => new Promise<{ decision: { status: "rejected" } }>((resolve) => {
+      rejectResize = resolve;
+    }));
+    const entry = ownerEntryForResize({ cols: 80, rows: 24 }, resize);
+
+    try {
+      const resizeOperation = __terminalTesting.reportTerminalSize(entry, 116, 43);
+      await Promise.resolve();
+      expect(resize).toHaveBeenCalledTimes(1);
+
+      __terminalTesting.setEntryBrokerState(entry, {
+        ...entry.brokerState!,
+        lease_epoch: entry.brokerState!.lease_epoch + 1,
+        owner_presentation_id: "another-owner",
+      });
+      rejectResize?.({ decision: { status: "rejected" } });
+      await resizeOperation;
+
+      expect(entry.pendingGeometry).toBe(true);
+      expect(entry.snapshotStatus).toBe("pending");
+      expect(entry.allowPendingKeyboard).toBe(false);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   it("still waits for a repaint when the broker commits a new geometry", async () => {
