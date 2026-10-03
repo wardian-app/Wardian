@@ -3131,8 +3131,12 @@ export const AgentTerminal = memo(function AgentTerminal({
     if (!sessionId || !terminalRef.current) {
       return;
     }
+    const existing = terminalSessionMap.get(terminalKey);
+    if (existing) {
+      // A reattached presentation owns its cached parser even when still suspended.
+      cancelRendererDisposal(existing);
+    }
     if (renderState !== "mounted") {
-      const existing = terminalSessionMap.get(terminalKey);
       if (existing?.renderer) {
         const renderer = existing.renderer;
         existing.renderer = null;
@@ -3142,13 +3146,15 @@ export const AgentTerminal = memo(function AgentTerminal({
       rendererEvictedRef.current = false;
       setRendererEvicted(false);
       invalidateRendererReveal();
-      return;
+      return () => {
+        const current = terminalSessionMap.get(terminalKey);
+        if (current && !current.disposed) {
+          // Suspended attachments skip renderer setup but still own this cached entry.
+          scheduleRendererDisposal(terminalKey);
+        }
+      };
     }
     if (visibility !== "visible") {
-      const existing = terminalSessionMap.get(terminalKey);
-      if (existing) {
-        cancelRendererDisposal(existing);
-      }
       invalidateRendererReveal();
       return;
     }
@@ -3590,7 +3596,6 @@ export const AgentTerminal = memo(function AgentTerminal({
       if (entry && !entry.disposed) {
         const lifecycle = presentationLifecycleRef.current;
         if (lifecycle.renderState !== "mounted") {
-          cancelRendererDisposal(entry);
           if (entry.renderer) {
             const renderer = entry.renderer;
             entry.renderer = null;
@@ -3599,9 +3604,10 @@ export const AgentTerminal = memo(function AgentTerminal({
           }
           rendererEvictedRef.current = false;
           markRendererReady(false);
-        } else {
-          scheduleRendererDisposal(terminalKey);
         }
+        // Suspension retires the renderer, while this grace period retains the
+        // parser for a quick remount of this presentation.
+        scheduleRendererDisposal(terminalKey);
       }
       if (entry && entry.titleHandlerRef.current === onTitleChangeRef.current) {
         entry.titleHandlerRef.current = undefined;
