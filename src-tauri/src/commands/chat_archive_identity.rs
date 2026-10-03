@@ -91,6 +91,62 @@ pub(crate) fn attach_native_legacy_aliases(
     }
 }
 
+/// Bridge pre-row-offset field identities only when a complete source snapshot
+/// proves that the legacy hash belongs to one eligible provider-log row.
+/// Claude uses raw-line identities and Codex user mirrors have occurrence-aware
+/// identities, so neither can use this field-hash bridge.
+pub(crate) fn attach_unique_legacy_row_aliases(
+    events: &mut [AgentChatEvent],
+    path: &Path,
+    complete: bool,
+) {
+    if !complete {
+        return;
+    }
+    let log_path = path.to_string_lossy();
+    let source_row = |event: &AgentChatEvent| {
+        event.metadata["provider_log"] == true
+            && event.metadata["log_path"].as_str() == Some(log_path.as_ref())
+            && !event.provider.eq_ignore_ascii_case("claude")
+            && event
+                .metadata
+                .get(PROVIDER_LOG_ROW_OFFSET_METADATA_KEY)
+                .and_then(Value::as_u64)
+                .is_some()
+    };
+    let eligible =
+        |event: &AgentChatEvent| source_row(event) && requires_provider_log_row_identity(event);
+
+    let mut counts = HashMap::<String, usize>::new();
+    for event in events.iter().filter(|event| source_row(event)) {
+        *counts
+            .entry(legacy_provider_log_event_id(event, path))
+            .or_default() += 1;
+    }
+
+    for event in events.iter_mut().filter(|event| eligible(event)) {
+        let legacy_id = legacy_provider_log_event_id(event, path);
+        if legacy_id == event.id || counts.get(&legacy_id) != Some(&1) {
+            continue;
+        }
+        let Some(metadata) = event.metadata.as_object_mut() else {
+            continue;
+        };
+        let aliases = metadata
+            .entry("legacy_event_ids")
+            .or_insert_with(|| serde_json::json!([]));
+        let Some(aliases) = aliases.as_array_mut() else {
+            continue;
+        };
+        if !aliases
+            .iter()
+            .any(|alias| alias.as_str() == Some(legacy_id.as_str()))
+        {
+            aliases.push(serde_json::json!(legacy_id));
+        }
+    }
+}
+
 pub(crate) fn stable_provider_log_event_id(event: &AgentChatEvent, path: &Path) -> String {
     with_provider_log_row_identity(event, stable_provider_log_event_id_inner(event, path))
 }
