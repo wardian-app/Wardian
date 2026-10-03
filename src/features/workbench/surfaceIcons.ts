@@ -58,7 +58,11 @@ export function surfaceIconForToken(icon: string): LucideIcon {
   return SURFACE_ICONS[icon] ?? AppWindow;
 }
 
-/** Icon tokens with an explicit glyph. Exported so the registry can be checked. */
+/**
+ * Icon tokens with an explicit glyph. Exported so the registry can be checked.
+ *
+ * @internal Test support, no production caller: surfaceIcons tests check registry coverage with it.
+ */
 export function mappedSurfaceIconTokens(): readonly string[] {
   return Object.keys(SURFACE_ICONS);
 }

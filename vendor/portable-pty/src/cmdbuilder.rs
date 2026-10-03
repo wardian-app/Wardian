@@ -207,9 +207,37 @@ pub struct CommandBuilder {
     #[cfg(unix)]
     pub(crate) umask: Option<libc::mode_t>,
     controlling_tty: bool,
+    #[cfg(windows)]
+    #[cfg_attr(feature = "serde_support", serde(skip))]
+    pub(crate) windows_job: Option<std::sync::Arc<WindowsJobHandle>>,
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+pub(crate) struct WindowsJobHandle(pub std::os::windows::io::OwnedHandle);
+
+#[cfg(windows)]
+impl PartialEq for WindowsJobHandle {
+    fn eq(&self, other: &Self) -> bool {
+        use std::os::windows::io::AsRawHandle;
+        self.0.as_raw_handle() == other.0.as_raw_handle()
+    }
 }
 
 impl CommandBuilder {
+    /// Contain a Windows PTY process before its main thread can run. The builder
+    /// duplicates the job handle and owns that duplicate through spawn. The job
+    /// must permit nested assignment when the parent already belongs to a job.
+    #[cfg(windows)]
+    pub fn set_windows_job(
+        &mut self,
+        job: std::os::windows::io::BorrowedHandle<'_>,
+    ) -> std::io::Result<()> {
+        self.windows_job = Some(std::sync::Arc::new(WindowsJobHandle(
+            job.try_clone_to_owned()?,
+        )));
+        Ok(())
+    }
     /// Create a new builder instance with argv\[0\] set to the specified
     /// program.
     pub fn new<S: AsRef<OsStr>>(program: S) -> Self {
@@ -220,6 +248,8 @@ impl CommandBuilder {
             #[cfg(unix)]
             umask: None,
             controlling_tty: true,
+            #[cfg(windows)]
+            windows_job: None,
         }
     }
 
@@ -232,6 +262,8 @@ impl CommandBuilder {
             #[cfg(unix)]
             umask: None,
             controlling_tty: true,
+            #[cfg(windows)]
+            windows_job: None,
         }
     }
 
@@ -259,6 +291,8 @@ impl CommandBuilder {
             #[cfg(unix)]
             umask: None,
             controlling_tty: true,
+            #[cfg(windows)]
+            windows_job: None,
         }
     }
 

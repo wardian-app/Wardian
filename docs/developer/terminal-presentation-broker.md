@@ -11,8 +11,10 @@ For each live terminal session:
 
 1. At most one presentation owns input and canonical PTY geometry.
 2. Every presentation consumes the same ordered output stream.
-3. Mount, focus, restore, viewport observation, and visibility changes never
-   acquire ownership implicitly.
+3. Registration, DOM focus, and viewport observation are lease-passive.
+   A visible interactive desktop terminal explicitly activates an unowned
+   runtime at startup or after deferred registration recovers; it cannot
+   automatically replace an existing owner.
 4. Mirrors never resize the PTY.
 5. Split, move, hide, suspend, and close affect presentations, not the runtime.
 6. Desktop and remote clients use the same generation, lease, snapshot,

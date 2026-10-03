@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import "./terminal-launch-parity-fixture.mjs";
 
 import {
   createNativeHarness,
@@ -354,7 +355,9 @@ test(
         mirror,
       };
     });
-    assert.equal(registered.mirror.broker_state.owner_presentation_id, null);
+    // The first interactive desktop view claims an unowned runtime at startup.
+    // Registering or focusing a second presentation cannot displace it.
+    assert.equal(registered.mirror.broker_state.owner_presentation_id, ownerPresentationId);
     assert.equal(registered.mirror.broker_state.pending_activation, null);
 
     await focusSurfaceTab(driver, "agent-session", wardianSessionId, { index: 0 });
@@ -374,7 +377,7 @@ test(
       runtimeGeneration,
       OWNER_GEOMETRY,
     );
-    assert.equal(passiveFocusState.broker_state.owner_presentation_id, null);
+    assert.equal(passiveFocusState.broker_state.owner_presentation_id, ownerPresentationId);
     assert.equal(passiveFocusState.broker_state.pending_activation, null);
 
     const consumerId = `desktop:${wardianSessionId}`;

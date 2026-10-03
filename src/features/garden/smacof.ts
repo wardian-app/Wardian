@@ -64,7 +64,11 @@ export const DRIFT_PINNED = Infinity;
 export const DRIFT_VISITED = 8.0;
 export const DRIFT_SETTLED = 1.0;
 export const DRIFT_NEW = 0.05;
-/** No drift at all — the node is free to go wherever the metric wants it. */
+/**
+ * No drift at all — the node is free to go wherever the metric wants it.
+ *
+ * @internal Test support, no production caller: tests use it for an unanchored layout.
+ */
 export const DRIFT_FREE = 0;
 
 /** World units per unit of semantic distance. */
@@ -406,6 +410,8 @@ export function runSmacof(
  *
  * The honest quality measure for a map: it says how far off the scale bar is.
  * Raw stress is scale-dependent and not comparable across districts.
+ *
+ * @internal Test support, no production caller: layout tests measure map quality with it.
  */
 export function distanceError(state: SmacofState): number {
   const internal = internals.get(state);
@@ -421,7 +427,11 @@ export function distanceError(state: SmacofState): number {
   return Math.sqrt(total / internal.pairI.length);
 }
 
-/** Largest displacement of any node between two layout passes, in world units. */
+/**
+ * Largest displacement of any node between two layout passes, in world units.
+ *
+ * @internal Test support, no production caller: layout tests check stability with it.
+ */
 export function maxDisplacement(
   before: ReadonlyMap<string, GardenPosition>,
   after: ReadonlyMap<string, GardenPosition>,

@@ -72,6 +72,9 @@ pub struct AppState {
     pub agents: Mutex<HashMap<String, ActiveAgent>>,
     pub system_metrics: Arc<Mutex<sysinfo::System>>,
     pub agent_order: Mutex<Vec<String>>,
+    // Set once startup restoration has published every saved agent. Until
+    // then `agents` holds only part of the roster; see `commands::agent_roster`.
+    pub agent_roster_restored: std::sync::atomic::AtomicBool,
     pub agent_name_reservations: Mutex<HashSet<String>>,
     pub agent_lifecycle_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub delivery_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -113,6 +116,10 @@ pub struct AppState {
     pub change_snapshots: ChangeSnapshotRuntime,
     // Live-only remote-control authentication and ticket records.
     pub remote_runtime: Mutex<crate::remote::models::RemoteRuntimeState>,
+    pub remote_listener: crate::remote::listener::RemoteListener,
+    /// Orders persisted settings and startup so an older startup snapshot
+    /// cannot reopen a listener after remote access was disabled.
+    pub remote_gateway_config_lock: Mutex<()>,
     // Last complete remote roster. The gateway uses this while a provider or
     // telemetry task temporarily owns a live agent snapshot lock.
     pub remote_agent_roster_cache: RwLock<Option<Vec<RemoteAgentSummary>>>,
@@ -509,6 +516,7 @@ impl Default for AppState {
             agents: Mutex::new(HashMap::new()),
             system_metrics: Arc::new(Mutex::new(sys)),
             agent_order: Mutex::new(Vec::new()),
+            agent_roster_restored: std::sync::atomic::AtomicBool::new(false),
             agent_name_reservations: Mutex::new(HashSet::new()),
             agent_lifecycle_locks: Mutex::new(HashMap::new()),
             delivery_locks: Mutex::new(HashMap::new()),
@@ -529,6 +537,8 @@ impl Default for AppState {
             clears_in_flight: Default::default(),
             change_snapshots: ChangeSnapshotRuntime::new(),
             remote_runtime: Mutex::new(crate::remote::models::RemoteRuntimeState::default()),
+            remote_listener: crate::remote::listener::RemoteListener::default(),
+            remote_gateway_config_lock: Mutex::new(()),
             remote_agent_roster_cache: RwLock::new(None),
             remote_agent_status_cache: RwLock::new(HashMap::new()),
             remote_inbox_runtime_cache: RwLock::new(None),
