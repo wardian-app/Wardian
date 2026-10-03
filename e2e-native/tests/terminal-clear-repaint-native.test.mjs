@@ -13,6 +13,9 @@ import {
   startNativeSession,
   waitForAppShell,
 } from "../lib/harness.mjs";
+import {
+  readTerminalDebugSnapshot,
+} from "../lib/terminal-debug.mjs";
 import { openWorkbenchSurface } from "../lib/workbench.mjs";
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
@@ -57,6 +60,19 @@ process.stdout.write(JSON.stringify({
   timestamp: new Date().toISOString(),
 }) + "\\n");
 process.stdout.write("quiet-start:" + providerSessionId + "\\r\\n");
+let pendingInput = "";
+process.stdin.on("data", (chunk) => {
+  pendingInput += chunk.toString();
+  let newline = pendingInput.search(/[\\r\\n]/);
+  while (newline >= 0) {
+    const line = pendingInput.slice(0, newline).trim();
+    pendingInput = pendingInput.slice(newline + 1);
+    if (line === "paint-bottom-prompt") {
+      process.stdout.write("\\x1b[999;1Hbottom-prompt>");
+    }
+    newline = pendingInput.search(/[\\r\\n]/);
+  }
+});
 setInterval(() => {}, 1000);
 process.stdin.resume();
 `, "utf8");
@@ -87,10 +103,28 @@ async function readTerminalState(driver, sessionId) {
   }, sessionId);
 }
 
-async function saveScreenshot(driver, name) {
+async function sendTerminalInput(driver, sessionId, presentationId, input) {
+  const snapshot = await readTerminalDebugSnapshot(driver, presentationId);
+  assert.equal(snapshot?.broker?.ownerPresentationId, presentationId, "Expected terminal input owner");
+  await invokeTauri(driver, "send_terminal_presentation_input", {
+    request: {
+      session_id: sessionId,
+      presentation_id: presentationId,
+      runtime_generation: snapshot.broker.runtimeGeneration,
+      lease_epoch: snapshot.broker.leaseEpoch,
+      input,
+    },
+  });
+}
+
+async function saveScreenshot(driver, sessionId, name) {
   if (!SCREENSHOT_DIR) return;
   fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
-  const png = await driver.takeScreenshot();
+  const host = await driver.findElement(By.css(
+    `[data-testid="agent-session-surface"][data-resource-key=${JSON.stringify(sessionId)}] `
+    + `[data-testid="agent-terminal-host"]`,
+  ));
+  const png = await host.takeScreenshot();
   fs.writeFileSync(path.join(SCREENSHOT_DIR, `${name}.png`), png, "base64");
 }
 
@@ -160,7 +194,14 @@ test(
       const state = await readTerminalState(driver, sessionId);
       return { ok: state.mode === "owner", state };
     });
-    await saveScreenshot(driver, "before-new-session");
+    const presentationId = await host.getAttribute("data-terminal-presentation-id");
+    assert.ok(presentationId, "Expected the Workbench terminal host to expose its presentation ID");
+    await sendTerminalInput(driver, sessionId, presentationId, "paint-bottom-prompt\r");
+    await waitFor("bottom prompt paint", 15000, async () => {
+      const snapshot = await readSnapshot();
+      return { ok: snapshot.visible_grid.includes("bottom-prompt>"), snapshot };
+    });
+    await saveScreenshot(driver, sessionId, "before-new-session");
 
     // A vertical-only resize gives an Ink-style provider nothing new to draw,
     // so it stays silent. The owner must still settle at the committed size.
@@ -170,7 +211,12 @@ test(
       afterResize = { state: await readTerminalState(driver, sessionId) };
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    await saveScreenshot(driver, "after-vertical-resize");
+    await saveScreenshot(driver, sessionId, "after-vertical-resize");
+    const resizedSnapshot = await readSnapshot();
+    assert.ok(
+      resizedSnapshot.visible_grid.includes("bottom-prompt>"),
+      `The bottom prompt must survive the native vertical resize: ${resizedSnapshot.visible_grid}`,
+    );
     assert.equal(
       afterResize.state.notice, null,
       `A silent provider must not leave the owner waiting for a repaint: ${JSON.stringify(afterResize.state)}`,
@@ -201,7 +247,7 @@ test(
       afterClear = { state };
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    await saveScreenshot(driver, "after-new-session");
+    await saveScreenshot(driver, sessionId, "after-new-session");
     assert.deepEqual(
       [...observedNotices], [],
       `New Session must not leave a repaint notice: ${JSON.stringify(afterClear.state)}`,
