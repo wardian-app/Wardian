@@ -23,9 +23,9 @@ afterEach(() => {
 });
 
 describe("RemoteInboxView", () => {
-  it("loads older Inbox items only after the mobile list is scrolled to its end", () => {
+  it("loads older remote Inbox items in 12-item batches as the list is scrolled", () => {
     useRemoteStore.setState({
-      remoteQueueItems: Array.from({ length: 120 }, (_, index) => ({
+      remoteQueueItems: Array.from({ length: 36 }, (_, index) => ({
         id: `remote-item-${index}`,
         type: "agent_completed" as const,
         timestamp: Date.now() - index,
@@ -37,8 +37,8 @@ describe("RemoteInboxView", () => {
 
     render(<RemoteInboxView />);
 
-    expect(screen.getByText("Agent 79")).toBeInTheDocument();
-    expect(screen.queryByText("Agent 80")).not.toBeInTheDocument();
+    expect(screen.getByText("Agent 11")).toBeInTheDocument();
+    expect(screen.queryByText("Agent 12")).not.toBeInTheDocument();
 
     const scrollRegion = screen.getByTestId("remote-inbox-scroll-region");
     Object.defineProperties(scrollRegion, {
@@ -48,7 +48,34 @@ describe("RemoteInboxView", () => {
     });
     fireEvent.scroll(scrollRegion);
 
-    expect(screen.getByText("Agent 119")).toBeInTheDocument();
+    expect(screen.getByText("Agent 23")).toBeInTheDocument();
+    expect(screen.queryByText("Agent 24")).not.toBeInTheDocument();
+  });
+
+  it("allows loading older items when the mobile list does not overflow", () => {
+    useRemoteStore.setState({
+      remoteQueueItems: Array.from({ length: 13 }, (_, index) => ({
+        id: `remote-item-${index}`,
+        type: "agent_completed" as const,
+        timestamp: Date.now() - index,
+        read: false,
+        agent_name: `Agent ${index}`,
+        summary: `Completed task ${index}.`,
+      })),
+    });
+
+    render(<RemoteInboxView />);
+
+    expect(screen.getByText("Agent 11")).toBeInTheDocument();
+    expect(screen.queryByText("Agent 12")).not.toBeInTheDocument();
+    const scrollRegion = screen.getByTestId("remote-inbox-scroll-region");
+    Object.defineProperties(scrollRegion, {
+      clientHeight: { configurable: true, value: 1000 },
+      scrollHeight: { configurable: true, value: 1000 },
+      scrollTop: { configurable: true, value: 0 },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Load older Inbox items" }));
+    expect(screen.getByText("Agent 12")).toBeInTheDocument();
   });
 
   it("collapses long summaries and opens the related agent", () => {

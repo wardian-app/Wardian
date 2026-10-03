@@ -357,7 +357,7 @@ export function InboxView({ onOpenAgent, onSendAgentPrompt }: InboxViewProps) {
     () => items.filter((item) => queueItemIsVisible(item, preferences)),
     [items, preferences],
   );
-  const { hasMore, loadMoreOnScroll, renderedItems } = useLazyQueueItems(visibleItems);
+  const { hasMore, loadMore, loadMoreOnScroll, renderedItems } = useLazyQueueItems(visibleItems);
 
   return (
     <div className="queue-view flex flex-col h-full min-h-0 p-4 gap-4">
@@ -405,7 +405,16 @@ export function InboxView({ onOpenAgent, onSendAgentPrompt }: InboxViewProps) {
               onSendAgentPrompt={onSendAgentPrompt}
             />
           ))}
-          {hasMore && <p className="sr-only" aria-live="polite">Scroll to load older Inbox items.</p>}
+          {hasMore && (
+            <button
+              type="button"
+              aria-label="Load older Inbox items"
+              onClick={loadMore}
+              className="mx-auto mt-1 rounded-md border border-wardian-border bg-wardian-card-bg-muted px-3 py-1.5 text-xs font-semibold text-muted-neutral transition-colors hover:text-bright-neutral"
+            >
+              Load older items
+            </button>
+          )}
         </div>
       )}
     </div>

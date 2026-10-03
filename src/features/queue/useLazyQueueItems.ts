@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type UIEvent } from "react";
 
-const INITIAL_QUEUE_RENDER_LIMIT = 80;
-const QUEUE_RENDER_CHUNK_SIZE = 80;
+const INITIAL_QUEUE_RENDER_LIMIT = 12;
+const QUEUE_RENDER_CHUNK_SIZE = 12;
 const QUEUE_LOAD_MORE_THRESHOLD_PX = 160;
 
 function queueItemsKey<T extends { id: string }>(items: T[]) {
@@ -42,6 +42,7 @@ export function useLazyQueueItems<T extends { id: string }>(items: T[]) {
 
   return {
     hasMore: renderLimit < items.length,
+    loadMore,
     loadMoreOnScroll,
     renderedItems: useMemo(
       () => items.slice(0, Math.min(renderLimit, items.length)),
