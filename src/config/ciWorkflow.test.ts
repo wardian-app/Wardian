@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import ciWorkflow from "../../.github/workflows/ci.yml?raw";
+import docsWorkflow from "../../.github/workflows/docs.yml?raw";
 import codecovConfig from "../../.codecov.yml?raw";
 import readme from "../../README.md?raw";
 import { readVerificationPlan } from "../../scripts/verify-ci.mjs";
@@ -19,13 +20,61 @@ function jobDefinition(jobName: string) {
 }
 
 describe("CI workflow contract", () => {
+  it.each([
+    {
+      name: "CI",
+      workflow: ciWorkflow,
+      triggers: `on:
+  push:
+    branches: [main]
+  pull_request:
+`,
+    },
+    {
+      name: "docs",
+      workflow: docsWorkflow,
+      triggers: `on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+`,
+    },
+  ])("routes $name pull requests to every base while preserving push and path filters", ({ workflow, triggers }) => {
+    // Pin the complete event block: a PR base filter silently excludes stacked PRs.
+    const eventBlock = workflow.replace(/\r\n/g, "\n").match(/^on:\n(?:[ \t].*\n|\n)*/m)?.[0];
+    expect(eventBlock?.trimEnd()).toBe(triggers.trimEnd());
+  });
+
+  it("keeps Pages configuration, artifact upload, and deployment disabled for pull requests", () => {
+    expect(docsWorkflow).toMatch(
+      /- name: Configure Pages\s+if: github\.event_name != 'pull_request'\s+uses: actions\/configure-pages@v5/,
+    );
+    expect(docsWorkflow).toMatch(
+      /- name: Upload Pages artifact\s+if: github\.event_name != 'pull_request'\s+uses: actions\/upload-pages-artifact@v3/,
+    );
+    expect(docsWorkflow).toMatch(
+      / {2}deploy:\s+name: Deploy docs\s+needs: build\s+runs-on: ubuntu-latest\s+if: github\.event_name != 'pull_request'/,
+    );
+    expect(docsWorkflow).toContain("uses: actions/deploy-pages@v4");
+  });
+
   it("gates frontend, backend, documentation, screenshots, and workbench cutover", () => {
     const frontend = jobDefinition("frontend-quality");
     const backend = jobDefinition("backend-windows");
     const backendCoverage = jobDefinition("backend-linux-coverage");
     const docs = jobDefinition("docs-quality");
 
-    expect(ciWorkflow).toMatch(/pull_request:\s+branches: \[main\]/);
     for (const requiredJob of [frontend, backend, backendCoverage, docs]) {
       expect(requiredJob).not.toMatch(/^ {4}if:/m);
     }
