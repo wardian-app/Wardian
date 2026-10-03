@@ -564,6 +564,7 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
           isSubmitting={sending}
           onApprovalSubmit={(response) => void sendPromptToActiveAgent(response)}
           onLoadOlder={() => void loadOlderActiveAgentChat()}
+          onRetry={() => void refreshActiveAgentChat()}
         />
       ) : (
         <TerminalPane agent={agent} loading={terminalLoading} error={terminalError} endRef={contentEndRef} />
@@ -995,6 +996,7 @@ function ChatPane({
   isSubmitting,
   onApprovalSubmit,
   onLoadOlder,
+  onRetry,
 }: {
   agent: RemoteAgentSummary;
   visibleEvents: AgentChatEvent[];
@@ -1006,6 +1008,7 @@ function ChatPane({
   isSubmitting: boolean;
   onApprovalSubmit: (response: string) => void;
   onLoadOlder: () => void;
+  onRetry: () => void;
 }) {
   const rows = useMemo(
     () =>
@@ -1021,14 +1024,21 @@ function ChatPane({
   return (
     <section className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`}>
       <div className="chat-transcript-list space-y-3">
-        {error && <div className="rounded-md border border-wardian-error px-3 py-2 text-xs text-wardian-error">{error}</div>}
+        {error && (
+          <div role="alert" className="rounded-md border border-wardian-error px-3 py-2 text-xs text-wardian-error">
+            <p>{error}</p>
+            <button type="button" className="mt-2 rounded border border-wardian-border px-3 py-1 text-primary" onClick={onRetry} disabled={loading || loadingOlder}>
+              {loading ? "Loading chat..." : "Retry Chat"}
+            </button>
+          </div>
+        )}
         {loading && visibleEvents.length === 0 && (
           <div className="inline-flex items-center gap-2 text-sm text-muted-neutral">
             <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
             Loading chat...
           </div>
         )}
-        {!loading && visibleEvents.length === 0 && (
+        {!error && !loading && visibleEvents.length === 0 && (
           <div className="rounded-md border border-dashed border-wardian-border px-3 py-4 text-xs text-muted-neutral">
             No chat transcript yet.
           </div>
@@ -1038,7 +1048,7 @@ function ChatPane({
             type="button"
             className="w-full rounded border border-wardian-border bg-wardian-card px-3 py-2 text-xs font-semibold leading-5 text-muted-neutral hover:text-primary"
             onClick={onLoadOlder}
-            disabled={loadingOlder}
+            disabled={loadingOlder || loading}
           >
             {loadingOlder ? "Loading older transcript..." : "Load older transcript"}
           </button>

@@ -120,6 +120,76 @@ describe("remoteClient error propagation", () => {
     }
   });
 
+  it("allows a healthy Chat read to finish past the session read deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      let finish!: (response: Response) => void;
+      let signal: AbortSignal | null | undefined;
+      vi.stubGlobal("fetch", vi.fn((_path: string, init?: RequestInit) =>
+        new Promise<Response>((resolve, reject) => {
+          finish = resolve;
+          signal = init?.signal;
+          signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+        }),
+      ));
+      const request = remoteClient.loadAgentChatPage("agent-1").catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(16_000);
+      expect(signal?.aborted).toBe(false);
+      finish(new Response(JSON.stringify({ events: [], has_older: false, next_before: null })));
+      await expect(request).resolves.toEqual({ events: [], has_older: false, next_before: null });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds Chat reads with a distinguishable local timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal("fetch", vi.fn((_path: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+        }),
+      ));
+      const request = remoteClient.loadAgentChatPage("agent-1").catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await expect(request).resolves.toMatchObject({ name: "RemoteChatTimeoutError" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels an owned Chat HTTP request independently of the read deadline", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal("fetch", vi.fn((_path: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+      }),
+    ));
+    const request = remoteClient.loadAgentChatPage("agent-1", 20, controller.signal).catch((error: unknown) => error);
+    controller.abort();
+    await expect(request).resolves.toMatchObject({ name: "AbortError" });
+  });
+
+  it("preserves a received Chat 401 when its error body reaches the deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | null | undefined;
+      const response = new Response(null, { status: 401 });
+      vi.spyOn(response, "json").mockImplementation(() => new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+      }));
+      vi.stubGlobal("fetch", vi.fn((_path: string, init?: RequestInit) => {
+        signal = init?.signal;
+        return Promise.resolve(response);
+      }));
+      const request = remoteClient.loadAgentChatPage("agent-1").catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await expect(request).resolves.toMatchObject({ name: "RemoteRequestError", status: 401 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("requests bounded automation monitor pages through server-owned offsets", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({

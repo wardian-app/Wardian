@@ -24,7 +24,7 @@ import {
   signRemoteAuthChallenge,
   type StoredRemoteDeviceIdentity,
 } from "./remoteIdentity";
-import { remoteClient, RemoteRequestError } from "./remoteClient";
+import { remoteClient, RemoteChatTimeoutError, RemoteRequestError } from "./remoteClient";
 
 type RemoteStatus =
   | "loading"
@@ -118,14 +118,31 @@ const statusFromError = (error: unknown): RemoteStatus => {
 };
 
 const chatConnectionStatusFromError = (error: unknown): RemoteStatus | null => {
+  if (error instanceof RemoteChatTimeoutError) return null;
   const status = statusFromError(error);
-  // Keep application 4xx errors local to Chat. Gateway failures and request
-  // timeouts can still mean the desktop is unreachable.
+  // A Chat deadline or application error does not establish connectivity loss.
+  // Authentication and actual transport/gateway failures retain their meaning.
   return error instanceof RemoteRequestError
     && status === "unreachable"
     && error.status >= 400
-    && error.status < 500
-    && error.status !== 408 ? null : status;
+    && error.status < 500 ? null : status;
+};
+
+const chatErrorMessage = (error: unknown): string => {
+  if (error instanceof RemoteChatTimeoutError) return error.message;
+  if (error instanceof RemoteRequestError) {
+    const stages: Record<string, string> = {
+      agent_chat_snapshot_failed: "Agent state could not be read",
+      agent_chat_provider_capture_failed: "Provider history could not be captured",
+      agent_chat_archive_write_failed: "Chat history could not be saved",
+      agent_chat_projection_failed: "Chat history could not be prepared",
+      agent_chat_provenance_failed: "Chat history ownership could not be verified",
+    };
+    const stage = error.code && Object.prototype.hasOwnProperty.call(stages, error.code) ? stages[error.code] : undefined;
+    // Gateway stages are safe to expose; arbitrary error detail may contain paths.
+    return stage ? `${stage} (${error.code}). Retry to load Chat again.` : `Remote request failed: ${error.status}`;
+  }
+  return "Chat could not be loaded. Retry when the desktop is available.";
 };
 
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -298,6 +315,9 @@ let statusStreamReconnectAttempts = 0;
 let lastActiveAgentRefreshKey: string | null = null;
 let terminalRefreshRequestSerial = 0;
 let chatRefreshRequestSerial = 0;
+let activeChatRead: { agentId: string; controller: AbortController; promise: Promise<void> } | null = null;
+let pendingChatRefresh = false;
+let olderChatPagesLoaded = false;
 let queueRefreshRequestSerial = 0;
 
 interface StatusStreamAttempt {
@@ -333,6 +353,15 @@ const clearBackgroundChatRefresh = () => {
     backgroundChatRefreshTimer = null;
   }
   backgroundChatRefreshQueued = false;
+};
+
+const cancelActiveChatRead = () => {
+  chatRefreshRequestSerial += 1;
+  activeChatRead?.controller.abort();
+  activeChatRead = null;
+  pendingChatRefresh = false;
+  olderChatPagesLoaded = false;
+  clearBackgroundChatRefresh();
 };
 
 const clearStatusStreamReconnect = () => {
@@ -384,6 +413,80 @@ const scheduleBackgroundActiveChatRefresh = (set: RemoteSet, get: RemoteGet) => 
     backgroundChatRefreshTimer = null;
     void runBackgroundActiveChatRefresh(set, get);
   }, delay);
+};
+
+/** Serialize active-agent reads without discarding a usable unfinished page. */
+const readActiveAgentChat = async (older: boolean, background: boolean, set: RemoteSet, get: RemoteGet) => {
+  const agentId = get().activeAgentId;
+  if (!agentId || (older && (get().chatNextBefore === null || get().chatLoadingOlder))) return;
+  if (activeChatRead && activeChatRead.agentId !== agentId) cancelActiveChatRead();
+  const requestSerial = chatRefreshRequestSerial;
+  // An older-page waiter already owns the next read after the current latest page.
+  if (!older && get().chatLoadingOlder && !activeChatRead) {
+    pendingChatRefresh = true;
+    return;
+  }
+  if (activeChatRead) {
+    if (!older) {
+      pendingChatRefresh = true;
+      return activeChatRead.promise;
+    }
+    set({ chatLoadingOlder: true, chatError: "" });
+    await activeChatRead.promise;
+    if (requestSerial !== chatRefreshRequestSerial || get().activeAgentId !== agentId) return;
+  }
+  const before = older ? get().chatNextBefore : undefined;
+  if (older && before === null) {
+    set({ chatLoadingOlder: false });
+    return;
+  }
+  if (older) set({ chatLoadingOlder: true, chatError: "" });
+  else if (!background) set({ chatLoading: true, chatError: "" });
+  const read = { agentId, controller: new AbortController(), promise: Promise.resolve() };
+  activeChatRead = read;
+  const isCurrent = () => activeChatRead === read && get().activeAgentId === agentId
+    && requestSerial === chatRefreshRequestSerial;
+  read.promise = (async () => {
+    try {
+      const page = await remoteClient.loadAgentChatPage(agentId, before ?? undefined, read.controller.signal);
+      if (!isCurrent()) return;
+      const retainOlderCursor = !older && olderChatPagesLoaded;
+      if (older) olderChatPagesLoaded = true;
+      set((state) => {
+        const events = older
+          ? [...page.events.filter((event) => !state.chatEvents.some((existing) => existing.id === event.id)), ...state.chatEvents]
+          : mergeRemoteChatPage(page.events, state.chatEvents);
+        return {
+          ...(chatEventsEqual(state.chatEvents, events) ? {} : { chatEvents: events }),
+          ...(older ? { chatLoadingOlder: false } : { chatLoading: false }),
+          ...(retainOlderCursor ? {} : { chatHasOlder: page.has_older, chatNextBefore: page.next_before }),
+          chatError: "",
+        };
+      });
+    } catch (error) {
+      if (!isCurrent()) return;
+      const connectionStatus = chatConnectionStatusFromError(error);
+      if (connectionStatus && connectionStatus !== "unreachable") {
+        // Expired/revoked authentication cannot be restored by an old roster frame.
+        closeStatusStream();
+        pendingChatRefresh = false;
+      }
+      set({
+        ...(older ? { chatLoadingOlder: false } : { chatLoading: false }),
+        chatError: chatErrorMessage(error),
+        ...(connectionStatus ? { status: connectionStatus } : {}),
+      });
+    } finally {
+      if (activeChatRead === read) {
+        activeChatRead = null;
+        if (pendingChatRefresh) {
+          pendingChatRefresh = false;
+          if (get().status === "ready") scheduleBackgroundActiveChatRefresh(set, get);
+        }
+      }
+    }
+  })();
+  await read.promise;
 };
 
 const activeAgentRefreshKey = (agent: RemoteAgentSummary) =>
@@ -446,6 +549,7 @@ const ensureStatusStream = async (set: RemoteSet, get: RemoteGet) => {
         const activeAgentId = get().activeAgentId;
         const liveAgentIds = new Set(agents.map((agent) => agent.session_id));
         const activeAgent = activeAgentId ? agents.find((agent) => agent.session_id === activeAgentId) : null;
+        if (activeAgentId && !activeAgent) cancelActiveChatRead();
         set((state) => ({
           agents,
           status: "ready",
@@ -480,8 +584,9 @@ const ensureStatusStream = async (set: RemoteSet, get: RemoteGet) => {
       },
       onSessionExpired: () => {
         if (!isCurrentStatusStreamAttempt(attempt)) return;
+        cancelActiveChatRead();
         closeStatusStream();
-        set({ status: "session_expired" });
+        set({ status: "session_expired", chatLoading: false, chatLoadingOlder: false });
       },
       onError: () => {
         if (!isCurrentStatusStreamAttempt(attempt)) return;
@@ -817,6 +922,8 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     }));
   },
   disconnectStatusStream() {
+    cancelActiveChatRead();
+    set({ chatLoading: false, chatLoadingOlder: false });
     closeStatusStream();
     statusStreamReconnectAttempts = 0;
   },
@@ -871,7 +978,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     }));
   },
   async openAgent(id) {
-    clearBackgroundChatRefresh();
+    cancelActiveChatRead();
     const activeAgent = get().agents.find((agent) => agent.session_id === id);
     lastActiveAgentRefreshKey = activeAgent ? activeAgentRefreshKey(activeAgent) : null;
     pushRemoteAgentDetailHistory(id);
@@ -901,7 +1008,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
         // If browser history cannot move, still close the in-app detail view.
       }
     }
-    clearBackgroundChatRefresh();
+    cancelActiveChatRead();
     lastActiveAgentRefreshKey = null;
     set({
       activeAgentId: null,
@@ -918,6 +1025,10 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     });
   },
   async setActiveAgentViewMode(mode) {
+    if (mode === "terminal") {
+      cancelActiveChatRead();
+      set({ chatLoading: false, chatLoadingOlder: false });
+    }
     set((state) => ({
       activeAgentViewMode: mode,
       activeAgentViewModesById: state.activeAgentId
@@ -937,76 +1048,10 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     if (!options?.background) set({ terminalLoading: false, terminalError: "" });
   },
   async refreshActiveAgentChat(options) {
-    const activeAgentId = get().activeAgentId;
-    if (!activeAgentId) return;
-    const requestSerial = (chatRefreshRequestSerial += 1);
-    if (!options?.background) {
-      set({ chatLoading: true, chatError: "" });
-    }
-    try {
-      const page = await remoteClient.loadAgentChatPage(activeAgentId);
-      set((state) => {
-        if (requestSerial !== chatRefreshRequestSerial) return {};
-        if (state.activeAgentId !== activeAgentId) return { chatLoading: false };
-        const mergedChatEvents = mergeRemoteChatPage(page.events, state.chatEvents);
-        if (chatEventsEqual(state.chatEvents, mergedChatEvents)) {
-          return {
-            chatLoading: false,
-            chatLoadingOlder: false,
-            chatHasOlder: page.has_older,
-            chatNextBefore: page.next_before,
-            chatError: "",
-          };
-        }
-        return {
-          chatEvents: mergedChatEvents,
-          chatLoading: false,
-          chatLoadingOlder: false,
-          chatHasOlder: page.has_older,
-          chatNextBefore: page.next_before,
-          chatError: "",
-        };
-      });
-    } catch (error) {
-      if (requestSerial !== chatRefreshRequestSerial) return;
-      if (get().activeAgentId !== activeAgentId) return;
-      const connectionStatus = chatConnectionStatusFromError(error);
-      set({
-        chatLoading: false,
-        chatError: error instanceof Error ? error.message : String(error),
-        ...(connectionStatus ? { status: connectionStatus } : {}),
-      });
-    }
+    await readActiveAgentChat(false, options?.background ?? false, set, get);
   },
   async loadOlderActiveAgentChat() {
-    const { activeAgentId, chatNextBefore, chatLoadingOlder } = get();
-    if (!activeAgentId || chatNextBefore === null || chatLoadingOlder) return;
-    const requestSerial = chatRefreshRequestSerial;
-    set({ chatLoadingOlder: true, chatError: "" });
-    try {
-      const page = await remoteClient.loadAgentChatPage(activeAgentId, chatNextBefore);
-      set((state) => {
-        if (requestSerial !== chatRefreshRequestSerial || state.activeAgentId !== activeAgentId) return {};
-        const existingIds = new Set(state.chatEvents.map((event) => event.id));
-        const olderEvents = page.events.filter((event) => !existingIds.has(event.id));
-        return {
-          chatEvents: [...olderEvents, ...state.chatEvents],
-          chatLoadingOlder: false,
-          chatHasOlder: page.has_older,
-          chatNextBefore: page.next_before,
-          chatError: "",
-        };
-      });
-    } catch (error) {
-      if (requestSerial !== chatRefreshRequestSerial) return;
-      if (get().activeAgentId !== activeAgentId) return;
-      const connectionStatus = chatConnectionStatusFromError(error);
-      set({
-        chatLoadingOlder: false,
-        chatError: error instanceof Error ? error.message : String(error),
-        ...(connectionStatus ? { status: connectionStatus } : {}),
-      });
-    }
+    await readActiveAgentChat(true, false, set, get);
   },
   async sendPromptToActiveAgent(prompt, inputMode = "message") {
     const trimmed = prompt.trim();
@@ -1048,6 +1093,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       await remoteClient.runAgentAction(action, target);
       if (get().activeAgentId === target) {
         if (action === "clear") {
+          cancelActiveChatRead();
           set({
             terminalSnapshot: null,
             terminalLoading: false,
