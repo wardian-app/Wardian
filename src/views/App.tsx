@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AgentConfig, AgentTelemetry, AgentClassDefinition } from "../types";
-import type { AgentChatEvent, CloneMode, OpenSurfaceRequest, WorkbenchShellV1 } from "../types";
+import type { CloneMode, OpenSurfaceRequest, WorkbenchShellV1 } from "../types";
 import "../styles/App.css";
 
 import AgentWatchlist from "../layout/watchlist/AgentWatchlist";
@@ -42,7 +42,7 @@ import { UpdateAvailableNotice } from "../features/settings/UpdateAvailableNotic
 import { useAppUpdate } from "../features/settings/useAppUpdate";
 import { useSelectedAgentGitStatus } from "../features/git/useSelectedAgentGitStatus";
 import { useQueueStore } from "../store/useQueueStore";
-import { completionPreviewFromTranscript } from "../features/queue/completionPreview";
+import { useAgentTurnCompletionHandler } from "../features/queue/useAgentTurnCompletionHandler";
 import { useLibraryStore } from "../store/useLibraryStore";
 import { useSettingsStore } from "../store/useSettingsStore";
 import { useLayoutStore } from "../store/useLayoutStore";
@@ -62,9 +62,7 @@ import { runNewSessionAction } from "../features/agents/newSessionAction";
 import {
   useAgentResourceController,
   type AgentStatusTransition,
-  type AgentTurnCompletion,
 } from "../features/agents/useAgentResourceController";
-import { RosterProvider } from "../features/agents/RosterContext";
 import { useRosterController } from "../features/agents/useRosterController";
 import { useAgentTelemetryStore } from "../features/agents/useAgentTelemetryStore";
 import {
@@ -398,6 +396,7 @@ function App() {
 function AppBody() {
   const confirm = useConfirm();
   const pendingQueueFlushRef = React.useRef<Set<string>>(new Set());
+  const [changeReviewTurnRevision, setChangeReviewTurnRevision] = useState(0);
   const workbenchRootRef = useRef<HTMLDivElement>(null);
   const sidebarIconRailRef = useRef<HTMLElement>(null);
   const agentWatchlistRef = useRef<HTMLElement>(null);
@@ -453,6 +452,7 @@ function AppBody() {
   const seenLibraryNavigationRequestRef = useRef(libraryNavigationRequest);
   const appendAgentEvent = useQueueStore((s) => s.appendAgentEvent);
   const flushAgentCompletion = useQueueStore((s) => s.flushAgentCompletion);
+  const applyPersistedAgentCompletion = useQueueStore((s) => s.applyPersistedAgentCompletion);
   const addActionNeeded = useQueueStore((s) => s.addActionNeeded);
   const addAutomationCompletion = useQueueStore((s) => s.addAutomationCompletion);
   const loadQueueItems = useQueueStore((s) => s.loadItems);
@@ -500,27 +500,12 @@ function AppBody() {
     };
   }, []);
 
-  const handleAgentTurnCompletion = useCallback((
-    completion: AgentTurnCompletion,
-  ) => {
-    setChangeReviewTurnRevision((revision) => revision + 1);
-    const { session_id: sessionId, agent } = completion;
-    const agentName = agent?.session_name.trim();
-    // Never emit a durable notification with a session UUID while the roster
-    // is still loading. A later config load intentionally does not replay it.
-    if (!agentName || pendingQueueFlushRef.current.has(sessionId)) return;
-
-    pendingQueueFlushRef.current.add(sessionId);
-    invoke<AgentChatEvent[]>("load_agent_chat_transcript", { sessionId })
-      .then(completionPreviewFromTranscript)
-      .then((preview) => {
-        if (preview) {
-          flushAgentCompletion(sessionId, agentName, preview.summary, preview.evidence_id);
-        }
-      })
-      .catch(() => undefined)
-      .finally(() => pendingQueueFlushRef.current.delete(sessionId));
-  }, [flushAgentCompletion]);
+  const handleAgentTurnCompletion = useAgentTurnCompletionHandler({
+    pending: pendingQueueFlushRef,
+    onCompletion: () => setChangeReviewTurnRevision((revision) => revision + 1),
+    applyPersisted: applyPersistedAgentCompletion,
+    flush: flushAgentCompletion,
+  });
 
   const maybeAddActionNeededQueueItem = useCallback((
     sessionId: string,
@@ -612,7 +597,6 @@ function AppBody() {
   const [watchlistPrefs, setWatchlistPrefs] = useState<WatchlistPrefs>(DEFAULT_WATCHLIST_PREFS);
   const [dashboardPrefs, setDashboardPrefs] = useState<DashboardPrefs>(DEFAULT_DASHBOARD_PREFS);
   const [agentInteractions, setAgentInteractions] = useState<AgentInteractions>({});
-  const [changeReviewTurnRevision, setChangeReviewTurnRevision] = useState(0);
   const agentInteractionsRef = useRef<AgentInteractions>({});
   const interactionSaveChainRef = useRef<Promise<unknown>>(Promise.resolve());
   const hasAutoPatched = useRef(false);
@@ -1863,195 +1847,193 @@ function AppBody() {
 
   return (
     <AgentResourceContext.Provider value={agentResources}>
-      <RosterProvider value={roster}>
-        <AppShell
-          navigation={workbenchNavigation}
-          contentBusy={workbenchResetPending}
-          titlebar={<CustomTitleBar
-        workbenchBusy={workbenchResetPending}
-        leftCollapsed={leftCollapsed}
-        setLeftCollapsed={setLeftCollapsed}
-        rightCollapsed={rightCollapsed}
-        setRightCollapsed={setRightCollapsed}
-        leftSidebarWidth={leftSidebarWidth}
-        rightSidebarWidth={rightSidebarWidth}
-        agents={agents}
-        offAgentIds={offAgentIds}
-        titlebarTelemetryVisible={resolvedTitlebarTelemetryVisible}
-          />}
+      <AppShell
+        navigation={workbenchNavigation}
+        contentBusy={workbenchResetPending}
+        titlebar={<CustomTitleBar
+      workbenchBusy={workbenchResetPending}
+      leftCollapsed={leftCollapsed}
+      setLeftCollapsed={setLeftCollapsed}
+      rightCollapsed={rightCollapsed}
+      setRightCollapsed={setRightCollapsed}
+      leftSidebarWidth={leftSidebarWidth}
+      rightSidebarWidth={rightSidebarWidth}
+      agents={agents}
+      offAgentIds={offAgentIds}
+      titlebarTelemetryVisible={resolvedTitlebarTelemetryVisible}
+        />}
 
-          status={workbenchNotice || (updateAvailable && !updateNoticeDismissed) ? (
-            <>
-              {workbenchNotice ? (
-                <div
-                  role="status"
-                  aria-live="polite"
-                  data-testid="workbench-persistence-notice"
-                  className="pointer-events-none fixed right-4 top-12 z-40 max-w-md rounded border px-3 py-2 text-xs shadow-lg"
-                  style={{
-                    background: "var(--color-wardian-card)",
-                    borderColor: "var(--color-wardian-border)",
-                    color: "var(--color-wardian-text-muted)",
-                  }}
-                >
-                  {workbenchNotice}
-                </div>
-              ) : null}
-              {updateAvailable && !updateNoticeDismissed && appUpdate.availableUpdate ? (
-                <UpdateAvailableNotice
-                  update={appUpdate.availableUpdate}
-                  onDismiss={() => setUpdateNoticeDismissed(true)}
-                  onReview={reviewUpdate}
-                />
-              ) : null}
-            </>
-          ) : null}
-
-          conflictDialog={(workbenchPersistence.conflict === "revision_conflict"
-          || workbenchPersistence.conflict === "future_schema") && (
-        <WorkbenchConflictDialog
-          mode={workbenchPersistence.conflict}
-          resolving={workbenchPersistence.resolving_conflict}
-          on_use_disk={() => { void workbenchPersistence.use_disk(); }}
-          on_replace_disk={() => { void workbenchPersistence.replace_disk(); }}
-          on_export_local={exportLocalWorkbench}
-        />
-          )}
-
-          leftRail={<SidebarIconRail
-          ref={sidebarIconRailRef}
-          activeTab={activeTab}
-          setActiveTab={setActiveTab}
-          setCollapsed={setLeftCollapsed}
-          userTerminalOpen={userTerminalOpen}
-          settingsOpen={settingsOpen}
-          updateAvailable={updateAvailable}
-          sourceControlChangeCount={sourceControlStatus.changeCount}
-          sourceControlBusy={sourceControlStatus.loading}
-          onToggleUserTerminal={toggleUserTerminal}
-          onToggleSettings={toggleSettings}
-          />}
-          leftPane={<SidebarContentPane
-          activeTab={activeTab}
-          leftCollapsed={leftCollapsed}
-          selectedAgentIds={selectedAgentIds}
-          setSelectedAgentIds={setSelectedAgentIds}
-          agents={agents}
-          agentClasses={agentClasses}
-          sourceControlStatus={sourceControlStatus}
-          turnRevision={changeReviewTurnRevision}
-          onAgentsUpdated={fetchAgents}
-          broadcastMessage={broadcastMessage}
-          setBroadcastMessage={setBroadcastMessage}
-          onBroadcast={broadcastInput}
-          onOpenSurface={openAuxiliarySurface}
-          />}
-
-          mainContent={(
-            <WorkbenchHost
-              store={workbenchPersistence.store}
-              safe_mode={workbenchPersistence.safe_mode}
-              registry={workbenchRegistry}
-              navigation={workbenchNavigation}
-              root_ref={workbenchRootRef}
-              new_tab_action={resolvedWorkbenchNewTabAction}
-              on_quick_open={openWorkbenchLauncher}
-              on_focus_left_dock={focusLeftDock}
-              on_focus_right_dock={focusRightDock}
-              resource_key={selectedWorkbenchResourceKey}
-              render_surface={renderWorkbenchSurface}
-              provision_surface_resource={provisionWorkbenchSurfaceResource}
-              surface_title={workbenchSurfaceTitle}
-            />
-          )}
-          mainOverlays={<>
-            {dirtySurfacePrompt.dialog}
-            <CustomCloneModal
-            sourceSessionId={customCloneSourceId ?? ""}
-            agentClasses={agentClasses}
-            isOpen={Boolean(customCloneSourceId)}
-            onClose={() => setCustomCloneSourceId(null)}
-            onCloned={async () => {
-              setCustomCloneSourceId(null);
-              await loadWatchlistState();
-              await fetchAgents();
-            }}
-            />
-            {userTerminalOpen && (
-            <UserTerminalPanel
-              theme={theme}
-              height={userTerminalHeight}
-              selectedWorkspace={selectedUserTerminalWorkspace}
-              onHeightChange={setUserTerminalHeight}
-              onHide={() => setUserTerminalOpen(false)}
-            />
-            )}
-            {settingsOpen && (
-            <SettingsModal appUpdate={appUpdate} isOpen={true} onClose={() => setSettingsOpen(false)} />
-            )}
-            {onboardingHintsLoaded && guidedTourState === "unseen" ? (
-              <OnboardingWelcome onStart={() => beginGuidedTour("setup")} onSkip={leaveGuidedTour} />
+        status={workbenchNotice || (updateAvailable && !updateNoticeDismissed) ? (
+          <>
+            {workbenchNotice ? (
+              <div
+                role="status"
+                aria-live="polite"
+                data-testid="workbench-persistence-notice"
+                className="pointer-events-none fixed right-4 top-12 z-40 max-w-md rounded border px-3 py-2 text-xs shadow-lg"
+                style={{
+                  background: "var(--color-wardian-card)",
+                  borderColor: "var(--color-wardian-border)",
+                  color: "var(--color-wardian-text-muted)",
+                }}
+              >
+                {workbenchNotice}
+              </div>
             ) : null}
-            {onboardingHintsLoaded && guidedTourState === "in_progress" ? (
-              <OnboardingTour
-                agents={agents}
-                reviewMode={guidedTourMode === "review"}
-                onClose={leaveGuidedTour}
-                onComplete={completeGuidedTour}
-                onPrepareAgentCreation={prepareTourAgentCreation}
-                onPrepareEvolver={prepareTourEvolver}
-                onPrepareGraph={prepareTourGraph}
-                onPrepareAutomation={prepareTourAutomation}
+            {updateAvailable && !updateNoticeDismissed && appUpdate.availableUpdate ? (
+              <UpdateAvailableNotice
+                update={appUpdate.availableUpdate}
+                onDismiss={() => setUpdateNoticeDismissed(true)}
+                onReview={reviewUpdate}
               />
             ) : null}
-          </>}
+          </>
+        ) : null}
 
-          roster={<AgentWatchlist
-          focus_target_ref={agentWatchlistRef}
-          agents={agents}
-          selectedAgentIds={selectedAgentIds}
-          offAgentIds={offAgentIds}
-          filter={rosterFilter}
-          onFilterChange={setRosterFilter}
-          onSelectAgent={selectAgentFromWatchlist}
-          onSelectionChange={setWatchlistSelection}
-          onRevealAgent={revealAgentFromWatchlist}
-          onOpenAgent={openAgent}
-          onOpenAgentToSide={openAgentToSide}
-          onRename={renameAgent}
-          onReorderAgents={async (newOrder) => {
-            try { await agentResources.reorder_agents(newOrder); } catch (e) { console.error(e); }
+        conflictDialog={(workbenchPersistence.conflict === "revision_conflict"
+        || workbenchPersistence.conflict === "future_schema") && (
+      <WorkbenchConflictDialog
+        mode={workbenchPersistence.conflict}
+        resolving={workbenchPersistence.resolving_conflict}
+        on_use_disk={() => { void workbenchPersistence.use_disk(); }}
+        on_replace_disk={() => { void workbenchPersistence.replace_disk(); }}
+        on_export_local={exportLocalWorkbench}
+      />
+        )}
+
+        leftRail={<SidebarIconRail
+        ref={sidebarIconRailRef}
+        activeTab={activeTab}
+        setActiveTab={setActiveTab}
+        setCollapsed={setLeftCollapsed}
+        userTerminalOpen={userTerminalOpen}
+        settingsOpen={settingsOpen}
+        updateAvailable={updateAvailable}
+        sourceControlChangeCount={sourceControlStatus.changeCount}
+        sourceControlBusy={sourceControlStatus.loading}
+        onToggleUserTerminal={toggleUserTerminal}
+        onToggleSettings={toggleSettings}
+        />}
+        leftPane={<SidebarContentPane
+        activeTab={activeTab}
+        leftCollapsed={leftCollapsed}
+        selectedAgentIds={selectedAgentIds}
+        setSelectedAgentIds={setSelectedAgentIds}
+        agents={agents}
+        agentClasses={agentClasses}
+        sourceControlStatus={sourceControlStatus}
+        turnRevision={changeReviewTurnRevision}
+        onAgentsUpdated={fetchAgents}
+        broadcastMessage={broadcastMessage}
+        setBroadcastMessage={setBroadcastMessage}
+        onBroadcast={broadcastInput}
+        onOpenSurface={openAuxiliarySurface}
+        />}
+
+        mainContent={(
+          <WorkbenchHost
+            store={workbenchPersistence.store}
+            safe_mode={workbenchPersistence.safe_mode}
+            registry={workbenchRegistry}
+            navigation={workbenchNavigation}
+            root_ref={workbenchRootRef}
+            new_tab_action={resolvedWorkbenchNewTabAction}
+            on_quick_open={openWorkbenchLauncher}
+            on_focus_left_dock={focusLeftDock}
+            on_focus_right_dock={focusRightDock}
+            resource_key={selectedWorkbenchResourceKey}
+            render_surface={renderWorkbenchSurface}
+            provision_surface_resource={provisionWorkbenchSurfaceResource}
+            surface_title={workbenchSurfaceTitle}
+          />
+        )}
+        mainOverlays={<>
+          {dirtySurfacePrompt.dialog}
+          <CustomCloneModal
+          sourceSessionId={customCloneSourceId ?? ""}
+          agentClasses={agentClasses}
+          isOpen={Boolean(customCloneSourceId)}
+          onClose={() => setCustomCloneSourceId(null)}
+          onCloned={async () => {
+            setCustomCloneSourceId(null);
+            await loadWatchlistState();
+            await fetchAgents();
           }}
-          onQuery={scrollToAgent}
-          onPause={onPause}
-          onRestart={onRestart}
-          onClear={onClear}
-          onClone={onClone}
-          onDelete={onDelete}
-          onDeleteAgents={onDeleteAgents}
-          onAddToList={handleAddToList}
-          onRemoveFromList={handleRemoveFromList}
-          onAddAgentsToList={handleAddAgentsToList}
-          onRemoveAgentsFromList={handleRemoveAgentsFromList}
-          collapsed={rightCollapsed}
-          watchlists={watchlists}
-          activeListId={activeListId}
-          onActiveListChange={setActiveListId}
-          onWatchlistsChange={persistWatchlists}
-          teams={teams}
-          onCreateTeam={handleCreateTeam}
-          onUngroupTeam={handleUngroupTeam}
-          onRenameTeam={handleRenameTeam}
-          onAddAgentToTeam={handleAddAgentToTeam}
-          onRemoveAgentFromTeam={handleRemoveAgentFromTeam}
-          onRemoveAgentFromTeamAtEntry={handleRemoveAgentFromTeamAtEntry}
-          onReorderTeamMember={handleReorderTeamMember}
-          prefs={watchlistPrefs}
-          onPrefsChange={persistWatchlistPrefs}
-          interactions={agentInteractions}
-          />}
-        />
-      </RosterProvider>
+          />
+          {userTerminalOpen && (
+          <UserTerminalPanel
+            theme={theme}
+            height={userTerminalHeight}
+            selectedWorkspace={selectedUserTerminalWorkspace}
+            onHeightChange={setUserTerminalHeight}
+            onHide={() => setUserTerminalOpen(false)}
+          />
+          )}
+          {settingsOpen && (
+          <SettingsModal appUpdate={appUpdate} isOpen={true} onClose={() => setSettingsOpen(false)} />
+          )}
+          {onboardingHintsLoaded && guidedTourState === "unseen" ? (
+            <OnboardingWelcome onStart={() => beginGuidedTour("setup")} onSkip={leaveGuidedTour} />
+          ) : null}
+          {onboardingHintsLoaded && guidedTourState === "in_progress" ? (
+            <OnboardingTour
+              agents={agents}
+              reviewMode={guidedTourMode === "review"}
+              onClose={leaveGuidedTour}
+              onComplete={completeGuidedTour}
+              onPrepareAgentCreation={prepareTourAgentCreation}
+              onPrepareEvolver={prepareTourEvolver}
+              onPrepareGraph={prepareTourGraph}
+              onPrepareAutomation={prepareTourAutomation}
+            />
+          ) : null}
+        </>}
+
+        roster={<AgentWatchlist
+        focus_target_ref={agentWatchlistRef}
+        agents={agents}
+        selectedAgentIds={selectedAgentIds}
+        offAgentIds={offAgentIds}
+        filter={rosterFilter}
+        onFilterChange={setRosterFilter}
+        onSelectAgent={selectAgentFromWatchlist}
+        onSelectionChange={setWatchlistSelection}
+        onRevealAgent={revealAgentFromWatchlist}
+        onOpenAgent={openAgent}
+        onOpenAgentToSide={openAgentToSide}
+        onRename={renameAgent}
+        onReorderAgents={async (newOrder) => {
+          try { await agentResources.reorder_agents(newOrder); } catch (e) { console.error(e); }
+        }}
+        onQuery={scrollToAgent}
+        onPause={onPause}
+        onRestart={onRestart}
+        onClear={onClear}
+        onClone={onClone}
+        onDelete={onDelete}
+        onDeleteAgents={onDeleteAgents}
+        onAddToList={handleAddToList}
+        onRemoveFromList={handleRemoveFromList}
+        onAddAgentsToList={handleAddAgentsToList}
+        onRemoveAgentsFromList={handleRemoveAgentsFromList}
+        collapsed={rightCollapsed}
+        watchlists={watchlists}
+        activeListId={activeListId}
+        onActiveListChange={setActiveListId}
+        onWatchlistsChange={persistWatchlists}
+        teams={teams}
+        onCreateTeam={handleCreateTeam}
+        onUngroupTeam={handleUngroupTeam}
+        onRenameTeam={handleRenameTeam}
+        onAddAgentToTeam={handleAddAgentToTeam}
+        onRemoveAgentFromTeam={handleRemoveAgentFromTeam}
+        onRemoveAgentFromTeamAtEntry={handleRemoveAgentFromTeamAtEntry}
+        onReorderTeamMember={handleReorderTeamMember}
+        prefs={watchlistPrefs}
+        onPrefsChange={persistWatchlistPrefs}
+        interactions={agentInteractions}
+        />}
+      />
     </AgentResourceContext.Provider>
   );
 }

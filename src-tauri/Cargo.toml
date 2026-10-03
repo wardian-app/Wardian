@@ -33,7 +33,6 @@ tauri-build = { version = "2", features = [] }
 axum = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
-hmac = { workspace = true }
 p256 = { workspace = true }
 rand = { workspace = true }
 raw-window-handle = "0.6"

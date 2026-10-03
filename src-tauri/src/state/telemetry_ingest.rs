@@ -1231,6 +1231,23 @@ fn telemetry_maintenance_is_due(now: Instant, next_attempt: Instant) -> bool {
     now >= next_attempt
 }
 
+/// The failures from this pass that were not already reported by the last one.
+///
+/// A source can fail the same way on every pass for as long as its claimant
+/// exists, for example when the store still records an earlier owner. Logging
+/// each repeat buried real diagnostics, so a failure is reported when it first
+/// appears and again only if it clears and returns or its message changes.
+fn unreported_failures<'a>(
+    reported: &mut HashSet<String>,
+    failures: &'a [String],
+) -> Vec<&'a String> {
+    reported.retain(|failure| failures.contains(failure));
+    failures
+        .iter()
+        .filter(|failure| reported.insert((*failure).clone()))
+        .collect()
+}
+
 /// Start the background ingest loop.
 ///
 /// The first pass is immediate rather than one interval away, so opening the app
@@ -1240,6 +1257,7 @@ pub fn start_telemetry_ingest(app_handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut discovery_cache = BackgroundDiscoveryCache::default();
         let mut last_worker_reconcile = None;
+        let mut reported_failures = HashSet::new();
         let mut next_maintenance_attempt =
             Instant::now() + crate::state::telemetry_maintenance::initial_delay();
         loop {
@@ -1281,7 +1299,7 @@ pub fn start_telemetry_ingest(app_handle: tauri::AppHandle) {
                     if reconcile_due {
                         last_worker_reconcile = Some(Instant::now());
                     }
-                    for failure in &report.failures {
+                    for failure in unreported_failures(&mut reported_failures, &report.failures) {
                         crate::utils::logging::log_debug(&format!(
                             "[Wardian] Telemetry ingest source failed: {failure}"
                         ));
@@ -1322,6 +1340,45 @@ pub fn start_telemetry_ingest(app_handle: tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn failures(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| item.to_string()).collect()
+    }
+
+    #[test]
+    fn an_unchanged_failure_is_reported_once_across_passes() {
+        let mut reported = HashSet::new();
+        let pass = failures(&["codex/worker-1: source is owned by agent-a"]);
+
+        assert_eq!(unreported_failures(&mut reported, &pass), vec![&pass[0]]);
+        for _ in 0..3 {
+            assert!(unreported_failures(&mut reported, &pass).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_failure_that_clears_and_returns_is_reported_again() {
+        let mut reported = HashSet::new();
+        let pass = failures(&["codex/worker-1: source is owned by agent-a"]);
+
+        assert_eq!(unreported_failures(&mut reported, &pass).len(), 1);
+        assert!(unreported_failures(&mut reported, &[]).is_empty());
+        assert_eq!(unreported_failures(&mut reported, &pass).len(), 1);
+    }
+
+    #[test]
+    fn a_changed_message_and_a_new_source_are_reported() {
+        let mut reported = HashSet::new();
+        let first = failures(&["codex/worker-1: owned by agent-a"]);
+        let second = failures(&[
+            "codex/worker-1: owned by agent-b",
+            "codex/worker-2: owned by agent-a",
+        ]);
+
+        assert_eq!(unreported_failures(&mut reported, &first).len(), 1);
+        assert_eq!(unreported_failures(&mut reported, &second).len(), 2);
+        assert!(unreported_failures(&mut reported, &second).is_empty());
+    }
 
     #[test]
     fn explicit_codex_home_selects_the_shared_catalog_without_scanning_native_home() {

@@ -7,6 +7,7 @@ use crate::remote::models::{
 use crate::state::AppState;
 use crate::utils::strip_ansi_controls;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use wardian_core::control::{
     ControlRequest, InboxListResponse, InboxNotificationKind, InteractionStatus, MessageInputMode,
@@ -17,6 +18,7 @@ use wardian_core::models::AgentConfig;
 const REMOTE_AUTOMATION_MONITOR_PAGE_SIZE: usize = 25;
 const REMOTE_RUN_FAILURE_SUMMARY: &str = "Run failed. Open Wardian desktop for details.";
 const REMOTE_SCHEDULE_FAILURE_SUMMARY: &str = "Last run failed. Open Wardian desktop for details.";
+pub(crate) const REMOTE_AUTOMATION_INBOX_UNAVAILABLE: &str = "automation_inbox_unavailable";
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RemoteAgentChatPage {
@@ -539,34 +541,41 @@ pub async fn remote_queue_items(state: &AppState) -> Vec<serde_json::Value> {
 pub async fn remote_queue_items_for_app(
     app: &AppHandle,
     state: &AppState,
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, String> {
     let items = remote_queue_items(state).await;
     if let Some(refresh_generation) = state.try_start_remote_inbox_runtime_refresh() {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             let state = app.state::<AppState>();
-            let runtime_items = remote_runtime_inbox_items(state.inner()).await;
-            state
-                .inner()
-                .set_remote_inbox_runtime_items(refresh_generation, runtime_items);
+            refresh_remote_inbox_runtime_projection(state.inner(), refresh_generation).await;
         });
     }
-    items
+    ensure_remote_automation_projection_available(state)?;
+    Ok(items)
+}
+
+fn ensure_remote_automation_projection_available(state: &AppState) -> Result<(), String> {
+    if state.remote_inbox_runtime_items().is_none() && state.remote_inbox_runtime_refresh_failed() {
+        return Err(REMOTE_AUTOMATION_INBOX_UNAVAILABLE.to_string());
+    }
+    Ok(())
 }
 
 /// Builds the action lookup from an authoritative notification projection.
 /// Read requests use a bounded timeout so the remote shell stays responsive;
 /// mutations must wait for the durable interaction source instead of turning
 /// lock contention into a false `inbox_item_not_found` or no-op bulk action.
-async fn remote_queue_items_for_mutation(state: &AppState) -> Vec<serde_json::Value> {
+async fn remote_queue_items_for_mutation(
+    state: &AppState,
+) -> Result<Vec<serde_json::Value>, String> {
     let mut items = remote_durable_queue_items_authoritative(state).await;
     if let Some(runtime_items) = state.remote_inbox_runtime_items() {
         items.extend(runtime_items);
     } else {
-        items.extend(remote_runtime_inbox_items(state).await);
+        items.extend(remote_runtime_inbox_items(state).await?);
     }
     sort_remote_queue_items(&mut items);
-    items
+    Ok(items)
 }
 
 async fn remote_durable_queue_items(state: &AppState) -> Vec<serde_json::Value> {
@@ -580,6 +589,7 @@ async fn remote_durable_queue_items(state: &AppState) -> Vec<serde_json::Value> 
         types: &[],
         sources: &[],
         unread: false,
+        automation_snapshot: None,
     };
     let mut items = Vec::new();
     if let Ok(Ok(page)) = tokio::time::timeout(
@@ -614,6 +624,7 @@ async fn remote_durable_queue_items_authoritative(state: &AppState) -> Vec<serde
         types: &[],
         sources: &[],
         unread: false,
+        automation_snapshot: None,
     };
     let mut items = Vec::new();
     if let Ok(page) = remote_inbox_source_page(
@@ -635,9 +646,22 @@ async fn remote_durable_queue_items_authoritative(state: &AppState) -> Vec<serde
     items
 }
 
-async fn remote_runtime_inbox_items(state: &AppState) -> Vec<serde_json::Value> {
+async fn refresh_remote_inbox_runtime_projection(state: &AppState, generation: u64) {
+    match remote_runtime_inbox_items(state).await {
+        Ok(items) => state.set_remote_inbox_runtime_items(generation, items),
+        Err(_) => state.fail_remote_inbox_runtime_refresh(generation),
+    }
+}
+
+async fn remote_runtime_inbox_items(state: &AppState) -> Result<Vec<serde_json::Value>, String> {
     let cutoff = chrono::Utc::now().timestamp_millis() - QUEUE_MAX_AGE_MS;
     let queue_metadata = wardian_core::queue::load_recent_items(MAX_INBOX_SOURCE_ITEMS, 0, cutoff);
+    let automation_snapshot = tokio::task::spawn_blocking(
+        crate::commands::automation::automation_run_summary_snapshot_for_inbox,
+    )
+    .await
+    .map_err(|_| REMOTE_AUTOMATION_INBOX_UNAVAILABLE.to_string())?
+    .map_err(|_| REMOTE_AUTOMATION_INBOX_UNAVAILABLE.to_string())?;
     let context = InboxProjectionContext {
         cutoff,
         read_notification_ids: &queue_metadata.read_notification_ids,
@@ -645,19 +669,19 @@ async fn remote_runtime_inbox_items(state: &AppState) -> Vec<serde_json::Value> 
         types: &[],
         sources: &[],
         unread: false,
+        automation_snapshot: Some(automation_snapshot),
     };
     let mut items = Vec::new();
     for source in [
         InboxSource::AutomationApprovals,
         InboxSource::AutomationTerminals,
     ] {
-        if let Ok(page) =
-            remote_inbox_source_page(state, source, 0, MAX_INBOX_SOURCE_ITEMS, &context).await
-        {
-            items.extend(page.items);
-        }
+        let page = remote_inbox_source_page(state, source, 0, MAX_INBOX_SOURCE_ITEMS, &context)
+            .await
+            .map_err(|_| REMOTE_AUTOMATION_INBOX_UNAVAILABLE.to_string())?;
+        items.extend(page.items);
     }
-    items
+    Ok(items)
 }
 
 fn sort_remote_queue_items(items: &mut Vec<serde_json::Value>) {
@@ -692,15 +716,6 @@ fn sort_remote_queue_items(items: &mut Vec<serde_json::Value>) {
 const MAX_INBOX_SOURCE_ITEMS: usize = 200;
 const QUEUE_MAX_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
-pub async fn remote_queue_items_page(
-    state: &AppState,
-    offset: usize,
-) -> (Vec<serde_json::Value>, bool, Option<usize>) {
-    remote_inbox_list_page(state, offset, &[], &[], false, MAX_INBOX_SOURCE_ITEMS)
-        .await
-        .unwrap_or_default()
-}
-
 #[derive(Clone, Copy)]
 enum InboxSource {
     Notifications,
@@ -721,6 +736,7 @@ struct InboxProjectionContext<'a> {
     types: &'a [String],
     sources: &'a [String],
     unread: bool,
+    automation_snapshot: Option<Arc<crate::commands::automation::AutomationRunSummarySnapshot>>,
 }
 
 /// Builds one globally ordered, filter-aware Inbox page. Each source is
@@ -753,6 +769,23 @@ pub async fn remote_inbox_list_page(
         InboxSource::AutomationTerminals,
         InboxSource::LegacyQueue,
     ];
+    let automation_snapshot_needed = source_kinds.iter().any(|source| {
+        matches!(
+            source,
+            InboxSource::AutomationApprovals | InboxSource::AutomationTerminals
+        ) && source_may_match(*source, types, sources)
+    });
+    let automation_snapshot = if automation_snapshot_needed {
+        Some(
+            tokio::task::spawn_blocking(
+                crate::commands::automation::automation_run_summary_snapshot_for_inbox,
+            )
+            .await
+            .map_err(|error| format!("automation run summary task failed: {error}"))??,
+        )
+    } else {
+        None
+    };
     let context = InboxProjectionContext {
         cutoff,
         read_notification_ids: &read_notification_ids,
@@ -760,6 +793,7 @@ pub async fn remote_inbox_list_page(
         types,
         sources,
         unread,
+        automation_snapshot,
     };
     let source_page_limit = offset.saturating_add(limit).saturating_add(1);
     let mut pages = Vec::with_capacity(source_kinds.len());
@@ -951,26 +985,45 @@ async fn remote_inbox_source_page(
             state,
             source,
             raw_offset,
-            context.cutoff,
-            context.read_notification_ids,
+            page_limit.min(match source {
+                InboxSource::AutomationApprovals | InboxSource::AutomationTerminals => {
+                    wardian_core::limits::MAX_AUTOMATION_RUNS
+                }
+                _ => MAX_INBOX_SOURCE_ITEMS,
+            }),
+            context,
         )
         .await?;
-        matching.extend(page.items.into_iter().filter(|item| {
+        let source_item_count = page.items.len();
+        let page_truncated = page.truncated;
+        let eligible = page.items.into_iter().filter(|item| {
             let persisted_automation_duplicate = matches!(source, InboxSource::AutomationTerminals)
                 && !context.sources.iter().any(|value| value == "live_runtime")
                 && automation_identity(item)
                     .is_some_and(|key| context.persisted_automation_runs.contains(&key));
             !persisted_automation_duplicate
                 && inbox_item_matches(item, context.types, context.sources, context.unread)
-        }));
+        });
+        let eligible = eligible.collect::<Vec<_>>();
+        let eligible_count = eligible.len();
+        matching.extend(eligible);
         if matching.len() > page_end {
             truncated = true;
             break;
         }
-        if !page.truncated {
+        if matching.len() == page_end && page_truncated && eligible_count == source_item_count {
+            truncated = true;
             break;
         }
-        raw_offset = raw_offset.saturating_add(MAX_INBOX_SOURCE_ITEMS);
+        if !page_truncated {
+            break;
+        }
+        raw_offset = raw_offset.saturating_add(match source {
+            InboxSource::AutomationApprovals | InboxSource::AutomationTerminals => {
+                page_limit.min(wardian_core::limits::MAX_AUTOMATION_RUNS)
+            }
+            _ => MAX_INBOX_SOURCE_ITEMS,
+        });
     }
     matching.sort_by(|left, right| {
         item_timestamp(left)
@@ -988,8 +1041,8 @@ async fn remote_inbox_source_page_raw(
     state: &AppState,
     source: InboxSource,
     offset: usize,
-    cutoff: i64,
-    read_notification_ids: &std::collections::HashSet<String>,
+    page_limit: usize,
+    context: &InboxProjectionContext<'_>,
 ) -> Result<InboxSourcePage, String> {
     match source {
         InboxSource::Notifications => {
@@ -1012,7 +1065,7 @@ async fn remote_inbox_source_page_raw(
                             "id": format!("notification:{}", notification.id),
                             "type": if is_approval { "approval_request" } else { "agent_update" },
                             "timestamp": queue_timestamp(&notification.created_at),
-                            "read": if is_approval { notification.status != InteractionStatus::AwaitingReply } else { read_notification_ids.contains(notification.id.as_str()) },
+                            "read": if is_approval { notification.status != InteractionStatus::AwaitingReply } else { context.read_notification_ids.contains(notification.id.as_str()) },
                             "agent_session_id": notification.sender_session_id,
                             "evidence_source": "interaction_store",
                             "inbox_notification_id": notification.id,
@@ -1032,7 +1085,16 @@ async fn remote_inbox_source_page_raw(
         }
         InboxSource::AutomationApprovals => {
             let (approvals, truncated) =
-                crate::commands::inbox::list_automation_inbox_approvals_page(offset).await?;
+                if let Some(snapshot) = context.automation_snapshot.as_ref() {
+                    crate::commands::inbox::list_automation_inbox_approvals_page_from_snapshot(
+                        Arc::clone(snapshot),
+                        offset,
+                        page_limit,
+                    )
+                    .await?
+                } else {
+                    crate::commands::inbox::list_automation_inbox_approvals_page(offset).await?
+                };
             Ok(InboxSourcePage {
                 items: approvals
                     .into_iter()
@@ -1060,7 +1122,16 @@ async fn remote_inbox_source_page_raw(
         }
         InboxSource::AutomationTerminals => {
             let (terminals, truncated) =
-                crate::commands::inbox::list_automation_inbox_terminal_runs_page(offset).await?;
+                if let Some(snapshot) = context.automation_snapshot.as_ref() {
+                    crate::commands::inbox::list_automation_inbox_terminal_runs_page_from_snapshot(
+                        Arc::clone(snapshot),
+                        offset,
+                        page_limit,
+                    )
+                    .await?
+                } else {
+                    crate::commands::inbox::list_automation_inbox_terminal_runs_page(offset).await?
+                };
             Ok(InboxSourcePage {
                 items: terminals
                     .into_iter()
@@ -1084,8 +1155,11 @@ async fn remote_inbox_source_page_raw(
             })
         }
         InboxSource::LegacyQueue => {
-            let persisted =
-                wardian_core::queue::load_recent_items(MAX_INBOX_SOURCE_ITEMS, offset, cutoff);
+            let persisted = wardian_core::queue::load_recent_items(
+                MAX_INBOX_SOURCE_ITEMS,
+                offset,
+                context.cutoff,
+            );
             Ok(InboxSourcePage {
                 items: persisted
                     .items
@@ -1169,6 +1243,68 @@ fn is_clearable_legacy_completion(item: &serde_json::Value) -> bool {
             item.get("type").and_then(serde_json::Value::as_str),
             Some("agent_completed" | "automation_completed")
         )
+}
+
+fn dismissed_agent_completion(item: &serde_json::Value) -> Option<serde_json::Value> {
+    (item.get("type").and_then(serde_json::Value::as_str) == Some("agent_completed")).then(|| {
+        let mut tombstone = item.clone();
+        tombstone["read"] = serde_json::Value::Bool(true);
+        tombstone["dismissed"] = serde_json::Value::Bool(true);
+        tombstone
+    })
+}
+
+fn clear_read_queue_items(persisted: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut automation_dismissals = Vec::new();
+    let mut next = persisted
+        .into_iter()
+        .filter_map(|item| {
+            let clear = is_clearable_legacy_completion(&item)
+                && item.get("read").and_then(serde_json::Value::as_bool) == Some(true);
+            if clear {
+                if let Some(tombstone) = dismissed_agent_completion(&item) {
+                    return Some(tombstone);
+                }
+                if let Some(marker) = automation_dismissal_marker(&item) {
+                    automation_dismissals.push(marker);
+                }
+                None
+            } else {
+                Some(item)
+            }
+        })
+        .collect::<Vec<_>>();
+    next.extend(automation_dismissals);
+    next
+}
+
+fn dismiss_persisted_queue_item(
+    persisted: Vec<serde_json::Value>,
+    item_id: &str,
+    projected_item: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    let mut found_agent_completion = false;
+    let mut next = persisted
+        .into_iter()
+        .filter_map(|candidate| {
+            if candidate.get("id").and_then(serde_json::Value::as_str) != Some(item_id) {
+                return Some(candidate);
+            }
+            if let Some(tombstone) = dismissed_agent_completion(&candidate) {
+                found_agent_completion = true;
+                return Some(tombstone);
+            }
+            None
+        })
+        .collect::<Vec<_>>();
+    if !found_agent_completion {
+        if let Some(tombstone) = dismissed_agent_completion(projected_item) {
+            next.push(tombstone);
+        } else if let Some(marker) = automation_dismissal_marker(projected_item) {
+            next.push(marker);
+        }
+    }
+    next
 }
 
 fn is_pending_approval(item: &serde_json::Value) -> bool {
@@ -1269,7 +1405,7 @@ pub async fn apply_remote_inbox_action(
     request: RemoteInboxActionRequest,
 ) -> Result<(), String> {
     let _queue_guard = state.queue_io_lock.lock().await;
-    let projected_items = remote_queue_items_for_mutation(state).await;
+    let projected_items = remote_queue_items_for_mutation(state).await?;
     match request.action.as_str() {
         "mark_read" => {
             let item_id = request
@@ -1356,25 +1492,7 @@ pub async fn apply_remote_inbox_action(
             save_persisted_queue_items(&persisted)?;
         }
         "clear_read" => {
-            let persisted = persisted_queue_items();
-            let mut automation_dismissals = Vec::new();
-            let next = persisted
-                .into_iter()
-                .filter_map(|item| {
-                    let clear = is_clearable_legacy_completion(&item)
-                        && item.get("read").and_then(serde_json::Value::as_bool) == Some(true);
-                    if clear {
-                        if let Some(marker) = automation_dismissal_marker(&item) {
-                            automation_dismissals.push(marker);
-                        }
-                        None
-                    } else {
-                        Some(item)
-                    }
-                })
-                .collect::<Vec<_>>();
-            let mut next = next;
-            next.extend(automation_dismissals);
+            let next = clear_read_queue_items(persisted_queue_items());
             save_persisted_queue_items(&next)?;
         }
         "dismiss" => {
@@ -1389,14 +1507,7 @@ pub async fn apply_remote_inbox_action(
             {
                 return Err("inbox_item_not_dismissible".to_string());
             }
-            let persisted = persisted_queue_items();
-            let next = persisted
-                .into_iter()
-                .filter(|candidate| {
-                    candidate.get("id").and_then(serde_json::Value::as_str) != Some(item_id)
-                })
-                .chain(automation_dismissal_marker(item))
-                .collect::<Vec<_>>();
+            let next = dismiss_persisted_queue_item(persisted_queue_items(), item_id, item);
             save_persisted_queue_items(&next)?;
         }
         "resolve_approval" => {
@@ -1542,27 +1653,6 @@ pub async fn remote_agent_terminal_snapshot(
         truncated: snapshot.output.truncated,
         omitted_bytes: snapshot.output.omitted_bytes,
     })
-}
-
-pub async fn remote_agent_terminal_raw_output(
-    state: &AppState,
-    session_id: &str,
-    tail_bytes: Option<usize>,
-) -> Result<String, String> {
-    let watch_state = {
-        let agents = state.agents.lock().await;
-        agents
-            .get(session_id)
-            .map(|agent| agent.watch_state.clone())
-            .ok_or_else(|| "agent_not_found".to_string())?
-    };
-    let snapshot = watch_state
-        .lock()
-        .map_err(|_| "watch_state_unavailable".to_string())?
-        .raw_snapshot_since(None, tail_bytes)
-        .map_err(|error| error.code().to_string())?;
-
-    Ok(snapshot.text)
 }
 
 pub fn validate_remote_agent_action(request: &RemoteAgentActionRequest) -> Result<(), String> {
@@ -2332,6 +2422,89 @@ mod tests {
         assert!(state.remote_inbox_runtime_items().is_none());
     }
 
+    #[tokio::test]
+    async fn failed_remote_automation_refresh_preserves_last_good_projection() {
+        let _home = TestWardianHome::new_async().await;
+        let run_root = wardian_core::paths::automation_runs_dir()
+            .expect("automation runs root")
+            .join("wf")
+            .join("run-corrupt");
+        std::fs::create_dir_all(&run_root).expect("corrupt run directory");
+        std::fs::write(run_root.join("state.json"), "not valid json").expect("corrupt checkpoint");
+
+        let state = AppState::new();
+        let approval = serde_json::json!({
+            "id": "automation-approval:wf:run-corrupt",
+            "type": "approval_request",
+            "timestamp": chrono::Utc::now().timestamp_millis(),
+            "automation_id": "wf",
+            "automation_run_id": "run-corrupt",
+        });
+        state.set_remote_inbox_runtime_items(0, vec![approval.clone()]);
+        let refreshed_at = state
+            .remote_inbox_runtime_refreshed_at
+            .load(std::sync::atomic::Ordering::Acquire);
+        state
+            .remote_inbox_runtime_refreshed_at
+            .store(refreshed_at - 5_000, std::sync::atomic::Ordering::Release);
+        let refresh_timestamp_before_failure = state
+            .remote_inbox_runtime_refreshed_at
+            .load(std::sync::atomic::Ordering::Acquire);
+        let generation = state
+            .try_start_remote_inbox_runtime_refresh()
+            .expect("refresh should start");
+
+        refresh_remote_inbox_runtime_projection(&state, generation).await;
+
+        assert!(state.remote_inbox_runtime_refresh_failed());
+        assert_eq!(
+            state
+                .remote_inbox_runtime_refreshed_at
+                .load(std::sync::atomic::Ordering::Acquire),
+            refresh_timestamp_before_failure,
+            "a failed refresh must preserve the last successful refresh time"
+        );
+        assert!(remote_queue_items(&state)
+            .await
+            .iter()
+            .any(|item| item["id"] == approval["id"]));
+        let mutation_items = remote_queue_items_for_mutation(&state)
+            .await
+            .expect("mutation projection should retain the cached approval");
+        assert_eq!(
+            current_queue_item(&mutation_items, "automation-approval:wf:run-corrupt")
+                .expect("approval remains addressable"),
+            &approval
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_remote_automation_refresh_without_last_good_reports_unavailable() {
+        let _home = TestWardianHome::new_async().await;
+        let run_root = wardian_core::paths::automation_runs_dir()
+            .expect("automation runs root")
+            .join("wf")
+            .join("run-corrupt");
+        std::fs::create_dir_all(&run_root).expect("corrupt run directory");
+        std::fs::write(run_root.join("state.json"), "not valid json").expect("corrupt checkpoint");
+
+        let state = AppState::new();
+        let generation = state
+            .try_start_remote_inbox_runtime_refresh()
+            .expect("refresh should start");
+        refresh_remote_inbox_runtime_projection(&state, generation).await;
+
+        assert!(state.remote_inbox_runtime_items().is_none());
+        assert_eq!(
+            ensure_remote_automation_projection_available(&state),
+            Err(REMOTE_AUTOMATION_INBOX_UNAVAILABLE.to_string())
+        );
+        assert_eq!(
+            remote_queue_items_for_mutation(&state).await,
+            Err(REMOTE_AUTOMATION_INBOX_UNAVAILABLE.to_string())
+        );
+    }
+
     #[test]
     fn inbox_page_reports_more_items_at_the_cursor_cap() {
         let (items, truncated, next_offset) = page_after_lookahead(
@@ -2574,6 +2747,50 @@ mod tests {
     }
 
     #[test]
+    fn remote_clear_read_tombstones_agent_completions_for_outbox_replay() {
+        let completion = serde_json::json!({
+            "id": "agent-completed:agent-1:prompt-1",
+            "type": "agent_completed",
+            "timestamp": 123,
+            "read": true,
+            "agent_session_id": "agent-1",
+            "evidence_id": "prompt-1",
+            "response_text": "finished",
+        });
+        let cleared = clear_read_queue_items(vec![completion]);
+
+        assert_eq!(cleared.len(), 1);
+        assert_eq!(cleared[0]["id"], "agent-completed:agent-1:prompt-1");
+        assert_eq!(cleared[0]["dismissed"], true);
+        assert_eq!(cleared[0]["read"], true);
+        assert_eq!(cleared[0]["response_text"], "finished");
+    }
+
+    #[test]
+    fn remote_dismiss_tombstones_agent_completion_without_losing_identity() {
+        let completion = serde_json::json!({
+            "id": "agent-completed:agent-1:prompt-1",
+            "type": "agent_completed",
+            "timestamp": 123,
+            "read": false,
+            "agent_session_id": "agent-1",
+            "evidence_id": "prompt-1",
+            "response_text": "finished",
+        });
+        let dismissed = dismiss_persisted_queue_item(
+            vec![completion.clone()],
+            "agent-completed:agent-1:prompt-1",
+            &completion,
+        );
+
+        assert_eq!(dismissed.len(), 1);
+        assert_eq!(dismissed[0]["id"], completion["id"]);
+        assert_eq!(dismissed[0]["evidence_id"], "prompt-1");
+        assert_eq!(dismissed[0]["dismissed"], true);
+        assert_eq!(dismissed[0]["read"], true);
+    }
+
+    #[test]
     fn automation_dismissal_marker_preserves_run_identity() {
         let marker = automation_dismissal_marker(&serde_json::json!({
             "type": "workflow_completed",
@@ -2676,7 +2893,9 @@ mod tests {
         .is_err());
         release.notify_one();
         blocker.await.expect("release first records lock");
-        let items = remote_queue_items_for_mutation(&state).await;
+        let items = remote_queue_items_for_mutation(&state)
+            .await
+            .expect("authoritative mutation projection");
         assert!(items
             .iter()
             .any(|item| { item["id"] == format!("notification:{}", first.id) }));
@@ -2717,7 +2936,9 @@ mod tests {
         .is_err());
         release.notify_one();
         blocker.await.expect("release second records lock");
-        let items = remote_queue_items_for_mutation(&state).await;
+        let items = remote_queue_items_for_mutation(&state)
+            .await
+            .expect("authoritative mutation projection");
         unsafe { std::env::remove_var("WARDIAN_HOME") };
         assert!(items
             .iter()
@@ -2880,27 +3101,6 @@ mod tests {
         assert_eq!(snapshot.text, "gamma");
         assert!(snapshot.truncated);
         assert!(snapshot.omitted_bytes > 0);
-    }
-
-    #[tokio::test]
-    async fn remote_agent_terminal_raw_output_preserves_escape_sequences_without_draining() {
-        let state = AppState::new();
-        let agent = test_agent("agent-1", "CoderOne", "Coder", "Processing");
-        {
-            let mut watch = agent.watch_state.lock().expect("watch state");
-            watch.push_output(b"\x1b[31mred terminal\x1b[0m\nsecond line");
-        }
-        insert_agent(&state, agent).await;
-
-        let first = remote_agent_terminal_raw_output(&state, "agent-1", Some(4096))
-            .await
-            .expect("first raw terminal output");
-        let second = remote_agent_terminal_raw_output(&state, "agent-1", Some(4096))
-            .await
-            .expect("second raw terminal output");
-
-        assert_eq!(first, "\x1b[31mred terminal\x1b[0m\nsecond line");
-        assert_eq!(second, first);
     }
 
     #[tokio::test]

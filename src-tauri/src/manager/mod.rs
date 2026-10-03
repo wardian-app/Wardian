@@ -18,15 +18,12 @@ pub(crate) mod telemetry;
 // All external callers (lib.rs, commands/*) continue to use
 // crate::manager::* exactly as before.
 
-pub use classes::{
-    get_agent_class_default_instruction, get_all_agent_classes, init_agent_classes, save_classes,
-};
+pub use classes::{get_all_agent_classes, init_agent_classes, save_classes};
 pub(crate) use codex_onboarding::{should_publish_provisionally, CodexAttachmentCompletion};
 pub use headless::{
     obtain_session_id, run_headless_with_options, HeadlessRunError, HeadlessRunErrorKind,
     HeadlessRunOptions, DEFAULT_HEADLESS_RUN_TIMEOUT,
 };
-pub(crate) use opencode::opencode_last_assistant_text;
 pub(crate) use session_identity::{
     apply_provider_identity, validate_config_for_launch, validate_session_values_for_launch,
 };
@@ -163,36 +160,127 @@ fn should_suppress_interrupted_status(
     interrupted.contains(&status_arc_key(current_status))
 }
 
+/// Reserve an admitted status intent while holding its status Arc stable.
+///
+/// The admission check happens before this helper so blocked provider states do
+/// not invalidate an already queued status transition.
+pub(crate) fn reserve_agent_status_intent(
+    state: &AppState,
+    admission: codex_onboarding::CodexStatusAdmission,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    expected_status: &str,
+    next_status: &str,
+) -> Option<u64> {
+    if admission == codex_onboarding::CodexStatusAdmission::Blocked {
+        return None;
+    }
+    let status = current_status.lock().ok()?;
+    if *status != expected_status {
+        return None;
+    }
+    Some(state.reserve_status_intent(session_id, current_status, next_status))
+}
+
+/// Commit a replacement publication only while its status still matches and
+/// no newer admitted intent targets a different status.
+pub(crate) fn commit_agent_status_publication(
+    state: &AppState,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    expected_status: &str,
+) -> Option<u64> {
+    let current = current_status.lock().ok()?;
+    if *current != expected_status
+        || state
+            .status_intent_status(session_id, current_status)
+            .is_some_and(|intent_status| intent_status != expected_status)
+    {
+        return None;
+    }
+    Some(state.commit_status_revision(session_id, current_status, expected_status))
+}
+
 pub(crate) fn set_agent_status(
     app: &AppHandle,
     session_id: &str,
     current_status: &std::sync::Arc<std::sync::Mutex<String>>,
     next_status: &str,
 ) {
-    match codex_onboarding::status_admission(app, session_id, current_status, next_status) {
+    let Ok(expected_status) = current_status.lock().map(|status| status.clone()) else {
+        return;
+    };
+    let admission =
+        codex_onboarding::status_admission(app, session_id, current_status, next_status);
+    if admission == codex_onboarding::CodexStatusAdmission::Blocked {
+        return;
+    }
+    let state = app.state::<AppState>();
+    let Some(intent_revision) = reserve_agent_status_intent(
+        state.inner(),
+        admission,
+        session_id,
+        current_status,
+        &expected_status,
+        next_status,
+    ) else {
+        return;
+    };
+    match admission {
         codex_onboarding::CodexStatusAdmission::Blocked => return,
         codex_onboarding::CodexStatusAdmission::WaitForRoster => {
             codex_onboarding::defer_status_transition(
                 app,
                 session_id,
                 current_status,
+                expected_status,
+                intent_revision,
                 next_status.to_string(),
             );
             return;
         }
         codex_onboarding::CodexStatusAdmission::Allowed => {}
     }
-    if let Ok(mut status) = current_status.lock() {
-        if *status != next_status {
-            *status = next_status.to_string();
-            schedule_agent_status_observation(
-                app,
-                session_id,
-                current_status,
-                next_status.to_string(),
-            );
-        }
+    if let Some((status_sequence, status_revision)) = apply_admitted_status_transition(
+        state.inner(),
+        session_id,
+        current_status,
+        &expected_status,
+        intent_revision,
+        next_status,
+    ) {
+        schedule_agent_status_observation(
+            app,
+            session_id,
+            current_status,
+            next_status.to_string(),
+            status_sequence,
+            status_revision,
+        );
     }
+}
+
+/// Commit an admitted status only while its exact runtime and intent still win.
+/// Returns its observation sequence and committed status revision.
+pub(crate) fn apply_admitted_status_transition(
+    state: &AppState,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    expected_status: &str,
+    intent_revision: u64,
+    next_status: &str,
+) -> Option<(u64, u64)> {
+    let mut status = current_status.lock().ok()?;
+    if state.status_intent_revision(session_id, current_status) != intent_revision
+        || *status != expected_status
+        || *status == next_status
+    {
+        return None;
+    }
+    *status = next_status.to_string();
+    let status_revision = state.commit_status_revision(session_id, current_status, next_status);
+    let status_sequence = state.next_status_observation_sequence(session_id);
+    Some((status_sequence, status_revision))
 }
 
 /// Persists and emits an already-current status. Runtime replacement uses this
@@ -204,18 +292,55 @@ pub(crate) fn publish_agent_status(
     session_id: &str,
     current_status: &std::sync::Arc<std::sync::Mutex<String>>,
 ) {
-    let Ok(status) = current_status.lock().map(|status| status.clone()) else {
+    let Ok(expected_status) = current_status.lock().map(|status| status.clone()) else {
         return;
     };
-    match codex_onboarding::status_admission(app, session_id, current_status, &status) {
+    let admission =
+        codex_onboarding::status_admission(app, session_id, current_status, &expected_status);
+    if admission == codex_onboarding::CodexStatusAdmission::Blocked {
+        return;
+    }
+    let state = app.state::<AppState>();
+    let Some(status_revision) = commit_agent_status_publication(
+        state.inner(),
+        session_id,
+        current_status,
+        &expected_status,
+    ) else {
+        return;
+    };
+    match admission {
         codex_onboarding::CodexStatusAdmission::Blocked => return,
         codex_onboarding::CodexStatusAdmission::WaitForRoster => {
-            codex_onboarding::defer_status_publication(app, session_id, current_status);
+            codex_onboarding::defer_status_publication(
+                app,
+                session_id,
+                current_status,
+                status_revision,
+            );
             return;
         }
         codex_onboarding::CodexStatusAdmission::Allowed => {}
     }
-    schedule_agent_status_observation(app, session_id, current_status, status);
+    let status_sequence = {
+        let Ok(current) = current_status.lock() else {
+            return;
+        };
+        if *current != expected_status
+            || state.status_revision(session_id, current_status) != status_revision
+        {
+            return;
+        }
+        state.next_status_observation_sequence(session_id)
+    };
+    schedule_agent_status_observation(
+        app,
+        session_id,
+        current_status,
+        expected_status,
+        status_sequence,
+        status_revision,
+    );
 }
 
 fn schedule_agent_status_observation(
@@ -223,91 +348,32 @@ fn schedule_agent_status_observation(
     session_id: &str,
     current_status: &std::sync::Arc<std::sync::Mutex<String>>,
     status: String,
+    status_sequence: u64,
+    status_revision: u64,
 ) {
     let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let status_app = app.clone();
     let status_session_id = session_id.to_string();
     let current_status = current_status.clone();
-    let status_sequence = app
-        .state::<AppState>()
-        .next_status_observation_sequence(session_id);
     tauri::async_runtime::spawn(async move {
         let state = status_app.state::<AppState>();
         // Startup also schedules Idle here. Serialize with replacement before
         // looking up the input generation so an old status Arc cannot publish
         // Ready into a replacement between identity validation and the write.
         let _lifecycle = state.lock_agent_lifecycle(&status_session_id).await;
-        let Some(status) = crate::control::codex_menu_status::constrain_publication(
+        let Some((status, _status_sequence, status_revision)) = persist_status_observation(
             state.inner(),
             &status_session_id,
             &current_status,
             &status,
+            status_sequence,
+            status_revision,
+            &observed_at,
         )
         .await
         else {
             return;
         };
-        // Keep the map lock through the synchronous durable write. A runtime
-        // replacement must wait until this observation is either rejected or
-        // committed, which prevents an old Arc from winning the database race
-        // after the replacement installs its own status incarnation.
-        let agents = state.agents.lock().await;
-        let Some(agent) = agents.get(&status_session_id) else {
-            log_debug(&format!(
-                "[Wardian] Ignoring stale status '{}' for replaced session {}",
-                status, status_session_id
-            ));
-            return;
-        };
-        if !std::sync::Arc::ptr_eq(&agent.current_status, &current_status) {
-            log_debug(&format!(
-                "[Wardian] Ignoring stale status '{}' for replaced session {}",
-                status, status_session_id
-            ));
-            return;
-        }
-        {
-            // Keep the status value locked through the synchronous durable
-            // write and watch update. A newer transition cannot mutate this
-            // Arc until the older observation has finished its ordered side
-            // effects.
-            let Ok(current_status_value) = agent.current_status.lock() else {
-                return;
-            };
-            if *current_status_value != status {
-                log_debug(&format!(
-                    "[Wardian] Ignoring superseded status '{}' for session {}",
-                    status, status_session_id
-                ));
-                return;
-            }
-
-            // Keep the remote roster useful after the current runtime identity
-            // has been verified, even when the following durable write or a
-            // later remote read encounters another busy agent-state path.
-            state.set_remote_agent_status(&status_session_id, &status, status_sequence);
-
-            // Phase 2: Persist while the reporting runtime still owns the
-            // active agent slot. `update_agent_status` is synchronous, so no
-            // await can let a replacement interleave between the identity
-            // check and write.
-            let _ = wardian_core::db::update_agent_status(&status_session_id, &status, None);
-            if let Some(agent) = agents.get(&status_session_id) {
-                if let Ok(mut last_status_at) = agent.last_status_at.lock() {
-                    *last_status_at = Some(observed_at.clone());
-                }
-                if let Ok(mut watch_state) = agent.watch_state.lock() {
-                    watch_state.push_event(
-                        "status",
-                        serde_json::json!({
-                            "status": wardian_core::identity::normalize_status(&status),
-                            "observed_at": observed_at,
-                        }),
-                    );
-                }
-            }
-        }
-        drop(agents);
 
         // Provider-input readiness and UI events are asynchronous side
         // effects. Revalidate after each await so a late observation cannot
@@ -317,6 +383,7 @@ fn schedule_agent_status_observation(
             &status_session_id,
             &current_status,
             &status,
+            status_revision,
         )
         .await
         {
@@ -326,7 +393,7 @@ fn schedule_agent_status_observation(
             &state,
             &status_session_id,
             &status,
-            status_sequence,
+            status_revision,
         )
         .await;
         if !status_observation_belongs_to_current_agent(
@@ -334,6 +401,7 @@ fn schedule_agent_status_observation(
             &status_session_id,
             &current_status,
             &status,
+            status_revision,
         )
         .await
         {
@@ -365,6 +433,7 @@ fn schedule_agent_status_observation(
             &status_session_id,
             &current_status,
             &status,
+            status_revision,
         )
         .await
         {
@@ -381,47 +450,177 @@ fn schedule_agent_status_observation(
     });
 }
 
+/// Persist an observation for the current runtime while its lifecycle lock is held.
+/// The caller remains responsible for later readiness and UI side effects.
+pub(crate) async fn persist_status_observation(
+    state: &AppState,
+    session_id: &str,
+    current_status: &std::sync::Arc<std::sync::Mutex<String>>,
+    requested_status: &str,
+    status_sequence: u64,
+    status_revision: u64,
+    observed_at: &str,
+) -> Option<(String, u64, u64)> {
+    let (status, status_sequence, status_revision) =
+        crate::control::codex_menu_status::constrain_publication(
+            state,
+            session_id,
+            current_status,
+            requested_status,
+            status_sequence,
+            status_revision,
+        )
+        .await?;
+    // Keep the map lock through the synchronous durable write so replacement
+    // cannot publish a new runtime before this observation is resolved.
+    let agents = state.agents.lock().await;
+    let Some(agent) = agents.get(session_id) else {
+        log_debug(&format!(
+            "[Wardian] Ignoring stale status '{}' for replaced session {}",
+            status, session_id
+        ));
+        return None;
+    };
+    if !std::sync::Arc::ptr_eq(&agent.current_status, current_status) {
+        log_debug(&format!(
+            "[Wardian] Ignoring stale status '{}' for replaced session {}",
+            status, session_id
+        ));
+        return None;
+    }
+    {
+        // Hold the value lock through the write and watch update so a newer
+        // transition cannot change this Arc between validation and persistence.
+        let Ok(current_status_value) = agent.current_status.lock() else {
+            return None;
+        };
+        if *current_status_value != status
+            || state.status_revision(session_id, current_status) != status_revision
+        {
+            log_debug(&format!(
+                "[Wardian] Ignoring superseded status '{}' for session {}",
+                status, session_id
+            ));
+            return None;
+        }
+        state.set_remote_agent_status(session_id, &status, status_sequence);
+        let _ = wardian_core::db::update_agent_status(session_id, &status, None);
+        if let Ok(mut last_status_at) = agent.last_status_at.lock() {
+            *last_status_at = Some(observed_at.to_string());
+        }
+        if let Ok(mut watch_state) = agent.watch_state.lock() {
+            watch_state.push_event(
+                "status",
+                serde_json::json!({
+                    "status": wardian_core::identity::normalize_status(&status),
+                    "observed_at": observed_at,
+                }),
+            );
+        }
+    }
+    Some((status, status_sequence, status_revision))
+}
+
+pub(crate) struct TelemetryStatusPublication {
+    pub(crate) readiness: Option<ProviderInputReadiness>,
+    pub(crate) current_status: Option<String>,
+    pub(crate) status_revision: Option<u64>,
+}
+
+/// Publishes one staged observation, waiting as long as it takes for the
+/// agent's lifecycle gate.
 pub(crate) async fn publish_telemetry_status_observation(
     state: &AppState,
     observation: &telemetry::TelemetryProviderStatus,
-) -> ProviderInputReadiness {
-    let agents = state.agents.lock().await;
-    let attachment_ready = agents
-        .get(&observation.session_id)
-        .is_none_or(codex_onboarding::codex_attachment_is_ready);
-    if !attachment_ready
-        && matches!(
-            wardian_core::identity::normalize_status(&observation.status).as_str(),
-            "idle" | "processing"
-        )
-    {
-        return ProviderInputReadiness::Unknown;
-    }
-    if let Some(agent) = agents.get(&observation.session_id) {
-        // Telemetry runs from a detached snapshot. Do not let an observation
-        // from a replaced runtime, or a status that was superseded after the
-        // snapshot, overwrite the fallback roster cache.
-        if std::sync::Arc::ptr_eq(&agent.current_status, &observation.current_status) {
-            if let Ok(current) = agent.current_status.lock() {
-                if *current == observation.status {
-                    let status_sequence =
-                        state.next_status_observation_sequence(&observation.session_id);
-                    state.set_remote_agent_status(
-                        &observation.session_id,
-                        &observation.status,
-                        status_sequence,
-                    );
-                }
-            }
-        }
+) -> TelemetryStatusPublication {
+    let lifecycle = state.lock_agent_lifecycle(&observation.session_id).await;
+    publish_telemetry_status_observation_locked(state, observation, lifecycle).await
+}
+
+/// Publishes under a lifecycle gate the caller already holds, so a caller that
+/// cannot wait indefinitely can bound its own acquisition.
+pub(crate) async fn publish_telemetry_status_observation_locked(
+    state: &AppState,
+    observation: &telemetry::TelemetryProviderStatus,
+    _lifecycle: tokio::sync::OwnedMutexGuard<()>,
+) -> TelemetryStatusPublication {
+    let active_runtime = {
+        let agents = state.agents.lock().await;
+        agents.get(&observation.session_id).map(|agent| {
+            (
+                std::sync::Arc::ptr_eq(&agent.current_status, &observation.current_status),
+                agent.current_status.clone(),
+                agent.last_status_at.clone(),
+                agent.watch_state.clone(),
+                agent.config.clone(),
+            )
+        })
+    };
+    let Some((owns_runtime, current_status, last_status_at, watch_state, config)) = active_runtime
+    else {
+        return TelemetryStatusPublication {
+            readiness: None,
+            current_status: None,
+            status_revision: None,
+        };
+    };
+
+    let active_status = current_status.lock().ok().map(|status| status.clone());
+    if !owns_runtime {
+        return TelemetryStatusPublication {
+            readiness: None,
+            current_status: active_status,
+            status_revision: None,
+        };
     }
 
-    match wardian_core::identity::normalize_status(&observation.status).as_str() {
-        "idle" => ProviderInputReadiness::Ready,
-        "processing" => ProviderInputReadiness::Busy,
-        "action_required" => ProviderInputReadiness::ActionRequired,
-        "off" | "error" => ProviderInputReadiness::Unavailable,
-        _ => ProviderInputReadiness::Unknown,
+    // Read item state only after releasing the roster lock. The lifecycle guard
+    // keeps this runtime installed while its staged status is validated/applied.
+    let attachment_ready = match config.lock() {
+        Ok(config) if config.provider != "codex" => true,
+        Ok(_) => watch_state
+            .lock()
+            .is_ok_and(|watch_state| watch_state.codex_attachment_ready()),
+        Err(_) => false,
+    };
+    let Some(current_status_value) = telemetry::commit_telemetry_status_observation(
+        state,
+        observation,
+        &current_status,
+        &last_status_at,
+        &watch_state,
+        attachment_ready,
+    ) else {
+        return TelemetryStatusPublication {
+            readiness: None,
+            current_status: current_status.lock().ok().map(|status| status.clone()),
+            status_revision: None,
+        };
+    };
+    let (current_status_value, status_sequence, status_revision) = current_status_value;
+    state.set_remote_agent_status(
+        &observation.session_id,
+        &current_status_value,
+        status_sequence,
+    );
+
+    let normalized_status = wardian_core::identity::normalize_status(&current_status_value);
+    let readiness =
+        if !attachment_ready && matches!(normalized_status.as_str(), "idle" | "processing") {
+            ProviderInputReadiness::Unknown
+        } else {
+            match normalized_status.as_str() {
+                "idle" => ProviderInputReadiness::Ready,
+                "processing" => ProviderInputReadiness::Busy,
+                "action_required" => ProviderInputReadiness::ActionRequired,
+                "off" | "error" => ProviderInputReadiness::Unavailable,
+                _ => ProviderInputReadiness::Unknown,
+            }
+        };
+    TelemetryStatusPublication {
+        readiness: Some(readiness),
+        current_status: Some(current_status_value),
+        status_revision: Some(status_revision),
     }
 }
 
@@ -430,14 +629,18 @@ async fn status_observation_belongs_to_current_agent(
     session_id: &str,
     current_status: &std::sync::Arc<std::sync::Mutex<String>>,
     expected_status: &str,
+    expected_revision: u64,
 ) -> bool {
     let agents = state.agents.lock().await;
     agents.get(session_id).is_some_and(|agent| {
         std::sync::Arc::ptr_eq(&agent.current_status, current_status)
-            && agent
-                .current_status
-                .lock()
-                .is_ok_and(|status| *status == expected_status)
+            && agent.current_status.lock().is_ok_and(|status| {
+                *status == expected_status
+                    && state.status_revision(session_id, current_status) == expected_revision
+                    && state
+                        .status_intent_status(session_id, current_status)
+                        .is_none_or(|intent_status| intent_status == expected_status)
+            })
     })
 }
 
@@ -445,7 +648,7 @@ async fn record_provider_input_from_status_state(
     state: &AppState,
     session_id: &str,
     next_status: &str,
-    status_sequence: u64,
+    status_revision: u64,
 ) {
     let readiness = match wardian_core::identity::normalize_status(next_status).as_str() {
         "idle" => ProviderInputReadiness::Ready,
@@ -465,7 +668,7 @@ async fn record_provider_input_from_status_state(
         .interactions
         .record_provider_input_status_observation(
             session_id,
-            status_sequence,
+            status_revision,
             generation,
             readiness,
             evidence,
@@ -487,9 +690,8 @@ pub(crate) fn emit_agent_turn_completed(app: &AppHandle, session_id: &str) {
         }),
     );
 
-    // Change snapshots run off the turn boundary, never on it. Spawning here is
-    // what keeps the agent's critical path clear; the snapshot itself coalesces
-    // per workspace and skips turns that wrote nothing.
+    // Change snapshots run off the turn boundary; this keeps the provider's
+    // completion path short and lets the snapshot coalesce per workspace.
     let snapshot_app = app.clone();
     let snapshot_session_id = session_id.to_string();
     tauri::async_runtime::spawn(async move {
@@ -500,6 +702,333 @@ pub(crate) fn emit_agent_turn_completed(app: &AppHandle, session_id: &str) {
         )
         .await;
     });
+}
+
+/// Persists a provider-confirmed Claude Stop-hook event before projecting it to
+/// the UI. The hook outbox keeps failed writes available for retry and startup
+/// replay until the canonical Inbox item is committed.
+pub(crate) fn emit_agent_turn_completed_with_message(
+    app: &AppHandle,
+    session_id: &str,
+    runtime_generation: u64,
+    message: Option<wardian_core::control::WatchTranscriptMessage>,
+    outbox_path: std::path::PathBuf,
+) {
+    let completion_app = app.clone();
+    let completion_session_id = session_id.to_string();
+    let (completion_timestamp, timestamp_source) = completion_timestamp_from_outbox(&outbox_path);
+    let completion = message
+        .filter(|message| {
+            message.provider == "claude"
+                && message.role == "assistant"
+                && !message.text.trim().is_empty()
+        })
+        .and_then(|message| {
+            let evidence_id = message
+                .turn_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?
+                .to_string();
+            Some((evidence_id, message, completion_timestamp, timestamp_source))
+        });
+    tauri::async_runtime::spawn(async move {
+        let state = completion_app.state::<AppState>();
+        let Some((_, message, _, _)) = completion.as_ref() else {
+            return;
+        };
+        let item_id = format!(
+            "agent-completed:{}:{}",
+            completion_session_id,
+            completion
+                .as_ref()
+                .map(|(id, _, _, _)| id.as_str())
+                .unwrap_or_default()
+        );
+        let mut persistence_failures = 0u64;
+        loop {
+            // Per-agent lifecycle is always acquired before the global queue
+            // lock; queue writers never take the lifecycle lock.
+            let lifecycle_guard = state.lock_agent_lifecycle(&completion_session_id).await;
+            let queue_guard = state.queue_io_lock.lock().await;
+            let current_agent_name = {
+                let agents = state.agents.lock().await;
+                agents.get(&completion_session_id).and_then(|agent| {
+                    if agent.runtime_generation != Some(runtime_generation) {
+                        return None;
+                    }
+                    agent.config.lock().ok().and_then(|config| {
+                        (config.provider == "claude" && !config.session_name.trim().is_empty())
+                            .then(|| config.session_name.clone())
+                    })
+                })
+            };
+            let Some(completion_agent_name) = current_agent_name else {
+                return;
+            };
+            let mut items = crate::utils::queue::load_items();
+            let existing = items.iter().find(|item| item["id"] == item_id).cloned();
+            let _persisted_item = if let Some(existing) = existing {
+                existing
+            } else {
+                let item = claude_completion_inbox_item(
+                    &completion_session_id,
+                    &completion_agent_name,
+                    message,
+                    completion
+                        .as_ref()
+                        .map(|(_, _, timestamp, _)| *timestamp)
+                        .unwrap_or_default(),
+                    completion
+                        .as_ref()
+                        .map(|(_, _, _, source)| *source)
+                        .unwrap_or("processing_time_fallback"),
+                );
+                items.insert(0, item.clone());
+                if let Err(error) = crate::utils::queue::save_items(&items) {
+                    persistence_failures += 1;
+                    if persistence_failures == 1 || persistence_failures.is_multiple_of(60) {
+                        log_debug(&format!(
+                            "[Wardian] Failed to persist Claude turn completion for {} ({persistence_failures} retries): {error}; keeping the durable Stop hook outbox record",
+                            completion_session_id
+                        ));
+                    }
+                    drop(queue_guard);
+                    drop(lifecycle_guard);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+                item
+            };
+            drop(queue_guard);
+            drop(lifecycle_guard);
+            record_agent_turn_completed_for_watch(&state, &completion_session_id).await;
+            {
+                // A remote dismissal may happen while the watch receipt is
+                // being published. Re-read under the queue lock and emit the
+                // canonical current item so a stale pre-dismissal snapshot
+                // cannot put the completion back into the desktop Inbox.
+                let queue_guard = state.queue_io_lock.lock().await;
+                let items = crate::utils::queue::load_items();
+                if let Some(current_item) = active_claude_completion(&items, &item_id) {
+                    let current_agent_name = current_item
+                        .get("agent_name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(&completion_agent_name);
+                    let _ = completion_app.emit(
+                        "agent-turn-completed",
+                        serde_json::json!({
+                            "session_id": completion_session_id,
+                            "agent_name": current_agent_name,
+                            "inbox_item": current_item,
+                        }),
+                    );
+                }
+                drop(queue_guard);
+            }
+            if let Err(error) = std::fs::remove_file(&outbox_path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    log_debug(&format!(
+                        "[Wardian] Failed to acknowledge persisted Claude Stop event {}: {error}",
+                        outbox_path.display()
+                    ));
+                }
+            }
+            break;
+        }
+
+        crate::commands::change_snapshot::snapshot_completed_turn(
+            state.inner(),
+            &completion_session_id,
+        )
+        .await;
+    });
+}
+
+fn claude_completion_inbox_item(
+    session_id: &str,
+    agent_name: &str,
+    message: &wardian_core::control::WatchTranscriptMessage,
+    timestamp: i64,
+    timestamp_source: &str,
+) -> serde_json::Value {
+    let evidence_id = message.turn_id.as_deref().unwrap_or_default().trim();
+    serde_json::json!({
+        "id": format!("agent-completed:{session_id}:{evidence_id}"),
+        "type": "agent_completed",
+        "timestamp": timestamp,
+        "timestamp_source": timestamp_source,
+        "read": false,
+        "agent_session_id": session_id,
+        "agent_name": agent_name,
+        "summary": message.text.trim().chars().take(500).collect::<String>(),
+        "response_text": message.text.clone(),
+        "evidence_id": evidence_id,
+        "evidence_source": "provider_runtime",
+    })
+}
+
+fn claude_completion_message_for_config(
+    config: &AgentConfig,
+    event: &serde_json::Value,
+) -> Option<wardian_core::control::WatchTranscriptMessage> {
+    if config.provider != "claude" {
+        return None;
+    }
+    let accepted_sessions = claude::claude_accepted_sessions(config);
+    spawn::claude_stop_event_message(event, &accepted_sessions)
+}
+
+fn active_claude_completion(
+    items: &[serde_json::Value],
+    item_id: &str,
+) -> Option<serde_json::Value> {
+    items
+        .iter()
+        .find(|item| item.get("id").and_then(serde_json::Value::as_str) == Some(item_id))
+        .filter(|item| {
+            item.get("type").and_then(serde_json::Value::as_str) == Some("agent_completed")
+                && item.get("dismissed").and_then(serde_json::Value::as_bool) != Some(true)
+        })
+        .cloned()
+}
+
+/// Replays durable Claude Stop records before saved providers are launched.
+/// This covers intentionally Off agents, which have no process watcher to
+/// discover an outbox record left by an interrupted persistence attempt.
+pub(crate) async fn replay_claude_completion_outboxes(app: &AppHandle, configs: &[AgentConfig]) {
+    let Some(home) = get_wardian_home() else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    for saved_config in configs.iter().filter(|config| config.provider == "claude") {
+        let completion_dir = home
+            .join("agents")
+            .join(&saved_config.session_id)
+            .join("claude")
+            .join("turn-completions");
+        let Ok(entries) = std::fs::read_dir(&completion_dir) else {
+            continue;
+        };
+        let mut outbox_paths = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+            .collect::<Vec<_>>();
+        outbox_paths.sort();
+
+        for outbox_path in outbox_paths {
+            let Ok(contents) = std::fs::read_to_string(&outbox_path) else {
+                continue;
+            };
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(&contents) else {
+                let _ = std::fs::rename(&outbox_path, outbox_path.with_extension("invalid"));
+                log_debug("[Wardian] Quarantined malformed Claude Stop hook outbox record during startup replay");
+                continue;
+            };
+            if event
+                .get("hook_event_name")
+                .and_then(serde_json::Value::as_str)
+                != Some("Stop")
+            {
+                let _ = std::fs::rename(&outbox_path, outbox_path.with_extension("ignored"));
+                continue;
+            }
+
+            let lifecycle_guard = state.lock_agent_lifecycle(&saved_config.session_id).await;
+            let current_config = {
+                let agents = state.agents.lock().await;
+                agents
+                    .get(&saved_config.session_id)
+                    .and_then(|agent| agent.config.lock().ok().map(|config| config.clone()))
+            };
+            let Some(config) = current_config else {
+                drop(lifecycle_guard);
+                continue;
+            };
+            if config.provider != "claude" {
+                drop(lifecycle_guard);
+                continue;
+            }
+            let accepted_sessions = claude::claude_accepted_sessions(&config);
+            let session_matches = accepted_sessions.iter().any(|session_id| {
+                claude::claude_permission_hook_matches_session(&event, session_id)
+            });
+            if !session_matches {
+                drop(lifecycle_guard);
+                continue;
+            }
+            let Some(message) = claude_completion_message_for_config(&config, &event) else {
+                let _ = std::fs::rename(&outbox_path, outbox_path.with_extension("ignored"));
+                drop(lifecycle_guard);
+                log_debug("[Wardian] Ignored Claude Stop hook outbox record without prompt identity or assistant text during startup replay");
+                continue;
+            };
+            let Some(evidence_id) = message.turn_id.as_deref() else {
+                drop(lifecycle_guard);
+                continue;
+            };
+            let item_id = format!("agent-completed:{}:{evidence_id}", config.session_id);
+            let queue_guard = state.queue_io_lock.lock().await;
+            let mut items = crate::utils::queue::load_items();
+            let already_committed = items
+                .iter()
+                .any(|item| item.get("id").and_then(serde_json::Value::as_str) == Some(&item_id));
+            if !already_committed {
+                let (timestamp, timestamp_source) = completion_timestamp_from_outbox(&outbox_path);
+                let item = claude_completion_inbox_item(
+                    &config.session_id,
+                    &config.session_name,
+                    &message,
+                    timestamp,
+                    timestamp_source,
+                );
+                items.insert(0, item);
+                if let Err(error) = crate::utils::queue::save_items(&items) {
+                    log_debug(&format!(
+                        "[Wardian] Startup replay could not persist Claude completion for {}: {error}; retaining Stop hook outbox record",
+                        config.session_id
+                    ));
+                    drop(queue_guard);
+                    drop(lifecycle_guard);
+                    continue;
+                }
+            }
+
+            let active_item = active_claude_completion(&items, &item_id);
+            let removal = std::fs::remove_file(&outbox_path);
+            if let Err(error) = removal {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    log_debug(&format!(
+                        "[Wardian] Failed to acknowledge startup-replayed Claude Stop event {}: {error}",
+                        outbox_path.display()
+                    ));
+                }
+            }
+            drop(queue_guard);
+            drop(lifecycle_guard);
+            if active_item.is_some() {
+                let _ = app.emit("inbox-updated", ());
+            }
+        }
+    }
+}
+
+fn completion_timestamp_from_outbox(path: &std::path::Path) -> (i64, &'static str) {
+    let timestamp = path
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|elapsed| elapsed.as_millis().min(i64::MAX as u128) as i64);
+    timestamp
+        .map(|value| (value, "hook_outbox_mtime"))
+        .unwrap_or_else(|| {
+            (
+                chrono::Utc::now().timestamp_millis(),
+                "processing_time_fallback",
+            )
+        })
 }
 
 pub(crate) fn emit_agent_turn_started(app: &AppHandle, session_id: &str) {
@@ -806,7 +1335,11 @@ pub(crate) fn apply_agent_status_event_with_policy(
             return;
         }
         set_agent_status(app, session_id, current_status, next_status);
-        if should_emit_agent_turn_completed(&current, &event) {
+        if should_emit_agent_turn_completed(&current, &event)
+            // Claude publishes from the provider's terminal result after its
+            // live watcher captured the final assistant message.
+            && policy != ProviderStatusEventPolicy::PreserveActionRequiredUntilTurnCompleted
+        {
             emit_agent_turn_completed(app, session_id);
         }
     }
@@ -1309,6 +1842,142 @@ pub(crate) fn display_log_path(path: &std::path::Path) -> String {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn claude_completion_inbox_item_uses_prompt_identity_and_keeps_full_response() {
+        let message = wardian_core::control::WatchTranscriptMessage {
+            role: "assistant".to_string(),
+            text: "  finished the requested work  ".to_string(),
+            provider: "claude".to_string(),
+            turn_id: Some("claude-message-7".to_string()),
+            source: Some("stream_json".to_string()),
+            provider_provenance: None,
+        };
+
+        let first =
+            claude_completion_inbox_item("agent-1", "Claude", &message, 100, "hook_outbox_mtime");
+        let retry =
+            claude_completion_inbox_item("agent-1", "Claude", &message, 100, "hook_outbox_mtime");
+
+        assert_eq!(first["id"], "agent-completed:agent-1:claude-message-7");
+        assert_eq!(first["evidence_id"], "claude-message-7");
+        assert_eq!(first["evidence_source"], "provider_runtime");
+        assert_eq!(first["summary"], "finished the requested work");
+        assert_eq!(first["response_text"], "  finished the requested work  ");
+        assert_eq!(first["timestamp"], retry["timestamp"]);
+        assert_eq!(first["timestamp_source"], "hook_outbox_mtime");
+        assert_eq!(first["id"], retry["id"]);
+    }
+
+    #[test]
+    fn replayed_claude_completion_uses_outbox_file_time() {
+        let directory = tempfile::tempdir().expect("temp outbox");
+        let path = directory.path().join("event.json");
+        std::fs::write(&path, "{}").expect("write outbox event");
+
+        let first = completion_timestamp_from_outbox(&path);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let replay = completion_timestamp_from_outbox(&path);
+
+        assert_eq!(first.1, "hook_outbox_mtime");
+        assert_eq!(
+            replay, first,
+            "replaying the same outbox record must preserve completion chronology"
+        );
+    }
+
+    #[test]
+    fn startup_replay_accepts_a_saved_off_claude_agent_with_matching_identity() {
+        let config = AgentConfig {
+            session_id: "agent-1".to_string(),
+            session_name: "Claude".to_string(),
+            provider: "claude".to_string(),
+            is_off: true,
+            resume_session: Some("claude-session-1".to_string()),
+            ..AgentConfig::default()
+        };
+        let event = serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": "claude-session-1",
+            "prompt_id": "f2d85983-9df6-4c82-92ae-5a3500bf0a16",
+            "last_assistant_message": "completed while the agent was saved Off",
+        });
+
+        let message = claude_completion_message_for_config(&config, &event)
+            .expect("saved-Off Claude identities remain eligible for outbox replay");
+        assert_eq!(message.provider, "claude");
+        assert_eq!(message.role, "assistant");
+        assert_eq!(
+            message.turn_id.as_deref(),
+            Some("f2d85983-9df6-4c82-92ae-5a3500bf0a16")
+        );
+        assert_eq!(message.text, "completed while the agent was saved Off");
+
+        let wrong_session = serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": "other-session",
+            "prompt_id": "f2d85983-9df6-4c82-92ae-5a3500bf0a16",
+            "last_assistant_message": "must not be attributed to this agent",
+        });
+        assert!(claude_completion_message_for_config(&config, &wrong_session).is_none());
+    }
+
+    #[test]
+    fn startup_replay_accepts_saved_off_fresh_claude_using_wardian_session_id() {
+        let config = AgentConfig {
+            session_id: "fresh-agent-id".to_string(),
+            session_name: "Claude".to_string(),
+            provider: "claude".to_string(),
+            is_off: true,
+            resume_session: None,
+            fresh_provider_session_id: None,
+            ..AgentConfig::default()
+        };
+        let event = serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": "fresh-agent-id",
+            "prompt_id": "8b918a55-8314-4ea7-bd2e-c3bf53135079",
+            "last_assistant_message": "fresh Claude turn completed before shutdown",
+        });
+
+        let message = claude_completion_message_for_config(&config, &event)
+            .expect("fresh saved-Off Claude replay accepts its fallback provider session ID");
+        assert_eq!(message.provider, "claude");
+        assert_eq!(message.role, "assistant");
+        assert_eq!(
+            message.turn_id.as_deref(),
+            Some("8b918a55-8314-4ea7-bd2e-c3bf53135079")
+        );
+        assert_eq!(message.text, "fresh Claude turn completed before shutdown");
+    }
+
+    #[test]
+    fn dismissed_claude_completion_is_not_emitted_from_a_stale_snapshot() {
+        let item = serde_json::json!({
+            "id": "agent-completed:agent-1:prompt-1",
+            "type": "agent_completed",
+            "dismissed": true,
+            "read": true,
+        });
+        assert!(active_claude_completion(
+            std::slice::from_ref(&item),
+            "agent-completed:agent-1:prompt-1",
+        )
+        .is_none());
+
+        let active = serde_json::json!({
+            "id": "agent-completed:agent-1:prompt-1",
+            "type": "agent_completed",
+            "dismissed": false,
+        });
+        assert_eq!(
+            active_claude_completion(
+                std::slice::from_ref(&active),
+                "agent-completed:agent-1:prompt-1",
+            ),
+            Some(active),
+        );
+    }
 
     #[test]
     fn try_save_state_snapshot_reports_write_failures() {
@@ -2339,7 +3008,13 @@ mod tests {
             .insert("agent-1".to_string(), new_agent);
 
         assert!(
-            !status_observation_belongs_to_current_agent(&state, "agent-1", &old_status, "Idle")
+            !status_observation_belongs_to_current_agent(
+                &state,
+                "agent-1",
+                &old_status,
+                "Idle",
+                0,
+            )
                 .await,
             "late status events from a cleared runtime must not update the replacement agent"
         );
@@ -2364,6 +3039,7 @@ mod tests {
                 "agent-1",
                 &current_status,
                 "Idle",
+                0,
             )
             .await
         );
@@ -2373,6 +3049,7 @@ mod tests {
                 "agent-1",
                 &current_status,
                 "Processing",
+                0,
             )
             .await
         );
@@ -2391,33 +3068,33 @@ mod tests {
 
         publish_telemetry_status_observation(
             &state,
-            &telemetry::TelemetryProviderStatus {
-                session_id: "agent-1".to_string(),
-                generation: 0,
-                status: "Idle".to_string(),
-                current_status: current_status.clone(),
-            },
+            &telemetry::TelemetryProviderStatus::current(
+                "agent-1",
+                0,
+                "Idle".to_string(),
+                current_status.clone(),
+            ),
         )
         .await;
         *current_status.lock().expect("status") = "Processing".to_string();
         publish_telemetry_status_observation(
             &state,
-            &telemetry::TelemetryProviderStatus {
-                session_id: "agent-1".to_string(),
-                generation: 0,
-                status: "Processing".to_string(),
-                current_status: current_status.clone(),
-            },
+            &telemetry::TelemetryProviderStatus::current(
+                "agent-1",
+                0,
+                "Processing".to_string(),
+                current_status.clone(),
+            ),
         )
         .await;
         publish_telemetry_status_observation(
             &state,
-            &telemetry::TelemetryProviderStatus {
-                session_id: "agent-1".to_string(),
-                generation: 0,
-                status: "Idle".to_string(),
+            &telemetry::TelemetryProviderStatus::current(
+                "agent-1",
+                0,
+                "Idle".to_string(),
                 current_status,
-            },
+            ),
         )
         .await;
 

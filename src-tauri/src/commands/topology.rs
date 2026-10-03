@@ -121,11 +121,6 @@ pub async fn ignore_topology_pair(app: AppHandle, a: String, b: String) -> Resul
     mutate_ui(&app, TopologyOperation::Ignore, &a, &b)
 }
 
-#[tauri::command]
-pub async fn unignore_topology_pair(app: AppHandle, a: String, b: String) -> Result<bool, String> {
-    mutate_ui(&app, TopologyOperation::Unignore, &a, &b)
-}
-
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PairActivityResult {
     pub pairs: Vec<PairActivity>,

@@ -16,9 +16,7 @@ use wardian_core::engine::store::{
     append_event, read_blueprint_snapshot, read_checkpoint, read_events, write_checkpoint,
 };
 use wardian_core::engine::{Engine, RunState, RunStatus};
-use wardian_core::models::{
-    AgentConfig, AutomationAssignments, AutomationRoleAssignment, InvocationKind,
-};
+use wardian_core::models::{AgentConfig, AutomationAssignments, AutomationRoleAssignment};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AutomationRunInvocation {
@@ -60,13 +58,6 @@ pub struct AutomationInboxUpdate {
 }
 
 pub const AUTOMATION_INBOX_UPDATED_EVENT: &str = "automation-inbox-updated";
-
-pub fn automation_inbox_update(
-    blueprint: &Blueprint,
-    run_root: &Path,
-) -> Option<AutomationInboxUpdate> {
-    automation_inbox_update_with_name(&blueprint.name, run_root)
-}
 
 pub fn automation_inbox_update_with_name(
     automation_name: &str,
@@ -116,6 +107,7 @@ pub fn emit_automation_inbox_update_with_name(
     automation_name: &str,
     run_root: &Path,
 ) {
+    crate::commands::automation::update_automation_run_summary_cache(run_root);
     if let Some(update) = automation_inbox_update_with_name(automation_name, run_root) {
         let _ = app.emit(AUTOMATION_INBOX_UPDATED_EVENT, update);
     }
@@ -173,31 +165,6 @@ pub fn mark_run_failed(run_root: &Path, message: impl Into<String>) -> Result<Ru
     state.failure = Some(message);
     write_checkpoint(run_root, &state).map_err(|error| error.to_string())?;
     Ok(state)
-}
-
-/// Scan `<runs_dir>/<id>/<run>/state.json` for runs still marked Running.
-/// Returns `(blueprint_id, run_id)` pairs for diagnostics and tests.
-pub fn scan_interrupted_runs(runs_dir: &Path) -> Vec<(String, String)> {
-    let mut interrupted = Vec::new();
-    let Ok(blueprints) = std::fs::read_dir(runs_dir) else {
-        return interrupted;
-    };
-
-    for blueprint in blueprints.flatten().filter(|entry| entry.path().is_dir()) {
-        let Ok(runs) = std::fs::read_dir(blueprint.path()) else {
-            continue;
-        };
-
-        for run in runs.flatten().filter(|entry| entry.path().is_dir()) {
-            if let Ok(Some(state)) = read_checkpoint(&run.path()) {
-                if state.status == RunStatus::Running {
-                    interrupted.push((state.blueprint_id, state.run_id));
-                }
-            }
-        }
-    }
-
-    interrupted
 }
 
 pub fn fail_interrupted_runs(runs_dir: &Path) -> Vec<(String, String)> {
@@ -302,30 +269,6 @@ fn recover_interrupted_state(
     Some(state)
 }
 
-/// Build the live executor for a run in `workspace` with `default_provider`.
-pub fn live_executor(
-    workspace: PathBuf,
-    default_provider: String,
-    bindings: HashMap<String, String>,
-) -> LiveStepExecutor {
-    live_executor_with_catalog(workspace, default_provider, bindings, HashMap::new())
-}
-
-pub fn live_executor_with_catalog(
-    workspace: PathBuf,
-    default_provider: String,
-    bindings: HashMap<String, String>,
-    agent_catalog: HashMap<String, AgentBinding>,
-) -> LiveStepExecutor {
-    LiveStepExecutor::new(
-        Arc::new(HeadlessAgentRunner),
-        workspace,
-        default_provider,
-        bindings,
-        agent_catalog,
-    )
-}
-
 pub fn live_executor_with_catalog_and_assignments(
     workspace: PathBuf,
     default_provider: String,
@@ -344,26 +287,10 @@ pub fn live_executor_with_catalog_and_assignments(
     )
 }
 
-pub fn live_executor_with_catalog_and_app(
-    app: tauri::AppHandle,
-    workspace: PathBuf,
-    default_provider: String,
-    bindings: HashMap<String, String>,
-    agent_catalog: HashMap<String, AgentBinding>,
-) -> LiveStepExecutor {
-    LiveStepExecutor::new_with_live_runner(
-        Arc::new(TauriHeadlessAgentRunner::new(app.clone())),
-        Some(Arc::new(TauriLiveAgentRunner::new(app.clone()))),
-        workspace,
-        default_provider,
-        bindings,
-        agent_catalog,
-    )
-    .with_notification_app(app)
-}
-
+/// Construct a host executor only with durable run provenance.
 pub fn live_executor_with_catalog_assignments_and_app(
     app: tauri::AppHandle,
+    run_state: &RunState,
     workspace: PathBuf,
     default_provider: String,
     bindings: HashMap<String, String>,
@@ -380,27 +307,11 @@ pub fn live_executor_with_catalog_assignments_and_app(
         agent_catalog,
     )
     .with_notification_app(app)
+    .with_run_state(run_state)
 }
 
 fn invocation_path(run_root: &Path) -> PathBuf {
     run_root.join("invocation.json")
-}
-
-pub fn write_run_invocation(
-    run_root: &Path,
-    provider: &str,
-    workspace: &Path,
-    bindings: &HashMap<String, String>,
-    assignments: &AutomationAssignments,
-) -> Result<(), String> {
-    write_run_invocation_with_schedule_id(
-        run_root,
-        provider,
-        workspace,
-        bindings,
-        assignments,
-        None,
-    )
 }
 
 pub fn write_run_invocation_with_schedule_id(
@@ -435,13 +346,6 @@ pub struct InvokerAttribution {
 }
 
 impl InvokerAttribution {
-    pub fn schedule(id: impl Into<String>) -> Self {
-        Self {
-            schedule_id: Some(id.into()),
-            listener_id: None,
-        }
-    }
-
     pub fn listener(id: impl Into<String>) -> Self {
         Self {
             schedule_id: None,
@@ -488,28 +392,6 @@ pub fn read_run_invocation(run_root: &Path) -> Result<Option<AutomationRunInvoca
     serde_json::from_str(&content)
         .map(Some)
         .map_err(|error| format!("failed to parse automation invocation: {error}"))
-}
-
-/// Restore the memory authority captured when an automation invocation started.
-/// Missing authority keeps legacy and memory-disabled runs fail-closed.
-fn memory_principal_for_resume(run_root: &Path) -> Result<Option<String>, String> {
-    Ok(read_run_invocation(run_root)?.and_then(|invocation| invocation.memory_principal))
-}
-
-pub async fn agent_catalog_from_state(
-    state: &AppState,
-    bindings: &HashMap<String, String>,
-    workspace: &Path,
-    default_provider: &str,
-) -> HashMap<String, AgentBinding> {
-    agent_catalog_from_state_with_assignments(
-        state,
-        bindings,
-        &AutomationAssignments::new(),
-        workspace,
-        default_provider,
-    )
-    .await
 }
 
 pub async fn agent_catalog_from_state_with_assignments(
@@ -615,7 +497,8 @@ fn agent_binding_from_config(
     })
 }
 
-/// Drive a fresh run to completion or pause.
+/// Drive a fresh manual run to completion or pause without an app handle, so
+/// tests exercise the same prepare and drive steps a scheduled run uses.
 pub async fn drive_new_run(
     blueprint: Blueprint,
     run_id: String,
@@ -625,66 +508,12 @@ pub async fn drive_new_run(
     input: Value,
     bindings: HashMap<String, String>,
 ) -> Result<(), String> {
-    drive_new_run_with_catalog(
-        None,
-        blueprint,
-        run_id,
-        run_root,
-        workspace,
-        default_provider,
-        input,
-        bindings,
-        HashMap::new(),
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn drive_new_run_with_catalog(
-    app: Option<tauri::AppHandle>,
-    blueprint: Blueprint,
-    run_id: String,
-    run_root: PathBuf,
-    workspace: PathBuf,
-    default_provider: String,
-    input: Value,
-    bindings: HashMap<String, String>,
-    agent_catalog: HashMap<String, AgentBinding>,
-) -> Result<(), String> {
     let assignments = wardian_core::automation::assignment::normalize_assignments(
         None,
         &bindings,
-        InvocationKind::Manual,
+        wardian_core::models::InvocationKind::Manual,
     );
-    drive_new_run_with_catalog_and_assignments(
-        app,
-        blueprint,
-        run_id,
-        run_root,
-        workspace,
-        default_provider,
-        input,
-        bindings,
-        assignments,
-        agent_catalog,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn drive_new_run_with_catalog_and_assignments(
-    app: Option<tauri::AppHandle>,
-    blueprint: Blueprint,
-    run_id: String,
-    run_root: PathBuf,
-    workspace: PathBuf,
-    default_provider: String,
-    input: Value,
-    bindings: HashMap<String, String>,
-    assignments: AutomationAssignments,
-    agent_catalog: HashMap<String, AgentBinding>,
-) -> Result<(), String> {
-    let state = prepare_new_run_with_assignments(
+    let state = prepare_new_run_with_assignments_and_memory_principal(
         &blueprint,
         &run_id,
         &run_root,
@@ -693,9 +522,10 @@ pub async fn drive_new_run_with_catalog_and_assignments(
         &bindings,
         &assignments,
         input,
+        None,
     )?;
     drive_started_run_with_catalog_and_assignments(
-        app,
+        None,
         blueprint,
         state,
         run_root,
@@ -703,33 +533,9 @@ pub async fn drive_new_run_with_catalog_and_assignments(
         default_provider,
         bindings,
         assignments,
-        agent_catalog,
+        HashMap::new(),
     )
     .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn prepare_new_run_with_assignments(
-    blueprint: &Blueprint,
-    run_id: &str,
-    run_root: &Path,
-    workspace: &Path,
-    default_provider: &str,
-    bindings: &HashMap<String, String>,
-    assignments: &AutomationAssignments,
-    input: Value,
-) -> Result<wardian_core::engine::RunState, String> {
-    prepare_new_run_with_assignments_and_memory_principal(
-        blueprint,
-        run_id,
-        run_root,
-        workspace,
-        default_provider,
-        bindings,
-        assignments,
-        input,
-        None,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -873,12 +679,10 @@ pub async fn drive_started_run_with_catalog_assignments_and_memory_principal(
                 return Err(message);
             }
         };
-    let blueprint_id = blueprint.id.clone();
-    let run_id = state.run_id.clone();
-    let owner_id = format!("{blueprint_id}/{run_id}");
     let exec = if let Some(app) = app {
         live_executor_with_catalog_assignments_and_app(
             app,
+            &state,
             workspace,
             default_provider,
             bindings,
@@ -894,98 +698,12 @@ pub async fn drive_started_run_with_catalog_assignments_and_memory_principal(
             agent_catalog,
         )
     }
-    .with_owner_id(owner_id)
-    .with_automation_origin(blueprint_id, run_id);
+    .with_run_state(&state);
     let exec = match memory_principal {
         Some(agent_id) => exec.with_memory_principal(agent_id),
         None => exec,
     };
     Engine::drive_from_state(&blueprint, state, &run_root, &exec)
-        .await
-        .map(|_| ())
-        .map_err(|err| err.to_string())
-}
-
-/// Resume an interrupted or paused run.
-pub async fn drive_resume(
-    blueprint: Blueprint,
-    run_root: PathBuf,
-    workspace: PathBuf,
-    default_provider: String,
-    bindings: HashMap<String, String>,
-) -> Result<(), String> {
-    drive_resume_with_catalog(
-        None,
-        blueprint,
-        run_root,
-        workspace,
-        default_provider,
-        bindings,
-        HashMap::new(),
-    )
-    .await
-}
-
-pub async fn drive_resume_with_catalog(
-    app: Option<tauri::AppHandle>,
-    blueprint: Blueprint,
-    run_root: PathBuf,
-    workspace: PathBuf,
-    default_provider: String,
-    bindings: HashMap<String, String>,
-    agent_catalog: HashMap<String, AgentBinding>,
-) -> Result<(), String> {
-    let _headless_execution =
-        match wardian_core::automation_execution_lock::acquire_headless_execution_guard() {
-            Ok(guard) => guard,
-            Err(error) => {
-                let message = format!("automation resume could not start: {error}");
-                if let Err(persist_error) = mark_run_failed(&run_root, &message) {
-                    return Err(format!(
-                        "{message}; failed to persist terminal failure: {persist_error}"
-                    ));
-                }
-                return Err(message);
-            }
-        };
-    let memory_principal = memory_principal_for_resume(&run_root)?;
-    let assignments = wardian_core::automation::assignment::normalize_assignments(
-        None,
-        &bindings,
-        InvocationKind::Manual,
-    );
-    let run_id = run_root
-        .file_name()
-        .and_then(|value| value.to_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| "resume".to_string());
-    let blueprint_id = blueprint.id.clone();
-    let owner_id = format!("{blueprint_id}/{run_id}");
-    let exec = if let Some(app) = app {
-        live_executor_with_catalog_assignments_and_app(
-            app,
-            workspace,
-            default_provider,
-            bindings,
-            assignments,
-            agent_catalog,
-        )
-    } else {
-        live_executor_with_catalog_and_assignments(
-            workspace,
-            default_provider,
-            bindings,
-            assignments,
-            agent_catalog,
-        )
-    }
-    .with_owner_id(owner_id)
-    .with_automation_origin(blueprint_id, run_id);
-    let exec = match memory_principal {
-        Some(agent_id) => exec.with_memory_principal(agent_id),
-        None => exec,
-    };
-    Engine::resume(&blueprint, &run_root, &exec)
         .await
         .map(|_| ())
         .map_err(|err| err.to_string())
@@ -1000,7 +718,9 @@ mod tests {
         store::{read_checkpoint, read_events},
         RunState, RunStatus,
     };
-    use wardian_core::models::{AgentConversationMode, AutomationRoleAssignment, BusyPolicy};
+    use wardian_core::models::{
+        AgentConversationMode, AutomationRoleAssignment, BusyPolicy, InvocationKind,
+    };
 
     const INVOKER_BLUEPRINT: &str = r#"---
 schema: 2
@@ -1103,19 +823,6 @@ edges:
 "#;
 
     #[test]
-    fn scan_interrupted_marks_running_runs() {
-        let dir = tempfile::tempdir().unwrap();
-        let run_root = dir.path().join("wf").join("run-1");
-        std::fs::create_dir_all(&run_root).unwrap();
-        let mut state = RunState::new("run-1", "wf");
-        state.status = RunStatus::Running;
-        wardian_core::engine::store::write_checkpoint(&run_root, &state).unwrap();
-
-        let interrupted = scan_interrupted_runs(dir.path());
-        assert_eq!(interrupted, vec![("wf".to_string(), "run-1".to_string())]);
-    }
-
-    #[test]
     fn automation_inbox_update_projects_approval_and_terminal_state_from_checkpoint() {
         let dir = tempfile::tempdir().unwrap();
         let run_root = dir.path().join("wf").join("run-1");
@@ -1124,7 +831,7 @@ edges:
         state.status = RunStatus::AwaitingApproval;
         write_checkpoint(&run_root, &state).unwrap();
 
-        let approval = automation_inbox_update(&blueprint, &run_root).unwrap();
+        let approval = automation_inbox_update_with_name(&blueprint.name, &run_root).unwrap();
         assert_eq!(approval.status, "awaiting_approval");
         assert_eq!(approval.automation_name, "Invoker");
         assert_eq!(approval.summary, None);
@@ -1143,7 +850,7 @@ edges:
         state.status = RunStatus::Completed;
         write_checkpoint(&run_root, &state).unwrap();
 
-        let completed = automation_inbox_update(&blueprint, &run_root).unwrap();
+        let completed = automation_inbox_update_with_name(&blueprint.name, &run_root).unwrap();
         assert_eq!(completed.status, "completed");
         assert_eq!(completed.summary.as_deref(), Some("Automation result"));
     }
@@ -1158,7 +865,7 @@ edges:
         state.failure = Some("approval rejected".to_string());
         write_checkpoint(&run_root, &state).unwrap();
 
-        let update = automation_inbox_update(&blueprint, &run_root).unwrap();
+        let update = automation_inbox_update_with_name(&blueprint.name, &run_root).unwrap();
         assert_eq!(update.status, "failed");
         assert_eq!(update.error.as_deref(), Some("approval rejected"));
     }
@@ -1335,48 +1042,6 @@ edges: []
     }
 
     #[test]
-    fn resume_restores_persisted_memory_authority_and_keeps_legacy_runs_disabled() {
-        let dir = tempfile::tempdir().unwrap();
-        let enabled_root = dir.path().join("enabled");
-        let disabled_root = dir.path().join("disabled");
-        let bindings = HashMap::new();
-        let assignments = AutomationAssignments::new();
-
-        write_run_invocation_with_authority(
-            &enabled_root,
-            "mock",
-            std::path::Path::new("/workspace"),
-            &bindings,
-            &assignments,
-            InvokerAttribution::default(),
-            Some("agent-a".to_string()),
-        )
-        .unwrap();
-        write_run_invocation_with_authority(
-            &disabled_root,
-            "mock",
-            std::path::Path::new("/workspace"),
-            &bindings,
-            &assignments,
-            InvokerAttribution::default(),
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(
-            memory_principal_for_resume(&enabled_root)
-                .unwrap()
-                .as_deref(),
-            Some("agent-a")
-        );
-        assert_eq!(memory_principal_for_resume(&disabled_root).unwrap(), None);
-        assert_eq!(
-            memory_principal_for_resume(&dir.path().join("legacy")).unwrap(),
-            None
-        );
-    }
-
-    #[test]
     fn prepare_new_run_writes_invocation_and_started_checkpoint() {
         let dir = tempfile::tempdir().unwrap();
         let run_root = dir.path().join("wf").join("run-1");
@@ -1388,7 +1053,7 @@ edges: []
             InvocationKind::Manual,
         );
 
-        let state = prepare_new_run_with_assignments(
+        let state = prepare_new_run_with_assignments_and_memory_principal(
             &blueprint,
             "run-1",
             &run_root,
@@ -1397,6 +1062,7 @@ edges: []
             &bindings,
             &assignments,
             serde_json::json!({"symbol":"SPY"}),
+            None,
         )
         .unwrap();
 

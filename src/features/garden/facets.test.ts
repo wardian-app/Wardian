@@ -6,20 +6,14 @@ import {
   SCENE_ANCHOR_MAX_WEIGHT,
   admit,
   buildCorpus,
-  buildInvertedIndex,
   cosine,
-  cosineContributions,
   createCorpus,
-  dirtySet,
   emitAgentFacets,
-  emitArtifactFacets,
   emitSkillFacets,
   facetClassOf,
   facetVector,
   idf,
   pathAncestorFacets,
-  perturbedTokens,
-  retract,
   sceneAnchorToken,
   sceneFacetWeight,
   withPlacement,
@@ -114,14 +108,6 @@ describe("idf", () => {
     expect(beforeRare - idf(base, "skill:skills/rare")).toBeGreaterThan(0.28);
   });
 
-  it("retract removes tokens that reach zero", () => {
-    const corpus = createCorpus();
-    const facets = { ref: agentRef("a1"), tokens: ["team:t1"], excludes: [] };
-    admit(corpus, facets);
-    retract(corpus, facets);
-    expect(corpus.df.has("team:t1")).toBe(false);
-    expect(corpus.entityCount).toBe(0);
-  });
 });
 
 describe("cosine", () => {
@@ -160,31 +146,6 @@ describe("cosine", () => {
       corpus,
     );
     expect(cosine(short, long)).toBeCloseTo(cosine(long, short), 12);
-  });
-});
-
-describe("cosineContributions", () => {
-  it("decomposes similarity into per-facet contributions that sum to it", () => {
-    // Explainability is a hard requirement: distances a user cannot interrogate
-    // make the map a lava lamp.
-    const entities = [
-      { ref: agentRef("a1"), tokens: ["team:t1", "skill:skills/rare", "path:d:/"], excludes: [] },
-      { ref: agentRef("a2"), tokens: ["team:t1", "skill:skills/rare", "path:d:/"], excludes: [] },
-      ...Array.from({ length: 30 }, (_, i) => ({
-        ref: agentRef(`f${i}`),
-        tokens: ["team:t1", "path:d:/"],
-        excludes: [],
-      })),
-    ];
-    const corpus = buildCorpus(entities);
-    const a = facetVector(entities[0], corpus);
-    const b = facetVector(entities[1], corpus);
-
-    const contributions = cosineContributions(a, b);
-    const total = contributions.reduce((sum, entry) => sum + entry.contribution, 0);
-    expect(total).toBeCloseTo(cosine(a, b), 10);
-    // The rare skill dominates the common team.
-    expect(contributions[0].token).toBe("skill:skills/rare");
   });
 });
 
@@ -240,18 +201,6 @@ describe("emitSkillFacets", () => {
   });
 });
 
-describe("emitArtifactFacets", () => {
-  it("lands an artifact next to its producing agent with no cold start", () => {
-    const facets = emitArtifactFacets(
-      { kind: "artifact", id: "art-1", source: "backend" },
-      { agentId: "a1", provider: "claude" },
-      "D:\\Dev\\Ward\\out.md",
-    );
-    expect(facets.tokens).toContain("origin:agent:a1");
-    expect(facets.tokens).toContain("path:d:/dev/ward");
-  });
-});
-
 describe("scene placement", () => {
   it("caps a placement's weight and decays it when the scene is abandoned", () => {
     const now = 1_000_000_000_000;
@@ -284,36 +233,6 @@ describe("scene placement", () => {
     const placed = withPlacement(base, { anchoredDistrictId: "d1" });
     const vector = facetVector(placed, buildCorpus([placed]), new Map([["scene_anchor:d1", 1.25]]));
     expect(vector.get("scene_anchor:d1")).toBe(1.25);
-  });
-});
-
-describe("dirty set", () => {
-  it("confines invalidation to holders of meaningfully perturbed facets", () => {
-    const teamPeers = Array.from({ length: 3 }, (_, i) => ({
-      ref: agentRef(`peer${i}`),
-      tokens: ["team:t1", "path:d:/"],
-      excludes: [],
-    }));
-    const strangers = Array.from({ length: 200 }, (_, i) => ({
-      ref: agentRef(`stranger${i}`),
-      tokens: ["path:d:/"],
-      excludes: [],
-    }));
-    const all = [...teamPeers, ...strangers];
-
-    const before = buildCorpus(all);
-    const after = buildCorpus(all);
-    const inserted = { ref: agentRef("new"), tokens: ["team:t1", "path:d:/"], excludes: [] };
-    admit(after, inserted);
-
-    const perturbed = perturbedTokens(before, after, inserted.tokens);
-    const dirty = dirtySet(inserted, buildInvertedIndex(all), perturbed);
-
-    // The rare team facet is dirty; the universal path facet is not, so the 200
-    // strangers are untouched.
-    expect(perturbed.has("team:t1")).toBe(true);
-    expect(perturbed.has("path:d:/")).toBe(false);
-    expect(dirty.size).toBe(teamPeers.length + 1);
   });
 });
 

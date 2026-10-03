@@ -24,3 +24,12 @@ do not identify the root cause within a stage. In particular, a stage code
 observed in a fixture or test does not establish the cause of a failure in a
 live session. Existing authentication and authorization failures retain their
 own status and error codes.
+
+## Remote Inbox availability
+
+`GET /remote/api/queue` and `POST /remote/api/queue/action` return HTTP 503 with
+code `automation_inbox_unavailable` when automation run-index reconciliation
+fails and no complete runtime projection is available. A failed refresh does
+not replace a cached complete projection or report an empty queue as a
+successful response. The next request can retry reconciliation; the error
+contains no local filesystem details.

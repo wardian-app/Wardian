@@ -32,6 +32,7 @@ Old automation system commands such as `run_automation`, `stop_all_triggers`,
 ### Inbox and Readiness
 
 - **`load_queue_items` / `save_queue_items`**: Load or persist the legacy completion projection for the active Wardian home. Inbox item identity should be derived from canonical evidence IDs rather than frontend timestamps.
+- **`dismiss_agent_completions`**: Writes durable dismissal tombstones for backend-owned provider completion items.
 - **`load_queue_preferences` / `save_queue_preferences`**: Load or persist per-event-type Inbox visibility, desktop alert, and sound alert preferences.
 - **`list_inbox_notifications` / `resolve_inbox_notification`**: Read and resolve durable agent-created updates and manual approval requests from the interaction store.
 - **`list_automation_inbox_approvals`**: Project native automation Approval nodes for Inbox while leaving automation state authoritative.
@@ -49,8 +50,6 @@ The Files IPC contract uses snake-case DTOs nested under `request`:
 - `close_file_renderer_lease` revokes the matching renderer lease and its
   tickets without closing the subscription.
 - `close_file_resource` releases one subscription.
-- `pick_file_resource` opens a native picker and returns an exact-file grant or
-  `null` when cancelled.
 
 For complete request and response JSON, see
 [Tauri Command Reference](./tauri-command-reference.md#files-resources-commandsfilesrs).
@@ -282,6 +281,8 @@ Valid states are `unknown`, `booting`, `ready`, `busy`, `action_required`, and `
 ### Inbox Evidence
 
 Inbox items project canonical live evidence instead of replayed terminal text. A legacy completion projection is created only from a live `agent-turn-completed` event for a named configured agent with a final normalized assistant response; generic status transitions, terminal output, provider control commands, and unknown session IDs are ignored. Antigravity's transcript marks intermediate planner and script steps as `DONE`, so Wardian emits its event only when that provider returns to its visible ready prompt, once per active turn. Legacy completion records can include:
+
+For interactive Claude sessions, Wardian's injected `Stop` hook supplies `prompt_id` and `last_assistant_message`; `StopFailure` and user interruption do not create completion items. Wardian writes the hook payload to a per-agent durable outbox, validates the provider session and prompt identity, then upserts the canonical Inbox item before emitting `agent-turn-completed`. The event carries the full `inbox_item`, including its stable ID, backend timestamp, bounded `summary`, and full `response_text`. The frontend treats it as a projection hint and does not reread the transcript or invent queue identity. Outbox files remain until the queue write succeeds, so startup replay is idempotent. Dismissal marks a durable tombstone; whole-queue snapshots cannot delete or revive backend-owned completion records.
 
 ```json
 {

@@ -8,6 +8,7 @@ import type {
   AgentTelemetry,
   AppTelemetry,
   CloneMode,
+  QueueItem,
 } from "../../types";
 import { useSettingsStore } from "../../store/useSettingsStore";
 import { classifyJsonEvent } from "../../utils/statusUtils";
@@ -30,6 +31,11 @@ export type AgentStatusTransition = {
 export type AgentTurnCompletion = {
   session_id: string;
   agent: AgentConfig | undefined;
+  inbox_item?: QueueItem;
+  agent_name?: string;
+  summary?: string;
+  evidence_id?: string;
+  inbox_persisted?: boolean;
 };
 
 export type AgentResourceControllerOptions = {
@@ -428,11 +434,23 @@ export function useAgentResourceController(
         if (next_telemetry === previous_telemetry) return;
         setTelemetry(next_telemetry);
       }),
-      listen<{ session_id: string }>("agent-turn-completed", (event) => {
-        const session_id = event.payload.session_id;
+      listen<{
+        session_id: string;
+        inbox_item?: QueueItem;
+        agent_name?: string;
+        summary?: string;
+        evidence_id?: string;
+        inbox_persisted?: boolean;
+      }>("agent-turn-completed", (event) => {
+        const { session_id } = event.payload;
         options_ref.current.on_agent_turn_completed?.({
           session_id,
           agent: agents_ref.current.find((agent) => agent.session_id === session_id),
+          ...(event.payload.inbox_item !== undefined && { inbox_item: event.payload.inbox_item }),
+          ...(event.payload.agent_name !== undefined && { agent_name: event.payload.agent_name }),
+          ...(event.payload.summary !== undefined && { summary: event.payload.summary }),
+          ...(event.payload.evidence_id !== undefined && { evidence_id: event.payload.evidence_id }),
+          ...(event.payload.inbox_persisted !== undefined && { inbox_persisted: event.payload.inbox_persisted }),
         });
       }),
     ];

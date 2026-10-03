@@ -211,20 +211,31 @@ async fn telemetry_cannot_publish_codex_ready_before_attachment() {
         .expect("provisional Codex")
         .current_status
         .clone();
-    let readiness = crate::manager::publish_telemetry_status_observation(
+    let publication = crate::manager::publish_telemetry_status_observation(
         &state,
         &crate::manager::telemetry::TelemetryProviderStatus {
             session_id: "codex-provisional".into(),
             generation: 1,
+            initial_status: "Booting".into(),
+            initial_status_revision: state.status_revision("codex-provisional", &current_status),
+            initial_status_intent_revision: state
+                .status_intent_revision("codex-provisional", &current_status),
             status: "Idle".into(),
+            transitions: vec![crate::manager::telemetry::TelemetryStatusTransition {
+                previous_status: "Booting".into(),
+                status: "Idle".into(),
+                observed_at: "2026-09-27T12:00:00.000Z".into(),
+            }],
+            active_execution_conflict: false,
             current_status,
         },
     )
     .await;
     assert_eq!(
-        readiness,
-        wardian_core::control::ProviderInputReadiness::Unknown
+        publication.readiness,
+        Some(wardian_core::control::ProviderInputReadiness::Unknown)
     );
+    assert_eq!(publication.current_status.as_deref(), Some("Booting"));
 }
 
 #[tokio::test]
@@ -270,5 +281,259 @@ async fn status_contention_rechecks_codex_gate_without_dropping_other_providers(
         status_admission(&app_handle, "claude-live", &claude_status, "Processing..."),
         CodexStatusAdmission::Allowed
     );
+    drop(home);
+}
+
+#[tokio::test]
+async fn blocked_codex_status_preserves_an_existing_status_revision() {
+    let (home, state) = seeded_state().await;
+    let app = tauri::test::mock_app();
+    app.manage(state);
+    let state = app.state::<AppState>();
+    let current_status = state
+        .agents
+        .lock()
+        .await
+        .get("codex-provisional")
+        .expect("provisional Codex")
+        .current_status
+        .clone();
+    // Model a deferred status intent that has already reserved its revision.
+    let pending_revision = {
+        let _status = current_status.lock().unwrap();
+        state.reserve_status_intent("codex-provisional", &current_status, "Processing...")
+    };
+
+    let admission =
+        super::status_admission(app.handle(), "codex-provisional", &current_status, "Idle");
+    assert_eq!(admission, super::CodexStatusAdmission::Blocked);
+    assert_eq!(
+        crate::manager::reserve_agent_status_intent(
+            state.inner(),
+            admission,
+            "codex-provisional",
+            &current_status,
+            "Booting",
+            "Idle",
+        ),
+        None,
+        "blocked status must not reserve a newer intent"
+    );
+
+    assert_eq!(
+        state.status_intent_revision("codex-provisional", &current_status),
+        pending_revision
+    );
+    assert_eq!(*current_status.lock().unwrap(), "Booting");
+    drop(home);
+}
+
+#[tokio::test]
+async fn publishing_starting_does_not_supersede_a_newer_queued_transition() {
+    let (home, state) = seeded_state().await;
+    let app = tauri::test::mock_app();
+    app.manage(state);
+    let state = app.state::<AppState>();
+    let current_status = state
+        .agents
+        .lock()
+        .await
+        .get("claude-live")
+        .expect("live Claude")
+        .current_status
+        .clone();
+    let app_handle = app.handle().clone();
+    let agents = state.agents.lock().await;
+    let admission =
+        super::status_admission(&app_handle, "claude-live", &current_status, "Processing...");
+    assert_eq!(admission, super::CodexStatusAdmission::WaitForRoster);
+    let intent_revision = crate::manager::reserve_agent_status_intent(
+        state.inner(),
+        admission,
+        "claude-live",
+        &current_status,
+        "Booting",
+        "Processing...",
+    )
+    .expect("queued Processing intent");
+    assert_eq!(
+        crate::manager::commit_agent_status_publication(
+            state.inner(),
+            "claude-live",
+            &current_status,
+            "Booting",
+        ),
+        None,
+        "publishing the older Starting value must preserve queued Processing"
+    );
+    assert_eq!(*current_status.lock().unwrap(), "Booting");
+    drop(agents);
+    let applied = super::apply_deferred_status_transition(
+        state.inner(),
+        "claude-live",
+        &current_status,
+        "Booting",
+        intent_revision,
+        "Processing...",
+    )
+    .await;
+    assert_eq!(*current_status.lock().unwrap(), "Processing...");
+    let (status_sequence, status_revision) =
+        applied.expect("the newer queued transition should be applied");
+    assert!(status_sequence > 0);
+    assert_eq!(
+        state.status_revision("claude-live", &current_status),
+        status_revision
+    );
+    // MockRuntime covers the revision and transition decision. The production
+    // Wry scheduler and persistence boundary is exercised by runtime tests.
+    drop(home);
+}
+
+#[tokio::test]
+async fn late_old_arc_intent_does_not_cancel_live_deferred_status() {
+    let (home, state) = seeded_state().await;
+    let app = tauri::test::mock_app();
+    app.manage(state);
+    let state = app.state::<AppState>();
+    let (old_status, current_status) = {
+        let mut agents = state.agents.lock().await;
+        let old_status = agents
+            .get("claude-live")
+            .expect("original agent")
+            .current_status
+            .clone();
+        let replacement = test_agent("claude-live", "claude", None);
+        let current_status = replacement.current_status.clone();
+        agents.insert("claude-live".into(), replacement);
+        (old_status, current_status)
+    };
+    let app_handle = app.handle().clone();
+    let agents = state.agents.lock().await;
+    let live_admission =
+        super::status_admission(&app_handle, "claude-live", &current_status, "Processing...");
+    let live_intent_revision = crate::manager::reserve_agent_status_intent(
+        state.inner(),
+        live_admission,
+        "claude-live",
+        &current_status,
+        "Booting",
+        "Processing...",
+    )
+    .expect("live deferred status intent");
+    let old_admission = super::status_admission(&app_handle, "claude-live", &old_status, "Idle");
+    let old_intent_revision = crate::manager::reserve_agent_status_intent(
+        state.inner(),
+        old_admission,
+        "claude-live",
+        &old_status,
+        "Booting",
+        "Idle",
+    )
+    .expect("old Arc intent reservation");
+    drop(agents);
+
+    assert_eq!(
+        state.status_intent_revision("claude-live", &current_status),
+        live_intent_revision,
+        "an old Arc intent must not replace the live Arc's revision"
+    );
+    assert_eq!(
+        super::apply_deferred_status_transition(
+            state.inner(),
+            "claude-live",
+            &old_status,
+            "Booting",
+            old_intent_revision,
+            "Idle",
+        )
+        .await,
+        None,
+        "a deferred intent from a replaced Arc must be rejected"
+    );
+    let (status_sequence, status_revision) = super::apply_deferred_status_transition(
+        state.inner(),
+        "claude-live",
+        &current_status,
+        "Booting",
+        live_intent_revision,
+        "Processing...",
+    )
+    .await
+    .expect("the accepted live status intent should apply");
+    assert!(status_sequence > 0);
+    assert_eq!(
+        state.status_revision("claude-live", &current_status),
+        status_revision
+    );
+    assert!(*old_status.lock().unwrap() == "Booting");
+    assert!(state.status_revision("claude-live", &current_status) > old_intent_revision);
+    drop(home);
+}
+
+#[tokio::test]
+async fn provisional_status_arc_publishes_after_replacement_install() {
+    let (home, state) = seeded_state().await;
+    wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+        session_id: "claude-live",
+        session_name: "claude-live",
+        description: "",
+        agent_class: "Coder",
+        provider: "claude",
+        workspace: None,
+        project: None,
+        is_off: false,
+        created_at: None,
+    })
+    .expect("insert isolated persisted agent");
+    let app = tauri::test::mock_app();
+    app.manage(state);
+    let state = app.state::<AppState>();
+    let replacement = test_agent("claude-live", "claude", None);
+    let current_status = replacement.current_status.clone();
+
+    let admission = super::status_admission(
+        app.handle(),
+        "claude-live",
+        &current_status,
+        "Processing...",
+    );
+    let intent_revision = crate::manager::reserve_agent_status_intent(
+        state.inner(),
+        admission,
+        "claude-live",
+        &current_status,
+        "Booting",
+        "Processing...",
+    )
+    .expect("provisional status intent");
+    let transition = crate::manager::apply_admitted_status_transition(
+        state.inner(),
+        "claude-live",
+        &current_status,
+        "Booting",
+        intent_revision,
+        "Processing...",
+    )
+    .expect("provisional status transition");
+    assert_eq!(*current_status.lock().unwrap(), "Processing...");
+    let provisional_revision = transition.1;
+    assert!(provisional_revision > 0);
+
+    state
+        .agents
+        .lock()
+        .await
+        .insert("claude-live".into(), replacement);
+    let publication_revision = crate::manager::commit_agent_status_publication(
+        state.inner(),
+        "claude-live",
+        &current_status,
+        "Processing...",
+    )
+    .expect("the installed provisional status should publish");
+    assert!(publication_revision > provisional_revision);
+    // MockRuntime verifies the provisional Arc's publication decision. The
+    // production Wry persistence boundary is covered by runtime publication tests.
     drop(home);
 }

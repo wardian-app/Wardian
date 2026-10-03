@@ -478,19 +478,6 @@ pub async fn deploy_skill(
 }
 
 #[tauri::command]
-pub async fn remove_deployed_skill(
-    app: AppHandle,
-    target_type: String,
-    target_id: String,
-    skill_name: String,
-) -> Result<(), String> {
-    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
-    library::remove_deployed_skill(&home, &target_type, &target_id, &skill_name)?;
-    refresh_live_antigravity_skill_projections(&app).await;
-    Ok(())
-}
-
-#[tauri::command]
 pub async fn list_deployed_skills(
     _app: AppHandle,
     target_type: String,
@@ -522,52 +509,6 @@ pub async fn list_deployed_skill_refs(
     target_id: String,
 ) -> Result<Vec<DeployedSkillRef>, String> {
     list_deployed_skill_refs_for_target(&target_type, &target_id)
-}
-
-#[tauri::command]
-pub async fn list_skill_deployments(
-    _app: AppHandle,
-    skill_name: String,
-    source_path: Option<String>,
-) -> Result<Vec<SkillDeployment>, String> {
-    let home = get_wardian_home().ok_or("Could not find Wardian home")?;
-    let sources = library::collect_skill_sources(&home);
-    let scan = library::scan_deployments(&home, &sources);
-
-    let mut deployments = Vec::new();
-    match source_path.as_deref() {
-        Some(source_path) => {
-            for target in scan.deployments.get(source_path).into_iter().flatten() {
-                deployments.push(SkillDeployment {
-                    target_type: target.target_type.clone(),
-                    target_id: target.target_id.clone(),
-                });
-            }
-        }
-        None => {
-            for (rel_path, targets) in &scan.deployments {
-                if skill_name_from_rel(rel_path) != skill_name {
-                    continue;
-                }
-                for target in targets {
-                    deployments.push(SkillDeployment {
-                        target_type: target.target_type.clone(),
-                        target_id: target.target_id.clone(),
-                    });
-                }
-            }
-            for orphan in &scan.orphans {
-                if orphan.skill_name == skill_name {
-                    deployments.push(SkillDeployment {
-                        target_type: orphan.target_type.clone(),
-                        target_id: orphan.target_id.clone(),
-                    });
-                }
-            }
-        }
-    }
-
-    Ok(deployments)
 }
 
 #[tauri::command]

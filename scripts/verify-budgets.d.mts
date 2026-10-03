@@ -13,6 +13,7 @@ export interface ManifestPair {
   head?: string;
 }
 export function packageContract(manifestText: string): string;
+export function assertDependencyParity(baseManifestText: string, headManifestText: string): void;
 export function changedLintPolicyFiles(changedFiles: string[], manifests?: ManifestPair): string[];
 export function assertLintPolicyUnchanged(changedFiles: string[], manifests?: ManifestPair): void;
 export function compareMetrics(current: Metrics, base: Metrics): {

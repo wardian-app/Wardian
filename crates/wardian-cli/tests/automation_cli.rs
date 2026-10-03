@@ -98,6 +98,44 @@ fn automation_failure(home: &TempDir, args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn automation_message_send_validates_launch_fields_and_exposes_recipient_contract() {
+    let home = TempDir::new().unwrap();
+    let path = home.path().join("delivery.md");
+    let blueprint = DEMO_BLUEPRINT
+        .replace("type: task", "type: message_send")
+        .replace(
+            "agent: role:planner",
+            "recipient: '{{trigger.output.requesting_agent}}'",
+        )
+        .replace(
+            "prompt: Plan the demo",
+            "artifact_path: '.wardian-review/{{run.id}}/review.md'",
+        );
+    std::fs::write(&path, &blueprint).unwrap();
+    let report = automation_command(&home, &["automation", "validate", path.to_str().unwrap()]);
+    assert_eq!(report["ok"], true);
+    let contract = automation_output(
+        &home,
+        &["automation", "node-types", "message_send", "--json"],
+    );
+    assert!(contract.contains("recipient"));
+    assert!(contract.contains("artifact_path"));
+    for invalid in [
+        blueprint.replace(
+            "trigger.output.requesting_agent",
+            "nodes.plan.output.recipient",
+        ),
+        blueprint.replace("recipient:", "recipient_id:"),
+        blueprint.replace("run.id", "run.untrusted"),
+    ] {
+        std::fs::write(&path, invalid).unwrap();
+        let failure =
+            automation_failure(&home, &["automation", "validate", path.to_str().unwrap()]);
+        assert!(!failure.status.success());
+    }
+}
+
+#[test]
 fn automation_list_uses_declared_ids_and_reports_parse_errors_per_row() {
     let home = TempDir::new().unwrap();
     let automations_dir = home.path().join("library").join("automations");

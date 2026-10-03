@@ -507,3 +507,222 @@ async fn agent_logging_transition_excludes_provider_bytes_written_while_disabled
     assert!(text.contains(&"After agent re-enable"));
     assert!(!text.contains(&"SECRET_AGENT_DISABLED"));
 }
+
+#[tokio::test]
+async fn lifecycle_archive_drain_does_not_queue_behind_background_syncs() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let _guard = crate::utils::wardian_test_env_lock_async().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    std::env::set_var("WARDIAN_HOME", temp.path());
+    let _home = WardianHomeGuard;
+    wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
+        .expect("initialize isolated state database");
+    crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+        conversation_logging: ConversationLoggingSetting::Enabled,
+        ..Default::default()
+    })
+    .expect("save enabled global logging");
+    let log_path = temp.path().join("provider.jsonl");
+    std::fs::write(
+        &log_path,
+        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Closing turn\"}}\n",
+    )
+    .expect("write provider event");
+    let state = Arc::new(AppState::new());
+    let agent = make_test_agent();
+    {
+        let mut config = agent.config.lock().expect("agent config");
+        config.session_id = "agent-1".to_string();
+        config.session_name = "Agent One".to_string();
+        config.agent_class = "Coder".to_string();
+        config.provider = "codex".to_string();
+        config.reset_provider_config_for_provider();
+        config.folder = temp.path().to_string_lossy().to_string();
+        config.fresh_provider_session_id = Some("provider-session-1".to_string());
+    }
+    *agent.log_path.lock().expect("agent log path") = Some(log_path);
+    state
+        .agents
+        .lock()
+        .await
+        .insert("agent-1".to_string(), agent);
+    state.agent_order.lock().await.push("agent-1".to_string());
+
+    // A capture pass is running, and several best-effort syncs (the restore and
+    // status syncs a restart schedules for every agent) are already waiting.
+    let running_pass = state.conversation_capture_policy_lock.lock().await;
+    let finished = Arc::new(AtomicUsize::new(0));
+    let mut background = Vec::new();
+    for _ in 0..4 {
+        let state = state.clone();
+        let finished = finished.clone();
+        background.push(tokio::spawn(async move {
+            crate::commands::chat::archive_agent_chat_events_until_stable_for_state(
+                &state, "agent-1",
+            )
+            .await
+            .expect("background sync");
+            finished.fetch_add(1, Ordering::SeqCst)
+        }));
+    }
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    let lifecycle = {
+        let state = state.clone();
+        let finished = finished.clone();
+        tokio::spawn(async move {
+            crate::commands::chat::archive_agent_chat_events_until_stable_for_lifecycle(
+                &state, "agent-1",
+            )
+            .await
+            .expect("lifecycle drain");
+            finished.fetch_add(1, Ordering::SeqCst)
+        })
+    };
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+
+    drop(running_pass);
+    let lifecycle_position = lifecycle.await.expect("lifecycle task");
+    for task in background {
+        task.await.expect("background task");
+    }
+
+    assert_eq!(
+        lifecycle_position, 0,
+        "New Session's closing drain must finish before the queued background syncs"
+    );
+}
+
+#[tokio::test]
+async fn background_capture_waiting_through_a_boundary_does_not_replay_the_old_session() {
+    use std::sync::Arc;
+    use wardian_core::conversations::{ConversationBoundaryReason, ConversationStatus};
+
+    let _guard = crate::utils::wardian_test_env_lock_async().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    std::env::set_var("WARDIAN_HOME", temp.path());
+    let _home = WardianHomeGuard;
+    wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
+        .expect("initialize isolated state database");
+    crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+        conversation_logging: ConversationLoggingSetting::Enabled,
+        ..Default::default()
+    })
+    .expect("save enabled global logging");
+    let user_message = |text: &str| {
+        format!("{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"{text}\"}}}}\n")
+    };
+    let old_log = temp.path().join("old-provider.jsonl");
+    std::fs::write(&old_log, user_message("Old session prompt")).expect("write old log");
+    let new_log = temp.path().join("new-provider.jsonl");
+    std::fs::write(&new_log, user_message("New session prompt")).expect("write new log");
+
+    let state = Arc::new(AppState::new());
+    let agent = make_test_agent();
+    {
+        let mut config = agent.config.lock().expect("agent config");
+        config.session_id = "agent-1".to_string();
+        config.session_name = "Agent One".to_string();
+        config.agent_class = "Coder".to_string();
+        config.provider = "codex".to_string();
+        config.reset_provider_config_for_provider();
+        config.folder = temp.path().to_string_lossy().to_string();
+        config.fresh_provider_session_id = Some("provider-session-1".to_string());
+    }
+    *agent.log_path.lock().expect("agent log path") = Some(old_log.clone());
+    state
+        .agents
+        .lock()
+        .await
+        .insert("agent-1".to_string(), agent);
+    state.agent_order.lock().await.push("agent-1".to_string());
+    crate::commands::chat::archive_agent_chat_events_until_stable_for_state(&state, "agent-1")
+        .await
+        .expect("capture the old session");
+
+    // A best-effort pass is waiting for the gate while a boundary runs.
+    let running_pass = state.conversation_capture_policy_lock.lock().await;
+    let waiting_pass = {
+        let state = state.clone();
+        tokio::spawn(async move {
+            crate::commands::chat::archive_agent_chat_events_until_stable_for_state(
+                &state, "agent-1",
+            )
+            .await
+            .expect("waiting background pass");
+        })
+    };
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+
+    // The boundary rotates the archive and installs the new provider session;
+    // the old provider then writes one last line.
+    state
+        .conversation_archive
+        .rollover_agent("agent-1", ConversationBoundaryReason::Clear)
+        .expect("roll over the archive")
+        .expect("an active conversation to close");
+    {
+        let agents = state.agents.lock().await;
+        let agent = agents.get("agent-1").expect("agent");
+        agent
+            .config
+            .lock()
+            .expect("agent config")
+            .fresh_provider_session_id = Some("provider-session-2".to_string());
+        *agent.log_path.lock().expect("agent log path") = Some(new_log);
+    }
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&old_log)
+            .expect("open old log");
+        file.write_all(user_message("Late old-session line").as_bytes())
+            .expect("append late line");
+    }
+
+    drop(running_pass);
+    waiting_pass.await.expect("waiting pass");
+
+    let entries = state
+        .conversation_archive
+        .list(Some("agent-1"), false)
+        .expect("list conversations");
+    let old_session = entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .provider_session_ids
+                .iter()
+                .any(|id| id == "provider-session-1")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        old_session.len(),
+        1,
+        "a stale pass must not create a second conversation for the old session: {entries:?}"
+    );
+    assert!(matches!(old_session[0].status, ConversationStatus::Closed));
+    assert!(matches!(
+        old_session[0].boundary_reason,
+        ConversationBoundaryReason::Clear
+    ));
+    for open in entries
+        .iter()
+        .filter(|entry| matches!(entry.status, ConversationStatus::Open))
+    {
+        assert!(
+            open.provider_session_ids
+                .iter()
+                .any(|id| id == "provider-session-2"),
+            "an open conversation must belong to the new session: {open:?}"
+        );
+    }
+}

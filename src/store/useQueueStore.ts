@@ -52,6 +52,9 @@ interface QueueState {
     summary?: string | null,
     evidenceId?: string,
   ) => void;
+  applyPersistedAgentCompletion: (
+    item: QueueItem,
+  ) => void;
   addActionNeeded: (
     sessionId: string,
     agentName: string,
@@ -144,6 +147,15 @@ function persistItems(
     .then(() => invoke("save_queue_items", {
       items: [...legacyItems, ...acknowledgementItems, ...automationDismissalItems],
     }).then(() => undefined, () => undefined));
+}
+
+function persistDismissedAgentCompletions(ids: string[]): Promise<boolean> {
+  if (ids.length === 0) return Promise.resolve(true);
+  const operation = persistQueue
+    .catch(() => undefined)
+    .then(() => invoke("dismiss_agent_completions", { ids }).then(() => true, () => false));
+  persistQueue = operation.then(() => undefined);
+  return operation;
 }
 
 function persistPreferences(preferences: QueuePreferences) {
@@ -326,7 +338,9 @@ export const useQueueStore = create<QueueState>((set, get) => ({
         if (loadRevision !== queueMutationRevision) return;
         const raw = await invoke<QueueItem[]>("load_queue_items");
         const cutoff = Date.now() - QUEUE_MAX_AGE_MS;
-        const persistedItems = (Array.isArray(raw) ? raw : []).filter((i) => i.timestamp > cutoff);
+        const persistedItems = (Array.isArray(raw) ? raw : []).filter((i) =>
+          i.timestamp > cutoff && !(i.type === "agent_completed" && i.dismissed),
+        );
         const readNotificationIds = new Set(
           persistedItems
             .filter((item) => item.type === "agent_update" && item.read && item.inbox_notification_id)
@@ -493,14 +507,17 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       (i) => i.type === "agent_completed"
         && i.agent_session_id === sessionId
         && (
-          (evidenceId !== undefined && i.evidence_id === evidenceId)
-          || Date.now() - i.timestamp < DEDUP_WINDOW_MS
+          evidenceId !== undefined
+            ? i.evidence_id === evidenceId
+            : Date.now() - i.timestamp < DEDUP_WINDOW_MS
         ),
     );
     if (recent) return;
 
     const item: QueueItem = {
-      id: crypto.randomUUID(),
+      id: evidenceId
+        ? `agent-completed:${sessionId}:${evidenceId}`
+        : crypto.randomUUID(),
       type: "agent_completed",
       timestamp: Date.now(),
       read: false,
@@ -518,6 +535,23 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       notifyForItem(item, s.preferences);
       return { items: next, _agentBuffers: { ...s._agentBuffers, [sessionId]: "" } };
     });
+  },
+
+  applyPersistedAgentCompletion(item) {
+    const sessionId = item.agent_session_id;
+    if (item.type !== "agent_completed" || item.dismissed || !sessionId) return;
+    if (get().items.some((current) => current.id === item.id)) {
+      set((state) => ({
+        _agentBuffers: { ...state._agentBuffers, [sessionId]: "" },
+      }));
+      return;
+    }
+    queueMutationRevision += 1;
+    set((state) => ({
+      items: [item, ...state.items],
+      _agentBuffers: { ...state._agentBuffers, [sessionId]: "" },
+    }));
+    notifyForItem(item, get().preferences);
   },
 
   addActionNeeded(sessionId, agentName, summary, evidenceId, evidenceSource, providerQuestion) {
@@ -613,6 +647,15 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     set((s) => {
       const item = s.items.find((candidate) => candidate.id === id);
       if (item && readProtected(item)) return {};
+      if (item?.type === "agent_completed") {
+        void persistDismissedAgentCompletions([id]).then((persisted) => {
+          if (persisted) return;
+          queueMutationRevision += 1;
+          set((state) => state.items.some((current) => current.id === id)
+            ? {}
+            : { items: [item, ...state.items].sort((left, right) => right.timestamp - left.timestamp) });
+        });
+      }
       queueMutationRevision += 1;
       const automationKey = item ? automationRunKey(item) : undefined;
       const dismissedAutomationRuns = automationKey
@@ -667,12 +710,24 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     queueMutationRevision += 1;
     set((s) => {
       const dismissedAutomationRuns = new Set(s._dismissedAutomationRuns);
+      const removedAgentCompletions: QueueItem[] = [];
       const next = s.items.filter((item) => {
         if (!(item.read && isClearableLegacyCompletion(item))) return true;
+        if (item.type === "agent_completed") removedAgentCompletions.push(item);
         const automationKey = automationRunKey(item);
         if (automationKey) dismissedAutomationRuns.add(automationKey);
         return false;
       });
+      void persistDismissedAgentCompletions(removedAgentCompletions.map((item) => item.id))
+        .then((persisted) => {
+          if (persisted) return;
+          queueMutationRevision += 1;
+          set((state) => ({
+            items: [...state.items, ...removedAgentCompletions]
+              .filter((item, index, all) => all.findIndex((candidate) => candidate.id === item.id) === index)
+              .sort((left, right) => right.timestamp - left.timestamp),
+          }));
+        });
       const dismissed = [...dismissedAutomationRuns];
       persistItems(next, s._readNotificationIds, dismissed);
       return { items: next, _dismissedAutomationRuns: dismissed };

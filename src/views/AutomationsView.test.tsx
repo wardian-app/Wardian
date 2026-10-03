@@ -66,9 +66,6 @@ vi.mock('../features/automations/builder/DiagnosticsPanel', () => ({
 vi.mock('../features/automations/builder/NodeConfigForm', () => ({
   NodeConfigForm: () => <div data-testid="node-config-form" />,
 }));
-vi.mock('../features/automations/builder/NodePalette', () => ({
-  NodePalette: () => <div data-testid="node-palette" />,
-}));
 vi.mock('../features/automations/builder/NodeLibrary', () => ({
   NodeLibrary: ({ onAdd }: { onAdd: (def: unknown) => void }) => (
     <div data-testid="node-library">

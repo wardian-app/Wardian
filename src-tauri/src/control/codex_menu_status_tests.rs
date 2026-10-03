@@ -68,6 +68,37 @@ fn status(observation: &ProviderStartupObservation) -> String {
     observation.current_status.lock().unwrap().clone()
 }
 
+fn status_sequence(state: &AppState) -> u64 {
+    state
+        .status_observation_sequences
+        .lock()
+        .unwrap()
+        .get(ID)
+        .copied()
+        .unwrap_or(0)
+}
+
+async fn constrain_status(
+    state: &AppState,
+    observation: &ProviderStartupObservation,
+    requested: &str,
+) -> Option<String> {
+    // Callers have applied the requested status directly; mirror the matching
+    // intent that set_agent_status reserves before scheduling publication.
+    state.reserve_status_intent(ID, &observation.current_status, requested);
+    let expected_sequence = status_sequence(state);
+    constrain_publication(
+        state,
+        ID,
+        &observation.current_status,
+        requested,
+        expected_sequence,
+        state.status_revision(ID, &observation.current_status),
+    )
+    .await
+    .map(|(status, _, _)| status)
+}
+
 #[tokio::test]
 async fn native_completion_and_processing_cannot_publish_over_current_menu() {
     let _home = TestWardianHome::new_async().await;
@@ -80,7 +111,7 @@ async fn native_completion_and_processing_cannot_publish_over_current_menu() {
         *observation.current_status.lock().unwrap() = requested.into();
         let _lifecycle = state.lock_agent_lifecycle(ID).await;
         assert_eq!(
-            constrain_publication(&state, ID, &observation.current_status, requested).await,
+            constrain_status(&state, &observation, requested).await,
             Some("Action Needed".into())
         );
         assert_eq!(status(&observation), "Action Needed");
@@ -242,7 +273,7 @@ async fn queued_dismissal_cannot_restore_replacement_runtime_or_status_arc() {
     assert_eq!(status(&observation), "Action Needed");
     let _lifecycle = state.lock_agent_lifecycle(ID).await;
     assert_eq!(
-        constrain_publication(&state, ID, &observation.current_status, "Action Needed").await,
+        constrain_status(&state, &observation, "Action Needed").await,
         None
     );
     assert!(old_input.try_recv().is_err());
@@ -321,7 +352,7 @@ async fn review_correction_unavailable_screen_cannot_publish_ready_or_busy() {
             // Mirror set_agent_status: the Arc changes before publication is queued.
             *observation.current_status.lock().unwrap() = requested.into();
             assert_eq!(
-                constrain_publication(&state, ID, &observation.current_status, requested).await,
+                constrain_status(&state, &observation, requested).await,
                 Some("Action Needed".into()),
                 "{unavailable}: {requested}"
             );
@@ -343,7 +374,7 @@ async fn review_correction_current_composer_and_non_codex_statuses_remain_publis
     for requested in ["Idle", "Processing...", "Off", "Error"] {
         *observation.current_status.lock().unwrap() = requested.into();
         assert_eq!(
-            constrain_publication(&state, ID, &observation.current_status, requested).await,
+            constrain_status(&state, &observation, requested).await,
             Some(requested.into())
         );
     }
@@ -364,7 +395,7 @@ async fn review_correction_current_composer_and_non_codex_statuses_remain_publis
         .unwrap();
     *observation.current_status.lock().unwrap() = "Idle".into();
     assert_eq!(
-        constrain_publication(&state, ID, &observation.current_status, "Idle").await,
+        constrain_status(&state, &observation, "Idle").await,
         Some("Idle".into())
     );
     assert!(input.try_recv().is_err());

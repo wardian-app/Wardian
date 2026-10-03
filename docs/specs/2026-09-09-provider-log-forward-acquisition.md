@@ -128,11 +128,24 @@ Privacy is fail-closed around setting persistence:
 
 ## Concurrency
 
-Callers snapshot the global agent roster before taking the asynchronous capture
-policy gate. They then acquire only the archive's per-agent gate. Per-agent
-configuration persistence releases its roster barrier before entering the
-per-agent archive gate. This ordering prevents a policy transition from
-deadlocking ordinary archive capture or agent replacement.
+A logging-policy transition snapshots the global agent roster before taking the
+asynchronous capture policy gate. An archive capture takes the gate first and
+snapshots its agent afterward, so a pass that waited through a lifecycle
+boundary sees the replacement runtime's identity, provider source and logging
+setting rather than the runtime it started with. Both then acquire only the
+archive's per-agent gate, and no holder of the roster map may wait for the
+policy gate. Per-agent configuration persistence releases its roster barrier
+before entering the per-agent archive gate. This ordering prevents a policy
+transition from deadlocking ordinary archive capture or agent replacement.
+
+The gate has two lanes. Policy transitions and lifecycle boundaries (New
+Session, fresh resume) queue on it in order. Best-effort captures (status,
+restored-agent, prompt, and Chat-read syncs) poll with `try_lock` and stand
+aside while any lifecycle boundary is registered. A restart schedules one sync
+per restored agent, so a first-in-first-out queue made a New Session wait behind
+all of them for minutes; a boundary now waits only for the pass already running.
+The boundary stays registered across all passes of its drain so background syncs
+cannot slip in between them.
 
 Policy generation and cursor compare-and-set reject a worker whose private
 state was superseded. Archive retries remain idempotent through the existing

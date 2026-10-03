@@ -3,18 +3,40 @@ use super::strip_ansi_controls;
 /// Recognizes readiness only in the current Pi editor frame supplied by the caller.
 pub(super) fn pi_output_has_startup_ready_prompt(output: &str) -> bool {
     let cleaned = strip_ansi_controls(output).replace('\r', "\n");
-    let lines = cleaned
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    let Some(frame_start) = lines
+    let screen = cleaned.lines().map(str::trim).collect::<Vec<_>>();
+    // Resume can scroll the banner out of the canonical screen. In that case,
+    // require the empty editor between its two borders immediately above the
+    // workspace footer, rather than treating transcript footer text as ready.
+    let editor_start = screen
         .iter()
-        .rposition(|line| line.to_ascii_lowercase().starts_with("pi v"))
-    else {
+        .rposition(|line| pi_editor_border(line))
+        .and_then(|bottom| {
+            let top = screen[..bottom]
+                .iter()
+                .rposition(|line| pi_editor_border(line))?;
+            (bottom > top + 1
+                && screen[top + 1..bottom].iter().all(|line| line.is_empty())
+                && screen
+                    .get(bottom + 1)
+                    .is_some_and(|line| pi_line_looks_like_workspace_footer(line)))
+            .then_some(top)
+        });
+    let banner_start = screen
+        .iter()
+        .rposition(|line| line.to_ascii_lowercase().starts_with("pi v"));
+    // A visible banner still owns its loading/error notices above the editor.
+    let frame_start = match (banner_start, editor_start) {
+        (Some(banner), Some(editor)) => Some(banner.min(editor)),
+        (banner, editor) => banner.or(editor),
+    };
+    let Some(frame_start) = frame_start else {
         return false;
     };
-    let frame = &lines[frame_start..];
+    let frame = screen[frame_start..]
+        .iter()
+        .copied()
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
     if frame.iter().any(|line| pi_line_is_blocking_status(line)) {
         return false;
     }
@@ -36,9 +58,13 @@ pub(super) fn pi_output_has_startup_ready_prompt(output: &str) -> bool {
         let has_editor_footer_context = preceding_context
             .iter()
             .any(|candidate| pi_line_looks_like_workspace_footer(candidate));
-        let has_current_model_footer = context
-            .iter()
-            .any(|candidate| candidate.contains(" • ") && candidate.contains(") "));
+        let has_current_model_footer = context.iter().any(|candidate| {
+            candidate.split_once(") ").is_some_and(|(_, model)| {
+                model
+                    .split_once(" •")
+                    .is_some_and(|(name, _)| !name.trim().is_empty())
+            })
+        });
 
         has_editor_footer_context
             && (has_current_model_footer
@@ -46,6 +72,10 @@ pub(super) fn pi_output_has_startup_ready_prompt(output: &str) -> bool {
                     .iter()
                     .any(|candidate| candidate.contains(" • ")))
     })
+}
+
+fn pi_editor_border(line: &str) -> bool {
+    line.chars().count() >= 8 && line.chars().all(|character| character == '─')
 }
 
 fn pi_line_looks_like_workspace_footer(line: &str) -> bool {
@@ -96,6 +126,36 @@ fn pi_line_is_blocking_status(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::pi_output_has_startup_ready_prompt;
+
+    #[test]
+    fn resumed_editor_is_ready_without_the_scrolled_startup_banner() {
+        let ready = "Previous answer\n\n────────────────────────────────\n\n────────────────────────────────\n<workspace-root>/project (fix/startup...)\n↑4.0k ↓9 $0.001 (sub) 1.5%/272k (auto) gpt-5.6-luna • high";
+        assert!(pi_output_has_startup_ready_prompt(ready));
+        assert!(!pi_output_has_startup_ready_prompt(&format!(
+            "pi v0.99.0\nError: provider authentication failed\n{ready}"
+        )));
+        assert!(!pi_output_has_startup_ready_prompt(&format!(
+            "pi v0.99.0\nLoading model…\n{ready}"
+        )));
+        assert!(!pi_output_has_startup_ready_prompt(&format!(
+            "pi v0.99.0\nNo models available. Use /login.\n{ready}"
+        )));
+        assert!(pi_output_has_startup_ready_prompt(
+            &ready.replace(" • high", " •")
+        ));
+        assert!(!pi_output_has_startup_ready_prompt(&ready.replace(
+            "\n\n────────────────",
+            "\nLoading model…\n────────────────"
+        )));
+        assert!(!pi_output_has_startup_ready_prompt(
+            &ready
+                .replace("Previous answer", "Draft: quoted footer")
+                .replace("────────────────────────────────\n\n", "")
+        ));
+        assert!(!pi_output_has_startup_ready_prompt(&format!(
+            "{ready}\nLoading model…"
+        )));
+    }
 
     #[test]
     fn loading_status_blocks_readiness_before_and_after_footer() {

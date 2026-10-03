@@ -23,13 +23,6 @@ export function scheduleSummaryLabel(schedule: ScheduleDefinition): string {
   }
 }
 
-/** Next-run wall-clock label, or a paused/none marker. */
-export function nextRunLabel(schedule: AutomationSchedule): string {
-  if (schedule.is_paused) return 'Paused';
-  if (!schedule.next_run_epoch_ms) return '-';
-  return new Date(schedule.next_run_epoch_ms).toLocaleString();
-}
-
 /** Status color (semantic theme var) for a schedule's last/active state. */
 export function scheduleStatusColor(schedule: AutomationSchedule): string {
   if (schedule.is_paused) return 'var(--color-wardian-warning)';

@@ -27,6 +27,9 @@ use crate::providers::{CodexProvider, PiProvider, ProviderFactory};
 
 mod codex;
 
+#[cfg(test)]
+pub(crate) use codex::shared_error as codex_shared_error_for_test;
+
 const SESSION_COMMAND_CAPACITY: usize = 64;
 const BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const PROTOCOL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
@@ -893,22 +896,6 @@ impl NativeDeliveryBroker {
         .await
     }
 
-    pub async fn supersede(
-        &self,
-        interaction_id: &str,
-    ) -> Result<NativeDeliveryRecord, NativeBrokerError> {
-        self.advance(
-            interaction_id,
-            NativeDeliveryPhase::Superseded,
-            NativeEvidenceSource::Caller,
-            None,
-            None,
-            Some("replaced by a new queued interaction".to_string()),
-            "supersede",
-        )
-        .await
-    }
-
     pub fn get(&self, interaction_id: &str) -> Result<NativeDeliveryRecord, NativeBrokerError> {
         wardian_core::db::native_delivery(interaction_id)
             .map_err(db_error)?
@@ -1183,17 +1170,6 @@ impl NativeDeliveryBroker {
             close_opencode_http_registration(previous).await;
         }
         Ok(())
-    }
-
-    /// A lifecycle registration is the only condition that routes an attached
-    /// OpenCode task away from the existing composer exception. A closed owner
-    /// stays registered until disposal so a lost transport leaves work pending.
-    pub async fn opencode_http_prepared(&self, target_agent_id: &str, generation: u64) -> bool {
-        !matches!(
-            self.opencode_http_eligibility(target_agent_id, generation)
-                .await,
-            OpenCodeHttpEligibility::Unsupported
-        )
     }
 
     /// Revalidate the owner and provider busy state before the canonical claim.
