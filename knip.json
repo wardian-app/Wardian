@@ -8,7 +8,12 @@
     "scripts/**/*.mjs"
   ],
   "project": [
-    "src/**/*.{ts,tsx}"
+    "src/**/*.{ts,tsx}!",
+    "!src/test/**!",
+    "!src/features/workbench/workbenchTestUtils.ts!",
+    "!src/features/workbench/workbenchSelectors.ts!",
+    "!src/config/viteDevServerHeaders.ts!",
+    "!src/config/viteWatchIgnored.ts!"
   ],
   "ignoreExportsUsedInFile": true,
   "tags": [

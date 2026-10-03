@@ -215,6 +215,23 @@ impl RestorePublication {
         })
     }
 
+    /// Read the registered configuration under this existing startup claim.
+    /// Completion replay must use this claim instead of reacquiring the
+    /// lifecycle gate that startup retains through provider publication.
+    pub(crate) async fn current_config(
+        &self,
+        state: &AppState,
+    ) -> Option<wardian_core::models::AgentConfig> {
+        let config = state
+            .agents
+            .lock()
+            .await
+            .get(&self.session_id)
+            .map(|agent| agent.config.clone())?;
+        let snapshot = config.lock().ok().map(|config| config.clone());
+        snapshot
+    }
+
     /// Reclaim only the exact failed startup placeholder after its lease wait.
     /// The caller must acquire the lifecycle gate before this check and keep
     /// the returned claim through the retry and its final publication.

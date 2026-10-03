@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod agent_reach;
+pub mod agent_roster;
 pub mod artifacts;
 pub mod automation;
 pub mod browser;

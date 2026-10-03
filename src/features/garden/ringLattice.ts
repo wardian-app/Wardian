@@ -86,7 +86,11 @@ export function ringSlotOf(index: number): RingSlot {
   return { ring, position: slot - firstSlotOfRing(ring) };
 }
 
-/** Ring and position back to a slot index. Inverse of `ringSlotOf`. */
+/**
+ * Ring and position back to a slot index. Inverse of `ringSlotOf`.
+ *
+ * @internal Test support, no production caller: tests check the lattice round-trips.
+ */
 export function slotIndex(slot: RingSlot): number {
   return firstSlotOfRing(slot.ring) + slot.position;
 }

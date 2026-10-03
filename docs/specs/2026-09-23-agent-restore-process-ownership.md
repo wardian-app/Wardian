@@ -1,6 +1,12 @@
 # Agent Restore Process Ownership
 
 Status: accepted
+
+Amendment: newly launched Windows Claude runtimes can release the exact
+prior-session hold after verified containment and tree exit, as specified in
+[Verified Windows Claude Process Stop](./2026-10-02-claude-process-containment.md).
+The permanent repair policy below remains for legacy/uncontained runtimes,
+other providers, and other operating systems.
 Date: 2026-09-23
 Scope: Cross-process provider startup and recovery on Windows, macOS, and Linux
 

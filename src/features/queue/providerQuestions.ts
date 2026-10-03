@@ -163,6 +163,7 @@ export function parseProviderQuestionEvents(
   return [...parseCodexEvent(sessionId, data), ...parseClaudeEvent(sessionId, data)];
 }
 
+/** @internal Test support, no production caller: tests parse a single expected projection with it. */
 export function parseProviderQuestionEvent(
   sessionId: string,
   data: Record<string, unknown>,

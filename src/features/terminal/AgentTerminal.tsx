@@ -3131,8 +3131,12 @@ export const AgentTerminal = memo(function AgentTerminal({
     if (!sessionId || !terminalRef.current) {
       return;
     }
+    const existing = terminalSessionMap.get(terminalKey);
+    if (existing) {
+      // A reattached presentation owns its cached parser even when still suspended.
+      cancelRendererDisposal(existing);
+    }
     if (renderState !== "mounted") {
-      const existing = terminalSessionMap.get(terminalKey);
       if (existing?.renderer) {
         const renderer = existing.renderer;
         existing.renderer = null;
@@ -3142,13 +3146,15 @@ export const AgentTerminal = memo(function AgentTerminal({
       rendererEvictedRef.current = false;
       setRendererEvicted(false);
       invalidateRendererReveal();
-      return;
+      return () => {
+        const current = terminalSessionMap.get(terminalKey);
+        if (current && !current.disposed) {
+          // Suspended attachments skip renderer setup but still own this cached entry.
+          scheduleRendererDisposal(terminalKey);
+        }
+      };
     }
     if (visibility !== "visible") {
-      const existing = terminalSessionMap.get(terminalKey);
-      if (existing) {
-        cancelRendererDisposal(existing);
-      }
       invalidateRendererReveal();
       return;
     }
@@ -3361,6 +3367,29 @@ export const AgentTerminal = memo(function AgentTerminal({
             }
             synchronizeReplacementGeometry();
             const lifecycle = presentationLifecycleRef.current;
+            if (autoActivateWhenUnowned && result.broker_state.owner_presentation_id === null &&
+                lifecycle.visibility === "visible" && lifecycle.renderState === "mounted" &&
+                lifecycle.requestedInteraction === "interactive") {
+              // A startup placeholder may register before its PTY exists. The
+              // registration retry must finish the same viewport/ownership
+              // handshake as an immediately available runtime.
+              invalidateRendererReveal();
+              void (async () => {
+                if (!terminalRef.current) return;
+                const dimensions = proposeTerminalDimensions(renderer, {
+                  container: terminalRef.current, useRenderedRowGeometry: false,
+                });
+                if (!dimensions) return;
+                await session.terminalClient.reportViewport(presentationId,
+                  Math.max(MIN_TERMINAL_COLS, dimensions.cols),
+                  Math.max(MIN_TERMINAL_ROWS, dimensions.rows));
+                if (!isMounted || session.disposed) return;
+                await session.terminalClient.activateWhenUnowned(presentationId);
+                if (isMounted && terminalRef.current) {
+                  await prepareRendererForReveal(session, terminalRef.current);
+                }
+              })().catch(error => console.warn("Failed to activate restored terminal", error));
+            }
             if (
               lifecycle.renderState === "mounted" &&
               result.presentation.requires_resync &&
@@ -3497,11 +3526,11 @@ export const AgentTerminal = memo(function AgentTerminal({
             lifecycleBeforeActivation.requestedInteraction === "interactive" &&
             currentBrokerState.owner_presentation_id === null
           ) {
-            const activation = await session.terminalClient.activate(presentationId);
+            const activation = await session.terminalClient.activateWhenUnowned(presentationId);
             if (!isMounted) {
               return;
             }
-            if (activation.ack) {
+            if (activation?.ack) {
               session.brokerState = activation.ack.broker_state;
               currentBrokerState = activation.ack.broker_state;
             }
@@ -3567,7 +3596,6 @@ export const AgentTerminal = memo(function AgentTerminal({
       if (entry && !entry.disposed) {
         const lifecycle = presentationLifecycleRef.current;
         if (lifecycle.renderState !== "mounted") {
-          cancelRendererDisposal(entry);
           if (entry.renderer) {
             const renderer = entry.renderer;
             entry.renderer = null;
@@ -3576,9 +3604,10 @@ export const AgentTerminal = memo(function AgentTerminal({
           }
           rendererEvictedRef.current = false;
           markRendererReady(false);
-        } else {
-          scheduleRendererDisposal(terminalKey);
         }
+        // Suspension retires the renderer, while this grace period retains the
+        // parser for a quick remount of this presentation.
+        scheduleRendererDisposal(terminalKey);
       }
       if (entry && entry.titleHandlerRef.current === onTitleChangeRef.current) {
         entry.titleHandlerRef.current = undefined;
@@ -3656,11 +3685,11 @@ export const AgentTerminal = memo(function AgentTerminal({
         requestedInteraction === "interactive" &&
         entry.brokerState.owner_presentation_id === null
       ) {
-        const activation = await entry.terminalClient.activate(presentationId);
+        const activation = await entry.terminalClient.activateWhenUnowned(presentationId);
         if (cancelled) {
           return;
         }
-        if (activation.ack) {
+        if (activation?.ack) {
           entry.brokerState = activation.ack.broker_state;
         }
       }
@@ -3912,6 +3941,7 @@ export const AgentTerminal = memo(function AgentTerminal({
   );
 });
 
+/** @internal Test support, no production caller: test seam exposing internals to AgentTerminal tests. */
 export const __terminalTesting = {
   applyBrokerSnapshot,
   canSendTerminalInput,
