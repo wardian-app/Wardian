@@ -55,33 +55,6 @@ pub(super) struct StderrRedactionContext {
 }
 
 impl StderrRedactionContext {
-    #[cfg(test)]
-    pub(super) fn new(
-        private_paths: impl IntoIterator<Item = impl AsRef<Path>>,
-        values: impl IntoIterator<Item = Vec<u8>>,
-    ) -> Self {
-        let private_paths = normalize_private_paths(private_paths);
-        let mut credential_values = Vec::new();
-        let mut credential_bytes = 0usize;
-        let mut redact_all = false;
-        for value in values {
-            add_credential_value(
-                &value,
-                &mut credential_values,
-                &mut credential_bytes,
-                &mut redact_all,
-            );
-            if redact_all {
-                break;
-            }
-        }
-        Self {
-            private_paths,
-            credential_values,
-            redact_all,
-        }
-    }
-
     pub(super) fn from_command(
         private_paths: impl IntoIterator<Item = std::path::PathBuf>,
         command: &std::process::Command,
@@ -210,11 +183,6 @@ impl SafeStderrDiagnostic {
             .unwrap_or(Value::Null)
     }
 
-    #[cfg(test)]
-    pub(super) fn as_str(&self) -> Option<&str> {
-        self.0.as_deref()
-    }
-
     fn fixed(message: &str) -> Self {
         Self(Some(message.to_string()))
     }
@@ -335,6 +303,38 @@ pub(super) fn rejection_message(method: &str, error: &Value) -> &'static str {
 }
 
 #[cfg(test)]
+pub(super) mod test_support {
+    use super::{add_credential_value, normalize_private_paths, StderrRedactionContext};
+    use std::path::Path;
+
+    pub(in crate::delivery::codex_shared) fn redaction_context(
+        private_paths: impl IntoIterator<Item = impl AsRef<Path>>,
+        values: impl IntoIterator<Item = Vec<u8>>,
+    ) -> StderrRedactionContext {
+        let private_paths = normalize_private_paths(private_paths);
+        let mut credential_values = Vec::new();
+        let mut credential_bytes = 0usize;
+        let mut redact_all = false;
+        for value in values {
+            add_credential_value(
+                &value,
+                &mut credential_values,
+                &mut credential_bytes,
+                &mut redact_all,
+            );
+            if redact_all {
+                break;
+            }
+        }
+        StderrRedactionContext {
+            private_paths,
+            credential_values,
+            redact_all,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn stderr_diagnostic_redacts_private_paths_credentials_and_token_shapes() {
-        let context = StderrRedactionContext::new(
+        let context = super::test_support::redaction_context(
             [std::path::PathBuf::from(
                 r"C:\Users\operator\.wardian\workspace",
             )],
@@ -438,6 +438,7 @@ mod tests {
                 false,
                 &context,
             )
+            .as_log_value()
             .as_str(),
             Some(sensitive)
         );
@@ -448,10 +449,11 @@ mod tests {
                 false,
                 &context,
             )
+            .as_log_value()
             .as_str(),
             Some(sensitive)
         );
-        let whitespace_split_credential = StderrRedactionContext::new(
+        let whitespace_split_credential = super::test_support::redaction_context(
             std::iter::empty::<std::path::PathBuf>(),
             [b"violet amber".to_vec()],
         );
@@ -462,6 +464,7 @@ mod tests {
                 false,
                 &whitespace_split_credential,
             )
+            .as_log_value()
             .as_str(),
             Some(sensitive)
         );
@@ -472,6 +475,7 @@ mod tests {
                 false,
                 &context,
             )
+            .as_log_value()
             .as_str(),
             Some(sensitive)
         );
@@ -482,6 +486,7 @@ mod tests {
                 false,
                 &context
             )
+            .as_log_value()
             .as_str(),
             Some("socket initialization failed")
         );
@@ -504,12 +509,13 @@ mod tests {
                 false,
                 &context,
             )
+            .as_log_value()
             .as_str(),
             Some("[provider stderr omitted: potentially sensitive content]")
         );
         assert!(is_credential_env_name(OsStr::new("AWS_ACCESS_KEY_ID")));
 
-        let short_secret = StderrRedactionContext::new(
+        let short_secret = super::test_support::redaction_context(
             std::iter::empty::<std::path::PathBuf>(),
             [b"abc".to_vec()],
         );
@@ -520,6 +526,7 @@ mod tests {
                 false,
                 &short_secret
             )
+            .as_log_value()
             .as_str(),
             Some("[provider stderr omitted: potentially sensitive content]")
         );
@@ -527,36 +534,45 @@ mod tests {
 
     #[test]
     fn stderr_diagnostic_omits_truncated_invalid_and_control_data() {
-        let context = StderrRedactionContext::new(
+        let context = super::test_support::redaction_context(
             std::iter::empty::<std::path::PathBuf>(),
             std::iter::empty::<Vec<u8>>(),
         );
         assert_eq!(
-            SafeStderrDiagnostic::from_bytes(b"useful prefix", true, false, &context).as_str(),
+            SafeStderrDiagnostic::from_bytes(b"useful prefix", true, false, &context)
+                .as_log_value()
+                .as_str(),
             Some("[provider stderr omitted: capture limit reached]")
         );
         assert_eq!(
-            SafeStderrDiagnostic::from_bytes(&[0xff], false, false, &context).as_str(),
+            SafeStderrDiagnostic::from_bytes(&[0xff], false, false, &context)
+                .as_log_value()
+                .as_str(),
             Some("[provider stderr omitted: non-text or control data]")
         );
         assert_eq!(
-            SafeStderrDiagnostic::from_bytes(b"first\x1bsecond", false, false, &context).as_str(),
+            SafeStderrDiagnostic::from_bytes(b"first\x1bsecond", false, false, &context)
+                .as_log_value()
+                .as_str(),
             Some("[provider stderr omitted: non-text or control data]")
         );
         assert_eq!(
-            SafeStderrDiagnostic::from_bytes(b"partial output", false, true, &context).as_str(),
+            SafeStderrDiagnostic::from_bytes(b"partial output", false, true, &context)
+                .as_log_value()
+                .as_str(),
             Some("[provider stderr omitted: capture failed]")
         );
     }
 
     #[test]
     fn stderr_diagnostic_collapses_whitespace_and_caps_safe_text() {
-        let context = StderrRedactionContext::new(
+        let context = super::test_support::redaction_context(
             std::iter::empty::<std::path::PathBuf>(),
             std::iter::empty::<Vec<u8>>(),
         );
         assert_eq!(
             SafeStderrDiagnostic::from_bytes(b"  startup\n\terror  ", false, false, &context)
+                .as_log_value()
                 .as_str(),
             Some("startup error")
         );
@@ -564,9 +580,9 @@ mod tests {
         let diagnostic =
             SafeStderrDiagnostic::from_bytes(long_text.as_bytes(), false, false, &context);
         assert_eq!(
-            diagnostic.as_str().unwrap().chars().count(),
+            diagnostic.as_log_value().as_str().unwrap().chars().count(),
             MAX_STDERR_DIAGNOSTIC_CHARS + 3
         );
-        assert!(diagnostic.as_str().unwrap().ends_with("..."));
+        assert!(diagnostic.as_log_value().as_str().unwrap().ends_with("..."));
     }
 }

@@ -155,6 +155,7 @@ impl Drop for CodexStderrCapture {
 
 #[cfg(test)]
 mod tests {
+    use super::super::diagnostics::test_support::redaction_context;
     use super::*;
     use std::future::Future;
     use std::pin::Pin;
@@ -185,7 +186,7 @@ mod tests {
     }
 
     fn empty_redaction() -> StderrRedactionContext {
-        StderrRedactionContext::new(
+        redaction_context(
             std::iter::empty::<std::path::PathBuf>(),
             std::iter::empty::<Vec<u8>>(),
         )
@@ -202,7 +203,7 @@ mod tests {
         drop(writer);
 
         assert_eq!(
-            capture.finish_startup().await.as_str(),
+            capture.finish_startup().await.as_log_value().as_str(),
             Some("[provider stderr omitted: capture limit reached]")
         );
         assert!(capture.reader.is_none());
@@ -222,7 +223,10 @@ mod tests {
         let mut capture = CodexStderrCapture::start(reader, empty_redaction());
         writer.write_all(b"socket ready\n").await.unwrap();
         read.await.unwrap();
-        assert_eq!(capture.seal_startup().await.as_str(), Some("socket ready"));
+        assert_eq!(
+            capture.seal_startup().await.as_log_value().as_str(),
+            Some("socket ready")
+        );
 
         writer
             .write_all(&vec![b'y'; MAX_CODEX_STDERR_CAPTURE_BYTES + 32 * 1024])
@@ -246,7 +250,7 @@ mod tests {
         drop(writer);
 
         assert_eq!(
-            capture.finish_startup().await.as_str(),
+            capture.finish_startup().await.as_log_value().as_str(),
             Some("startup rejected")
         );
         assert!(capture.reader.is_none());
