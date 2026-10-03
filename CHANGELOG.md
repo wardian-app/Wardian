@@ -4,6 +4,78 @@ All notable changes to Wardian will be documented in this file. The format is ba
 
 Entries from `0.3.0` onward are generated automatically by release-please from Conventional Commits. Entries for `0.1.0` through `0.2.1` were backfilled from git history and are thematic summaries rather than exhaustive commit lists.
 
+## [0.6.2](https://github.com/wardian-app/Wardian/compare/v0.6.1...v0.6.2) (2026-10-03)
+
+
+### Features
+
+* **codex:** add bounded owner startup diagnostics ([#1490](https://github.com/wardian-app/Wardian/issues/1490)) ([740f823](https://github.com/wardian-app/Wardian/commit/740f823202486251c93d52283bb199e1ca42f15d))
+* **memory:** add reviewed operator maintenance plans ([#1416](https://github.com/wardian-app/Wardian/issues/1416)) ([941f5dc](https://github.com/wardian-app/Wardian/commit/941f5dcf35e0c3547bc854a631b4c39355221ea0))
+* **messaging:** add a wake-only mailbox wait ([#1529](https://github.com/wardian-app/Wardian/issues/1529)) ([993c572](https://github.com/wardian-app/Wardian/commit/993c5724074264772a0ee11429e466459df22b49))
+* **messaging:** return Codex task results and wait on mailbox events ([#1519](https://github.com/wardian-app/Wardian/issues/1519)) ([35fd5c0](https://github.com/wardian-app/Wardian/commit/35fd5c0ee4e85e1fe19616194340b8213b4d5298))
+* **remote:** expose sanitized chat capture stages ([#1425](https://github.com/wardian-app/Wardian/issues/1425)) ([7528e94](https://github.com/wardian-app/Wardian/commit/7528e943b9b9f0a3088f26d8d9a2fdff3693bd26))
+* **workbench:** reveal watchlist agents in active surface ([#1389](https://github.com/wardian-app/Wardian/issues/1389)) ([728dab0](https://github.com/wardian-app/Wardian/commit/728dab0c9c8a51c9bb5002fb9de6fdfcd31f17e7))
+
+
+### Bug Fixes
+
+* **agent:** keep New Session ahead of background archive syncs ([#1500](https://github.com/wardian-app/Wardian/issues/1500)) ([781d8d4](https://github.com/wardian-app/Wardian/commit/781d8d4f292e303d70adfdfad46bb76e468fe5db))
+* **agent:** reserve Codex restore before owner start ([#1427](https://github.com/wardian-app/Wardian/issues/1427)) ([e1ef245](https://github.com/wardian-app/Wardian/commit/e1ef245d3d36519e41801327b152864ac256a6c2))
+* **agent:** restore sessions using verified ownership ([#1401](https://github.com/wardian-app/Wardian/issues/1401)) ([86deba2](https://github.com/wardian-app/Wardian/commit/86deba248933d57e3b01d3a1e9d513bf7ebf9e91))
+* **automation:** deliver artifacts through authenticated host messaging ([#1465](https://github.com/wardian-app/Wardian/issues/1465)) ([9c66a99](https://github.com/wardian-app/Wardian/commit/9c66a99dd0b0c92a79aa965a2daa606b71e5282c))
+* **chat:** distinguish repeated Codex user mirrors ([#1434](https://github.com/wardian-app/Wardian/issues/1434)) ([2e02caa](https://github.com/wardian-app/Wardian/commit/2e02caa19f96ed85707d044d4f032f49a76d73f3))
+* **ci:** update async-trait for Rust 1.99 Clippy compatibility ([#1537](https://github.com/wardian-app/Wardian/issues/1537)) ([d7dd9ab](https://github.com/wardian-app/Wardian/commit/d7dd9ab09b5decd66f23b702f88ecb0e3354dfea))
+* **ci:** validate pull requests targeting stacked branches ([#1561](https://github.com/wardian-app/Wardian/issues/1561)) ([b64e241](https://github.com/wardian-app/Wardian/commit/b64e241d30e9e42bd32d9209f90ac8409571b325))
+* **claude:** confirm assigned workspace trust after stable startup ([#1448](https://github.com/wardian-app/Wardian/issues/1448)) ([456d7ff](https://github.com/wardian-app/Wardian/commit/456d7ff65135af493678265673921854adb42257))
+* **claude:** verify contained process exit before releasing holds ([#1546](https://github.com/wardian-app/Wardian/issues/1546)) ([0207b94](https://github.com/wardian-app/Wardian/commit/0207b94b707715dc37d6cd29657de932eabb874b))
+* **cli:** extend live Inbox read deadline ([#1458](https://github.com/wardian-app/Wardian/issues/1458)) ([61aba09](https://github.com/wardian-app/Wardian/commit/61aba0988afe57f6a7aa982c2c782d6f67bc6884))
+* **codex:** accept absent macOS ACL in private home ([#1396](https://github.com/wardian-app/Wardian/issues/1396)) ([b98ec82](https://github.com/wardian-app/Wardian/commit/b98ec8213183355cd9bfc8b3b22f33d8f147e304))
+* **codex:** capture terminal wheel before xterm ([#1400](https://github.com/wardian-app/Wardian/issues/1400)) ([71bc5d8](https://github.com/wardian-app/Wardian/commit/71bc5d8717eecfce26992c19261fb7b387620433))
+* **codex:** preserve fullscreen composer across terminal restores ([#1393](https://github.com/wardian-app/Wardian/issues/1393)) ([c755134](https://github.com/wardian-app/Wardian/commit/c7551344838039f3dff35f958bbc0c8e5214a4d9))
+* **codex:** reconcile stale processing before follow-up delivery ([#1482](https://github.com/wardian-app/Wardian/issues/1482)) ([9f6ec36](https://github.com/wardian-app/Wardian/commit/9f6ec36831c9dbb837aaa7fe9e56e1dd8cd543dc))
+* **codex:** silence managed MCP on Windows ([#1391](https://github.com/wardian-app/Wardian/issues/1391)) ([fc2c87f](https://github.com/wardian-app/Wardian/commit/fc2c87fd72550dd73d849b183ab4ef39b9729038))
+* **delivery:** wake pending tasks after startup ([#1446](https://github.com/wardian-app/Wardian/issues/1446)) ([084a611](https://github.com/wardian-app/Wardian/commit/084a6119afb82dd406b5932921039ba5194f4d87))
+* **garden:** prune scene state for deleted agents against an authoritative roster ([#1550](https://github.com/wardian-app/Wardian/issues/1550)) ([7e31291](https://github.com/wardian-app/Wardian/commit/7e312915a5597d8383f646633f470502f01a9b03))
+* **graph:** align node status with agent views ([#1443](https://github.com/wardian-app/Wardian/issues/1443)) ([6b780b0](https://github.com/wardian-app/Wardian/commit/6b780b0ef760f284ef3707e0d1f20471fa1b7389))
+* **graph:** update status color during camera animation ([#1450](https://github.com/wardian-app/Wardian/issues/1450)) ([38e2e51](https://github.com/wardian-app/Wardian/commit/38e2e51a79436571785a84e56335a285962153f6))
+* **inbox:** capture Claude turn completions ([#1485](https://github.com/wardian-app/Wardian/issues/1485)) ([9082e55](https://github.com/wardian-app/Wardian/commit/9082e5599706994680a28c6a8fe98433179cc5fb))
+* **memory:** balance startup recall across memory kinds ([#1413](https://github.com/wardian-app/Wardian/issues/1413)) ([b529359](https://github.com/wardian-app/Wardian/commit/b5293596cc27359034a9d50731b6706a389db3bc))
+* **memory:** classify active checkpoints in retention guidance ([#1411](https://github.com/wardian-app/Wardian/issues/1411)) ([83bf50e](https://github.com/wardian-app/Wardian/commit/83bf50ee6b7e724aa3a7a12a6d7f23230faa64fd))
+* **memory:** reject duplicate maintenance scope keys ([#1420](https://github.com/wardian-app/Wardian/issues/1420)) ([2449c1d](https://github.com/wardian-app/Wardian/commit/2449c1d7ccdc4658d2165b20f30fd1cccf54dd99))
+* **memory:** show a useful digest in native maintenance confirmation ([#1417](https://github.com/wardian-app/Wardian/issues/1417)) ([9cfe2e2](https://github.com/wardian-app/Wardian/commit/9cfe2e2f07cfc8e129ac84644c24734ff9afe22a))
+* **pi:** resume from saved project directory ([#1429](https://github.com/wardian-app/Wardian/issues/1429)) ([1227ad0](https://github.com/wardian-app/Wardian/commit/1227ad0d631d71509b686b9056661bb2ccd90ffe))
+* preserve restored Codex status across roster publication ([#1468](https://github.com/wardian-app/Wardian/issues/1468)) ([82abf45](https://github.com/wardian-app/Wardian/commit/82abf45d141a4e8d4a51f080cdb8b0564468b8db))
+* prevent agent rename lock-order stall ([#1437](https://github.com/wardian-app/Wardian/issues/1437)) ([78a0c2a](https://github.com/wardian-app/Wardian/commit/78a0c2a6e6bfcb5576090fdab1ed0f2c50750a73))
+* prevent silent New Session archive failure ([#1412](https://github.com/wardian-app/Wardian/issues/1412)) ([f69e503](https://github.com/wardian-app/Wardian/commit/f69e5038ac61813f7c7a745132aa206043c733c7))
+* **release:** serialize updater metadata publishing ([#1380](https://github.com/wardian-app/Wardian/issues/1380)) ([6581efc](https://github.com/wardian-app/Wardian/commit/6581efcf98880c2937989b6f688fbf87f9742e12))
+* **remote:** keep chat HTTP errors in agent detail ([#1422](https://github.com/wardian-app/Wardian/issues/1422)) ([5944976](https://github.com/wardian-app/Wardian/commit/59449761323bbd09d6c8510aceab33522a29103d))
+* **remote:** own gateway listener and join app exit ([#1542](https://github.com/wardian-app/Wardian/issues/1542)) ([c3f431a](https://github.com/wardian-app/Wardian/commit/c3f431a3ae1ae86162ed3554ab525c7aef3560bb))
+* **restore:** validate inherited provider spawn lease ([#1481](https://github.com/wardian-app/Wardian/issues/1481)) ([c68e7fc](https://github.com/wardian-app/Wardian/commit/c68e7fca34abdcce4b624ed443fb8cb6d642f395))
+* **runtime:** claim one desktop owner per Wardian home ([#1544](https://github.com/wardian-app/Wardian/issues/1544)) ([e56e0e9](https://github.com/wardian-app/Wardian/commit/e56e0e9c681e9ee3ceda1a02586e0fe006b07120))
+* **runtime:** recognize resumed Pi and OpenCode editors ([#1520](https://github.com/wardian-app/Wardian/issues/1520)) ([17a5eac](https://github.com/wardian-app/Wardian/commit/17a5eacb5741a22299b4164b57b801fddd619e2f))
+* **security:** update audited dependency pins ([#1522](https://github.com/wardian-app/Wardian/issues/1522)) ([8db0b93](https://github.com/wardian-app/Wardian/commit/8db0b93f76bc6ef7dfa4466b193c939a6c31d775))
+* **startup:** replay Claude completions under restore claims ([#1540](https://github.com/wardian-app/Wardian/issues/1540)) ([fc2fd8a](https://github.com/wardian-app/Wardian/commit/fc2fd8a5170eb6c6b3c7a2584748f1af170f2eff))
+* **startup:** retry restore after lifecycle lease expiry ([1c8db0c](https://github.com/wardian-app/Wardian/commit/1c8db0c8cf599a34675bd1a1c6252316263d07e2))
+* **startup:** retry unresolved OpenCode readiness screen ([8769cc9](https://github.com/wardian-app/Wardian/commit/8769cc9919c95d807f62879bc099cc69414f396b))
+* **telemetry:** keep the metrics tick off lifecycle gates and queue delivery ([#1498](https://github.com/wardian-app/Wardian/issues/1498)) ([a6aacb8](https://github.com/wardian-app/Wardian/commit/a6aacb89fb5a4de8b398aedd134ac6f5df25480d))
+* **telemetry:** log each ingest source failure once instead of every pass ([#1501](https://github.com/wardian-app/Wardian/issues/1501)) ([6a04d80](https://github.com/wardian-app/Wardian/commit/6a04d80eed6dbad9dc427e98e42a61fca8dfc5fc))
+* **telemetry:** reject stale terminal status snapshots ([#1476](https://github.com/wardian-app/Wardian/issues/1476)) ([e7f81e6](https://github.com/wardian-app/Wardian/commit/e7f81e6dae7a4be24d8ac9a7104e4017c2ac8336))
+* **terminal:** dispose suspended presentations after close grace ([#1559](https://github.com/wardian-app/Wardian/issues/1559)) ([da95078](https://github.com/wardian-app/Wardian/commit/da95078deb9e37ee34f75da51e3b6fd151aed885))
+* **terminal:** preserve formatted snapshots across presentation sizes ([#1431](https://github.com/wardian-app/Wardian/issues/1431)) ([ac48dbe](https://github.com/wardian-app/Wardian/commit/ac48dbeebea941f04875467b1cbb88e90c8dbee0))
+* **terminal:** preserve launch colors and recover viewport ownership ([#1548](https://github.com/wardian-app/Wardian/issues/1548)) ([757ced3](https://github.com/wardian-app/Wardian/commit/757ced378440176db60ecb30cb5dacefaa833af5))
+* **terminal:** recover restored frames after fit instability ([#1524](https://github.com/wardian-app/Wardian/issues/1524)) ([3d94f1e](https://github.com/wardian-app/Wardian/commit/3d94f1e25f36e07f59ffe549d9d9e4d3fb93c282))
+* **terminal:** settle a silent provider at the committed geometry ([#1499](https://github.com/wardian-app/Wardian/issues/1499)) ([4ebe939](https://github.com/wardian-app/Wardian/commit/4ebe939d77ffae5d6653b04376953b6946ab3a89))
+
+
+### Performance
+
+* **explorer:** render directory previews before full listings ([#1383](https://github.com/wardian-app/Wardian/issues/1383)) ([7e55340](https://github.com/wardian-app/Wardian/commit/7e5534092b2fb9b4e49dd87005e6478d1e10f114))
+* **inbox:** reuse automation run summary snapshot ([#1486](https://github.com/wardian-app/Wardian/issues/1486)) ([7c4262e](https://github.com/wardian-app/Wardian/commit/7c4262ee2171993395e8df3090404135aa1928db))
+* **memory:** bound startup recall selection ([#1419](https://github.com/wardian-app/Wardian/issues/1419)) ([739c5fe](https://github.com/wardian-app/Wardian/commit/739c5fe04b32ea0fc1dfe736c54dc5db7c4d315c))
+* **telemetry:** attribute the status pass's time to its phases ([#1506](https://github.com/wardian-app/Wardian/issues/1506)) ([d402c71](https://github.com/wardian-app/Wardian/commit/d402c718dcee373114780091a819471f5c0c0e68))
+* **telemetry:** bound how long a status pass waits for the process table ([#1503](https://github.com/wardian-app/Wardian/issues/1503)) ([fe50b25](https://github.com/wardian-app/Wardian/commit/fe50b2567152440e02f7412ad3a01e1c573cba39))
+* **zoom:** speed up Garden and Graph wheel navigation ([#1410](https://github.com/wardian-app/Wardian/issues/1410)) ([1422bc6](https://github.com/wardian-app/Wardian/commit/1422bc6e2b52f44d3eca3720b356b089adf8038b))
+
 ## [0.6.1](https://github.com/wardian-app/Wardian/compare/v0.6.0...v0.6.1) (2026-09-18)
 
 
