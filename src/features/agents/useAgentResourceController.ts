@@ -16,6 +16,7 @@ import {
   resetAgentTelemetryStore,
   useAgentTelemetryStore,
 } from "./useAgentTelemetryStore";
+import { resetAgentRosterStore, useAgentRosterStore } from "./useAgentRosterStore";
 import { normalizeAgentConfig, normalizeAgentConfigs } from "./configUtils";
 
 export type AgentStatusTransitionSource = "metrics" | "status_event";
@@ -189,6 +190,7 @@ export function useAgentResourceController(
   const refresh_pending_ref = useRef(false);
   const pending_spawned_agent_ref = useRef<AgentConfig | undefined>(undefined);
   const roster_refresh_timer_ref = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const roster_restored_ref = useRef(false);
 
   const reportError = useCallback((operation: string, error: unknown) => {
     const handler = options_ref.current.on_error;
@@ -234,13 +236,31 @@ export function useAgentResourceController(
         const requested_spawned_agent = pending_spawned_agent_ref.current;
         pending_spawned_agent_ref.current = undefined;
         const request_id = ++fetch_request_ref.current;
+        useAgentRosterStore.setState((roster) => (
+          roster.status === "loaded" ? roster : { status: "loading" }
+        ));
         try {
+          // Asked before listing, never after: the backend's flag is monotonic,
+          // so only a `true` read first can vouch for the list that follows,
+          // and once seen it never needs asking again. A failed check costs
+          // nothing but authority; the roster still loads.
+          const roster_restored = roster_restored_ref.current
+            || await invoke<boolean>("agent_roster_restored")
+              .then((restored) => restored === true, () => false);
+          roster_restored_ref.current = roster_restored;
           const listed_agents = await invoke<AgentConfig[]>("list_agents");
           if (!mounted_ref.current || request_id !== fetch_request_ref.current) {
             return agents_ref.current;
           }
 
           const normalized = normalizeAgentConfigs(listed_agents);
+          // Published before the roster itself, so anything that reacts to the
+          // new agents already sees whether they are the complete set. While
+          // startup restoration is still publishing agents, a successful list
+          // is only part of the roster and stays `loading`.
+          useAgentRosterStore.setState(roster_restored
+            ? { status: "loaded", session_ids: normalized.map((agent) => agent.session_id) }
+            : { status: "loading" });
           const spawned_agent_id = requested_spawned_agent?.session_id;
           const should_place_new_agent = Boolean(spawned_agent_id);
           const new_agent_position = useSettingsStore.getState().watchlistNewAgentPosition;
@@ -277,6 +297,7 @@ export function useAgentResourceController(
           }
         } catch (error) {
           if (request_id === fetch_request_ref.current) {
+            useAgentRosterStore.setState({ status: "failed" });
             reportError("list_agents", error);
           }
           latest_agents = agents_ref.current;
@@ -335,6 +356,7 @@ export function useAgentResourceController(
   useEffect(() => {
     mounted_ref.current = true;
     resetAgentTelemetryStore();
+    resetAgentRosterStore();
     void refreshAgents();
 
     const subscriptions = [

@@ -438,6 +438,8 @@ export async function installWorkbenchIpcMock(
 
           if (command === "get_workbench_boot_config") return { safe_mode: safeMode };
           if (command === "load_workbench_state") return clone(runtime.load_result);
+          // The mock roster is complete from the start, as after startup restoration.
+          if (command === "agent_roster_restored") return true;
           if (command === "list_agents") return clone(runtime.agents);
 
           if (command === "get_explorer_root") return explorerRoot;

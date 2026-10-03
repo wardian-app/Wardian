@@ -512,7 +512,11 @@ function rankBy(units: readonly UnitBox[], axis: "x" | "y"): Map<string, number>
   return new Map(ordered.map((unit, position) => [unit.key, position]));
 }
 
-/** True when two footprints overlap, padding included. */
+/**
+ * True when two footprints overlap, padding included.
+ *
+ * @internal Test support, no production caller: layout tests check the no-overlap invariant with it.
+ */
 export function overlaps(a: UnitBox, b: UnitBox, padding = DEFAULT_UNIT_PADDING): boolean {
   return (
     Math.abs(a.position.x - b.position.x) <

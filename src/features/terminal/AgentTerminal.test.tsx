@@ -2290,7 +2290,13 @@ describe("AgentTerminal scrollback", () => {
     assertFocusIsPassiveBeforeExplicitActivation,
   );
 
-  it("keeps an Agents terminal hidden until its unowned session is activated and fitted", async () => {
+  it.each([false, true])("activates an unowned Agents terminal after registration (deferred=%s)", async (deferredRegistration) => {
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    let registrations = 0;
+    mockListen.mockImplementation(async (name, handler) => {
+      listeners.set(name, handler as (event: { payload: unknown }) => void);
+      return () => listeners.delete(name);
+    });
     const activationAck = deferred<{
       decision: {
         status: "accepted";
@@ -2306,6 +2312,8 @@ describe("AgentTerminal scrollback", () => {
       const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
       const presentationId = request?.presentation_id ?? "agents-pane";
       if (command === "register_terminal_presentation") {
+        registrations += 1;
+        if (deferredRegistration && registrations === 1) throw new Error("SessionNotFound");
         return modernRegistrationResult(presentationId);
       }
       if (command === "subscribe_terminal_events") {
@@ -2348,6 +2356,15 @@ describe("AgentTerminal scrollback", () => {
       />,
     );
 
+    if (deferredRegistration) {
+      await waitFor(() => expect(registrations).toBe(1));
+      await act(async () => {
+        listeners.get("terminal-session-lifecycle")?.({ payload: {
+          session_id: "modern-agent", runtime_generation: 1, lifecycle: "runtime_replaced",
+        } });
+      });
+    }
+
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
       "ack_terminal_activation",
       expect.anything(),
@@ -2369,8 +2386,12 @@ describe("AgentTerminal scrollback", () => {
     await waitFor(() => {
       expect(screen.getByTestId("agent-terminal-host")).toHaveStyle({ visibility: "visible" });
     });
-    const latestFitAddon = mockFitAddon.mock.results[mockFitAddon.mock.results.length - 1]?.value;
-    expect(latestFitAddon.proposeDimensions).toHaveBeenCalled();
+    if (deferredRegistration) {
+      expect(mockInvoke).toHaveBeenCalledWith("report_terminal_presentation_viewport", expect.anything());
+    } else {
+      const fitAddon = mockFitAddon.mock.results[mockFitAddon.mock.results.length - 1]?.value;
+      expect(fitAddon.proposeDimensions).toHaveBeenCalled();
+    }
   });
 
   it("keeps an unowned presentation on its snapshot grid with canonical fit", async () => {
@@ -3731,14 +3752,20 @@ describe("AgentTerminal scrollback", () => {
 
   it("disposes the presentation entry once it stays unmounted past the grace window", async () => {
     const firstRender = render(
-      <AgentTerminal sessionId="codex-grace" provider="codex" theme="dark" />,
+      <AgentTerminal
+        sessionId="codex-grace"
+        presentationId="pane-codex-grace"
+        provider="codex"
+        theme="dark"
+      />,
     );
 
     await waitFor(() => {
-      expect(window.__wardianTerminalDebug?.snapshot("codex-grace")?.renderer).toBeTruthy();
+      expect(window.__wardianTerminalDebug?.snapshot("pane-codex-grace")?.renderer).toBeTruthy();
     });
 
     const instance = getLatestTerminalInstance();
+    const parser = getLatestHeadlessTerminalInstance();
 
     // Switch to fake timers only for the unmount + grace-window advance, so the
     // async mount above stays on real timers (avoids RTL/fake-timer deadlocks).
@@ -3746,15 +3773,178 @@ describe("AgentTerminal scrollback", () => {
     try {
       firstRender.unmount();
       expect(instance.dispose).not.toHaveBeenCalled();
-      expect(window.__wardianTerminalDebug?.snapshot("codex-grace")?.renderer).toBeTruthy();
+      expect(window.__wardianTerminalDebug?.snapshot("pane-codex-grace")?.renderer).toBeTruthy();
 
       vi.advanceTimersByTime(30_000);
 
       expect(instance.dispose).toHaveBeenCalled();
-      expect(window.__wardianTerminalDebug?.snapshot("codex-grace")).toBeNull();
+      expect(parser.dispose).toHaveBeenCalledTimes(1);
+      expect(window.__wardianTerminalDebug?.snapshot("pane-codex-grace")).toBeNull();
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("disposes a closed suspended presentation after grace without affecting its active sibling", async () => {
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      const presentationId = request?.presentation_id ?? "pane-suspended-close";
+      if (command === "register_terminal_presentation") {
+        return modernRegistrationResult(presentationId);
+      }
+      if (command === "subscribe_terminal_events") {
+        return { broker_state: modernBrokerState(), initial_snapshot: modernSnapshot() };
+      }
+      if (command === "update_terminal_presentation") {
+        return modernRegistrationResult(presentationId);
+      }
+      if (command === "request_terminal_snapshot") return modernSnapshot();
+      if (command === "report_terminal_presentation_viewport") {
+        return modernRegistrationResult(presentationId).presentation;
+      }
+      if (command === "unregister_terminal_presentation") return modernBrokerState();
+      if (command === "unsubscribe_terminal_events") return undefined;
+      return null;
+    });
+
+    const renderPresentations = (
+      includeSibling: boolean,
+      lifecycle: "mounted" | "suspended" = "mounted",
+      includeClosingPresentation = true,
+    ) => (
+      <div>
+        {includeClosingPresentation && (
+          <AgentTerminal
+            key="pane-suspended-close"
+            sessionId="modern-agent"
+            presentationId="pane-suspended-close"
+            visibility={lifecycle === "mounted" ? "visible" : "hidden"}
+            renderState={lifecycle}
+            provider="codex"
+            theme="dark"
+          />
+        )}
+        {includeSibling && (
+          <AgentTerminal
+            key="pane-active-sibling"
+            sessionId="modern-agent"
+            presentationId="pane-active-sibling"
+            provider="codex"
+            theme="dark"
+          />
+        )}
+      </div>
+    );
+
+    const view = render(renderPresentations(false));
+    await waitFor(() => expect(mockTerminal).toHaveBeenCalledTimes(1));
+    const suspendedRenderer = getLatestTerminalInstance();
+    const suspendedParser = getLatestHeadlessTerminalInstance();
+
+    view.rerender(renderPresentations(true));
+    await waitFor(() => expect(mockTerminal).toHaveBeenCalledTimes(2));
+    const siblingRenderer = getLatestTerminalInstance();
+    const siblingParser = getLatestHeadlessTerminalInstance();
+    await waitFor(() => {
+      expect(window.__wardianTerminalDebug?.snapshot("pane-suspended-close")?.renderer).toBeTruthy();
+      expect(window.__wardianTerminalDebug?.snapshot("pane-active-sibling")?.renderer).toBeTruthy();
+    });
+    expect(window.__wardianTerminalDebug?.snapshot("modern-agent")).toBeNull();
+    expect(mockInvoke.mock.calls.filter(([command]) => command === "subscribe_terminal_events")).toHaveLength(1);
+
+    view.rerender(renderPresentations(true, "suspended"));
+    await waitFor(() => {
+      expect(suspendedRenderer.dispose).toHaveBeenCalledTimes(1);
+      expect(window.__wardianTerminalDebug?.snapshot("pane-suspended-close")?.renderer).toBeNull();
+    });
+    expect(suspendedParser.dispose).not.toHaveBeenCalled();
+
+    vi.useFakeTimers();
+    try {
+      view.rerender(renderPresentations(true, "mounted", false));
+      act(() => vi.advanceTimersByTime(15_000));
+      expect(suspendedParser.dispose).not.toHaveBeenCalled();
+      expect(window.__wardianTerminalDebug?.snapshot("pane-suspended-close")).not.toBeNull();
+
+      // Reattach the same presentation while still suspended. This must cancel
+      // the first close's grace timer even though no renderer is remounted.
+      view.rerender(renderPresentations(true, "suspended"));
+      act(() => vi.advanceTimersByTime(30_000));
+      expect(suspendedParser.dispose).not.toHaveBeenCalled();
+      expect(window.__wardianTerminalDebug?.snapshot("pane-suspended-close")).not.toBeNull();
+
+      // A second close while still suspended must arm a fresh grace timer.
+      view.rerender(renderPresentations(true, "mounted", false));
+      act(() => vi.advanceTimersByTime(29_999));
+      expect(suspendedParser.dispose).not.toHaveBeenCalled();
+
+      act(() => vi.advanceTimersByTime(1));
+      expect(suspendedParser.dispose).toHaveBeenCalledTimes(1);
+      expect(window.__wardianTerminalDebug?.snapshot("pane-suspended-close")).toBeNull();
+      expect(window.__wardianTerminalDebug?.presentationIds()).not.toContain("pane-suspended-close");
+
+      expect(siblingParser.dispose).not.toHaveBeenCalled();
+      expect(siblingRenderer.dispose).not.toHaveBeenCalled();
+      expect(window.__wardianTerminalDebug?.snapshot("pane-active-sibling")?.renderer).toBeTruthy();
+      expect(window.__wardianTerminalDebug?.presentationIds()).toContain("pane-active-sibling");
+      expect(mockInvoke.mock.calls.filter(([command]) => command === "subscribe_terminal_events")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels suspended-close disposal when the same presentation remounts within grace", async () => {
+    const props = {
+      sessionId: "quick-remount-agent",
+      presentationId: "pane-quick-remount",
+      provider: "codex",
+      theme: "dark" as const,
+    };
+    const view = render(<AgentTerminal {...props} />);
+
+    await waitFor(() => {
+      expect(window.__wardianTerminalDebug?.snapshot(props.presentationId)?.renderer).toBeTruthy();
+    });
+    const parser = getLatestHeadlessTerminalInstance();
+    const renderer = getLatestTerminalInstance();
+
+    view.rerender(
+      <AgentTerminal
+        {...props}
+        visibility="hidden"
+        renderState="suspended"
+      />,
+    );
+    await waitFor(() => expect(renderer.dispose).toHaveBeenCalledTimes(1));
+    expect(parser.dispose).not.toHaveBeenCalled();
+
+    vi.useFakeTimers();
+    let remounted: ReturnType<typeof render> | undefined;
+    try {
+      view.unmount();
+      act(() => vi.advanceTimersByTime(15_000));
+      remounted = render(
+        <AgentTerminal
+          {...props}
+          visibility="hidden"
+          renderState="suspended"
+        />,
+      );
+      act(() => vi.advanceTimersByTime(30_000));
+      expect(parser.dispose).not.toHaveBeenCalled();
+      expect(window.__wardianTerminalDebug?.snapshot(props.presentationId)).not.toBeNull();
+      expect(window.__wardianTerminalDebug?.presentationIds()).toContain(props.presentationId);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    remounted?.rerender(<AgentTerminal {...props} />);
+    await waitFor(() => {
+      expect(mockTerminal).toHaveBeenCalledTimes(2);
+      expect(window.__wardianTerminalDebug?.snapshot(props.presentationId)?.renderer).toBeTruthy();
+    });
+    expect(getLatestHeadlessTerminalInstance()).toBe(parser);
+    expect(parser.dispose).not.toHaveBeenCalled();
   });
 
   it("force-loses the WebGL context when a renderer is disposed", async () => {

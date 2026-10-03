@@ -699,6 +699,24 @@ describe('AgentsOverviewView maximize behavior', () => {
     expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
   });
 
+  it('keeps a persisted Single focus while the roster has not loaded', () => {
+    // The roster starts empty and arrives later. An empty layout has nothing
+    // to focus; persisting that would replace the saved focus with the first
+    // agent once the roster lands.
+    const onFocusedAgentChange = vi.fn();
+    const { rerender } = render(<AgentsOverviewView
+      {...gridProps('agent-2', [])}
+      onFocusedAgentChange={onFocusedAgentChange}
+    />);
+    expect(onFocusedAgentChange).not.toHaveBeenCalled();
+
+    rerender(<AgentsOverviewView
+      {...gridProps('agent-2', agents)}
+      onFocusedAgentChange={onFocusedAgentChange}
+    />);
+    expect(onFocusedAgentChange).not.toHaveBeenCalled();
+  });
+
   it('renders terminal cards when Agent card display is terminal', () => {
     useSettingsStore.getState().setGridCardDisplayMode('terminal');
 

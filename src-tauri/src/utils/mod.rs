@@ -5,6 +5,7 @@ pub(crate) mod codex_messaging;
 pub(crate) mod codex_thread_state;
 pub mod delivery_profile;
 pub mod delivery_transaction;
+pub(crate) mod desktop_owner;
 pub mod fs;
 pub mod logging;
 pub mod migration;

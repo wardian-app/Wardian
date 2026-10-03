@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { AgentConfig, AgentTelemetry, AgentClassDefinition, AgentOutputPayload, AgentJsonEvent } from "./index";
+import type { AgentConfig, AgentTelemetry, AgentClassDefinition, AgentJsonEvent } from "./index";
 
 describe("TypeScript Interface Shape Tests", () => {
   describe("AgentConfig", () => {
@@ -88,26 +88,6 @@ describe("TypeScript Interface Shape Tests", () => {
       };
       expect(cls.is_default).toBe(false);
       expect(cls.name).toBe("DevOps");
-    });
-  });
-
-  describe("AgentOutputPayload", () => {
-    it("accepts stdout output", () => {
-      const payload: AgentOutputPayload = {
-        session_id: "abc-123",
-        text: "Hello world\n",
-        stream: "stdout",
-      };
-      expect(payload.stream).toBe("stdout");
-    });
-
-    it("accepts stderr output", () => {
-      const payload: AgentOutputPayload = {
-        session_id: "abc-123",
-        text: "Error occurred",
-        stream: "stderr",
-      };
-      expect(payload.stream).toBe("stderr");
     });
   });
 

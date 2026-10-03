@@ -2316,16 +2316,23 @@ async fn retired_records_survive_restore_and_idle_without_pty_or_v2_replay() {
         })
         .unwrap();
     }
-    original
-        .interactions
-        .create_task(
-            None,
-            "receiver".into(),
-            InteractionBodyRef::Inline {
-                body: "old automation".into(),
-            },
-        )
-        .await;
+    // Pre-v2 automation task row, as an older release left it on disk.
+    wardian_core::db::upsert_interaction_record(&wardian_core::control::InteractionRecord {
+        id: "legacy-automation-task".into(),
+        kind: wardian_core::control::InteractionKind::Task,
+        sender_session_id: None,
+        target_session_ids: vec!["receiver".into()],
+        status: wardian_core::control::InteractionStatus::AwaitingReply,
+        trigger_policy: wardian_core::control::InteractionTriggerPolicy::ReplyRequired,
+        body_ref: InteractionBodyRef::Inline {
+            body: "old automation".into(),
+        },
+        parent_interaction_id: None,
+        created_at: "2020-01-01T00:00:00Z".into(),
+        updated_at: "2020-01-01T00:00:00Z".into(),
+        completed_at: None,
+    })
+    .unwrap();
     let rows = wardian_core::db::list_mailbox_messages().unwrap();
     let interactions = wardian_core::db::list_interaction_records().unwrap();
     for _ in 0..2 {

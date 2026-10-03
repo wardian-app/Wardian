@@ -233,6 +233,7 @@ export function AgentSessionSurface({
           visibility={visibility}
           renderState={render_state}
           requestedInteraction={requested_interaction}
+          autoActivateWhenUnowned
           provider={resolvedAgent.provider}
           isMaximized={is_maximized}
           theme={theme}

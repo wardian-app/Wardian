@@ -27,6 +27,37 @@ and examples. Documentation tests run separately because `--all-targets` does
 not include them. The command-contract tests in `src/verify-ci.test.ts` pin
 this coverage and exercise invalid arguments and workflow declarations.
 
+## Dead-code gates
+
+Two [knip](https://knip.dev) passes over `src/` run in the frontend job:
+
+- `npm run check:deadcode` treats tests, E2E specs, and scripts as entry
+  points. It catches files and exports that nothing reaches, including unused
+  test helpers.
+- `npm run check:deadcode:production` runs `knip --production`, which drops
+  every test entry. Only `src/main.tsx`, reached through `index.html`, remains.
+  It catches production code that only its own tests import.
+
+When the production pass reports an export, delete it and the tests that only
+exercise it. If it is deliberate test support, such as a test seam, a fixture
+builder, or an invariant checker, keep it and add an `@internal` JSDoc tag with
+the reason:
+
+```ts
+/** @internal Test support, no production caller: resets module state between tests. */
+export function resetForTesting() {}
+```
+
+knip ignores `@internal` exports only in production mode. The default pass
+still reports one that tests stop using.
+
+A file that only tests import is excluded from the production project in
+`knip.json` with a `"!<path>!"` pattern. The trailing `!` limits the exclusion
+to production mode. `src/test/**` is excluded as a directory. Every other
+exclusion names one file. `src/config/vite*.ts` is excluded because only
+`vite.config.ts` imports it, and knip does not trace plugin config files in
+production mode.
+
 For provider fixtures, shared environment locks, and deliberate contention,
 use [Test Reliability](./test-reliability.md). That guide maps each pattern to
 its executable check and states the limits of the evidence.
@@ -45,3 +76,11 @@ A local pass does not complete PR delivery. Follow [Pull Request
 Delivery](./pull-requests.md) to monitor hosted checks on the latest published
 commit, resolve failures, and verify that all applicable checks have finished
 successfully before declaring the task complete.
+
+CI validates pull requests against any base branch, including stacked PRs.
+The `Wardian Docs` workflow also accepts any PR base when its existing docs,
+package metadata, or workflow path filters match. Pull requests build docs;
+Pages configuration, artifact upload, and deployment remain disabled for PRs.
+Both workflows retain `main`-only push triggers, and the docs workflow retains
+its manual `workflow_dispatch` trigger. Routing and Pages guards are pinned in
+`src/config/ciWorkflow.test.ts`.
