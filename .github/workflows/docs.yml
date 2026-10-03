@@ -9,7 +9,6 @@ on:
       - "package-lock.json"
       - ".github/workflows/docs.yml"
   pull_request:
-    branches: [main]
     paths:
       - "docs/**"
       - "package.json"

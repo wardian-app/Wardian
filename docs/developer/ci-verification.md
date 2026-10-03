@@ -76,3 +76,11 @@ A local pass does not complete PR delivery. Follow [Pull Request
 Delivery](./pull-requests.md) to monitor hosted checks on the latest published
 commit, resolve failures, and verify that all applicable checks have finished
 successfully before declaring the task complete.
+
+CI validates pull requests against any base branch, including stacked PRs.
+The `Wardian Docs` workflow also accepts any PR base when its existing docs,
+package metadata, or workflow path filters match. Pull requests build docs;
+Pages configuration, artifact upload, and deployment remain disabled for PRs.
+Both workflows retain `main`-only push triggers, and the docs workflow retains
+its manual `workflow_dispatch` trigger. Routing and Pages guards are pinned in
+`src/config/ciWorkflow.test.ts`.
