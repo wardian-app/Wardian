@@ -611,6 +611,18 @@ async fn archive_agent_chat_events_for_state_with_stage(
             })?;
             let _consumed_provider_log_bytes = batch.consumed_bytes;
             decorate_forward_provider_log_events(&mut batch.events, &snapshot.provider, path);
+            if logging_enabled {
+                attach_archive_bound_provider_log_retry_aliases(
+                    &state.conversation_archive,
+                    &context,
+                    &mut batch.events,
+                    path,
+                )
+                .map_err(|error| AgentChatTranscriptFailure {
+                    stage: ChatTranscriptFailureStage::ArchiveWrite,
+                    message: format!("conversation archive retry identity read failed: {error}"),
+                })?;
+            }
             // OpenCode's watcher can label a fallback message `opencode_db`,
             // but it does not carry the database session/path binding. Keep
             // the canonical DB projection in this incremental provider batch
@@ -864,6 +876,20 @@ fn decorate_forward_provider_log_events(
         }
     }
     attach_incremental_legacy_aliases(events, provider, path);
+}
+
+fn attach_archive_bound_provider_log_retry_aliases(
+    archive: &crate::state::conversation_archive::ConversationArchiveState,
+    context: &ConversationArchiveContext,
+    events: &mut [AgentChatEvent],
+    path: &Path,
+) -> std::io::Result<()> {
+    if !archive_identity::has_unaliased_archive_bound_legacy_row_candidate(events, path) {
+        return Ok(());
+    }
+    let archived_events = archive.chat_events_for_capture(context)?;
+    archive_identity::attach_archive_bound_legacy_row_aliases(events, path, &archived_events);
+    Ok(())
 }
 
 fn attach_incremental_legacy_aliases(events: &mut [AgentChatEvent], provider: &str, path: &Path) {
@@ -3035,6 +3061,206 @@ Do you want to proceed?
             records[0].event_refs.len(),
             "replayed aliases must not duplicate durable references"
         );
+    }
+
+    #[tokio::test]
+    async fn oversized_identityless_retry_uses_archived_source_sequence() {
+        use std::io::Write as _;
+
+        let env_lock = crate::utils::wardian_test_env_lock_async().await;
+        let temp = tempfile::tempdir().expect("isolated Wardian home");
+        let _home = WardianHomeGuard::set(&env_lock, temp.path());
+        let log_path = temp.path().join("codex.jsonl");
+        let filler = format!(r#"{{"type":"ignored","padding":"{}"}}"#, "x".repeat(4096));
+        {
+            let mut file = std::fs::File::create(&log_path).expect("create oversized source");
+            for _ in 0..600 {
+                writeln!(file, "{filler}").expect("write ignored source prefix");
+            }
+        }
+        assert!(
+            std::fs::metadata(&log_path).unwrap().len() > PROVIDER_LOG_TAIL_BYTES,
+            "the fixture must exceed the complete-snapshot limit"
+        );
+
+        let source_key = "codex:session:oversized-offset-upgrade";
+        let context = ConversationArchiveContext {
+            agent_id: "agent-1".to_string(),
+            agent_name: "Synthetic Codex".to_string(),
+            agent_class: "Coder".to_string(),
+            workspace: "<absolute-workspace-path>".to_string(),
+            provider: "codex".to_string(),
+            provider_session_ids: vec!["provider-session-1".to_string()],
+            provider_source_key: Some(source_key.to_string()),
+        };
+        let archive = crate::state::conversation_archive::ConversationArchiveState::default();
+        let initial = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1", "codex", &log_path, source_key, None, false,
+        )
+        .expect("start at the already-existing oversized source prefix");
+        assert!(initial.events.is_empty());
+        archive
+            .append_provider_log_batch_with_context(context.clone(), &[], None, &initial.next)
+            .expect("persist the cursor before the duplicate rows");
+
+        let raw_line = r#"{"type":"response_item","turn_id":"turn-1","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Repeated durable response"}]}}"#;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .and_then(|mut file| writeln!(file, "{raw_line}\n{raw_line}"))
+            .expect("append two identical provider rows");
+
+        let mut retry = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &log_path,
+            source_key,
+            Some(initial.next.clone()),
+            true,
+        )
+        .expect("acquire both rows from the persisted cursor");
+        assert_eq!(retry.events.len(), 2);
+        decorate_forward_provider_log_events(&mut retry.events, "codex", &log_path);
+        let first_legacy_id = legacy_provider_log_event_id(&retry.events[0], &log_path);
+        assert_eq!(
+            first_legacy_id,
+            legacy_provider_log_event_id(&retry.events[1], &log_path),
+            "the duplicate rows share the pre-offset field hash"
+        );
+        assert_ne!(retry.events[0].id, retry.events[1].id);
+        assert!(retry.events.iter().all(|event| {
+            event.metadata["legacy_event_ids"]
+                .as_array()
+                .is_none_or(Vec::is_empty)
+        }));
+
+        let mut legacy_event = retry.events[0].clone();
+        legacy_event.id = first_legacy_id.clone();
+        let metadata = legacy_event
+            .metadata
+            .as_object_mut()
+            .expect("provider metadata object");
+        metadata.remove(PROVIDER_LOG_ROW_OFFSET_METADATA_KEY);
+        metadata.remove("legacy_event_ids");
+        archive
+            .append_chat_events_with_context(context.clone(), &[legacy_event.clone()])
+            .expect("publish one pre-offset row while its cursor remains behind");
+        assert_eq!(
+            archive
+                .provider_log_capture_state("agent-1", source_key)
+                .expect("read cursor before retry")
+                .expect("persisted cursor")
+                .committed_offset,
+            initial.next.committed_offset
+        );
+
+        attach_archive_bound_provider_log_retry_aliases(
+            &archive,
+            &context,
+            &mut retry.events,
+            &log_path,
+        )
+        .expect("read archive-bound retry identities");
+        assert_eq!(
+            retry.events[0].metadata["legacy_event_ids"][0],
+            first_legacy_id
+        );
+        assert!(retry.events[1].metadata["legacy_event_ids"]
+            .as_array()
+            .is_none_or(Vec::is_empty));
+        assert_eq!(retry.events[0].sequence, legacy_event.sequence);
+        assert_eq!(retry.events[0].source, legacy_event.source);
+        assert_eq!(retry.events[0].turn_id, legacy_event.turn_id);
+        assert_eq!(retry.events[0].role, legacy_event.role);
+        assert_eq!(retry.events[0].text, legacy_event.text);
+        assert_eq!(
+            retry.events[0].metadata["raw_type"],
+            legacy_event.metadata["raw_type"]
+        );
+
+        // Publish the identity upgrade first, then retry the still-uncommitted
+        // batch just as capture does after a cursor-write failure.
+        archive
+            .append_chat_events_with_context(context.clone(), &retry.events)
+            .expect("publish upgraded rows before cursor commit");
+        let mut replay = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &log_path,
+            source_key,
+            Some(initial.next.clone()),
+            true,
+        )
+        .expect("replay both rows after archive publication");
+        decorate_forward_provider_log_events(&mut replay.events, "codex", &log_path);
+        attach_archive_bound_provider_log_retry_aliases(
+            &archive,
+            &context,
+            &mut replay.events,
+            &log_path,
+        )
+        .expect("reconcile retry against the upgraded archive");
+        archive
+            .append_provider_log_batch_with_context(
+                context.clone(),
+                &replay.events,
+                replay.previous.as_ref(),
+                &replay.next,
+            )
+            .expect("commit the source cursor after idempotent archive replay");
+        assert_eq!(
+            archive
+                .provider_log_capture_state("agent-1", source_key)
+                .expect("read cursor after retry")
+                .as_ref(),
+            Some(&replay.next)
+        );
+
+        let archived = archive
+            .chat_events_for_capture(&context)
+            .expect("read canonical archived rows");
+        assert_eq!(archived.len(), 2, "both repeated source rows stay distinct");
+        let archived_first = archived
+            .iter()
+            .find(|event| event.sequence == retry.events[0].sequence)
+            .expect("first source row");
+        let archived_second = archived
+            .iter()
+            .find(|event| event.sequence == retry.events[1].sequence)
+            .expect("second source row");
+        assert_ne!(archived_first.id, archived_second.id);
+        assert!(
+            archived_first.id == first_legacy_id
+                || archived_first.metadata["legacy_event_ids"]
+                    .as_array()
+                    .is_some_and(|aliases| aliases.iter().any(|alias| alias == &first_legacy_id))
+        );
+        assert!(archived_second.metadata["legacy_event_ids"]
+            .as_array()
+            .is_none_or(Vec::is_empty));
+
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active synthetic conversation");
+        let conversation_dir =
+            wardian_core::paths::agent_conversation_dir("agent-1", &conversation_id)
+                .expect("synthetic conversation directory");
+        let records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
+            wardian_core::conversations::read_jsonl_records(
+                &conversation_dir.join("conversation.jsonl"),
+            )
+            .expect("read durable narrative records");
+        assert_eq!(records.len(), 2, "both repeated rows retain a narrative");
+        assert!(records
+            .iter()
+            .any(|record| record.event_refs.contains(&first_legacy_id)));
+        for record in records {
+            assert_eq!(
+                record.event_refs.iter().collect::<HashSet<_>>().len(),
+                record.event_refs.len(),
+                "retry aliases must not duplicate durable references"
+            );
+        }
     }
 
     #[tokio::test]

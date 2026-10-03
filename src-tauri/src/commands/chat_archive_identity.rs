@@ -147,6 +147,135 @@ pub(crate) fn attach_unique_legacy_row_aliases(
     }
 }
 
+/// Bridge a legacy field ID only when the open archive and this retry agree on
+/// one source row sequence. This covers bounded tails that cannot prove
+/// uniqueness from a complete provider-log snapshot.
+pub(crate) fn has_unaliased_archive_bound_legacy_row_candidate(
+    events: &[AgentChatEvent],
+    path: &Path,
+) -> bool {
+    let log_path = path.to_string_lossy();
+    events.iter().any(|event| {
+        event.metadata["provider_log"] == true
+            && event.metadata["log_path"].as_str() == Some(log_path.as_ref())
+            && !event.provider.eq_ignore_ascii_case("claude")
+            && event
+                .metadata
+                .get(PROVIDER_LOG_ROW_OFFSET_METADATA_KEY)
+                .and_then(Value::as_u64)
+                .is_some()
+            && event.sequence.is_some()
+            && requires_provider_log_row_identity(event)
+            && !has_legacy_alias(event, &legacy_provider_log_event_id(event, path))
+    })
+}
+
+/// Attach aliases from pre-offset archive rows only when both the archived
+/// source sequence and the current batch identify exactly one observation.
+/// Repeated equal provider rows therefore remain distinct.
+pub(crate) fn attach_archive_bound_legacy_row_aliases(
+    events: &mut [AgentChatEvent],
+    path: &Path,
+    archived_events: &[AgentChatEvent],
+) {
+    let log_path = path.to_string_lossy();
+    let eligible = |event: &AgentChatEvent, require_offset: bool| {
+        event.metadata["provider_log"] == true
+            && event.metadata["log_path"].as_str() == Some(log_path.as_ref())
+            && !event.provider.eq_ignore_ascii_case("claude")
+            && event
+                .metadata
+                .get(PROVIDER_LOG_ROW_OFFSET_METADATA_KEY)
+                .and_then(Value::as_u64)
+                .is_some()
+                == require_offset
+            && event.sequence.is_some()
+            && requires_provider_log_row_identity(event)
+    };
+    let row_key = |event: &AgentChatEvent| {
+        Some((
+            event.session_id.clone(),
+            event.provider.clone(),
+            legacy_provider_log_event_id(event, path),
+            event.sequence?,
+        ))
+    };
+
+    let mut current_counts = HashMap::<(String, String, String, u64), usize>::new();
+    for event in events.iter().filter(|event| eligible(event, true)) {
+        if let Some(key) = row_key(event) {
+            *current_counts.entry(key).or_default() += 1;
+        }
+    }
+
+    let mut archived_counts = HashMap::<(String, String, String, u64), usize>::new();
+    for event in archived_events
+        .iter()
+        .filter(|event| eligible(event, false))
+    {
+        let Some(key) = row_key(event) else {
+            continue;
+        };
+        if has_legacy_alias(event, &key.2) {
+            *archived_counts.entry(key).or_default() += 1;
+        }
+    }
+
+    let mut upgraded_archive_counts =
+        HashMap::<((String, String, String, u64), String), usize>::new();
+    for event in archived_events.iter().filter(|event| eligible(event, true)) {
+        let Some(key) = row_key(event) else {
+            continue;
+        };
+        if has_legacy_alias(event, &key.2) {
+            *upgraded_archive_counts
+                .entry((key, event.id.clone()))
+                .or_default() += 1;
+        }
+    }
+
+    for event in events.iter_mut().filter(|event| eligible(event, true)) {
+        let Some(key) = row_key(event) else {
+            continue;
+        };
+        let archived_pre_offset_count = archived_counts.get(&key).copied().unwrap_or_default();
+        let archived_upgraded_count = upgraded_archive_counts
+            .get(&(key.clone(), event.id.clone()))
+            .copied()
+            .unwrap_or_default();
+        if current_counts.get(&key) != Some(&1)
+            || archived_pre_offset_count + archived_upgraded_count != 1
+            || key.2 == event.id
+            || has_legacy_alias(event, &key.2)
+        {
+            continue;
+        }
+        if let Some(aliases) = event
+            .metadata
+            .as_object_mut()
+            .map(|metadata| {
+                metadata
+                    .entry("legacy_event_ids")
+                    .or_insert_with(|| serde_json::json!([]))
+            })
+            .and_then(Value::as_array_mut)
+        {
+            aliases.push(serde_json::json!(key.2));
+        }
+    }
+}
+
+fn has_legacy_alias(event: &AgentChatEvent, legacy_id: &str) -> bool {
+    event.id == legacy_id
+        || event.metadata["legacy_event_ids"]
+            .as_array()
+            .is_some_and(|aliases| {
+                aliases
+                    .iter()
+                    .any(|alias| alias.as_str() == Some(legacy_id))
+            })
+}
+
 pub(crate) fn stable_provider_log_event_id(event: &AgentChatEvent, path: &Path) -> String {
     with_provider_log_row_identity(event, stable_provider_log_event_id_inner(event, path))
 }
