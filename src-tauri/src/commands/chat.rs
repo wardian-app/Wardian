@@ -9,8 +9,9 @@ use crate::manager::{
 };
 use crate::providers::antigravity::AntigravityProvider;
 use crate::providers::chat_transcript::{
-    legacy_visible_chat_text_for_provider, normalize_chat_lines, visible_chat_text,
-    visible_chat_text_for_provider, PROVIDER_RAW_LINE_METADATA_KEY,
+    codex_user_mirror_pair, legacy_visible_chat_text_for_provider, normalize_chat_lines,
+    visible_chat_text, visible_chat_text_for_provider, PROVIDER_LOG_ROW_OFFSET_METADATA_KEY,
+    PROVIDER_RAW_LINE_METADATA_KEY,
 };
 use crate::providers::pi::PiProvider;
 use crate::state::conversation_archive::{
@@ -28,7 +29,11 @@ use wardian_core::models::chat::{
 
 #[path = "chat_archive_identity.rs"]
 pub(crate) mod archive_identity;
-use archive_identity::stable_provider_log_event_id;
+use archive_identity::{
+    attach_provider_log_row_offsets, can_alias_legacy_provider_log_event_id,
+    legacy_provider_log_event_id, provider_log_row_offsets, requires_provider_log_row_identity,
+    stable_provider_log_event_id, with_provider_log_row_identity,
+};
 
 const PROVIDER_LOG_TAIL_BYTES: u64 = 2 * 1024 * 1024;
 const SLOW_LIFECYCLE_POLICY_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
@@ -606,6 +611,18 @@ async fn archive_agent_chat_events_for_state_with_stage(
             })?;
             let _consumed_provider_log_bytes = batch.consumed_bytes;
             decorate_forward_provider_log_events(&mut batch.events, &snapshot.provider, path);
+            if logging_enabled {
+                attach_archive_bound_provider_log_retry_aliases(
+                    &state.conversation_archive,
+                    &context,
+                    &mut batch.events,
+                    path,
+                )
+                .map_err(|error| AgentChatTranscriptFailure {
+                    stage: ChatTranscriptFailureStage::ArchiveWrite,
+                    message: format!("conversation archive retry identity read failed: {error}"),
+                })?;
+            }
             // OpenCode's watcher can label a fallback message `opencode_db`,
             // but it does not carry the database session/path binding. Keep
             // the canonical DB projection in this incremental provider batch
@@ -827,7 +844,7 @@ fn decorate_forward_provider_log_events(
     provider: &str,
     path: &Path,
 ) {
-    for event in events {
+    for event in events.iter_mut() {
         let raw_line = event
             .metadata
             .as_object_mut()
@@ -844,7 +861,7 @@ fn decorate_forward_provider_log_events(
             if let Some(raw_line) = raw_line.as_deref() {
                 let legacy_id = claude_legacy_provider_log_event_id(event, path, raw_line);
                 event.id = stable_provider_log_event_id_from_raw_line(event, path, raw_line);
-                if event.id != legacy_id {
+                if event.id != legacy_id && can_alias_legacy_provider_log_event_id(event) {
                     set_metadata(
                         &mut event.metadata,
                         "legacy_event_ids",
@@ -856,6 +873,72 @@ fn decorate_forward_provider_log_events(
             }
         } else {
             event.id = stable_provider_log_event_id(event, path);
+        }
+    }
+    attach_incremental_legacy_aliases(events, provider, path);
+}
+
+fn attach_archive_bound_provider_log_retry_aliases(
+    archive: &crate::state::conversation_archive::ConversationArchiveState,
+    context: &ConversationArchiveContext,
+    events: &mut [AgentChatEvent],
+    path: &Path,
+) -> std::io::Result<()> {
+    if !archive_identity::has_unaliased_archive_bound_legacy_row_candidate(events, path) {
+        return Ok(());
+    }
+    let archived_events = archive.chat_events_for_capture(context)?;
+    archive_identity::attach_archive_bound_legacy_row_aliases(events, path, &archived_events);
+    Ok(())
+}
+
+fn attach_incremental_legacy_aliases(events: &mut [AgentChatEvent], provider: &str, path: &Path) {
+    if provider.eq_ignore_ascii_case("claude")
+        || !events.iter().any(|event| {
+            requires_provider_log_row_identity(event)
+                && event.metadata[PROVIDER_LOG_ROW_OFFSET_METADATA_KEY]
+                    .as_u64()
+                    .is_some()
+        })
+    {
+        return;
+    }
+    let Some(session_id) = events.first().map(|event| event.session_id.as_str()) else {
+        return;
+    };
+    let snapshot = load_provider_log_chat_events(session_id, provider, Some(path), &[]);
+    let aliases_by_id = snapshot
+        .into_iter()
+        .filter_map(|event| {
+            event
+                .metadata
+                .get("legacy_event_ids")
+                .and_then(serde_json::Value::as_array)
+                .filter(|aliases| !aliases.is_empty())
+                .map(|aliases| (event.id, aliases.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    for event in events {
+        let Some(aliases) = aliases_by_id.get(&event.id) else {
+            continue;
+        };
+        let Some(metadata) = event.metadata.as_object_mut() else {
+            continue;
+        };
+        let existing = metadata
+            .entry("legacy_event_ids")
+            .or_insert_with(|| serde_json::json!([]));
+        let Some(existing) = existing.as_array_mut() else {
+            continue;
+        };
+        for alias in aliases {
+            if alias.as_str().is_some_and(|alias| {
+                !existing
+                    .iter()
+                    .any(|current| current.as_str() == Some(alias))
+            }) {
+                existing.push(alias.clone());
+            }
         }
     }
 }
@@ -1032,50 +1115,53 @@ fn load_provider_log_chat_events(
     if provider == "antigravity" && path.extension().is_some_and(|extension| extension == "db") {
         return load_antigravity_database_chat_events(session_id, provider, path);
     }
-    let Ok(content) = read_provider_log_tail(path) else {
+    let Ok((content, row_offsets)) = read_provider_log_tail(path) else {
         return Vec::new();
     };
 
     let lines = content.lines().collect::<Vec<_>>();
-    let mut events = normalize_chat_lines(session_id, provider, lines.iter())
-        .into_iter()
-        .map(|mut event| {
-            set_metadata(&mut event.metadata, "provider_log", true);
-            set_metadata(&mut event.metadata, "log_source", "active_agent_log_path");
-            set_metadata(
-                &mut event.metadata,
-                "log_path",
-                path.to_string_lossy().to_string(),
-            );
-            if provider.eq_ignore_ascii_case("claude") {
-                let raw_line = event
-                    .sequence
-                    .and_then(|sequence| sequence.checked_sub(1))
-                    .and_then(|index| lines.get(index as usize))
-                    .copied();
-                if let Some(raw_line) = raw_line {
-                    let legacy_id = claude_legacy_provider_log_event_id(&event, path, raw_line);
-                    event.id = stable_provider_log_event_id_from_raw_line(&event, path, raw_line);
-                    if event.id != legacy_id {
-                        set_metadata(
-                            &mut event.metadata,
-                            "legacy_event_ids",
-                            serde_json::json!([legacy_id]),
-                        );
-                    }
+    let mut events = normalize_chat_lines(session_id, provider, lines.iter());
+    for event in &mut events {
+        set_metadata(&mut event.metadata, "provider_log", true);
+        set_metadata(&mut event.metadata, "log_source", "active_agent_log_path");
+        set_metadata(
+            &mut event.metadata,
+            "log_path",
+            path.to_string_lossy().to_string(),
+        );
+    }
+    attach_provider_log_row_offsets(&mut events, &row_offsets, 1);
+    for event in &mut events {
+        if provider.eq_ignore_ascii_case("claude") {
+            let raw_line = event
+                .sequence
+                .and_then(|sequence| sequence.checked_sub(1))
+                .and_then(|index| lines.get(index as usize))
+                .copied();
+            if let Some(raw_line) = raw_line {
+                let legacy_id = claude_legacy_provider_log_event_id(event, path, raw_line);
+                event.id = stable_provider_log_event_id_from_raw_line(event, path, raw_line);
+                if event.id != legacy_id && can_alias_legacy_provider_log_event_id(event) {
+                    set_metadata(
+                        &mut event.metadata,
+                        "legacy_event_ids",
+                        serde_json::json!([legacy_id]),
+                    );
                 }
             } else {
-                event.id = stable_provider_log_event_id(&event, path);
+                event.id = stable_provider_log_event_id(event, path);
             }
-            event
-        })
-        .collect::<Vec<_>>();
+        } else {
+            event.id = stable_provider_log_event_id(event, path);
+        }
+    }
     // The bridge is available only for a complete, session-headed snapshot.
     // A bounded tail may use persisted aliases but cannot invent new ones.
     let complete = std::fs::metadata(path).is_ok_and(|meta| {
         meta.len() == content.len() as u64 && meta.len() <= PROVIDER_LOG_TAIL_BYTES
     });
     archive_identity::attach_native_legacy_aliases(&mut events, path, &content, complete);
+    archive_identity::attach_unique_legacy_row_aliases(&mut events, path, complete);
     events
 }
 
@@ -1111,7 +1197,7 @@ fn claude_legacy_provider_log_event_id(
             }
         }
     }
-    stable_provider_log_event_id(&legacy_event, path)
+    legacy_provider_log_event_id(&legacy_event, path)
 }
 
 fn find_legacy_claude_user_text(value: &serde_json::Value, current_text: &str) -> Option<String> {
@@ -1151,11 +1237,16 @@ fn stable_provider_log_event_id_from_raw_line(
     hash.update(b"\0");
     hash.update(raw_line.trim().as_bytes());
     hash.update(b"\0");
-    format!(
+    let stable_id = format!(
         "{}:provider_log:{}",
         event.session_id,
         hex_prefix(hash.finalize().as_slice(), 16)
-    )
+    );
+    if requires_provider_log_row_identity(event) {
+        with_provider_log_row_identity(event, stable_id)
+    } else {
+        stable_id
+    }
 }
 
 fn load_antigravity_database_chat_events(
@@ -1267,17 +1358,21 @@ fn provider_log_path_is_cleared(
     })
 }
 
-fn read_provider_log_tail(path: &Path) -> std::io::Result<String> {
-    read_provider_log_tail_with_limit(path, PROVIDER_LOG_TAIL_BYTES)
+fn read_provider_log_tail(path: &Path) -> std::io::Result<(String, Vec<u64>)> {
+    read_provider_log_tail_with_limit_and_offset(path, PROVIDER_LOG_TAIL_BYTES)
 }
 
-fn read_provider_log_tail_with_limit(path: &Path, tail_bytes: u64) -> std::io::Result<String> {
+fn read_provider_log_tail_with_limit_and_offset(
+    path: &Path,
+    tail_bytes: u64,
+) -> std::io::Result<(String, Vec<u64>)> {
     let mut file = std::fs::File::open(path)?;
     let file_len = file.metadata()?.len();
     if file_len <= tail_bytes {
         let mut content = String::new();
         file.read_to_string(&mut content)?;
-        return Ok(content);
+        let row_offsets = provider_log_row_offsets(content.as_bytes(), 0);
+        return Ok((content, row_offsets));
     }
 
     let start = file_len.saturating_sub(tail_bytes);
@@ -1285,16 +1380,21 @@ fn read_provider_log_tail_with_limit(path: &Path, tail_bytes: u64) -> std::io::R
     file.seek(SeekFrom::Start(read_start))?;
     let mut bytes = Vec::with_capacity((file_len - read_start) as usize);
     file.read_to_end(&mut bytes)?;
-    let content = if read_start < start && bytes.first() == Some(&b'\n') {
-        String::from_utf8_lossy(&bytes[1..]).to_string()
-    } else {
-        let content = String::from_utf8_lossy(&bytes);
-        content
-            .split_once('\n')
-            .map(|(_, rest)| rest.to_string())
-            .unwrap_or_default()
-    };
-    Ok(content)
+    let (content_bytes, content_start_offset) =
+        if read_start < start && bytes.first() == Some(&b'\n') {
+            (&bytes[1..], start)
+        } else {
+            match bytes.iter().position(|byte| *byte == b'\n') {
+                Some(index) => (
+                    &bytes[index + 1..],
+                    read_start.saturating_add(index as u64 + 1),
+                ),
+                None => (&bytes[bytes.len()..], file_len),
+            }
+        };
+    let content = String::from_utf8_lossy(content_bytes).to_string();
+    let row_offsets = provider_log_row_offsets(content_bytes, content_start_offset);
+    Ok((content, row_offsets))
 }
 
 struct ConversationArchiveContextInput<'a> {
@@ -1826,62 +1926,49 @@ fn codex_watch_native_observation_matches(watch: &AgentChatEvent, native: &Agent
     same_path && same_provider_turn && same_provider_session
 }
 
-/// Projects Codex's two native user-input records into one chat row while
-/// retaining both observation IDs in the returned metadata. The raw provider
-/// log and archive source records remain unchanged, so this is a presentation
-/// projection rather than evidence deletion.
+/// Projects only a source-bound Codex user mirror pair into one chat row.
 fn canonicalize_provider_input_projection(events: &mut Vec<AgentChatEvent>) {
-    let mut canonical_indexes = HashMap::new();
-    let mut projected = Vec::with_capacity(events.len());
-
-    for event in events.drain(..) {
-        let Some(identity) = provider_input_projection_identity(&event) else {
-            projected.push(event);
+    let mut removed = HashSet::new();
+    for mirror_index in 0..events.len() {
+        if removed.contains(&mirror_index)
+            || events[mirror_index].source.as_deref() != Some("event_msg")
+        {
             continue;
-        };
-
-        let Some(&canonical_index) = canonical_indexes.get(&identity) else {
-            let index = projected.len();
-            canonical_indexes.insert(identity, index);
-            projected.push(event);
-            continue;
-        };
-
-        let candidate = event;
-        let replace =
-            should_prefer_message_duplicate_candidate(&projected[canonical_index], &candidate);
-        if replace {
-            let mut replacement = candidate;
-            retain_provider_observation_ids(&mut replacement, &projected[canonical_index]);
-            projected[canonical_index] = replacement;
-        } else {
-            retain_provider_observation_ids(&mut projected[canonical_index], &candidate);
         }
-    }
+        let request_matches = (0..events.len())
+            .filter(|&request_index| {
+                request_index != mirror_index
+                    && !removed.contains(&request_index)
+                    && codex_user_mirror_pair(&events[mirror_index], &events[request_index])
+            })
+            .collect::<Vec<_>>();
+        if request_matches.len() != 1 {
+            continue;
+        }
+        let request_index = request_matches[0];
+        let mirror_matches = (0..events.len())
+            .filter(|&candidate_index| {
+                candidate_index != request_index
+                    && !removed.contains(&candidate_index)
+                    && codex_user_mirror_pair(&events[request_index], &events[candidate_index])
+            })
+            .collect::<Vec<_>>();
+        if mirror_matches.len() != 1 || mirror_matches[0] != mirror_index {
+            continue;
+        }
 
-    *events = projected;
-}
-
-fn provider_input_projection_identity(event: &AgentChatEvent) -> Option<String> {
-    if event.kind != AgentChatEventKind::Message
-        || event.role != Some(AgentChatRole::User)
-        || !event.provider.eq_ignore_ascii_case("codex")
-        || event.metadata["provider_log"] != true
-        || event.metadata["input_origin"] != "human_input"
-        || event.metadata["input_purpose"] != "request"
-    {
-        return None;
+        let mut canonical = events[request_index].clone();
+        retain_provider_observation_ids(&mut canonical, &events[mirror_index]);
+        events[request_index] = canonical;
+        removed.insert(mirror_index);
     }
-    let provider_turn_id = event
-        .metadata
-        .get("provider_turn_id")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    Some(format!(
-        "{}|{}|{provider_turn_id}",
-        event.session_id, event.provider
-    ))
+    if !removed.is_empty() {
+        *events = events
+            .drain(..)
+            .enumerate()
+            .filter_map(|(index, event)| (!removed.contains(&index)).then_some(event))
+            .collect();
+    }
 }
 
 fn retain_provider_observation_ids(canonical: &mut AgentChatEvent, duplicate: &AgentChatEvent) {
@@ -1892,6 +1979,32 @@ fn retain_provider_observation_ids(canonical: &mut AgentChatEvent, duplicate: &A
         }
     }
     canonical.metadata["provider_observation_ids"] = serde_json::json!(ids);
+
+    if canonical.source.as_deref() == Some("response_item")
+        && duplicate.source.as_deref() == Some("event_msg")
+    {
+        let mut roots = canonical.metadata["provider_mirror_request_root_ids"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let mirror_roots = duplicate.metadata["provider_mirror_request_root_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .chain(event_metadata_string(duplicate, "request_root_id"));
+        for root in mirror_roots {
+            if event_metadata_string(canonical, "request_root_id") != Some(root)
+                && !roots.iter().any(|value| value.as_str() == Some(root))
+            {
+                roots.push(serde_json::json!(root));
+            }
+        }
+        if !roots.is_empty() {
+            canonical.metadata["provider_mirror_request_root_ids"] =
+                serde_json::Value::Array(roots);
+        }
+    }
 }
 
 fn provider_observation_ids(event: &AgentChatEvent) -> Vec<String> {
@@ -2770,6 +2883,384 @@ Do you want to proceed?
             chat_events[0].metadata["log_path"].as_str(),
             Some(log_path.to_string_lossy().as_ref())
         );
+    }
+
+    #[tokio::test]
+    async fn identityless_provider_retry_reconciles_pre_offset_archive_and_cursor() {
+        use std::io::Write as _;
+
+        let env_lock = crate::utils::wardian_test_env_lock_async().await;
+        let temp = tempfile::tempdir().expect("isolated Wardian home");
+        let _home = WardianHomeGuard::set(&env_lock, temp.path());
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: ConversationLoggingSetting::Enabled,
+            ..Default::default()
+        })
+        .expect("enable conversation archive for the regression");
+
+        let log_path = temp.path().join("codex.jsonl");
+        std::fs::write(&log_path, "").expect("create empty provider log");
+        let source_key = "codex:session:offset-upgrade";
+        let context = crate::state::conversation_archive::ConversationArchiveContext {
+            agent_id: "agent-1".to_string(),
+            agent_name: "Synthetic Codex".to_string(),
+            agent_class: "Coder".to_string(),
+            workspace: "<absolute-workspace-path>".to_string(),
+            provider: "codex".to_string(),
+            provider_session_ids: vec!["provider-session-1".to_string()],
+            provider_source_key: Some(source_key.to_string()),
+        };
+        let archive = crate::state::conversation_archive::ConversationArchiveState::default();
+        let initial = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1", "codex", &log_path, source_key, None, true,
+        )
+        .expect("capture empty source at offset zero");
+        assert!(initial.events.is_empty());
+        archive
+            .append_provider_log_batch_with_context(context.clone(), &[], None, &initial.next)
+            .expect("persist the pre-row cursor at offset zero");
+
+        let raw_line = r#"{"type":"response_item","turn_id":"turn-1","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Durable response"}]}}"#;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .and_then(|mut file| writeln!(file, "{raw_line}"))
+            .expect("append one identity-less provider row");
+
+        let mut pre_upgrade =
+            crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+                "agent-1",
+                "codex",
+                &log_path,
+                source_key,
+                Some(initial.next.clone()),
+                true,
+            )
+            .expect("capture the row as the pre-upgrade writer did");
+        assert_eq!(pre_upgrade.events.len(), 1);
+        decorate_forward_provider_log_events(&mut pre_upgrade.events, "codex", &log_path);
+        let mut legacy_event = pre_upgrade.events[0].clone();
+        let legacy_id = legacy_provider_log_event_id(&legacy_event, &log_path);
+        let offset_id = legacy_event.id.clone();
+        assert_ne!(legacy_id, offset_id);
+        legacy_event.id = legacy_id.clone();
+        legacy_event
+            .metadata
+            .as_object_mut()
+            .expect("provider metadata")
+            .remove(PROVIDER_LOG_ROW_OFFSET_METADATA_KEY);
+        legacy_event
+            .metadata
+            .as_object_mut()
+            .unwrap()
+            .remove("legacy_event_ids");
+
+        archive
+            .append_chat_events_with_context(context.clone(), std::slice::from_ref(&legacy_event))
+            .expect("persist the old event and narrative before its cursor");
+        assert_eq!(
+            archive
+                .provider_log_capture_state("agent-1", source_key)
+                .expect("read cursor left behind by the old writer"),
+            Some(initial.next.clone()),
+            "the archived observation must remain ahead of the source cursor"
+        );
+
+        let mut upgraded_retry =
+            crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+                "agent-1",
+                "codex",
+                &log_path,
+                source_key,
+                Some(initial.next.clone()),
+                true,
+            )
+            .expect("retry the same row after the identity upgrade");
+        decorate_forward_provider_log_events(&mut upgraded_retry.events, "codex", &log_path);
+        let retry_event = &upgraded_retry.events[0];
+        assert_eq!(retry_event.id, offset_id);
+        assert_eq!(
+            retry_event.metadata["legacy_event_ids"][0].as_str(),
+            Some(legacy_id.as_str()),
+            "a complete unique source row carries its pre-offset archive identity"
+        );
+        assert_eq!(retry_event.source, legacy_event.source);
+        assert_eq!(retry_event.turn_id, legacy_event.turn_id);
+        assert_eq!(retry_event.role, legacy_event.role);
+        assert_eq!(retry_event.text, legacy_event.text);
+        assert_eq!(
+            retry_event.metadata["raw_type"],
+            legacy_event.metadata["raw_type"]
+        );
+
+        // This append stands in for archive publication succeeding while the
+        // following cursor write fails. The retry below must remain idempotent.
+        archive
+            .append_chat_events_with_context(context.clone(), &upgraded_retry.events)
+            .expect("publish upgraded identity before simulating cursor failure");
+        assert_eq!(
+            archive
+                .provider_log_capture_state("agent-1", source_key)
+                .expect("cursor remains unchanged after simulated failure"),
+            Some(initial.next.clone())
+        );
+
+        let mut replay = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &log_path,
+            source_key,
+            Some(initial.next.clone()),
+            true,
+        )
+        .expect("replay after archive success and cursor failure");
+        decorate_forward_provider_log_events(&mut replay.events, "codex", &log_path);
+        assert_eq!(replay.events[0].id, retry_event.id);
+        assert_eq!(replay.events[0].metadata["legacy_event_ids"][0], legacy_id);
+        archive
+            .append_provider_log_batch_with_context(
+                context.clone(),
+                &replay.events,
+                replay.previous.as_ref(),
+                &replay.next,
+            )
+            .expect("reconcile the archive and commit the retried cursor");
+        assert_eq!(
+            archive
+                .provider_log_capture_state("agent-1", source_key)
+                .expect("read committed cursor"),
+            Some(replay.next.clone())
+        );
+
+        let archived = archive
+            .chat_events_for_capture(&context)
+            .expect("read canonical archived events");
+        assert_eq!(archived.len(), 1, "the source row has one durable event");
+        assert!(archived.iter().any(|event| {
+            event.id == legacy_id
+                || event.metadata["legacy_event_ids"]
+                    .as_array()
+                    .is_some_and(|aliases| aliases.iter().any(|alias| alias == &legacy_id))
+        }));
+
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active synthetic conversation");
+        let conversation_dir =
+            wardian_core::paths::agent_conversation_dir("agent-1", &conversation_id)
+                .expect("synthetic conversation directory");
+        let records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
+            wardian_core::conversations::read_jsonl_records(
+                &conversation_dir.join("conversation.jsonl"),
+            )
+            .expect("read durable narrative records");
+        assert_eq!(records.len(), 1, "the source row has one narrative record");
+        assert!(records[0].event_refs.contains(&legacy_id));
+        assert_eq!(
+            records[0].event_refs.iter().collect::<HashSet<_>>().len(),
+            records[0].event_refs.len(),
+            "replayed aliases must not duplicate durable references"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_identityless_retry_uses_archived_source_sequence() {
+        use std::io::Write as _;
+
+        let env_lock = crate::utils::wardian_test_env_lock_async().await;
+        let temp = tempfile::tempdir().expect("isolated Wardian home");
+        let _home = WardianHomeGuard::set(&env_lock, temp.path());
+        let log_path = temp.path().join("codex.jsonl");
+        let filler = format!(r#"{{"type":"ignored","padding":"{}"}}"#, "x".repeat(4096));
+        {
+            let mut file = std::fs::File::create(&log_path).expect("create oversized source");
+            for _ in 0..600 {
+                writeln!(file, "{filler}").expect("write ignored source prefix");
+            }
+        }
+        assert!(
+            std::fs::metadata(&log_path).unwrap().len() > PROVIDER_LOG_TAIL_BYTES,
+            "the fixture must exceed the complete-snapshot limit"
+        );
+
+        let source_key = "codex:session:oversized-offset-upgrade";
+        let context = ConversationArchiveContext {
+            agent_id: "agent-1".to_string(),
+            agent_name: "Synthetic Codex".to_string(),
+            agent_class: "Coder".to_string(),
+            workspace: "<absolute-workspace-path>".to_string(),
+            provider: "codex".to_string(),
+            provider_session_ids: vec!["provider-session-1".to_string()],
+            provider_source_key: Some(source_key.to_string()),
+        };
+        let archive = crate::state::conversation_archive::ConversationArchiveState::default();
+        let initial = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1", "codex", &log_path, source_key, None, false,
+        )
+        .expect("start at the already-existing oversized source prefix");
+        assert!(initial.events.is_empty());
+        archive
+            .append_provider_log_batch_with_context(context.clone(), &[], None, &initial.next)
+            .expect("persist the cursor before the duplicate rows");
+
+        let raw_line = r#"{"type":"response_item","turn_id":"turn-1","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Repeated durable response"}]}}"#;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .and_then(|mut file| writeln!(file, "{raw_line}\n{raw_line}"))
+            .expect("append two identical provider rows");
+
+        let mut retry = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &log_path,
+            source_key,
+            Some(initial.next.clone()),
+            true,
+        )
+        .expect("acquire both rows from the persisted cursor");
+        assert_eq!(retry.events.len(), 2);
+        decorate_forward_provider_log_events(&mut retry.events, "codex", &log_path);
+        let first_legacy_id = legacy_provider_log_event_id(&retry.events[0], &log_path);
+        assert_eq!(
+            first_legacy_id,
+            legacy_provider_log_event_id(&retry.events[1], &log_path),
+            "the duplicate rows share the pre-offset field hash"
+        );
+        assert_ne!(retry.events[0].id, retry.events[1].id);
+        assert!(retry.events.iter().all(|event| {
+            event.metadata["legacy_event_ids"]
+                .as_array()
+                .is_none_or(Vec::is_empty)
+        }));
+
+        let mut legacy_event = retry.events[0].clone();
+        legacy_event.id = first_legacy_id.clone();
+        let metadata = legacy_event
+            .metadata
+            .as_object_mut()
+            .expect("provider metadata object");
+        metadata.remove(PROVIDER_LOG_ROW_OFFSET_METADATA_KEY);
+        metadata.remove("legacy_event_ids");
+        archive
+            .append_chat_events_with_context(context.clone(), &[legacy_event.clone()])
+            .expect("publish one pre-offset row while its cursor remains behind");
+        assert_eq!(
+            archive
+                .provider_log_capture_state("agent-1", source_key)
+                .expect("read cursor before retry")
+                .expect("persisted cursor")
+                .committed_offset,
+            initial.next.committed_offset
+        );
+
+        attach_archive_bound_provider_log_retry_aliases(
+            &archive,
+            &context,
+            &mut retry.events,
+            &log_path,
+        )
+        .expect("read archive-bound retry identities");
+        assert_eq!(
+            retry.events[0].metadata["legacy_event_ids"][0],
+            first_legacy_id
+        );
+        assert!(retry.events[1].metadata["legacy_event_ids"]
+            .as_array()
+            .is_none_or(Vec::is_empty));
+        assert_eq!(retry.events[0].sequence, legacy_event.sequence);
+        assert_eq!(retry.events[0].source, legacy_event.source);
+        assert_eq!(retry.events[0].turn_id, legacy_event.turn_id);
+        assert_eq!(retry.events[0].role, legacy_event.role);
+        assert_eq!(retry.events[0].text, legacy_event.text);
+        assert_eq!(
+            retry.events[0].metadata["raw_type"],
+            legacy_event.metadata["raw_type"]
+        );
+
+        // Publish the identity upgrade first, then retry the still-uncommitted
+        // batch just as capture does after a cursor-write failure.
+        archive
+            .append_chat_events_with_context(context.clone(), &retry.events)
+            .expect("publish upgraded rows before cursor commit");
+        let mut replay = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &log_path,
+            source_key,
+            Some(initial.next.clone()),
+            true,
+        )
+        .expect("replay both rows after archive publication");
+        decorate_forward_provider_log_events(&mut replay.events, "codex", &log_path);
+        attach_archive_bound_provider_log_retry_aliases(
+            &archive,
+            &context,
+            &mut replay.events,
+            &log_path,
+        )
+        .expect("reconcile retry against the upgraded archive");
+        archive
+            .append_provider_log_batch_with_context(
+                context.clone(),
+                &replay.events,
+                replay.previous.as_ref(),
+                &replay.next,
+            )
+            .expect("commit the source cursor after idempotent archive replay");
+        assert_eq!(
+            archive
+                .provider_log_capture_state("agent-1", source_key)
+                .expect("read cursor after retry")
+                .as_ref(),
+            Some(&replay.next)
+        );
+
+        let archived = archive
+            .chat_events_for_capture(&context)
+            .expect("read canonical archived rows");
+        assert_eq!(archived.len(), 2, "both repeated source rows stay distinct");
+        let archived_first = archived
+            .iter()
+            .find(|event| event.sequence == retry.events[0].sequence)
+            .expect("first source row");
+        let archived_second = archived
+            .iter()
+            .find(|event| event.sequence == retry.events[1].sequence)
+            .expect("second source row");
+        assert_ne!(archived_first.id, archived_second.id);
+        assert!(
+            archived_first.id == first_legacy_id
+                || archived_first.metadata["legacy_event_ids"]
+                    .as_array()
+                    .is_some_and(|aliases| aliases.iter().any(|alias| alias == &first_legacy_id))
+        );
+        assert!(archived_second.metadata["legacy_event_ids"]
+            .as_array()
+            .is_none_or(Vec::is_empty));
+
+        let conversation_id = archive
+            .active_conversation_id_for_test("agent-1")
+            .expect("active synthetic conversation");
+        let conversation_dir =
+            wardian_core::paths::agent_conversation_dir("agent-1", &conversation_id)
+                .expect("synthetic conversation directory");
+        let records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
+            wardian_core::conversations::read_jsonl_records(
+                &conversation_dir.join("conversation.jsonl"),
+            )
+            .expect("read durable narrative records");
+        assert_eq!(records.len(), 2, "both repeated rows retain a narrative");
+        assert!(records
+            .iter()
+            .any(|record| record.event_refs.contains(&first_legacy_id)));
+        for record in records {
+            assert_eq!(
+                record.event_refs.iter().collect::<HashSet<_>>().len(),
+                record.event_refs.len(),
+                "retry aliases must not duplicate durable references"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3900,7 +4391,8 @@ Do you want to proceed?
         let latest_line = r#"{"type":"response_item","turn_id":"turn-2","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Recent provider log message"}]}}"#;
         std::fs::write(&log_path, format!("{stale_line}\n{latest_line}\n")).expect("write log");
 
-        let content = read_provider_log_tail_with_limit(&log_path, 256).expect("tail content");
+        let (content, _) =
+            read_provider_log_tail_with_limit_and_offset(&log_path, 256).expect("tail content");
 
         assert!(!content.contains("stale"));
         assert!(content.contains("Recent provider log message"));
@@ -3916,8 +4408,8 @@ Do you want to proceed?
         std::fs::write(&log_path, format!("{stale_line}\n{latest_line}\n")).expect("write log");
 
         let tail_bytes = latest_line.len() as u64 + 1;
-        let content =
-            read_provider_log_tail_with_limit(&log_path, tail_bytes).expect("tail content");
+        let (content, _) = read_provider_log_tail_with_limit_and_offset(&log_path, tail_bytes)
+            .expect("tail content");
 
         assert!(!content.contains(stale_line));
         assert!(content.contains("Boundary provider log message"));
@@ -3925,7 +4417,38 @@ Do you want to proceed?
     }
 
     #[test]
-    fn provider_log_event_ids_stay_stable_when_line_position_changes() {
+    fn provider_log_tail_keeps_lossy_utf8_and_tracks_raw_row_offsets() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_path = temp.path().join("pi.jsonl");
+        let large_prefix = format!(
+            r#"{{"type":"ignored","padding":"{}"}}"#,
+            "x".repeat(PROVIDER_LOG_TAIL_BYTES as usize + 256)
+        );
+        let mut bytes = large_prefix.into_bytes();
+        bytes.push(b'\n');
+        bytes.extend_from_slice(br#"{"type":"ignored","padding":"bad"#);
+        bytes.push(0xff);
+        bytes.extend_from_slice(b"\"}\n");
+        let target_offset = bytes.len() as u64;
+        let target =
+            br#"{"type":"message","message":{"role":"user","content":"After invalid UTF-8"}}"#;
+        bytes.extend_from_slice(target);
+        bytes.push(b'\n');
+        std::fs::write(&log_path, bytes).expect("write provider log with invalid UTF-8");
+
+        let events = load_provider_log_chat_events("agent-1", "pi", Some(&log_path), &[]);
+        let event = events
+            .iter()
+            .find(|event| event.text.as_deref() == Some("After invalid UTF-8"))
+            .expect("valid row after lossy tail decoding");
+        assert_eq!(
+            event.metadata["provider_log_row_offset"].as_u64(),
+            Some(target_offset)
+        );
+    }
+
+    #[test]
+    fn fallback_provider_log_ids_follow_absolute_row_offsets() {
         let temp = tempfile::tempdir().expect("temp dir");
         let log_path = temp.path().join("codex.jsonl");
         let target_line = r#"{"type":"response_item","turn_id":"turn-2","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Stable provider log message"}]}}"#;
@@ -3949,7 +4472,181 @@ Do you want to proceed?
             .id
             .clone();
 
-        assert_eq!(first_id, second_id);
+        assert_ne!(first_id, second_id);
+    }
+
+    #[test]
+    fn codex_rows_in_the_same_provider_turn_keep_distinct_fallback_ids() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_path = temp.path().join("codex.jsonl");
+        let line = r#"{"type":"response_item","turn_id":"turn-shared","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Repeated response"}]}}"#;
+        std::fs::write(&log_path, format!("{line}\n{line}\n")).expect("write duplicate rows");
+
+        let events = load_provider_log_chat_events("agent-1", "codex", Some(&log_path), &[]);
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].turn_id, events[1].turn_id);
+        assert_ne!(events[0].id, events[1].id);
+        assert_eq!(
+            events[0].metadata["provider_log_row_offset"].as_u64(),
+            Some(0)
+        );
+        assert_eq!(
+            events[1].metadata["provider_log_row_offset"].as_u64(),
+            Some((line.len() + 1) as u64)
+        );
+        assert!(events
+            .iter()
+            .all(|event| event.metadata.get("legacy_event_ids").is_none()));
+    }
+
+    #[test]
+    fn legacy_pending_codex_state_recovers_forward_tail_identity() {
+        use std::io::Write as _;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_path = temp.path().join("codex.jsonl");
+        let context = r#"{"type":"response_item","payload":{"type":"message","id":"context-1","role":"user","content":[{"type":"input_text","text":"Host context."}],"internal_chat_message_metadata_passthrough":{"turn_id":"codex-turn-1"}}}"#;
+        std::fs::write(&log_path, format!("{context}\n")).expect("write pending context");
+
+        let first = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &log_path,
+            "codex:session:one",
+            None,
+            true,
+        )
+        .expect("capture context into pending normalization state");
+        assert!(first.events.is_empty());
+        assert!(first.next.normalizer.has_pending_events());
+
+        let mut old_state = serde_json::to_value(&first.next).expect("serialize current state");
+        let old_offset = old_state["normalizer"]["pending_events"][0]["metadata"]
+            .as_object_mut()
+            .expect("pending event metadata")
+            .remove("provider_log_row_offset")
+            .expect("new state has an absolute row offset");
+        assert_eq!(old_offset.as_u64(), Some(0));
+        let old_state: crate::commands::provider_log_acquisition::ProviderLogCaptureState =
+            serde_json::from_value(old_state).expect("restore pre-offset capture state");
+
+        let request = r#"{"type":"event_msg","payload":{"type":"user_message","message":"Inspect the archive."}}"#;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .and_then(|mut file| writeln!(file, "{request}"))
+            .expect("append the request that releases pending context");
+        let mut next = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &log_path,
+            "codex:session:one",
+            Some(old_state.clone()),
+            true,
+        )
+        .expect("continue from pre-offset state");
+        let forward_context = next
+            .events
+            .iter()
+            .find(|event| event.metadata["input_origin"] == "context_injection")
+            .expect("released pending context");
+        assert_eq!(forward_context.sequence, Some(1));
+        assert_eq!(
+            forward_context.metadata["provider_log_row_offset"].as_u64(),
+            Some(0)
+        );
+        decorate_forward_provider_log_events(&mut next.events, "codex", &log_path);
+        let forward_id = next
+            .events
+            .iter()
+            .find(|event| event.metadata["input_origin"] == "context_injection")
+            .expect("decorated forward context")
+            .id
+            .clone();
+
+        let mut replay = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &log_path,
+            "codex:session:one",
+            Some(old_state),
+            true,
+        )
+        .expect("replay the same source range from the same legacy state");
+        decorate_forward_provider_log_events(&mut replay.events, "codex", &log_path);
+        let replayed_context_id = replay
+            .events
+            .iter()
+            .find(|event| event.metadata["input_origin"] == "context_injection")
+            .expect("replayed legacy context")
+            .id
+            .clone();
+        assert_eq!(forward_id, replayed_context_id);
+
+        let full_tail = load_provider_log_chat_events("agent-1", "codex", Some(&log_path), &[]);
+        let projected_context = full_tail
+            .iter()
+            .find(|event| event.metadata["input_origin"] == "context_injection")
+            .expect("full-tail context projection");
+        assert_eq!(forward_id, projected_context.id);
+    }
+
+    #[test]
+    fn legacy_pending_codex_state_without_matching_source_row_fails_closed() {
+        use std::io::Write as _;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_path = temp.path().join("codex.jsonl");
+        let context = r#"{"type":"response_item","payload":{"type":"message","id":"context-1","role":"user","content":[{"type":"input_text","text":"Host context."}],"internal_chat_message_metadata_passthrough":{"turn_id":"codex-turn-1"}}}"#;
+        std::fs::write(&log_path, format!("{context}\n")).expect("write pending context");
+        let first = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &log_path,
+            "codex:session:one",
+            None,
+            true,
+        )
+        .expect("capture context into pending normalization state");
+
+        let mut old_state = serde_json::to_value(&first.next).expect("serialize current state");
+        let pending_metadata = old_state["normalizer"]["pending_events"][0]["metadata"]
+            .as_object_mut()
+            .expect("pending event metadata");
+        pending_metadata.remove("provider_log_row_offset");
+        pending_metadata.remove("_wardian_provider_raw_line");
+        old_state["normalizer"]["pending_events"][0]["text"] =
+            serde_json::json!("A stale pending context that is absent from the source row.");
+        let old_state: crate::commands::provider_log_acquisition::ProviderLogCaptureState =
+            serde_json::from_value(old_state).expect("restore state without source row proof");
+        let original_offset = old_state.committed_offset;
+
+        let request = r#"{"type":"event_msg","payload":{"type":"user_message","message":"Inspect the archive."}}"#;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .and_then(|mut file| writeln!(file, "{request}"))
+            .expect("append the request that would release pending context");
+        let batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &log_path,
+            "codex:session:one",
+            Some(old_state.clone()),
+            true,
+        )
+        .expect("unprovable legacy state is represented as incomplete capture");
+
+        assert!(batch.events.is_empty());
+        assert_eq!(batch.consumed_bytes, 0);
+        assert_eq!(batch.next.status, "incomplete");
+        assert_eq!(
+            batch.next.reason.as_deref(),
+            Some("provider_log_legacy_pending_row_offset_unavailable")
+        );
+        assert_eq!(batch.next.committed_offset, original_offset);
+        assert_eq!(batch.previous, Some(old_state));
     }
 
     #[test]
@@ -3977,7 +4674,7 @@ Do you want to proceed?
         );
         assert_eq!(
             legacy_id,
-            stable_provider_log_event_id(&legacy_event, &log_path)
+            legacy_provider_log_event_id(&legacy_event, &log_path)
         );
         assert_ne!(first_id, legacy_id);
         assert_eq!(first_event.text.as_deref(), Some("Review this patch"));
@@ -3998,7 +4695,7 @@ Do you want to proceed?
     }
 
     #[test]
-    fn claude_provider_log_ids_keep_aliases_for_unchanged_event_kinds() {
+    fn claude_provider_log_ids_alias_only_native_event_id_rows() {
         let temp = tempfile::tempdir().expect("temp dir");
         let log_path = temp.path().join("claude.jsonl");
         let lines = [
@@ -4012,9 +4709,14 @@ Do you want to proceed?
         let events = load_provider_log_chat_events("agent-1", "claude", Some(&log_path), &[]);
 
         assert_eq!(events.len(), 4);
-        assert!(events.iter().all(|event| event.metadata["legacy_event_ids"]
+        assert!(events[0].metadata["legacy_event_ids"]
             .as_array()
-            .is_some_and(|ids| ids.len() == 1 && ids[0].as_str() != Some(event.id.as_str()))));
+            .is_some_and(|ids| ids.len() == 1 && ids[0].as_str() != Some(events[0].id.as_str())));
+        assert!(events[2].metadata["legacy_event_ids"]
+            .as_array()
+            .is_some_and(|ids| ids.len() == 1 && ids[0].as_str() != Some(events[2].id.as_str())));
+        assert!(events[1].metadata.get("legacy_event_ids").is_none());
+        assert!(events[3].metadata.get("legacy_event_ids").is_none());
         assert!(events
             .iter()
             .any(|event| event.kind == AgentChatEventKind::ToolCall));
@@ -4036,26 +4738,30 @@ Do you want to proceed?
         let events = load_provider_log_chat_events("agent-1", "claude", Some(&log_path), &[]);
 
         assert_eq!(events.len(), 2);
-        for event in events {
+        for (index, event) in events.into_iter().enumerate() {
             assert_eq!(event.role, Some(AgentChatRole::System));
             assert!(matches!(
                 event.metadata["input_origin"].as_str(),
                 Some("context_injection" | "provider_internal")
             ));
-            let legacy_id = event
-                .metadata
-                .get("legacy_event_ids")
-                .and_then(serde_json::Value::as_array)
-                .and_then(|ids| ids.first())
-                .and_then(serde_json::Value::as_str)
-                .expect("pre-migration role alias");
-            let mut pre_migration_event = event.clone();
-            pre_migration_event.role = Some(AgentChatRole::User);
-            assert_eq!(
-                legacy_id,
-                stable_provider_log_event_id(&pre_migration_event, &log_path)
-            );
-            assert_ne!(legacy_id, event.id);
+            if index == 0 {
+                let legacy_id = event
+                    .metadata
+                    .get("legacy_event_ids")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|ids| ids.first())
+                    .and_then(serde_json::Value::as_str)
+                    .expect("UUID-qualified pre-migration role alias");
+                let mut pre_migration_event = event.clone();
+                pre_migration_event.role = Some(AgentChatRole::User);
+                assert_eq!(
+                    legacy_id,
+                    legacy_provider_log_event_id(&pre_migration_event, &log_path)
+                );
+                assert_ne!(legacy_id, event.id);
+            } else {
+                assert!(event.metadata.get("legacy_event_ids").is_none());
+            }
         }
     }
 
@@ -4217,7 +4923,11 @@ Do you want to proceed?
             language: None,
             created_at: None,
             sequence: Some(1),
-            metadata: serde_json::json!({"provider_log": true}),
+            metadata: serde_json::json!({
+                "provider_log": true,
+                "log_path": "<codex-log>",
+                "provider_turn_id": "provider-turn",
+            }),
         };
         let mut completed = first.clone();
         completed.id = "agent-1:provider:2".to_string();
@@ -4227,6 +4937,7 @@ Do you want to proceed?
         completed.turn_id =
             Some("msg_003d4bf15d017fea016a460ea8668481938d3c49f567fe9108".to_string());
         completed.source = Some("response_item".to_string());
+        completed.metadata["provider_phase"] = serde_json::json!("final_answer");
 
         let chat_events = merge_chat_events(Vec::new(), vec![first, completed]);
 
@@ -4255,6 +4966,7 @@ Do you want to proceed?
         rooted_stream.metadata["request_root_id"] = serde_json::json!("request-a");
         let mut rooted_completion = chat_events[0].clone();
         rooted_completion.metadata["request_root_id"] = serde_json::json!("request-b");
+        rooted_completion.metadata["provider_turn_id"] = serde_json::json!("other-turn");
         assert_eq!(
             merge_chat_events(Vec::new(), vec![rooted_stream, rooted_completion]).len(),
             2
@@ -4445,18 +5157,36 @@ Do you want to proceed?
         lines.extend([
             r#"{"type":"turn_context","payload":{"turn_id":"provider-turn-b"}}"#,
             r#"{"type":"response_item","payload":{"type":"message","id":"message-b","role":"user","content":[{"type":"input_text","text":"Inspect the archive."}],"internal_chat_message_metadata_passthrough":{"turn_id":"provider-turn-b","content_item_kinds":["user.text"]}}}"#,
-            r#"{"type":"event_msg","payload":{"type":"user_message","client_id":"client-b","message":"Inspect the archive."}}"#,
+            r#"{"type":"event_msg","payload":{"type":"user_message","id":"msg:provider-turn-b","client_id":"client-b","message":"Inspect the archive."}}"#,
         ]);
         let mut provider_events = normalize_chat_lines("agent-1", "codex", lines);
         for event in &mut provider_events {
             event.metadata["provider_log"] = serde_json::json!(true);
             event.metadata["provider_session_id"] = serde_json::json!("provider-session");
             event.metadata["log_path"] = serde_json::json!("<provider-log>");
+            if event.role == Some(AgentChatRole::User)
+                && event.source.as_deref() == Some("event_msg")
+            {
+                event.metadata["request_root_id"] = serde_json::json!(format!(
+                    "msg:{}",
+                    event.metadata["provider_turn_id"].as_str().unwrap()
+                ));
+            }
         }
         let raw_user_ids = provider_events
             .iter()
             .filter(|event| event.role == Some(AgentChatRole::User))
             .map(|event| event.id.clone())
+            .collect::<Vec<_>>();
+        let raw_user_roots = provider_events
+            .iter()
+            .filter(|event| event.role == Some(AgentChatRole::User))
+            .map(|event| {
+                event.metadata["request_root_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
             .collect::<Vec<_>>();
 
         let projected = merge_chat_events(Vec::new(), provider_events);
@@ -4466,7 +5196,15 @@ Do you want to proceed?
             .collect::<Vec<_>>();
 
         assert_eq!(raw_user_ids.len(), 4);
+        assert_ne!(raw_user_roots[0], raw_user_roots[1]);
+        assert_ne!(raw_user_roots[2], raw_user_roots[3]);
+        assert_ne!(raw_user_roots[0], raw_user_roots[2]);
         assert_eq!(users.len(), 2);
+        assert_eq!(users[0].text, users[1].text);
+        assert_ne!(
+            users[0].metadata["request_root_id"],
+            users[1].metadata["request_root_id"]
+        );
         assert_eq!(
             users
                 .iter()
@@ -4484,6 +5222,17 @@ Do you want to proceed?
                 .collect::<Vec<_>>(),
             vec!["provider-turn-a", "provider-turn-b"]
         );
+        assert_eq!(
+            users
+                .iter()
+                .map(
+                    |event| event.metadata["provider_mirror_request_root_ids"][0]
+                        .as_str()
+                        .unwrap()
+                )
+                .collect::<Vec<_>>(),
+            vec!["msg:provider-turn-a", "msg:provider-turn-b"]
+        );
         assert!(users.iter().all(|event| {
             event.metadata["provider_observation_ids"]
                 .as_array()
@@ -4494,6 +5243,33 @@ Do you want to proceed?
                         .is_some_and(|id| raw_user_ids.iter().any(|raw_id| raw_id == id))
                 })
         }));
+    }
+
+    #[test]
+    fn does_not_canonicalize_codex_user_rows_with_changed_text_in_one_turn() {
+        let mut events = normalize_chat_lines(
+            "agent-1",
+            "codex",
+            [
+                r#"{"type":"turn_context","payload":{"turn_id":"provider-turn-a"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"native-request-a","role":"user","content":[{"type":"input_text","text":"Inspect the archive."}],"internal_chat_message_metadata_passthrough":{"turn_id":"provider-turn-a","content_item_kinds":["user.text"]}}}"#,
+                r#"{"type":"event_msg","payload":{"type":"user_message","message":"Inspect another archive."}}"#,
+            ],
+        );
+        for event in &mut events {
+            event.metadata["provider_log"] = serde_json::json!(true);
+            event.metadata["provider_session_id"] = serde_json::json!("provider-session");
+            event.metadata["log_path"] = serde_json::json!("<codex-log>");
+        }
+
+        let projected = merge_chat_events(Vec::new(), events);
+        let users = projected
+            .iter()
+            .filter(|event| event.role == Some(AgentChatRole::User))
+            .collect::<Vec<_>>();
+
+        assert_eq!(users.len(), 2);
+        assert_ne!(users[0].text, users[1].text);
     }
 
     #[test]

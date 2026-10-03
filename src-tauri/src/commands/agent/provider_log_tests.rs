@@ -231,6 +231,189 @@ fn empty_or_mismatched_runtime_identity_fails_closed() {
 }
 
 #[tokio::test]
+async fn identical_fallback_provider_rows_keep_distinct_archive_and_chat_identity() {
+    let _env_lock = crate::utils::wardian_test_env_lock_async().await;
+    let temp = tempfile::tempdir().expect("isolated Wardian home");
+    struct RestoreWardianHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreWardianHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => std::env::set_var("WARDIAN_HOME", home),
+                None => std::env::remove_var("WARDIAN_HOME"),
+            }
+        }
+    }
+    let _home = RestoreWardianHome(std::env::var_os("WARDIAN_HOME"));
+    std::env::set_var("WARDIAN_HOME", temp.path());
+    wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
+        .expect("initialize isolated state database");
+    crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+        conversation_logging: ConversationLoggingSetting::Enabled,
+        ..Default::default()
+    })
+    .expect("enable conversation logging");
+
+    let log_path = temp.path().join("mock-provider.jsonl");
+    let prefix_template = r#"{"type":"ignored","padding":"{}"}"#;
+    let prefix_base = prefix_template.replace("{}", "");
+    let prefix_line = prefix_template.replace(
+        "{}",
+        &"x".repeat(310_usize.saturating_sub(prefix_base.len())),
+    );
+    let row_template = r#"{"type":"message","message":{"role":"user","content":"Repeat this request"},"padding":"{}"}"#;
+    let row_base = row_template.replace("{}", "");
+    let row = row_template.replace("{}", &"x".repeat(203_usize.saturating_sub(row_base.len())));
+    assert_eq!(prefix_line.len(), 310);
+    assert_eq!(row.len(), 203);
+    std::fs::write(&log_path, format!("{prefix_line}\n{row}\n"))
+        .expect("write first provider row at byte offset 311");
+    let state = AppState::new();
+    let agent = make_test_agent();
+    {
+        let mut config = agent.config.lock().expect("agent config");
+        config.session_id = "agent-1".to_string();
+        config.session_name = "Agent One".to_string();
+        config.agent_class = "Coder".to_string();
+        config.provider = "pi".to_string();
+        config.reset_provider_config_for_provider();
+        config.folder = temp.path().to_string_lossy().to_string();
+        config.fresh_provider_session_id = Some("pi-session-1".to_string());
+        config.conversation_logging = AgentConversationLoggingSetting::Enabled;
+    }
+    *agent.log_path.lock().expect("agent log path") = Some(log_path.clone());
+    state
+        .agents
+        .lock()
+        .await
+        .insert("agent-1".to_string(), agent);
+    state.agent_order.lock().await.push("agent-1".to_string());
+
+    let first = crate::commands::chat::archive_agent_chat_events_for_state(&state, "agent-1")
+        .await
+        .expect("capture first provider row");
+    let first_event = first
+        .events
+        .iter()
+        .find(|event| event.metadata["provider_log"] == true)
+        .expect("first provider event")
+        .clone();
+    assert_eq!(
+        first_event.metadata["provider_log_row_offset"].as_u64(),
+        Some(311)
+    );
+    let context = first.context.clone();
+    let conversation_id = state
+        .conversation_archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation");
+    let (_, records_before_second) = state
+        .conversation_archive
+        .show(&conversation_id)
+        .expect("read first narrative");
+
+    use std::io::Write as _;
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .expect("open provider log for append"),
+        "{row}"
+    )
+    .expect("append identical second row");
+    let second = crate::commands::chat::archive_agent_chat_events_for_state(&state, "agent-1")
+        .await
+        .expect("capture second distinct provider row");
+    let second_event = second
+        .events
+        .iter()
+        .find(|event| event.metadata["provider_log"] == true)
+        .expect("second provider event")
+        .clone();
+    assert_eq!(
+        second_event.metadata["provider_log_row_offset"].as_u64(),
+        Some(515)
+    );
+    assert_ne!(first_event.id, second_event.id);
+
+    let snapshot = crate::commands::chat::agent_archive_capture_snapshot(&state, "agent-1")
+        .await
+        .expect("snapshot for direct provider-log projection");
+    let tail_projection = crate::commands::chat::collect_agent_chat_events_for_archive(&snapshot)
+        .expect("project complete provider log");
+    let tail_events = tail_projection
+        .events
+        .iter()
+        .filter(|event| event.metadata["provider_log"] == true)
+        .collect::<Vec<_>>();
+    let first_tail_event = tail_events
+        .iter()
+        .find(|event| event.metadata["provider_log_row_offset"].as_u64() == Some(311))
+        .expect("first direct-tail observation");
+    let second_tail_event = tail_events
+        .iter()
+        .find(|event| event.metadata["provider_log_row_offset"].as_u64() == Some(515))
+        .expect("second direct-tail observation");
+    assert_eq!(first_tail_event.id, first_event.id);
+    assert_eq!(second_tail_event.id, second_event.id);
+
+    let chat_events = state
+        .conversation_archive
+        .chat_events_for_capture(&context)
+        .expect("read archived chat events");
+    assert_eq!(
+        chat_events
+            .iter()
+            .filter(|event| event.text.as_deref() == Some("Repeat this request"))
+            .count(),
+        2,
+        "Chat must retain both identical provider rows"
+    );
+    let second_archived_event = chat_events
+        .iter()
+        .find(|event| event.metadata["provider_log_row_offset"].as_u64() == Some(515))
+        .expect("persisted second provider observation")
+        .clone();
+    state
+        .conversation_archive
+        .append_chat_events_with_context(
+            context.clone(),
+            std::slice::from_ref(&second_archived_event),
+        )
+        .expect("replaying the same source row is idempotent");
+    let conversation_id = state
+        .conversation_archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation");
+    let (_, records) = state
+        .conversation_archive
+        .show(&conversation_id)
+        .expect("read narratives");
+    assert_eq!(records.len(), 2);
+    assert_ne!(records[0].event_refs, records[1].event_refs);
+    assert_eq!(records_before_second[0].event_refs, records[0].event_refs);
+    assert_eq!(records_before_second[0].source_refs, records[0].source_refs);
+
+    let chat_read =
+        crate::commands::chat::load_agent_chat_transcript_for_state(&state, "agent-1".to_string())
+            .await
+            .expect("read the transcript through Chat");
+    assert_eq!(
+        chat_read
+            .iter()
+            .filter(|event| event.text.as_deref() == Some("Repeat this request"))
+            .count(),
+        2
+    );
+    let chat_ids = chat_read
+        .iter()
+        .filter(|event| event.text.as_deref() == Some("Repeat this request"))
+        .map(|event| event.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(chat_ids.contains(first_event.id.as_str()));
+    assert!(chat_ids.contains(second_event.id.as_str()));
+}
+
+#[tokio::test]
 async fn agent_logging_transition_excludes_provider_bytes_written_while_disabled() {
     let _guard = crate::utils::wardian_test_env_lock_async().await;
     let temp = tempfile::tempdir().expect("temp dir");

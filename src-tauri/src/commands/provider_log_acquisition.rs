@@ -6,6 +6,7 @@
 //! append-only; a small overlap cannot prove that an arbitrary older prefix was
 //! never rewritten in place.
 
+use std::collections::HashMap;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
@@ -14,7 +15,8 @@ use sha2::{Digest, Sha256};
 use wardian_core::models::chat::AgentChatEvent;
 
 use crate::providers::chat_transcript::{
-    normalize_chat_lines_with_state, TranscriptNormalizationState,
+    normalize_chat_line, normalize_chat_lines_with_state, TranscriptNormalizationState,
+    PROVIDER_LOG_ROW_OFFSET_METADATA_KEY, PROVIDER_RAW_LINE_METADATA_KEY,
 };
 
 /// Normal forward-acquisition work per pass. A record that starts in this
@@ -23,6 +25,8 @@ pub(crate) const PROVIDER_LOG_BATCH_BYTES: u64 = 256 * 1024;
 /// Maximum size of one newline-terminated JSONL record, including its newline.
 /// This is a record-framing bound, separate from the normal batch work budget.
 pub(crate) const PROVIDER_LOG_MAX_RECORD_BYTES: u64 = 16 * 1024 * 1024;
+/// Maximum source suffix scanned to upgrade a pre-row-offset pending event.
+const MAX_LEGACY_PENDING_ROW_RECOVERY_BYTES: u64 = 16 * 1024 * 1024;
 const PROVIDER_LOG_ANCHOR_BYTES: u64 = 4 * 1024;
 const MAX_PROVIDER_LOG_POLICY_SPANS: usize = 256;
 
@@ -162,6 +166,31 @@ pub(crate) fn acquire_provider_log_batch(
         });
     }
 
+    let recovered_pending_offsets = match recover_legacy_pending_row_offsets(
+        &mut file,
+        state.committed_offset,
+        state.normalizer.next_sequence(),
+        state.normalizer.pending_events(),
+        MAX_LEGACY_PENDING_ROW_RECOVERY_BYTES,
+    )? {
+        Some(offsets) => offsets,
+        None => {
+            return Ok(incomplete_batch(
+                previous,
+                state,
+                "provider_log_legacy_pending_row_offset_unavailable",
+            ));
+        }
+    };
+    for event in state.normalizer.pending_events_mut() {
+        if let Some(offset) = event
+            .sequence
+            .and_then(|sequence| recovered_pending_offsets.get(&sequence))
+        {
+            event.metadata[PROVIDER_LOG_ROW_OFFSET_METADATA_KEY] = serde_json::json!(offset);
+        }
+    }
+
     if state.committed_offset == file_len {
         state.status = if state.normalizer_has_pending_events() {
             "pending".to_string()
@@ -287,8 +316,14 @@ pub(crate) fn acquire_provider_log_batch(
         });
     }
 
+    let first_sequence = state.normalizer.next_sequence();
+    let batch_start_offset = state.committed_offset;
+    let row_offsets = super::chat::archive_identity::provider_log_row_offsets(
+        complete.as_bytes(),
+        batch_start_offset,
+    );
     let mut next_normalizer = state.normalizer.clone();
-    let events = match normalize_chat_lines_with_state(
+    let mut events = match normalize_chat_lines_with_state(
         session_id,
         provider,
         complete.lines(),
@@ -309,6 +344,12 @@ pub(crate) fn acquire_provider_log_batch(
             });
         }
     };
+    next_normalizer.attach_pending_row_offsets(&row_offsets, first_sequence);
+    super::chat::archive_identity::attach_provider_log_row_offsets(
+        &mut events,
+        &row_offsets,
+        first_sequence,
+    );
     let consumed_bytes = complete_len as u64;
     state.committed_offset = state.committed_offset.saturating_add(consumed_bytes);
     state.continuity_anchor = read_anchor(&mut file, state.committed_offset)?;
@@ -513,6 +554,150 @@ fn next_disabled_start(state: &ProviderLogCaptureState, file_len: u64) -> Option
         .chain(state.open_disabled_from)
         .filter(|start| *start >= state.committed_offset && *start <= file_len)
         .min()
+}
+
+fn recover_legacy_pending_row_offsets(
+    file: &mut std::fs::File,
+    committed_offset: u64,
+    next_sequence: u64,
+    pending_events: &[AgentChatEvent],
+    max_scan_bytes: u64,
+) -> io::Result<Option<HashMap<u64, u64>>> {
+    let mut pending_rows = HashMap::<u64, (AgentChatEvent, Option<String>)>::new();
+    for event in pending_events {
+        if !super::chat::archive_identity::requires_provider_log_row_identity(event)
+            || event.metadata[PROVIDER_LOG_ROW_OFFSET_METADATA_KEY]
+                .as_u64()
+                .is_some()
+        {
+            continue;
+        }
+        let Some(sequence) = event.sequence else {
+            return Ok(None);
+        };
+        if sequence == 0
+            || sequence >= next_sequence
+            || pending_rows
+                .insert(
+                    sequence,
+                    (
+                        event.clone(),
+                        event
+                            .metadata
+                            .get(PROVIDER_RAW_LINE_METADATA_KEY)
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned),
+                    ),
+                )
+                .is_some()
+        {
+            return Ok(None);
+        }
+    }
+    if pending_rows.is_empty() {
+        return Ok(Some(HashMap::new()));
+    }
+    if committed_offset == 0 || next_sequence == u64::MAX || max_scan_bytes == 0 {
+        return Ok(None);
+    }
+
+    let scan_len = committed_offset.min(max_scan_bytes);
+    let scan_start = committed_offset - scan_len;
+    let scan_len_usize = usize::try_from(scan_len).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "legacy provider-log recovery span exceeds address space",
+        )
+    })?;
+    let mut bytes = Vec::with_capacity(scan_len_usize);
+    let scan_start_is_boundary = if scan_start == 0 {
+        true
+    } else {
+        file.seek(SeekFrom::Start(scan_start - 1))?;
+        let mut preceding_byte = [0];
+        file.read_exact(&mut preceding_byte)?;
+        preceding_byte[0] == b'\n'
+    };
+    file.seek(SeekFrom::Start(scan_start))?;
+    Read::by_ref(file).take(scan_len).read_to_end(&mut bytes)?;
+    if bytes.len() != scan_len_usize {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "provider log ended during legacy pending-row recovery",
+        ));
+    }
+
+    let earliest_sequence = pending_rows
+        .keys()
+        .copied()
+        .min()
+        .expect("pending rows are non-empty");
+    let mut sequence = next_sequence - 1;
+    let mut cursor = bytes.len();
+    let mut recovered = HashMap::with_capacity(pending_rows.len());
+    loop {
+        if cursor == 0 || bytes[cursor - 1] != b'\n' {
+            return Ok(None);
+        }
+        let row_end = cursor - 1;
+        let mut row_start = row_end;
+        while row_start > 0 && bytes[row_start - 1] != b'\n' {
+            row_start -= 1;
+        }
+        let mut row = &bytes[row_start..row_end];
+        if row.last() == Some(&b'\r') {
+            row = &row[..row.len() - 1];
+        }
+        if let Some((expected_event, expected_raw_line)) = pending_rows.get(&sequence) {
+            if row_start == 0 && !scan_start_is_boundary {
+                return Ok(None);
+            }
+            let Ok(raw_line) = std::str::from_utf8(row) else {
+                return Ok(None);
+            };
+            if expected_raw_line
+                .as_deref()
+                .is_some_and(|expected| row != expected.as_bytes())
+                || !codex_pending_event_matches_row(expected_event, raw_line, sequence)
+            {
+                return Ok(None);
+            }
+            recovered.insert(sequence, scan_start.saturating_add(row_start as u64));
+        }
+        if sequence == earliest_sequence {
+            break;
+        }
+        sequence -= 1;
+        cursor = row_start;
+    }
+
+    Ok((recovered.len() == pending_rows.len()).then_some(recovered))
+}
+
+/// Reconstruct a legacy Codex row binding from the normalized event that was
+/// persisted in continuation state. Codex deliberately drops raw JSON lines
+/// from that state, so the source row must independently reproduce its stable
+/// narrative and provider identity fields at the saved sequence.
+fn codex_pending_event_matches_row(
+    expected: &AgentChatEvent,
+    raw_line: &str,
+    sequence: u64,
+) -> bool {
+    let Some(candidate) = normalize_chat_line(&expected.session_id, "codex", raw_line, sequence)
+    else {
+        return false;
+    };
+    candidate.provider == expected.provider
+        && candidate.session_id == expected.session_id
+        && candidate.sequence == expected.sequence
+        && candidate.source == expected.source
+        && candidate.kind == expected.kind
+        && candidate.role == expected.role
+        && candidate.text == expected.text
+        && candidate.turn_id == expected.turn_id
+        && ["input_origin", "provider_turn_id", "provider_event_id"]
+            .iter()
+            .all(|key| candidate.metadata.get(*key) == expected.metadata.get(*key))
 }
 
 fn incomplete_batch(
@@ -764,6 +949,133 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["Visible after disabled"]
         );
+    }
+
+    #[test]
+    fn pending_codex_context_keeps_its_source_offset_across_batches() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.jsonl");
+        let context = r#"{"type":"response_item","payload":{"type":"message","id":"context-1","role":"user","content":[{"type":"input_text","text":"Host context."}],"internal_chat_message_metadata_passthrough":{"turn_id":"codex-turn-1"}}}"#;
+        std::fs::write(&path, format!("{context}\n")).expect("write pending context");
+
+        let first =
+            acquire_provider_log_batch("agent-1", "codex", &path, "codex:session:one", None, true)
+                .expect("acquire pending context");
+        assert!(first.events.is_empty());
+        assert!(first.next.normalizer.has_pending_events());
+
+        let request = r#"{"type":"event_msg","payload":{"type":"user_message","message":"Inspect the archive."}}"#;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| {
+                use std::io::Write as _;
+                writeln!(file, "{request}")
+            })
+            .expect("append request that roots the pending context");
+        let second = acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            "codex:session:one",
+            Some(first.next),
+            true,
+        )
+        .expect("acquire request and release context");
+        let context_event = second
+            .events
+            .iter()
+            .find(|event| event.metadata["input_origin"] == "context_injection")
+            .expect("released context event");
+        assert_eq!(context_event.sequence, Some(1));
+        assert_eq!(
+            context_event.metadata["provider_log_row_offset"].as_u64(),
+            Some(0)
+        );
+        let request_event = second
+            .events
+            .iter()
+            .find(|event| event.metadata["input_origin"] == "human_input")
+            .expect("request event");
+        assert_eq!(request_event.sequence, Some(2));
+        assert_eq!(
+            request_event.metadata["provider_log_row_offset"].as_u64(),
+            Some(context.len() as u64 + 1)
+        );
+    }
+
+    #[test]
+    fn legacy_pending_row_recovery_fails_when_sequence_is_outside_scan_limit() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.jsonl");
+        let context = r#"{"type":"response_item","payload":{"type":"message","id":"context-1","role":"user","content":[{"type":"input_text","text":"Host context."}],"internal_chat_message_metadata_passthrough":{"turn_id":"codex-turn-1"}}}"#;
+        let content = format!("{context}\n{{\"type\":\"ignored\"}}\n{{\"type\":\"ignored\"}}\n");
+        std::fs::write(&path, &content).expect("write source rows");
+
+        let mut event =
+            crate::providers::chat_transcript::normalize_chat_line("agent-1", "codex", context, 1)
+                .expect("normalize pending Codex context");
+        event.metadata[PROVIDER_RAW_LINE_METADATA_KEY] = serde_json::json!(context);
+        let mut file = std::fs::File::open(&path).expect("open source rows");
+
+        let recovered =
+            recover_legacy_pending_row_offsets(&mut file, content.len() as u64, 4, &[event], 8)
+                .expect("bounded recovery scan");
+
+        assert!(recovered.is_none());
+    }
+
+    #[test]
+    fn legacy_pending_row_recovery_rejects_a_mid_record_scan_boundary() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.jsonl");
+        let context = r#"{"type":"response_item","payload":{"type":"message","id":"context-1","role":"user","content":[{"type":"input_text","text":"Host context."}],"internal_chat_message_metadata_passthrough":{"turn_id":"codex-turn-1"}}}"#;
+        let source_row = format!("    {context}\n");
+        std::fs::write(&path, &source_row).expect("write source row with JSON whitespace prefix");
+
+        let mut event =
+            crate::providers::chat_transcript::normalize_chat_line("agent-1", "codex", context, 1)
+                .expect("normalize pending Codex context");
+        // Simulate a stored row string that matches the scan suffix but does
+        // not establish that the suffix begins at the physical row boundary.
+        event.metadata[PROVIDER_RAW_LINE_METADATA_KEY] = serde_json::json!(context);
+        let mut file = std::fs::File::open(&path).expect("open source row");
+
+        let recovered = recover_legacy_pending_row_offsets(
+            &mut file,
+            source_row.len() as u64,
+            2,
+            &[event],
+            source_row.len() as u64 - 4,
+        )
+        .expect("bounded recovery scan");
+
+        assert!(recovered.is_none());
+    }
+
+    #[test]
+    fn legacy_pending_row_recovery_rejects_duplicate_sequence_mapping() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.jsonl");
+        let context = r#"{"type":"response_item","payload":{"type":"message","id":"context-1","role":"user","content":[{"type":"input_text","text":"Host context."}],"internal_chat_message_metadata_passthrough":{"turn_id":"codex-turn-1"}}}"#;
+        let content = format!("{context}\n");
+        std::fs::write(&path, &content).expect("write source row");
+        let event =
+            crate::providers::chat_transcript::normalize_chat_line("agent-1", "codex", context, 1)
+                .expect("normalize pending Codex context");
+        assert!(event.metadata.get(PROVIDER_RAW_LINE_METADATA_KEY).is_none());
+        let mut file = std::fs::File::open(&path).expect("open source row");
+
+        let recovered = recover_legacy_pending_row_offsets(
+            &mut file,
+            content.len() as u64,
+            2,
+            &[event.clone(), event],
+            content.len() as u64,
+        )
+        .expect("bounded recovery scan");
+
+        assert!(recovered.is_none());
     }
 
     #[test]

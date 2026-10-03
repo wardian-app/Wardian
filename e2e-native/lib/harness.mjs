@@ -746,7 +746,9 @@ export async function invokeTauri(driver, command, args = {}) {
   const result = await invokeTauriResult(driver, command, args);
   if (!result?.ok) {
     const detail = result?.error?.message ?? JSON.stringify(result?.error ?? null);
-    throw new Error(`${command} failed: ${detail}`);
+    const failure = new Error(`${command} failed: ${detail}`);
+    if (typeof result?.error?.code === "string") failure.code = result.error.code;
+    throw failure;
   }
   return result.value;
 }
