@@ -171,12 +171,10 @@ type TerminalSessionEntry = {
   frameGeometry: { cols: number; rows: number } | null;
   frameGeneration: number;
   pendingGeometry: boolean;
-  ownerGeometryTransitionSettled: boolean;
   repaintRequestedForGeometry: boolean;
   preserveOwnerScrollback: boolean;
   snapshotStatus: "ready" | "pending" | "degraded";
   snapshotDegradation: "missing_formatted_state" | "invalid_formatted_state" | null;
-  allowPendingKeyboard: boolean;
   geometrySettleEpoch: number;
   presentationBindingEpoch: number;
   geometrySettleTimer?: ReturnType<typeof setTimeout> | null;
@@ -1123,7 +1121,6 @@ async function reportTerminalSize(
   const previousTransition = {
     pendingGeometry: entry.pendingGeometry,
     repaintRequestedForGeometry: entry.repaintRequestedForGeometry,
-    allowPendingKeyboard: entry.allowPendingKeyboard,
     snapshotStatus: entry.snapshotStatus,
   };
   const transitionGeneration = entry.generation;
@@ -1138,7 +1135,6 @@ async function reportTerminalSize(
     transitionEpoch = entry.geometrySettleEpoch;
     entry.pendingGeometry = true;
     entry.repaintRequestedForGeometry = false;
-    entry.allowPendingKeyboard = false;
     setSnapshotStatus(entry, "pending");
   }
   const ownsCurrentTransition = () => {
@@ -1158,7 +1154,6 @@ async function reportTerminalSize(
   const restorePreviousTransition = () => {
     entry.pendingGeometry = previousTransition.pendingGeometry;
     entry.repaintRequestedForGeometry = previousTransition.repaintRequestedForGeometry;
-    entry.allowPendingKeyboard = previousTransition.allowPendingKeyboard;
     setSnapshotStatus(entry, previousTransition.snapshotStatus);
   };
   try {
@@ -1267,7 +1262,6 @@ function setSnapshotStatus(entry: TerminalSessionEntry, status: TerminalSessionE
   entry.snapshotStatus = status;
   if (status === "ready") {
     entry.snapshotDegradation = null;
-    entry.allowPendingKeyboard = false;
   }
   if (status === "pending") {
     scheduleGeometrySettle(entry);
@@ -1394,32 +1388,36 @@ async function settleQuietGeometry(
   }
 }
 
-function canEnablePendingKeyboard(entry: TerminalSessionEntry) {
+function hasCurrentTerminalOwner(entry: TerminalSessionEntry) {
   const state = entry.brokerState;
   return state?.owner_presentation_id === entry.presentationId &&
-    state.pending_activation === null && state.runtime_generation === entry.generation;
+    state.pending_activation === null && state.runtime_state === "live" &&
+    state.runtime_generation === entry.generation;
 }
 
-function canSendTerminalInput(entry: TerminalSessionEntry, data?: string) {
-  if (!canEnablePendingKeyboard(entry)) return false;
-  const fit = entry.renderer?.canonicalFit;
-  if (data !== undefined && entry.allowPendingKeyboard &&
-      (entry.pendingGeometry || entry.snapshotStatus === "degraded")) {
-    // A deliberate keyboard recovery action cannot grant coordinate input.
-    return !/\x1b\[(?:<\d+;\d+;\d+[Mm]|\d+;\d+;\d+M|M|\d+;\d+R)/.test(data);
-  }
+function hasAccurateTerminalGeometry(entry: TerminalSessionEntry) {
   const state = entry.brokerState;
-  if (data !== undefined && !entry.ownerGeometryTransitionSettled &&
-      entry.pendingGeometry && entry.snapshotStatus === "pending" &&
-      entry.lastReportedSize?.cols === state?.geometry.cols &&
-      entry.lastReportedSize?.rows === state?.geometry.rows) {
-    // A stale source frame cannot safely map mouse or cursor coordinates.
-    // xterm's ordinary keyboard text has no dependency on that frame.
-    return !/[\x1b\x9b]/.test(data);
-  }
-  return !entry.pendingGeometry &&
-    entry.snapshotStatus === "ready" && fit?.scale === 1 && !fit.pan &&
-    fit.cols === state?.geometry.cols && fit.rows === state?.geometry.rows;
+  const fit = entry.renderer?.canonicalFit;
+  // A plain degraded projection has no authoritative VT cursor or mode state.
+  return Boolean(state && entry.snapshotStatus === "ready" && !entry.pendingGeometry &&
+    entry.frameGeneration === state.runtime_generation &&
+    entry.frameGeometry?.cols === state.geometry.cols &&
+    entry.frameGeometry.rows === state.geometry.rows &&
+    fit?.scale === 1 && !fit.pan &&
+    fit.cols === state.geometry.cols && fit.rows === state.geometry.rows);
+}
+
+function containsCoordinateDependentTerminalInput(data: string) {
+  // While the rendered frame is stale, key reports remain usable. Mouse
+  // reports and CPR values encode cells in that frame and must wait for sync.
+  return /(?:\x1b\[|\x9b)(?:<\d+;\d+;\d+[Mm]|\d+;\d+;\d+M|M[\s\S]{3}|(?:\?)?\d+;\d+R)/.test(data);
+}
+
+function canSendTerminalInput(entry: TerminalSessionEntry, data?: string, keyboardInput = false) {
+  if (!hasCurrentTerminalOwner(entry)) return false;
+  if (data === undefined) return hasAccurateTerminalGeometry(entry);
+  return keyboardInput || !containsCoordinateDependentTerminalInput(data) ||
+    hasAccurateTerminalGeometry(entry);
 }
 
 function sizeRendererToSource(entry: TerminalSessionEntry, cols: number, rows: number) {
@@ -1640,7 +1638,6 @@ async function applyBrokerSnapshot(
     entry.geometrySettleEpoch += 1;
     entry.pendingGeometry = true;
     entry.repaintRequestedForGeometry = false;
-    entry.allowPendingKeyboard = false;
     entry.preserveOwnerScrollback = Boolean(
       options.preserveLocalScrollback && renderer &&
       snapshot.scrollback.length === 0 &&
@@ -1651,9 +1648,6 @@ async function applyBrokerSnapshot(
     return;
   }
   entry.brokerDecoder = new TextDecoder();
-  // A rejected resize can roll status back to ready without a frame. Only a
-  // post-geometry snapshot consumes the first owner's keyboard allowance.
-  const wasPendingGeometry = entry.pendingGeometry && entry.snapshotStatus === "pending";
   const replay = decodeTerminalSnapshot(snapshot);
   if (replay.kind === "degraded" && entry.frameGeometry &&
       entry.frameGeneration === snapshot.runtime_generation) {
@@ -1662,11 +1656,9 @@ async function applyBrokerSnapshot(
       entry.geometrySettleEpoch += 1;
       if (!entry.pendingGeometry) entry.repaintRequestedForGeometry = false;
       entry.pendingGeometry = true;
-      entry.allowPendingKeyboard = false;
       applyCanonicalGeometry(entry, snapshot.geometry.cols, snapshot.geometry.rows);
     }
     entry.snapshotDegradation = replay.reason;
-    if (entry.pendingGeometry) entry.ownerGeometryTransitionSettled = true;
     setSnapshotStatus(entry, "degraded");
     return;
   }
@@ -1742,7 +1734,6 @@ async function applyBrokerSnapshot(
   entry.repaintRequestedForGeometry = false;
   entry.preserveOwnerScrollback = false;
   entry.snapshotDegradation = replay.kind === "degraded" ? replay.reason : null;
-  if (wasPendingGeometry) entry.ownerGeometryTransitionSettled = true;
   setSnapshotStatus(entry, replay.kind === "formatted" ? "ready" : "degraded");
   terminalSessionMap.get(terminalKey)?.titleHandlerRef.current?.(entry.latestTitle ?? "");
 }
@@ -1787,7 +1778,6 @@ async function applyBrokerEvents(
         entry.geometrySettleEpoch += 1;
         entry.pendingGeometry = true;
         entry.repaintRequestedForGeometry = false;
-        entry.allowPendingKeyboard = false;
         setSnapshotStatus(entry, "pending");
       }
       applyCanonicalGeometry(entry, event.geometry.cols, event.geometry.rows);
@@ -2240,12 +2230,10 @@ async function getOrCreateTerminalSession(
     frameGeometry: null,
     frameGeneration: 0,
     pendingGeometry: false,
-    ownerGeometryTransitionSettled: false,
     repaintRequestedForGeometry: false,
     preserveOwnerScrollback: false,
     snapshotStatus: "ready",
     snapshotDegradation: null,
-    allowPendingKeyboard: false,
     geometrySettleEpoch: 0,
     presentationBindingEpoch: 0,
     cursorRegistration,
@@ -2472,8 +2460,14 @@ function createRenderer(terminalKey: string, entry: TerminalSessionEntry) {
     snapshotOverlay: null,
   };
 
+  const pendingKeyboardSequences = new Set<string>();
+  term.onKey(({ key }) => pendingKeyboardSequences.add(key));
   term.onData((data) => {
-    if (!entry.legacyMode && !canSendTerminalInput(entry, data)) return;
+    // xterm emits onKey immediately before onData for physical keyboard input.
+    // Use that origin to distinguish modified function keys such as Ctrl+F3
+    // (CSI 1;5R) from an identical cursor-position report.
+    const keyboardInput = pendingKeyboardSequences.delete(data);
+    if (!entry.legacyMode && !canSendTerminalInput(entry, data, keyboardInput)) return;
     if ((data === "\x1b[I" || data === "\x1b[O") && entry.provider !== "opencode") {
       return;
     }
@@ -2484,6 +2478,12 @@ function createRenderer(terminalKey: string, entry: TerminalSessionEntry) {
     const input = filterProviderTerminalInput(entry.provider, data);
     if (input.length === 0) {
       return;
+    }
+    if (entry.pendingGeometry && entry.snapshotStatus === "degraded") {
+      // A fresh owner keystroke is the recovery signal after one failed
+      // post-output snapshot. The next provider output may now carry a usable
+      // formatted frame, without a separate keyboard-enable control.
+      entry.repaintRequestedForGeometry = false;
     }
     if (entry.provider !== "opencode" && term.buffer.active.viewportY < term.buffer.active.baseY) {
       term.scrollToBottom();
@@ -2713,7 +2713,6 @@ export const AgentTerminal = memo(function AgentTerminal({
   const [rendererReady, setRendererReady] = useState(false);
   const [snapshotStatus, setSnapshotStatusView] = useState<TerminalSessionEntry["snapshotStatus"]>("ready");
   const [snapshotDegradation, setSnapshotDegradationView] = useState<TerminalSessionEntry["snapshotDegradation"]>(null);
-  const [canRecoverKeyboard, setCanRecoverKeyboard] = useState(false);
   const [rendererMountRevision, setRendererMountRevision] = useState(0);
   const terminalFontSize = useSettingsStore((state) => state.terminalFontSize);
   const terminalFontFamily = useSettingsStore((state) => state.terminalFontFamily);
@@ -3352,11 +3351,9 @@ export const AgentTerminal = memo(function AgentTerminal({
         entry = session;
         setSnapshotStatusView(session.snapshotStatus);
         setSnapshotDegradationView(session.snapshotDegradation);
-        setCanRecoverKeyboard(Boolean(canEnablePendingKeyboard(session)));
         session.onSnapshotStatusChange = (status, reason) => {
           setSnapshotStatusView(status);
           setSnapshotDegradationView(reason);
-          setCanRecoverKeyboard(Boolean(canEnablePendingKeyboard(session)));
         };
         session.onRendererEvicted = () => {
           rendererEvictedRef.current = true;
@@ -3486,8 +3483,6 @@ export const AgentTerminal = memo(function AgentTerminal({
               return;
             }
             setEntryBrokerState(session, state);
-            if (!canEnablePendingKeyboard(session)) session.allowPendingKeyboard = false;
-            setCanRecoverKeyboard(Boolean(canEnablePendingKeyboard(session)));
             if (presentationObserverMountedRef.current) {
               onPresentationStateChangeRef.current?.(state, session.presentationState);
             }
@@ -3504,8 +3499,6 @@ export const AgentTerminal = memo(function AgentTerminal({
             }
             session.presentationState = result.presentation;
             setEntryBrokerState(session, result.broker_state);
-            if (!canEnablePendingKeyboard(session)) session.allowPendingKeyboard = false;
-            setCanRecoverKeyboard(Boolean(canEnablePendingKeyboard(session)));
             if (presentationObserverMountedRef.current) {
               onPresentationStateChangeRef.current?.(result.broker_state, result.presentation);
             }
@@ -3566,8 +3559,6 @@ export const AgentTerminal = memo(function AgentTerminal({
                 lease_epoch: decision.lease_epoch,
                 owner_presentation_id: decision.owner_presentation_id,
               });
-              if (!canEnablePendingKeyboard(session)) session.allowPendingKeyboard = false;
-              setCanRecoverKeyboard(Boolean(canEnablePendingKeyboard(session)));
               if (presentationObserverMountedRef.current) {
                 onPresentationStateChangeRef.current?.(
                   session.brokerState,
@@ -4022,23 +4013,10 @@ export const AgentTerminal = memo(function AgentTerminal({
           </button>
         </div>
       )}
-      {snapshotStatus !== "ready" && !initError && (
+      {snapshotStatus === "degraded" && !initError && (
         <div data-testid="terminal-snapshot-status" className="absolute right-2 top-2 z-30 max-w-72 rounded border border-wardian-border bg-[var(--color-wardian-card)] px-2 py-1 text-xs text-muted shadow">
-          <span>{snapshotStatus === "pending" ? "Waiting for terminal repaint" :
-            snapshotDegradation === "invalid_formatted_state" ? "Terminal formatting invalid" :
-              "Terminal formatting unavailable"}</span>
-          {canRecoverKeyboard && (
-            <div className="mt-1">
-              <p>The provider has not repainted. Keys may affect an unseen prompt.</p>
-              <button type="button" className="mt-1 rounded border border-current px-2 py-0.5" onClick={() => {
-                const entry = terminalSessionMap.get(terminalKey);
-                if (!entry || !canEnablePendingKeyboard(entry)) return;
-                entry.allowPendingKeyboard = true;
-                entry.repaintRequestedForGeometry = false;
-                focusTerminal();
-              }}>Enable keyboard input</button>
-            </div>
-          )}
+          <span>{snapshotDegradation === "invalid_formatted_state" ? "Terminal formatting invalid" :
+            "Terminal formatting unavailable"}</span>
         </div>
       )}
       <div
