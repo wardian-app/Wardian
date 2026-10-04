@@ -22,6 +22,7 @@ import { normalizeWatchlistState } from "../layout/watchlist/watchlistUtils";
 import type { AgentInteractions, WatchlistPrefs } from "../layout/watchlist/types";
 import { ConfirmProvider } from "../components/ConfirmDialog";
 import { makeSingleGroupDocument, makeSurface } from "../features/workbench/workbenchTestUtils";
+import type { WorkbenchSaveRequest, WorkbenchSaveResult } from "../features/workbench/workbenchPersistence";
 import { createCoreWorkbenchSurfaceRegistry } from "../features/workbench/coreSurfaceRegistry";
 import type { TelemetryFleet } from "../features/telemetry/telemetryTypes";
 
@@ -952,6 +953,59 @@ describe("Workbench persistence boot integration", () => {
     ]) {
       expect(mockListen.mock.calls.filter(([name]) => name === eventName)).toHaveLength(1);
     }
+  });
+
+  it("keeps routine save progress internal while ordinary navigation remains usable", async () => {
+    setupDefaultMocks([], defaultClasses);
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    let finishSave!: (result: WorkbenchSaveResult) => void;
+    const pendingSave = new Promise<WorkbenchSaveResult>((resolve) => { finishSave = resolve; });
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "save_workbench_state") return pendingSave;
+      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
+    });
+    render(<App />);
+    await screen.findByTestId("agents-overview-surface");
+    act(() => { useLibraryStore.getState().openLibraryAt("skills"); });
+    await screen.findByTestId("library-surface");
+    await waitFor(() => expect(mockInvoke.mock.calls.some(([command]) =>
+      command === "save_workbench_state")).toBe(true));
+    const routineNotice = screen.queryByTestId("workbench-persistence-notice")?.textContent ?? null;
+    const request = mockInvoke.mock.calls.find(([command]) => command === "save_workbench_state")?.[1] as WorkbenchSaveRequest;
+    try {
+      const agentsTab = screen.getByRole("tab", { name: "Agents" });
+      fireEvent.pointerDown(agentsTab);
+      fireEvent.mouseDown(agentsTab);
+      fireEvent.click(agentsTab);
+      expect(await screen.findByTestId("agents-overview-surface")).toBeInTheDocument();
+      await waitFor(() => expect(agentsTab).toHaveAttribute("aria-selected", "true"));
+    } finally {
+      // Settle the save even when a preceding navigation assertion fails.
+      await act(async () => {
+        finishSave({
+          outcome: "saved",
+          durable_revision: request.document.revision,
+          durable_token: "completed-save-token",
+          request_id: request.request_id,
+        });
+        await pendingSave;
+      });
+    }
+    expect(routineNotice).toBeNull();
+  });
+
+  it("keeps actionable workbench save errors visible", async () => {
+    setupDefaultMocks([], defaultClasses);
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "save_workbench_state") return Promise.reject(new Error("Controlled disk write failure"));
+      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
+    });
+    render(<App />);
+    await screen.findByTestId("agents-overview-surface");
+    act(() => { useLibraryStore.getState().openLibraryAt("skills"); });
+    await waitFor(() => expect(screen.getByTestId("workbench-persistence-notice"))
+      .toHaveTextContent("Controlled disk write failure"));
   });
 
   it("shows nonblocking recovery and backend safe-mode state", async () => {
