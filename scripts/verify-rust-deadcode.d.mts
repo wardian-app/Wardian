@@ -42,6 +42,6 @@ export function unreachableItems(
   allFiles: Map<string, SourceAnalysis>,
 ): Array<DefinedItem & { file: string }>;
 export function registeredCommands(libSource: string): string[];
-export function stripJsComments(text: string, options?: { ambiguousSlash?: "division" | "regex" }): string;
+export function blankPossibleComments(text: string): string;
 export function quotedNamesIn(text: string): Set<string>;
 export function main(argv?: string[]): number;

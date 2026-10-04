@@ -21,7 +21,6 @@ import {
   rewriteVisibility,
   splitCfgGated,
   quotedNamesIn,
-  stripJsComments,
   unreachableItems,
 } from '../scripts/verify-rust-deadcode.mjs';
 
@@ -278,33 +277,31 @@ describe('Rust dead-code gate', () => {
     ].join('\n'))).toEqual(['first', 'debug_second', 'third']);
   });
 
-  it('does not count a command name in a comment as an invocation', () => {
-    const stripped = stripJsComments([
+  it('never counts a command name that could sit in a comment', () => {
+    const names = (source: string) => [...quotedNamesIn(source)].sort();
+    expect(names([
       '// invoke("line_comment_command") was removed',
       '/* invoke("block_comment_command")',
       '   spans lines */ invoke("live_command");',
-      'const url = "https://example.test/path"; // trailing "after_url_command"',
       'const tpl = `/* kept */ ${"template_command"}`;',
-    ].join('\n'));
-    const names = [...stripped.matchAll(/['"`]([a-z_][a-z0-9_]*)['"`]/g)].map((hit) => hit[1]);
-    expect(names).toEqual(['live_command', 'template_command']);
-    expect(stripped).toContain('https://example.test/path');
-    expect(stripped.split('\n')).toHaveLength(5);
-  });
-
-  it('keeps regex literals intact so a quote inside one cannot hide a comment', () => {
-    const names = (source: string) => [...quotedNamesIn(source)];
+    ].join('\n'))).toEqual(['live_command', 'template_command']);
+    // Quotes inside regex literals cannot hide a comment, whatever the slash reading.
     expect(names('const quote = /"/; // invoke("dead_command") was removed')).toEqual([]);
     expect(names('const slash = /[/"]/g; /* invoke("block_dead") */')).toEqual([]);
-    expect(names('if (x) return /\'/.test(s); // "after_return"')).toEqual([]);
-    // A slash after `)` or `}` may start a regex; both readings must keep a name.
     expect(names('if (ready) /"/.test(text); // invoke("dead_command") was removed')).toEqual([]);
-    expect(names('{ } /"/.test(text); // invoke("after_block")')).toEqual([]);
-    expect(names('const half = total / 2; invoke("live_after_division"); // "gone"')).toEqual([
-      'live_after_division',
+    expect(names([
+      'if (ready) /"/.test(text);',
+      'const ratio = (a) / length("a/b"); // invoke("dead_command")',
+    ].join('\n'))).toEqual([]);
+    // A block comment opened after a `//` inside a string still spans its lines.
+    expect(names('const u = "http://x"; /*\n invoke("dead_in_block")\n*/ invoke("after_block");')).toEqual([
+      'after_block',
     ]);
-    expect(names('const ratio = (a) / (b); invoke("live_after_paren");')).toEqual(['live_after_paren']);
-    expect(names('const scaled = (a) / (b) / 2; invoke("live_two_slashes");')).toEqual(['live_two_slashes']);
+    // Division keeps live names on the same line.
+    expect(names('const half = (a) / (b) / 2; invoke("live_after_division");')).toEqual(['live_after_division']);
+    // Over-blanking is the accepted cost: a name after `//` in a URL on the same line is
+    // not counted, so the check reports that command rather than missing a dead one.
+    expect(names('fetch("https://example.test"); invoke("after_url");')).toEqual([]);
   });
 
   it('follows import aliases to the item they name', () => {
