@@ -8,6 +8,7 @@ mod codex_terminal_theme;
 pub(crate) mod headless;
 pub(crate) mod opencode;
 pub(crate) mod pi_receipt;
+pub(crate) mod roster_io;
 pub(crate) mod session_identity;
 pub(crate) mod spawn;
 #[cfg(test)]
@@ -1514,29 +1515,45 @@ pub(crate) fn try_save_state_snapshot(configs: &[AgentConfig]) -> Result<(), Str
 
 pub(crate) fn try_save_state_snapshot_unlocked(configs: &[AgentConfig]) -> Result<(), String> {
     let app_dir = get_wardian_home().ok_or_else(|| "Could not locate Wardian home".to_string())?;
-    std::fs::create_dir_all(&app_dir).map_err(|error| error.to_string())?;
+    try_save_state_snapshot_for_home(&app_dir, configs)
+}
+
+/// Persist to the command's captured root; a cancelled caller must not let a
+/// later environment change redirect its still-running worker.
+pub(crate) fn try_save_state_snapshot_for_home(
+    app_dir: &std::path::Path,
+    configs: &[AgentConfig],
+) -> Result<(), String> {
+    std::fs::create_dir_all(app_dir).map_err(|error| error.to_string())?;
     let settings_dir = app_dir.join("settings");
     std::fs::create_dir_all(&settings_dir).map_err(|error| error.to_string())?;
+    #[cfg(test)]
+    if let Some(probe) = ROSTER_IO_PROBE
+        .try_with(|probe| probe.borrow_mut().take())
+        .ok()
+        .flatten()
+    {
+        let _ = probe.started.send(());
+        let _ = probe.entered.send(());
+        probe.release.recv().map_err(|error| error.to_string())?;
+    }
     write_json_atomic(&settings_dir.join("state.json"), configs).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+pub(crate) struct RosterIoProbe {
+    pub(crate) entered: tokio::sync::oneshot::Sender<()>,
+    pub(crate) started: std::sync::mpsc::Sender<()>,
+    pub(crate) release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static ROSTER_IO_PROBE: std::cell::RefCell<Option<RosterIoProbe>>;
 }
 
 pub(crate) fn save_state_snapshot(_app: &AppHandle, configs: &[AgentConfig]) {
     if let Err(error) = try_save_state_snapshot(configs) {
-        log_debug(&format!(
-            "[WARDIAN] Failed to persist state snapshot: {error}"
-        ));
-    }
-}
-
-/// Persist under the caller's roster barrier, acquired before either global lock.
-/// Reacquiring it here would deadlock a writer against concurrent rename.
-pub fn save_state(
-    _barrier: &wardian_core::agent_replacement::AgentRosterBarrier,
-    agents: &HashMap<String, ActiveAgent>,
-    order: &[String],
-) {
-    let configs = state_configs_snapshot(agents, order);
-    if let Err(error) = try_save_state_snapshot_unlocked(&configs) {
         log_debug(&format!(
             "[WARDIAN] Failed to persist state snapshot: {error}"
         ));

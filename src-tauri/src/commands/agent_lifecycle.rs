@@ -41,9 +41,11 @@ mod tests;
 mod rename_tests;
 
 #[cfg(test)]
-tokio::task_local! {
-    static RENAME_ROSTER_ATTEMPT: std::cell::RefCell<Option<tokio::sync::oneshot::Sender<()>>>;
-}
+#[path = "agent/roster_io_tests.rs"]
+mod roster_io_tests;
+
+#[cfg(test)]
+use crate::manager::roster_io::ROSTER_BARRIER_ATTEMPT as RENAME_ROSTER_ATTEMPT;
 
 pub(super) fn fresh_provider_session_for_initial_capture(
     config: &wardian_core::models::AgentConfig,
@@ -143,27 +145,7 @@ pub(super) async fn lock_rename_mutation(
 /// The file-lock wait runs outside the async executor so unrelated commands progress.
 pub(super) async fn acquire_agent_roster_barrier_async(
 ) -> Result<wardian_core::agent_replacement::AgentRosterBarrier, String> {
-    // The test-scoped probe reports actual contention before asserting map access.
-    #[cfg(test)]
-    let attempt = RENAME_ROSTER_ATTEMPT
-        .try_with(|signal| signal.borrow_mut().take())
-        .ok()
-        .flatten();
-    tokio::task::spawn_blocking(move || {
-        #[cfg(test)]
-        if let Some(signal) = attempt {
-            let immediate = wardian_core::agent_replacement::acquire_agent_roster_barrier(false)?;
-            if immediate.is_some() {
-                return Ok(immediate);
-            }
-            let _ = signal.send(());
-        }
-        wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
-    })
-    .await
-    .map_err(|error| error.to_string())?
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| "Agent roster barrier is unavailable".to_string())
+    crate::manager::roster_io::acquire_roster_barrier().await
 }
 
 /// Field order releases the order/map locks before the cross-process barrier.
@@ -171,7 +153,28 @@ pub(super) struct AgentRosterWriteGuard<'a> {
     pub(super) order: tokio::sync::MutexGuard<'a, Vec<String>>,
     pub(super) agents:
         tokio::sync::MutexGuard<'a, std::collections::HashMap<String, crate::state::ActiveAgent>>,
-    pub(super) barrier: wardian_core::agent_replacement::AgentRosterBarrier,
+    pub(super) barrier: Option<wardian_core::agent_replacement::AgentRosterBarrier>,
+}
+
+impl AgentRosterWriteGuard<'_> {
+    /// Capture under durable exclusion, then release global reads before I/O.
+    /// Lifecycle context travels through the worker and back to its caller.
+    pub(super) async fn save<C: Send + 'static>(self, context: C) -> Result<C, String> {
+        let configs = crate::manager::state_configs_snapshot(&self.agents, &self.order);
+        let Self {
+            order,
+            agents,
+            barrier,
+        } = self;
+        drop(order);
+        drop(agents);
+        match barrier {
+            Some(barrier) => {
+                crate::manager::roster_io::save_snapshot(barrier, configs, context).await
+            }
+            None => Ok(context),
+        }
+    }
 }
 
 /// Wait for durable exclusion before acquiring either global roster lock.
@@ -179,13 +182,37 @@ pub(super) async fn lock_agent_roster_for_save(
     state: &AppState,
 ) -> Result<AgentRosterWriteGuard<'_>, String> {
     let barrier = acquire_agent_roster_barrier_async().await?;
+    Ok(lock_agent_roster_after_admission(state, Some(barrier)).await)
+}
+
+/// Pause preserves its best-effort persistence errors, but waits for admission
+/// before changing local state so cancellation cannot discard an unqueued save.
+pub(super) async fn lock_agent_roster_for_best_effort_save(
+    state: &AppState,
+) -> AgentRosterWriteGuard<'_> {
+    let barrier = match acquire_agent_roster_barrier_async().await {
+        Ok(barrier) => Some(barrier),
+        Err(error) => {
+            crate::manager::log_debug(&format!(
+                "[WARDIAN] Failed to persist state snapshot: {error}"
+            ));
+            None
+        }
+    };
+    lock_agent_roster_after_admission(state, barrier).await
+}
+
+async fn lock_agent_roster_after_admission(
+    state: &AppState,
+    barrier: Option<wardian_core::agent_replacement::AgentRosterBarrier>,
+) -> AgentRosterWriteGuard<'_> {
     let agents = state.agents.lock().await;
     let order = state.agent_order.lock().await;
-    Ok(AgentRosterWriteGuard {
+    AgentRosterWriteGuard {
         order,
         agents,
         barrier,
-    })
+    }
 }
 
 pub(super) async fn acquire_agent_lifecycle_guard(
