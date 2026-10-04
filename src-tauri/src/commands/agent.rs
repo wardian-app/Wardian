@@ -40,7 +40,8 @@ mod provider_log_tests;
 mod removal;
 use agent_lifecycle::{
     acquire_agent_lifecycle_guard, hold_previous_provider_before_rotation, lock_agent_lifecycle,
-    lock_rename_mutation, stop_native_owner, stop_native_owner_with_before_capture, PendingRuntime,
+    lock_agent_roster_for_save, lock_rename_mutation, stop_native_owner,
+    stop_native_owner_with_before_capture, PendingRuntime,
 };
 use agent_naming::{
     generated_agent_name, persisted_agent_session_names, resolve_requested_spawn_session_name,
@@ -4620,15 +4621,14 @@ pub async fn enable_agent_worktree(
 
     lifecycle_heartbeat.ensure_active("clear")?;
     {
-        let mut agents = state.agents.lock().await;
-        let order = state.agent_order.lock().await;
-        if let Some(agent) = agents.get_mut(&session_id) {
+        let mut roster = lock_agent_roster_for_save(&state).await?;
+        if let Some(agent) = roster.agents.get_mut(&session_id) {
             lifecycle_heartbeat.ensure_active("clear")?;
             {
                 let mut config = agent.config.lock().unwrap();
                 enable_worktree_config(&mut config, &worktree_path);
             }
-            manager::save_state(&app, &agents, &order);
+            manager::save_state(&roster.barrier, &roster.agents, &roster.order);
             let _ = app.emit("agents-updated", ());
         } else {
             return Err(format!("Agent {} not found", session_id));
@@ -4733,9 +4733,8 @@ pub async fn assign_agent_worktree(
             .ok_or_else(|| "Worktree is not managed by Wardian".to_string())?;
     lifecycle_heartbeat.ensure_active("clear")?;
     {
-        let mut agents = state.agents.lock().await;
-        let order = state.agent_order.lock().await;
-        if let Some(agent) = agents.get_mut(&session_id) {
+        let mut roster = lock_agent_roster_for_save(&state).await?;
+        if let Some(agent) = roster.agents.get_mut(&session_id) {
             lifecycle_heartbeat.ensure_active("clear")?;
             {
                 let mut config = agent.config.lock().unwrap();
@@ -4753,7 +4752,7 @@ pub async fn assign_agent_worktree(
                 )?;
                 assign_worktree_config(&mut config, &worktree_folder)?;
             }
-            manager::save_state(&app, &agents, &order);
+            manager::save_state(&roster.barrier, &roster.agents, &roster.order);
             let _ = app.emit("agents-updated", ());
         } else {
             return Err(format!("Agent {} not found", session_id));
@@ -4877,15 +4876,14 @@ pub async fn disable_agent_worktree(
 
     lifecycle_heartbeat.ensure_active("clear")?;
     {
-        let mut agents = state.agents.lock().await;
-        let order = state.agent_order.lock().await;
-        if let Some(agent) = agents.get_mut(&session_id) {
+        let mut roster = lock_agent_roster_for_save(&state).await?;
+        if let Some(agent) = roster.agents.get_mut(&session_id) {
             lifecycle_heartbeat.ensure_active("clear")?;
             {
                 let mut config = agent.config.lock().unwrap();
                 disable_worktree_config(&mut config)?;
             }
-            manager::save_state(&app, &agents, &order);
+            manager::save_state(&roster.barrier, &roster.agents, &roster.order);
             let _ = app.emit("agents-updated", ());
         } else {
             return Err(format!("Agent {} not found", session_id));
@@ -4915,16 +4913,15 @@ fn apply_agent_order(
 }
 
 #[tauri::command]
-pub async fn reorder_agents(
+pub async fn reorder_agents<R: tauri::Runtime>(
     session_ids: Vec<String>,
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle<R>,
 ) -> Result<(), String> {
     manager::log_debug("[WARDIAN] reorder_agents called");
-    let agents = state.agents.lock().await;
-    let mut order = state.agent_order.lock().await;
-    apply_agent_order(&agents, &mut order, session_ids)?;
-    manager::save_state(&app, &agents, &order);
+    let mut roster = lock_agent_roster_for_save(&state).await?;
+    apply_agent_order(&roster.agents, &mut roster.order, session_ids)?;
+    manager::save_state(&roster.barrier, &roster.agents, &roster.order);
     Ok(())
 }
 

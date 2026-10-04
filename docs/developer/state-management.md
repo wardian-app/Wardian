@@ -73,6 +73,14 @@ repair historical user data or invent missing source identity.
 
 ## Startup restoration and configuration ownership
 
+Rename, reorder, and worktree enable/assign/disable acquire the cross-process
+agent roster barrier before locking the in-memory agent map and display order;
+file-lock waits run on the blocking pool. Persistence within these mutations
+uses the already-held barrier. Other roster paths can use a nonblocking
+try/retry, releasing global locks before a contested wait. No roster path may
+wait for the barrier while holding the agent map or order: that can deadlock
+against a concurrent rename.
+
 Startup restoration uses the same per-agent lifecycle gate as configuration
 updates, pause, and resume. It claims the gate before selecting a saved config
 for an unregistered agent or publishing its `Restoring` placeholder, and keeps
