@@ -571,16 +571,44 @@ const IDENT_WORD = /[A-Za-z_][A-Za-z0-9_]*/g;
 const FORMAT_ARG = /\{([A-Za-z_][A-Za-z0-9_]*)/g;
 
 /**
+ * Aliases introduced by `use path::name as alias` for any of `names`, so a call
+ * through the alias reaches the original item. `as _` binds no name.
+ *
+ * @returns {Map<string, Set<string>>} alias -> original item names
+ */
+function importAliases(tokens, names) {
+  const aliases = new Map();
+  for (let index = 0; index < tokens.count; index += 1) {
+    if (tokens.kinds[index] !== IDENT || tokens.values[index] !== "use") continue;
+    let cursor = index + 1;
+    for (; cursor < tokens.count && tokens.values[cursor] !== ";"; cursor += 1) {
+      if (tokens.kinds[cursor] !== IDENT || tokens.values[cursor] !== "as") continue;
+      const original = tokens.values[cursor - 1];
+      const alias = tokens.values[cursor + 1];
+      if (tokens.kinds[cursor - 1] !== IDENT || !names.has(original)) continue;
+      if (tokens.kinds[cursor + 1] !== IDENT || alias === "_") continue;
+      if (!aliases.has(alias)) aliases.set(alias, new Set());
+      aliases.get(alias).add(original);
+    }
+    index = cursor;
+  }
+  return aliases;
+}
+
+/**
  * Every reference to one of `names` in an analysed file: identifier tokens that
  * are not the name in a definition (`fn name`), not inside a `use`
  * declaration, plus names inside string literals that Rust resolves by name
  * (inline format arguments, and any identifier in an attribute string such as
- * `#[serde(default = "path::to::fn")]`).
+ * `#[serde(default = "path::to::fn")]`). A use of an import alias
+ * (`use path::name as alias`) is a reference to the original name; the import
+ * itself is not.
  *
  * @returns {Array<{ name: string, index: number, testOnly: boolean, inactive: boolean }>}
  */
 export function collectReferences(analysis, names) {
   const { tokens, match, testOnly, inactive } = analysis;
+  const aliases = importAliases(tokens, names);
   const found = [];
   let useEnd = -1;
   let attributeEnd = -1;
@@ -604,9 +632,11 @@ export function collectReferences(analysis, names) {
     if (index <= useEnd) continue;
     const flags = { testOnly: testOnly[index] === 1, inactive: inactive[index] === 1 };
     if (kind === IDENT) {
-      if (!names.has(value)) continue;
+      const aliased = aliases.get(value);
+      if (!names.has(value) && !aliased) continue;
       if (index > 0 && tokens.kinds[index - 1] === IDENT && DEFINITION_KEYWORDS.has(tokens.values[index - 1])) continue;
-      found.push({ name: value, index, ...flags });
+      if (names.has(value)) found.push({ name: value, index, ...flags });
+      for (const original of aliased ?? []) found.push({ name: original, index, ...flags });
     } else if (kind === STR) {
       const pattern = index < attributeEnd ? IDENT_WORD : FORMAT_ARG;
       pattern.lastIndex = 0;

@@ -609,10 +609,44 @@ function walk(dir, found = []) {
 
 const QUOTED_NAME = /['"`]([a-z_][a-z0-9_]*)['"`]/g;
 
+/**
+ * JavaScript or TypeScript source with `//` and `/* *\/` comments blanked, so a
+ * command name left in a comment is not a caller. String and template
+ * literals are kept intact; newlines survive so line structure is unchanged.
+ */
+export function stripJsComments(text) {
+  let out = "";
+  let quote = null;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote) {
+      out += char;
+      if (char === "\\") {
+        out += text[index + 1] ?? "";
+        index += 1;
+      } else if (char === quote) {
+        quote = null;
+      }
+    } else if (char === "/" && text[index + 1] === "/") {
+      while (index < text.length && text[index] !== "\n") index += 1;
+      if (index < text.length) out += "\n";
+    } else if (char === "/" && text[index + 1] === "*") {
+      const end = text.indexOf("*/", index + 2);
+      const stop = end === -1 ? text.length : end + 2;
+      out += text.slice(index, stop).replace(/[^\n]/g, " ");
+      index = stop - 1;
+    } else {
+      if (char === "'" || char === '"' || char === "`") quote = char;
+      out += char;
+    }
+  }
+  return out;
+}
+
 function quotedNames(files) {
   const names = new Set();
   for (const file of files) {
-    for (const hit of readFileSync(file, "utf8").matchAll(QUOTED_NAME)) names.add(hit[1]);
+    for (const hit of stripJsComments(readFileSync(file, "utf8")).matchAll(QUOTED_NAME)) names.add(hit[1]);
   }
   return names;
 }

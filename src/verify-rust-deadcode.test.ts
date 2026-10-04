@@ -20,6 +20,7 @@ import {
   rewriteManifestPaths,
   rewriteVisibility,
   splitCfgGated,
+  stripJsComments,
   unreachableItems,
 } from '../scripts/verify-rust-deadcode.mjs';
 
@@ -274,6 +275,39 @@ describe('Rust dead-code gate', () => {
       '  third',
       '])',
     ].join('\n'))).toEqual(['first', 'debug_second', 'third']);
+  });
+
+  it('does not count a command name in a comment as an invocation', () => {
+    const stripped = stripJsComments([
+      '// invoke("line_comment_command") was removed',
+      '/* invoke("block_comment_command")',
+      '   spans lines */ invoke("live_command");',
+      'const url = "https://example.test/path"; // trailing "after_url_command"',
+      'const tpl = `/* kept */ ${"template_command"}`;',
+    ].join('\n'));
+    const names = [...stripped.matchAll(/['"`]([a-z_][a-z0-9_]*)['"`]/g)].map((hit) => hit[1]);
+    expect(names).toEqual(['live_command', 'template_command']);
+    expect(stripped).toContain('https://example.test/path');
+    expect(stripped.split('\n')).toHaveLength(5);
+  });
+
+  it('follows import aliases to the item they name', () => {
+    const library = new Map([[path.resolve('/ws/core/lib.rs'), analyze([
+      'pub fn perform_cleanup() {}',
+      'pub fn imported_never_called() {}',
+      'pub fn test_alias_target() {}',
+      'use crate::inner_target as local;',
+      'pub fn entry() { local() }',
+      'fn inner_target() {}',
+    ].join('\n'))]]);
+    const consumer = new Map([[path.resolve('/ws/app/main.rs'), analyze([
+      'use core::perform_cleanup as cleanup;',
+      'use core::imported_never_called as never_called;',
+      'fn main() { cleanup(); core::entry(); }',
+      '#[cfg(test)] mod tests { use core::test_alias_target as t; fn x() { t() } }',
+    ].join('\n'))]]);
+    const dead = unreachableItems(library, new Map([...library, ...consumer]));
+    expect(dead.map((item) => item.name).sort()).toEqual(['imported_never_called', 'test_alias_target']);
   });
 
   it('fails new findings and stale entries, but not entries this platform cannot observe', () => {
