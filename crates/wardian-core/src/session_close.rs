@@ -43,13 +43,6 @@ pub fn load_invokers() -> Vec<AutomationSessionCloseInvoker> {
         .unwrap_or_default()
 }
 
-pub fn save_invokers(invokers: &[AutomationSessionCloseInvoker]) -> std::io::Result<()> {
-    mutate_invokers(|stored| {
-        *stored = invokers.to_vec();
-        Ok(())
-    })
-}
-
 /// Serialize the complete read-modify-write operation across app and CLI
 /// processes. Atomic replacement alone prevents torn JSON, not lost updates.
 pub fn mutate_invokers<T>(

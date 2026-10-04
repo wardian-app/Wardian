@@ -405,10 +405,6 @@ impl BrowserSession {
         format!("browser:{}", self.short_ref)
     }
 
-    pub fn owner_agent_id(&self) -> Option<&str> {
-        self.owner_agent_id.as_deref()
-    }
-
     /// The protocol session for the page this surface is presenting.
     ///
     /// Every call goes to the presented page, not to the base one: a popup is
@@ -1088,11 +1084,6 @@ impl BrowserSession {
     /// Forgets the recorded downloads. The files themselves stay on disk.
     pub async fn clear_downloads(&self) {
         self.state.write().await.downloads.clear();
-    }
-
-    /// Where this session writes downloads.
-    pub fn download_dir(&self) -> &Path {
-        &self.download_dir
     }
 
     /// Starts streaming frames and issues this attachment's lease token.

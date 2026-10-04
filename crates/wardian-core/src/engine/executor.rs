@@ -123,11 +123,6 @@ impl MockExecutor {
         self
     }
 
-    pub fn with_failure(mut self, node: &str, err: &str) -> Self {
-        self.fail_nodes.insert(node.into(), err.into());
-        self
-    }
-
     pub fn with_skipped(mut self, node: &str, reason: &str) -> Self {
         self.skip_nodes.insert(node.into(), reason.into());
         self
