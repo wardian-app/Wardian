@@ -920,16 +920,16 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
   await expect(page.getByRole("button", { name: "Collapse summary" })).toHaveAttribute("aria-expanded", "true");
   await expect(inboxSummary).toHaveClass(/max-h-80/);
   await captureFeatureScreenshot("inbox-summary.png", page.locator("main"));
-  await expect(page.getByText("Inbox history 10", { exact: true })).toBeVisible();
-  await expect(page.getByText("Inbox history 11", { exact: true })).toBeHidden();
+  await expect(page.getByText("Inbox history 18", { exact: true })).toBeVisible();
+  await expect(page.getByText("Inbox history 19", { exact: true })).toBeHidden();
   await expect(page.getByText("Inbox history 100", { exact: true })).toBeHidden();
   const inboxScrollRegion = page.getByTestId("remote-inbox-scroll-region");
-  for (let batch = 1; batch <= 9; batch += 1) {
+  for (let batch = 1; batch <= 5; batch += 1) {
     await inboxScrollRegion.evaluate((element) => {
       element.scrollTop = element.scrollHeight;
       element.dispatchEvent(new Event("scroll", { bubbles: true }));
     });
-    const lastExpectedIndex = 10 + batch * 12;
+    const lastExpectedIndex = 18 + batch * 20;
     await expect(page.getByText(`Inbox history ${lastExpectedIndex}`, { exact: true })).toBeVisible();
   }
   await captureFeatureScreenshot("inbox-lazy-history.png", page.locator("main"));

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type UIEvent } from "react";
 
-const INITIAL_QUEUE_RENDER_LIMIT = 12;
-const QUEUE_RENDER_CHUNK_SIZE = 12;
+const INITIAL_QUEUE_RENDER_LIMIT = 20;
+const QUEUE_RENDER_CHUNK_SIZE = 20;
 const QUEUE_LOAD_MORE_THRESHOLD_PX = 160;
 
 function queueItemsKey<T extends { id: string }>(items: T[]) {

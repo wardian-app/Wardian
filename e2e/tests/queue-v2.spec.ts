@@ -385,28 +385,28 @@ test.describe("Inbox", () => {
     await openSurface(page, "inbox");
 
     await expect(page.getByText("Inbox history 0", { exact: true })).toBeVisible();
-    await expect(page.getByText("Inbox history 10", { exact: true })).toBeVisible();
-    await expect(page.getByText("Inbox history 11", { exact: true })).toBeHidden();
-    await expect(page.getByText("Inbox history 12", { exact: true })).toBeHidden();
+    await expect(page.getByText("Inbox history 18", { exact: true })).toBeVisible();
+    await expect(page.getByText("Inbox history 19", { exact: true })).toBeHidden();
+    await expect(page.getByText("Inbox history 20", { exact: true })).toBeHidden();
     await expect(page.getByText("Inbox history 100", { exact: true })).toBeHidden();
-
-    const scrollRegion = page.getByTestId("inbox-scroll-region");
-    for (let batch = 1; batch <= 10; batch += 1) {
-      await scrollRegion.evaluate((element) => {
-        element.scrollTop = element.scrollHeight;
-        element.dispatchEvent(new Event("scroll", { bubbles: true }));
-      });
-      const lastExpectedIndex = Math.min(batch * 12 + 10, 119);
-      await expect(page.getByText(`Inbox history ${lastExpectedIndex}`, { exact: true })).toBeVisible();
-      if (batch === 1) {
-        await expect(page.getByText("Inbox history 23", { exact: true })).toBeHidden();
-      }
-    }
 
     if (process.env.WARDIAN_INBOX_LAZY_SCREENSHOT) {
       await page
         .locator('[data-testid="surface-panel"][data-surface-type="inbox"]')
         .screenshot({ path: process.env.WARDIAN_INBOX_LAZY_SCREENSHOT, animations: "disabled" });
+    }
+
+    const scrollRegion = page.getByTestId("inbox-scroll-region");
+    for (let batch = 1; batch <= 6; batch += 1) {
+      await scrollRegion.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+        element.dispatchEvent(new Event("scroll", { bubbles: true }));
+      });
+      const lastExpectedIndex = Math.min(batch * 20 + 18, 119);
+      await expect(page.getByText(`Inbox history ${lastExpectedIndex}`, { exact: true })).toBeVisible();
+      if (batch === 1) {
+        await expect(page.getByText("Inbox history 39", { exact: true })).toBeHidden();
+      }
     }
   });
 

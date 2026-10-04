@@ -674,9 +674,9 @@ describe("InboxView", () => {
     expect(firstCard?.parentElement).toHaveClass("flex-1", "min-h-0", "overflow-y-auto");
   });
 
-  it("loads older Inbox items in 12-item batches as the list is scrolled", () => {
+  it("loads older Inbox items in 20-item batches as the list is scrolled", () => {
     useQueueStore.setState({
-      items: Array.from({ length: 36 }, (_, index) => ({
+      items: Array.from({ length: 60 }, (_, index) => ({
         id: `item-${index}`,
         type: "agent_completed",
         timestamp: Date.now() - index,
@@ -688,8 +688,8 @@ describe("InboxView", () => {
 
     render(<InboxView />);
 
-    expect(screen.getByText("Agent 11")).toBeInTheDocument();
-    expect(screen.queryByText("Agent 12")).not.toBeInTheDocument();
+    expect(screen.getByText("Agent 19")).toBeInTheDocument();
+    expect(screen.queryByText("Agent 20")).not.toBeInTheDocument();
 
     const scrollRegion = screen.getByTestId("inbox-scroll-region");
     Object.defineProperties(scrollRegion, {
@@ -698,20 +698,20 @@ describe("InboxView", () => {
       scrollTop: { configurable: true, value: 0, writable: true },
     });
     fireEvent.scroll(scrollRegion);
-    expect(screen.queryByText("Agent 12")).not.toBeInTheDocument();
+    expect(screen.queryByText("Agent 20")).not.toBeInTheDocument();
 
     scrollRegion.scrollTop = 900;
     fireEvent.scroll(scrollRegion);
-    expect(screen.getByText("Agent 23")).toBeInTheDocument();
-    expect(screen.queryByText("Agent 24")).not.toBeInTheDocument();
+    expect(screen.getByText("Agent 39")).toBeInTheDocument();
+    expect(screen.queryByText("Agent 40")).not.toBeInTheDocument();
 
     fireEvent.scroll(scrollRegion);
-    expect(screen.getByText("Agent 35")).toBeInTheDocument();
+    expect(screen.getByText("Agent 59")).toBeInTheDocument();
   });
 
   it("allows loading older items when the initial list does not overflow", () => {
     useQueueStore.setState({
-      items: Array.from({ length: 13 }, (_, index) => ({
+      items: Array.from({ length: 21 }, (_, index) => ({
         id: `item-${index}`,
         type: "agent_completed",
         timestamp: Date.now() - index,
@@ -723,8 +723,8 @@ describe("InboxView", () => {
 
     render(<InboxView />);
 
-    expect(screen.getByText("Agent 11")).toBeInTheDocument();
-    expect(screen.queryByText("Agent 12")).not.toBeInTheDocument();
+    expect(screen.getByText("Agent 19")).toBeInTheDocument();
+    expect(screen.queryByText("Agent 20")).not.toBeInTheDocument();
     const scrollRegion = screen.getByTestId("inbox-scroll-region");
     Object.defineProperties(scrollRegion, {
       clientHeight: { configurable: true, value: 1000 },
@@ -732,6 +732,6 @@ describe("InboxView", () => {
       scrollTop: { configurable: true, value: 0 },
     });
     fireEvent.click(screen.getByRole("button", { name: "Load older Inbox items" }));
-    expect(screen.getByText("Agent 12")).toBeInTheDocument();
+    expect(screen.getByText("Agent 20")).toBeInTheDocument();
   });
 });
