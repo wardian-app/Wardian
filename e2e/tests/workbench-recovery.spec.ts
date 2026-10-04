@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { surfacePanel, surfaceTab } from "../fixtures/workbench";
+import { openSurface, surfacePanel, surfaceTab } from "../fixtures/workbench";
 import {
   installWorkbenchIpcMock,
   makeWorkbenchDocument,
@@ -27,6 +27,40 @@ async function executeWorkbenchCommand(page: Page, query: string): Promise<void>
 }
 
 test.describe("Workbench recovery", () => {
+  test("keeps navigation usable and routine progress internal during a delayed save", async ({ page }) => {
+    const dashboard = makeWorkbenchSurface("background-dashboard", "dashboard");
+    const restored = makeWorkbenchDocument({ surfaces: [dashboard] });
+    const ipc = await installWorkbenchIpcMock(page, {
+      response_delays_ms: { save_workbench_state: 30_000 },
+      load_result: {
+        source: "primary", document: restored, notice: null,
+        durable_revision: restored.revision, durable_token: "background-token",
+      },
+    });
+    await page.goto("/");
+    await expect(surfaceTab(page, "dashboard")).toBeVisible();
+    await openSurface(page, "inbox");
+    await expect(surfaceTab(page, "inbox")).toHaveAttribute("aria-selected", "true");
+    await expect.poll(async () => (await ipc.calls("save_workbench_state")).length).toBe(1);
+    await surfaceTab(page, "dashboard").click();
+    await expect(surfaceTab(page, "dashboard")).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByTestId("app-shell-content")).not.toHaveAttribute("inert");
+    await expect(page.getByTestId("workbench-persistence-notice")).toHaveCount(0);
+    // The delayed response has not committed the opened Inbox surface yet.
+    expect((await ipc.snapshot()).load_result.document).toEqual(restored);
+    if (process.env.WARDIAN_CAPTURE_SAVE_EVIDENCE === "1") {
+      await surfaceTab(page, "inbox").click();
+      await expect(page.getByText("No completions yet.", { exact: true })).toBeVisible();
+      await page.getByRole("button", { name: "Hide Left Sidebar", exact: true }).click();
+      await expect(page.getByTestId("workbench-persistence-notice")).toHaveCount(0);
+      expect((await ipc.snapshot()).load_result.document).toEqual(restored);
+      await page.screenshot({
+        animations: "disabled",
+        path: "e2e/screenshots/workbench-background-save/20261004/navigation-during-save-settled.png",
+      });
+    }
+  });
+
   test("restores the exact split document, shell sizes, and an inert unknown surface", async ({ page }) => {
     const overview = makeWorkbenchSurface("surface-overview", "agents-overview", {
       state: {

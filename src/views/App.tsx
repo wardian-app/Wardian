@@ -1349,9 +1349,6 @@ function AppBody() {
       ? "Workbench safe mode is active; the durable document is preserved."
       : null,
     workbenchPersistence.save_error,
-    workbenchPersistence.save_pending || workbenchPersistence.is_dirty
-      ? "Saving workbench changes…"
-      : null,
   ].filter((message): message is string => Boolean(message)).join(" ") || null;
 
   const exportLocalWorkbench = useCallback(() => {
