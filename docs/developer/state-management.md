@@ -14,9 +14,10 @@ Located in `src-tauri/src/state/app_state.rs`, the `AppState` is managed as a Ta
   that owns one actor per PTY runtime, including canonical geometry, runtime
   generation, lease epoch, ordered stream sequence, bounded parser/replay state,
   presentations, and feed consumers.
-- **`workbench_io_lock: tokio::sync::Mutex<()>`**: Serializes validated,
+- **`workbench_io_lock: Arc<tokio::sync::Mutex<()>>`**: Serializes validated,
   compare-and-swap workbench load/save/reset operations against the two durable
-  JSON files.
+  JSON files. Its owned guard stays with the blocking I/O worker until the
+  operation finishes, including when the awaiting command is cancelled.
 - **`conversation_archive: ConversationArchiveState`**: Owns per-agent archive
   serialization and durable provider-log acquisition cursors. The adjacent
   **`conversation_capture_policy_lock`** serializes global and per-agent logging
@@ -72,6 +73,14 @@ Recovery repairs durable archive observations and their artifacts; it does not
 repair historical user data or invent missing source identity.
 
 ## Startup restoration and configuration ownership
+
+Rename, reorder, and worktree enable/assign/disable acquire the cross-process
+agent roster barrier before locking the in-memory agent map and display order;
+file-lock waits run on the blocking pool. Persistence within these mutations
+uses the already-held barrier. Other roster paths can use a nonblocking
+try/retry, releasing global locks before a contested wait. No roster path may
+wait for the barrier while holding the agent map or order: that can deadlock
+against a concurrent rename.
 
 Startup restoration uses the same per-agent lifecycle gate as configuration
 updates, pause, and resume. It claims the gate before selecting a saved config

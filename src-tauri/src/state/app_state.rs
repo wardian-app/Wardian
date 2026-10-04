@@ -59,9 +59,9 @@ impl StatusRevisionSession {
 
 pub struct AppState {
     // Serializes workbench load/save/reset commands before the core's per-home
-    // disk CAS lock, keeping the async command boundary ordered without a
-    // synchronous mutex held across an await.
-    pub workbench_io_lock: Mutex<()>,
+    // disk CAS lock. An owned guard travels with blocking I/O so caller
+    // cancellation cannot release ordering before the operation finishes.
+    pub workbench_io_lock: Arc<Mutex<()>>,
     // Serializes queue read-modify-write mutations shared by the desktop and
     // remote Inbox surfaces.
     pub queue_io_lock: Mutex<()>,
@@ -510,7 +510,7 @@ impl Default for AppState {
         let mut sys = sysinfo::System::new_all();
         sys.refresh_all();
         Self {
-            workbench_io_lock: Mutex::new(()),
+            workbench_io_lock: Arc::new(Mutex::new(())),
             queue_io_lock: Mutex::new(()),
             queue_loaded_snapshot: Mutex::new(None),
             agents: Mutex::new(HashMap::new()),

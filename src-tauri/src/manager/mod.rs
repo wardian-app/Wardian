@@ -1528,9 +1528,19 @@ pub(crate) fn save_state_snapshot(_app: &AppHandle, configs: &[AgentConfig]) {
     }
 }
 
-pub fn save_state(app: &AppHandle, agents: &HashMap<String, ActiveAgent>, order: &[String]) {
+/// Persist under the caller's roster barrier, acquired before either global lock.
+/// Reacquiring it here would deadlock a writer against concurrent rename.
+pub fn save_state(
+    _barrier: &wardian_core::agent_replacement::AgentRosterBarrier,
+    agents: &HashMap<String, ActiveAgent>,
+    order: &[String],
+) {
     let configs = state_configs_snapshot(agents, order);
-    save_state_snapshot(app, &configs);
+    if let Err(error) = try_save_state_snapshot_unlocked(&configs) {
+        log_debug(&format!(
+            "[WARDIAN] Failed to persist state snapshot: {error}"
+        ));
+    }
 }
 
 pub(crate) fn strip_flag_value_pairs(args: Vec<String>, flag: &str) -> Vec<String> {

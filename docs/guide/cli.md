@@ -71,6 +71,12 @@ responses, and timeouts remain errors. Conversation and Inbox responses include
 `status_source`; agent identity exposes it through `--fields` or `--field`.
 An empty persisted response is not evidence of current live state.
 
+On Windows, a busy control pipe is retried only while opening the connection.
+The retry uses the command's existing timeout. Once connected, a request is sent
+once; a failed exchange is reported without reconnecting or replaying it. The
+desktop listener retains its claimed endpoint during a busy replenishment retry
+and prepares the next pipe instance before dispatching an accepted connection.
+
 `agent wait --timeout` bounds the whole wait, including IPC and polling;
 `--next` charges its initial cursor read to the same budget. A zero timeout
 expires without contacting the endpoint. A response received after the

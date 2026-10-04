@@ -48,8 +48,8 @@ pub use maintenance::{
 pub use matrix::{matrix, totals_at, Grain, Matrix, MatrixRow, Measure};
 pub use models::{
     ActiveTime, ActivityMethod, BreakdownRow, Cursor, CursorKind, EditFact, EditOp, IntervalFact,
-    LimitObservation, ParsedFacts, RollupRow, SourceCarry, SourceKind, TelemetrySummary,
-    TokenCounts, TurnFact,
+    LimitObservation, ParsedFacts, SourceCarry, SourceKind, TelemetrySummary, TokenCounts,
+    TurnFact,
 };
 pub use recovery::{
     inspect_attribution, repair_attribution, AttributionRepairReport, AttributionStatus,
