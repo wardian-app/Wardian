@@ -130,9 +130,9 @@ pub(crate) async fn persist_turn_completion(
         let agent_name = {
             let agents = state.agents.lock().await;
             agents.get(session_id).and_then(|agent| {
-                if runtime_generation.is_some_and(|generation| {
-                    agent.runtime_generation != Some(generation)
-                }) {
+                if runtime_generation
+                    .is_some_and(|generation| agent.runtime_generation != Some(generation))
+                {
                     return None;
                 }
                 agent.config.lock().ok().and_then(|config| {
@@ -288,16 +288,33 @@ pub(crate) fn codex_owner_turn_completion(
 /// The transcript must end with an assistant message that answers a user
 /// request. A later user message means the completion raced with another
 /// turn, and provider control commands such as `/login` are not requests.
+/// Tool activity after the last assistant message means that message was
+/// interim prose and the final answer has not reached the transcript yet.
 pub(crate) fn transcript_turn_completion(
     session_id: &str,
     events: &[AgentChatEvent],
 ) -> Option<TurnCompletion> {
-    let messages = events
+    let is_message = |event: &AgentChatEvent| {
+        event.kind == AgentChatEventKind::Message
+            && event
+                .text
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty())
+    };
+    let final_index = events.iter().rposition(is_message)?;
+    if events[final_index + 1..].iter().any(|event| {
+        matches!(
+            event.kind,
+            AgentChatEventKind::ToolCall
+                | AgentChatEventKind::ToolResult
+                | AgentChatEventKind::Approval
+        )
+    }) {
+        return None;
+    }
+    let messages = events[..=final_index]
         .iter()
-        .filter(|event| {
-            event.kind == AgentChatEventKind::Message
-                && event.text.as_deref().is_some_and(|text| !text.trim().is_empty())
-        })
+        .filter(|event| is_message(event))
         .collect::<Vec<_>>();
     let (final_answer, earlier) = messages.split_last()?;
     if final_answer.role != Some(AgentChatRole::Assistant) {
@@ -340,19 +357,24 @@ pub(crate) fn transcript_turn_completion(
     )
 }
 
+/// The agent's provider and live runtime generation, if it still exists.
+async fn current_runtime(state: &AppState, session_id: &str) -> Option<(String, Option<u64>)> {
+    let agents = state.agents.lock().await;
+    let agent = agents.get(session_id)?;
+    let provider = agent.config.lock().ok()?.provider.clone();
+    Some((provider, agent.runtime_generation))
+}
+
 /// Publishes a completion for providers that report only a turn boundary.
 ///
 /// The transcript can trail the boundary event by a few hundred
-/// milliseconds, so the final answer is polled briefly before giving up.
+/// milliseconds, so the final answer is polled briefly before giving up. A
+/// candidate that is already an Inbox card belongs to an earlier turn, so
+/// polling continues. The runtime that reported the boundary fences every
+/// read and the write: a replacement runtime's transcript never answers it.
 pub(crate) async fn publish_transcript_turn_completion(app: AppHandle, session_id: String) {
     let state = app.state::<AppState>();
-    let provider = {
-        let agents = state.agents.lock().await;
-        agents
-            .get(&session_id)
-            .and_then(|agent| agent.config.lock().ok().map(|config| config.provider.clone()))
-    };
-    let Some(provider) = provider else {
+    let Some((provider, runtime_generation)) = current_runtime(&state, &session_id).await else {
         return;
     };
     // Claude and Codex publish from provider-native turn records.
@@ -363,6 +385,11 @@ pub(crate) async fn publish_transcript_turn_completion(app: AppHandle, session_i
         if attempt > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
+        if current_runtime(&state, &session_id).await
+            != Some((provider.clone(), runtime_generation))
+        {
+            return;
+        }
         let Ok(events) =
             crate::commands::chat::load_agent_chat_transcript_for_state(&state, session_id.clone())
                 .await
@@ -372,10 +399,27 @@ pub(crate) async fn publish_transcript_turn_completion(app: AppHandle, session_i
         let Some(completion) = transcript_turn_completion(&session_id, &events) else {
             continue;
         };
+        let item_id = completion_item_id(&session_id, &completion.evidence_id);
+        let already_recorded = {
+            let _queue_guard = state.queue_io_lock.lock().await;
+            crate::utils::queue::load_items()
+                .iter()
+                .any(|item| item["id"] == item_id)
+        };
+        if already_recorded {
+            continue;
+        }
         if let PersistedCompletion::Committed {
             agent_name,
             item_id,
-        } = persist_turn_completion(&state, &session_id, &provider, None, &completion).await
+        } = persist_turn_completion(
+            &state,
+            &session_id,
+            &provider,
+            runtime_generation,
+            &completion,
+        )
+        .await
         {
             emit_active_completion(&app, &state, &session_id, &agent_name, &item_id).await;
         }
@@ -411,9 +455,13 @@ mod tests {
 
     #[test]
     fn completion_item_keeps_the_full_answer_and_a_stable_identity() {
-        let completion =
-            TurnCompletion::new("claude-message-7", "  finished the requested work  ", 100, "hook_outbox_mtime")
-                .expect("answer");
+        let completion = TurnCompletion::new(
+            "claude-message-7",
+            "  finished the requested work  ",
+            100,
+            "hook_outbox_mtime",
+        )
+        .expect("answer");
         let first = completion_inbox_item("agent-1", "Claude", &completion);
         let retry = completion_inbox_item("agent-1", "Claude", &completion);
 
@@ -432,7 +480,9 @@ mod tests {
             &TurnCompletion::new("p", &long, 1, "hook_outbox_mtime").expect("answer"),
         );
         assert_eq!(
-            long_item["summary"].as_str().map(|text| text.chars().count()),
+            long_item["summary"]
+                .as_str()
+                .map(|text| text.chars().count()),
             Some(SUMMARY_MAX_CHARS)
         );
         assert_eq!(long_item["response_text"], long);
@@ -489,8 +539,14 @@ mod tests {
 
         let completion =
             codex_rollout_turn_completion(&record, observed_since).expect("completed turn");
-        assert_eq!(completion.evidence_id, "01a108c0-dc49-7d70-b9e3-362bce231a39");
-        assert_eq!(completion.response_text, "The audit found no change is justified.");
+        assert_eq!(
+            completion.evidence_id,
+            "01a108c0-dc49-7d70-b9e3-362bce231a39"
+        );
+        assert_eq!(
+            completion.response_text,
+            "The audit found no change is justified."
+        );
         assert_eq!(completion.timestamp_source, "provider_log_timestamp");
         assert_eq!(completion.timestamp, observed_since + 619_500);
 
@@ -576,6 +632,90 @@ mod tests {
         )
         .expect("answer");
         assert_eq!(first.evidence_id, reread.evidence_id);
+    }
+
+    #[test]
+    fn transcript_completion_waits_past_interim_prose() {
+        let mut tool_call = message(AgentChatRole::Assistant, "");
+        tool_call.kind = AgentChatEventKind::ToolCall;
+        tool_call.text = None;
+        let events = [
+            message(AgentChatRole::User, "Run the tests"),
+            message(AgentChatRole::Assistant, "Running the suite now."),
+            tool_call,
+        ];
+        // The final answer has not reached the transcript yet.
+        assert!(transcript_turn_completion("agent-1", &events).is_none());
+
+        let mut caught_up = events.to_vec();
+        caught_up.push(message(AgentChatRole::Assistant, "All tests pass."));
+        assert_eq!(
+            transcript_turn_completion("agent-1", &caught_up)
+                .expect("final answer")
+                .response_text,
+            "All tests pass."
+        );
+    }
+
+    #[tokio::test]
+    async fn persistence_is_idempotent_and_fenced_to_the_reporting_runtime() {
+        use crate::state::{ActiveAgent, AgentWatchState};
+        use std::sync::{Arc, Mutex};
+
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
+        let state = AppState::new();
+        state.agents.lock().await.insert(
+            "agent-1".into(),
+            ActiveAgent {
+                config: Arc::new(Mutex::new(wardian_core::models::AgentConfig {
+                    session_id: "agent-1".into(),
+                    session_name: "Gemini Agent".into(),
+                    provider: "gemini".into(),
+                    ..Default::default()
+                })),
+                child_process: None,
+                background_processes: Vec::new(),
+                memory_capability: None,
+                runtime_generation: Some(2),
+                process_id: None,
+                query_count: Arc::new(Mutex::new(0)),
+                init_timestamp: Arc::new(Mutex::new(None)),
+                last_query_timestamp: Arc::new(Mutex::new(None)),
+                current_status: Arc::new(Mutex::new("Idle".into())),
+                last_status_at: Arc::new(Mutex::new(None)),
+                watch_state: Arc::new(Mutex::new(AgentWatchState::new(
+                    "agent-1".to_string(),
+                    4096,
+                    262_144,
+                ))),
+                terminal_title: Arc::new(Mutex::new(String::new())),
+                last_output_at: Arc::new(Mutex::new(None)),
+                log_path: Arc::new(Mutex::new(None)),
+                log_last_modified: Arc::new(Mutex::new(None)),
+                #[cfg(windows)]
+                job_object: None,
+            },
+        );
+        let completion =
+            TurnCompletion::new("answer:1", "Done.", 1, "provider_event_observed").expect("answer");
+
+        // A completion reported by a replaced runtime is never written.
+        assert!(matches!(
+            persist_turn_completion(&state, "agent-1", "gemini", Some(1), &completion).await,
+            PersistedCompletion::Stale
+        ));
+        assert!(crate::utils::queue::load_items().is_empty());
+
+        for _ in 0..2 {
+            assert!(matches!(
+                persist_turn_completion(&state, "agent-1", "gemini", Some(2), &completion).await,
+                PersistedCompletion::Committed { .. }
+            ));
+        }
+        let items = crate::utils::queue::load_items();
+        assert_eq!(items.len(), 1, "a re-observed turn keeps one card");
+        assert_eq!(items[0]["id"], "agent-completed:agent-1:answer:1");
+        assert_eq!(items[0]["agent_name"], "Gemini Agent");
     }
 
     #[test]

@@ -120,7 +120,8 @@ tokio::task_local! {
 /// the current incarnation. Mere inbox appends produce no activity transition.
 ///
 /// Every turn that finishes with a final answer also becomes an Inbox card,
-/// including turns coalesced between two wake-ups of this observer.
+/// including turns coalesced between two wake-ups of this observer and turns
+/// that finished before it started.
 pub(super) fn observe_turn_activity(
     app: tauri::AppHandle,
     agent_id: String,
@@ -130,7 +131,10 @@ pub(super) fn observe_turn_activity(
 ) {
     tauri::async_runtime::spawn(async move {
         let mut previous = CodexTurnActivity::Pending;
-        let mut finished_cursor = observations.borrow().finished_turn_cursor();
+        // The observation belongs to this runtime's owner connection alone,
+        // so every turn in its finished log is this runtime's. Starting at
+        // zero reports turns that finished before this task first ran.
+        let mut finished_cursor = 0;
         loop {
             let (activity, finished) = {
                 let observation = observations.borrow_and_update();

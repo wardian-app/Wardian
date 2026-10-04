@@ -2742,6 +2742,8 @@ async fn spawn_agent_inner(
     } else {
         None
     };
+    // Provider records written after this instant belong to this runtime.
+    let provider_launched_at_ms = chrono::Utc::now().timestamp_millis();
     let child_result = pair.slave.spawn_command(cmd);
     let child = match child_result {
         Ok(child) => child,
@@ -3837,7 +3839,7 @@ async fn spawn_agent_inner(
         let watcher_runtime_generation = runtime_generation;
         // A resumed rollout is re-read from its start; only turns finishing
         // after this runtime launched are new Inbox completions.
-        let watcher_completions_since = chrono::Utc::now().timestamp_millis();
+        let watcher_completions_since = provider_launched_at_ms;
         let wardian_agent_dir = get_wardian_home()
             .map(|home| home.join("agents").join(&watcher_session))
             .filter(|path| path.exists())

@@ -832,9 +832,8 @@ fn claude_turn_completion(
     message: Option<&wardian_core::control::WatchTranscriptMessage>,
     outbox_path: &std::path::Path,
 ) -> Option<turn_completion::TurnCompletion> {
-    let message = message.filter(|message| {
-        message.provider == "claude" && message.role == "assistant"
-    })?;
+    let message =
+        message.filter(|message| message.provider == "claude" && message.role == "assistant")?;
     let (timestamp, timestamp_source) = completion_timestamp_from_outbox(outbox_path);
     turn_completion::TurnCompletion::new(
         message.turn_id.as_deref()?,

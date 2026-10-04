@@ -227,13 +227,7 @@ pub(crate) enum CodexTurnActivity {
 }
 
 impl Observation {
-    /// Sequence number of the most recently finished turn. An observer that
-    /// starts here reports only turns that finish after it attached.
-    pub(crate) fn finished_turn_cursor(&self) -> u64 {
-        self.finished_sequence
-    }
-
-    /// Finished turns after `cursor`, oldest first. A watch receiver sees only
+    /// Finished turns after `cursor`, oldest first; sequences start at 1. A watch receiver sees only
     /// the latest observation, so this lets it report every turn that
     /// finished between two wake-ups.
     pub(crate) fn finished_turns_after(&self, cursor: u64) -> Vec<FinishedTurn> {
@@ -1495,7 +1489,7 @@ mod tests {
             thread_id: Some("owned".into()),
             ..Default::default()
         };
-        let cursor = state.finished_turn_cursor();
+        let cursor = 0;
         for (turn, answer) in [("first", "first answer"), ("second", "second answer")] {
             state.observe(
                 &json!({"method":"turn/started","params":{"threadId":"owned","turn":{"id":turn}}}),
@@ -1516,16 +1510,18 @@ mod tests {
         assert_eq!(
             finished
                 .iter()
-                .map(|turn| (turn.turn_id.as_str(), turn.status.as_str(), turn.answer.as_str()))
+                .map(|turn| (
+                    turn.turn_id.as_str(),
+                    turn.status.as_str(),
+                    turn.answer.as_str()
+                ))
                 .collect::<Vec<_>>(),
             vec![
                 ("first", "completed", "first answer"),
                 ("second", "completed", "second answer"),
             ]
         );
-        assert!(state
-            .finished_turns_after(finished[1].sequence)
-            .is_empty());
+        assert!(state.finished_turns_after(finished[1].sequence).is_empty());
     }
 
     #[test]

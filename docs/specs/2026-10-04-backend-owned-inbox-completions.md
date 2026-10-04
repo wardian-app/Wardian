@@ -42,15 +42,20 @@ about it. The frontend applies the persisted card and never builds one.
 - The Codex owner observer reads a bounded, sequenced log of finished turns
   instead of only the latest activity. A watch receiver sees only the latest
   observation, so two turns finishing between wake-ups would otherwise lose
-  the first.
+  the first. The log belongs to one runtime's owner connection, so the
+  observer starts at its beginning and also reports turns that finished
+  before the observer task first ran.
 - A resumed rollout is re-read from its start. Records timestamped before the
-  current runtime launched are history and never become cards.
+  current provider process launched are history and never become cards.
 - Some providers reuse one `turn_id` for a whole thread, and transcript event
   IDs are not stable for every source, so the generic path hashes the request
   and answer instead. Repeating an identical request and answer in one session
   yields one card.
 - The generic path polls the transcript for up to three seconds, because a
-  transcript can trail the turn boundary.
+  transcript can trail the turn boundary. It keeps polling while tool
+  activity follows the last assistant message (interim prose) or while the
+  candidate is already a card (an earlier turn). It is fenced to the runtime
+  that reported the boundary.
 - `agent-turn-completed` has two forms: a turn boundary (no `inbox_item`)
   that refreshes turn-scoped views, and a card projection (with
   `inbox_item`). Claude now emits both, matching the other providers.
@@ -75,7 +80,8 @@ about it. The frontend applies the persisted card and never builds one.
   rejection of blank answers, Codex rollout parsing including history and
   unanswered turns, owner/rollout identity convergence, coalesced owner
   observations, and generic transcript selection, including thread-wide
-  `turn_id` reuse and provider control commands.
+  `turn_id` reuse, interim prose, and provider control commands, plus
+  persistence idempotence and the runtime-generation fence.
 - Frontend tests cover the two event forms, the absence of frontend-built
   cards, and full-answer expansion.
 - A real-provider run in an isolated `WARDIAN_HOME` must show one card per
