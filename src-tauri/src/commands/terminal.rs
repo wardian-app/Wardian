@@ -478,30 +478,14 @@ fn spawn_user_terminal_session(
     cmd.cwd(&cwd);
     manager::apply_terminal_identity_env(&mut cmd);
 
+    #[cfg(windows)]
+    let job_object = Some(crate::utils::process::RuntimeProcessJob::prepare(&mut cmd)?);
+
     let child = pair
         .slave
         .spawn_command(cmd)
         .map_err(|e| format!("Failed to spawn user terminal: {}", e))?;
     let process_id = child.process_id();
-
-    #[cfg(windows)]
-    let job_object = {
-        if manager::app_process_supervisor_active() {
-            None
-        } else if let Ok(job) = manager::create_kill_on_close_job("user terminal fallback") {
-            if let Some(pid) = process_id {
-                if let Err(err) = manager::assign_pid_to_job(&job, pid, "user terminal fallback") {
-                    manager::log_debug(&format!(
-                        "[Wardian] Failed to assign user terminal PID {} to fallback job: {}",
-                        pid, err
-                    ));
-                }
-            }
-            Some(job)
-        } else {
-            None
-        }
-    };
 
     let mut reader = pair
         .master

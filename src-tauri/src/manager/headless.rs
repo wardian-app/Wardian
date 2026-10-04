@@ -714,7 +714,8 @@ pub async fn run_headless_with_options(
     // If the control request is cancelled, dropping the child must terminate
     // the provider rather than leaving it running against a leased session.
     cmd.kill_on_drop(true);
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let mut child =
+        crate::utils::process::spawn_owned_command(&mut cmd).map_err(|e| e.to_string())?;
     let mut process_tree_guard = HeadlessProcessTreeGuard::new(child.id());
     // Read stdout and stderr concurrently to avoid deadlock when stderr buffer fills.
     let stdout_handle = {
@@ -1399,7 +1400,7 @@ pub async fn obtain_session_id(
         launch_spec.args.len(),
         command_cwd.display()
     ));
-    match cmd.spawn() {
+    match crate::utils::process::spawn_owned_command(&mut cmd) {
         Ok(mut child) => {
             log_debug("[WARDIAN-DEBUG] Spawned headless process. Reading stdout...");
             let mut session_id_res = None;

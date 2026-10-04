@@ -10,14 +10,17 @@ pub struct UserTerminalSession {
     pub process_id: Option<u32>,
     pub exited: Arc<Mutex<bool>>,
     #[cfg(windows)]
-    pub job_object: Option<win32job::Job>,
+    pub job_object: Option<crate::utils::process::RuntimeProcessJob>,
 }
 
 impl Drop for UserTerminalSession {
     fn drop(&mut self) {
         #[cfg(windows)]
         {
-            if let Some(pid) = self.process_id.take() {
+            if let Some(job) = &self.job_object {
+                let _ = job.terminate();
+                self.process_id = None;
+            } else if let Some(pid) = self.process_id.take() {
                 let _ = crate::utils::process::force_kill_process_tree(pid);
             }
         }

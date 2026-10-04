@@ -49,13 +49,23 @@ To prevent orphaned provider and console-host processes when Wardian crashes or 
 4. Provider shells, CLIs, ConPTY console hosts, and descendants inherit the job from process creation time.
 5. When the Wardian process terminates, the job object is closed by the OS, which automatically kills all processes assigned to it.
 
-New Windows Claude PTY runtimes also have a dedicated non-breakaway job. Their
+New Windows provider and user-terminal PTY runtimes also have a dedicated non-breakaway job. Their
 main thread is suspended until assignment succeeds, closing the post-launch
 descendant race. Fresh resume and clear reject new job members, retain and join
 the current members' handles, and verify the direct child and empty job before
-releasing their newly created prior-session hold. Other
-providers continue to use process-tree termination, with per-agent fallback
-jobs if app-level supervision cannot be installed. Legacy runtimes do not gain
+releasing their newly created prior-session hold. Managed native transports,
+Codex owners and proxies, headless providers and browser engines start suspended
+inside the outer app job, then join a non-breakaway app-owned-child job before
+their initial thread resumes. Existing Codex per-owner jobs also join before
+resume. These jobs have non-inheritable handles retained by Wardian, so abrupt
+app termination closes them and stops their members. Failed containment or
+thread identity checks reject the launch and join only the retained child
+handle. Managed launches fail closed if the outer app job cannot be installed.
+
+The outer app job permits explicit breakaway for updater handoff. Ordinary
+owned descendants cannot use that exception because their nested job forbids
+breakaway. External applications and updater handoffs bypass the managed
+launcher. Legacy runtimes do not gain
 an exit receipt from post-launch assignment. See
 [Verified Windows Claude Process Stop](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-10-02-claude-process-containment.md).
 

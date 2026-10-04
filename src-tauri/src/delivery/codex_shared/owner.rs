@@ -442,7 +442,11 @@ impl CodexSharedOwner {
             })?)
         };
         let child_spawn_at = std::time::Instant::now();
-        let mut child = match command.spawn() {
+        #[cfg(windows)]
+        let child_result = crate::utils::process::spawn_owned_command_in_job(&mut command, &job);
+        #[cfg(not(windows))]
+        let child_result = crate::utils::process::spawn_owned_command(&mut command);
+        let mut child = match child_result {
             Ok(child) => child,
             Err(error) => {
                 restore_launch_overlay(&mut launch_config)?;
@@ -451,24 +455,6 @@ impl CodexSharedOwner {
                 )));
             }
         };
-        #[cfg(windows)]
-        if let Err(error) = child
-            .id()
-            .ok_or_else(|| "Codex owner PID missing".to_string())
-            .and_then(|pid| {
-                crate::utils::process::assign_pid_to_job(&job, pid, "Codex shared owner")
-            })
-        {
-            if let Some(pid) = child.id() {
-                let _ = tokio::task::spawn_blocking(move || {
-                    crate::utils::process::force_kill_process_tree(pid)
-                })
-                .await;
-            }
-            terminate_starting_child(&mut child).await;
-            restore_launch_overlay(&mut launch_config)?;
-            return Err(CodexSharedError::unsupported(error));
-        }
         timings.child_spawn = child_spawn_at.elapsed();
         let mut connected = None;
         let mut owned_socket = None;
