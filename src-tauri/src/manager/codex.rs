@@ -13,6 +13,19 @@ pub(crate) fn codex_session_file_path_in(
     base: &std::path::Path,
     session_id: &str,
 ) -> Option<std::path::PathBuf> {
+    codex_active_session_file_path_in(base, session_id).or_else(|| {
+        let files = std::fs::read_dir(base.join("archived_sessions")).ok()?;
+        files
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| codex_rollout_matches_session(path, session_id))
+    })
+}
+
+fn codex_active_session_file_path_in(
+    base: &std::path::Path,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
     let base = base.join("sessions");
     let years = std::fs::read_dir(base).ok()?;
 
@@ -33,11 +46,7 @@ pub(crate) fn codex_session_file_path_in(
                 };
                 for file in files.flatten() {
                     let path = file.path();
-                    if !path.is_file() {
-                        continue;
-                    }
-                    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if file_name.ends_with(&format!("{}.jsonl", session_id)) {
+                    if codex_rollout_matches_session(&path, session_id) {
                         return Some(path);
                     }
                 }
@@ -46,6 +55,39 @@ pub(crate) fn codex_session_file_path_in(
     }
 
     None
+}
+
+/// Bind the SDK filename's thread identity to its original session metadata.
+/// Reverted rollouts can append a distinct rollout UUID after the thread UUID.
+fn codex_rollout_matches_session(path: &std::path::Path, session_id: &str) -> bool {
+    use std::io::{BufRead, Read};
+
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(stem) = name
+        .strip_prefix("rollout-")
+        .and_then(|name| name.strip_suffix(".jsonl"))
+    else {
+        return false;
+    };
+    let Some(identity) = stem.get(20..).filter(|_| stem.get(19..20) == Some("-")) else {
+        return false;
+    };
+    if identity.split('_').next() != Some(session_id) || !path.is_file() {
+        return false;
+    }
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut reader = std::io::BufReader::new(file.take(256 * 1024 + 1));
+    let mut header = Vec::new();
+    if reader.read_until(b'\n', &mut header).is_err() || header.len() > 256 * 1024 {
+        return false;
+    }
+    serde_json::from_slice::<serde_json::Value>(&header).is_ok_and(|metadata| {
+        metadata["type"] == "session_meta" && metadata["payload"]["id"].as_str() == Some(session_id)
+    })
 }
 
 pub(crate) fn codex_session_file_path(
@@ -327,6 +369,56 @@ mod tests {
     use crate::manager::{strip_flag_value_pairs, strip_standalone_flag};
     use std::path::Path;
     use wardian_core::models::AgentConfig;
+
+    #[test]
+    fn issue1214_source_lookup_binds_active_and_flat_archived_rollouts() {
+        let temp = tempfile::tempdir().expect("private source lookup fixture");
+        for (root, id) in [
+            (
+                "sessions/2026/10/04",
+                "6aa31bfb-52de-4ef8-a103-2b2a244a64af",
+            ),
+            ("archived_sessions", "72b88f3e-4bf7-4330-8d70-2af6b05c480d"),
+        ] {
+            let directory = temp.path().join(root);
+            std::fs::create_dir_all(&directory).unwrap();
+            let file = directory.join(format!("rollout-2026-10-04T00-00-00-{id}.jsonl"));
+            let header = serde_json::json!({"type":"session_meta","payload":{
+                "id":id,"cwd":temp.path(),"source":"cli","model_provider":"openai"
+            }});
+            std::fs::write(&file, format!("{header}\n")).unwrap();
+            assert_eq!(
+                codex_session_file_path_in(temp.path(), id),
+                Some(file),
+                "normal discovery must preserve the exact requested source in either root"
+            );
+        }
+    }
+    #[test]
+    fn issue1214_source_lookup_checks_header_identity_and_reverted_thread_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let id = "6aa31bfb-52de-4ef8-a103-2b2a244a64af";
+        let rollout_id = "72b88f3e-4bf7-4330-8d70-2af6b05c480d";
+        let archive = temp.path().join("archived_sessions");
+        std::fs::create_dir_all(&archive).unwrap();
+        let file = archive.join(format!(
+            "rollout-2026-10-04T00-00-00-{id}_{rollout_id}.jsonl"
+        ));
+        std::fs::write(
+            &file,
+            format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{rollout_id}\"}}}}\n"),
+        )
+        .unwrap();
+        assert_eq!(codex_session_file_path_in(temp.path(), id), None);
+        std::fs::write(
+            &file,
+            format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\"}}}}\n"),
+        )
+        .unwrap();
+        assert_eq!(codex_session_file_path_in(temp.path(), id), Some(file));
+        assert_eq!(codex_session_file_path_in(temp.path(), rollout_id), None);
+    }
+
     #[test]
     fn codex_log_lookup_prefers_provider_thread_id_when_available() {
         assert_eq!(
