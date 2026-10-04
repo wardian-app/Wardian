@@ -4518,7 +4518,7 @@ fn external_terminal_env(
     provider_cwd: &std::path::Path,
 ) -> Result<Vec<(String, String)>, String> {
     let mut envs = vec![("WARDIAN_SESSION_ID".to_string(), config.session_id.clone())];
-    envs.extend(crate::manager::worktree_build_env(config));
+    envs.extend(crate::manager::worktree_build_env(config)?);
     match config.provider.as_str() {
         "claude" => envs.extend(
             crate::manager::claude_terminal_runtime_env()

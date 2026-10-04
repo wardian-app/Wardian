@@ -2655,7 +2655,7 @@ async fn spawn_agent_inner(
             capability.token(),
         );
     }
-    for (key, value) in super::worktree_build_env(&config) {
+    for (key, value) in super::worktree_build_env(&config)? {
         cmd.env(key, value);
     }
 

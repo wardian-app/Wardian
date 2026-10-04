@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { assertVerificationAdmission } from './compiler-input-guard.mjs';
+import { cargoInvocation, withRustCache } from './rust-build-cache.mjs';
 
 const WORKFLOW_PATH = resolve('.github/workflows/ci.yml');
 const CATEGORIES = new Set(['frontend', 'backend', 'docs']);
@@ -60,8 +61,14 @@ export function selectPlan(plan, only) {
 }
 
 function execute(command) {
-  assertVerificationAdmission(command, { cwd: process.cwd(), env: process.env });
-  const result = spawnSync(command, { cwd: process.cwd(), shell: true, stdio: 'inherit' });
+  let result;
+  if (command.startsWith('cargo ') && process.env.WARDIAN_RUST_CACHE_TARGET) {
+    const invocation = cargoInvocation(command.slice(6).split(/\s+/));
+    result = spawnSync(invocation.program, invocation.args, { cwd: invocation.cwd, env: invocation.env, stdio: 'inherit', windowsHide: true });
+  } else {
+    assertVerificationAdmission(command, { cwd: process.cwd(), env: process.env });
+    result = spawnSync(command, { cwd: process.cwd(), shell: true, stdio: 'inherit', windowsHide: true });
+  }
   if (result.error) throw result.error;
   if (result.status !== 0) {
     console.error(`FAILED: ${command}`);
@@ -79,11 +86,14 @@ export function main(argv = process.argv.slice(2)) {
     for (const step of plan) console.log(`${step.category}\t${step.command}`);
     return 0;
   }
-  for (const step of plan) {
-    console.log(`\n>>> ${step.command}`);
-    if (!execute(step.command)) return process.exitCode;
-  }
-  return 0;
+  const run = () => {
+    for (const step of plan) {
+      console.log(`\n>>> ${step.command}`);
+      if (!execute(step.command)) return process.exitCode;
+    }
+    return 0;
+  };
+  return plan.some((step) => step.category === 'backend') ? withRustCache(run) : run();
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
