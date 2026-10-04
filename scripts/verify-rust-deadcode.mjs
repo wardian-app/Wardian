@@ -615,34 +615,39 @@ const REGEX_AFTER_WORD = new Set([
 ]);
 
 /**
- * Whether a `/` that follows `before` starts a regular-expression literal.
- * After a value (an identifier, number, `)` or `]`) it is division; after an
- * operator, an opening bracket, or a keyword such as `return` it is a regex.
+ * How a `/` that follows `before` reads: `"regex"`, `"division"`, or
+ * `"ambiguous"`. After an identifier, number, or `]` it is division; after an
+ * operator, an opening bracket, or a keyword such as `return` it starts a
+ * regex. After `)` or `}` it can be either: `(a) / b` divides, while
+ * `if (ready) /re/.test(s)` starts a regex.
  */
-function slashStartsRegex(before) {
+function slashReading(before) {
   const trimmed = before.trimEnd();
-  if (trimmed === "") return true;
+  if (trimmed === "") return "regex";
   const last = trimmed[trimmed.length - 1];
-  if (/[\w$]/.test(last)) return REGEX_AFTER_WORD.has(/[\w$]+$/.exec(trimmed)[0]);
-  return !")]}'\"`".includes(last);
+  if (/[\w$]/.test(last)) return REGEX_AFTER_WORD.has(/[\w$]+$/.exec(trimmed)[0]) ? "regex" : "division";
+  if (last === ")" || last === "}") return "ambiguous";
+  return "]'\"`".includes(last) ? "division" : "regex";
 }
 
 /**
  * End index (exclusive) of the regular-expression literal starting at the `/`
- * at `start`. Escapes and `[...]` classes are honoured, so a `/` or quote
- * inside them neither ends the literal nor opens a string. A newline ends it.
+ * at `start`, or -1 when no closing `/` follows on the same line (a regex
+ * cannot span lines, so the slash is division). Escapes and `[...]` classes
+ * are honoured, so a `/` or quote inside them neither ends the literal nor
+ * opens a string.
  */
 function regexLiteralEnd(text, start) {
   let inClass = false;
   for (let index = start + 1; index < text.length; index += 1) {
     const char = text[index];
-    if (char === "\n") return index;
+    if (char === "\n" || char === "\r") return -1;
     if (char === "\\") index += 1;
     else if (char === "[") inClass = true;
     else if (char === "]") inClass = false;
     else if (char === "/" && !inClass) return index + 1;
   }
-  return text.length;
+  return -1;
 }
 
 /**
@@ -650,17 +655,25 @@ function regexLiteralEnd(text, start) {
  * command name left in a comment is not a caller. String, template, and
  * regular-expression literals are kept intact, so a quote inside a regex does
  * not hide a comment after it. Newlines survive so line structure is unchanged.
+ * `ambiguousSlash` decides how a slash after `)` or `}` reads; see
+ * `quotedNames`, which takes both readings.
+ *
+ * @param {string} text
+ * @param {{ ambiguousSlash?: "division" | "regex" }} [options]
  */
-export function stripJsComments(text) {
+export function stripJsComments(text, { ambiguousSlash = "division" } = {}) {
   let out = "";
   let quote = null;
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index];
-    if (!quote && char === "/" && text[index + 1] !== "/" && text[index + 1] !== "*" && slashStartsRegex(out)) {
-      const end = regexLiteralEnd(text, index);
-      out += text.slice(index, end);
-      index = end - 1;
-      continue;
+    if (!quote && char === "/" && text[index + 1] !== "/" && text[index + 1] !== "*") {
+      const reading = slashReading(out);
+      const end = (reading === "ambiguous" ? ambiguousSlash : reading) === "regex" ? regexLiteralEnd(text, index) : -1;
+      if (end !== -1) {
+        out += text.slice(index, end);
+        index = end - 1;
+        continue;
+      }
     }
     if (quote) {
       out += char;
@@ -686,10 +699,26 @@ export function stripJsComments(text) {
   return out;
 }
 
+/**
+ * Quoted identifier-shaped names in JavaScript or TypeScript source, outside
+ * comments. A slash after `)` or `}` is read both ways, and a name counts only
+ * when both readings keep it in a literal: the ambiguity can make the check
+ * report a command, never hide one behind a commented-out call.
+ *
+ * @param {string} text
+ * @returns {Set<string>}
+ */
+export function quotedNamesIn(text) {
+  const collect = (stripped) => new Set([...stripped.matchAll(QUOTED_NAME)].map((hit) => hit[1]));
+  const asDivision = collect(stripJsComments(text, { ambiguousSlash: "division" }));
+  const asRegex = collect(stripJsComments(text, { ambiguousSlash: "regex" }));
+  return new Set([...asDivision].filter((name) => asRegex.has(name)));
+}
+
 function quotedNames(files) {
   const names = new Set();
   for (const file of files) {
-    for (const hit of stripJsComments(readFileSync(file, "utf8")).matchAll(QUOTED_NAME)) names.add(hit[1]);
+    for (const name of quotedNamesIn(readFileSync(file, "utf8"))) names.add(name);
   }
   return names;
 }

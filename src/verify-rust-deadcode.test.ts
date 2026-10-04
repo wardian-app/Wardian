@@ -20,6 +20,7 @@ import {
   rewriteManifestPaths,
   rewriteVisibility,
   splitCfgGated,
+  quotedNamesIn,
   stripJsComments,
   unreachableItems,
 } from '../scripts/verify-rust-deadcode.mjs';
@@ -292,15 +293,18 @@ describe('Rust dead-code gate', () => {
   });
 
   it('keeps regex literals intact so a quote inside one cannot hide a comment', () => {
-    const names = (source: string) =>
-      [...stripJsComments(source).matchAll(/['"`]([a-z_][a-z0-9_]*)['"`]/g)].map((hit) => hit[1]);
+    const names = (source: string) => [...quotedNamesIn(source)];
     expect(names('const quote = /"/; // invoke("dead_command") was removed')).toEqual([]);
     expect(names('const slash = /[/"]/g; /* invoke("block_dead") */')).toEqual([]);
     expect(names('if (x) return /\'/.test(s); // "after_return"')).toEqual([]);
+    // A slash after `)` or `}` may start a regex; both readings must keep a name.
+    expect(names('if (ready) /"/.test(text); // invoke("dead_command") was removed')).toEqual([]);
+    expect(names('{ } /"/.test(text); // invoke("after_block")')).toEqual([]);
     expect(names('const half = total / 2; invoke("live_after_division"); // "gone"')).toEqual([
       'live_after_division',
     ]);
     expect(names('const ratio = (a) / (b); invoke("live_after_paren");')).toEqual(['live_after_paren']);
+    expect(names('const scaled = (a) / (b) / 2; invoke("live_two_slashes");')).toEqual(['live_two_slashes']);
   });
 
   it('follows import aliases to the item they name', () => {
