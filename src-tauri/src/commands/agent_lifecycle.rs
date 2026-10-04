@@ -45,6 +45,10 @@ mod rename_tests;
 mod roster_io_tests;
 
 #[cfg(test)]
+#[path = "agent/removal_persistence_tests.rs"]
+mod removal_persistence_tests;
+
+#[cfg(test)]
 use crate::manager::roster_io::ROSTER_BARRIER_ATTEMPT as RENAME_ROSTER_ATTEMPT;
 
 pub(super) fn fresh_provider_session_for_initial_capture(

@@ -1506,12 +1506,8 @@ pub(crate) fn validate_agent_order(
     ))
 }
 
-pub(crate) fn try_save_state_snapshot(configs: &[AgentConfig]) -> Result<(), String> {
-    let _barrier = wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "Agent roster barrier is unavailable".to_string())?;
-    try_save_state_snapshot_unlocked(configs)
-}
+#[cfg(test)]
+pub(crate) use tests::try_save_state_snapshot;
 
 pub(crate) fn try_save_state_snapshot_unlocked(configs: &[AgentConfig]) -> Result<(), String> {
     let app_dir = get_wardian_home().ok_or_else(|| "Could not locate Wardian home".to_string())?;
@@ -1550,14 +1546,7 @@ pub(crate) struct RosterIoProbe {
 #[cfg(test)]
 tokio::task_local! {
     pub(crate) static ROSTER_IO_PROBE: std::cell::RefCell<Option<RosterIoProbe>>;
-}
-
-pub(crate) fn save_state_snapshot(_app: &AppHandle, configs: &[AgentConfig]) {
-    if let Err(error) = try_save_state_snapshot(configs) {
-        log_debug(&format!(
-            "[WARDIAN] Failed to persist state snapshot: {error}"
-        ));
-    }
+    pub(crate) static ROSTER_SNAPSHOT_CAPTURE: std::cell::RefCell<Option<tokio::sync::oneshot::Sender<Vec<AgentConfig>>>>;
 }
 
 pub(crate) fn strip_flag_value_pairs(args: Vec<String>, flag: &str) -> Vec<String> {
@@ -1918,6 +1907,21 @@ pub(crate) fn display_log_path(path: &std::path::Path) -> String {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// Models an independently admitted snapshot writer for persistence fixtures.
+    pub(crate) fn try_save_state_snapshot(configs: &[AgentConfig]) -> Result<(), String> {
+        if let Some(signal) = ROSTER_SNAPSHOT_CAPTURE
+            .try_with(|signal| signal.borrow_mut().take())
+            .ok()
+            .flatten()
+        {
+            let _ = signal.send(configs.to_vec());
+        }
+        let _barrier = wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "Agent roster barrier is unavailable".to_string())?;
+        try_save_state_snapshot_unlocked(configs)
+    }
 
     #[test]
     fn claude_completion_inbox_item_uses_prompt_identity_and_keeps_full_response() {

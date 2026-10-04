@@ -92,9 +92,22 @@ try/retry, releasing global locks before a contested wait. No roster path may
 wait for the barrier while holding the agent map or order: that can deadlock
 against a concurrent rename.
 
-This executor repair does not make every legacy whole-roster snapshot fresh.
-Delete, rollback, and runtime persistence paths still require a separate audit
-of snapshots captured before durable admission.
+Runtime identity watchers also use admitted live-roster persistence. Delete
+acquires the barrier before capturing its deletion snapshot and retains it
+through strict filesystem publication, SQLite deletion and cache/map publication.
+An owned continuation retains the per-agent lifecycle guard, exact persisted
+lease acquisition and heartbeat after caller cancellation. The target's config
+`Arc` identifies its incarnation; a stopped runtime generation is insufficient.
+SQLite work runs on the blocking pool while its owned mutation gate remains
+held through cache invalidation. A filesystem or database failure recaptures the
+current live roster under the same barrier and verifies the same incarnation and
+lease before compensation. Map/order/config locks are released before physical
+I/O. Compensation never reuses a pre-admission or pre-delete snapshot.
+This sequencing does not establish crash atomicity
+between the filesystem and SQLite.
+After both durable stores commit, local publication completes under the retained
+lifecycle guard; a later heartbeat failure cannot leave a deleted incarnation
+advertised in the live roster.
 
 Startup restoration uses the same per-agent lifecycle gate as configuration
 updates, pause, and resume. It claims the gate before selecting a saved config
