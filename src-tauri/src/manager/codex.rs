@@ -77,6 +77,8 @@ pub(crate) fn codex_provider_session_is_excluded(candidate: &str, excluded: &[St
             .any(|session_id| session_id.trim() == candidate)
 }
 
+/// Derives status from the latest meaningful rollout event, preserving the
+/// provider parser's terminal aliases while ignoring non-waking inbox output.
 pub(crate) fn codex_status_from_log(lines: &[serde_json::Value]) -> Option<String> {
     for line in lines.iter().rev() {
         if line["type"] == "response_item"
@@ -95,7 +97,12 @@ pub(crate) fn codex_status_from_log(lines: &[serde_json::Value]) -> Option<Strin
             | Some("turn.aborted")
             | Some("turn.cancelled")
             | Some("turn.canceled")
-            | Some("turn.interrupted") => return Some("Idle".to_string()),
+            | Some("turn.interrupted")
+            | Some("turn_failed")
+            | Some("turn_aborted")
+            | Some("turn_cancelled")
+            | Some("turn_canceled")
+            | Some("turn_interrupted") => return Some("Idle".to_string()),
             Some("exec_approval_request") => return Some("Action Needed".to_string()),
             Some("task_started")
             | Some("turn.started")
@@ -668,6 +675,105 @@ mod tests {
             codex_status_from_log(&lines).as_deref(),
             Some("Processing...")
         );
+    }
+
+    #[test]
+    fn aborted_event_msg_remains_idle_after_nonwaking_inbox_append() {
+        let inbox: serde_json::Value = serde_json::from_str(include_str!(
+            "../providers/fixtures/codex-0.153.4-inbox-output.json"
+        ))
+        .unwrap();
+        let lines = vec![
+            serde_json::json!({"type":"response_item","payload":{"type":"reasoning"}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"sanitized-turn"}}),
+            inbox,
+        ];
+
+        assert_eq!(codex_status_from_log(&lines).as_deref(), Some("Idle"));
+    }
+
+    #[test]
+    fn aborted_event_msg_preserves_later_activity_and_approval_precedence() {
+        let aborted = serde_json::json!({"type":"event_msg","payload":{"type":"turn_aborted"}});
+        for (later, expected) in [
+            (
+                serde_json::json!({"type":"event_msg","payload":{"type":"task_started"}}),
+                "Processing...",
+            ),
+            (
+                serde_json::json!({"type":"response_item","payload":{"type":"reasoning"}}),
+                "Processing...",
+            ),
+            (
+                serde_json::json!({"type":"event_msg","payload":{"type":"exec_approval_request"}}),
+                "Action Needed",
+            ),
+        ] {
+            assert_eq!(
+                codex_status_from_log(&[aborted.clone(), later]).as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn native_terminal_aliases_remain_idle_after_nonwaking_inbox_append() {
+        let inbox: serde_json::Value = serde_json::from_str(include_str!(
+            "../providers/fixtures/codex-0.153.4-inbox-output.json"
+        ))
+        .unwrap();
+        let statuses: Vec<_> = [
+            "turn_failed",
+            "turn_aborted",
+            "turn_cancelled",
+            "turn_canceled",
+            "turn_interrupted",
+        ]
+        .into_iter()
+        .map(|terminal| {
+            codex_status_from_log(&[
+                serde_json::json!({"type":"response_item","payload":{"type":"reasoning"}}),
+                serde_json::json!({"type":"event_msg","payload":{"type":terminal}}),
+                inbox.clone(),
+            ])
+        })
+        .collect();
+        assert_eq!(statuses, vec![Some("Idle".to_string()); 5]);
+    }
+
+    #[test]
+    fn native_terminal_aliases_preserve_later_activity_and_approval() {
+        for terminal in [
+            "turn_failed",
+            "turn_aborted",
+            "turn_cancelled",
+            "turn_canceled",
+            "turn_interrupted",
+        ] {
+            for (later, expected) in [
+                (
+                    serde_json::json!({"type":"event_msg","payload":{"type":"task_started"}}),
+                    "Processing...",
+                ),
+                (
+                    serde_json::json!({"type":"response_item","payload":{"type":"reasoning"}}),
+                    "Processing...",
+                ),
+                (
+                    serde_json::json!({"type":"event_msg","payload":{"type":"exec_approval_request"}}),
+                    "Action Needed",
+                ),
+            ] {
+                assert_eq!(
+                    codex_status_from_log(&[
+                        serde_json::json!({"type":"event_msg","payload":{"type":terminal}}),
+                        later,
+                    ])
+                    .as_deref(),
+                    Some(expected),
+                );
+            }
+        }
     }
 
     #[test]
