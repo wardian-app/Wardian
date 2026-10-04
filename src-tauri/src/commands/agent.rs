@@ -36,7 +36,7 @@ pub use settings::{
 };
 #[cfg(test)]
 #[path = "agent/provider_log_tests.rs"]
-mod provider_log_tests;
+pub(crate) mod provider_log_tests;
 mod removal;
 use agent_lifecycle::{
     acquire_agent_lifecycle_guard, hold_previous_provider_before_rotation, lock_agent_lifecycle,

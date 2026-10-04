@@ -149,6 +149,7 @@ pub(super) struct StatusFollowUp {
     /// advanced past what they staged, so dropping them would lose the
     /// transition; the caller publishes them once the gate frees.
     pub(super) deferred: Vec<TelemetryProviderStatus>,
+    pub(super) background_captures: Vec<crate::state::background_capture::CaptureRequest>,
 }
 
 /// Hands a pass's follow-up work to detached workers.
@@ -159,6 +160,18 @@ pub(super) struct StatusFollowUp {
 /// to: the gate holder's own changes are still revalidated against the
 /// observation's revisions, so a stale one is rejected as before.
 pub(super) fn spawn_follow_up(app: &tauri::AppHandle, follow_up: StatusFollowUp) {
+    let capture_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = tauri::Manager::state::<AppState>(&capture_app);
+        dispatch_capture_follow_up(&state, follow_up.background_captures, |claim| {
+            let app = capture_app.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = tauri::Manager::state::<AppState>(&app);
+                crate::commands::background_capture::run_background_capture(&state, claim).await;
+            });
+        })
+        .await;
+    });
     if !follow_up.deferred.is_empty() {
         crate::utils::logging::log_debug(&format!(
             "[Wardian] Telemetry deferred status publication behind busy lifecycle gates: {}",
@@ -199,6 +212,20 @@ pub(super) fn spawn_follow_up(app: &tauri::AppHandle, follow_up: StatusFollowUp)
                 .await;
             }
         });
+    }
+}
+
+/// The same production admission path serves the app and state-only hosts.
+pub(super) async fn dispatch_capture_follow_up(
+    state: &AppState,
+    requests: Vec<crate::state::background_capture::CaptureRequest>,
+    mut spawn: impl FnMut(crate::state::background_capture::CaptureClaim),
+) {
+    for request in requests {
+        crate::commands::background_capture::dispatch_background_capture(
+            state, request, false, &mut spawn,
+        )
+        .await;
     }
 }
 

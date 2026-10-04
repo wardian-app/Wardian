@@ -469,7 +469,7 @@ fn schedule_agent_status_observation(
             tauri::async_runtime::spawn(async move {
                 let state = archive_app.state::<AppState>();
                 if let Err(error) =
-                    crate::commands::chat::archive_agent_chat_events_until_stable_for_state(
+                    crate::commands::background_capture::capture_background_for_state(
                         state.inner(),
                         &archive_session_id,
                     )
