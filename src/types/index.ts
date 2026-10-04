@@ -374,8 +374,16 @@ export interface QueueItem {
     summary?: string;
     /** Full provider-authored final response for durable completion records. */
     response_text?: string;
-    /** Source used to preserve the completion's event time across outbox replay. */
-    timestamp_source?: "hook_outbox_mtime" | "processing_time_fallback";
+    /**
+     * Where a completion's timestamp came from: the Claude Stop-hook outbox
+     * file, the provider log record, or the moment Wardian observed the
+     * provider's completion event.
+     */
+    timestamp_source?:
+      | "hook_outbox_mtime"
+      | "processing_time_fallback"
+      | "provider_log_timestamp"
+      | "provider_event_observed";
     provider_choice_sent?: string;
     provider_choice_pending?: string;
     provider_question?: ProviderQuestion;

@@ -118,18 +118,45 @@ tokio::task_local! {
 /// Publish TUI- as well as broker-originated turns through the ordinary runtime
 /// status path. That path fences persistence/UI emission by the status Arc of
 /// the current incarnation. Mere inbox appends produce no activity transition.
+///
+/// Every turn that finishes with a final answer also becomes an Inbox card,
+/// including turns coalesced between two wake-ups of this observer.
 pub(super) fn observe_turn_activity(
     app: tauri::AppHandle,
     agent_id: String,
+    runtime_generation: u64,
     current_status: Arc<std::sync::Mutex<String>>,
     mut observations: tokio::sync::watch::Receiver<crate::delivery::codex_shared::Observation>,
 ) {
     tauri::async_runtime::spawn(async move {
         let mut previous = CodexTurnActivity::Pending;
+        let mut finished_cursor = observations.borrow().finished_turn_cursor();
         loop {
-            let activity = observations.borrow_and_update().activity();
+            let (activity, finished) = {
+                let observation = observations.borrow_and_update();
+                (
+                    observation.activity(),
+                    observation.finished_turns_after(finished_cursor),
+                )
+            };
             if current_status.lock().is_ok_and(|status| *status == "Off") {
                 break;
+            }
+            for turn in finished {
+                finished_cursor = turn.sequence;
+                if let Some(completion) = super::turn_completion::codex_owner_turn_completion(
+                    &turn.turn_id,
+                    &turn.status,
+                    &turn.answer,
+                ) {
+                    super::turn_completion::publish_turn_completion(
+                        &app,
+                        &agent_id,
+                        "codex",
+                        Some(runtime_generation),
+                        completion,
+                    );
+                }
             }
             if activity != previous {
                 match codex_activity_status_update(&activity) {

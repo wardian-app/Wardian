@@ -356,6 +356,7 @@ impl CodexAttachmentCompletion {
         super::codex_shared::observe_turn_activity(
             self.app.clone(),
             self.session_id.clone(),
+            self.runtime_generation,
             self.current_status.clone(),
             observations,
         );

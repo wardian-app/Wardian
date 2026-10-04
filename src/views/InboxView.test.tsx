@@ -456,6 +456,46 @@ describe("InboxView", () => {
     expect(screen.getByRole("button", { name: /collapse summary/i })).toBeInTheDocument();
   });
 
+  it("expands a completion card from its bounded summary to the full answer", () => {
+    const answer = `${"a".repeat(500)}\n\nThe conclusion after the summary bound.`;
+    useQueueStore.setState({
+      items: [{
+        id: "agent-completed:agent-1:turn-1",
+        type: "agent_completed",
+        timestamp: Date.now(),
+        read: false,
+        agent_name: "My Coder",
+        summary: answer.slice(0, 500),
+        response_text: answer,
+      }],
+    });
+    render(<InboxView />);
+
+    const summary = screen.getByTestId("queue-item-summary-agent-completed:agent-1:turn-1");
+    expect(summary).not.toHaveTextContent("The conclusion after the summary bound.");
+
+    fireEvent.click(screen.getByRole("button", { name: /show full summary/i }));
+
+    expect(summary).toHaveTextContent("The conclusion after the summary bound.");
+  });
+
+  it("does not offer expansion when the summary is already the full answer", () => {
+    useQueueStore.setState({
+      items: [{
+        id: "agent-completed:agent-1:turn-2",
+        type: "agent_completed",
+        timestamp: Date.now(),
+        read: false,
+        agent_name: "My Coder",
+        summary: "Short.",
+        response_text: "Short.",
+      }],
+    });
+    render(<InboxView />);
+
+    expect(screen.queryByRole("button", { name: /show full summary/i })).not.toBeInTheDocument();
+  });
+
   it("clear item button removes item", () => {
     useQueueStore.setState({
       items: [{
