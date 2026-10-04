@@ -38,6 +38,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSy
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
+import ts from "typescript";
 
 import {
   IDENT,
@@ -607,52 +608,45 @@ function walk(dir, found = []) {
   return found;
 }
 
-const QUOTED_NAME = /['"`]([a-z_][a-z0-9_]*)['"`]/g;
+const COMMAND_NAME = /^[a-z_][a-z0-9_]*$/;
+const SCRIPT_KINDS = {
+  ".ts": ts.ScriptKind.TS,
+  ".mts": ts.ScriptKind.TS,
+  ".cts": ts.ScriptKind.TS,
+  ".tsx": ts.ScriptKind.TSX,
+  ".js": ts.ScriptKind.JS,
+  ".mjs": ts.ScriptKind.JS,
+  ".cjs": ts.ScriptKind.JS,
+  ".jsx": ts.ScriptKind.JSX,
+};
 
 /**
- * JavaScript or TypeScript source with every span that could be a comment
- * blanked: each `//` to the end of its line and each `/*` to the next `*\/`,
- * wherever they occur, even inside a string or regex literal. Every real
- * comment lies inside the blanked spans whatever the true lexing is, so a
- * command name left in a comment can never count as a caller. Over-blanking
- * (text after a URL on the same line, say) can only make the check report a
- * command, never hide one. Newlines are kept and blanked characters become
- * spaces, so no quote and name become adjacent that were not before.
+ * Identifier-shaped string literals in JavaScript or TypeScript source. The
+ * TypeScript parser tells comments, regular-expression literals, and template
+ * text apart exactly, so a command name left in a comment is never a caller.
  *
  * @param {string} text
- */
-export function blankPossibleComments(text) {
-  const blank = new Uint8Array(text.length);
-  for (let start = text.indexOf("//"); start !== -1; start = text.indexOf("//", start + 1)) {
-    const newline = text.indexOf("\n", start);
-    blank.fill(1, start, newline === -1 ? text.length : newline);
-  }
-  for (let start = text.indexOf("/*"); start !== -1; start = text.indexOf("/*", start + 1)) {
-    const close = text.indexOf("*/", start + 2);
-    blank.fill(1, start, close === -1 ? text.length : close + 2);
-  }
-  let out = "";
-  for (let index = 0; index < text.length; index += 1) {
-    out += blank[index] && text[index] !== "\n" && text[index] !== "\r" ? " " : text[index];
-  }
-  return out;
-}
-
-/**
- * Quoted identifier-shaped names in JavaScript or TypeScript source, outside
- * anything that could be a comment (see `blankPossibleComments`).
- *
- * @param {string} text
+ * @param {string} [fileName] picks the script kind from its extension
  * @returns {Set<string>}
  */
-export function quotedNamesIn(text) {
-  return new Set([...blankPossibleComments(text).matchAll(QUOTED_NAME)].map((hit) => hit[1]));
+export function quotedNamesIn(text, fileName = "source.tsx") {
+  const kind = SCRIPT_KINDS[path.extname(fileName).toLowerCase()] ?? ts.ScriptKind.TSX;
+  const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, false, kind);
+  const names = new Set();
+  const visit = (node) => {
+    if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && COMMAND_NAME.test(node.text)) {
+      names.add(node.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return names;
 }
 
 function quotedNames(files) {
   const names = new Set();
   for (const file of files) {
-    for (const name of quotedNamesIn(readFileSync(file, "utf8"))) names.add(name);
+    for (const name of quotedNamesIn(readFileSync(file, "utf8"), file)) names.add(name);
   }
   return names;
 }

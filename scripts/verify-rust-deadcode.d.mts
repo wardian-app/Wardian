@@ -42,6 +42,5 @@ export function unreachableItems(
   allFiles: Map<string, SourceAnalysis>,
 ): Array<DefinedItem & { file: string }>;
 export function registeredCommands(libSource: string): string[];
-export function blankPossibleComments(text: string): string;
-export function quotedNamesIn(text: string): Set<string>;
+export function quotedNamesIn(text: string, fileName?: string): Set<string>;
 export function main(argv?: string[]): number;

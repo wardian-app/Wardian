@@ -41,7 +41,9 @@ checks. Tests never count as callers in any of them.
    counts as possibly enabled.
 3. **Tauri commands.** Every command in `generate_handler!` must be invoked by
    name from production code. `debug_*` commands can be invoked from the E2E
-   suites or scripts instead.
+   suites or scripts instead. Frontend names come from the TypeScript parser's
+   string literals, not a text search, so a call left in a comment never
+   counts; the Windows backend job installs the npm dependencies for this.
 
 Existing findings are recorded in `scripts/rust-deadcode-baseline.json`,
 grouped by the reason each is kept. A new finding fails the gate. A baseline

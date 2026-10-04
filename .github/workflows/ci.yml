@@ -128,6 +128,15 @@ jobs:
       - name: Check Compilation
         # local-verify: backend
         run: cargo check --workspace
+      # The dead-code command check parses frontend sources with the
+      # TypeScript parser, so it needs the npm dependencies.
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: "npm"
+      - name: Install dependencies
+        run: npm ci
       # Runs after `cargo check --workspace` so every dependency is already
       # checked; only the visibility-rewritten copy of the workspace crates is
       # compiled. Windows is the authoritative platform for the baseline.

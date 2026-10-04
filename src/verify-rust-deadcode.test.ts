@@ -277,7 +277,7 @@ describe('Rust dead-code gate', () => {
     ].join('\n'))).toEqual(['first', 'debug_second', 'third']);
   });
 
-  it('never counts a command name that could sit in a comment', () => {
+  it('never counts a command name in a comment', () => {
     const names = (source: string) => [...quotedNamesIn(source)].sort();
     expect(names([
       '// invoke("line_comment_command") was removed',
@@ -299,9 +299,13 @@ describe('Rust dead-code gate', () => {
     ]);
     // Division keeps live names on the same line.
     expect(names('const half = (a) / (b) / 2; invoke("live_after_division");')).toEqual(['live_after_division']);
-    // Over-blanking is the accepted cost: a name after `//` in a URL on the same line is
-    // not counted, so the check reports that command rather than missing a dead one.
-    expect(names('fetch("https://example.test"); invoke("after_url");')).toEqual([]);
+    // A `//` or `/*` inside a string or a line comment does not start a comment.
+    expect(names('fetch("https://example.test"); invoke("after_url");')).toEqual(['after_url']);
+    expect(names([
+      '// the watcher does not cover agents/* deployments',
+      'invoke("live_after_glob_comment");',
+      'const x = 1; /* closes here */',
+    ].join('\n'))).toEqual(['live_after_glob_comment']);
   });
 
   it('follows import aliases to the item they name', () => {

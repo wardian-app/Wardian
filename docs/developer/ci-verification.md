@@ -100,7 +100,7 @@ The script runs three checks:
 | --- | --- | --- |
 | rustc | The `src-tauri` library | The script copies the workspace under `<cargo-target-dir>/rust-deadcode/`. In the copy, every `pub` item in `src-tauri/src` becomes `pub(crate)`, except the functions that `main.rs` calls (`run`). Then it runs `cargo check --workspace --lib` without `cfg(test)`. Each `dead_code` warning that rustc then reports is a finding. |
 | Token search | Shared library crates (`wardian-core`) | An item is dead when production code cannot reach it by name. Production code in another workspace crate, and crate code outside any item (for example a trait impl), are the roots. A name used inside an item counts only once that item is reachable, so a chain or cycle of items that only call each other is dead. Definitions, `impl` headers, `use` declarations, comments, `#[cfg(test)]` code, tests, and examples do not count. |
-| Commands | `tauri::generate_handler!` | Every registered command must be invoked by name from non-test frontend code or Rust production code. A `debug_*` command can also be invoked from `e2e/`, `e2e-native/`, or `scripts/`. |
+| Commands | `tauri::generate_handler!` | Every registered command must be invoked by name from non-test frontend code or Rust production code. Frontend names are string literals found with the TypeScript parser, so a name in a comment never counts. A `debug_*` command can also be invoked from `e2e/`, `e2e-native/`, or `scripts/`. |
 
 The script never writes to the checkout. It updates the copy in place and
 rewrites only files whose content changed, so cargo reuses its incremental
