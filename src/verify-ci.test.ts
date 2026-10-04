@@ -6,6 +6,16 @@ import { parseArgs, readVerificationPlan, selectPlan } from '../scripts/verify-c
 
 const workflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 
+describe('compiler protected-input admission', () => {
+  it('proves the normal execute boundary and shared wrapper entry with harmless children', () => {
+    const result = spawnSync(process.execPath, ['--test', resolve('scripts/compiler-input-guard.test.mjs')], {
+      cwd: process.cwd(), encoding: 'utf8', timeout: 30_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+  }, 35_000);
+});
+
 describe('verification arguments', () => {
   it('defaults to the full plan only when no category option is supplied', () => {
     expect(parseArgs([])).toEqual({ list: false, only: null });

@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { assertVerificationAdmission } from './compiler-input-guard.mjs';
 
 const WORKFLOW_PATH = resolve('.github/workflows/ci.yml');
 const CATEGORIES = new Set(['frontend', 'backend', 'docs']);
@@ -59,6 +60,7 @@ export function selectPlan(plan, only) {
 }
 
 function execute(command) {
+  assertVerificationAdmission(command, { cwd: process.cwd(), env: process.env });
   const result = spawnSync(command, { cwd: process.cwd(), shell: true, stdio: 'inherit' });
   if (result.error) throw result.error;
   if (result.status !== 0) {
