@@ -1,4 +1,4 @@
-use crate::manager;
+use crate::manager::{self, roster_io::save_live_state};
 use crate::providers::antigravity::AntigravityProvider;
 use crate::providers::ProviderFactory;
 use crate::state::conversation_archive::effective_conversation_logging;
@@ -40,8 +40,8 @@ mod provider_log_tests;
 mod removal;
 use agent_lifecycle::{
     acquire_agent_lifecycle_guard, hold_previous_provider_before_rotation, lock_agent_lifecycle,
-    lock_agent_roster_for_save, lock_rename_mutation, stop_native_owner,
-    stop_native_owner_with_before_capture, PendingRuntime,
+    lock_agent_roster_for_best_effort_save, lock_agent_roster_for_save, lock_rename_mutation,
+    stop_native_owner, stop_native_owner_with_before_capture, PendingRuntime,
 };
 use agent_naming::{
     generated_agent_name, persisted_agent_session_names, resolve_requested_spawn_session_name,
@@ -2954,11 +2954,9 @@ pub async fn pause_agent(
     let _lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
     lifecycle_heartbeat.ensure_active("pause")?;
     stop_native_owner(&state, &session_id, false).await?;
-    let (mut termination, state_snapshot, status_arc) = {
-        let mut agents = state.agents.lock().await;
-        let order = state.agent_order.lock().await;
-
-        let Some(agent) = agents.get_mut(&session_id) else {
+    let mut roster = lock_agent_roster_for_best_effort_save(&state).await;
+    let (mut termination, status_arc) = {
+        let Some(agent) = roster.agents.get_mut(&session_id) else {
             return Err(format!("Agent {} not found", session_id));
         };
 
@@ -2970,10 +2968,11 @@ pub async fn pause_agent(
             config.is_off = true;
         }
 
-        let state_snapshot = manager::state_configs_snapshot(&agents, &order);
-        (termination, state_snapshot, status_arc)
+        (termination, status_arc)
     };
-    manager::save_state_snapshot(&app, &state_snapshot);
+    let (_lifecycle_guard, _lifecycle_lease, lifecycle_heartbeat) = roster
+        .save((_lifecycle_guard, _lifecycle_lease, lifecycle_heartbeat))
+        .await?;
     manager::publish_agent_status(&app, &session_id, &status_arc);
 
     if let Some(runtime_generation) = termination.runtime_generation {
@@ -2992,12 +2991,11 @@ pub async fn pause_agent(
     lifecycle_heartbeat.ensure_active("pause")?;
     manager::terminate_active_agent_process(&mut termination);
 
-    let state_snapshot = {
-        let agents = state.agents.lock().await;
-        let order = state.agent_order.lock().await;
-        manager::state_configs_snapshot(&agents, &order)
-    };
-    manager::save_state_snapshot(&app, &state_snapshot);
+    let _lifecycle_context = save_live_state(
+        &state,
+        (_lifecycle_guard, _lifecycle_lease, lifecycle_heartbeat),
+    )
+    .await?;
 
     let _ = app.emit("agents-updated", ());
     Ok(())
@@ -4620,20 +4618,20 @@ pub async fn enable_agent_worktree(
     }
 
     lifecycle_heartbeat.ensure_active("clear")?;
-    {
+    let (lifecycle_guard, lifecycle_lease, lifecycle_heartbeat) = {
         let mut roster = lock_agent_roster_for_save(&state).await?;
-        if let Some(agent) = roster.agents.get_mut(&session_id) {
-            lifecycle_heartbeat.ensure_active("clear")?;
-            {
-                let mut config = agent.config.lock().unwrap();
-                enable_worktree_config(&mut config, &worktree_path);
-            }
-            manager::save_state(&roster.barrier, &roster.agents, &roster.order);
-            let _ = app.emit("agents-updated", ());
-        } else {
+        let Some(agent) = roster.agents.get_mut(&session_id) else {
             return Err(format!("Agent {} not found", session_id));
+        };
+        lifecycle_heartbeat.ensure_active("clear")?;
+        {
+            let mut config = agent.config.lock().unwrap();
+            enable_worktree_config(&mut config, &worktree_path);
         }
-    }
+        let context = (lifecycle_guard, lifecycle_lease, lifecycle_heartbeat);
+        roster.save(context).await?
+    };
+    let _ = app.emit("agents-updated", ());
 
     clear_agent_after_worktree_mutation(
         session_id,
@@ -4732,32 +4730,32 @@ pub async fn assign_agent_worktree(
         find_assignable_worktree(&configs, &wardian_home, &worktree_folder, discovered)
             .ok_or_else(|| "Worktree is not managed by Wardian".to_string())?;
     lifecycle_heartbeat.ensure_active("clear")?;
-    {
+    let (lifecycle_guard, lifecycle_lease, lifecycle_heartbeat) = {
         let mut roster = lock_agent_roster_for_save(&state).await?;
-        if let Some(agent) = roster.agents.get_mut(&session_id) {
-            lifecycle_heartbeat.ensure_active("clear")?;
-            {
-                let mut config = agent.config.lock().unwrap();
-                let source_folder = config
-                    .git_worktree_source
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|folder| !folder.is_empty())
-                    .unwrap_or(config.folder.trim())
-                    .to_string();
-                validate_assignable_worktree_for_agent(
-                    &source_folder,
-                    &managed_worktree,
-                    worktree_path,
-                )?;
-                assign_worktree_config(&mut config, &worktree_folder)?;
-            }
-            manager::save_state(&roster.barrier, &roster.agents, &roster.order);
-            let _ = app.emit("agents-updated", ());
-        } else {
+        let Some(agent) = roster.agents.get_mut(&session_id) else {
             return Err(format!("Agent {} not found", session_id));
+        };
+        lifecycle_heartbeat.ensure_active("clear")?;
+        {
+            let mut config = agent.config.lock().unwrap();
+            let source_folder = config
+                .git_worktree_source
+                .as_deref()
+                .map(str::trim)
+                .filter(|folder| !folder.is_empty())
+                .unwrap_or(config.folder.trim())
+                .to_string();
+            validate_assignable_worktree_for_agent(
+                &source_folder,
+                &managed_worktree,
+                worktree_path,
+            )?;
+            assign_worktree_config(&mut config, &worktree_folder)?;
         }
-    }
+        let context = (lifecycle_guard, lifecycle_lease, lifecycle_heartbeat);
+        roster.save(context).await?
+    };
+    let _ = app.emit("agents-updated", ());
 
     clear_agent_after_worktree_mutation(
         session_id,
@@ -4875,20 +4873,20 @@ pub async fn disable_agent_worktree(
             .ok();
 
     lifecycle_heartbeat.ensure_active("clear")?;
-    {
+    let (lifecycle_guard, lifecycle_lease, lifecycle_heartbeat) = {
         let mut roster = lock_agent_roster_for_save(&state).await?;
-        if let Some(agent) = roster.agents.get_mut(&session_id) {
-            lifecycle_heartbeat.ensure_active("clear")?;
-            {
-                let mut config = agent.config.lock().unwrap();
-                disable_worktree_config(&mut config)?;
-            }
-            manager::save_state(&roster.barrier, &roster.agents, &roster.order);
-            let _ = app.emit("agents-updated", ());
-        } else {
+        let Some(agent) = roster.agents.get_mut(&session_id) else {
             return Err(format!("Agent {} not found", session_id));
+        };
+        lifecycle_heartbeat.ensure_active("clear")?;
+        {
+            let mut config = agent.config.lock().unwrap();
+            disable_worktree_config(&mut config)?;
         }
-    }
+        let context = (lifecycle_guard, lifecycle_lease, lifecycle_heartbeat);
+        roster.save(context).await?
+    };
+    let _ = app.emit("agents-updated", ());
 
     clear_agent_after_worktree_mutation(
         session_id,
@@ -4921,7 +4919,7 @@ pub async fn reorder_agents<R: tauri::Runtime>(
     manager::log_debug("[WARDIAN] reorder_agents called");
     let mut roster = lock_agent_roster_for_save(&state).await?;
     apply_agent_order(&roster.agents, &mut roster.order, session_ids)?;
-    manager::save_state(&roster.barrier, &roster.agents, &roster.order);
+    roster.save(()).await?;
     Ok(())
 }
 

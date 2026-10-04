@@ -74,12 +74,26 @@ repair historical user data or invent missing source identity.
 ## Startup restoration and configuration ownership
 
 Rename, reorder, and worktree enable/assign/disable acquire the cross-process
-agent roster barrier before locking the in-memory agent map and display order;
-file-lock waits run on the blocking pool. Persistence within these mutations
-uses the already-held barrier. Other roster paths can use a nonblocking
+agent roster barrier before locking the in-memory agent map and display order.
+Admission attempts run on the blocking pool and retry asynchronously, so a
+contended file lock cannot occupy the worker needed by the admitted writer.
+Reorder, worktree updates, pause snapshots, and background Codex identity
+publication capture current configuration after admission, release global
+roster locks, and perform disk I/O on the blocking pool. The physical operation
+owns the barrier and its caller's lifecycle context until completion, including
+when the awaiting caller is cancelled. Background identity publication commits
+the saved resume identity before updating memory under that same exclusion.
+Pause preserves best-effort write errors; background publication returns a
+write error without publishing the identity in memory.
+
+These paths use the already-held barrier. Other roster paths can use a nonblocking
 try/retry, releasing global locks before a contested wait. No roster path may
 wait for the barrier while holding the agent map or order: that can deadlock
 against a concurrent rename.
+
+This executor repair does not make every legacy whole-roster snapshot fresh.
+Delete, rollback, and runtime persistence paths still require a separate audit
+of snapshots captured before durable admission.
 
 Startup restoration uses the same per-agent lifecycle gate as configuration
 updates, pause, and resume. It claims the gate before selecting a saved config

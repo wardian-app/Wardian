@@ -50,7 +50,7 @@ pub(crate) async fn publish_background_identity(
     native_id: &str,
     started_fresh: bool,
 ) -> Result<(), String> {
-    let _lifecycle = state.lock_agent_lifecycle(&spec.target_agent_id).await;
+    let lifecycle = state.lock_agent_lifecycle(&spec.target_agent_id).await;
     if state
         .interactions
         .current_provider_input_generation(&spec.target_agent_id)
@@ -59,9 +59,15 @@ pub(crate) async fn publish_background_identity(
     {
         return Err("background identity generation is no longer current".into());
     }
-    let _barrier = wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
-        .map_err(|error| error.to_string())?
-        .ok_or("agent roster barrier unavailable")?;
+    let barrier = super::roster_io::acquire_roster_barrier().await?;
+    if state
+        .interactions
+        .current_provider_input_generation(&spec.target_agent_id)
+        .await
+        != Some(spec.generation)
+    {
+        return Err("background identity generation is no longer current".into());
+    }
     let agents = state.agents.lock().await;
     let order = state.agent_order.lock().await;
     let agent = agents
@@ -79,12 +85,34 @@ pub(crate) async fn publish_background_identity(
         .find(|config| config.session_id == spec.target_agent_id)
         .ok_or("background target missing from agent order")?;
     *entry = updated.clone();
-    super::try_save_state_snapshot_unlocked(&snapshot)?;
-    *agent
-        .config
-        .lock()
-        .map_err(|_| "agent config lock unavailable")? = updated;
-    Ok(())
+    let config = agent.config.clone();
+    let home = crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| "Could not locate Wardian home".to_string())?;
+    drop(order);
+    drop(agents);
+    #[cfg(test)]
+    let publication_probe = BACKGROUND_PUBLICATION_PROBE
+        .try_with(|probe| probe.borrow_mut().take())
+        .ok()
+        .flatten();
+    super::roster_io::run_roster_io(barrier, move || {
+        let _lifecycle = lifecycle;
+        super::try_save_state_snapshot_for_home(&home, &snapshot)?;
+        #[cfg(test)]
+        if let Some(probe) = publication_probe {
+            let _ = probe.started.send(());
+            let _ = probe.entered.send(());
+            probe.release.recv().map_err(|error| error.to_string())?;
+        }
+        *config.lock().map_err(|_| "agent config lock unavailable")? = updated;
+        Ok(())
+    })
+    .await
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static BACKGROUND_PUBLICATION_PROBE: std::cell::RefCell<Option<super::RosterIoProbe>>;
 }
 
 /// Publish TUI- as well as broker-originated turns through the ordinary runtime
