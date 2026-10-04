@@ -48,7 +48,7 @@ async fn registered_off_source(
         .join(&session_id)
         .join("habitat/.codex/sessions/2026/10/04");
     std::fs::create_dir_all(&source_dir).unwrap();
-    let path = source_dir.join(format!("rollout-{conversation}.jsonl"));
+    let path = source_dir.join(format!("rollout-2026-10-04T00-00-00-{conversation}.jsonl"));
     let header = serde_json::json!({
         "type": "session_meta",
         "payload": { "id": conversation, "cwd": home.path() }
@@ -576,7 +576,9 @@ async fn failed_source_observation_cannot_fall_back_across_replacement() {
     })
     .await;
     let new_conversation = "replacement-source-conversation";
-    let new_path = path.with_file_name(format!("rollout-{new_conversation}.jsonl"));
+    let new_path = path.with_file_name(format!(
+        "rollout-2026-10-04T00-00-00-{new_conversation}.jsonl"
+    ));
     std::fs::write(
         &new_path,
         format!(
