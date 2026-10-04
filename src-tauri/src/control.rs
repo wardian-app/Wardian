@@ -49,6 +49,9 @@ const MAX_HEADLESS_DELIVERY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 #[cfg(windows)]
 pub(crate) type ControlEndpointClaim = tokio::net::windows::named_pipe::NamedPipeServer;
 
+#[cfg(windows)]
+mod windows_pipe;
+
 #[cfg(unix)]
 pub(crate) struct ControlEndpointClaim {
     listener: Option<tokio::net::UnixListener>,
@@ -140,18 +143,10 @@ async fn run_control_server(
     app: AppHandle,
     first_server: ControlEndpointClaim,
 ) -> std::io::Result<()> {
-    use tokio::net::windows::named_pipe::ServerOptions;
-
     let pipe_name = wardian_core::control::pipe_name()
         .ok_or_else(|| std::io::Error::other("could not resolve Wardian control pipe"))?;
 
-    let mut next_server = Some(first_server);
-    loop {
-        let server = match next_server.take() {
-            Some(server) => server,
-            None => ServerOptions::new().create(&pipe_name)?,
-        };
-        server.connect().await?;
+    windows_pipe::serve(&pipe_name, first_server, move |server| {
         let app_handle = app.clone();
         tauri::async_runtime::spawn(async move {
             if let Err(error) = handle_connection(server, app_handle).await {
@@ -160,7 +155,8 @@ async fn run_control_server(
                 ));
             }
         });
-    }
+    })
+    .await
 }
 
 #[cfg(unix)]
