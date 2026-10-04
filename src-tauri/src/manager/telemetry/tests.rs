@@ -12,6 +12,8 @@ fn test_snapshot(status: &str) -> AgentSnapshot {
         folder: "D:/work".to_string(),
         is_off: false,
         resume_session: None,
+        conversation_logging: wardian_core::conversations::AgentConversationLoggingSetting::Default,
+        capture_conversation: None,
         provider_generation: 0,
         process_id: Some(1234),
         query_count: Arc::new(Mutex::new(0)),
@@ -36,7 +38,7 @@ fn test_snapshot(status: &str) -> AgentSnapshot {
     }
 }
 
-fn test_active_agent(
+pub(super) fn test_active_agent(
     session_id: &str,
     provider: &str,
     status: &str,
@@ -84,6 +86,11 @@ fn test_snapshot_from_agent(
         folder: config.folder.clone(),
         is_off: config.is_off,
         resume_session: super::opencode_telemetry_session_id(&config),
+        conversation_logging: config.conversation_logging,
+        capture_conversation: config
+            .resume_session
+            .clone()
+            .or(config.fresh_provider_session_id.clone()),
         provider_generation,
         process_id: agent.process_id,
         query_count: agent.query_count.clone(),
