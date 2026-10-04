@@ -39,6 +39,7 @@ import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
+import { assertCompilerAdmission } from "./compiler-input-guard.mjs";
 
 import {
   IDENT,
@@ -123,7 +124,9 @@ function pruneBaseline(text, stale) {
 // Workspace model
 
 function cargoMetadata() {
-  const output = execFileSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], {
+  const args = ["metadata", "--no-deps", "--format-version", "1"];
+  assertCompilerAdmission({ program: "cargo", args, cwd: REPO_ROOT });
+  const output = execFileSync("cargo", args, {
     cwd: REPO_ROOT,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
@@ -365,6 +368,13 @@ function runRustcPass(metadata, workspace, options) {
   const isCopied = (resolved) =>
     copiedRoots.some((dir) => resolved === dir || resolved.startsWith(dir + path.sep));
   const hash = createHash("sha1").update(workspaceRoot).digest("hex").slice(0, 12);
+  // Source-copy writes are inside the metadata target tree. Admit that exact
+  // tree before creating directories or syncing rewritten files into it.
+  assertCompilerAdmission({
+    program: "cargo",
+    args: ["check", "--target-dir", metadata.target_directory],
+    cwd: REPO_ROOT,
+  });
   const copyRoot = prepareCopyRoot(metadata.target_directory, hash);
 
   const files = listCopiedFiles(memberDirs);
@@ -392,6 +402,7 @@ function runRustcPass(metadata, workspace, options) {
     metadata.target_directory,
   ];
   if (options.verbose) console.log(`rustc pass: ${written} file(s) synced into ${copyRoot}`);
+  assertCompilerAdmission({ program: "cargo", args, cwd: copyRoot });
   const result = spawnSync("cargo", args, {
     cwd: copyRoot,
     encoding: "utf8",
