@@ -13,6 +13,8 @@ mod attachment;
 #[cfg(test)]
 #[path = "owner_preparation_tests.rs"]
 mod preparation_tests;
+#[path = "startup_resources.rs"]
+mod startup_resources;
 
 /// Phase durations for one owner startup.
 ///
@@ -35,6 +37,7 @@ pub(super) struct OwnerStartTimings {
     stderr_diagnostic: Value,
     socket_wait: std::time::Duration,
     socket_wait_diagnostic: Option<SocketWaitDiagnostic>,
+    socket_wait_resources: Value,
     proxy_connect: std::time::Duration,
     initialize: std::time::Duration,
     launch_model: std::time::Duration,
@@ -189,6 +192,13 @@ impl OwnerStartTimings {
         self.stderr_diagnostic = diagnostic.as_log_value();
     }
 
+    fn record_socket_wait_resources(
+        &mut self,
+        resources: Option<startup_resources::StartupResourceDelta>,
+    ) {
+        self.socket_wait_resources = json!(resources);
+    }
+
     pub(super) fn socket_wait_diagnostic_value(&self) -> Value {
         self.socket_wait_diagnostic
             .map(SocketWaitDiagnostic::as_log_value)
@@ -202,7 +212,7 @@ impl OwnerStartTimings {
 habitat_ms={} codex_home_ms={} compact_home_ms={} codex_projection_ms={} messaging_ms={} \
             socket_recovery_ms={} thread_seed_ms={} launch_config_ms={} child_spawn_ms={} \
             stderr_diagnostic={} socket_wait_ms={} \
-            socket_wait_diagnostic={} proxy_connect_ms={} initialize_ms={} launch_model_ms={}",
+            socket_wait_diagnostic={} socket_wait_resources={} proxy_connect_ms={} initialize_ms={} launch_model_ms={}",
             self.total.as_millis(),
             self.quiescent.as_millis(),
             self.habitat_workspace.as_millis(),
@@ -217,6 +227,7 @@ habitat_ms={} codex_home_ms={} compact_home_ms={} codex_projection_ms={} messagi
             self.stderr_diagnostic,
             self.socket_wait.as_millis(),
             socket_wait_diagnostic,
+            self.socket_wait_resources,
             self.proxy_connect.as_millis(),
             self.initialize.as_millis(),
             self.launch_model.as_millis(),
@@ -502,14 +513,19 @@ impl CodexSharedOwner {
         let start = async {
             // A private socket must appear while our daemon is alive. No controller
             // RPC is retried, and a proxy handshake failure is final.
+            // Fix the original deadline before optional OS queries so sampling
+            // cannot extend the socket-wait budget.
+            let socket_deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+            let resources = startup_resources::StartupResourceObserver::start(&child);
             let socket_wait = observe_socket_wait(
                 &socket,
-                tokio::time::Instant::now() + STARTUP_TIMEOUT,
+                socket_deadline,
                 async { let _ = (&mut cancelled).await; },
                 || observe_child_liveness(&mut child),
             )
             .await;
             timings.record_socket_wait(socket_wait);
+            timings.record_socket_wait_resources(resources.finish());
             socket_wait.outcome.into_result()?;
             let mut proxy_command = Command::new(&program);
             proxy_command.args(&prefix_args).current_dir(&spec.workspace).env("CODEX_HOME", &codex_home);
