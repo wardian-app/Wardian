@@ -42,7 +42,8 @@
         "tauri-command::browser_engine_status",
         "tauri-command::list_agent_metrics",
         "tauri-command::list_browser_sessions",
-        "tauri-command::show_conversation"
+        "tauri-command::show_conversation",
+        "tauri-command::telemetry_dashboard"
       ]
     },
     {
