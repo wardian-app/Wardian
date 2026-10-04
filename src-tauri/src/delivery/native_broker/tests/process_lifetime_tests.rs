@@ -5,7 +5,6 @@ use std::os::windows::io::{AsRawHandle, BorrowedHandle};
 use std::time::Duration;
 
 #[test]
-#[ignore = "isolated native broker fixture entry point"]
 fn native_broker_lifetime_helper() {
     let Some(root) = std::env::var_os("WARDIAN_BROKER_LIFETIME_TEST_ROOT") else {
         return;
@@ -65,7 +64,6 @@ require('node:readline').createInterface({input: process.stdin}).on('line', line
     );
     command
         .args([
-            "--ignored",
             "--exact",
             &format!("{module}::native_broker_lifetime_helper"),
         ])

@@ -48,11 +48,7 @@ impl Drop for Member {
 }
 fn helper_args() -> Vec<String> {
     let (_, module) = module_path!().split_once("::").unwrap();
-    vec![
-        "--ignored".into(),
-        "--exact".into(),
-        format!("{module}::owned_process_helper"),
-    ]
+    vec!["--exact".into(), format!("{module}::owned_process_helper")]
 }
 fn command(role: &str, root: &Path, case: &str) -> std::process::Command {
     let mut command =
@@ -154,7 +150,6 @@ fn write_ready(root: &Path, child: &tokio::process::Child, descendant: Option<&M
 
 // Each role runs in a fresh test process. Environment changes are command-local.
 #[test]
-#[ignore = "isolated child entry point for process lifetime tests"]
 fn owned_process_helper() {
     let Ok(role) = std::env::var(ROLE) else {
         return;
