@@ -50,6 +50,8 @@ import { useTerrainOpen } from "../features/garden/useTerrainOpen";
 import { basename as terrainCellName } from "../features/garden/terrain";
 import type { TerrainViewport } from "../features/garden/terrainFrontier";
 import { useGardenStore } from "../store/useGardenStore";
+import { gardenLiveKeys } from "../features/garden/gardenLiveEntities";
+import { useAgentRosterStore } from "../features/agents/useAgentRosterStore";
 import { useLibraryStore } from "../store/useLibraryStore";
 import { useAutomationsView } from "../store/useAutomationsView";
 import { useAppShellWorkbenchNavigation } from "../layout/AppShell";
@@ -311,11 +313,19 @@ export const GardenView: React.FC<GardenViewProps> = ({
   // warm-start from them; without that the map re-derives from scratch on every
   // reload and visibly rearranges itself. `adoptScene` ignores a scene that has
   // not moved materially, so this cannot churn storage.
+  //
+  // The same write prunes state for agents that no longer exist, but only once
+  // the full roster is known with authority (`gardenLiveKeys`); before that it
+  // passes null and nothing is pruned. Authority arriving is itself a reason to
+  // write: startup restoration often ends without changing the layout, and the
+  // re-adopted scene is the one already laid out, so nothing moves.
+  const roster = useAgentRosterStore((state) => state);
+  const liveKeys = useMemo(() => gardenLiveKeys(roster), [roster]);
   const adoptSceneRef = useRef(adoptScene);
   adoptSceneRef.current = adoptScene;
   useEffect(() => {
-    adoptSceneRef.current(layout.scene);
-  }, [layout]);
+    adoptSceneRef.current(layout.scene, liveKeys);
+  }, [layout, liveKeys]);
 
   // Fall back to an externally-selected single agent (e.g. chosen in Grid) when
   // there is no local Garden selection yet.

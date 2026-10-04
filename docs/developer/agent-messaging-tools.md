@@ -8,10 +8,20 @@ server's `WARDIAN_HOME` and a managed caller identified by `WARDIAN_SESSION_ID`.
 
 ## Tool contract
 
+Use wait_agent when you need to suspend for mailbox activity without reading
+or acknowledging records. It returns immediately if unacknowledged activity
+already exists; otherwise it subscribes before checking durable state and
+waits for the next mailbox signal. The wake response contains no message body.
+Call receive_messages afterward to inspect and acknowledge records. The
+default and maximum timeout is 60 seconds; timeout_ms: 0 checks immediately.
+Waiting never starts or interrupts an idle agent. The CLI equivalent is
+wardian message wait --timeout-ms 60000.
+
 The tool surface follows Codex v2's distinction between information and work:
 
 | Tool | Meaning |
 | --- | --- |
+| wait_agent | Wait for mailbox activity without reading, claiming, or acknowledging records. |
 | `send_message` | Send information without starting or interrupting a turn. |
 | `followup_task` | Assign work and return a request receipt without waiting for its reply. |
 | `receive_messages` | Read a bounded batch of information, tasks, and replies addressed to the caller. |
@@ -105,10 +115,11 @@ recover already captured outcomes after a failed reply write without rerunning
 provider work. Startup marks bindings with lost observation continuity uncertain;
 historical or manually received tasks are never inferred from transcripts.
 
-Receive waits on recipient mailbox signals after committed admissions,
-replies, and provider-context delivery. It retains its original deadline and
-cursor acknowledgement rules. Completion wakes an existing mailbox wait; it
-does not start a finished requester's turn.
+Receive with a nonzero timeout waits on recipient mailbox signals and returns
+the resulting page; it retains its cursor acknowledgement rules. wait_agent is
+the separate wake-only operation and does not claim or acknowledge records.
+Completion wakes an active mailbox wait, but does not start a finished
+requester's turn.
 
 Information and replies use the same canonical interaction store. A capable
 Codex session can receive them through `thread/inject_items` as

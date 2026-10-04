@@ -329,6 +329,18 @@ Current sequence:
    Wardian requires that exact thread to appear in the owned daemon before
    subscribing and enabling peer delivery. No model bootstrap turn is required.
 
+#### App-server startup stderr
+
+The owner drains app-server stderr from spawn onward and retains at most 16 KiB
+until startup completes. It adds only sanitized text, capped at 1,024 characters
+plus an optional three-character ellipsis when shortened, to the startup timing
+log. Credential-like environment values, token-shaped text, private paths,
+invalid text, and truncated captures are replaced with fixed omission markers.
+Raw provider stderr is never written to general logs. After successful startup
+the owner keeps draining and discards later stderr. Startup failure and owner
+shutdown terminate the process tree, then wait up to 500 ms for stderr EOF before
+aborting the reader if a descendant still holds the pipe open.
+
 The ordinary TUI startup overlay also sets
 `check_for_update_on_startup = false` so an interactive update notice cannot
 block attachment. The guarded journal restores the prior setting after the TUI

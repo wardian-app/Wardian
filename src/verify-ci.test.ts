@@ -113,6 +113,7 @@ describe('CI verification contract', () => {
       'npm run check:workbench-cutover',
       'npm run check:test-reachability',
       'npm run check:deadcode',
+      'npm run check:deadcode:production',
       'npm run check:budgets',
       'npm run check:page-fixtures',
       'cargo clippy --workspace --all-targets -- -D warnings',

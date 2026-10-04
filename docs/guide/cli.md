@@ -489,11 +489,13 @@ precedence. Multiple tasks admitted into the same turn receive that turn's
 shared final answer. Manual inbox delivery, composer delivery, and other
 providers still require an explicit reply.
 
-`message receive --timeout-ms 60000` waits for committed mailbox activity,
-including completion results. A completion wakes an active receive wait;
-information and completion notifications do not start an idle agent's turn.
-Active task steering requires stable Codex 0.159.2 or newer. Older supported
-versions retain idle task delivery and information delivery.
+`message wait --timeout-ms 60000` waits for mailbox activity, including
+completion results, without returning or acknowledging inbox records. Follow it
+with `message receive` to inspect the page. `message receive --timeout-ms 60000`
+also waits for activity and returns the resulting page. Completion wakes an
+active wait; information and completion notifications do not start an idle
+agent's turn. Active task steering requires stable Codex 0.159.2 or newer.
+Older supported versions retain idle task delivery and information delivery.
 
 When a task is queued because the target is busy or an eligible native owner is
 still handshaking, Wardian retains the canonical task for a later authoritative

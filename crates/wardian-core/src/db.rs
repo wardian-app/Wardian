@@ -1144,13 +1144,6 @@ fn row_to_delivery_attempt(
     })
 }
 
-pub fn upsert_structured_reply(reply: &StructuredReply) -> Result<(), Box<dyn std::error::Error>> {
-    get_db_conn(|conn| {
-        upsert_structured_reply_with_conn(conn, reply)?;
-        Ok(())
-    })
-}
-
 pub fn upsert_structured_reply_with_conn(
     conn: &Connection,
     reply: &StructuredReply,
