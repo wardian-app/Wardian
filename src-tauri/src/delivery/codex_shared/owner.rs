@@ -32,7 +32,6 @@ pub(super) struct OwnerStartTimings {
     managed_messaging: std::time::Duration,
     socket_recovery: std::time::Duration,
     launch_config: std::time::Duration,
-    thread_seed: std::time::Duration,
     child_spawn: std::time::Duration,
     stderr_diagnostic: Value,
     socket_wait: std::time::Duration,
@@ -210,7 +209,7 @@ impl OwnerStartTimings {
         crate::utils::logging::log_debug(&format!(
             "[Wardian] Codex owner start agent={agent_id} total_ms={} quiescent_ms={} \
 habitat_ms={} codex_home_ms={} compact_home_ms={} codex_projection_ms={} messaging_ms={} \
-            socket_recovery_ms={} thread_seed_ms={} launch_config_ms={} child_spawn_ms={} \
+            socket_recovery_ms={} launch_config_ms={} child_spawn_ms={} \
             stderr_diagnostic={} socket_wait_ms={} \
             socket_wait_diagnostic={} socket_wait_resources={} proxy_connect_ms={} initialize_ms={} launch_model_ms={}",
             self.total.as_millis(),
@@ -221,7 +220,6 @@ habitat_ms={} codex_home_ms={} compact_home_ms={} codex_projection_ms={} messagi
             self.codex_projection.as_millis(),
             self.managed_messaging.as_millis(),
             self.socket_recovery.as_millis(),
-            self.thread_seed.as_millis(),
             self.launch_config.as_millis(),
             self.child_spawn.as_millis(),
             self.stderr_diagnostic,
@@ -263,63 +261,10 @@ fn prepare_owner_habitat(
     })
     .map_err(CodexSharedError::unsupported)?;
     let codex_home = attachment::canonical_home(&compact_home)?;
-    // Seed under the preparation lock and before any daemon exists for this
-    // agent, so the copy cannot race the provider creating its own database.
-    // Optional: without a published snapshot the agent rebuilds, as before.
-    let outcome = phase(&mut timings.thread_seed, || {
-        crate::utils::codex_thread_state::seed(&wardian_home, &codex_home)
-    });
-    // Every skip is legitimate, but they mean different things; say which, so a
-    // cache that quietly stopped working is not mistaken for an empty one.
-    let seeded = match outcome {
-        Ok(outcome) => {
-            crate::utils::logging::log_debug(&format!(
-                "[Wardian] Codex thread index for agent {agent_id}: {}",
-                outcome.reason()
-            ));
-            outcome.database().map(str::to_owned)
-        }
-        Err(error) => {
-            crate::utils::logging::log_debug(&format!(
-                "[Wardian] Codex thread index seed unavailable for agent {agent_id}: {error}"
-            ));
-            None
-        }
-    };
     phase(&mut timings.codex_projection, || {
         crate::utils::fs::ensure_codex_home_projection(&habitat, workspace, agent_id)
     })
     .map_err(CodexSharedError::unsupported)?;
-    // The seed assumes this home reads the central session tree. Projection can
-    // fall back to a private local directory, and a seeded home would then hold
-    // migration state saying it is finished over rollouts it cannot see.
-    if let Some(database) = seeded.as_deref() {
-        let real_codex_home = dirs::home_dir()
-            .map(|home| home.join(".codex"))
-            .ok_or_else(|| CodexSharedError::unsupported("user home unavailable"))?;
-        if !crate::utils::codex_thread_state::projects_central_sessions(
-            &codex_home,
-            &real_codex_home,
-        ) {
-            // Undo by the exact name written, never by re-reading published
-            // metadata: another agent may have published a new generation.
-            match crate::utils::codex_thread_state::discard_seed(&codex_home, database) {
-                Ok(()) => crate::utils::logging::log_debug(&format!(
-                    "[Wardian] Discarded Codex thread index seed for agent {agent_id}: \
-this home does not project the central session tree"
-                )),
-                // Starting on an index this code has just judged unusable is
-                // worse than not starting: its migration state would claim the
-                // central tree is indexed while the home reads a local one, so
-                // the agent's own rollouts would never be indexed at all.
-                Err(error) => {
-                    return Err(CodexSharedError::unsupported(format!(
-                        "could not discard an unusable Codex thread index seed: {error}"
-                    )))
-                }
-            }
-        }
-    }
     if let crate::utils::codex_messaging::Registration::Unavailable(reason) =
         phase(&mut timings.managed_messaging, || {
             crate::utils::codex_messaging::ensure_managed_messaging(&wardian_home, agent_id)
@@ -592,28 +537,6 @@ impl CodexSharedOwner {
         }.await;
         if start.is_ok() {
             timings.record_stderr_diagnostic(stderr_capture.seal_startup().await);
-            // The socket is open, so this home's thread index is current for the
-            // projected session tree. Publishing it lets the next agent skip the
-            // rebuild. Detached and best effort: it must never delay or fail a
-            // launch that has already succeeded.
-            let home = codex_home.clone();
-            tokio::task::spawn_blocking(move || {
-                let Some(wardian_home) = crate::utils::get_wardian_home() else {
-                    return;
-                };
-                let Some(real_codex_home) = dirs::home_dir().map(|home| home.join(".codex")) else {
-                    return;
-                };
-                if let Err(error) = crate::utils::codex_thread_state::refresh(
-                    &wardian_home,
-                    &home,
-                    &real_codex_home,
-                ) {
-                    crate::utils::logging::log_debug(&format!(
-                        "[Wardian] Codex thread index publication skipped: {error}"
-                    ));
-                }
-            });
         }
         match start {
             Ok((client, observed_version)) => Ok(Arc::new(Self {
