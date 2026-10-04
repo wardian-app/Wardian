@@ -731,7 +731,14 @@ async fn record_provider_input_from_status_state(
         .await;
 }
 
-pub(crate) fn emit_agent_turn_completed(app: &AppHandle, session_id: &str) {
+/// Reports a provider turn boundary. `reporting_status` is the status cell of
+/// the runtime incarnation that observed it; work derived from the boundary
+/// is discarded once that incarnation is replaced.
+pub(crate) fn emit_agent_turn_completed(
+    app: &AppHandle,
+    session_id: &str,
+    reporting_status: &std::sync::Arc<std::sync::Mutex<String>>,
+) {
     let watch_app = app.clone();
     let watch_session_id = session_id.to_string();
     tauri::async_runtime::spawn(async move {
@@ -747,6 +754,7 @@ pub(crate) fn emit_agent_turn_completed(app: &AppHandle, session_id: &str) {
     tauri::async_runtime::spawn(turn_completion::publish_transcript_turn_completion(
         app.clone(),
         session_id.to_string(),
+        reporting_status.clone(),
     ));
 
     // Change snapshots run off the turn boundary; this keeps the provider's
@@ -1290,7 +1298,7 @@ pub(crate) fn apply_agent_status_event_with_policy(
             // live watcher captured the final assistant message.
             && policy != ProviderStatusEventPolicy::PreserveActionRequiredUntilTurnCompleted
         {
-            emit_agent_turn_completed(app, session_id);
+            emit_agent_turn_completed(app, session_id, current_status);
         }
     }
 }

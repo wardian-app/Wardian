@@ -357,10 +357,18 @@ pub(crate) fn transcript_turn_completion(
     )
 }
 
-/// The agent's provider and live runtime generation, if it still exists.
-async fn current_runtime(state: &AppState, session_id: &str) -> Option<(String, Option<u64>)> {
+/// The agent's provider and runtime generation while the incarnation that
+/// owns `reporting_status` is still the live one.
+async fn reporting_runtime(
+    state: &AppState,
+    session_id: &str,
+    reporting_status: &std::sync::Arc<std::sync::Mutex<String>>,
+) -> Option<(String, Option<u64>)> {
     let agents = state.agents.lock().await;
     let agent = agents.get(session_id)?;
+    if !std::sync::Arc::ptr_eq(&agent.current_status, reporting_status) {
+        return None;
+    }
     let provider = agent.config.lock().ok()?.provider.clone();
     Some((provider, agent.runtime_generation))
 }
@@ -370,11 +378,18 @@ async fn current_runtime(state: &AppState, session_id: &str) -> Option<(String, 
 /// The transcript can trail the boundary event by a few hundred
 /// milliseconds, so the final answer is polled briefly before giving up. A
 /// candidate that is already an Inbox card belongs to an earlier turn, so
-/// polling continues. The runtime that reported the boundary fences every
-/// read and the write: a replacement runtime's transcript never answers it.
-pub(crate) async fn publish_transcript_turn_completion(app: AppHandle, session_id: String) {
+/// polling continues. Every read and the write are fenced to the runtime
+/// incarnation that reported the boundary (its status cell): a replacement
+/// runtime's transcript never answers it.
+pub(crate) async fn publish_transcript_turn_completion(
+    app: AppHandle,
+    session_id: String,
+    reporting_status: std::sync::Arc<std::sync::Mutex<String>>,
+) {
     let state = app.state::<AppState>();
-    let Some((provider, runtime_generation)) = current_runtime(&state, &session_id).await else {
+    let Some((provider, runtime_generation)) =
+        reporting_runtime(&state, &session_id, &reporting_status).await
+    else {
         return;
     };
     // Claude and Codex publish from provider-native turn records.
@@ -385,7 +400,7 @@ pub(crate) async fn publish_transcript_turn_completion(app: AppHandle, session_i
         if attempt > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
-        if current_runtime(&state, &session_id).await
+        if reporting_runtime(&state, &session_id, &reporting_status).await
             != Some((provider.clone(), runtime_generation))
         {
             return;
@@ -658,12 +673,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persistence_is_idempotent_and_fenced_to_the_reporting_runtime() {
+    async fn persistence_and_transcript_reads_are_fenced_to_the_reporting_runtime() {
         use crate::state::{ActiveAgent, AgentWatchState};
         use std::sync::{Arc, Mutex};
 
         let _home = crate::control::test_support::TestWardianHome::new_async().await;
         let state = AppState::new();
+        let reporting_status = Arc::new(Mutex::new("Idle".to_string()));
         state.agents.lock().await.insert(
             "agent-1".into(),
             ActiveAgent {
@@ -681,7 +697,7 @@ mod tests {
                 query_count: Arc::new(Mutex::new(0)),
                 init_timestamp: Arc::new(Mutex::new(None)),
                 last_query_timestamp: Arc::new(Mutex::new(None)),
-                current_status: Arc::new(Mutex::new("Idle".into())),
+                current_status: reporting_status.clone(),
                 last_status_at: Arc::new(Mutex::new(None)),
                 watch_state: Arc::new(Mutex::new(AgentWatchState::new(
                     "agent-1".to_string(),
@@ -716,6 +732,19 @@ mod tests {
         assert_eq!(items.len(), 1, "a re-observed turn keeps one card");
         assert_eq!(items[0]["id"], "agent-completed:agent-1:answer:1");
         assert_eq!(items[0]["agent_name"], "Gemini Agent");
+
+        // A boundary stays bound to the incarnation that reported it.
+        assert_eq!(
+            reporting_runtime(&state, "agent-1", &reporting_status).await,
+            Some(("gemini".to_string(), Some(2)))
+        );
+        if let Some(agent) = state.agents.lock().await.get_mut("agent-1") {
+            agent.current_status = Arc::new(Mutex::new("Idle".into()));
+        }
+        assert_eq!(
+            reporting_runtime(&state, "agent-1", &reporting_status).await,
+            None
+        );
     }
 
     #[test]

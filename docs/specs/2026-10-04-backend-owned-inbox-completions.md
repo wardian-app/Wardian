@@ -54,8 +54,10 @@ about it. The frontend applies the persisted card and never builds one.
 - The generic path polls the transcript for up to three seconds, because a
   transcript can trail the turn boundary. It keeps polling while tool
   activity follows the last assistant message (interim prose) or while the
-  candidate is already a card (an earlier turn). It is fenced to the runtime
-  that reported the boundary.
+  candidate is already a card (an earlier turn). Every transcript read and
+  the write are fenced to the runtime incarnation that reported the
+  boundary, identified by its status cell, so a replacement runtime's
+  transcript never answers it.
 - `agent-turn-completed` has two forms: a turn boundary (no `inbox_item`)
   that refreshes turn-scoped views, and a card projection (with
   `inbox_item`). Claude now emits both, matching the other providers.
@@ -70,6 +72,11 @@ about it. The frontend applies the persisted card and never builds one.
 - Policy for which turns deserve a card is unchanged: every completed turn
   with a final answer, including peer-requested turns, produces one, as
   Claude already did.
+- The generic path does not yet bind a boundary to the current request. If
+  the transcript has not recorded the current request when the boundary
+  arrives, an earlier request/answer pair that never became a card can be
+  published instead. The removed frontend projection behaved the same way;
+  [#1587](https://github.com/wardian-app/Wardian/issues/1587) tracks it.
 - Claude `StopFailure` (for example, a usage limit) still produces no card;
   [#1492](https://github.com/wardian-app/Wardian/issues/1492) tracks a
   stronger Claude terminal verdict.
