@@ -14,9 +14,10 @@ Located in `src-tauri/src/state/app_state.rs`, the `AppState` is managed as a Ta
   that owns one actor per PTY runtime, including canonical geometry, runtime
   generation, lease epoch, ordered stream sequence, bounded parser/replay state,
   presentations, and feed consumers.
-- **`workbench_io_lock: tokio::sync::Mutex<()>`**: Serializes validated,
+- **`workbench_io_lock: Arc<tokio::sync::Mutex<()>>`**: Serializes validated,
   compare-and-swap workbench load/save/reset operations against the two durable
-  JSON files.
+  JSON files. Its owned guard stays with the blocking I/O worker until the
+  operation finishes, including when the awaiting command is cancelled.
 - **`conversation_archive: ConversationArchiveState`**: Owns per-agent archive
   serialization and durable provider-log acquisition cursors. The adjacent
   **`conversation_capture_policy_lock`** serializes global and per-agent logging
