@@ -98,6 +98,7 @@ describe("CI workflow contract", () => {
       "cargo test --workspace --all-targets -- --test-threads=1",
       "cargo test --workspace --doc -- --test-threads=1",
       "cargo check --workspace",
+      "npm run check:rust-deadcode",
     ]);
     expect(backendCoverage).toContain(
       "cargo llvm-cov --workspace --lcov --output-path coverage/rust-lcov.info",

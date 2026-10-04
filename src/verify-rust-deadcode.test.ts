@@ -291,6 +291,18 @@ describe('Rust dead-code gate', () => {
     expect(stripped.split('\n')).toHaveLength(5);
   });
 
+  it('keeps regex literals intact so a quote inside one cannot hide a comment', () => {
+    const names = (source: string) =>
+      [...stripJsComments(source).matchAll(/['"`]([a-z_][a-z0-9_]*)['"`]/g)].map((hit) => hit[1]);
+    expect(names('const quote = /"/; // invoke("dead_command") was removed')).toEqual([]);
+    expect(names('const slash = /[/"]/g; /* invoke("block_dead") */')).toEqual([]);
+    expect(names('if (x) return /\'/.test(s); // "after_return"')).toEqual([]);
+    expect(names('const half = total / 2; invoke("live_after_division"); // "gone"')).toEqual([
+      'live_after_division',
+    ]);
+    expect(names('const ratio = (a) / (b); invoke("live_after_paren");')).toEqual(['live_after_paren']);
+  });
+
   it('follows import aliases to the item they name', () => {
     const library = new Map([[path.resolve('/ws/core/lib.rs'), analyze([
       'pub fn perform_cleanup() {}',
