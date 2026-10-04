@@ -213,7 +213,7 @@ export const RemoteInboxView: React.FC = () => {
   const [headerAction, setHeaderAction] = useState<"mark_all_read" | "clear_read" | null>(null);
   const [headerActionError, setHeaderActionError] = useState<string | null>(null);
   const visibleItems = useMemo(() => items.filter((item) => matchesFilter(item, filter)), [filter, items]);
-  const { hasMore, loadMoreOnScroll, renderedItems } = useLazyQueueItems(visibleItems);
+  const { hasMore, loadMore, loadMoreOnScroll, renderedItems } = useLazyQueueItems(visibleItems);
   const unreadCount = items.filter((item) => !item.read).length;
   const clearableReadCount = items.filter((item) => item.read
     && isClearableLegacyCompletion(item)
@@ -272,7 +272,16 @@ export const RemoteInboxView: React.FC = () => {
         ) : (
           <div className="flex flex-col gap-3">
             {renderedItems.map((item) => <RemoteInboxCard key={item.id} item={item} onAction={runInboxAction} onOpenAgent={(sessionId) => void openAgent(sessionId)} onSendAgentPrompt={sendPromptToAgent} onRefreshInbox={refreshInbox} />)}
-            {hasMore && <p className="sr-only" aria-live="polite">Scroll to load older Inbox items.</p>}
+            {hasMore && (
+              <button
+                type="button"
+                aria-label="Load older Inbox items"
+                onClick={loadMore}
+                className="mx-auto mt-1 rounded-md border border-wardian-border bg-wardian-card-bg-muted px-3 py-1.5 text-xs font-semibold text-muted-neutral transition-colors hover:text-bright-neutral"
+              >
+                Load older items
+              </button>
+            )}
           </div>
         )}
       </div>
