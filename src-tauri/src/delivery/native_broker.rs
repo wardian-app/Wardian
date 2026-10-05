@@ -3014,7 +3014,13 @@ fn native_command(
         Some(&spec.target_agent_id),
         memory_enabled,
     );
-    for (key, value) in crate::manager::worktree_build_env(&config) {
+    for (key, value) in crate::manager::worktree_build_env(&config).map_err(|message| {
+        error(
+            NativeDeliveryErrorCode::TransportUnavailable,
+            message,
+            false,
+        )
+    })? {
         command.env(key, value);
     }
     if protocol == NativeProviderProtocol::CodexAppServer {

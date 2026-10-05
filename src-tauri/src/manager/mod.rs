@@ -1635,9 +1635,30 @@ pub(crate) fn interactive_provider_cwd(
     }
 }
 
-pub(crate) fn worktree_build_env(config: &AgentConfig) -> Vec<(String, String)> {
+/// Route managed defaults to a non-prunable lane separate from launcher outputs.
+/// Explicit output environments, custom configs and wrappers remain under user control.
+pub(crate) fn worktree_build_env(config: &AgentConfig) -> Result<Vec<(String, String)>, String> {
+    let explicit_outputs = [
+        "CARGO_TARGET_DIR",
+        "CARGO_BUILD_TARGET_DIR",
+        "CARGO_BUILD_BUILD_DIR",
+    ]
+    .iter()
+    .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()));
+    worktree_build_env_with_policy(config, explicit_outputs)
+}
+
+fn worktree_build_env_with_policy(
+    config: &AgentConfig,
+    explicit_outputs: bool,
+) -> Result<Vec<(String, String)>, String> {
+    // Runtime command builders already inherit these values. Preserve them without
+    // inventing provenance or resolving a source the caller is not asking us to use.
+    if explicit_outputs {
+        return Ok(Vec::new());
+    }
     if config.git_worktree != Some(true) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let Some(source_folder) = config
@@ -1646,12 +1667,12 @@ pub(crate) fn worktree_build_env(config: &AgentConfig) -> Vec<(String, String)> 
         .map(str::trim)
         .filter(|source| !source.is_empty())
     else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
     let source_path = std::path::Path::new(source_folder);
     if !source_path.join("Cargo.toml").is_file() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let Some(worktree_folder) = config
@@ -1660,16 +1681,21 @@ pub(crate) fn worktree_build_env(config: &AgentConfig) -> Vec<(String, String)> 
         .map(str::trim)
         .filter(|folder| !folder.is_empty())
     else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
-    vec![(
-        "CARGO_TARGET_DIR".to_string(),
-        std::path::Path::new(worktree_folder)
-            .join("target")
-            .to_string_lossy()
-            .to_string(),
-    )]
+    let Some(target) = crate::commands::git::managed_worktree_cargo_target(
+        source_path,
+        std::path::Path::new(worktree_folder),
+    )?
+    else {
+        return Ok(Vec::new());
+    };
+    let target = target.to_string_lossy().to_string();
+    Ok(vec![
+        ("CARGO_TARGET_DIR".to_string(), target.clone()),
+        ("CARGO_BUILD_BUILD_DIR".to_string(), target),
+    ])
 }
 
 pub(crate) fn interactive_provider_args(
@@ -3360,13 +3386,17 @@ mod tests {
     }
 
     #[test]
-    fn worktree_build_env_points_cargo_target_dir_to_worktree() {
+    fn worktree_build_env_rejects_unregistered_worktree() {
         let temp = tempfile::tempdir().expect("temp");
         let source = temp.path().join("Wardian");
         let worktree = temp.path().join("Wardian.wt").join("debugging");
         std::fs::create_dir_all(&source).expect("source");
         std::fs::create_dir_all(&worktree).expect("worktree");
         std::fs::write(source.join("Cargo.toml"), "[workspace]\n").expect("cargo toml");
+        for path in [&source, &worktree] {
+            crate::commands::git::run_git(&path.to_string_lossy(), &["init", "-q"])
+                .expect("fixture repository");
+        }
         let config = AgentConfig {
             git_worktree: Some(true),
             git_worktree_source: Some(source.to_string_lossy().to_string()),
@@ -3374,12 +3404,9 @@ mod tests {
             ..Default::default()
         };
 
-        let env = worktree_build_env(&config);
-
-        assert!(env.contains(&(
-            "CARGO_TARGET_DIR".to_string(),
-            worktree.join("target").to_string_lossy().to_string(),
-        )));
+        assert!(worktree_build_env(&config)
+            .unwrap_err()
+            .contains("not registered"));
     }
 
     #[test]
@@ -3394,7 +3421,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(worktree_build_env(&config).is_empty());
+        assert!(worktree_build_env(&config).unwrap().is_empty());
     }
 
     #[test]
@@ -3404,7 +3431,20 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(worktree_build_env(&config).is_empty());
+        assert!(worktree_build_env(&config).unwrap().is_empty());
+    }
+
+    #[test]
+    fn worktree_build_env_preserves_explicit_output_before_source_resolution() {
+        let config = AgentConfig {
+            git_worktree: Some(true),
+            git_worktree_source: Some("missing-source".to_string()),
+            git_worktree_folder: Some("missing-tree".to_string()),
+            ..Default::default()
+        };
+        assert!(worktree_build_env_with_policy(&config, true)
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

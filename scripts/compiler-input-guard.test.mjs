@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -29,11 +30,19 @@ function fixture(t) {
   writeFileSync(manifest, JSON.stringify([{ path: protectedFile, sha256: 'fixture' }]));
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
-    if (/^(?:CARGO_|RUST|WARDIAN_PROTECTED_INPUT_MANIFESTS|NODE_OPTIONS)/i.test(key)) delete env[key];
+    if (/^(?:CARGO_|RUST|SCCACHE_|WARDIAN_(?:PROTECTED_INPUT_MANIFESTS|SCCACHE_IDENTITY|RUST_CACHE_)|NODE_OPTIONS)/i.test(key)) delete env[key];
   }
   env.CARGO_HOME = path.join(root, 'cargo-home');
   env.CARGO_TARGET_DIR = target;
   env.WARDIAN_PROTECTED_INPUT_MANIFESTS = JSON.stringify([manifest]);
+  // Model a surrounding cache phase's existing lease, so this suite exercises
+  // the real verification dispatch without performing Git discovery or cache
+  // setup. Compiler admission remains enabled with the fixture inventory.
+  const claim = path.join(root, 'cache-claim');
+  mkdirSync(claim);
+  writeFileSync(path.join(claim, 'owner.json'), JSON.stringify({ token: 'guard-fixture' }));
+  env.WARDIAN_RUST_CACHE_CLAIM = claim;
+  env.WARDIAN_RUST_CACHE_TOKEN = 'guard-fixture';
   writeFileSync(path.join(cwd, 'Cargo.toml'), '[workspace]\nmembers = []\n');
   mkdirSync(path.join(cwd, '.github', 'workflows'), { recursive: true });
   writeFileSync(path.join(cwd, '.github', 'workflows', 'ci.yml'), '# local-verify: backend\nrun: cargo check\n');
@@ -71,6 +80,166 @@ function denied(f, command) {
   assert.equal(existsSync(f.marker), false, 'child was never launched');
   assert.equal(readFileSync(f.protectedFile, 'utf8'), 'immutable input');
 }
+
+// Match the setup record; it is deliberately not a production trust mechanism.
+// The executable really exists and is harmless; a correct self-hash must still
+// fail rather than grant arbitrary binaries compiler-wrapper authority.
+function declaredSccache(f) {
+  const wrapper = path.join(f.root, process.platform === 'win32' ? 'sccache.cmd' : 'sccache');
+  const wrapperMarker = path.join(f.root, 'wrapper-marker');
+  writeFileSync(wrapper, process.platform === 'win32'
+    ? '@echo off\r\necho harmless wrapper launched>"%GUARD_WRAPPER_MARKER%"\r\n'
+    : '#!/bin/sh\nprintf "%s" "harmless wrapper launched" > "$GUARD_WRAPPER_MARKER"\n');
+  chmodSync(wrapper, 0o755);
+  const cacheDir = path.join(f.root, 'cache');
+  mkdirSync(cacheDir);
+  const identityManifest = path.join(cacheDir, 'sccache-identity.json');
+  const identity = {
+    schema: 1,
+    version: '0.18.0',
+    wrapper_path: wrapper,
+    wrapper_sha256: createHash('sha256').update(readFileSync(wrapper)).digest('hex'),
+    cache_dir: cacheDir,
+    cache_size: '10G',
+    server_port: '4227',
+  };
+  writeFileSync(identityManifest, JSON.stringify(identity));
+  Object.assign(f.env, {
+    RUSTC_WRAPPER: wrapper,
+    SCCACHE_DIR: identity.cache_dir,
+    SCCACHE_CACHE_SIZE: identity.cache_size,
+    SCCACHE_SERVER_PORT: String(identity.server_port),
+    WARDIAN_SCCACHE_IDENTITY_MANIFEST: identityManifest,
+    GUARD_WRAPPER_MARKER: wrapperMarker,
+  });
+  return { wrapper, wrapperMarker, identity, identityManifest };
+}
+
+test('a real harmless wrapper and matching self-declared identity cannot reach normal dispatch', (t) => {
+  const f = fixture(t);
+  f.env.CARGO_TARGET_DIR = path.join(f.root, 'disjoint');
+  const { wrapper, wrapperMarker, identity, identityManifest } = declaredSccache(f);
+  const proof = spawnSync(wrapper, [], {
+    env: f.env, shell: process.platform === 'win32', encoding: 'utf8', timeout: 10_000,
+  });
+  assert.equal(proof.error, undefined);
+  assert.equal(proof.status, 0, proof.stdout + proof.stderr);
+  assert.match(readFileSync(wrapperMarker, 'utf8'), /harmless wrapper launched/);
+  rmSync(wrapperMarker);
+  assert.equal(createHash('sha256').update(readFileSync(wrapper)).digest('hex'), identity.wrapper_sha256);
+  assert.deepEqual(JSON.parse(readFileSync(identityManifest)), identity);
+  const result = f.run();
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /unsupported compiler environment RUSTC_WRAPPER/);
+  assert.equal(existsSync(f.trace), false);
+  assert.equal(existsSync(f.marker), false);
+  assert.equal(existsSync(wrapperMarker), false);
+  assert.deepEqual(JSON.parse(readFileSync(identityManifest)), identity);
+  assert.equal(existsSync(f.env.CARGO_TARGET_DIR), false);
+  assert.equal(readFileSync(f.protectedFile, 'utf8'), 'immutable input');
+});
+
+test('changed wrapper bytes deny before dispatch even when the caller refreshes its hash', (t) => {
+  for (const refreshHash of [false, true]) {
+    const f = fixture(t);
+    f.env.CARGO_TARGET_DIR = path.join(f.root, 'disjoint');
+    const { wrapper, wrapperMarker, identity, identityManifest } = declaredSccache(f);
+    writeFileSync(wrapper, readFileSync(wrapper, 'utf8') + (process.platform === 'win32' ? 'rem changed\r\n' : '# changed\n'));
+    const changedHash = createHash('sha256').update(readFileSync(wrapper)).digest('hex');
+    assert.notEqual(changedHash, identity.wrapper_sha256);
+    if (refreshHash) {
+      identity.wrapper_sha256 = changedHash;
+      writeFileSync(identityManifest, JSON.stringify(identity));
+    }
+    denied(f);
+    assert.equal(existsSync(wrapperMarker), false);
+  }
+});
+
+test('self-declared sccache denies direct and aliased cache overlap before any spawn', (t) => {
+  for (const alias of [false, true]) {
+    const f = fixture(t);
+    f.env.CARGO_TARGET_DIR = path.join(f.root, 'disjoint');
+    const { wrapperMarker, identity, identityManifest } = declaredSccache(f);
+    identity.cache_dir = f.target;
+    if (alias) {
+      identity.cache_dir = path.join(f.root, 'cache-alias');
+      symlinkSync(f.target, identity.cache_dir, process.platform === 'win32' ? 'junction' : 'dir');
+    }
+    f.env.SCCACHE_DIR = identity.cache_dir;
+    writeFileSync(identityManifest, JSON.stringify(identity));
+    denied(f);
+    assert.equal(existsSync(wrapperMarker), false);
+  }
+});
+
+test('invalid setup records and custom wrappers never confer admission', (t) => {
+  for (const mode of ['missing', 'relative', 'missing-file', 'directory', 'mismatched-hash', 'malformed',
+    'wrong-version', 'wrong-schema', 'custom-wrapper', 'cache-mismatch', 'manifest-relative', 'manifest-directory', 'manifest-link']) {
+    const f = fixture(t);
+    f.env.CARGO_TARGET_DIR = path.join(f.root, 'disjoint');
+    const { wrapperMarker, identity, identityManifest } = declaredSccache(f);
+    if (mode === 'relative') identity.wrapper_path = path.basename(identity.wrapper_path);
+    if (mode === 'missing-file') identity.wrapper_path = path.join(f.root, 'absent-sccache');
+    if (mode === 'directory') identity.wrapper_path = f.cwd;
+    if (mode === 'mismatched-hash') identity.wrapper_sha256 = '0'.repeat(64);
+    if (mode === 'wrong-version') identity.version = '0.17.0';
+    if (mode === 'wrong-schema') identity.schema = 2;
+    if (mode === 'custom-wrapper') f.env.RUSTC_WRAPPER = process.execPath;
+    if (mode === 'cache-mismatch') f.env.SCCACHE_DIR = f.target;
+    writeFileSync(identityManifest, mode === 'malformed' ? '{' : JSON.stringify(identity));
+    if (mode === 'missing') delete f.env.WARDIAN_SCCACHE_IDENTITY_MANIFEST;
+    if (mode === 'manifest-relative') f.env.WARDIAN_SCCACHE_IDENTITY_MANIFEST = 'sccache-identity.json';
+    if (mode === 'manifest-directory') f.env.WARDIAN_SCCACHE_IDENTITY_MANIFEST = f.cwd;
+    if (mode === 'manifest-link') {
+      const alias = path.join(f.root, 'manifest-alias');
+      symlinkSync(identity.cache_dir, alias, process.platform === 'win32' ? 'junction' : 'dir');
+      f.env.WARDIAN_SCCACHE_IDENTITY_MANIFEST = path.join(alias, 'sccache-identity.json');
+    }
+    denied(f);
+    assert.equal(existsSync(wrapperMarker), false);
+  }
+});
+
+test('workspace and config wrappers remain rejected independently of a sccache carrier', (t) => {
+  for (const mode of ['workspace-env', 'cargo-env', 'config', 'inline-config']) {
+    const f = fixture(t);
+    f.env.CARGO_TARGET_DIR = path.join(f.root, 'disjoint');
+    const { wrapper, wrapperMarker } = declaredSccache(f);
+    delete f.env.RUSTC_WRAPPER;
+    if (mode === 'workspace-env') f.env.RUSTC_WORKSPACE_WRAPPER = wrapper;
+    if (mode === 'cargo-env') f.env.CARGO_BUILD_RUSTC_WRAPPER = wrapper;
+    if (mode === 'config') {
+      mkdirSync(path.join(f.cwd, '.cargo'));
+      writeFileSync(path.join(f.cwd, '.cargo', 'config.toml'), `[build]\nrustc-workspace-wrapper = '${wrapper}'\n`);
+    }
+    denied(f, mode === 'inline-config' ? 'cargo check --config build.rustc-wrapper="sccache"' : undefined);
+    assert.equal(existsSync(wrapperMarker), false);
+  }
+});
+
+test('foreground mode and an explicit daemon endpoint do not make self-declared sccache safe', (t) => {
+  const f = fixture(t);
+  f.env.CARGO_TARGET_DIR = path.join(f.root, 'disjoint');
+  declaredSccache(f);
+  Object.assign(f.env, { SCCACHE_NO_DAEMON: '1', SCCACHE_SERVER_PORT: '4227', SCCACHE_ERROR_LOG: f.protectedFile });
+  denied(f);
+});
+
+test('disjoint ordinary verification still launches after removing the unsupported wrapper', (t) => {
+  const f = fixture(t);
+  f.env.CARGO_TARGET_DIR = path.join(f.root, 'disjoint');
+  const { wrapperMarker } = declaredSccache(f);
+  delete f.env.RUSTC_WRAPPER;
+  delete f.env.WARDIAN_SCCACHE_IDENTITY_MANIFEST;
+  delete f.env.SCCACHE_DIR;
+  const result = f.run();
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.ok(existsSync(f.marker));
+  assert.ok(existsSync(f.trace));
+  assert.equal(existsSync(wrapperMarker), false);
+  assert.equal(readFileSync(f.protectedFile, 'utf8'), 'immutable input');
+});
 
 function nestedRun(f, mode = 'full', metadataTarget = f.env.CARGO_TARGET_DIR) {
   const appDir = path.join(f.cwd, 'src-tauri');
@@ -276,7 +445,8 @@ test('pinned Rust dead-code source distinguishes the copied cwd from the compile
   const text = readFileSync(new URL('./verify-rust-deadcode.mjs', import.meta.url), 'utf8');
   assert.match(text, /const copyRoot = prepareCopyRoot\(metadata\.target_directory, hash\)/);
   assert.match(text, /"--target-dir",\s*metadata\.target_directory,/);
-  assert.match(text, /spawnSync\("cargo", args, \{\s*cwd: copyRoot,/);
+  assert.match(text, /const invocation = cargoInvocation\(args, \{ cwd: copyRoot \}\)/);
+  assert.match(text, /spawnSync\("cargo", invocation\.args, \{\s*cwd: copyRoot,/);
 });
 
 test('normal execute rejects a writable ancestor of a protected file', (t) => {
