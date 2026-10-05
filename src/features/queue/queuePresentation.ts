@@ -54,3 +54,21 @@ export function queueItemTone(item: QueueItem): QueueItemTone {
 export function queueItemIsAgentEvent(item: QueueItem): boolean {
   return item.type === "agent_completed" || item.type === "action_needed" || item.type === "agent_update" || item.type === "approval_request";
 }
+
+/**
+ * Text a card shows collapsed and expanded. A completion card keeps a bounded
+ * summary; expanding it shows the agent's full final answer.
+ */
+export function queueCardBodyText(item: QueueItem, bodyText: string | undefined): {
+  expandedText: string | undefined;
+  isExpandable: boolean;
+} {
+  const fullAnswer = bodyText && item.type === "agent_completed" ? item.response_text?.trim() : undefined;
+  const expandedText = fullAnswer || bodyText;
+  const isExpandable = Boolean(bodyText && (
+    bodyText.length > 220
+    || bodyText.split("\n").length > 4
+    || expandedText !== bodyText
+  ));
+  return { expandedText, isExpandable };
+}

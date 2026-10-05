@@ -22,11 +22,13 @@ impl TurnCompletions {
             .or_insert_with(|| watch::channel(None).0);
     }
 
-    pub(super) fn finish(&mut self, id: &str, status: &str, answer: &str) {
+    /// Records a turn's terminal outcome once. Returns `false` when the turn
+    /// already had one, so callers never report a completion twice.
+    pub(super) fn finish(&mut self, id: &str, status: &str, answer: &str) -> bool {
         self.start(id);
         let slot = &self.turns[id];
         if slot.borrow().is_some() {
-            return;
+            return false;
         }
         slot.send_replace(Some(Ok((status.to_owned(), answer.to_owned()))));
         self.recent.push_back(id.to_owned());
@@ -44,6 +46,7 @@ impl TurnCompletions {
                 self.recent.push_back(oldest);
             }
         }
+        true
     }
 
     pub(super) fn subscribe(&self, id: &str) -> Result<watch::Receiver<Outcome>, CodexSharedError> {

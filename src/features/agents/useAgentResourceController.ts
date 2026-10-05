@@ -29,14 +29,11 @@ export type AgentStatusTransition = {
   agent: AgentConfig | undefined;
 };
 
+/** A provider turn boundary, or a completion card the backend persisted. */
 export type AgentTurnCompletion = {
   session_id: string;
   agent: AgentConfig | undefined;
   inbox_item?: QueueItem;
-  agent_name?: string;
-  summary?: string;
-  evidence_id?: string;
-  inbox_persisted?: boolean;
 };
 
 export type AgentResourceControllerOptions = {
@@ -459,20 +456,12 @@ export function useAgentResourceController(
       listen<{
         session_id: string;
         inbox_item?: QueueItem;
-        agent_name?: string;
-        summary?: string;
-        evidence_id?: string;
-        inbox_persisted?: boolean;
       }>("agent-turn-completed", (event) => {
         const { session_id } = event.payload;
         options_ref.current.on_agent_turn_completed?.({
           session_id,
           agent: agents_ref.current.find((agent) => agent.session_id === session_id),
           ...(event.payload.inbox_item !== undefined && { inbox_item: event.payload.inbox_item }),
-          ...(event.payload.agent_name !== undefined && { agent_name: event.payload.agent_name }),
-          ...(event.payload.summary !== undefined && { summary: event.payload.summary }),
-          ...(event.payload.evidence_id !== undefined && { evidence_id: event.payload.evidence_id }),
-          ...(event.payload.inbox_persisted !== undefined && { inbox_persisted: event.payload.inbox_persisted }),
         });
       }),
     ];

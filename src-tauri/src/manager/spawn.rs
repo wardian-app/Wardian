@@ -2746,6 +2746,8 @@ async fn spawn_agent_inner(
     } else {
         None
     };
+    // Provider records written after this instant belong to this runtime.
+    let provider_launched_at_ms = chrono::Utc::now().timestamp_millis();
     let child_result = pair.slave.spawn_command(cmd);
     let child = match child_result {
         Ok(child) => child,
@@ -3822,6 +3824,7 @@ async fn spawn_agent_inner(
         super::codex_shared::observe_turn_activity(
             app.clone(),
             config.session_id.clone(),
+            runtime_generation,
             current_status.clone(),
             observations,
         );
@@ -3837,6 +3840,10 @@ async fn spawn_agent_inner(
         let watcher_config = config_lock.clone();
         let watcher_watch_state = watch_state.clone();
         let watcher_skip_existing_log = is_restored;
+        let watcher_runtime_generation = runtime_generation;
+        // A resumed rollout is re-read from its start; only turns finishing
+        // after this runtime launched are new Inbox completions.
+        let watcher_completions_since = provider_launched_at_ms;
         let wardian_agent_dir = get_wardian_home()
             .map(|home| home.join("agents").join(&watcher_session))
             .filter(|path| path.exists())
@@ -3937,6 +3944,20 @@ async fn spawn_agent_inner(
                                     let raw_line = parsed.to_string();
                                     let event = watcher_provider.parse_output(&raw_line);
                                     codex_watch_binding.observe_record(&raw_line, event.as_ref());
+                                    if let Some(completion) =
+                                        super::turn_completion::codex_rollout_turn_completion(
+                                            &parsed,
+                                            watcher_completions_since,
+                                        )
+                                    {
+                                        super::turn_completion::publish_turn_completion(
+                                            &watcher_app,
+                                            &watcher_session,
+                                            "codex",
+                                            Some(watcher_runtime_generation),
+                                            completion,
+                                        );
+                                    }
                                     if let Some(message) =
                                         codex_watch_binding.extract_message(&raw_line)
                                     {
