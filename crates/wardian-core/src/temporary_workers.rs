@@ -208,6 +208,26 @@ pub struct RegisterProviderChild<'a> {
     pub terminal_at: Option<&'a str>,
 }
 
+/// Why a Codex child lifecycle observation is authoritative enough to publish.
+///
+/// Pending observations deliberately clear stale terminal state for Codex
+/// children only. The legacy registration API keeps its historical treatment
+/// of `Unknown` so other callers cannot erase terminal evidence by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexChildObservationQualification {
+    Qualified,
+    PendingOrUnqualified,
+}
+
+/// A Codex lifecycle observation plus the provider timestamp for the current
+/// turn start, when one has been observed in the rollout.
+#[derive(Debug, Clone)]
+pub struct ObserveCodexProviderChild<'a> {
+    pub registration: RegisterProviderChild<'a>,
+    pub qualification: CodexChildObservationQualification,
+    pub turn_started_at: Option<&'a str>,
+}
+
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS temporary_workers (
@@ -523,38 +543,200 @@ pub fn register_provider_child(
     input: RegisterProviderChild<'_>,
 ) -> Result<TemporaryWorkerRecord, Box<dyn std::error::Error>> {
     crate::db::get_db_conn(|conn| {
-        if let Some(existing) =
-            find_by_provider_session_with_conn(conn, input.provider, input.provider_session_id)?
-        {
-            let expected_origin = input.automation_origin.map(|origin| {
-                (
-                    origin.blueprint_id.as_str(),
-                    origin.run_id.as_str(),
-                    origin.node_id.as_str(),
-                )
-            });
-            let existing_origin = existing
-                .blueprint_id
-                .as_deref()
-                .zip(existing.run_id.as_deref())
-                .zip(existing.node_id.as_deref())
-                .map(|((blueprint_id, run_id), node_id)| (blueprint_id, run_id, node_id));
-            if existing.root_agent_id.as_deref() != input.root_agent_id
-                || existing.parent_provider_session_id.as_deref()
-                    != Some(input.parent_provider_session_id)
-                || existing_origin != expected_origin
-                || existing.parent_worker_id.as_deref().is_some_and(|parent| {
-                    input
-                        .parent_worker_id
-                        .is_some_and(|expected| parent != expected)
-                })
-            {
-                return Err(format!(
-                    "conflicting verified ownership for {} session {}",
-                    input.provider, input.provider_session_id
-                )
-                .into());
+        register_provider_child_with_conn(conn, input, None, false, false)
+    })
+}
+
+/// Publish a staged Codex lifecycle observation after its source ancestry has
+/// been validated and the caller has serialized the observation with watcher
+/// and periodic updates.
+pub fn observe_codex_provider_child(
+    input: ObserveCodexProviderChild<'_>,
+) -> Result<TemporaryWorkerRecord, Box<dyn std::error::Error>> {
+    validate_codex_provider_child_observation(&input)?;
+    crate::db::get_db_conn(|conn| observe_codex_provider_child_with_conn(conn, input))
+}
+
+/// A captured automation root became obsolete, or the atomic publication could
+/// not be stored. Neither outcome acknowledges the caller's lifecycle stage.
+#[derive(Debug)]
+pub enum CodexAutomationObservationError {
+    ObsoleteRoot,
+    Storage(Box<dyn std::error::Error>),
+}
+
+impl std::fmt::Display for CodexAutomationObservationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ObsoleteRoot => formatter.write_str("captured Codex automation root is obsolete"),
+            Self::Storage(error) => {
+                write!(formatter, "Codex automation observation failed: {error}")
             }
+        }
+    }
+}
+
+impl std::error::Error for CodexAutomationObservationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ObsoleteRoot => None,
+            Self::Storage(error) => Some(error.as_ref()),
+        }
+    }
+}
+
+/// Check the captured actual automation identity and publish its child under
+/// one SQLite writer transaction. Automation lifecycle writers and Drop recovery
+/// use this same database, so a synthetic AppState gate cannot exclude them.
+pub fn observe_codex_provider_child_for_automation(
+    input: ObserveCodexProviderChild<'_>,
+    expected_root: &TemporaryWorkerRecord,
+) -> Result<TemporaryWorkerRecord, CodexAutomationObservationError> {
+    crate::db::get_db_conn(|conn| {
+        Ok(observe_codex_provider_child_for_automation_with_conn(
+            conn,
+            input,
+            expected_root,
+        ))
+    })
+    .map_err(CodexAutomationObservationError::Storage)?
+}
+
+fn observe_codex_provider_child_for_automation_with_conn(
+    conn: &Connection,
+    input: ObserveCodexProviderChild<'_>,
+    expected_root: &TemporaryWorkerRecord,
+) -> Result<TemporaryWorkerRecord, CodexAutomationObservationError> {
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+            .map_err(|error| CodexAutomationObservationError::Storage(error.into()))?;
+    let current = load_with_conn(&transaction, &expected_root.worker_id)
+        .map_err(|error| CodexAutomationObservationError::Storage(error.into()))?
+        .ok_or(CodexAutomationObservationError::ObsoleteRoot)?;
+    let origin = input.registration.automation_origin;
+    if expected_root.kind != TemporaryWorkerKind::Automation
+        || expected_root.provider != "codex"
+        || current.kind != expected_root.kind
+        || current.provider != expected_root.provider
+        || current.runtime_session_id != expected_root.runtime_session_id
+        || current.runtime_generation != expected_root.runtime_generation
+        || current.owner_instance_id != expected_root.owner_instance_id
+        || current.attempt != expected_root.attempt
+        || current.blueprint_id != expected_root.blueprint_id
+        || current.run_id != expected_root.run_id
+        || current.node_id != expected_root.node_id
+        || current.workspace != expected_root.workspace
+        || current.provider_session_id != expected_root.provider_session_id
+        || current.state != expected_root.state
+        || current.root_agent_id != expected_root.root_agent_id
+        || current.parent_worker_id != expected_root.parent_worker_id
+        || current.parent_provider_session_id != expected_root.parent_provider_session_id
+        || expected_root
+            .provider_session_id
+            .as_deref()
+            .is_none_or(|session| session.trim().is_empty())
+        || input.registration.runtime_session_id != expected_root.runtime_session_id
+        || input.registration.workspace != expected_root.workspace
+        || input.registration.root_agent_id != expected_root.root_agent_id.as_deref()
+        || origin.map(|origin| origin.blueprint_id.as_str())
+            != expected_root.blueprint_id.as_deref()
+        || origin.map(|origin| origin.run_id.as_str()) != expected_root.run_id.as_deref()
+        || origin.map(|origin| origin.node_id.as_str()) != expected_root.node_id.as_deref()
+    {
+        return Err(CodexAutomationObservationError::ObsoleteRoot);
+    }
+    let result = observe_codex_provider_child_with_conn(&transaction, input)
+        .map_err(CodexAutomationObservationError::Storage)?;
+    transaction
+        .commit()
+        .map_err(|error| CodexAutomationObservationError::Storage(error.into()))?;
+    Ok(result)
+}
+
+fn observe_codex_provider_child_with_conn(
+    conn: &Connection,
+    input: ObserveCodexProviderChild<'_>,
+) -> Result<TemporaryWorkerRecord, Box<dyn std::error::Error>> {
+    let allow_pending_clear = validate_codex_provider_child_observation(&input)?;
+    register_provider_child_with_conn(
+        conn,
+        input.registration,
+        input.turn_started_at,
+        allow_pending_clear,
+        true,
+    )
+}
+
+fn validate_codex_provider_child_observation(
+    input: &ObserveCodexProviderChild<'_>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let registration = &input.registration;
+    if registration.provider != "codex" {
+        return Err("Codex lifecycle observations require provider=codex".into());
+    }
+    match input.qualification {
+        CodexChildObservationQualification::PendingOrUnqualified
+            if registration.state != TemporaryWorkerState::Unknown
+                || registration.outcome.is_some()
+                || registration.terminal_at.is_some()
+                || input.turn_started_at.is_some() =>
+        {
+            return Err(
+                "pending Codex observations must publish Unknown without terminal fields".into(),
+            );
+        }
+        CodexChildObservationQualification::Qualified
+            if registration.state != TemporaryWorkerState::Running
+                && !registration.state.is_terminal() =>
+        {
+            return Err("qualified Codex observations require Running or a terminal state".into());
+        }
+        _ => {}
+    }
+    Ok(input.qualification == CodexChildObservationQualification::PendingOrUnqualified)
+}
+
+fn register_provider_child_with_conn(
+    conn: &Connection,
+    input: RegisterProviderChild<'_>,
+    turn_started_at: Option<&str>,
+    allow_pending_clear: bool,
+    provider_timestamp_only: bool,
+) -> Result<TemporaryWorkerRecord, Box<dyn std::error::Error>> {
+    if let Some(existing) =
+        find_by_provider_session_with_conn(conn, input.provider, input.provider_session_id)?
+    {
+        let expected_origin = input.automation_origin.map(|origin| {
+            (
+                origin.blueprint_id.as_str(),
+                origin.run_id.as_str(),
+                origin.node_id.as_str(),
+            )
+        });
+        let existing_origin = existing
+            .blueprint_id
+            .as_deref()
+            .zip(existing.run_id.as_deref())
+            .zip(existing.node_id.as_deref())
+            .map(|((blueprint_id, run_id), node_id)| (blueprint_id, run_id, node_id));
+        if existing.root_agent_id.as_deref() != input.root_agent_id
+            || existing.parent_provider_session_id.as_deref()
+                != Some(input.parent_provider_session_id)
+            || existing_origin != expected_origin
+            || existing.parent_worker_id.as_deref().is_some_and(|parent| {
+                input
+                    .parent_worker_id
+                    .is_some_and(|expected| parent != expected)
+            })
+        {
+            return Err(format!(
+                "conflicting verified ownership for {} session {}",
+                input.provider, input.provider_session_id
+            )
+            .into());
+        }
+
+        if !provider_timestamp_only {
             let observed = now();
             let retention_baseline = input
                 .terminal_at
@@ -599,58 +781,172 @@ pub fn register_provider_child(
         }
 
         let observed = now();
-        let requested_at = input
-            .requested_at
-            .filter(|value| DateTime::parse_from_rfc3339(value).is_ok())
-            .map(str::to_string)
-            .unwrap_or_else(|| observed.clone());
-        let retention_baseline = input
-            .terminal_at
-            .filter(|value| DateTime::parse_from_rfc3339(value).is_ok())
-            .unwrap_or(observed.as_str());
-        let (terminal_at, resumable_until, detail_retained_until) =
-            retention_dates(input.state, retention_baseline);
-        let worker_id = uuid::Uuid::new_v4().to_string();
-        let source_key =
-            crate::telemetry::identity::source_key(input.provider, &worker_id, input.source_path);
-        let record = TemporaryWorkerRecord {
-            worker_id,
-            kind: TemporaryWorkerKind::ProviderChild,
-            provider: input.provider.to_string(),
-            workspace: input.workspace.to_string(),
-            root_agent_id: input.root_agent_id.map(str::to_string),
-            parent_worker_id: input.parent_worker_id.map(str::to_string),
-            parent_provider_session_id: Some(input.parent_provider_session_id.to_string()),
-            blueprint_id: input
-                .automation_origin
-                .map(|origin| origin.blueprint_id.clone()),
-            run_id: input.automation_origin.map(|origin| origin.run_id.clone()),
-            node_id: input.automation_origin.map(|origin| origin.node_id.clone()),
-            attempt: None,
-            runtime_session_id: input.runtime_session_id.to_string(),
-            provider_session_id: Some(input.provider_session_id.to_string()),
-            runtime_generation: None,
-            owner_instance_id: None,
-            state: input.state,
-            outcome: input.outcome.map(str::to_string),
-            capabilities: TemporaryWorkerCapabilities::observe_only(
-                "codex child adapter is observe-only",
-            ),
-            coverage: input.coverage.to_string(),
-            source_key: Some(source_key),
-            source_path: Some(input.source_path.to_string()),
-            requested_at: requested_at.clone(),
-            started_at: Some(requested_at),
-            terminal_at,
-            last_observed_at: observed,
-            last_follow_up_accepted_at: None,
-            resumable_until,
-            detail_retained_until,
-            error: None,
+        let incoming_terminal_at = valid_provider_timestamp(input.terminal_at);
+        let replaces_terminal = input.state.is_terminal()
+            && terminal_observation_is_newer(
+                incoming_terminal_at,
+                existing.terminal_at.as_deref(),
+                existing.state.is_terminal(),
+            );
+        let clears_terminal = input.state == TemporaryWorkerState::Running || allow_pending_clear;
+        let preserve_terminal = existing.state.is_terminal()
+            && !clears_terminal
+            && (input.state == TemporaryWorkerState::Unknown
+                || (input.state.is_terminal() && !replaces_terminal));
+        let state = if preserve_terminal {
+            existing.state
+        } else {
+            input.state
         };
-        insert_record(conn, &record)?;
-        Ok(record)
-    })
+        let outcome = if clears_terminal {
+            None
+        } else if preserve_terminal {
+            existing.outcome.clone()
+        } else if input.state.is_terminal() {
+            input.outcome.map(str::to_string)
+        } else {
+            input
+                .outcome
+                .map(str::to_string)
+                .or_else(|| existing.outcome.clone())
+        };
+
+        let (computed_terminal_at, resumable_until, detail_retained_until) = if clears_terminal {
+            (None, None, None)
+        } else if replaces_terminal {
+            let retention_baseline = incoming_terminal_at.unwrap_or(observed.as_str());
+            let (_, resumable_until, detail_retained_until) =
+                retention_dates(input.state, retention_baseline);
+            let terminal_at = incoming_terminal_at.map(str::to_string).or_else(|| {
+                // The legacy API retains its existing observer-time fallback.
+                // The explicit Codex API leaves provider time absent when the
+                // rollout did not supply it.
+                (!provider_timestamp_only).then(|| retention_baseline.to_string())
+            });
+            (terminal_at, resumable_until, detail_retained_until)
+        } else if preserve_terminal {
+            (
+                existing.terminal_at.clone(),
+                existing.resumable_until.clone(),
+                existing.detail_retained_until.clone(),
+            )
+        } else {
+            (None, None, None)
+        };
+        let started_at = if clears_terminal || replaces_terminal {
+            valid_provider_timestamp(turn_started_at)
+                .map(str::to_string)
+                .or_else(|| existing.started_at.clone())
+        } else {
+            existing.started_at.clone()
+        };
+
+        conn.execute(
+            "UPDATE temporary_workers SET state = ?2, outcome = ?3,
+             parent_worker_id = COALESCE(?4, parent_worker_id), source_path = ?5,
+             source_key = ?6, coverage = ?7, last_observed_at = ?8, started_at = ?9,
+             terminal_at = ?10, resumable_until = ?11, detail_retained_until = ?12
+             WHERE worker_id = ?1",
+            params![
+                existing.worker_id,
+                state.as_str(),
+                outcome,
+                input.parent_worker_id,
+                input.source_path,
+                crate::telemetry::identity::source_key(
+                    input.provider,
+                    &existing.worker_id,
+                    input.source_path,
+                ),
+                input.coverage,
+                observed,
+                started_at,
+                computed_terminal_at,
+                resumable_until,
+                detail_retained_until,
+            ],
+        )?;
+        return load_with_conn(conn, &existing.worker_id)?.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "updated worker disappeared").into()
+        });
+    }
+
+    let observed = now();
+    let requested_at = input
+        .requested_at
+        .filter(|value| DateTime::parse_from_rfc3339(value).is_ok())
+        .map(str::to_string)
+        .unwrap_or_else(|| observed.clone());
+    let incoming_terminal_at = valid_provider_timestamp(input.terminal_at);
+    let retention_baseline = incoming_terminal_at.unwrap_or(observed.as_str());
+    let (legacy_terminal_at, resumable_until, detail_retained_until) =
+        retention_dates(input.state, retention_baseline);
+    let terminal_at = if provider_timestamp_only {
+        incoming_terminal_at.map(str::to_string)
+    } else {
+        legacy_terminal_at
+    };
+    let worker_id = uuid::Uuid::new_v4().to_string();
+    let source_key =
+        crate::telemetry::identity::source_key(input.provider, &worker_id, input.source_path);
+    let record = TemporaryWorkerRecord {
+        worker_id,
+        kind: TemporaryWorkerKind::ProviderChild,
+        provider: input.provider.to_string(),
+        workspace: input.workspace.to_string(),
+        root_agent_id: input.root_agent_id.map(str::to_string),
+        parent_worker_id: input.parent_worker_id.map(str::to_string),
+        parent_provider_session_id: Some(input.parent_provider_session_id.to_string()),
+        blueprint_id: input
+            .automation_origin
+            .map(|origin| origin.blueprint_id.clone()),
+        run_id: input.automation_origin.map(|origin| origin.run_id.clone()),
+        node_id: input.automation_origin.map(|origin| origin.node_id.clone()),
+        attempt: None,
+        runtime_session_id: input.runtime_session_id.to_string(),
+        provider_session_id: Some(input.provider_session_id.to_string()),
+        runtime_generation: None,
+        owner_instance_id: None,
+        state: input.state,
+        outcome: input.outcome.map(str::to_string),
+        capabilities: TemporaryWorkerCapabilities::observe_only(
+            "codex child adapter is observe-only",
+        ),
+        coverage: input.coverage.to_string(),
+        source_key: Some(source_key),
+        source_path: Some(input.source_path.to_string()),
+        requested_at: requested_at.clone(),
+        started_at: valid_provider_timestamp(turn_started_at)
+            .map(str::to_string)
+            .or(Some(requested_at)),
+        terminal_at,
+        last_observed_at: observed,
+        last_follow_up_accepted_at: None,
+        resumable_until,
+        detail_retained_until,
+        error: None,
+    };
+    insert_record(conn, &record)?;
+    Ok(record)
+}
+
+fn valid_provider_timestamp(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| DateTime::parse_from_rfc3339(value).is_ok())
+}
+
+fn terminal_observation_is_newer(
+    incoming: Option<&str>,
+    existing: Option<&str>,
+    existing_is_terminal: bool,
+) -> bool {
+    let incoming = incoming.and_then(|value| DateTime::parse_from_rfc3339(value).ok());
+    let existing = existing.and_then(|value| DateTime::parse_from_rfc3339(value).ok());
+    match (incoming, existing) {
+        (Some(incoming), Some(existing)) => incoming > existing,
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (None, None) => !existing_is_terminal,
+    }
 }
 
 pub fn load(worker_id: &str) -> Result<Option<TemporaryWorkerRecord>, Box<dyn std::error::Error>> {
@@ -1163,6 +1459,223 @@ mod tests {
         }
     }
 
+    fn automation_child_observation<'a>(
+        root: &'a TemporaryWorkerRecord,
+        origin: &'a AutomationWorkerOrigin,
+    ) -> ObserveCodexProviderChild<'a> {
+        ObserveCodexProviderChild {
+            registration: RegisterProviderChild {
+                provider: "codex",
+                workspace: &root.workspace,
+                root_agent_id: root.root_agent_id.as_deref(),
+                parent_worker_id: Some(&root.worker_id),
+                parent_provider_session_id: root.provider_session_id.as_deref().unwrap(),
+                runtime_session_id: &root.runtime_session_id,
+                provider_session_id: "guarded-child",
+                automation_origin: Some(origin),
+                state: TemporaryWorkerState::Succeeded,
+                outcome: Some("completed"),
+                source_path: "/logs/guarded-child.jsonl",
+                coverage: "codex_rollout_verified",
+                requested_at: Some("2026-10-05T02:00:00Z"),
+                terminal_at: Some("2026-10-05T02:01:00Z"),
+            },
+            qualification: CodexChildObservationQualification::Qualified,
+            turn_started_at: Some("2026-10-05T02:00:00Z"),
+        }
+    }
+
+    #[test]
+    fn automation_guard_rejects_deleted_root_without_child_insertion() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let mut expected = sample_record("root", 1);
+        expected.state = TemporaryWorkerState::Running;
+        expected.provider_session_id = Some("parent-session".into());
+        insert_record(&conn, &expected).unwrap();
+        let origin = AutomationWorkerOrigin {
+            blueprint_id: "flow".into(),
+            run_id: "run-1".into(),
+            node_id: "research".into(),
+        };
+
+        // Delete before observing a child so the fixture obeys the parent foreign key.
+        assert_eq!(
+            conn.execute("DELETE FROM temporary_workers WHERE worker_id='root'", [])
+                .unwrap(),
+            1
+        );
+        assert!(load_with_conn(&conn, &expected.worker_id)
+            .unwrap()
+            .is_none());
+        let result = observe_codex_provider_child_for_automation_with_conn(
+            &conn,
+            automation_child_observation(&expected, &origin),
+            &expected,
+        );
+        assert!(matches!(
+            result,
+            Err(CodexAutomationObservationError::ObsoleteRoot)
+        ));
+        let stored_workers: i64 = conn
+            .query_row("SELECT COUNT(*) FROM temporary_workers", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored_workers, 0);
+    }
+
+    #[test]
+    fn automation_guard_rejects_changed_identity_without_child_mutation() {
+        for change in [
+            "kind",
+            "provider",
+            "runtime",
+            "generation",
+            "owner",
+            "attempt",
+            "origin",
+            "workspace",
+            "session",
+            "state",
+        ] {
+            let conn = Connection::open_in_memory().unwrap();
+            migrate(&conn).unwrap();
+            let mut expected = sample_record("root", 1);
+            expected.state = TemporaryWorkerState::Running;
+            expected.provider_session_id = Some("parent-session".into());
+            insert_record(&conn, &expected).unwrap();
+            let origin = AutomationWorkerOrigin {
+                blueprint_id: "flow".into(),
+                run_id: "run-1".into(),
+                node_id: "research".into(),
+            };
+            let child = observe_codex_provider_child_for_automation_with_conn(
+                &conn,
+                automation_child_observation(&expected, &origin),
+                &expected,
+            )
+            .unwrap();
+            let sql = match change {
+                "kind" => "UPDATE temporary_workers SET kind='provider_child' WHERE worker_id='root'",
+                "provider" => "UPDATE temporary_workers SET provider='claude' WHERE worker_id='root'",
+                "runtime" => "UPDATE temporary_workers SET runtime_session_id='other' WHERE worker_id='root'",
+                "generation" => "UPDATE temporary_workers SET runtime_generation=2 WHERE worker_id='root'",
+                "owner" => "UPDATE temporary_workers SET owner_instance_id='other' WHERE worker_id='root'",
+                "attempt" => "UPDATE temporary_workers SET attempt=2 WHERE worker_id='root'",
+                "origin" => "UPDATE temporary_workers SET node_id='other' WHERE worker_id='root'",
+                "workspace" => "UPDATE temporary_workers SET workspace='/other' WHERE worker_id='root'",
+                "session" => "UPDATE temporary_workers SET provider_session_id='other' WHERE worker_id='root'",
+                "state" => "UPDATE temporary_workers SET state='waiting' WHERE worker_id='root'",
+                _ => unreachable!(),
+            };
+            conn.execute(sql, []).unwrap();
+            let result = observe_codex_provider_child_for_automation_with_conn(
+                &conn,
+                automation_child_observation(&expected, &origin),
+                &expected,
+            );
+            assert!(
+                matches!(result, Err(CodexAutomationObservationError::ObsoleteRoot)),
+                "{change}"
+            );
+            assert_eq!(
+                load_with_conn(&conn, &child.worker_id).unwrap().unwrap(),
+                child,
+                "{change}"
+            );
+        }
+    }
+
+    #[test]
+    fn automation_guard_excludes_actual_terminal_and_drop_unknown_transitions() {
+        for terminal in [false, true] {
+            let conn = Connection::open_in_memory().unwrap();
+            migrate(&conn).unwrap();
+            let mut expected = sample_record("root", 1);
+            expected.state = TemporaryWorkerState::Running;
+            expected.provider_session_id = Some("parent-session".into());
+            insert_record(&conn, &expected).unwrap();
+            if terminal {
+                assert!(mark_terminal_with_conn(
+                    &conn,
+                    &expected,
+                    TerminalUpdate {
+                        state: TemporaryWorkerState::Succeeded,
+                        outcome: Some("completed"),
+                        provider_session_id: Some("parent-session"),
+                        source_path: None,
+                        coverage: "provider_session_identified",
+                        error: None,
+                        observed: Utc::now()
+                    }
+                )
+                .unwrap());
+            } else {
+                assert!(mark_unknown_with_conn(
+                    &conn,
+                    &expected,
+                    "execution_future_dropped",
+                    None,
+                    &now()
+                )
+                .unwrap());
+            }
+            let origin = AutomationWorkerOrigin {
+                blueprint_id: "flow".into(),
+                run_id: "run-1".into(),
+                node_id: "research".into(),
+            };
+            assert!(matches!(
+                observe_codex_provider_child_for_automation_with_conn(
+                    &conn,
+                    automation_child_observation(&expected, &origin),
+                    &expected
+                ),
+                Err(CodexAutomationObservationError::ObsoleteRoot)
+            ));
+            assert!(
+                find_by_provider_session_with_conn(&conn, "codex", "guarded-child")
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn automation_guard_admits_unchanged_retained_terminal_root_and_distinguishes_storage_failure()
+    {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let mut expected = sample_record("root", 1);
+        expected.state = TemporaryWorkerState::Succeeded;
+        expected.provider_session_id = Some("parent-session".into());
+        insert_record(&conn, &expected).unwrap();
+        let origin = AutomationWorkerOrigin {
+            blueprint_id: "flow".into(),
+            run_id: "run-1".into(),
+            node_id: "research".into(),
+        };
+        let child = observe_codex_provider_child_for_automation_with_conn(
+            &conn,
+            automation_child_observation(&expected, &origin),
+            &expected,
+        )
+        .unwrap();
+        assert_eq!(child.state, TemporaryWorkerState::Succeeded);
+        assert_eq!(load_with_conn(&conn, "root").unwrap().unwrap(), expected);
+        let mut invalid = automation_child_observation(&expected, &origin);
+        invalid.registration.provider = "claude";
+        assert!(matches!(
+            observe_codex_provider_child_for_automation_with_conn(&conn, invalid, &expected),
+            Err(CodexAutomationObservationError::Storage(_))
+        ));
+        assert_eq!(
+            load_with_conn(&conn, &child.worker_id).unwrap().unwrap(),
+            child
+        );
+    }
+
     #[test]
     fn migration_allocates_distinct_attempts_and_preserves_structured_origin() {
         let conn = Connection::open_in_memory().unwrap();
@@ -1203,6 +1716,176 @@ mod tests {
             retention_dates(TemporaryWorkerState::Succeeded, "2026-09-13T00:00:00Z");
         assert_eq!(resumable.as_deref(), Some("2026-09-20T00:00:00+00:00"));
         assert_eq!(detail.as_deref(), Some("2026-10-13T00:00:00+00:00"));
+    }
+
+    fn provider_child_input<'a>(
+        state: TemporaryWorkerState,
+        outcome: Option<&'a str>,
+        terminal_at: Option<&'a str>,
+    ) -> RegisterProviderChild<'a> {
+        RegisterProviderChild {
+            provider: "codex",
+            workspace: "/workspace",
+            root_agent_id: Some("root"),
+            parent_worker_id: None,
+            parent_provider_session_id: "parent-session",
+            runtime_session_id: "runtime",
+            provider_session_id: "child-session",
+            automation_origin: None,
+            state,
+            outcome,
+            source_path: "/logs/child.jsonl",
+            coverage: "codex_parent_thread_id_verified",
+            requested_at: Some("2026-10-04T21:00:00Z"),
+            terminal_at,
+        }
+    }
+
+    fn terminal_provider_child() -> TemporaryWorkerRecord {
+        let mut record = sample_record("codex-child", 1);
+        record.kind = TemporaryWorkerKind::ProviderChild;
+        record.root_agent_id = Some("root".into());
+        record.parent_provider_session_id = Some("parent-session".into());
+        record.blueprint_id = None;
+        record.run_id = None;
+        record.node_id = None;
+        record.provider_session_id = Some("child-session".into());
+        record.state = TemporaryWorkerState::Succeeded;
+        record.outcome = Some("completed".into());
+        record.started_at = Some("2026-10-04T21:00:00Z".into());
+        record.terminal_at = Some("2026-10-04T21:14:15.359Z".into());
+        record.resumable_until = Some("2026-10-11T21:14:15.359+00:00".into());
+        record.detail_retained_until = Some("2026-11-03T21:14:15.359+00:00".into());
+        record
+    }
+
+    #[test]
+    fn qualified_new_running_turn_clears_previous_terminal_fields() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        insert_record(&conn, &terminal_provider_child()).unwrap();
+
+        let running = register_provider_child_with_conn(
+            &conn,
+            provider_child_input(TemporaryWorkerState::Running, None, None),
+            Some("2026-10-04T21:55:00.000Z"),
+            false,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(running.state, TemporaryWorkerState::Running);
+        assert_eq!(running.outcome, None);
+        assert_eq!(
+            running.started_at.as_deref(),
+            Some("2026-10-04T21:55:00.000Z")
+        );
+        assert_eq!(running.terminal_at, None);
+        assert_eq!(running.resumable_until, None);
+        assert_eq!(running.detail_retained_until, None);
+    }
+
+    #[test]
+    fn pending_codex_unknown_clears_terminal_only_with_explicit_opt_in() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        insert_record(&conn, &terminal_provider_child()).unwrap();
+
+        let legacy_unknown = register_provider_child_with_conn(
+            &conn,
+            provider_child_input(TemporaryWorkerState::Unknown, None, None),
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(legacy_unknown.state, TemporaryWorkerState::Succeeded);
+        assert_eq!(legacy_unknown.outcome.as_deref(), Some("completed"));
+        assert!(legacy_unknown.terminal_at.is_some());
+
+        let pending_unknown = register_provider_child_with_conn(
+            &conn,
+            provider_child_input(TemporaryWorkerState::Unknown, None, None),
+            None,
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(pending_unknown.state, TemporaryWorkerState::Unknown);
+        assert_eq!(pending_unknown.outcome, None);
+        assert_eq!(pending_unknown.terminal_at, None);
+        assert_eq!(pending_unknown.resumable_until, None);
+        assert_eq!(pending_unknown.detail_retained_until, None);
+    }
+
+    #[test]
+    fn legacy_running_registration_keeps_existing_completion_metadata() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        insert_record(&conn, &terminal_provider_child()).unwrap();
+
+        let running = register_provider_child_with_conn(
+            &conn,
+            provider_child_input(TemporaryWorkerState::Running, None, None),
+            Some("2026-10-04T21:55:00.000Z"),
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(running.state, TemporaryWorkerState::Running);
+        assert_eq!(running.outcome.as_deref(), Some("completed"));
+        assert_eq!(
+            running.terminal_at.as_deref(),
+            Some("2026-10-04T21:14:15.359Z")
+        );
+        assert_eq!(
+            running.resumable_until.as_deref(),
+            Some("2026-10-11T21:14:15.359+00:00")
+        );
+        assert_eq!(
+            running.detail_retained_until.as_deref(),
+            Some("2026-11-03T21:14:15.359+00:00")
+        );
+    }
+
+    #[test]
+    fn newer_codex_terminal_replaces_terminal_timestamp_without_intermediate_running() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        insert_record(&conn, &terminal_provider_child()).unwrap();
+
+        let second_terminal = register_provider_child_with_conn(
+            &conn,
+            provider_child_input(
+                TemporaryWorkerState::Succeeded,
+                Some("completed"),
+                Some("2026-10-04T21:55:17.125Z"),
+            ),
+            Some("2026-10-04T21:55:00.000Z"),
+            false,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(second_terminal.state, TemporaryWorkerState::Succeeded);
+        assert_eq!(second_terminal.outcome.as_deref(), Some("completed"));
+        assert_eq!(
+            second_terminal.terminal_at.as_deref(),
+            Some("2026-10-04T21:55:17.125Z")
+        );
+        assert_eq!(
+            second_terminal.resumable_until.as_deref(),
+            Some("2026-10-11T21:55:17.125+00:00")
+        );
+        assert_eq!(
+            second_terminal.detail_retained_until.as_deref(),
+            Some("2026-11-03T21:55:17.125+00:00")
+        );
+        assert_eq!(
+            second_terminal.started_at.as_deref(),
+            Some("2026-10-04T21:55:00.000Z")
+        );
     }
 
     #[test]

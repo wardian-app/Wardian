@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback, type RefObject } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { createPortal } from "react-dom";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { AgentConfig, CloneMode } from "../../types";
@@ -36,11 +35,9 @@ import { SidebarResizeHandle } from "../../components/SidebarResizeHandle";
 import { useDragAutoScroll } from "./dragAutoScroll";
 import {
   RootTemporaryWorkerInspector,
-  normalizeRootWorkerSummary,
-  type RawRootWorkerSummary,
-  type RootWorkerSummary,
   hasRootWorkers,
 } from "../../features/agents/RootTemporaryWorkerInspector";
+import { useRootWorkerSummaries } from "../../features/agents/useRootWorkerSummaries";
 
 type DragSource =
   | { type: "agent"; agentId: string }
@@ -200,30 +197,7 @@ export default function AgentWatchlist({
   const telemetry = useAgentTelemetryStore((state) => state.telemetry);
   const terminalTitles = useAgentTelemetryStore((state) => state.terminal_titles);
   const currentThoughts = useAgentTelemetryStore((state) => state.current_thoughts);
-  const [workerSummaries, setWorkerSummaries] = useState<Record<string, RootWorkerSummary>>({});
-
-  useEffect(() => {
-    let disposed = false;
-    const refresh = async () => {
-      try {
-        const result = await invoke<{ summaries?: RawRootWorkerSummary[] }>('temporary_worker_root_summaries');
-        if (!disposed) {
-          const summaries = (result.summaries ?? [])
-            .map(normalizeRootWorkerSummary)
-            .filter((summary): summary is RootWorkerSummary => summary !== null);
-          setWorkerSummaries(Object.fromEntries(summaries.map((summary) => [summary.root_agent_id, summary])));
-        }
-      } catch {
-        // Child summaries become available after the backend migration is ready.
-      }
-    };
-    void refresh();
-    const interval = window.setInterval(() => void refresh(), 60_000);
-    return () => {
-      disposed = true;
-      window.clearInterval(interval);
-    };
-  }, []);
+  const workerSummaries = useRootWorkerSummaries();
 
   // ── Column picker state ────────────────────────────────────────────
   const [pickerOpen, setPickerOpen] = useState(false);
