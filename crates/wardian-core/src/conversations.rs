@@ -768,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the separately admitted measurement slot; reports no speed threshold"]
+    // Byte equivalence is deterministic; timing output is informational.
     fn jsonl_real_file_write_metrics() {
         let temp = tempfile::tempdir().unwrap();
         let rows = jsonl_write_records();

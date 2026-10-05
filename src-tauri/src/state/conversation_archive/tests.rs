@@ -3683,7 +3683,7 @@ fn buffered_jsonl_acquisition_retries_partial_archive_before_cursor_commit() {
 }
 
 #[test]
-#[ignore = "requires a separately admitted baseline/candidate performance slot"]
+// Run the bounded production-prefix assertions normally; timings are informational.
 fn buffered_jsonl_acquire_archive_prefix_metrics() {
     use crate::commands::provider_log_acquisition::acquire_provider_log_batch;
 
