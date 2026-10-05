@@ -456,6 +456,7 @@ describe("RemoteAccessSettings", () => {
     render(<RemoteAccessSettings />);
 
     await screen.findByText("Remote Access");
+    await waitFor(() => expect(screen.getByRole("button", { name: /create pairing code/i })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: /create pairing code/i }));
 
     await screen.findByText(/offer-1/);
