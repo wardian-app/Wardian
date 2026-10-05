@@ -5,13 +5,15 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, OpenOptions},
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, BufWriter, Write},
     path::Path,
 };
 
 pub const CONVERSATION_SCHEMA: u8 = 1;
 pub const CONVERSATION_TURNS_SCHEMA: u8 = 3;
 pub const CONVERSATION_INLINE_TEXT_LIMIT_BYTES: usize = 8 * 1024;
+
+const JSONL_WRITE_BUFFER_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -361,15 +363,23 @@ pub struct MaterializedTextPayload {
     pub artifact_refs: Vec<String>,
 }
 
+/// Appends one complete encoded row, then flushes without adding an fsync.
+/// The destination is opened before serialization so filesystem errors retain
+/// precedence. Only this record is buffered, including its terminating newline.
 pub fn append_jsonl_record<T: Serialize>(path: &Path, record: &T) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
 
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut file, record).map_err(io::Error::other)?;
-    file.write_all(b"\n")?;
-    file.flush()
+    append_jsonl_to_writer(&mut file, record)
+}
+
+fn append_jsonl_to_writer<T: Serialize>(writer: &mut impl Write, record: &T) -> io::Result<()> {
+    let mut row = serde_json::to_vec(record).map_err(io::Error::other)?;
+    row.push(b'\n');
+    writer.write_all(&row)?;
+    writer.flush()
 }
 
 pub fn read_jsonl_records<T: for<'de> Deserialize<'de>>(path: &Path) -> io::Result<Vec<T>> {
@@ -479,6 +489,8 @@ pub fn read_latest_index_entries(path: &Path) -> io::Result<Vec<ConversationInde
     Ok(entries)
 }
 
+/// Streams JSONL rows through a bounded buffer, flushing before fsync and
+/// closing the temporary file before replacement. No archive-sized copy is made.
 pub fn write_jsonl_atomic<T: Serialize>(path: &Path, records: &[T]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -486,13 +498,21 @@ pub fn write_jsonl_atomic<T: Serialize>(path: &Path, records: &[T]) -> io::Resul
     let tmp_path = tmp_path_for(path);
     {
         let mut file = fs::File::create(&tmp_path)?;
-        for record in records {
-            serde_json::to_writer(&mut file, record).map_err(io::Error::other)?;
-            file.write_all(b"\n")?;
-        }
+        write_jsonl_to_writer(&mut file, records)?;
         file.sync_all()?;
     }
     replace_file(&tmp_path, path)
+}
+
+fn write_jsonl_to_writer<T: Serialize>(writer: &mut impl Write, records: &[T]) -> io::Result<()> {
+    let mut buffer = BufWriter::with_capacity(JSONL_WRITE_BUFFER_BYTES, writer);
+    for record in records {
+        serde_json::to_writer(&mut buffer, record).map_err(io::Error::other)?;
+        buffer.write_all(b"\n")?;
+    }
+    // Drop cannot report a buffered write failure. Propagate it before the
+    // caller can fsync or replace the authoritative destination.
+    buffer.flush()
 }
 
 fn sanitize_artifact_stem(stem: &str) -> String {
@@ -540,6 +560,248 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::Write;
+
+    /// Counts calls reaching a real File below the production encoding/buffer.
+    /// These are Write calls, not a claim about kernel syscall counts.
+    struct CountedFile {
+        file: fs::File,
+        write_calls: usize,
+        flush_calls: usize,
+        max_chunk: usize,
+        fail_write: bool,
+        fail_flush: bool,
+    }
+
+    impl CountedFile {
+        fn create(path: &Path) -> Self {
+            Self {
+                file: fs::File::create(path).unwrap(),
+                write_calls: 0,
+                flush_calls: 0,
+                max_chunk: usize::MAX,
+                fail_write: false,
+                fail_flush: false,
+            }
+        }
+    }
+
+    impl Write for CountedFile {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.fail_write {
+                return Err(io::Error::other("injected write failure"));
+            }
+            self.write_calls += 1;
+            self.file.write(&bytes[..bytes.len().min(self.max_chunk)])
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flush_calls += 1;
+            if self.fail_flush {
+                return Err(io::Error::other("injected flush failure"));
+            }
+            self.file.flush()
+        }
+    }
+
+    struct FailingRecord<'a>(&'a std::cell::Cell<bool>);
+
+    impl Serialize for FailingRecord<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeSeq;
+            self.0.set(true);
+            let mut sequence = serializer.serialize_seq(Some(2))?;
+            sequence.serialize_element("prefix before serialization failure")?;
+            Err(serde::ser::Error::custom("injected serialization failure"))
+        }
+    }
+
+    fn jsonl_write_records() -> Vec<serde_json::Value> {
+        (0..32)
+            .map(|seq| {
+                serde_json::json!({"schema":1,"seq":seq,"text":"λ 雪 \"quoted\"\nnext",
+                    "refs":(0..64).map(|n|format!("event-{seq}-{n}")).collect::<Vec<_>>()})
+            })
+            .collect()
+    }
+
+    fn unbuffered_jsonl(writer: &mut impl Write, rows: &[serde_json::Value]) {
+        for row in rows {
+            serde_json::to_writer(&mut *writer, row).unwrap();
+            writer.write_all(b"\n").unwrap();
+        }
+        writer.flush().unwrap();
+    }
+
+    #[test]
+    fn jsonl_buffering_matches_legacy_bytes_and_reduces_real_file_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let rows = jsonl_write_records();
+        let legacy_path = temp.path().join("legacy.jsonl");
+        let append_path = temp.path().join("append.jsonl");
+        let rewrite_path = temp.path().join("rewrite.jsonl");
+        let mut legacy = CountedFile::create(&legacy_path);
+        unbuffered_jsonl(&mut legacy, &rows);
+        let mut appended = CountedFile::create(&append_path);
+        for row in &rows {
+            append_jsonl_to_writer(&mut appended, row).unwrap();
+        }
+        let mut rewritten = CountedFile::create(&rewrite_path);
+        write_jsonl_to_writer(&mut rewritten, &rows).unwrap();
+        let expected = fs::read(&legacy_path).unwrap();
+        assert_eq!(fs::read(&append_path).unwrap(), expected);
+        assert_eq!(fs::read(&rewrite_path).unwrap(), expected);
+        assert_eq!(
+            read_jsonl_records::<serde_json::Value>(&rewrite_path).unwrap(),
+            rows
+        );
+        assert!(appended.write_calls * 10 < legacy.write_calls);
+        assert!(rewritten.write_calls * 10 < legacy.write_calls);
+        assert_eq!(appended.flush_calls, rows.len());
+        assert_eq!(rewritten.flush_calls, 1);
+    }
+
+    #[test]
+    fn jsonl_public_helpers_preserve_order_unicode_newlines_and_empty_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("nested/archive.jsonl");
+        let rows = jsonl_write_records();
+        for row in &rows {
+            append_jsonl_record(&path, row).unwrap();
+        }
+        let appended = fs::read(&path).unwrap();
+        write_jsonl_atomic(&path, &rows).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), appended);
+        assert_eq!(
+            appended.iter().filter(|byte| **byte == b'\n').count(),
+            rows.len()
+        );
+        write_jsonl_atomic::<serde_json::Value>(&path, &[]).unwrap();
+        assert!(fs::read(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn jsonl_oversized_row_streams_through_fixed_rewrite_buffer() {
+        let temp = tempfile::tempdir().unwrap();
+        let row = serde_json::json!({"seq":7,"text":"雪".repeat(1024 * 1024)});
+        let rows = [row];
+        let path = temp.path().join("large.jsonl");
+        append_jsonl_record(&path, &rows[0]).unwrap();
+        let expected = fs::read(&path).unwrap();
+        assert!(expected.len() > 2 * 1024 * 1024);
+        write_jsonl_atomic(&path, &rows).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), expected);
+        assert_eq!(
+            read_jsonl_records::<serde_json::Value>(&path).unwrap(),
+            rows
+        );
+        let counted_path = temp.path().join("counted-large.jsonl");
+        let mut writer = CountedFile::create(&counted_path);
+        write_jsonl_to_writer(&mut writer, &rows).unwrap();
+        assert_eq!(fs::read(&counted_path).unwrap(), expected);
+        assert!(
+            writer.write_calls < 64,
+            "the oversized string must not fragment per character"
+        );
+    }
+
+    #[test]
+    fn jsonl_open_error_precedes_serialization_and_serialization_does_not_append_prefix() {
+        let temp = tempfile::tempdir().unwrap();
+        let called = std::cell::Cell::new(false);
+        let record = FailingRecord(&called);
+        append_jsonl_record(temp.path(), &record).unwrap_err();
+        assert!(
+            !called.get(),
+            "opening the destination must precede encoding"
+        );
+        let path = temp.path().join("archive.jsonl");
+        fs::write(&path, b"{\"seq\":1}\n").unwrap();
+        let expected = fs::read(&path).unwrap();
+        let error = append_jsonl_record(&path, &record).unwrap_err();
+        assert!(called.get());
+        assert!(error.to_string().contains("injected serialization failure"));
+        assert_eq!(fs::read(&path).unwrap(), expected);
+        write_jsonl_atomic(&path, &[record]).unwrap_err();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            expected,
+            "failed encoding cannot replace target"
+        );
+    }
+
+    #[test]
+    fn jsonl_writers_handle_partial_writes_and_propagate_write_and_flush_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        let rows = jsonl_write_records();
+        for atomic in [false, true] {
+            let path = temp.path().join(format!("partial-{atomic}.jsonl"));
+            let mut writer = CountedFile::create(&path);
+            writer.max_chunk = 7;
+            if atomic {
+                write_jsonl_to_writer(&mut writer, &rows).unwrap();
+                assert_eq!(
+                    read_jsonl_records::<serde_json::Value>(&path).unwrap(),
+                    rows
+                );
+            } else {
+                append_jsonl_to_writer(&mut writer, &rows[0]).unwrap();
+                assert_eq!(
+                    read_jsonl_records::<serde_json::Value>(&path).unwrap(),
+                    rows[..1]
+                );
+            }
+            for flush_fault in [false, true] {
+                let mut writer = CountedFile::create(&path);
+                writer.fail_write = !flush_fault;
+                writer.fail_flush = flush_fault;
+                let error = if atomic {
+                    write_jsonl_to_writer(&mut writer, &rows)
+                } else {
+                    append_jsonl_to_writer(&mut writer, &rows[0])
+                }
+                .unwrap_err();
+                assert!(error
+                    .to_string()
+                    .contains(if flush_fault { "flush" } else { "write" }));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the separately admitted measurement slot; reports no speed threshold"]
+    fn jsonl_real_file_write_metrics() {
+        let temp = tempfile::tempdir().unwrap();
+        let rows = jsonl_write_records();
+        let mut results = Vec::new();
+        let mut reference = None;
+        for mode in ["legacy", "append", "rewrite"] {
+            let path = temp.path().join(format!("{mode}.jsonl"));
+            let mut writer = CountedFile::create(&path);
+            let started = std::time::Instant::now();
+            for _ in 0..100 {
+                match mode {
+                    "legacy" => unbuffered_jsonl(&mut writer, &rows),
+                    "append" => {
+                        for row in &rows {
+                            append_jsonl_to_writer(&mut writer, row).unwrap();
+                        }
+                    }
+                    _ => write_jsonl_to_writer(&mut writer, &rows).unwrap(),
+                }
+            }
+            let elapsed = started.elapsed();
+            let bytes = fs::read(&path).unwrap();
+            if let Some(expected) = &reference {
+                assert_eq!(&bytes, expected);
+            } else {
+                reference = Some(bytes.clone());
+            }
+            results.push(serde_json::json!({"mode":mode,"rows":rows.len()*100,
+                "bytes":bytes.len(),"file_write_calls":writer.write_calls,
+                "flush_calls":writer.flush_calls,"elapsed_ms":elapsed.as_secs_f64()*1000.0}));
+        }
+        eprintln!("{}", serde_json::to_string(&results).unwrap());
+    }
 
     #[test]
     fn manifest_serializes_archive_enums_as_snake_case_without_capture_quality() {

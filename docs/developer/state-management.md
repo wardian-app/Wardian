@@ -72,6 +72,20 @@ with a recoverable error. The failure must not consume unrelated future input.
 Recovery repairs durable archive observations and their artifacts; it does not
 repair historical user data or invent missing source identity.
 
+The shared JSONL append helper opens the destination before encoding one record
+and its newline into a byte buffer, then writes and explicitly flushes that row.
+Serialization failure leaves existing rows intact. Memory grows with one encoded
+record, including oversized records; it does not grow with the archive. Atomic
+JSONL rewrites stream through an 8 KiB buffer, explicitly flush before the existing
+file fsync, close the temporary file, and then replace the destination. A failed
+encoding, write or flush must not be acknowledged as successful publication.
+
+These helpers preserve serialization, row order and newline framing. They add no
+append fsync, cursor transaction or archive ownership rule. Provider acquisition
+still compares its expected cursor before archive publication and commits the
+next cursor only after publication succeeds. Retries repair durable observations
+and deduplicate them under the existing provenance rules.
+
 ## Startup restoration and configuration ownership
 
 Rename, reorder, and worktree enable/assign/disable acquire the cross-process
