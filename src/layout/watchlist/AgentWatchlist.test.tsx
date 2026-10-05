@@ -352,32 +352,43 @@ describe('AgentWatchlist', () => {
 
   it('opens and closes the inspector with Enter without revealing the row', async () => {
     const user = userEvent.setup();
-    invokeMock
-      .mockResolvedValueOnce({
-        summaries: [{
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'temporary_worker_root_summaries') {
+        return {
+          summaries: [{
+            root_agent_id: 'agent-1',
+            active: 1,
+            past: 0,
+            unknown: 0,
+            attention_count: 0,
+            attention_waiting: 0,
+            attention_failed: 0,
+            attention_unknown: 0,
+          }],
+        };
+      }
+      if (command === 'temporary_worker_root_details') {
+        return {
           root_agent_id: 'agent-1',
-          active: 1,
-          past: 0,
-          unknown: 0,
-          attention_count: 0,
-          attention_waiting: 0,
-          attention_failed: 0,
-          attention_unknown: 0,
-        }],
-      })
-      .mockResolvedValueOnce({
-        root_agent_id: 'agent-1',
-        workers: [],
-        worker_telemetry: {},
-      });
+          workers: [],
+          worker_telemetry: {},
+        };
+      }
+      return undefined;
+    });
 
     render(<AgentWatchlist {...defaultProps} />);
     const badge = await screen.findByTestId('watchlist-child-worker-indicator-agent-1');
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.filter(([command]) => command === 'temporary_worker_root_summaries').length)
+        .toBeGreaterThanOrEqual(2);
+    });
 
     badge.focus();
     await user.keyboard('{Enter}');
 
     expect(await screen.findByTestId('agent-child-worker-details-agent-1')).toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith('temporary_worker_root_details', { rootAgentId: 'agent-1' });
     expect(mockOnRevealAgent).not.toHaveBeenCalled();
 
     const closeButton = screen.getByRole('button', { name: 'Close subagent details' });
@@ -389,6 +400,7 @@ describe('AgentWatchlist', () => {
     });
     expect(mockOnRevealAgent).not.toHaveBeenCalled();
   });
+
 
   it('offers navigation and management actions in one context menu', async () => {
     render(<AgentWatchlist {...defaultProps} />);
