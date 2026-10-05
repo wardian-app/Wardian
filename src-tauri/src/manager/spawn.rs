@@ -2050,14 +2050,18 @@ fn line_event_status_for_pty_provider(
     )
 }
 
-fn persist_runtime_agent_configs(app: &AppHandle) {
+/// Persists the admitted live roster after an identity watcher releases its config lock.
+pub(crate) fn persist_runtime_agent_configs<R: tauri::Runtime>(app: &AppHandle<R>) {
     let state = app.state::<AppState>();
-    let snapshot = tauri::async_runtime::block_on(async {
-        let agents = state.agents.lock().await;
-        let order = state.agent_order.lock().await;
-        super::state_configs_snapshot(&agents, &order)
-    });
-    super::save_state_snapshot(app, &snapshot);
+    // Identity watchers run after releasing configuration locks. Admission must
+    // precede the live snapshot so a queued watcher cannot overwrite newer state.
+    if let Err(error) =
+        tauri::async_runtime::block_on(super::roster_io::save_live_state(&state, ()))
+    {
+        super::log_debug(&format!(
+            "[WARDIAN] Failed to persist runtime agent configs: {error}"
+        ));
+    }
 }
 
 pub async fn spawn_agent(
