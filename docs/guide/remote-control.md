@@ -266,6 +266,9 @@ boundary.
   open and earlier chat remains visible. Select **Retry Chat**. If the error
   repeats, inspect the host's chat and archive diagnostics; re-pairing does not
   resolve an error from the chat endpoint.
+- **A Chat response stops before its history finishes arriving:** earlier rows
+  remain visible with **Retry Chat**. An interrupted successful Chat response
+  does not by itself establish that the desktop is unreachable.
 - **Chat history takes longer to load:** the phone allows up to 60 seconds for
   each Chat read. A read deadline keeps Chat open with earlier rows and a
   **Retry Chat** button; it does not mean the desktop is disconnected or that

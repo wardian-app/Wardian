@@ -167,6 +167,10 @@ Choose **Reset Workbench** from the command palette when the saved layout is unu
 
 Wardian saves the tab order, pane tree, active tabs, split sizes, and supported per-surface state. It restores that document at the next launch. If the primary document is invalid, Wardian can recover from its backup. A newer, unknown, or unavailable surface is kept as a placeholder instead of silently dropping its stored state.
 
+Routine layout saves run in the background without a titlebar progress notice.
+You can continue switching tabs while a save is pending. Save errors, conflicts,
+recovery notices, and safe-mode notices remain visible when action is needed.
+
 If Wardian cannot safely load the layout, it enters **Workbench safe mode**. Safe mode renders a conservative single-pane projection while preserving the durable document so it can be recovered, exported, replaced, or reset deliberately.
 
 ## Agent Sessions and Terminal Ownership

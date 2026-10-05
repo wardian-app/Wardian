@@ -12,7 +12,7 @@ import type {
   ChangeReviewLoadResponse,
   ProviderReadiness,
 } from "../types";
-import type { AgentTelemetry } from "../types";
+import type { AgentTelemetry, QueueItem } from "../types";
 import { useLayoutStore } from "../store/useLayoutStore";
 import { useLibraryStore } from "../store/useLibraryStore";
 import { useQueueStore } from "../store/useQueueStore";
@@ -22,6 +22,7 @@ import { normalizeWatchlistState } from "../layout/watchlist/watchlistUtils";
 import type { AgentInteractions, WatchlistPrefs } from "../layout/watchlist/types";
 import { ConfirmProvider } from "../components/ConfirmDialog";
 import { makeSingleGroupDocument, makeSurface } from "../features/workbench/workbenchTestUtils";
+import type { WorkbenchSaveRequest, WorkbenchSaveResult } from "../features/workbench/workbenchPersistence";
 import { createCoreWorkbenchSurfaceRegistry } from "../features/workbench/coreSurfaceRegistry";
 import type { TelemetryFleet } from "../features/telemetry/telemetryTypes";
 
@@ -459,9 +460,7 @@ function captureQueueAgentListeners() {
   type TurnCompletionPayload = {
     session_id: string;
     agent_name?: string;
-    summary?: string;
-    evidence_id?: string;
-    inbox_persisted?: boolean;
+    inbox_item?: QueueItem;
   };
   let turnCompletionListener: EventCallback<TurnCompletionPayload> | null = null;
   mockListen.mockImplementation((eventName, handler) => {
@@ -952,6 +951,59 @@ describe("Workbench persistence boot integration", () => {
     ]) {
       expect(mockListen.mock.calls.filter(([name]) => name === eventName)).toHaveLength(1);
     }
+  });
+
+  it("keeps routine save progress internal while ordinary navigation remains usable", async () => {
+    setupDefaultMocks([], defaultClasses);
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    let finishSave!: (result: WorkbenchSaveResult) => void;
+    const pendingSave = new Promise<WorkbenchSaveResult>((resolve) => { finishSave = resolve; });
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "save_workbench_state") return pendingSave;
+      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
+    });
+    render(<App />);
+    await screen.findByTestId("agents-overview-surface");
+    act(() => { useLibraryStore.getState().openLibraryAt("skills"); });
+    await screen.findByTestId("library-surface");
+    await waitFor(() => expect(mockInvoke.mock.calls.some(([command]) =>
+      command === "save_workbench_state")).toBe(true));
+    const routineNotice = screen.queryByTestId("workbench-persistence-notice")?.textContent ?? null;
+    const request = mockInvoke.mock.calls.find(([command]) => command === "save_workbench_state")?.[1] as WorkbenchSaveRequest;
+    try {
+      const agentsTab = screen.getByRole("tab", { name: "Agents" });
+      fireEvent.pointerDown(agentsTab);
+      fireEvent.mouseDown(agentsTab);
+      fireEvent.click(agentsTab);
+      expect(await screen.findByTestId("agents-overview-surface")).toBeInTheDocument();
+      await waitFor(() => expect(agentsTab).toHaveAttribute("aria-selected", "true"));
+    } finally {
+      // Settle the save even when a preceding navigation assertion fails.
+      await act(async () => {
+        finishSave({
+          outcome: "saved",
+          durable_revision: request.document.revision,
+          durable_token: "completed-save-token",
+          request_id: request.request_id,
+        });
+        await pendingSave;
+      });
+    }
+    expect(routineNotice).toBeNull();
+  });
+
+  it("keeps actionable workbench save errors visible", async () => {
+    setupDefaultMocks([], defaultClasses);
+    const defaultInvoke = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "save_workbench_state") return Promise.reject(new Error("Controlled disk write failure"));
+      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
+    });
+    render(<App />);
+    await screen.findByTestId("agents-overview-surface");
+    act(() => { useLibraryStore.getState().openLibraryAt("skills"); });
+    await waitFor(() => expect(screen.getByTestId("workbench-persistence-notice"))
+      .toHaveTextContent("Controlled disk write failure"));
   });
 
   it("shows nonblocking recovery and backend safe-mode state", async () => {
@@ -2354,100 +2406,7 @@ describe("Agent Watchlist Sidebar", () => {
     });
   });
 
-  it("adds an agent completion from an explicit provider turn with its final transcript response", async () => {
-    setupDefaultMocks(sampleAgents, defaultClasses);
-    const defaultInvoke = mockInvoke.getMockImplementation();
-    mockInvoke.mockImplementation((command, args) => {
-      if (command === "load_agent_chat_transcript") {
-        return Promise.resolve([
-          {
-            id: "user-1", session_id: "agent-1", provider: "claude", kind: "message", role: "user",
-            text: "Finish the requested update.", title: null, status: null, turn_id: "turn-1",
-            source: "provider_log", command: null, exit_code: null, path: null, language: null,
-            created_at: null, sequence: 1, metadata: {},
-          },
-          {
-            id: "assistant-1", session_id: "agent-1", provider: "claude", kind: "message", role: "assistant",
-            text: "Finished the requested update.", title: null, status: null, turn_id: "turn-1",
-            source: "provider_log", command: null, exit_code: null, path: null, language: null,
-            created_at: null, sequence: 2, metadata: {},
-          },
-        ]);
-      }
-      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
-    });
-    const { emitTurnCompletion } = captureQueueAgentListeners();
-
-    await act(async () => {
-      render(<App />);
-    });
-    await screen.findByText("All Agents");
-    mockInvoke.mockClear();
-
-    await act(async () => {
-      emitTurnCompletion({ session_id: "agent-1" });
-    });
-
-    await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith(
-        "save_queue_items",
-        expect.objectContaining({
-          items: [
-            expect.objectContaining({
-              type: "agent_completed",
-              agent_session_id: "agent-1",
-              agent_name: "Alpha",
-              summary: "Finished the requested update.",
-              evidence_id: "assistant-1",
-              evidence_source: "provider_runtime",
-              read: false,
-            }),
-          ],
-        }),
-      );
-    });
-  });
-
-  it("suppresses provider-control turns from the Inbox", async () => {
-    setupDefaultMocks(sampleAgents, defaultClasses);
-    const defaultInvoke = mockInvoke.getMockImplementation();
-    mockInvoke.mockImplementation((command, args) => {
-      if (command === "load_agent_chat_transcript") {
-        return Promise.resolve([
-          {
-            id: "user-login", session_id: "agent-1", provider: "claude", kind: "message", role: "user",
-            text: "/login", title: null, status: null, turn_id: "turn-login", source: "provider_log",
-            command: null, exit_code: null, path: null, language: null, created_at: null, sequence: 1, metadata: {},
-          },
-          {
-            id: "assistant-login", session_id: "agent-1", provider: "claude", kind: "message", role: "assistant",
-            text: "Opening browser to sign in.", title: null, status: null, turn_id: "turn-login", source: "provider_log",
-            command: null, exit_code: null, path: null, language: null, created_at: null, sequence: 2, metadata: {},
-          },
-        ]);
-      }
-      return defaultInvoke?.(command, args) ?? Promise.resolve(null);
-    });
-    const { emitTurnCompletion } = captureQueueAgentListeners();
-
-    render(<App />);
-    await screen.findByText("All Agents");
-    mockInvoke.mockClear();
-
-    await act(async () => {
-      emitTurnCompletion({ session_id: "agent-1" });
-    });
-
-    await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith("load_agent_chat_transcript", { sessionId: "agent-1" });
-    });
-    expect(mockInvoke).not.toHaveBeenCalledWith(
-      "save_queue_items",
-      expect.objectContaining({ items: expect.any(Array) }),
-    );
-  });
-
-  it("suppresses completion events received before the agent roster resolves their name", async () => {
+  it("never builds an Inbox card from a bare turn boundary", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     const { emitTurnCompletion } = captureQueueAgentListeners();
 
@@ -2456,17 +2415,18 @@ describe("Agent Watchlist Sidebar", () => {
     mockInvoke.mockClear();
 
     await act(async () => {
+      emitTurnCompletion({ session_id: "agent-1" });
       emitTurnCompletion({ session_id: "unknown-agent" });
     });
 
-    expect(mockInvoke).not.toHaveBeenCalledWith(
-      "load_agent_chat_transcript",
-      expect.objectContaining({ sessionId: "unknown-agent" }),
-    );
+    // The backend persists completion cards; the frontend neither rereads the
+    // transcript nor writes a card of its own.
+    expect(mockInvoke).not.toHaveBeenCalledWith("load_agent_chat_transcript", expect.anything());
     expect(mockInvoke).not.toHaveBeenCalledWith(
       "save_queue_items",
       expect.objectContaining({ items: expect.any(Array) }),
     );
+    expect(useQueueStore.getState().items).toHaveLength(0);
   });
 
   it("adds an action-needed queue item when an agent transitions into Action Needed", async () => {
@@ -3359,31 +3319,38 @@ describe("Sidebar Navigation", () => {
     });
   });
 
-  it("projects a persisted Claude completion without rereading its transcript", async () => {
+  it("projects a backend-persisted completion card with the full answer", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     const { emitTurnCompletion } = captureQueueAgentListeners();
 
     render(<App />);
     await screen.findByTestId("terminal-agent-1");
+    mockInvoke.mockClear();
 
+    const inbox_item: QueueItem = {
+      id: "agent-completed:agent-1:turn-7",
+      type: "agent_completed",
+      timestamp: 1,
+      read: false,
+      agent_session_id: "agent-1",
+      agent_name: "Alpha",
+      summary: "Codex finished this turn.",
+      response_text: "Codex finished this turn. Full answer follows.",
+      evidence_id: "turn-7",
+      evidence_source: "provider_runtime",
+    };
     await act(async () => {
-      emitTurnCompletion({
-        session_id: "agent-1",
-        agent_name: "Alpha",
-        summary: "Claude finished this turn.",
-        evidence_id: "message-7",
-        inbox_persisted: true,
-      });
+      emitTurnCompletion({ session_id: "agent-1", agent_name: "Alpha", inbox_item });
     });
 
     await waitFor(() => {
-      expect(useQueueStore.getState().items).toContainEqual(expect.objectContaining({
-        id: "agent-completed:agent-1:message-7",
-        summary: "Claude finished this turn.",
-        evidence_id: "message-7",
-      }));
+      expect(useQueueStore.getState().items).toContainEqual(inbox_item);
     });
     expect(mockInvoke.mock.calls.some(([command]) => command === "load_agent_chat_transcript")).toBe(false);
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "save_queue_items",
+      expect.objectContaining({ items: expect.any(Array) }),
+    );
   });
 
   it("shows the selected agent source-control change count on the activity rail", async () => {

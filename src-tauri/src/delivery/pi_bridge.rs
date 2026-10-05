@@ -320,10 +320,6 @@ impl fmt::Debug for PiBridgeOwner {
 }
 
 impl PiBridgeOwner {
-    pub fn binding(&self) -> &PiBridgeBinding {
-        &self.binding
-    }
-
     pub fn is_ready(&self) -> bool {
         !self.closed.load(Ordering::Acquire) && self.ready.load(Ordering::Acquire)
     }

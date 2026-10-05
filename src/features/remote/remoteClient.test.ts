@@ -158,6 +158,51 @@ describe("remoteClient error propagation", () => {
     }
   });
 
+  it("keeps an interrupted successful Chat body distinguishable from connection loss", async () => {
+    const response = new Response(null, { status: 200 });
+    vi.spyOn(response, "json").mockRejectedValue(new TypeError("Private transport detail"));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    await expect(remoteClient.loadAgentChatPage("agent-1")).rejects.toMatchObject({
+      name: "RemoteChatBodyError",
+      message: "Chat could not be loaded. Retry when the desktop is available.",
+    });
+    await expect(remoteClient.loadSession()).rejects.toThrow("Private transport detail");
+  });
+
+  it("preserves caller cancellation after Chat headers have arrived", async () => {
+    const controller = new AbortController();
+    const response = new Response(null, { status: 200 });
+    vi.spyOn(response, "json").mockImplementation(async () => {
+      controller.abort();
+      throw new DOMException("Aborted", "AbortError");
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    await expect(remoteClient.loadAgentChatPage("agent-1", undefined, controller.signal))
+      .rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("keeps the Chat deadline classification when a successful body stalls", async () => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | null | undefined;
+      const response = new Response(null, { status: 200 });
+      vi.spyOn(response, "json").mockImplementation(() => new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+      }));
+      vi.stubGlobal("fetch", vi.fn((_path: string, init?: RequestInit) => {
+        signal = init?.signal;
+        return Promise.resolve(response);
+      }));
+      const read = remoteClient.loadAgentChatPage("agent-1").catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await expect(read).resolves.toMatchObject({ name: "RemoteChatTimeoutError" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("cancels an owned Chat HTTP request independently of the read deadline", async () => {
     const controller = new AbortController();
     vi.stubGlobal("fetch", vi.fn((_path: string, init?: RequestInit) =>

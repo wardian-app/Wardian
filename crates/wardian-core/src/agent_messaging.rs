@@ -10,7 +10,9 @@ pub const MAX_RECEIVE_BODY_BYTES: usize = 128 * 1024;
 /// Serialized response bound, allowing JSON escaping of one maximum-size body.
 pub const MAX_RECEIVE_SERIALIZED_BYTES: usize = 512 * 1024;
 pub const MAX_RECEIVE_ITEMS: u32 = 100;
-pub const MAX_RECEIVE_TIMEOUT_MS: u64 = 60_000;
+pub const MAX_MAILBOX_WAIT_TIMEOUT_MS: u64 = 60_000;
+pub const MAX_RECEIVE_TIMEOUT_MS: u64 = MAX_MAILBOX_WAIT_TIMEOUT_MS;
+pub const MAX_WAIT_AGENT_TIMEOUT_MS: u64 = MAX_MAILBOX_WAIT_TIMEOUT_MS;
 
 /// Managed-origin operations; caller identity is supplied outside this payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -36,6 +38,10 @@ pub enum AgentMessagingRequest {
         ack_cursor: Option<String>,
         #[serde(default)]
         limit: Option<u32>,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    WaitAgent {
         #[serde(default)]
         timeout_ms: Option<u64>,
     },
@@ -140,6 +146,9 @@ pub enum AgentMessagingResponse {
     ReceiveMessages {
         #[serde(flatten)]
         page: AgentMessagePage,
+    },
+    WaitAgent {
+        timed_out: bool,
     },
     Reply {
         request_id: String,

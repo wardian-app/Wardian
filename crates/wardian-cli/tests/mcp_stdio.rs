@@ -136,7 +136,7 @@ fn stdio_discovery_and_rejections_do_not_create_home_or_need_app() {
     ]);
     let responses = run(&test_home, requests);
     assert_eq!(responses.len(), 4);
-    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 7);
     let error: Value = serde_json::from_str(
         responses[2]["result"]["content"][0]["text"]
             .as_str()
@@ -225,7 +225,7 @@ fn control_fixture(test_home: &Path, responses: Vec<Value>) -> thread::JoinHandl
 }
 
 #[test]
-fn stdio_six_calls_use_typed_control_and_preserve_literal_body_origin_and_receipts() {
+fn stdio_seven_calls_use_typed_control_and_preserve_literal_body_origin_and_receipts() {
     let root = tempfile::tempdir().unwrap();
     let message =
         "  \u{4e2d}\u{6587} \u{3bb}\u{1f600}\nline two\r\n\"quotes\" C:\\path\\file\t\0\u{1b}  ";
@@ -244,6 +244,11 @@ fn stdio_six_calls_use_typed_control_and_preserve_literal_body_origin_and_receip
             "receive_messages",
             json!({"cursor":"cursor-1","ack_cursor":"ack-1","limit":7,"timeout_ms":0}),
             json!({"operation":"receive_messages","messages":[],"next_cursor":"cursor-2","ack_cursor":"ack-2","has_more":false,"timed_out":true}),
+        ),
+        (
+            "wait_agent",
+            json!({"timeout_ms":60000}),
+            json!({"operation":"wait_agent","timed_out":false}),
         ),
         (
             "reply",
@@ -272,12 +277,12 @@ fn stdio_six_calls_use_typed_control_and_preserve_literal_body_origin_and_receip
     for (name, arguments, _) in &specs {
         requests.push(json!({"jsonrpc":"2.0","id":name,"method":"tools/call","params":{"name":name,"arguments":arguments}}));
     }
-    // Notifications cannot create a seventh control operation or interrupt.
+    // Notifications cannot create an eighth control operation or interrupt.
     requests.push(json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"followup_task"}}));
     let responses = run(root.path(), requests);
     let sent = server.join().unwrap();
-    assert_eq!(sent.len(), 6);
-    assert_eq!(responses.len(), 7);
+    assert_eq!(sent.len(), 7);
+    assert_eq!(responses.len(), 8);
     for (index, (name, args, receipt)) in specs.iter().enumerate() {
         assert_eq!(sent[index]["command"], "agent_messaging");
         assert_eq!(

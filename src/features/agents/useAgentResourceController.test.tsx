@@ -9,6 +9,7 @@ import type {
   AgentStatusUpdate,
   AgentTelemetry,
   AppTelemetry,
+  QueueItem,
 } from "../../types";
 import { useAgentResourceController } from "./useAgentResourceController";
 import { useAgentTelemetryStore } from "./useAgentTelemetryStore";
@@ -50,9 +51,7 @@ type ListenerPayloads = {
   "agent-turn-completed": {
     session_id: string;
     agent_name?: string;
-    summary?: string;
-    evidence_id?: string;
-    inbox_persisted?: boolean;
+    inbox_item?: QueueItem;
   };
 };
 
@@ -398,21 +397,29 @@ describe("useAgentResourceController", () => {
     const { result } = renderHook(() => useAgentResourceController({ on_agent_turn_completed }));
     await waitFor(() => expect(result.current.agents).toHaveLength(2));
 
-    act(() => emit("agent-turn-completed", {
-      session_id: "agent-1",
-      agent_name: "Alpha",
-      summary: "Completed response",
-      evidence_id: "message-7",
-      inbox_persisted: true,
-    }));
-
-    expect(on_agent_turn_completed).toHaveBeenCalledWith({
+    act(() => emit("agent-turn-completed", { session_id: "agent-1" }));
+    expect(on_agent_turn_completed).toHaveBeenLastCalledWith({
       session_id: "agent-1",
       agent: expect.objectContaining({ session_name: "Alpha" }),
+    });
+
+    const inbox_item: QueueItem = {
+      id: "agent-completed:agent-1:message-7",
+      type: "agent_completed",
+      timestamp: 1,
+      read: false,
+      agent_session_id: "agent-1",
       agent_name: "Alpha",
       summary: "Completed response",
+      response_text: "Completed response",
       evidence_id: "message-7",
-      inbox_persisted: true,
+      evidence_source: "provider_runtime",
+    };
+    act(() => emit("agent-turn-completed", { session_id: "agent-1", agent_name: "Alpha", inbox_item }));
+    expect(on_agent_turn_completed).toHaveBeenLastCalledWith({
+      session_id: "agent-1",
+      agent: expect.objectContaining({ session_name: "Alpha" }),
+      inbox_item,
     });
   });
 

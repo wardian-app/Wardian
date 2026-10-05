@@ -25,9 +25,12 @@ wardian message followup <agent-name-or-uuid> "Review the change" `
 ```
 
 Use `wardian message send` for information without waking or interrupting the
-recipient. Use `wardian message receive` for a bounded inbox read and
-`wardian message reply` to complete a canonical task. Interruption is explicit
-through `wardian message interrupt`; a correction message does not imply it.
+recipient. Use `wardian message wait --timeout-ms 60000` to wait for mailbox
+activity without reading or acknowledging inbox records, then use
+`wardian message receive` to inspect a bounded page. `message receive` can also
+wait while returning the page. Use `wardian message reply` to complete a
+canonical task. Interruption is explicit through `wardian message interrupt`;
+a correction message does not imply it.
 
 Inspect session capabilities and retained native-delivery evidence:
 

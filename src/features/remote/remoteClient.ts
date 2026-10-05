@@ -36,6 +36,14 @@ export class RemoteChatTimeoutError extends Error {
   }
 }
 
+/** A received Chat response whose body failed does not establish desktop loss. */
+export class RemoteChatBodyError extends Error {
+  constructor() {
+    super("Chat could not be loaded. Retry when the desktop is available.");
+    this.name = "RemoteChatBodyError";
+  }
+}
+
 export class RemoteRequestError extends Error {
   constructor(
     message: string,
@@ -114,7 +122,14 @@ async function remoteJson<T>(path: string, init?: RequestInit, chatRead = false)
         detail,
       );
     }
-    return await response.json() as T;
+    try {
+      return await response.json() as T;
+    } catch (error) {
+      // Keep failures after successful headers local; other APIs may be healthy.
+      // Deadlines and caller cancellation retain their own classification.
+      if (chatRead && !timedOut && !requestSignal?.aborted) throw new RemoteChatBodyError();
+      throw error;
+    }
   } catch (error) {
     // Optional error-body parsing cannot erase an already received HTTP failure.
     if (chatRead && timedOut && !(error instanceof RemoteRequestError)) throw new RemoteChatTimeoutError();

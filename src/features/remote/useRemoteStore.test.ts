@@ -650,6 +650,34 @@ describe("useRemoteStore watchlists", () => {
     expect(useRemoteStore.getState().status).toBe("session_expired");
   });
 
+  it("retains connected Chat and retries after a received successful body is interrupted", async () => {
+    const actual = await vi.importActual<typeof import("./remoteClient")>("./remoteClient");
+    vi.mocked(remoteClient.loadAgentChatPage).mockImplementationOnce(actual.remoteClient.loadAgentChatPage);
+    const response = new Response(null, { status: 200 });
+    vi.spyOn(response, "json").mockRejectedValue(new TypeError("Private transport detail"));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+    useRemoteStore.setState({
+      status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      chatEvents: [chatMessage("earlier", "Earlier reply", 1)],
+    });
+    try {
+      await useRemoteStore.getState().refreshActiveAgentChat();
+      expect(useRemoteStore.getState().status).toBe("ready");
+      expect(useRemoteStore.getState().chatLoading).toBe(false);
+      expect(useRemoteStore.getState().chatError).toBe("Chat could not be loaded. Retry when the desktop is available.");
+      expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["Earlier reply"]);
+
+      vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValueOnce({
+        events: [chatMessage("recovered", "Recovered reply", 2)], has_older: false, next_before: null,
+      });
+      await useRemoteStore.getState().refreshActiveAgentChat();
+      expect(useRemoteStore.getState().chatError).toBe("");
+      expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["Earlier reply", "Recovered reply"]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("keeps Chat deadlines local, retains rows and allows a manual retry", async () => {
     useRemoteStore.setState({
       status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",

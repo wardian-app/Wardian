@@ -387,22 +387,6 @@ impl ActiveTime {
     }
 }
 
-/// Aggregated measures for one hour bucket.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct RollupRow {
-    pub bucket_start: String,
-    pub session_id: String,
-    pub provider: String,
-    pub model: Option<String>,
-    pub active: ActiveTime,
-    pub turns: i64,
-    pub tokens: TokenCounts,
-    pub files_touched: i64,
-    pub lines_added: i64,
-    pub lines_removed: i64,
-    pub cost_usd: Option<f64>,
-}
-
 /// Aggregate measures over a horizon, as returned to the UI.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TelemetrySummary {

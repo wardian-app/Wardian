@@ -39,6 +39,11 @@ uuid = { version = "1.21.0", features = ["v4"] }
 portable-pty = { path = "vendor/portable-pty" }
 vt100 = { path = "vendor/vt100" }
 
+# Routine development and test builds do not need full debugger symbols. Opt in
+# with CARGO_PROFILE_DEV_DEBUG=2 when inspecting variables in a native debugger.
+[profile.dev]
+debug = false
+
 [profile.dev.package."*"]
 debug = false
 opt-level = 1

@@ -48,7 +48,7 @@ This file is an agent-readable index for the public Wardian documentation. Use t
 
 ## CLI and Agent Communication
 
-- https://docs.wardian.org/developer/agent-messaging-tools - Use structured peer messaging, follow-up tasks, receiving, and correlated replies through managed Codex tools.
+- https://docs.wardian.org/developer/agent-messaging-tools - Use structured peer messaging, follow-up tasks, event-driven mailbox waits, receiving, and correlated replies through managed Codex tools.
 
 - https://docs.wardian.org/guide/cli - Use the Wardian CLI for agent inspection, live control, inter-agent messages, worktree assignment, and automation commands.
 - https://docs.wardian.org/developer/ipc-events - Understand frontend/backend event contracts and runtime telemetry surfaces.
@@ -65,6 +65,7 @@ This file is an agent-readable index for the public Wardian documentation. Use t
 
 - https://docs.wardian.org/developer/architecture - Read the high-level architecture for frontend, backend, state, and runtime boundaries.
 - https://docs.wardian.org/developer/setup - Set up a development checkout and local verification environment.
+- https://docs.wardian.org/developer/rust-build-cache - Set up bounded Rust compiler caching, isolated concurrent targets, protected-input lanes, and explicit inactive output retention.
 - https://docs.wardian.org/developer/state-management - Understand persisted state, runtime state, and frontend state ownership.
 - https://docs.wardian.org/developer/agent-memory - Understand the SQLite authority, startup injection, automation commit boundary, and provider-neutral recall architecture.
 - https://docs.wardian.org/developer/automation-engine - Debug or extend deterministic automation execution.

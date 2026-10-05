@@ -24,7 +24,7 @@ import {
   signRemoteAuthChallenge,
   type StoredRemoteDeviceIdentity,
 } from "./remoteIdentity";
-import { remoteClient, RemoteChatTimeoutError, RemoteRequestError } from "./remoteClient";
+import { remoteClient, RemoteChatBodyError, RemoteChatTimeoutError, RemoteRequestError } from "./remoteClient";
 
 type RemoteStatus =
   | "loading"
@@ -118,7 +118,7 @@ const statusFromError = (error: unknown): RemoteStatus => {
 };
 
 const chatConnectionStatusFromError = (error: unknown): RemoteStatus | null => {
-  if (error instanceof RemoteChatTimeoutError) return null;
+  if (error instanceof RemoteChatTimeoutError || error instanceof RemoteChatBodyError) return null;
   const status = statusFromError(error);
   // A Chat deadline or application error does not establish connectivity loss.
   // Authentication and actual transport/gateway failures retain their meaning.

@@ -10,40 +10,6 @@ pub struct LibraryItemMetadata {
     pub last_used: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub struct LibraryPrompt {
-    pub path: String,
-    pub name: String,
-    pub content: String,
-    pub metadata: LibraryItemMetadata,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub struct LibrarySkill {
-    pub path: String,
-    pub name: String,
-    pub description: String,
-    pub content: String,
-    pub metadata: LibraryItemMetadata,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LibraryFolder {
-    pub path: String,
-    pub name: String,
-    pub children: Vec<LibraryNode>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum LibraryNode {
-    Folder(LibraryFolder),
-    Prompt(LibraryPrompt),
-    Skill(LibrarySkill),
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SkillDeployment {
     pub target_type: String,

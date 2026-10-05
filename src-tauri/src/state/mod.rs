@@ -2,6 +2,7 @@ pub mod active_agent;
 pub mod agent_watch;
 pub mod app_state;
 pub mod artifact_runtime;
+pub(crate) mod background_capture;
 pub mod browser_session;
 pub mod capture_policy_gate;
 pub mod change_snapshot_runtime;
