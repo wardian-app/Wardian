@@ -211,8 +211,8 @@ pub struct RegisterProviderChild<'a> {
 /// Why a Codex child lifecycle observation is authoritative enough to publish.
 ///
 /// Pending observations deliberately clear stale terminal state for Codex
-/// children only. The legacy registration API keeps its historical treatment
-/// of `Unknown` so other callers cannot erase terminal evidence by accident.
+/// children only. The registration core keeps its historical treatment of
+/// `Unknown` for other updates so terminal evidence is preserved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexChildObservationQualification {
     Qualified,
@@ -481,36 +481,6 @@ fn mark_terminal_with_conn(
     Ok(changed == 1)
 }
 
-pub fn attach_verified_source(
-    worker_id: &str,
-    source_path: &str,
-    coverage: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    crate::db::get_db_conn(|conn| {
-        let provider = conn
-            .query_row(
-                "SELECT provider FROM temporary_workers WHERE worker_id = ?1",
-                params![worker_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        let Some(provider) = provider else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("temporary worker not found: {worker_id}"),
-            )
-            .into());
-        };
-        let source_key = crate::telemetry::identity::source_key(&provider, worker_id, source_path);
-        conn.execute(
-            "UPDATE temporary_workers SET source_key = ?2, source_path = ?3,
-             coverage = ?4, last_observed_at = ?5 WHERE worker_id = ?1",
-            params![worker_id, source_key, source_path, coverage, now()],
-        )?;
-        Ok(())
-    })
-}
-
 /// Move retention windows only after a provider adapter has explicitly
 /// accepted a correlated follow-up. Attempted or uncertain delivery does not
 /// extend eligibility.
@@ -536,14 +506,6 @@ pub fn record_follow_up_accepted(worker_id: &str) -> Result<(), Box<dyn std::err
             .into());
         }
         Ok(())
-    })
-}
-
-pub fn register_provider_child(
-    input: RegisterProviderChild<'_>,
-) -> Result<TemporaryWorkerRecord, Box<dyn std::error::Error>> {
-    crate::db::get_db_conn(|conn| {
-        register_provider_child_with_conn(conn, input, None, false, false)
     })
 }
 

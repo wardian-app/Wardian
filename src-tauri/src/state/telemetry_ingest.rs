@@ -1155,10 +1155,12 @@ mod tests {
     }
 
     fn read_codex_rollout_meta(path: &Path) -> Option<CodexRolloutMeta> {
-        match read_codex_rollout_header(path, CODEX_META_BYTES as usize) {
-            CodexHeaderRead::Complete(meta, _) => meta,
-            CodexHeaderRead::Deferred(_) => None,
-        }
+        let (meta, bytes_read) = match read_codex_rollout_header(path, CODEX_META_BYTES as usize) {
+            CodexHeaderRead::Complete(meta, bytes_read) => (meta, bytes_read),
+            CodexHeaderRead::Deferred(bytes_read) => (None, bytes_read),
+        };
+        assert!(bytes_read <= CODEX_META_BYTES as usize);
+        meta
     }
 
     fn verified_codex_descendants<'a>(

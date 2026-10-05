@@ -27,10 +27,6 @@ struct PendingPaths {
 }
 
 impl PendingPaths {
-    fn new(capacity: usize) -> Self {
-        Self::with_wake(capacity, WorkerEventWake::new())
-    }
-
     fn with_wake(capacity: usize, wake: WorkerEventWake) -> Self {
         Self {
             capacity: capacity.clamp(1, MAX_PENDING_PATHS),
@@ -235,11 +231,20 @@ impl CodexWorkerEventWatcher {
                 return Err(WatcherUpdateError::Closed);
             }
         }
-        result.recv().map_err(|_| {
+        let update = result.recv().map_err(|_| {
             mark_overflow(&self.pending);
             mark_closed(&self.pending);
             WatcherUpdateError::Closed
-        })
+        })?;
+        if update.truncated_roots > 0 || !update.failed_roots.is_empty() {
+            eprintln!(
+                "[telemetry] Codex child watcher covers {} roots; {} truncated, {} failed; periodic reconciliation remains active",
+                update.watched_roots,
+                update.truncated_roots,
+                update.failed_roots.len()
+            );
+        }
+        Ok(update)
     }
 
     /// Clone the coalesced async wake and terminal signal for the single owner
@@ -478,6 +483,12 @@ mod tests {
     use super::*;
     use notify::event::{CreateKind, ModifyKind};
     use notify::{Event, EventKind};
+
+    impl PendingPaths {
+        fn new(capacity: usize) -> Self {
+            Self::with_wake(capacity, WorkerEventWake::new())
+        }
+    }
 
     #[test]
     fn queues_only_create_or_modify_events_for_rollout_jsonl_paths() {

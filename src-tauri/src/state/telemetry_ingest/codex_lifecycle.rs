@@ -174,10 +174,6 @@ impl LifecycleReadBudget {
         }
     }
 
-    pub fn for_pass() -> Self {
-        Self::new(CODEX_LIFECYCLE_BYTES_PER_PASS)
-    }
-
     pub fn consumed(&self) -> u64 {
         self.consumed
     }
@@ -223,11 +219,6 @@ impl LifecycleObserver {
         }
     }
 
-    /// Change the parser generation. Each existing source resets on next read.
-    pub fn set_parser_version(&mut self, parser_version: u32) {
-        self.parser_version = parser_version;
-    }
-
     /// Forget paths no longer present in the validated source topology.
     pub fn retain_canonical_paths(&mut self, live_paths: &[PathBuf]) {
         let stale: Vec<SourceKey> = self
@@ -254,10 +245,6 @@ impl LifecycleObserver {
                     .saturating_sub(checkpoint.partial_line.len());
             }
         }
-    }
-
-    pub fn cached_partial_bytes(&self) -> usize {
-        self.cached_partial_bytes
     }
 
     /// Reopen a publication whose DB write failed or was interrupted.
@@ -421,7 +408,7 @@ impl LifecycleObserver {
         let mut checkpoint = if reset {
             Checkpoint::new(
                 native_file_identity.clone(),
-                modified_at.clone(),
+                modified_at,
                 generation,
                 self.parser_version,
                 file_len,
@@ -1149,6 +1136,23 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
+    impl LifecycleReadBudget {
+        pub fn for_pass() -> Self {
+            Self::new(CODEX_LIFECYCLE_BYTES_PER_PASS)
+        }
+    }
+
+    impl LifecycleObserver {
+        /// Change the parser generation. Each existing source resets on next read.
+        pub fn set_parser_version(&mut self, parser_version: u32) {
+            self.parser_version = parser_version;
+        }
+
+        pub fn cached_partial_bytes(&self) -> usize {
+            self.cached_partial_bytes
+        }
+    }
+
     #[test]
     fn retaining_paths_preserves_pending_retry_and_removes_only_obsolete_source() {
         let directory = tempfile::tempdir().unwrap();
@@ -1196,7 +1200,7 @@ mod tests {
         );
         drop(retry);
         assert_eq!(observer.cached_partial_bytes(), retained_bytes);
-        observer.retain_canonical_paths(&[b.canonical_path.clone()]);
+        observer.retain_canonical_paths(std::slice::from_ref(&b.canonical_path));
         assert!(observer.retry_pending().is_none());
         assert_eq!(observer.cached_partial_bytes(), 0);
         let mut unchanged_budget = LifecycleReadBudget::new(0);
