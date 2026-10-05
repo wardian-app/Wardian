@@ -258,6 +258,9 @@ function resolveInsideCopy(copyRoot, file) {
  * Create `<target-dir>/rust-deadcode/<hash>` and prove it is a plain
  * directory where it claims to be. A link or junction at either component
  * could point the copy at the checkout, so it fails the run instead.
+ * Return the verified physical cwd while retaining the caller's target spelling
+ * for compiler output, which may need a shorter path on Windows.
+ * Native resolution also expands Windows short path components.
  */
 export function prepareCopyRoot(targetDirectory, hash) {
   const base = path.join(path.resolve(targetDirectory), "rust-deadcode");
@@ -271,11 +274,11 @@ export function prepareCopyRoot(targetDirectory, hash) {
       throw new Error(`refusing to use ${directory}: it is a link, not a directory`);
     }
   }
-  const expected = path.join(realpathSync(targetDirectory), "rust-deadcode", hash);
-  const actual = realpathSync(copyRoot);
+  const expected = path.join(realpathSync.native(targetDirectory), "rust-deadcode", hash);
+  const actual = realpathSync.native(copyRoot);
   const same = process.platform === "win32" ? expected.toLowerCase() === actual.toLowerCase() : expected === actual;
   if (!same) throw new Error(`refusing to use ${copyRoot}: it resolves to ${actual}`);
-  return copyRoot;
+  return actual;
 }
 
 function syncCopy(copyRoot, files, transform) {
