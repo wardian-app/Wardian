@@ -91,5 +91,12 @@ about it. The frontend applies the persisted card and never builds one.
   persistence idempotence and the runtime-generation fence.
 - Frontend tests cover the two event forms, the absence of frontend-built
   cards, and full-answer expansion.
-- A real-provider run in an isolated `WARDIAN_HOME` must show one card per
-  completed Codex and Claude turn.
+- A real-provider run in an isolated `WARDIAN_HOME` showed one card per
+  completed Claude turn (with the full answer) and per mock-provider turn.
+  The mock run used a build before the review fixes to the generic path;
+  those fixes are unit-tested.
+- Codex has no isolated real-provider run: the owned app-server did not
+  open its socket within 120 seconds in an isolated home
+  ([#1386](https://github.com/wardian-app/Wardian/issues/1386)). Codex
+  acceptance is one card per completed turn in a normal Wardian home after
+  this change ships.
