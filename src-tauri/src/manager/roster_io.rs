@@ -101,3 +101,25 @@ pub(crate) async fn save_live_state<C: Send + 'static>(
     };
     save_snapshot(barrier, configs, context).await
 }
+
+/// Strict persistence for an owned continuation that retains admission through
+/// filesystem publication, SQLite deletion and live publication or compensation.
+/// Unlike best-effort saves, deletion must observe the physical write's error.
+pub(crate) async fn write_snapshot_strict(
+    _barrier: &AgentRosterBarrier,
+    home: std::path::PathBuf,
+    configs: Vec<AgentConfig>,
+) -> Result<(), String> {
+    #[cfg(test)]
+    let probe = super::ROSTER_IO_PROBE
+        .try_with(|probe| probe.borrow_mut().take())
+        .ok()
+        .flatten();
+    let operation = move || super::try_save_state_snapshot_for_home(&home, &configs);
+    #[cfg(test)]
+    let operation =
+        move || super::ROSTER_IO_PROBE.sync_scope(std::cell::RefCell::new(probe), operation);
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|error| format!("Roster deletion I/O task failed: {error}"))?
+}

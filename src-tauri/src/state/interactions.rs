@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 mod agent_messaging;
 mod mailbox_wait;
 mod task_turns;
@@ -16,7 +17,7 @@ use wardian_core::control::{
 
 #[derive(Debug, Default)]
 pub struct InteractionState {
-    mutation_lock: Mutex<()>,
+    mutation_lock: Arc<Mutex<()>>,
     deleted_sessions: Mutex<HashSet<String>>,
     // Crate-visible for remote projection tests that need to model source-lock
     // contention without adding another production synchronization path.
@@ -672,10 +673,43 @@ impl InteractionState {
     /// task/reply cache under the same mutation gate used by reply completion.
     /// A late provider reply therefore observes `not_found` instead of
     /// recreating a task that was already deleted.
-    pub async fn delete_agent_durable_state(&self, session_id: &str) -> Result<(), String> {
-        let _mutation = self.mutation_lock.lock().await;
-        wardian_core::db::delete_agent(session_id)
-            .map_err(|error| format!("Failed to delete agent state: {error}"))?;
+    /// Once admitted, an owned continuation retains the gate through physical
+    /// SQLite completion and cache invalidation even if its caller is cancelled.
+    pub async fn delete_agent_durable_state(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> Result<(), String> {
+        let mutation = Arc::clone(&self.mutation_lock).lock_owned().await;
+        let owner = Arc::clone(self);
+        let session_id = session_id.to_string();
+        #[cfg(test)]
+        let probe = DELETE_IO_PROBE
+            .try_with(|probe| probe.borrow_mut().take())
+            .ok()
+            .flatten();
+        tokio::spawn(async move {
+            let _mutation = mutation;
+            let database_session_id = session_id.clone();
+            tokio::task::spawn_blocking(move || {
+                #[cfg(test)]
+                if let Some(probe) = probe {
+                    let _ = probe.started.send(());
+                    let _ = probe.entered.send(());
+                    probe.release.recv().map_err(|error| error.to_string())?;
+                }
+                wardian_core::db::delete_agent(&database_session_id)
+                    .map_err(|error| format!("Failed to delete agent state: {error}"))
+            })
+            .await
+            .map_err(|error| format!("Agent state deletion I/O task failed: {error}"))??;
+            owner.delete_agent_cached_state(&session_id).await;
+            Ok(())
+        })
+        .await
+        .map_err(|error| format!("Agent state deletion continuation failed: {error}"))?
+    }
+
+    async fn delete_agent_cached_state(&self, session_id: &str) {
         self.deleted_sessions
             .lock()
             .await
@@ -732,8 +766,19 @@ impl InteractionState {
         self.provider_generations.lock().await.remove(session_id);
         self.provider_inputs.lock().await.remove(session_id);
         self.mark_agent_mailbox_deleted(session_id).await;
-        Ok(())
     }
+}
+
+#[cfg(test)]
+pub(crate) struct DeleteIoProbe {
+    pub(crate) entered: tokio::sync::oneshot::Sender<()>,
+    pub(crate) started: std::sync::mpsc::Sender<()>,
+    pub(crate) release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static DELETE_IO_PROBE: std::cell::RefCell<Option<DeleteIoProbe>>;
 }
 
 fn provider_input_state_record(
@@ -1359,7 +1404,7 @@ mod reply_tests {
         unsafe { std::env::set_var("WARDIAN_HOME", home.path()) };
         wardian_core::db::init_db_at_path(&home.path().join("state.db")).unwrap();
 
-        let state = InteractionState::default();
+        let state = Arc::new(InteractionState::default());
         let task = admit_task(&state, "agent-delete", "agent-target", "review").await;
         let answered = admit_task(&state, "agent-requester", "agent-delete", "review").await;
         state

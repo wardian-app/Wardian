@@ -394,7 +394,9 @@ impl CodexSharedOwner {
             Some(&spec.target_agent_id),
             crate::utils::memory_feature_enabled(),
         );
-        for (key, value) in crate::manager::worktree_build_env(&spec.config) {
+        for (key, value) in crate::manager::worktree_build_env(&spec.config)
+            .map_err(CodexSharedError::unsupported)?
+        {
             command.env(key, value);
         }
         let mut private_paths = vec![

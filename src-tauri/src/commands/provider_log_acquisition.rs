@@ -84,11 +84,32 @@ pub(crate) fn acquire_provider_log_batch(
     previous: Option<ProviderLogCaptureState>,
     trust_source_from_start: bool,
 ) -> io::Result<ProviderLogBatch> {
+    acquire_provider_log_batch_for_identity(
+        session_id,
+        provider,
+        path,
+        provider_source_key,
+        previous,
+        trust_source_from_start,
+        None,
+    )
+}
+
+pub(crate) fn acquire_provider_log_batch_for_identity(
+    session_id: &str,
+    provider: &str,
+    path: &Path,
+    provider_source_key: &str,
+    previous: Option<ProviderLogCaptureState>,
+    trust_source_from_start: bool,
+    expected_identity: Option<&ProviderLogNativeIdentity>,
+) -> io::Result<ProviderLogBatch> {
     let mut file = std::fs::File::open(path)?;
     let metadata = file.metadata()?;
     let file_len = metadata.len();
     let canonical_path = std::fs::canonicalize(path)?.to_string_lossy().to_string();
     let native_identity = native_file_identity(&file)?;
+    ensure_observed_identity(expected_identity, &native_identity)?;
 
     let mut state = match previous.clone() {
         Some(state) => {
@@ -347,17 +368,22 @@ pub(crate) fn acquire_provider_log_batch(
     })
 }
 
-pub(crate) fn observe_provider_log_policy(
+#[cfg(test)]
+pub(crate) use tests::observe_provider_log_policy;
+
+fn observe_provider_log_policy_for_identity(
     path: &Path,
     provider_source_key: &str,
     previous: Option<ProviderLogCaptureState>,
     logging_enabled: bool,
     trust_source_from_start: bool,
+    expected_identity: Option<&ProviderLogNativeIdentity>,
 ) -> io::Result<ProviderLogBatch> {
     let mut file = std::fs::File::open(path)?;
     let file_len = file.metadata()?.len();
     let canonical_path = std::fs::canonicalize(path)?.to_string_lossy().to_string();
     let native_identity = native_file_identity(&file)?;
+    ensure_observed_identity(expected_identity, &native_identity)?;
     let mut state = match previous.clone() {
         Some(state) => {
             let reason = if state.provider_source_key != provider_source_key
@@ -464,17 +490,64 @@ pub(crate) fn observe_provider_log_policy_with_initial_absence(
     logging_enabled: bool,
     trust_source_from_start: bool,
 ) -> io::Result<Option<ProviderLogBatch>> {
-    match observe_provider_log_policy(
+    observe_provider_log_policy_with_identity(
+        path,
+        provider_source_key,
+        previous,
+        logging_enabled,
+        trust_source_from_start,
+        None,
+    )
+}
+
+pub(crate) fn observe_provider_log_policy_with_identity(
+    path: &Path,
+    provider_source_key: &str,
+    previous: Option<ProviderLogCaptureState>,
+    logging_enabled: bool,
+    trust_source_from_start: bool,
+    expected_identity: Option<&ProviderLogNativeIdentity>,
+) -> io::Result<Option<ProviderLogBatch>> {
+    match observe_provider_log_policy_for_identity(
         path,
         provider_source_key,
         previous.clone(),
         logging_enabled,
         trust_source_from_start,
+        expected_identity,
     ) {
         Ok(batch) => Ok(Some(batch)),
         Err(error) if previous.is_none() && error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+fn ensure_observed_identity(
+    expected: Option<&ProviderLogNativeIdentity>,
+    actual: &ProviderLogNativeIdentity,
+) -> io::Result<()> {
+    if expected.is_some_and(|expected| expected != actual) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "provider_log_source_replaced",
+        ));
+    }
+    Ok(())
+}
+
+/// Observe the opened source rather than treating a path or parser watermark
+/// as its identity. The capture pass checks this native identity on each open.
+pub(crate) fn observe_provider_log_source(
+    path: &Path,
+) -> io::Result<crate::state::background_capture::SourceObservation> {
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    Ok(crate::state::background_capture::SourceObservation {
+        path: std::fs::canonicalize(path)?,
+        native_identity: native_file_identity(&file)?,
+        length: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
 }
 
 impl ProviderLogCaptureState {
@@ -641,6 +714,23 @@ fn native_file_identity(file: &std::fs::File) -> io::Result<ProviderLogNativeIde
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    pub(crate) fn observe_provider_log_policy(
+        path: &Path,
+        provider_source_key: &str,
+        previous: Option<ProviderLogCaptureState>,
+        logging_enabled: bool,
+        trust_source_from_start: bool,
+    ) -> io::Result<ProviderLogBatch> {
+        observe_provider_log_policy_for_identity(
+            path,
+            provider_source_key,
+            previous,
+            logging_enabled,
+            trust_source_from_start,
+            None,
+        )
+    }
     use wardian_core::models::chat::{AgentChatEventKind, AgentChatRole};
 
     #[test]

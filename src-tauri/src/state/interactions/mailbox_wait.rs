@@ -222,7 +222,7 @@ mod tests {
         let _guard = crate::utils::wardian_test_env_lock_async().await;
         let test_home = tempfile::tempdir().unwrap();
         wardian_core::db::init_db_at_path(&test_home.path().join("state.db")).unwrap();
-        let state = InteractionState::default();
+        let state = std::sync::Arc::new(InteractionState::default());
         let mut first = state.subscribe_agent_mailbox("recipient").await;
         let mut second = state.subscribe_agent_mailbox("recipient").await;
         state.notify_agent_mailbox("recipient", true).await;
@@ -262,7 +262,7 @@ mod tests {
         let _guard = crate::utils::wardian_test_env_lock_async().await;
         let test_home = tempfile::tempdir().unwrap();
         wardian_core::db::init_db_at_path(&test_home.path().join("state.db")).unwrap();
-        let state = InteractionState::default();
+        let state = std::sync::Arc::new(InteractionState::default());
         let mut existing = state.subscribe_agent_mailbox("recipient").await;
         state.notify_agent_mailbox("recipient", true).await;
         state.delete_agent_durable_state("recipient").await.unwrap();
