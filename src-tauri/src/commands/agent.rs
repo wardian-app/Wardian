@@ -1,4 +1,4 @@
-use crate::manager;
+use crate::manager::{self, roster_io::save_live_state};
 use crate::providers::antigravity::AntigravityProvider;
 use crate::providers::ProviderFactory;
 use crate::state::conversation_archive::effective_conversation_logging;
@@ -36,11 +36,12 @@ pub use settings::{
 };
 #[cfg(test)]
 #[path = "agent/provider_log_tests.rs"]
-mod provider_log_tests;
+pub(crate) mod provider_log_tests;
 mod removal;
 use agent_lifecycle::{
     acquire_agent_lifecycle_guard, hold_previous_provider_before_rotation, lock_agent_lifecycle,
-    lock_rename_mutation, stop_native_owner, stop_native_owner_with_before_capture, PendingRuntime,
+    lock_agent_roster_for_best_effort_save, lock_agent_roster_for_save, lock_rename_mutation,
+    stop_native_owner, stop_native_owner_with_before_capture, PendingRuntime,
 };
 use agent_naming::{
     generated_agent_name, persisted_agent_session_names, resolve_requested_spawn_session_name,
@@ -48,7 +49,7 @@ use agent_naming::{
 };
 use codex_onboarding::register_new_agent;
 pub(crate) use codex_onboarding::rollback_provisional_codex;
-use removal::{cleanup_removed_agent_directory, join_agent_processes_for_removal};
+use removal::remove_agent;
 
 const MAX_AGENT_DESCRIPTION_CHARS: usize = 280;
 
@@ -2746,164 +2747,6 @@ pub async fn kill_agent(
     delete_agent(session_id, confirm_name, true, state, app).await
 }
 
-async fn remove_agent<R: tauri::Runtime>(
-    session_id: String,
-    expected_name: Option<&str>,
-    state: State<'_, AppState>,
-    app: AppHandle<R>,
-    require_stopped: bool,
-) -> Result<(), String> {
-    manager::log_debug(&format!(
-        "[WARDIAN] {} agent for session: {}",
-        if require_stopped { "delete" } else { "kill" },
-        session_id,
-    ));
-    let _lifecycle_lease =
-        acquire_agent_lifecycle_transition_lease_for_session(&state, &session_id, "remove").await?;
-    let lifecycle_heartbeat = LifecycleLeaseHeartbeat::start(_lifecycle_lease.owner().clone());
-    let _lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
-    lifecycle_heartbeat.ensure_active("remove")?;
-    {
-        let agents = state.agents.lock().await;
-        let agent = agents
-            .get(&session_id)
-            .ok_or_else(|| format!("Agent with session ID {} not found", session_id))?;
-        validate_agent_removal(agent, expected_name, require_stopped)?;
-    }
-    stop_native_owner(&state, &session_id, true).await?;
-    let (previous_state_snapshot, deletion_state_snapshot) = {
-        let agents = state.agents.lock().await;
-        let order = state.agent_order.lock().await;
-        if !agents.contains_key(&session_id) {
-            return Err(format!("Agent with session ID {} not found", session_id));
-        }
-        let previous = manager::state_configs_snapshot(&agents, &order);
-        let deletion = previous
-            .iter()
-            .filter(|config| config.session_id != session_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        (previous, deletion)
-    };
-    lifecycle_heartbeat.ensure_active("remove")?;
-    if let Err(error) = manager::try_save_state_snapshot(&deletion_state_snapshot) {
-        return Err(format!("Failed to persist agent deletion: {error}"));
-    }
-    if let Err(error) = state
-        .interactions
-        .delete_agent_durable_state(&session_id)
-        .await
-    {
-        let rollback_error = manager::try_save_state_snapshot(&previous_state_snapshot)
-            .err()
-            .map(|rollback| format!("; state snapshot rollback failed: {rollback}"))
-            .unwrap_or_default();
-        return Err(format!("{error}{rollback_error}"));
-    }
-    let (agent, remaining_agent_ids) = {
-        let mut agents = state.agents.lock().await;
-        let mut order = state.agent_order.lock().await;
-        let agent = detach_agent_for_kill(&mut agents, &mut order, &session_id);
-        let remaining_agent_ids = agent
-            .is_some()
-            .then(|| agents.keys().cloned().collect::<BTreeSet<_>>());
-        (agent, remaining_agent_ids)
-    };
-    if agent.is_some() {
-        state.remove_agent_delivery_state(&session_id).await;
-    }
-    state
-        .terminal_sessions
-        .forget_deferred_geometry(&session_id)
-        .await;
-    // A browser this agent opened has no other owner, so it goes with the
-    // agent rather than lingering as an orphaned headless process.
-    for browser_id in state.browser_sessions.close_for_agent(&session_id).await {
-        manager::log_debug(&format!(
-            "[WARDIAN] closed browser session {browser_id} owned by {session_id}"
-        ));
-    }
-
-    #[allow(unused_mut)]
-    if let Some(mut agent) = agent {
-        let terminal_cleanup = state
-            .terminal_sessions
-            .remove_agent_session(&session_id, agent.runtime_generation)
-            .await
-            .map_err(|error| format!("Terminal broker cleanup failed: {error}"));
-        let agent_workspace = agent
-            .config
-            .lock()
-            .ok()
-            .map(|config| config.folder.clone())
-            .filter(|folder| !folder.trim().is_empty());
-        // Broker shutdown alone is not proof of TUI exit (it can time out).
-        let process_join = join_agent_processes_for_removal(&mut agent).await;
-        let process_join = terminal_cleanup.and(process_join);
-
-        // Durable state was deleted before detaching the live agent. Post-commit
-        // cleanup is best-effort so a lease heartbeat cannot leave the roster
-        // diverging from the two durable stores after the commit.
-        let _ = app.emit("agents-updated", ());
-
-        // Cleanup: remove persisted references and the agent's private directory.
-        // Snapshot refs go with the agent. They live in the operator's own object
-        // store, so leaving them behind would keep superseded blobs reachable for
-        // an agent that no longer exists.
-        if let Some(workspace) = agent_workspace.as_deref() {
-            if let Err(error) =
-                crate::commands::change_snapshot::drop_agent_snapshots(workspace, &session_id)
-            {
-                manager::log_debug(&format!(
-                    "[WARDIAN] Failed to drop change snapshots for {}: {}",
-                    session_id, error
-                ));
-            }
-        }
-        if let Some(home) = crate::utils::fs::get_wardian_home() {
-            if let Err(error) =
-                crate::commands::change_review::remove_change_review_watermarks_for_agent(
-                    &home,
-                    &session_id,
-                )
-            {
-                manager::log_debug(&format!(
-                    "[WARDIAN] Failed to clean change review watermarks for {}: {}",
-                    session_id, error
-                ));
-            }
-            if let Some(remaining_agent_ids) = remaining_agent_ids.as_ref() {
-                match DeletedAgentReferenceCleanup::run(&home, remaining_agent_ids) {
-                    Ok(cleanup) => {
-                        if cleanup.watchlists_changed {
-                            let _ = app.emit("watchlists-updated", ());
-                        }
-                        if cleanup.topology_changed {
-                            let _ = app.emit("topology-changed", ());
-                        }
-                    }
-                    Err(error) => manager::log_debug(&format!(
-                        "[WARDIAN] Failed to clean deleted agent references for {}: {}",
-                        session_id, error
-                    )),
-                }
-            }
-
-            if let Err(error) = cleanup_removed_agent_directory(&home, &session_id, process_join) {
-                manager::log_debug(&format!(
-                    "[WARDIAN] Retaining agent directory and compact ownership records for {session_id}: {error}"
-                ));
-            }
-        }
-
-        Ok(())
-    } else {
-        let err_msg = format!("Agent with session ID {} not found", session_id);
-        manager::log_debug(&format!("[WARDIAN] {}", err_msg));
-        Err(err_msg)
-    }
-}
-
 fn agent_has_running_process(agent: &ActiveAgent) -> bool {
     agent.runtime_generation.is_some()
         || agent.process_id.is_some()
@@ -2953,11 +2796,9 @@ pub async fn pause_agent(
     let _lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
     lifecycle_heartbeat.ensure_active("pause")?;
     stop_native_owner(&state, &session_id, false).await?;
-    let (mut termination, state_snapshot, status_arc) = {
-        let mut agents = state.agents.lock().await;
-        let order = state.agent_order.lock().await;
-
-        let Some(agent) = agents.get_mut(&session_id) else {
+    let mut roster = lock_agent_roster_for_best_effort_save(&state).await;
+    let (mut termination, status_arc) = {
+        let Some(agent) = roster.agents.get_mut(&session_id) else {
             return Err(format!("Agent {} not found", session_id));
         };
 
@@ -2969,10 +2810,11 @@ pub async fn pause_agent(
             config.is_off = true;
         }
 
-        let state_snapshot = manager::state_configs_snapshot(&agents, &order);
-        (termination, state_snapshot, status_arc)
+        (termination, status_arc)
     };
-    manager::save_state_snapshot(&app, &state_snapshot);
+    let (_lifecycle_guard, _lifecycle_lease, lifecycle_heartbeat) = roster
+        .save((_lifecycle_guard, _lifecycle_lease, lifecycle_heartbeat))
+        .await?;
     manager::publish_agent_status(&app, &session_id, &status_arc);
 
     if let Some(runtime_generation) = termination.runtime_generation {
@@ -2991,12 +2833,11 @@ pub async fn pause_agent(
     lifecycle_heartbeat.ensure_active("pause")?;
     manager::terminate_active_agent_process(&mut termination);
 
-    let state_snapshot = {
-        let agents = state.agents.lock().await;
-        let order = state.agent_order.lock().await;
-        manager::state_configs_snapshot(&agents, &order)
-    };
-    manager::save_state_snapshot(&app, &state_snapshot);
+    let _lifecycle_context = save_live_state(
+        &state,
+        (_lifecycle_guard, _lifecycle_lease, lifecycle_heartbeat),
+    )
+    .await?;
 
     let _ = app.emit("agents-updated", ());
     Ok(())
@@ -4519,7 +4360,7 @@ fn external_terminal_env(
     provider_cwd: &std::path::Path,
 ) -> Result<Vec<(String, String)>, String> {
     let mut envs = vec![("WARDIAN_SESSION_ID".to_string(), config.session_id.clone())];
-    envs.extend(crate::manager::worktree_build_env(config));
+    envs.extend(crate::manager::worktree_build_env(config)?);
     match config.provider.as_str() {
         "claude" => envs.extend(
             crate::manager::claude_terminal_runtime_env()
@@ -4619,21 +4460,20 @@ pub async fn enable_agent_worktree(
     }
 
     lifecycle_heartbeat.ensure_active("clear")?;
-    {
-        let mut agents = state.agents.lock().await;
-        let order = state.agent_order.lock().await;
-        if let Some(agent) = agents.get_mut(&session_id) {
-            lifecycle_heartbeat.ensure_active("clear")?;
-            {
-                let mut config = agent.config.lock().unwrap();
-                enable_worktree_config(&mut config, &worktree_path);
-            }
-            manager::save_state(&app, &agents, &order);
-            let _ = app.emit("agents-updated", ());
-        } else {
+    let (lifecycle_guard, lifecycle_lease, lifecycle_heartbeat) = {
+        let mut roster = lock_agent_roster_for_save(&state).await?;
+        let Some(agent) = roster.agents.get_mut(&session_id) else {
             return Err(format!("Agent {} not found", session_id));
+        };
+        lifecycle_heartbeat.ensure_active("clear")?;
+        {
+            let mut config = agent.config.lock().unwrap();
+            enable_worktree_config(&mut config, &worktree_path);
         }
-    }
+        let context = (lifecycle_guard, lifecycle_lease, lifecycle_heartbeat);
+        roster.save(context).await?
+    };
+    let _ = app.emit("agents-updated", ());
 
     clear_agent_after_worktree_mutation(
         session_id,
@@ -4732,33 +4572,32 @@ pub async fn assign_agent_worktree(
         find_assignable_worktree(&configs, &wardian_home, &worktree_folder, discovered)
             .ok_or_else(|| "Worktree is not managed by Wardian".to_string())?;
     lifecycle_heartbeat.ensure_active("clear")?;
-    {
-        let mut agents = state.agents.lock().await;
-        let order = state.agent_order.lock().await;
-        if let Some(agent) = agents.get_mut(&session_id) {
-            lifecycle_heartbeat.ensure_active("clear")?;
-            {
-                let mut config = agent.config.lock().unwrap();
-                let source_folder = config
-                    .git_worktree_source
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|folder| !folder.is_empty())
-                    .unwrap_or(config.folder.trim())
-                    .to_string();
-                validate_assignable_worktree_for_agent(
-                    &source_folder,
-                    &managed_worktree,
-                    worktree_path,
-                )?;
-                assign_worktree_config(&mut config, &worktree_folder)?;
-            }
-            manager::save_state(&app, &agents, &order);
-            let _ = app.emit("agents-updated", ());
-        } else {
+    let (lifecycle_guard, lifecycle_lease, lifecycle_heartbeat) = {
+        let mut roster = lock_agent_roster_for_save(&state).await?;
+        let Some(agent) = roster.agents.get_mut(&session_id) else {
             return Err(format!("Agent {} not found", session_id));
+        };
+        lifecycle_heartbeat.ensure_active("clear")?;
+        {
+            let mut config = agent.config.lock().unwrap();
+            let source_folder = config
+                .git_worktree_source
+                .as_deref()
+                .map(str::trim)
+                .filter(|folder| !folder.is_empty())
+                .unwrap_or(config.folder.trim())
+                .to_string();
+            validate_assignable_worktree_for_agent(
+                &source_folder,
+                &managed_worktree,
+                worktree_path,
+            )?;
+            assign_worktree_config(&mut config, &worktree_folder)?;
         }
-    }
+        let context = (lifecycle_guard, lifecycle_lease, lifecycle_heartbeat);
+        roster.save(context).await?
+    };
+    let _ = app.emit("agents-updated", ());
 
     clear_agent_after_worktree_mutation(
         session_id,
@@ -4876,21 +4715,20 @@ pub async fn disable_agent_worktree(
             .ok();
 
     lifecycle_heartbeat.ensure_active("clear")?;
-    {
-        let mut agents = state.agents.lock().await;
-        let order = state.agent_order.lock().await;
-        if let Some(agent) = agents.get_mut(&session_id) {
-            lifecycle_heartbeat.ensure_active("clear")?;
-            {
-                let mut config = agent.config.lock().unwrap();
-                disable_worktree_config(&mut config)?;
-            }
-            manager::save_state(&app, &agents, &order);
-            let _ = app.emit("agents-updated", ());
-        } else {
+    let (lifecycle_guard, lifecycle_lease, lifecycle_heartbeat) = {
+        let mut roster = lock_agent_roster_for_save(&state).await?;
+        let Some(agent) = roster.agents.get_mut(&session_id) else {
             return Err(format!("Agent {} not found", session_id));
+        };
+        lifecycle_heartbeat.ensure_active("clear")?;
+        {
+            let mut config = agent.config.lock().unwrap();
+            disable_worktree_config(&mut config)?;
         }
-    }
+        let context = (lifecycle_guard, lifecycle_lease, lifecycle_heartbeat);
+        roster.save(context).await?
+    };
+    let _ = app.emit("agents-updated", ());
 
     clear_agent_after_worktree_mutation(
         session_id,
@@ -4915,16 +4753,15 @@ fn apply_agent_order(
 }
 
 #[tauri::command]
-pub async fn reorder_agents(
+pub async fn reorder_agents<R: tauri::Runtime>(
     session_ids: Vec<String>,
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle<R>,
 ) -> Result<(), String> {
     manager::log_debug("[WARDIAN] reorder_agents called");
-    let agents = state.agents.lock().await;
-    let mut order = state.agent_order.lock().await;
-    apply_agent_order(&agents, &mut order, session_ids)?;
-    manager::save_state(&app, &agents, &order);
+    let mut roster = lock_agent_roster_for_save(&state).await?;
+    apply_agent_order(&roster.agents, &mut roster.order, session_ids)?;
+    roster.save(()).await?;
     Ok(())
 }
 

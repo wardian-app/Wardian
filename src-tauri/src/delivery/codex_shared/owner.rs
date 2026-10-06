@@ -1,3 +1,5 @@
+use super::diagnostics::{SafeStderrDiagnostic, StderrRedactionContext};
+use super::stderr_capture::CodexStderrCapture;
 use super::*;
 use crate::delivery::native_broker::NativeSessionSpec;
 use crate::providers::ProviderFactory;
@@ -11,6 +13,8 @@ mod attachment;
 #[cfg(test)]
 #[path = "owner_preparation_tests.rs"]
 mod preparation_tests;
+#[path = "startup_resources.rs"]
+mod startup_resources;
 
 /// Phase durations for one owner startup.
 ///
@@ -28,10 +32,11 @@ pub(super) struct OwnerStartTimings {
     managed_messaging: std::time::Duration,
     socket_recovery: std::time::Duration,
     launch_config: std::time::Duration,
-    thread_seed: std::time::Duration,
     child_spawn: std::time::Duration,
+    stderr_diagnostic: Value,
     socket_wait: std::time::Duration,
     socket_wait_diagnostic: Option<SocketWaitDiagnostic>,
+    socket_wait_resources: Value,
     proxy_connect: std::time::Duration,
     initialize: std::time::Duration,
     launch_model: std::time::Duration,
@@ -182,6 +187,17 @@ impl OwnerStartTimings {
         self.socket_wait_diagnostic = Some(diagnostic);
     }
 
+    pub(super) fn record_stderr_diagnostic(&mut self, diagnostic: SafeStderrDiagnostic) {
+        self.stderr_diagnostic = diagnostic.as_log_value();
+    }
+
+    fn record_socket_wait_resources(
+        &mut self,
+        resources: Option<startup_resources::StartupResourceDelta>,
+    ) {
+        self.socket_wait_resources = json!(resources);
+    }
+
     pub(super) fn socket_wait_diagnostic_value(&self) -> Value {
         self.socket_wait_diagnostic
             .map(SocketWaitDiagnostic::as_log_value)
@@ -193,8 +209,9 @@ impl OwnerStartTimings {
         crate::utils::logging::log_debug(&format!(
             "[Wardian] Codex owner start agent={agent_id} total_ms={} quiescent_ms={} \
 habitat_ms={} codex_home_ms={} compact_home_ms={} codex_projection_ms={} messaging_ms={} \
-socket_recovery_ms={} thread_seed_ms={} launch_config_ms={} child_spawn_ms={} socket_wait_ms={} \
-socket_wait_diagnostic={} proxy_connect_ms={} initialize_ms={} launch_model_ms={}",
+            socket_recovery_ms={} launch_config_ms={} child_spawn_ms={} \
+            stderr_diagnostic={} socket_wait_ms={} \
+            socket_wait_diagnostic={} socket_wait_resources={} proxy_connect_ms={} initialize_ms={} launch_model_ms={}",
             self.total.as_millis(),
             self.quiescent.as_millis(),
             self.habitat_workspace.as_millis(),
@@ -203,11 +220,12 @@ socket_wait_diagnostic={} proxy_connect_ms={} initialize_ms={} launch_model_ms={
             self.codex_projection.as_millis(),
             self.managed_messaging.as_millis(),
             self.socket_recovery.as_millis(),
-            self.thread_seed.as_millis(),
             self.launch_config.as_millis(),
             self.child_spawn.as_millis(),
+            self.stderr_diagnostic,
             self.socket_wait.as_millis(),
             socket_wait_diagnostic,
+            self.socket_wait_resources,
             self.proxy_connect.as_millis(),
             self.initialize.as_millis(),
             self.launch_model.as_millis(),
@@ -243,63 +261,10 @@ fn prepare_owner_habitat(
     })
     .map_err(CodexSharedError::unsupported)?;
     let codex_home = attachment::canonical_home(&compact_home)?;
-    // Seed under the preparation lock and before any daemon exists for this
-    // agent, so the copy cannot race the provider creating its own database.
-    // Optional: without a published snapshot the agent rebuilds, as before.
-    let outcome = phase(&mut timings.thread_seed, || {
-        crate::utils::codex_thread_state::seed(&wardian_home, &codex_home)
-    });
-    // Every skip is legitimate, but they mean different things; say which, so a
-    // cache that quietly stopped working is not mistaken for an empty one.
-    let seeded = match outcome {
-        Ok(outcome) => {
-            crate::utils::logging::log_debug(&format!(
-                "[Wardian] Codex thread index for agent {agent_id}: {}",
-                outcome.reason()
-            ));
-            outcome.database().map(str::to_owned)
-        }
-        Err(error) => {
-            crate::utils::logging::log_debug(&format!(
-                "[Wardian] Codex thread index seed unavailable for agent {agent_id}: {error}"
-            ));
-            None
-        }
-    };
     phase(&mut timings.codex_projection, || {
         crate::utils::fs::ensure_codex_home_projection(&habitat, workspace, agent_id)
     })
     .map_err(CodexSharedError::unsupported)?;
-    // The seed assumes this home reads the central session tree. Projection can
-    // fall back to a private local directory, and a seeded home would then hold
-    // migration state saying it is finished over rollouts it cannot see.
-    if let Some(database) = seeded.as_deref() {
-        let real_codex_home = dirs::home_dir()
-            .map(|home| home.join(".codex"))
-            .ok_or_else(|| CodexSharedError::unsupported("user home unavailable"))?;
-        if !crate::utils::codex_thread_state::projects_central_sessions(
-            &codex_home,
-            &real_codex_home,
-        ) {
-            // Undo by the exact name written, never by re-reading published
-            // metadata: another agent may have published a new generation.
-            match crate::utils::codex_thread_state::discard_seed(&codex_home, database) {
-                Ok(()) => crate::utils::logging::log_debug(&format!(
-                    "[Wardian] Discarded Codex thread index seed for agent {agent_id}: \
-this home does not project the central session tree"
-                )),
-                // Starting on an index this code has just judged unusable is
-                // worse than not starting: its migration state would claim the
-                // central tree is indexed while the home reads a local one, so
-                // the agent's own rollouts would never be indexed at all.
-                Err(error) => {
-                    return Err(CodexSharedError::unsupported(format!(
-                        "could not discard an unusable Codex thread index seed: {error}"
-                    )))
-                }
-            }
-        }
-    }
     if let crate::utils::codex_messaging::Registration::Unavailable(reason) =
         phase(&mut timings.managed_messaging, || {
             crate::utils::codex_messaging::ensure_managed_messaging(&wardian_home, agent_id)
@@ -329,6 +294,9 @@ pub struct CodexSharedOwner {
     pub observed_version: String,
     pub attachment: CodexTuiAttachment,
     child: Mutex<Option<Child>>,
+    stderr_capture: Mutex<Option<CodexStderrCapture>>,
+    #[cfg(unix)]
+    process_group_id: u32,
     interactive: bool,
     initial_context: String,
     policy: attachment::ExpectedPolicy,
@@ -407,7 +375,7 @@ impl CodexSharedOwner {
             .env("CODEX_HOME", &codex_home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         #[cfg(windows)]
         {
@@ -426,9 +394,22 @@ impl CodexSharedOwner {
             Some(&spec.target_agent_id),
             crate::utils::memory_feature_enabled(),
         );
-        for (key, value) in crate::manager::worktree_build_env(&spec.config) {
+        for (key, value) in crate::manager::worktree_build_env(&spec.config)
+            .map_err(CodexSharedError::unsupported)?
+        {
             command.env(key, value);
         }
+        let mut private_paths = vec![
+            wardian_home.clone(),
+            spec.workspace.clone(),
+            habitat.clone(),
+            codex_home.clone(),
+        ];
+        if let Some(home) = dirs::home_dir() {
+            private_paths.push(home);
+        }
+        let stderr_redaction =
+            StderrRedactionContext::from_command(private_paths, command.as_std());
         #[cfg(windows)]
         let job = crate::utils::process::create_kill_on_close_job("Codex shared owner")
             .map_err(CodexSharedError::unsupported)?;
@@ -451,21 +432,24 @@ impl CodexSharedOwner {
                 )));
             }
         };
-        #[cfg(windows)]
-        if let Err(error) = child
+        let child_pid = child
             .id()
-            .ok_or_else(|| "Codex owner PID missing".to_string())
-            .and_then(|pid| {
-                crate::utils::process::assign_pid_to_job(&job, pid, "Codex shared owner")
-            })
+            .expect("newly spawned Codex owner must have a process identifier");
+        let stderr = child
+            .stderr
+            .take()
+            .expect("Codex owner stderr was configured as piped");
+        let mut stderr_capture = CodexStderrCapture::start(stderr, stderr_redaction);
+        #[cfg(windows)]
+        if let Err(error) =
+            crate::utils::process::assign_pid_to_job(&job, child_pid, "Codex shared owner")
         {
-            if let Some(pid) = child.id() {
-                let _ = tokio::task::spawn_blocking(move || {
-                    crate::utils::process::force_kill_process_tree(pid)
-                })
-                .await;
-            }
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::utils::process::force_kill_process_tree(child_pid)
+            })
+            .await;
             terminate_starting_child(&mut child).await;
+            timings.record_stderr_diagnostic(stderr_capture.finish_startup().await);
             restore_launch_overlay(&mut launch_config)?;
             return Err(CodexSharedError::unsupported(error));
         }
@@ -476,14 +460,19 @@ impl CodexSharedOwner {
         let start = async {
             // A private socket must appear while our daemon is alive. No controller
             // RPC is retried, and a proxy handshake failure is final.
+            // Fix the original deadline before optional OS queries so sampling
+            // cannot extend the socket-wait budget.
+            let socket_deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+            let resources = startup_resources::StartupResourceObserver::start(&child);
             let socket_wait = observe_socket_wait(
                 &socket,
-                tokio::time::Instant::now() + STARTUP_TIMEOUT,
+                socket_deadline,
                 async { let _ = (&mut cancelled).await; },
                 || observe_child_liveness(&mut child),
             )
             .await;
             timings.record_socket_wait(socket_wait);
+            timings.record_socket_wait_resources(resources.finish());
             socket_wait.outcome.into_result()?;
             let mut proxy_command = Command::new(&program);
             proxy_command.args(&prefix_args).current_dir(&spec.workspace).env("CODEX_HOME", &codex_home);
@@ -549,28 +538,7 @@ impl CodexSharedOwner {
             }
         }.await;
         if start.is_ok() {
-            // The socket is open, so this home's thread index is current for the
-            // projected session tree. Publishing it lets the next agent skip the
-            // rebuild. Detached and best effort: it must never delay or fail a
-            // launch that has already succeeded.
-            let home = codex_home.clone();
-            tokio::task::spawn_blocking(move || {
-                let Some(wardian_home) = crate::utils::get_wardian_home() else {
-                    return;
-                };
-                let Some(real_codex_home) = dirs::home_dir().map(|home| home.join(".codex")) else {
-                    return;
-                };
-                if let Err(error) = crate::utils::codex_thread_state::refresh(
-                    &wardian_home,
-                    &home,
-                    &real_codex_home,
-                ) {
-                    crate::utils::logging::log_debug(&format!(
-                        "[Wardian] Codex thread index publication skipped: {error}"
-                    ));
-                }
-            });
+            timings.record_stderr_diagnostic(stderr_capture.seal_startup().await);
         }
         match start {
             Ok((client, observed_version)) => Ok(Arc::new(Self {
@@ -587,6 +555,9 @@ impl CodexSharedOwner {
                     generation: spec.generation,
                 },
                 child: Mutex::new(Some(child)),
+                stderr_capture: Mutex::new(Some(stderr_capture)),
+                #[cfg(unix)]
+                process_group_id: child_pid,
                 interactive: !spec.config.is_off,
                 initial_context: initialization_context(
                     &spec.target_agent_id,
@@ -607,12 +578,13 @@ impl CodexSharedOwner {
                 #[cfg(windows)]
                 drop(job);
                 #[cfg(unix)]
-                if let Some(pid) = child.id() {
+                {
                     unsafe {
-                        libc::kill(-(pid as i32), libc::SIGKILL);
+                        libc::kill(-(child_pid as i32), libc::SIGKILL);
                     }
                 }
                 terminate_starting_child(&mut child).await;
+                timings.record_stderr_diagnostic(stderr_capture.finish_startup().await);
                 restore_launch_overlay(&mut launch_config)?;
                 if let Some(socket) = owned_socket {
                     socket.remove_after_exit()?;
@@ -709,9 +681,9 @@ impl CodexSharedOwner {
                 self.job.lock().await.take();
             }
             #[cfg(unix)]
-            if let Some(pid) = child.id() {
+            {
                 unsafe {
-                    libc::kill(-(pid as i32), libc::SIGKILL);
+                    libc::kill(-(self.process_group_id as i32), libc::SIGKILL);
                 }
             }
             if child
@@ -729,6 +701,10 @@ impl CodexSharedOwner {
                 .await
                 .map_err(|_| CodexSharedError::uncertain("owner exit was not observed"))?;
             owned.take();
+        }
+        drop(owned);
+        if let Some(mut stderr_capture) = self.stderr_capture.lock().await.take() {
+            stderr_capture.join_after_owner_shutdown().await;
         }
         let mut overlay = self.launch_config.lock().await;
         restore_launch_overlay(&mut overlay)?;
@@ -919,10 +895,11 @@ fn append_runtime_context(
 fn initialization_context(agent_id: &str, name: &str) -> String {
     format!(
         "Wardian runtime identity: {}. \
-         The wardian MCP server exposes six messaging tools: \
+         The wardian MCP server exposes seven messaging tools: \
          list_agents() discovers available Wardian UUIDs, names and statuses; \
          send_message(target,message) delivers information without waking or interrupting; \
          followup_task(target,message) assigns work asynchronously and returns a request receipt; \
+         wait_agent(timeout_ms?) waits for mailbox activity, including completion replies, without reading or acknowledging the inbox; \
          receive_messages(cursor?,ack_cursor?,limit?,timeout_ms?) reads your inbox, including correlated replies; \
          reply(request_id,status,message) answers canonical peer tasks with status done, blocked or failed; \
          interrupt_agent(target) requests interruption of the observed active turn while retaining the session. \
@@ -935,6 +912,7 @@ fn initialization_context(agent_id: &str, name: &str) -> String {
          A canonical task dispatched to an exact native Codex turn automatically returns that turn's final result \
          to its requester unless an explicit reply already completed it. Explicit reply is required for tasks \
          acquired through receive_messages and providers without exact-turn completion support. \
+         If a task result is required, wait_agent reports mailbox activity and receive_messages reads the correlated reply. \
          A transport admission receipt is not a correlated reply to that task. \
          Complete ordinary input with an ordinary assistant response. Native interaction_id, message_id and \
          clientUserMessageId are diagnostic identities, not reply request IDs; never substitute them for request_id. \
@@ -956,6 +934,7 @@ mod tests {
             "send_message(",
             "followup_task(",
             "receive_messages(",
+            "wait_agent(",
             "reply(",
             "interrupt_agent(",
         ] {
@@ -966,6 +945,7 @@ mod tests {
             "Owned agent",
             "request_id",
             "ack_cursor",
+            "without reading or acknowledging the inbox",
             "not human requests",
             "automatically returns that turn's final result",
             "A transport admission receipt is not a correlated reply",

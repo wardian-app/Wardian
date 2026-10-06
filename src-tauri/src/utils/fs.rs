@@ -648,9 +648,11 @@ pub(crate) fn sync_codex_agent_home(
             projected_home.display(),
             error
         ));
-        let local_sessions = projected_home.join("sessions");
-        if !local_sessions.exists() && local_sessions.symlink_metadata().is_err() {
-            let _ = std::fs::create_dir_all(local_sessions);
+        for name in ["sessions", "archived_sessions"] {
+            let local_sessions = projected_home.join(name);
+            if !local_sessions.exists() && local_sessions.symlink_metadata().is_err() {
+                let _ = std::fs::create_dir_all(local_sessions);
+            }
         }
     }
 
@@ -788,7 +790,24 @@ fn ensure_codex_sessions_projection_with_linker<F>(
 where
     F: Fn(&std::path::Path, &std::path::Path) -> Result<(), String>,
 {
-    let central_sessions = real_codex_home.join("sessions");
+    for name in ["sessions", "archived_sessions"] {
+        ensure_codex_session_root_projection(real_codex_home, projected_home, name, &linker)?;
+    }
+    Ok(())
+}
+
+/// Project each SDK namespace independently so archive moves remain visible
+/// without merging conflicting local files or sharing private runtime state.
+fn ensure_codex_session_root_projection<F>(
+    real_codex_home: &std::path::Path,
+    projected_home: &std::path::Path,
+    name: &str,
+    linker: &F,
+) -> Result<(), String>
+where
+    F: Fn(&std::path::Path, &std::path::Path) -> Result<(), String>,
+{
+    let central_sessions = real_codex_home.join(name);
     std::fs::create_dir_all(&central_sessions).map_err(|error| {
         format!(
             "could not create central sessions directory {}: {error}",
@@ -796,12 +815,12 @@ where
         )
     })?;
 
-    let projected_sessions = projected_home.join("sessions");
+    let projected_sessions = projected_home.join(name);
     if projected_link_matches_target(&projected_sessions, &central_sessions) {
         return Ok(());
     }
 
-    let migration_backup = projected_home.join(".sessions.wardian-migration");
+    let migration_backup = projected_home.join(format!(".{name}.wardian-migration"));
     if !projected_sessions.exists() && projected_sessions.symlink_metadata().is_err() {
         if migration_backup.exists() || migration_backup.symlink_metadata().is_ok() {
             std::fs::rename(&migration_backup, &projected_sessions).map_err(|error| {
@@ -2381,6 +2400,104 @@ mod tests {
         assert!(!projected_home.join("state_5.sqlite").exists());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn issue1214_home_projection_preserves_active_and_archived_identity_parity() {
+        let temp = tempfile::tempdir().expect("private catalogue fixture");
+        let central = temp.path().join("native");
+        let agent = temp.path().join("agent");
+        let records = [
+            (
+                "sessions/2026/10/04/active.jsonl",
+                "active-id",
+                "cli",
+                "openai",
+            ),
+            (
+                "archived_sessions/archived.jsonl",
+                "archived-id",
+                "vscode",
+                "other-provider",
+            ),
+        ];
+        for (relative, id, source, model_provider) in records {
+            let file = central.join(relative);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            let header = serde_json::json!({"type":"session_meta","payload":{
+                "id":id,"cwd":temp.path().join(id),"source":source,
+                "model_provider":model_provider
+            }});
+            std::fs::write(file, format!("{header}\n")).unwrap();
+        }
+
+        sync_codex_agent_home(&central, &agent, &temp.path().join("skills"))
+            .expect("normal home projection");
+        for name in ["sessions", "archived_sessions"] {
+            assert_eq!(
+                std::fs::canonicalize(agent.join(name)).expect("both roots are exposed"),
+                std::fs::canonicalize(central.join(name)).unwrap()
+            );
+        }
+        for (relative, _, _, _) in records {
+            assert_eq!(
+                std::fs::read(agent.join(relative)).expect("every input remains visible"),
+                std::fs::read(central.join(relative)).unwrap(),
+                "UUID, CWD, source and model provider must survive projection"
+            );
+        }
+        sync_codex_agent_home(&central, &agent, &temp.path().join("skills"))
+            .expect("idempotent repeat");
+        assert_eq!(
+            std::fs::read_dir(central.join("archived_sessions"))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn issue1214_archive_projection_preserves_local_files_on_link_failure_or_conflict() {
+        for conflict in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let central = temp.path().join("native");
+            let agent = temp.path().join("agent");
+            let local = agent.join("archived_sessions/rollout-local.jsonl");
+            let target = central.join("archived_sessions/rollout-local.jsonl");
+            std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+            std::fs::write(&local, "original archive").unwrap();
+            if conflict {
+                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                std::fs::write(&target, "different central archive").unwrap();
+            }
+            let result =
+                ensure_codex_sessions_projection_with_linker(&central, &agent, |target, link| {
+                    if link.ends_with("archived_sessions") {
+                        Err("archive link denied".into())
+                    } else {
+                        crate::utils::fs::create_directory_link(target, link)
+                    }
+                });
+            assert!(result.is_err());
+            assert_eq!(std::fs::read_to_string(&local).unwrap(), "original archive");
+            assert_eq!(
+                std::fs::read_to_string(&target).unwrap(),
+                if conflict {
+                    "different central archive"
+                } else {
+                    "original archive"
+                }
+            );
+            assert!(projected_link_matches_target(
+                &agent.join("sessions"),
+                &central.join("sessions")
+            ));
+            assert!(!projected_link_matches_target(
+                &agent.join("archived_sessions"),
+                &central.join("archived_sessions")
+            ));
+            assert!(!agent.join(".archived_sessions.wardian-migration").exists());
+        }
     }
 
     #[test]

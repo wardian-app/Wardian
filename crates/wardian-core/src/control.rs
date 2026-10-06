@@ -407,24 +407,6 @@ pub enum ApprovalAction {
     FreeText { text: String },
 }
 
-/// An outbound message that is waiting for a live provider surface to become
-/// safe for delivery.
-///
-/// This record is shared with the durable store so a queued message survives
-/// an application restart instead of existing only in a process-local queue.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MailboxMessageDraft {
-    pub interaction_id: String,
-    pub target_session_id: String,
-    pub body: String,
-    pub input_mode: MessageInputMode,
-    pub queue_policy: QueuePolicy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approval_action: Option<ApprovalAction>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin: Option<MessageOrigin>,
-}
-
 /// A persisted live-surface mailbox entry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MailboxMessageRecord {

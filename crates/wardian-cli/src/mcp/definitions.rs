@@ -1,9 +1,10 @@
 use serde_json::{json, Value};
 
-pub(super) const NAMES: [&str; 6] = [
+pub(super) const NAMES: [&str; 7] = [
     "send_message",
     "followup_task",
     "receive_messages",
+    "wait_agent",
     "reply",
     "interrupt_agent",
     "list_agents",
@@ -23,17 +24,21 @@ fn definition(name: &str) -> Value {
             json!({"target":target,"message":message}), vec!["target", "message"],
         ),
         "followup_task" => (
-            "Assign a task to one Wardian agent and return its request receipt without waiting for a reply. Exact native Codex task turns automatically return their final result unless an explicit reply already completed the task; other delivery paths require explicit reply. Starting an inactive receiver can take time. If your assignment requires its result, wait with receive_messages until the correlated reply arrives or the caller's deadline expires; do not finish merely because early inbox polls are empty.",
+            "Assign a task to one Wardian agent and return its request receipt without waiting for a reply. Exact native Codex task turns automatically return their final result unless an explicit reply already completed the task; other delivery paths require explicit reply. Starting an inactive receiver can take time. If your assignment requires its result, use wait_agent for mailbox activity, then receive_messages to inspect the correlated reply. A timeout does not mean the task failed.",
             json!({"target":target,"message":message}), vec!["target", "message"],
         ),
         "receive_messages" => (
-            "Receive information, tasks and replies addressed to this managed Wardian agent. A bounded timeout waits for mailbox activity, including automatic task results, without starting an idle agent. Reuse the returned cursor; ack_cursor acknowledges a previously returned batch. When waiting for assigned work, use timeout_ms=60000 and repeat within the caller's deadline. A timeout means no message arrived during that wait, not that the task failed. It does not cancel tasks or authorize resending them.",
+            "Read a bounded batch of information, tasks and replies addressed to this managed Wardian agent. Reuse the returned cursor; ack_cursor acknowledges a previously returned batch. A nonzero timeout waits for mailbox activity and then returns the page. Use wait_agent when you need a wake without reading, claiming, or acknowledging inbox records.",
             json!({
                 "cursor":{"type":"string","minLength":1},
                 "ack_cursor":{"type":"string","minLength":1},
                 "limit":{"type":"integer","minimum":1,"maximum":100,"default":100},
                 "timeout_ms":{"type":"integer","minimum":0,"maximum":60000,"default":0}
             }), vec![],
+        ),
+        "wait_agent" => (
+            "Wait for mailbox activity addressed to this managed Wardian agent, including information and task-completion replies. This returns no message bodies and does not read, claim, or acknowledge inbox records; call receive_messages to inspect and acknowledge them. It returns immediately when unacknowledged inbox activity already exists. Waiting never starts or interrupts an idle agent. timeout_ms is bounded to 60000; a timeout does not mean a task failed.",
+            json!({"timeout_ms":{"type":"integer","minimum":0,"maximum":60000,"default":60000}}), vec![],
         ),
         "reply" => (
             "Reply to a Wardian task request as its authorized recipient. The request determines the destination. A committed explicit reply suppresses automatic native Codex final-result fallback; manual receive and unsupported provider delivery require this tool. Ordinary messages do not complete a request.",

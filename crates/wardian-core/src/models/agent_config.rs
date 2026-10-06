@@ -721,10 +721,6 @@ impl AgentConfig {
         }
     }
 
-    pub fn codex_config_mut(&mut self) -> &mut CodexProviderConfig {
-        self.codex_config_mut_preserve_encoding()
-    }
-
     pub fn codex_config_mut_preserve_encoding(&mut self) -> &mut CodexProviderConfig {
         let encoding = self.provider_config_encoding;
         if !matches!(self.provider_config, ProviderConfig::Codex(_)) {

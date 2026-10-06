@@ -1,0 +1,158 @@
+{
+  "$comment": "Rust items with no production caller that predate the check (#1085). Shrink freely: delete the code, then the entry (or run `npm run check:rust-deadcode -- --prune`). Adding an entry needs a reason a reviewer accepts. See docs/developer/ci-verification.md#rust-dead-code.",
+  "groups": [
+    {
+      "reason": "Held only for Drop: the field owns an OS resource (a file watcher, a Windows job object) that must live exactly as long as the struct.",
+      "entries": [
+        "src-tauri/src/state/app_state.rs::ExplorerWatchRegistration.watcher",
+        "src-tauri/src/state/user_terminal.rs::UserTerminalSession.job_object"
+      ]
+    },
+    {
+      "reason": "Record fields filled in when the record is built but read only by tests or Debug output.",
+      "entries": [
+        "src-tauri/src/delivery/headless_process.rs::HeadlessProcessPromptResult.interaction",
+        "src-tauri/src/delivery/opencode_http/sse.rs::OpenCodeEvent.event",
+        "src-tauri/src/delivery/opencode_http/sse.rs::OpenCodeEvent.raw_data",
+        "src-tauri/src/remote/models.rs::PendingPairingRequestRecord.pairing_offer_id",
+        "src-tauri/src/remote/models.rs::RemoteSessionRecord.created_at_ms"
+      ]
+    },
+    {
+      "reason": "Error variants that production code matches on but never constructs.",
+      "entries": [
+        "src-tauri/src/delivery/opencode_http/owner.rs::OpenCodeHttpErrorCode.Busy",
+        "src-tauri/src/state/terminal_session/actor.rs::TerminalBrokerError.ActorClosed"
+      ]
+    },
+    {
+      "reason": "Write, cleanup, and retention paths with no production caller. Each may be a missing call rather than dead code (the telemetry::maintain shape from #1085); triage in #1536 before deleting.",
+      "entries": [
+        "crates/wardian-core/src/db.rs::delete_mailbox_message",
+        "crates/wardian-core/src/db.rs::delete_mailbox_messages_for_target",
+        "crates/wardian-core/src/db.rs::delete_provider_input_state",
+        "crates/wardian-core/src/db.rs::prune_events",
+        "crates/wardian-core/src/db.rs::replace_native_delivery",
+        "crates/wardian-core/src/temporary_workers.rs::record_follow_up_accepted"
+      ]
+    },
+    {
+      "reason": "Commands invoked only by the native E2E suite through the app's real IPC.",
+      "entries": [
+        "tauri-command::browser_engine_status",
+        "tauri-command::list_agent_metrics",
+        "tauri-command::list_browser_sessions",
+        "tauri-command::show_conversation",
+        "tauri-command::telemetry_dashboard"
+      ]
+    },
+    {
+      "reason": "Commands with no caller outside unit tests, E2E IPC mocks, or the docs app mock; triage in #1536.",
+      "entries": [
+        "tauri-command::deploy_skill",
+        "tauri-command::list_deployed_skill_refs",
+        "tauri-command::list_deployed_skills",
+        "tauri-command::telemetry_overview"
+      ]
+    },
+    {
+      "reason": "App code called only from tests (or only from other test-only code). Delete it with its tests, or move it into the #[cfg(test)] module that uses it.",
+      "entries": [
+        "src-tauri/src/automation/mod.rs::LiveStepExecutor.new",
+        "src-tauri/src/automation/mod.rs::LiveStepExecutor.new_with_live_runner",
+        "src-tauri/src/automation/runs.rs::drive_new_run",
+        "src-tauri/src/delivery/codex_shared.rs::CodexSharedClient.connect",
+        "src-tauri/src/delivery/codex_shared.rs::CodexSharedError.connection_pending",
+        "src-tauri/src/delivery/codex_shared.rs::validate_endpoint",
+        "src-tauri/src/delivery/live_surface.rs::LiveSurfacePromptRequest.message",
+        "src-tauri/src/delivery/native_broker/codex.rs::NativeDeliveryBroker.run_codex_background",
+        "src-tauri/src/delivery/native_broker/codex.rs::NativeDeliveryBroker.run_prepared_codex_background",
+        "src-tauri/src/delivery/opencode_http/sse.rs::OpenCodeEvent.event_type",
+        "src-tauri/src/delivery/opencode_http/sse.rs::OpenCodeEvent.message_id",
+        "src-tauri/src/manager/headless.rs::HeadlessRunError.contains",
+        "src-tauri/src/remote/policy.rs::CanonicalOrigin.allows_host_and_origin",
+        "src-tauri/src/state/agent_watch.rs::WatchCursor.sequence",
+        "src-tauri/src/state/artifact_runtime.rs::ArtifactRuntime.pending_count",
+        "src-tauri/src/state/browser_session/actor.rs::BrowserSessionEvent.browser_id",
+        "src-tauri/src/state/capture_policy_gate.rs::CapturePolicyGate.try_lock",
+        "src-tauri/src/state/conversation_archive/mod.rs::ConversationArchiveState.append_chat_events",
+        "src-tauri/src/state/conversation_archive/mod.rs::ConversationArchiveState.append_delivered_input",
+        "src-tauri/src/state/conversation_archive/mod.rs::ConversationArchiveState.append_lifecycle_boundary",
+        "src-tauri/src/state/conversation_archive/mod.rs::ConversationArchiveState.chat_events_for_agent",
+        "src-tauri/src/state/conversation_archive/mod.rs::ConversationArchiveState.discard_agent",
+        "src-tauri/src/state/conversation_archive/mod.rs::ConversationArchiveState.discard_agent_with_events",
+        "src-tauri/src/state/conversation_archive/mod.rs::ConversationArchiveState.turn_records_for_conversations",
+        "src-tauri/src/state/conversation_archive/storage.rs::provider_from_events",
+        "src-tauri/src/state/file_resources/grants.rs::durable_user_file_grant_matches",
+        "src-tauri/src/state/file_resources/runtime.rs::FileResourceRuntime.durable_user_file_grant_matches",
+        "src-tauri/src/state/file_resources/runtime.rs::FileResourceRuntime.issue_ticket",
+        "src-tauri/src/state/file_resources/runtime.rs::FileResourceRuntime.open_matching_user_file",
+        "src-tauri/src/state/file_resources/runtime.rs::FileResourceRuntime.read_ticket_range",
+        "src-tauri/src/state/file_resources/runtime.rs::FileResourceRuntime.snapshot",
+        "src-tauri/src/state/file_resources/runtime.rs::FileResourceRuntime.subscribe_events",
+        "src-tauri/src/state/interactions/agent_messaging.rs::InteractionState.agent_message_provider_revision",
+        "src-tauri/src/state/terminal_session/actor.rs::TerminalRuntimeHandles.new",
+        "src-tauri/src/state/terminal_session/actor.rs::TerminalRuntimeInput.Legacy",
+        "src-tauri/src/state/terminal_session/actor.rs::TerminalSessionBroker.consumer_acknowledgements",
+        "src-tauri/src/state/terminal_session/actor.rs::TerminalSessionMessage.ConsumerAcknowledgements",
+        "src-tauri/src/utils/app_settings.rs::save_app_settings",
+        "src-tauri/src/utils/app_settings.rs::save_app_settings_to_path",
+        "src-tauri/src/utils/process.rs::is_wardian_provider_process_candidate",
+        "src-tauri/src/utils/process.rs::is_wardian_provider_session_process_candidate",
+        "src-tauri/src/utils/shell.rs::build_shell_command_with_settings",
+        "src-tauri/src/utils/shell.rs::save_shell_settings",
+        "src-tauri/src/utils/shell.rs::save_shell_settings_to_path",
+        "src-tauri/src/utils/terminal_input.rs::provider_submit_chunks"
+      ]
+    },
+    {
+      "reason": "wardian-core code called only from tests, its own integration tests, or other test-only code. Delete it with its tests, or move it into a #[cfg(test)] test-support module.",
+      "entries": [
+        "crates/wardian-core/src/artifacts/store.rs::blob_count",
+        "crates/wardian-core/src/artifacts/store.rs::close_thread",
+        "crates/wardian-core/src/automation/locate.rs::list_blueprint_files_bounded",
+        "crates/wardian-core/src/control.rs::MailboxDeliveryPhase",
+        "crates/wardian-core/src/control.rs::MailboxMessageRecord",
+        "crates/wardian-core/src/control.rs::MailboxMessageStatus",
+        "crates/wardian-core/src/conversation_lease.rs::release_owner_persisted",
+        "crates/wardian-core/src/db.rs::init_db",
+        "crates/wardian-core/src/db.rs::list_interaction_delivery_attempts",
+        "crates/wardian-core/src/db.rs::list_interaction_delivery_attempts_with_conn",
+        "crates/wardian-core/src/db.rs::list_mailbox_messages",
+        "crates/wardian-core/src/db.rs::list_mailbox_messages_with_conn",
+        "crates/wardian-core/src/db.rs::list_native_deliveries",
+        "crates/wardian-core/src/db.rs::row_to_delivery_attempt",
+        "crates/wardian-core/src/db.rs::row_to_mailbox_message",
+        "crates/wardian-core/src/db.rs::upsert_mailbox_message",
+        "crates/wardian-core/src/db.rs::upsert_mailbox_message_with_conn",
+        "crates/wardian-core/src/db/agent_messaging/task_turns.rs::pending_task_turn_bindings",
+        "crates/wardian-core/src/engine/driver.rs::grant_approval",
+        "crates/wardian-core/src/engine/executor.rs::with_decision",
+        "crates/wardian-core/src/engine/executor.rs::with_skipped",
+        "crates/wardian-core/src/engine/executor.rs::with_task_output",
+        "crates/wardian-core/src/engine/graph.rs::entry_nodes",
+        "crates/wardian-core/src/engine/graph.rs::outbound_from_port",
+        "crates/wardian-core/src/files/authorized_roots.rs::read_verified_range",
+        "crates/wardian-core/src/files/authorized_roots.rs::verify_revision",
+        "crates/wardian-core/src/listeners/mod.rs::save_listeners",
+        "crates/wardian-core/src/models/session_policy.rs::AgentExecutionPolicy",
+        "crates/wardian-core/src/models/session_policy.rs::AutomationAgentMode",
+        "crates/wardian-core/src/models/session_policy.rs::from_legacy_session_type",
+        "crates/wardian-core/src/models/session_policy.rs::parse_automation_agent_mode",
+        "crates/wardian-core/src/native_transport.rs::is_automatically_retryable",
+        "crates/wardian-core/src/paths.rs::cli_bin_path",
+        "crates/wardian-core/src/queue.rs::read_recent_items",
+        "crates/wardian-core/src/telemetry/matrix.rs::empty",
+        "crates/wardian-core/src/telemetry/models.rs::any_reported",
+        "crates/wardian-core/src/telemetry/query.rs::SeriesPoint",
+        "crates/wardian-core/src/telemetry/query.rs::series",
+        "crates/wardian-core/src/telemetry/query.rs::series_impl",
+        "crates/wardian-core/src/telemetry/sources/claude.rs::parse_delta",
+        "crates/wardian-core/src/telemetry/sources/codex.rs::parse_delta",
+        "crates/wardian-core/src/telemetry/sources/mod.rs::with_provider_session_id",
+        "crates/wardian-core/src/telemetry/sources/pi.rs::parse_delta",
+        "crates/wardian-core/src/telemetry/store.rs::save_source_state"
+      ]
+    }
+  ]
+}
