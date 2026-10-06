@@ -280,9 +280,24 @@ Valid states are `unknown`, `booting`, `ready`, `busy`, `action_required`, and `
 
 ### Inbox Evidence
 
-Inbox items project canonical live evidence instead of replayed terminal text. A legacy completion projection is created only from a live `agent-turn-completed` event for a named configured agent with a final normalized assistant response; generic status transitions, terminal output, provider control commands, and unknown session IDs are ignored. Antigravity's transcript marks intermediate planner and script steps as `DONE`, so Wardian emits its event only when that provider returns to its visible ready prompt, once per active turn. Legacy completion records can include:
+Inbox items project canonical live evidence instead of replayed terminal text. The backend owns every agent completion card: it writes the card to the queue before any client sees it, so a card does not depend on a mounted desktop window. `agent-turn-completed` has two forms:
 
-For interactive Claude sessions, Wardian's injected `Stop` hook supplies `prompt_id` and `last_assistant_message`; `StopFailure` and user interruption do not create completion items. Wardian writes the hook payload to a per-agent durable outbox, validates the provider session and prompt identity, then upserts the canonical Inbox item before emitting `agent-turn-completed`. The event carries the full `inbox_item`, including its stable ID, backend timestamp, bounded `summary`, and full `response_text`. The frontend treats it as a projection hint and does not reread the transcript or invent queue identity. Outbox files remain until the queue write succeeds, so startup replay is idempotent. Dismissal marks a durable tombstone; whole-queue snapshots cannot delete or revive backend-owned completion records.
+- Without `inbox_item`, it marks a provider turn boundary. The frontend refreshes turn-scoped views such as change review and never builds a card from it.
+- With `inbox_item`, it projects a completion card the backend has already persisted. The item carries its stable ID, backend timestamp, `timestamp_source`, bounded `summary`, and full `response_text`. The frontend applies it as-is and does not reread the transcript or invent queue identity.
+
+A card is keyed by provider evidence for its turn, `agent-completed:<agent-session>:<evidence_id>`:
+
+| Provider | Completion source | `evidence_id` |
+| --- | --- | --- |
+| Claude | Injected `Stop` hook (`last_assistant_message`) | Claude `prompt_id` |
+| Codex | Owned app-server `turn/completed` with its `final_answer`, and the rollout `task_complete` record (`last_agent_message`) | Codex turn ID, shared by both sources |
+| Other providers | The final assistant message of the transcript at the turn boundary | `answer:` plus a digest of the request and its answer |
+
+Two observers of the same turn converge on one card, and a dismissed card stays dismissed. A turn without non-empty final answer text produces no card: interrupted and failed turns, Claude `StopFailure`, provider control commands such as `/login`, and turns whose transcript does not end in an assistant answer to a user request. Rollout records written before the current runtime launched are history and are ignored. A failed queue write is retried while the same agent runtime remains current. Antigravity's transcript marks intermediate planner and script steps as `DONE`, so Wardian reports its turn boundary only when that provider returns to its visible ready prompt, once per active turn.
+
+For interactive Claude sessions, Wardian writes the `Stop` hook payload to a per-agent durable outbox and validates the provider session and prompt identity before upserting the card. Outbox files remain until the queue write succeeds, so startup replay is idempotent. Dismissal marks a durable tombstone; whole-queue snapshots cannot delete or revive backend-owned completion records.
+
+Other queue records, such as action-needed cards, have this shape:
 
 ```json
 {

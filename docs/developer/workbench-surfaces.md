@@ -391,6 +391,13 @@ claim those native properties.
 
 ## Persistence and Migration
 
+The Tauri load, save, and reset commands run synchronous workbench persistence
+on Tokio's blocking pool, including surface migration during load. One owned
+async mutex guard serializes those operations and stays inside the blocking
+operation until physical I/O finishes. Cancelling the awaiting command does
+not release exclusion while its worker is still writing. Routine save progress
+stays internal; actionable errors and recovery state remain in the UI.
+
 Rust is the durable authority for:
 
 - `<wardian-home>/settings/workbench.json`;

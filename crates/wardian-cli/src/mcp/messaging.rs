@@ -53,8 +53,19 @@ struct ReceiveArgs {
     timeout_ms: u64,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WaitArgs {
+    #[serde(default = "default_wait_timeout")]
+    timeout_ms: u64,
+}
+
 fn default_limit() -> u32 {
     100
+}
+
+fn default_wait_timeout() -> u64 {
+    wardian_core::agent_messaging::MAX_WAIT_AGENT_TIMEOUT_MS
 }
 
 pub(super) fn call(
@@ -164,6 +175,15 @@ fn parse(name: &str, arguments: Value, key: &str) -> Result<AgentMessagingReques
                 cursor: args.cursor,
                 ack_cursor: args.ack_cursor,
                 limit: Some(args.limit),
+                timeout_ms: Some(args.timeout_ms),
+            }
+        }
+        "wait_agent" => {
+            let args: WaitArgs = decode(arguments)?;
+            if args.timeout_ms > wardian_core::agent_messaging::MAX_WAIT_AGENT_TIMEOUT_MS {
+                return Err("timeout_ms must be 0..60000.".into());
+            }
+            AgentMessagingRequest::WaitAgent {
                 timeout_ms: Some(args.timeout_ms),
             }
         }

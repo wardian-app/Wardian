@@ -146,6 +146,46 @@ fn admission<'a>(message: &'a str, task: bool) -> Admission<'a> {
 }
 
 #[test]
+fn mailbox_activity_query_is_read_only_and_tracks_acknowledged_frontier() {
+    let conn = database();
+    assert!(!has_unacknowledged_messages(&conn, "receiver").unwrap());
+    let admitted = admit(&conn, admission("information", false)).unwrap();
+    let owner_before: String = conn
+        .query_row(
+            "SELECT owner FROM agent_message_delivery WHERE interaction_id=?1",
+            [&admitted.record.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(has_unacknowledged_messages(&conn, "receiver").unwrap());
+    let owner_after: String = conn
+        .query_row(
+            "SELECT owner FROM agent_message_delivery WHERE interaction_id=?1",
+            [&admitted.record.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        owner_after, owner_before,
+        "wait checks must not claim messages"
+    );
+    let acknowledgements: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agent_message_ack WHERE recipient='receiver'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(acknowledgements, 0, "wait checks must not advance cursors");
+
+    let page = receive(&conn, "receiver", None, None, 100).unwrap();
+    assert_eq!(page.messages.len(), 1);
+    assert!(has_unacknowledged_messages(&conn, "receiver").unwrap());
+    receive(&conn, "receiver", None, Some(&page.ack_cursor), 100).unwrap();
+    assert!(!has_unacknowledged_messages(&conn, "receiver").unwrap());
+}
+
+#[test]
 fn startup_failure_publishes_one_correlated_reply_and_removes_task_from_dispatch() {
     let conn = database();
     let task = admit(&conn, admission("work", true)).unwrap();

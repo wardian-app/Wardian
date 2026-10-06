@@ -71,6 +71,12 @@ responses, and timeouts remain errors. Conversation and Inbox responses include
 `status_source`; agent identity exposes it through `--fields` or `--field`.
 An empty persisted response is not evidence of current live state.
 
+On Windows, a busy control pipe is retried only while opening the connection.
+The retry uses the command's existing timeout. Once connected, a request is sent
+once; a failed exchange is reported without reconnecting or replaying it. The
+desktop listener retains its claimed endpoint during a busy replenishment retry
+and prepares the next pipe instance before dispatching an accepted connection.
+
 `agent wait --timeout` bounds the whole wait, including IPC and polling;
 `--next` charges its initial cursor read to the same budget. A zero timeout
 expires without contacting the endpoint. A response received after the
@@ -489,11 +495,13 @@ precedence. Multiple tasks admitted into the same turn receive that turn's
 shared final answer. Manual inbox delivery, composer delivery, and other
 providers still require an explicit reply.
 
-`message receive --timeout-ms 60000` waits for committed mailbox activity,
-including completion results. A completion wakes an active receive wait;
-information and completion notifications do not start an idle agent's turn.
-Active task steering requires stable Codex 0.159.2 or newer. Older supported
-versions retain idle task delivery and information delivery.
+`message wait --timeout-ms 60000` waits for mailbox activity, including
+completion results, without returning or acknowledging inbox records. Follow it
+with `message receive` to inspect the page. `message receive --timeout-ms 60000`
+also waits for activity and returns the resulting page. Completion wakes an
+active wait; information and completion notifications do not start an idle
+agent's turn. Active task steering requires stable Codex 0.159.2 or newer.
+Older supported versions retain idle task delivery and information delivery.
 
 When a task is queued because the target is busy or an eligible native owner is
 still handshaking, Wardian retains the canonical task for a later authoritative

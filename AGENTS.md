@@ -49,6 +49,8 @@ Detail: [`docs/developer/architecture.md`](docs/developer/architecture.md), [`st
 
 Commands and setup: [`docs/developer/native-e2e.md`](docs/developer/native-e2e.md), [`ci-verification.md`](docs/developer/ci-verification.md), [`setup.md`](docs/developer/setup.md) (isolated `WARDIAN_HOME`, mock provider).
 
+For routine Rust builds, checks, tests and clippy, use the supported [Rust cache launcher](docs/developer/rust-build-cache.md). It shares bounded compiler results while keeping each worktree's writable outputs separate. Preserve explicit debugger, incremental and custom-wrapper settings; never redirect compilation into qualified runtime artifacts.
+
 Write a test at the **lowest** layer that can prove the behavior:
 
 | Layer | Command | Proves | Cannot prove |
@@ -75,6 +77,7 @@ If a browser E2E test needs a higher layer to be meaningful, wrap it in `test.sk
 - **Default delivery (Wardian only)**: implementation tasks in this repository include committing, pushing, and opening or updating an issue-linked PR after verification and zero-blocker local-agent review. This is standing authorization for those steps unless the user explicitly requests local-only work. Never merge or deploy without separate authorization. Procedure: [Pull Request Delivery](docs/developer/pull-requests.md).
 - **Local review, not GitHub reviewer requests**: zero-blocker review means review by local agents, obtained through the `autoreview` workflow when available and otherwise routed to a reviewer agent. Never request reviewers on GitHub. GitHub's review status is not the local review verdict.
 - **Branching**: never work directly on `main`. Use descriptive branches (`feat/junction-refactor`, `fix/telemetry-bug`).
+- **Project worktrees**: use `wardian agent worktree enable` or `join` to create or assign implementation worktrees in the project's sibling `<project>.wt` directory. Reuse an existing registered worktree when appropriate. Never create project worktrees inside an agent's private workspace; keep task evidence there instead. Preserve in-flight worktrees when changing build configuration.
 - **Atomic commits**: small and semantic, using [Conventional Commits](https://www.conventionalcommits.org/).
 - **One PR, one issue**: every PR links an existing issue and carries only that issue's work. Open a separate branch for adjacent work rather than bundling it — a reviewer can only accept or reject the whole thing.
 - **PR descriptions**: use the template. Explain the "Why" and include verification evidence.

@@ -93,6 +93,63 @@ describe('base-relative debt budget comparison', () => {
       expect(() => assertDependencyParity(securityBase, securityHead)).not.toThrow();
     });
 
+    const recoveryManifest = (
+      vitest: unknown,
+      coverage: unknown,
+      dompurify: unknown,
+      eslint = '^10.9.1',
+    ) => JSON.stringify({
+      devDependencies: {
+        eslint,
+        'typescript-eslint': '^8.68.0',
+        vitest,
+        '@vitest/coverage-v8': coverage,
+      },
+      overrides: { dompurify, esbuild: '0.28.1', vite: '6.4.3', ws: '8.21.0' },
+    });
+    const recoveryBase = recoveryManifest('^4.1.8', '^4.1.8', '3.4.13');
+    const recoveryHead = recoveryManifest('^4.1.11', '^4.1.11', '3.4.16');
+
+    for (const [description, head] of [
+      ['Vitest and coverage', recoveryManifest('^4.1.11', '^4.1.11', '3.4.13')],
+      ['DOMPurify', recoveryManifest('^4.1.8', '^4.1.8', '3.4.16')],
+      ['combined npm audit recovery', recoveryHead],
+    ]) {
+      it(`allows the exact audited ${description} transition in both comparisons`, () => {
+        expect(changedLintPolicyFiles(['package.json'], { base: recoveryBase, head })).toEqual([]);
+        expect(() => assertLintPolicyUnchanged(['package.json'], { base: recoveryBase, head })).not.toThrow();
+        expect(() => assertDependencyParity(recoveryBase, head)).not.toThrow();
+      });
+    }
+
+    for (const [description, head] of [
+      ['an unaudited Vitest patch', recoveryManifest('^4.1.12', '^4.1.11', '3.4.16')],
+      ['an unaudited coverage patch', recoveryManifest('^4.1.11', '^4.1.12', '3.4.16')],
+      ['an unaudited DOMPurify patch', recoveryManifest('^4.1.11', '^4.1.11', '3.4.17')],
+      ['a Vitest major upgrade', recoveryManifest('^5.0.0', '^5.0.0', '3.4.16')],
+      ['a malformed recovery pin', recoveryManifest({ version: '^4.1.11' }, '^4.1.11', '3.4.16')],
+      ['a simultaneous lint dependency change', recoveryManifest('^4.1.11', '^4.1.11', '3.4.16', '^10.9.2')],
+    ]) {
+      it(`rejects ${description} during npm audit recovery`, () => {
+        expect(changedLintPolicyFiles(['package.json'], { base: recoveryBase, head })).toEqual(['package.json']);
+        expect(() => assertDependencyParity(recoveryBase, head))
+          .toThrow('Debt budget gate cannot resolve base dependencies');
+      });
+    }
+
+    it('rejects an unexpected starting version for each recovery dependency', () => {
+      for (const unexpectedBase of [
+        recoveryManifest('^4.1.9', '^4.1.8', '3.4.13'),
+        recoveryManifest('^4.1.8', '^4.1.9', '3.4.13'),
+        recoveryManifest('^4.1.8', '^4.1.8', '3.4.14'),
+      ]) {
+        expect(changedLintPolicyFiles(['package.json'], { base: unexpectedBase, head: recoveryHead }))
+          .toEqual(['package.json']);
+        expect(() => assertDependencyParity(unexpectedBase, recoveryHead))
+          .toThrow('Debt budget gate cannot resolve base dependencies');
+      }
+    });
+
     const rejectedSecurityTransitions = [
       ['an unapproved patch pin', securityManifest('5.0.11', '7.29.1')],
       ['a new override path', securityManifest('5.0.12', '7.29.1', { 'brace-expansion': '5.0.12' })],

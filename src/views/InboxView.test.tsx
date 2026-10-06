@@ -456,6 +456,46 @@ describe("InboxView", () => {
     expect(screen.getByRole("button", { name: /collapse summary/i })).toBeInTheDocument();
   });
 
+  it("expands a completion card from its bounded summary to the full answer", () => {
+    const answer = `${"a".repeat(500)}\n\nThe conclusion after the summary bound.`;
+    useQueueStore.setState({
+      items: [{
+        id: "agent-completed:agent-1:turn-1",
+        type: "agent_completed",
+        timestamp: Date.now(),
+        read: false,
+        agent_name: "My Coder",
+        summary: answer.slice(0, 500),
+        response_text: answer,
+      }],
+    });
+    render(<InboxView />);
+
+    const summary = screen.getByTestId("queue-item-summary-agent-completed:agent-1:turn-1");
+    expect(summary).not.toHaveTextContent("The conclusion after the summary bound.");
+
+    fireEvent.click(screen.getByRole("button", { name: /show full summary/i }));
+
+    expect(summary).toHaveTextContent("The conclusion after the summary bound.");
+  });
+
+  it("does not offer expansion when the summary is already the full answer", () => {
+    useQueueStore.setState({
+      items: [{
+        id: "agent-completed:agent-1:turn-2",
+        type: "agent_completed",
+        timestamp: Date.now(),
+        read: false,
+        agent_name: "My Coder",
+        summary: "Short.",
+        response_text: "Short.",
+      }],
+    });
+    render(<InboxView />);
+
+    expect(screen.queryByRole("button", { name: /show full summary/i })).not.toBeInTheDocument();
+  });
+
   it("clear item button removes item", () => {
     useQueueStore.setState({
       items: [{
@@ -674,9 +714,9 @@ describe("InboxView", () => {
     expect(firstCard?.parentElement).toHaveClass("flex-1", "min-h-0", "overflow-y-auto");
   });
 
-  it("loads older Inbox items only after the list is scrolled to its end", () => {
+  it("loads older Inbox items in 20-item batches as the list is scrolled", () => {
     useQueueStore.setState({
-      items: Array.from({ length: 120 }, (_, index) => ({
+      items: Array.from({ length: 60 }, (_, index) => ({
         id: `item-${index}`,
         type: "agent_completed",
         timestamp: Date.now() - index,
@@ -688,8 +728,8 @@ describe("InboxView", () => {
 
     render(<InboxView />);
 
-    expect(screen.getByText("Agent 79")).toBeInTheDocument();
-    expect(screen.queryByText("Agent 80")).not.toBeInTheDocument();
+    expect(screen.getByText("Agent 19")).toBeInTheDocument();
+    expect(screen.queryByText("Agent 20")).not.toBeInTheDocument();
 
     const scrollRegion = screen.getByTestId("inbox-scroll-region");
     Object.defineProperties(scrollRegion, {
@@ -698,10 +738,40 @@ describe("InboxView", () => {
       scrollTop: { configurable: true, value: 0, writable: true },
     });
     fireEvent.scroll(scrollRegion);
-    expect(screen.queryByText("Agent 80")).not.toBeInTheDocument();
+    expect(screen.queryByText("Agent 20")).not.toBeInTheDocument();
 
     scrollRegion.scrollTop = 900;
     fireEvent.scroll(scrollRegion);
-    expect(screen.getByText("Agent 119")).toBeInTheDocument();
+    expect(screen.getByText("Agent 39")).toBeInTheDocument();
+    expect(screen.queryByText("Agent 40")).not.toBeInTheDocument();
+
+    fireEvent.scroll(scrollRegion);
+    expect(screen.getByText("Agent 59")).toBeInTheDocument();
+  });
+
+  it("allows loading older items when the initial list does not overflow", () => {
+    useQueueStore.setState({
+      items: Array.from({ length: 21 }, (_, index) => ({
+        id: `item-${index}`,
+        type: "agent_completed",
+        timestamp: Date.now() - index,
+        read: false,
+        agent_name: `Agent ${index}`,
+        summary: `Completed task ${index}.`,
+      })),
+    });
+
+    render(<InboxView />);
+
+    expect(screen.getByText("Agent 19")).toBeInTheDocument();
+    expect(screen.queryByText("Agent 20")).not.toBeInTheDocument();
+    const scrollRegion = screen.getByTestId("inbox-scroll-region");
+    Object.defineProperties(scrollRegion, {
+      clientHeight: { configurable: true, value: 1000 },
+      scrollHeight: { configurable: true, value: 1000 },
+      scrollTop: { configurable: true, value: 0 },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Load older Inbox items" }));
+    expect(screen.getByText("Agent 20")).toBeInTheDocument();
   });
 });

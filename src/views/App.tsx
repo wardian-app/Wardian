@@ -395,7 +395,6 @@ function App() {
 
 function AppBody() {
   const confirm = useConfirm();
-  const pendingQueueFlushRef = React.useRef<Set<string>>(new Set());
   const [changeReviewTurnRevision, setChangeReviewTurnRevision] = useState(0);
   const workbenchRootRef = useRef<HTMLDivElement>(null);
   const sidebarIconRailRef = useRef<HTMLElement>(null);
@@ -451,7 +450,6 @@ function AppBody() {
   const libraryNavigationRequest = useLibraryStore((s) => s.navigationRequest);
   const seenLibraryNavigationRequestRef = useRef(libraryNavigationRequest);
   const appendAgentEvent = useQueueStore((s) => s.appendAgentEvent);
-  const flushAgentCompletion = useQueueStore((s) => s.flushAgentCompletion);
   const applyPersistedAgentCompletion = useQueueStore((s) => s.applyPersistedAgentCompletion);
   const addActionNeeded = useQueueStore((s) => s.addActionNeeded);
   const addAutomationCompletion = useQueueStore((s) => s.addAutomationCompletion);
@@ -500,11 +498,13 @@ function AppBody() {
     };
   }, []);
 
+  const bumpChangeReviewTurnRevision = useCallback(
+    () => setChangeReviewTurnRevision((revision) => revision + 1),
+    [],
+  );
   const handleAgentTurnCompletion = useAgentTurnCompletionHandler({
-    pending: pendingQueueFlushRef,
-    onCompletion: () => setChangeReviewTurnRevision((revision) => revision + 1),
+    onCompletion: bumpChangeReviewTurnRevision,
     applyPersisted: applyPersistedAgentCompletion,
-    flush: flushAgentCompletion,
   });
 
   const maybeAddActionNeededQueueItem = useCallback((
@@ -1349,9 +1349,6 @@ function AppBody() {
       ? "Workbench safe mode is active; the durable document is preserved."
       : null,
     workbenchPersistence.save_error,
-    workbenchPersistence.save_pending || workbenchPersistence.is_dirty
-      ? "Saving workbench changes…"
-      : null,
   ].filter((message): message is string => Boolean(message)).join(" ") || null;
 
   const exportLocalWorkbench = useCallback(() => {

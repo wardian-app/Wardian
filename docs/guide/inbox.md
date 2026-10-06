@@ -10,7 +10,7 @@ Use Inbox to review finished work, catch failed automation runs, read an importa
 
 Wardian records these items:
 
-- **Work finished**: an agent or automation reached a terminal outcome. For agents, Wardian creates the card only for an explicit provider turn-completed event from a named configured agent, and shows that turn's final provider response. It never turns generic Idle transitions, terminal output, provider control commands, or an unconfigured session ID into a completion card. If Wardian cannot identify a canonical final response, it skips the automatic card.
+- **Work finished**: an agent or automation reached a terminal outcome. When an agent finishes a turn with an answer, Wardian creates one card that holds that answer. This works for every provider and does not require the Wardian window to be open; the card also reaches the mobile Inbox. Wardian never turns generic Idle transitions, terminal output, provider control commands, interrupted or failed turns, or an unconfigured session ID into a completion card. If Wardian cannot identify the turn's final answer, it skips the automatic card.
 - **Important update**: an agent explicitly sends a concise user-facing update with `wardian notify update`. Use this for a material result, a significant limitation, or a change that affects the user's next decision.
 - **Approval request**: an agent explicitly sends a structured request with `wardian notify approval`. It names the proposed action, why it is risky, the available choices, and an expiry. Provider-native permission prompts remain provider-sourced **Action needed** items.
 - **Automation outcome**: an automation completed or failed. Automation approval nodes also project their waiting decision into Inbox; the automation engine remains authoritative for its state and resolution.
@@ -22,12 +22,12 @@ Manual approval is intentionally exceptional. Agents should request it only for 
 
 Press `Ctrl+P` / `Cmd+P`, select a pane's **+** button, or use the empty-pane Home state, then choose **Inbox**. Unread items appear first and increment the Inbox tab badge. Inbox is a singleton surface, so opening it again focuses the existing tab.
 
-Each item shows its source, agent or automation, time, and summary. Long text is collapsed by default; use **Show details** to expand it.
+Each item shows its source, agent or automation, time, and summary. Long text is collapsed by default; use **Show details** to expand it. On a completion card, **Show details** shows the agent's full answer, not only the summary.
 
 To keep large histories responsive, desktop and mobile Inbox initially show the
-newest cards and load older cards in batches as you scroll to the end of the
-list. This only limits what is mounted on screen; it does not discard Inbox
-history or change filters, read state, or triage actions.
+newest 20 cards and load up to 20 older cards as you scroll near the end of the
+list or select **Load older items**. This only limits what is mounted on screen;
+it does not discard Inbox history or change filters, read state, or triage actions.
 
 Use the **Filter** dropdown to choose visible event types:
 

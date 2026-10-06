@@ -2,7 +2,7 @@
 use crate::{
     args::{
         MessageArgs, MessageCommand, MessageCommandArgs, ReceiveMessagesArgs, ReplyArgs,
-        ReplyStatusArg,
+        ReplyStatusArg, WaitAgentArgs,
     },
     errors::{CliError, ExitCode},
     live, read_message_input,
@@ -89,6 +89,12 @@ fn receive(args: &ReceiveMessagesArgs) -> Result<String, CliError> {
     })
 }
 
+fn wait(args: &WaitAgentArgs) -> Result<String, CliError> {
+    invoke(AgentMessagingRequest::WaitAgent {
+        timeout_ms: Some(args.timeout_ms),
+    })
+}
+
 fn reply(args: &ReplyArgs) -> Result<String, CliError> {
     nonempty(&args.request_id)?;
     let message = body(args.message.as_deref(), args.stdin, args.file.as_deref())?;
@@ -131,6 +137,7 @@ pub(crate) fn handle(args: &MessageCommandArgs) -> Result<String, CliError> {
         MessageCommand::Send(args) => send(args, false),
         MessageCommand::Followup(args) => send(args, true),
         MessageCommand::Receive(args) => receive(args),
+        MessageCommand::Wait(args) => wait(args),
         MessageCommand::Reply(args) => reply(args),
         MessageCommand::Interrupt { target } => {
             // Reuse exact-recipient validation, without admitting a message.

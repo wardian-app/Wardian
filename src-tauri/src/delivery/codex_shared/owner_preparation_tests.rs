@@ -197,6 +197,85 @@ fn owner_prepares_a_new_home_without_config_or_journal() {
 }
 
 #[test]
+fn issue1214_normal_owner_preparation_preserves_private_state_without_shared_cache() {
+    let _lock = crate::utils::wardian_test_env_lock();
+    for retained in [false, true] {
+        let fixture = Fixture::new();
+        let wardian = fixture._temp.path().join("wardian");
+        let native = fixture._temp.path().join("native");
+        let cache = wardian.join("codex/thread-state");
+        std::fs::create_dir_all(&cache).unwrap();
+        let snapshot = cache.join("snapshot-state_5.sqlite");
+        let meta = cache.join("snapshot.json");
+        let cache_bytes = b"obsolete shared index fixture";
+        let metadata = serde_json::json!({
+            "version":1, "database":"state_5.sqlite", "threads":1,
+            "captured_at":chrono::Utc::now().to_rfc3339()
+        })
+        .to_string();
+        std::fs::write(&snapshot, cache_bytes).unwrap();
+        std::fs::write(&meta, &metadata).unwrap();
+        std::fs::write(native.join("state_5.sqlite"), b"native private index").unwrap();
+        std::fs::write(native.join("auth.json"), b"inert auth fixture").unwrap();
+        for root in ["sessions", "archived_sessions"] {
+            std::fs::create_dir_all(native.join(root)).unwrap();
+        }
+        let initial = habitat_codex_home(&fixture.neutral());
+        std::fs::create_dir_all(&initial).unwrap();
+        if retained {
+            std::fs::write(initial.join("state_5.sqlite"), b"owned private index").unwrap();
+            std::fs::write(initial.join("logs_2.sqlite"), b"owned private log").unwrap();
+        }
+
+        let (_, home) = prepare_owner_habitat(
+            &fixture.workspace,
+            "",
+            "agent",
+            &mut OwnerStartTimings::default(),
+        )
+        .unwrap();
+        if retained {
+            assert_eq!(
+                std::fs::read(home.join("state_5.sqlite")).unwrap(),
+                b"owned private index"
+            );
+            assert_eq!(
+                std::fs::read(home.join("logs_2.sqlite")).unwrap(),
+                b"owned private log"
+            );
+        } else {
+            assert!(
+                !home.join("state_5.sqlite").exists(),
+                "the SDK creates its own new index"
+            );
+        }
+        for root in ["sessions", "archived_sessions"] {
+            assert_eq!(
+                std::fs::canonicalize(home.join(root)).unwrap(),
+                std::fs::canonicalize(native.join(root)).unwrap()
+            );
+        }
+        assert!(!home
+            .join("auth.json")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        std::fs::write(home.join("auth.json"), b"owned auth fixture").unwrap();
+        assert_eq!(
+            std::fs::read(native.join("auth.json")).unwrap(),
+            b"inert auth fixture"
+        );
+        assert_eq!(
+            std::fs::read(native.join("state_5.sqlite")).unwrap(),
+            b"native private index"
+        );
+        assert_eq!(std::fs::read(&snapshot).unwrap(), cache_bytes);
+        assert_eq!(std::fs::read_to_string(&meta).unwrap(), metadata);
+    }
+}
+
+#[test]
 fn invalid_recovery_input_blocks_config_and_mcp_projection_without_mutation() {
     let _lock = crate::utils::wardian_test_env_lock();
     let fixture = Fixture::new();

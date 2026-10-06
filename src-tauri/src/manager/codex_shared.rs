@@ -50,7 +50,7 @@ pub(crate) async fn publish_background_identity(
     native_id: &str,
     started_fresh: bool,
 ) -> Result<(), String> {
-    let _lifecycle = state.lock_agent_lifecycle(&spec.target_agent_id).await;
+    let lifecycle = state.lock_agent_lifecycle(&spec.target_agent_id).await;
     if state
         .interactions
         .current_provider_input_generation(&spec.target_agent_id)
@@ -59,9 +59,15 @@ pub(crate) async fn publish_background_identity(
     {
         return Err("background identity generation is no longer current".into());
     }
-    let _barrier = wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
-        .map_err(|error| error.to_string())?
-        .ok_or("agent roster barrier unavailable")?;
+    let barrier = super::roster_io::acquire_roster_barrier().await?;
+    if state
+        .interactions
+        .current_provider_input_generation(&spec.target_agent_id)
+        .await
+        != Some(spec.generation)
+    {
+        return Err("background identity generation is no longer current".into());
+    }
     let agents = state.agents.lock().await;
     let order = state.agent_order.lock().await;
     let agent = agents
@@ -79,29 +85,82 @@ pub(crate) async fn publish_background_identity(
         .find(|config| config.session_id == spec.target_agent_id)
         .ok_or("background target missing from agent order")?;
     *entry = updated.clone();
-    super::try_save_state_snapshot_unlocked(&snapshot)?;
-    *agent
-        .config
-        .lock()
-        .map_err(|_| "agent config lock unavailable")? = updated;
-    Ok(())
+    let config = agent.config.clone();
+    let home = crate::utils::fs::get_wardian_home()
+        .ok_or_else(|| "Could not locate Wardian home".to_string())?;
+    drop(order);
+    drop(agents);
+    #[cfg(test)]
+    let publication_probe = BACKGROUND_PUBLICATION_PROBE
+        .try_with(|probe| probe.borrow_mut().take())
+        .ok()
+        .flatten();
+    super::roster_io::run_roster_io(barrier, move || {
+        let _lifecycle = lifecycle;
+        super::try_save_state_snapshot_for_home(&home, &snapshot)?;
+        #[cfg(test)]
+        if let Some(probe) = publication_probe {
+            let _ = probe.started.send(());
+            let _ = probe.entered.send(());
+            probe.release.recv().map_err(|error| error.to_string())?;
+        }
+        *config.lock().map_err(|_| "agent config lock unavailable")? = updated;
+        Ok(())
+    })
+    .await
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static BACKGROUND_PUBLICATION_PROBE: std::cell::RefCell<Option<super::RosterIoProbe>>;
 }
 
 /// Publish TUI- as well as broker-originated turns through the ordinary runtime
 /// status path. That path fences persistence/UI emission by the status Arc of
 /// the current incarnation. Mere inbox appends produce no activity transition.
+///
+/// Every turn that finishes with a final answer also becomes an Inbox card,
+/// including turns coalesced between two wake-ups of this observer and turns
+/// that finished before it started.
 pub(super) fn observe_turn_activity(
     app: tauri::AppHandle,
     agent_id: String,
+    runtime_generation: u64,
     current_status: Arc<std::sync::Mutex<String>>,
     mut observations: tokio::sync::watch::Receiver<crate::delivery::codex_shared::Observation>,
 ) {
     tauri::async_runtime::spawn(async move {
         let mut previous = CodexTurnActivity::Pending;
+        // The observation belongs to this runtime's owner connection alone,
+        // so every turn in its finished log is this runtime's. Starting at
+        // zero reports turns that finished before this task first ran.
+        let mut finished_cursor = 0;
         loop {
-            let activity = observations.borrow_and_update().activity();
+            let (activity, finished) = {
+                let observation = observations.borrow_and_update();
+                (
+                    observation.activity(),
+                    observation.finished_turns_after(finished_cursor),
+                )
+            };
             if current_status.lock().is_ok_and(|status| *status == "Off") {
                 break;
+            }
+            for turn in finished {
+                finished_cursor = turn.sequence;
+                if let Some(completion) = super::turn_completion::codex_owner_turn_completion(
+                    &turn.turn_id,
+                    &turn.status,
+                    &turn.answer,
+                ) {
+                    super::turn_completion::publish_turn_completion(
+                        &app,
+                        &agent_id,
+                        "codex",
+                        Some(runtime_generation),
+                        completion,
+                    );
+                }
             }
             if activity != previous {
                 match codex_activity_status_update(&activity) {

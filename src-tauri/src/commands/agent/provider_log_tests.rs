@@ -20,6 +20,24 @@ async fn persist_agent_config_for_test(
     persist_agent_config_with_roster_barrier(new_config, state, &roster_barrier).await
 }
 
+pub(crate) async fn register_capture_test_agent(
+    state: &AppState,
+    config: &AgentConfig,
+    active: crate::state::ActiveAgent,
+) -> Result<(), String> {
+    let pending = super::PendingRuntime::prepare(config, &state.terminal_sessions)?.attach(active);
+    let mut completion = None;
+    super::codex_onboarding::commit_registered_agent(
+        state,
+        &config.session_id,
+        pending,
+        &mut completion,
+        super::AgentOrderPlacement::Top,
+    )
+    .await
+    .map_err(|(_, error)| error)
+}
+
 #[test]
 fn pi_fresh_provider_session_promotion_retains_launch_provenance() {
     let mut new_active = make_test_agent();

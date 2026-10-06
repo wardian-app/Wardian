@@ -571,11 +571,6 @@ pub(super) fn delete_references(
     Ok(())
 }
 
-/// Identify the v2 reply transaction boundary for legacy CLI reply compatibility.
-pub fn is_task(conn: &Connection, id: &str) -> Result<bool> {
-    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM agent_message_delivery WHERE interaction_id=?1 AND operation='followup_task')", [id], |row| row.get(0))?)
-}
-
 fn cursor_sequence(conn: &Connection, recipient: &str, token: &str) -> Result<i64> {
     if !token.starts_with("am1_") || token.len() != 36 {
         return Err(Error::new(
@@ -620,6 +615,24 @@ fn issue_cursor(conn: &Connection, recipient: &str, sequence: i64) -> Result<Str
         params![token, recipient, sequence],
     )?;
     Ok(token)
+}
+
+/// Check whether the recipient has available records beyond its acknowledged
+/// frontier without claiming an item or issuing a cursor.
+pub fn has_unacknowledged_messages(conn: &Connection, recipient: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM agent_message_availability a
+            LEFT JOIN agent_message_delivery d ON d.interaction_id=a.interaction_id
+            WHERE a.recipient=?1
+            AND a.sequence > COALESCE(
+                (SELECT sequence FROM agent_message_ack WHERE recipient=?1),0
+            )
+            AND (d.owner IS NULL OR d.owner IN ('stored','pending','receiver_available'))
+        )",
+        [recipient],
+        |row| row.get(0),
+    )?)
 }
 
 /// Read/claim a bounded page transactionally. Replaying its input cursor returns
