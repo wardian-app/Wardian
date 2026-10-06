@@ -60,6 +60,11 @@ const AUDITED_SECURITY_PIN_TRANSITIONS = [
     to: "5.0.12",
   },
   { path: ["overrides", "undici"], from: "7.29.0", to: "7.29.1" },
+  // GHSA-82fw-gwwq-j7x9: keep Vitest and its coverage adapter on patched 4.1.
+  { path: ["devDependencies", "vitest"], from: "^4.1.8", to: "^4.1.11" },
+  { path: ["devDependencies", "@vitest/coverage-v8"], from: "^4.1.8", to: "^4.1.11" },
+  // GHSA-p98j-92pf-mc4p and GHSA-6688-9rhm-gjv2 fix in-place sanitization.
+  { path: ["overrides", "dompurify"], from: "3.4.13", to: "3.4.16" },
 ];
 const TRACKED_FILE_LINES = [
   "src-tauri/src/commands/agent.rs",
