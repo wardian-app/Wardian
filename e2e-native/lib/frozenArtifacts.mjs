@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { validatePairedNativeCli } from "./native-artifact-resolution.mjs";
 
 /** Directory inside a run's home holding that run's private binaries. */
 export const FROZEN_BIN_DIR = ".frozen-bin";
@@ -64,23 +65,25 @@ function copyMissingTree(sourcePath, destPath) {
  * bytes underneath a live session. The normal build target is shared, so a run
  * takes its own copy and executes that instead. The recorded identity ties the
  * copy back to the source it came from.
+ * `includeRuntime=false` copies only a paired CLI; its app owns the runtime.
  */
-export function freezeArtifact(sourcePath, destDir) {
+export function freezeArtifact(sourcePath, destDir, { includeRuntime = true } = {}) {
   if (!sourcePath || !fs.existsSync(sourcePath)) {
     return null;
   }
   fs.mkdirSync(destDir, { recursive: true });
 
-  for (const sidecar of sidecarsFor(sourcePath)) {
-    const target = path.join(destDir, path.basename(sidecar));
-    if (!fs.existsSync(target)) {
-      fs.copyFileSync(sidecar, target);
+  if (includeRuntime) {
+    for (const sidecar of sidecarsFor(sourcePath)) {
+      const target = path.join(destDir, path.basename(sidecar));
+      if (!fs.existsSync(target)) {
+        fs.copyFileSync(sidecar, target);
+      }
     }
-  }
-
-  for (const payload of runtimePayloadsFor(sourcePath)) {
-    const target = path.join(destDir, path.basename(payload));
-    copyMissingTree(payload, target);
+    for (const payload of runtimePayloadsFor(sourcePath)) {
+      const target = path.join(destDir, path.basename(payload));
+      copyMissingTree(payload, target);
+    }
   }
 
   const frozenPath = path.join(destDir, path.basename(sourcePath));
@@ -100,10 +103,40 @@ export function freezeArtifact(sourcePath, destDir) {
  *
  * The home is per-run and is removed with the run, so the copies are cleaned up
  * without any extra bookkeeping.
+ * An explicit pair is checked before freezing and again against the copied
+ * packaged CLI. Its CLI source directory never contributes runtime files.
  */
-export function freezeRunArtifacts({ home, appPath, cliPath }) {
+export function freezeRunArtifacts({ home, appPath, cliPath, pairedCli = false, platform = process.platform }) {
+  const pair = pairedCli ? validatePairedNativeCli({ appPath, cliPath, platform }) : null;
   const destDir = path.join(home, FROZEN_BIN_DIR);
-  const app = freezeArtifact(appPath, destDir);
-  const cli = cliPath ? freezeArtifact(cliPath, destDir) : null;
+  const app = freezeArtifact(pair?.appPath ?? appPath, destDir);
+  if (pair) {
+    // Preserve the app loader's POSIX resource layout in this owned home.
+    // Cargo-output resource roots also contain build outputs: copy only the
+    // app's resource folders, never the whole shared compiler directory.
+    const resourceDest = platform === "win32" ? destDir
+      : platform === "darwin" ? path.join(home, "Resources") : path.join(home, "lib", "Wardian");
+    if (pair.resourceDir === path.dirname(pair.appPath)) {
+      const directories = ["bin", "resources"];
+      if (platform === "win32") {
+        // Tauri declares these alongside the executable, including the nested
+        // parent-relative scripts layout. The compiler directory stays bounded.
+        directories.push("agent_prompts", path.join("_up_", "scripts"));
+      }
+      for (const name of directories) {
+        const source = path.join(pair.resourceDir, name);
+        if (fs.existsSync(source) && fs.statSync(source).isDirectory()) {
+          copyMissingTree(source, path.join(resourceDest, name));
+        }
+      }
+    } else {
+      copyMissingTree(pair.resourceDir, resourceDest);
+    }
+  }
+  // The paired app supplies the runtime. Importing the CLI's adjacent files
+  // would silently mix builds even when the CLI executable itself matches.
+  const cliSource = pair?.cliPath ?? cliPath;
+  const cli = cliSource ? freezeArtifact(cliSource, destDir, { includeRuntime: !pairedCli }) : null;
+  if (pair) validatePairedNativeCli({ appPath: app.path, cliPath: cli.path, platform });
   return { dir: destDir, app, cli };
 }

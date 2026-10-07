@@ -10,7 +10,7 @@ import { startStdioRpc } from "../lib/stdio-json-rpc.mjs";
 import { createNativeHarness, ensureNativeAppBuilt, prepareIsolatedHome, startNativeSession, waitForAppShell, invokeTauri } from "../lib/harness.mjs";
 
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
-const TOOLS = ["followup_task", "interrupt_agent", "list_agents", "receive_messages", "reply", "send_message"];
+const TOOLS = ["followup_task", "interrupt_agent", "list_agents", "receive_messages", "reply", "send_message", "wait_agent"];
 
 function receipt(result) {
   const item = result?.content?.find((entry) => entry.type === "text");
@@ -82,13 +82,15 @@ test("v2 information has consistent sender and receiver semantics without starti
     report.artifact_sha256.cli = hash(await fs.readFile(cli));
     assert.equal(hash(await fs.readFile(installedCli)), report.artifact_sha256.cli,
       "The tested MCP CLI must match the application's installed CLI");
+    // Use the maintained Off mock-agent setup: this native store test must
+    // not require an installed or authenticated real provider.
     const agents = [];
     for (const name of ["Message-Sender", "Message-Receiver"]) {
       const workspace = path.join(harness.isolatedHome, "workspaces", name);
       await fs.mkdir(workspace, { recursive: true });
       agents.push(await invokeTauri(session.driver, "spawn_agent", { req: {
         sessionName: name, agentClass: "TestClass", folder: workspace, isOff: true,
-        resumeSession: null, configOverride: { provider: "codex", model: "gpt-5.4-mini", conversation_logging: "enabled" },
+        resumeSession: null, configOverride: { provider: "mock", conversation_logging: "enabled" },
       } }));
     }
     const [sender, receiver] = agents;
