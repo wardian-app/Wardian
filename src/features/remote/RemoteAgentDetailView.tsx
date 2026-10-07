@@ -1,16 +1,19 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, RefreshCw, Send } from "lucide-react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import type {
   AgentChatEvent,
+  AgentChatDetail,
   RemoteAgentSummary,
   RemoteTerminalBrokerEvent,
   TerminalSnapshot,
 } from "../../types";
 import { formatAgentStatusLabel } from "../../utils/statusUtils";
 import { ChatTranscriptRow } from "../chat/ChatTranscriptRows";
+import { chatReadProgress } from "../chat/chatReadState";
+import { captureChatScrollAnchor, restoreChatScrollAnchor, type ChatScrollAnchor } from "../chat/chatScrollAnchor";
 import type { ChatMarkdownLinkHandling } from "../grid/markdown/ChatMarkdown";
 import {
   isProcessingAgentStatus,
@@ -448,7 +451,11 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
   const chatLoading = useRemoteStore((state) => state.chatLoading);
   const chatLoadingOlder = useRemoteStore((state) => state.chatLoadingOlder);
   const chatHasOlder = useRemoteStore((state) => state.chatHasOlder);
+  const chatBrowsingOlder = useRemoteStore((state) => state.chatBrowsingOlder);
+  const jumpToLatestChat = useRemoteStore((state) => state.jumpToLatestActiveAgentChat);
   const chatError = useRemoteStore((state) => state.chatError);
+  const chatProgress = useRemoteStore((state) => state.chatPage?.progress ?? "indexing");
+  const loadChatDetail = useRemoteStore((state) => state.loadActiveAgentChatDetail);
   const sending = useRemoteStore((state) => state.sending);
   const closeAgent = useRemoteStore((state) => state.closeAgent);
   const setActiveAgentViewMode = useRemoteStore((state) => state.setActiveAgentViewMode);
@@ -470,10 +477,13 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
   );
 
   useEffect(() => {
-    const lastVisibleChatEventId = visibleEvents[visibleEvents.length - 1]?.id;
+    const lastEvent = visibleEvents[visibleEvents.length - 1];
+    const lastVisibleChatEventId = lastEvent?.metadata.chat_display_key as string | undefined ?? lastEvent?.id;
     const shouldScroll = activeAgentViewMode === "terminal" || lastVisibleChatEventId !== lastVisibleChatEventIdRef.current;
     lastVisibleChatEventIdRef.current = lastVisibleChatEventId;
-    if (shouldScroll) contentEndRef.current?.scrollIntoView({ block: "end" });
+    const scroll = contentEndRef.current?.closest("section");
+    const nearBottom = scroll ? scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 48 : true;
+    if (shouldScroll && (activeAgentViewMode === "terminal" || nearBottom)) contentEndRef.current?.scrollIntoView({ block: "end" });
   }, [activeAgentViewMode, visibleEvents]);
 
   const submit = async (event: React.FormEvent) => {
@@ -554,16 +564,22 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
 
       {activeAgentViewMode === "chat" ? (
         <ChatPane
+          key={agent.session_id}
           agent={agent}
           visibleEvents={visibleEvents}
           loading={chatLoading}
           loadingOlder={chatLoadingOlder}
           hasOlder={chatHasOlder}
+          browsingOlder={chatBrowsingOlder}
+          onJumpToLatest={jumpToLatestChat}
           error={chatError}
           endRef={contentEndRef}
           isSubmitting={sending}
           onApprovalSubmit={(response) => void sendPromptToActiveAgent(response)}
-          onLoadOlder={() => void loadOlderActiveAgentChat()}
+          onLoadOlder={loadOlderActiveAgentChat}
+          onRetryChat={() => void refreshActiveAgentChat()}
+          onLoadDetail={loadChatDetail}
+          progress={chatProgress}
         />
       ) : (
         <TerminalPane agent={agent} loading={terminalLoading} error={terminalError} endRef={contentEndRef} />
@@ -990,26 +1006,60 @@ function ChatPane({
   loading,
   loadingOlder,
   hasOlder,
+  browsingOlder,
+  onJumpToLatest,
   error,
   endRef,
   isSubmitting,
   onApprovalSubmit,
   onLoadOlder,
+  onRetryChat,
+  onLoadDetail,
+  progress,
 }: {
   agent: RemoteAgentSummary;
   visibleEvents: AgentChatEvent[];
   loading: boolean;
   loadingOlder: boolean;
   hasOlder: boolean;
+  browsingOlder: boolean;
+  onJumpToLatest: () => void;
   error: string;
   endRef: React.RefObject<HTMLDivElement | null>;
   isSubmitting: boolean;
   onApprovalSubmit: (response: string) => void;
-  onLoadOlder: () => void;
+  onLoadOlder: () => Promise<void>;
+  onRetryChat: () => void;
+  onLoadDetail: (reference: string) => Promise<AgentChatDetail>;
+  progress: string;
 }) {
+  const scrollRef = useRef<HTMLElement>(null);
+  const prepend = useRef<ChatScrollAnchor | null>(null);
+  const [settledPrepend, setSettledPrepend] = useState<ChatScrollAnchor | null>(null);
+  const loadOlder = async () => {
+    if (!hasOlder || loadingOlder || prepend.current) return;
+    const scroll = scrollRef.current;
+    const snapshot = scroll ? captureChatScrollAnchor(scroll) : null;
+    if (snapshot) prepend.current = snapshot;
+    try {
+      await onLoadOlder();
+    } finally {
+      // A skipped or empty read may never change loadingOlder or visibleEvents.
+      // Signal completion without restoring before the prepend DOM commits.
+      if (snapshot && prepend.current === snapshot) setSettledPrepend(snapshot);
+    }
+  };
+  useLayoutEffect(() => {
+    const scroll = scrollRef.current;
+    if (scroll && prepend.current && settledPrepend === prepend.current && !loadingOlder) {
+      restoreChatScrollAnchor(scroll, prepend.current);
+      prepend.current = null;
+    }
+  }, [loadingOlder, visibleEvents, settledPrepend]);
+  const progressText = chatReadProgress(progress);
   const rows = useMemo(
     () =>
-      withTurnChangeSummaries(derivePresentedChatRows(sortTranscriptEvents(visibleEvents).filter(shouldShowChatEvent)), {
+      withTurnChangeSummaries(derivePresentedChatRows(visibleEvents.filter(shouldShowChatEvent)), {
         // Remote pages from the newest end, so while older events remain
         // unloaded the leading rows are the tail of a turn whose earlier edits
         // are off-page. Summarizing them would understate that turn.
@@ -1019,41 +1069,55 @@ function ChatPane({
   );
   const liveApprovalId = useMemo(() => liveApprovalEventId(sortTranscriptEvents(visibleEvents)), [visibleEvents]);
   return (
-    <section className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`}>
+    <section className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`} ref={scrollRef} onScroll={() => { if ((scrollRef.current?.scrollTop ?? 0) <= 160) loadOlder(); }}>
       <div className="chat-transcript-list space-y-3">
-        {error && <div className="rounded-md border border-wardian-error px-3 py-2 text-xs text-wardian-error">{error}</div>}
+        {error && <div role="alert" className="rounded-md border border-wardian-error px-3 py-2 text-xs text-wardian-error">
+          <p>{error}</p>
+          <button type="button" onClick={onRetryChat} disabled={loading || loadingOlder}
+            className="mt-2 rounded-md border border-wardian-border px-3 py-1 text-wardian-text disabled:opacity-50">Retry Chat</button>
+        </div>}
         {loading && visibleEvents.length === 0 && (
           <div className="inline-flex items-center gap-2 text-sm text-muted-neutral">
             <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
             Loading chat...
           </div>
         )}
-        {!loading && visibleEvents.length === 0 && (
+        {progressText ? <p role="status" className="text-xs text-muted-neutral">{progressText}</p> : null}
+        {!error && !loading && visibleEvents.length === 0 && !progressText && (
           <div className="rounded-md border border-dashed border-wardian-border px-3 py-4 text-xs text-muted-neutral">
             No chat transcript yet.
           </div>
         )}
+        {browsingOlder ? (
+          <button
+            type="button"
+            className="w-full rounded border border-wardian-border bg-wardian-card px-3 py-2 text-xs font-semibold leading-5 text-muted-neutral hover:text-primary"
+            onClick={() => { prepend.current = null; onJumpToLatest(); }}
+          >Jump to latest</button>
+        ) : null}
         {hasOlder ? (
           <button
             type="button"
             className="w-full rounded border border-wardian-border bg-wardian-card px-3 py-2 text-xs font-semibold leading-5 text-muted-neutral hover:text-primary"
-            onClick={onLoadOlder}
+            onClick={loadOlder}
             disabled={loadingOlder}
           >
             {loadingOlder ? "Loading older transcript..." : "Load older transcript"}
           </button>
         ) : null}
         {rows.map((row) => (
-          <ChatTranscriptRow
-            key={chatTranscriptRowKey(row)}
-            agentIsWorking={isProcessingAgentStatus(agent.status) || isSubmitting}
-            isSubmitting={isSubmitting}
-            layout="full_width"
-            liveApprovalId={liveApprovalId}
-            linkHandling={REMOTE_CHAT_LINK_HANDLING}
-            onApprovalSubmit={onApprovalSubmit}
-            row={row}
-          />
+          <div key={chatTranscriptRowKey(row)} data-chat-row-key={chatTranscriptRowKey(row)}>
+            <ChatTranscriptRow
+              agentIsWorking={isProcessingAgentStatus(agent.status) || isSubmitting}
+              isSubmitting={isSubmitting}
+              layout="full_width"
+              liveApprovalId={liveApprovalId}
+              linkHandling={REMOTE_CHAT_LINK_HANDLING}
+              onApprovalSubmit={onApprovalSubmit}
+              onLoadDetail={onLoadDetail}
+              row={row}
+            />
+          </div>
         ))}
         <div ref={endRef} aria-hidden="true" />
       </div>

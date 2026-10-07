@@ -1,4 +1,3 @@
-use crate::commands::chat::ChatTranscriptFailureStage;
 use crate::remote::models::{
     RemoteAgentActionRequest, RemoteAgentSummary, RemoteAutomationMonitorRun,
     RemoteAutomationMonitorSchedule, RemoteAutomationMonitorSnapshot, RemoteInboxActionRequest,
@@ -12,20 +11,12 @@ use tauri::{AppHandle, Emitter, Manager};
 use wardian_core::control::{
     ControlRequest, InboxListResponse, InboxNotificationKind, InteractionStatus, MessageInputMode,
 };
-use wardian_core::models::chat::AgentChatEvent;
 use wardian_core::models::AgentConfig;
 
 const REMOTE_AUTOMATION_MONITOR_PAGE_SIZE: usize = 25;
 const REMOTE_RUN_FAILURE_SUMMARY: &str = "Run failed. Open Wardian desktop for details.";
 const REMOTE_SCHEDULE_FAILURE_SUMMARY: &str = "Last run failed. Open Wardian desktop for details.";
 pub(crate) const REMOTE_AUTOMATION_INBOX_UNAVAILABLE: &str = "automation_inbox_unavailable";
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct RemoteAgentChatPage {
-    pub events: Vec<AgentChatEvent>,
-    pub has_older: bool,
-    pub next_before: Option<usize>,
-}
 
 pub async fn remote_agent_roster(state: &AppState) -> Vec<RemoteAgentSummary> {
     // `set_agent_status` persists observations while it owns the global agent
@@ -1592,40 +1583,21 @@ fn queue_timestamp(value: &str) -> i64 {
         .unwrap_or_else(|_| chrono::Utc::now().timestamp_millis())
 }
 
-pub(crate) async fn remote_agent_chat_transcript(
-    state: &AppState,
-    session_id: &str,
-) -> Result<Vec<AgentChatEvent>, ChatTranscriptFailureStage> {
-    crate::commands::chat::load_agent_chat_transcript_for_remote_state(
-        state,
-        session_id.to_string(),
-    )
-    .await
-}
-
 pub(crate) async fn remote_agent_chat_page(
     state: &AppState,
     session_id: &str,
-    before: Option<usize>,
-    limit: usize,
-) -> Result<RemoteAgentChatPage, ChatTranscriptFailureStage> {
-    let events = remote_agent_chat_transcript(state, session_id).await?;
-    Ok(page_remote_agent_chat_events(events, before, limit))
-}
-
-pub fn page_remote_agent_chat_events(
-    events: Vec<AgentChatEvent>,
-    before: Option<usize>,
-    limit: usize,
-) -> RemoteAgentChatPage {
-    let end = before.unwrap_or(events.len()).min(events.len());
-    let start = end.saturating_sub(limit.max(1));
-
-    RemoteAgentChatPage {
-        events: events[start..end].to_vec(),
-        has_older: start > 0,
-        next_before: (start > 0).then_some(start),
-    }
+    before: Option<String>,
+    revision: Option<String>,
+    detail: Option<String>,
+) -> Result<wardian_core::models::chat::AgentChatPage, String> {
+    crate::commands::chat::load_agent_chat_page_for_state(
+        state,
+        session_id.to_string(),
+        before,
+        revision,
+        detail,
+    )
+    .await
 }
 
 pub async fn remote_agent_terminal_snapshot(
@@ -1682,7 +1654,7 @@ pub fn validate_remote_agent_action(request: &RemoteAgentActionRequest) -> Resul
 pub async fn run_remote_agent_action(
     app: &AppHandle,
     request: RemoteAgentActionRequest,
-) -> Result<(), String> {
+) -> Result<Option<wardian_core::models::chat::ChatInputReceipt>, String> {
     validate_remote_agent_action(&request)?;
     match request.action.as_str() {
         "send_prompt" => {
@@ -1705,20 +1677,27 @@ pub async fn run_remote_agent_action(
         }
         "pause" => {
             let state = app.state::<AppState>();
-            crate::commands::agent::pause_agent(request.target, state, app.clone()).await
+            crate::commands::agent::pause_agent(request.target, state, app.clone())
+                .await
+                .map(|_| None)
         }
         "resume" => {
             let state = app.state::<AppState>();
-            crate::commands::agent::resume_agent(request.target, state, app.clone()).await
+            crate::commands::agent::resume_agent(request.target, state, app.clone())
+                .await
+                .map(|_| None)
         }
         "clear" => {
             let state = app.state::<AppState>();
             crate::commands::agent::clear_agent_session(request.target, None, state, app.clone())
                 .await
+                .map(|_| None)
         }
         "kill" => {
             let state = app.state::<AppState>();
-            crate::commands::agent::kill_agent(request.target, state, app.clone()).await
+            crate::commands::agent::kill_agent(request.target, state, app.clone())
+                .await
+                .map(|_| None)
         }
         _ => Err("unsupported_remote_agent_action".to_string()),
     }
@@ -1731,7 +1710,7 @@ async fn send_remote_prompt_with_idempotency(
     prompt: &str,
     input_mode: MessageInputMode,
     inbox_item_id: Option<&str>,
-) -> Result<(), String> {
+) -> Result<Option<wardian_core::models::chat::ChatInputReceipt>, String> {
     if let Some(item_id) = inbox_item_id {
         let mut persisted = crate::utils::queue::load_items();
         let index = persisted
@@ -1764,7 +1743,7 @@ async fn send_remote_prompt_with_idempotency(
             .and_then(serde_json::Value::as_str)
         {
             return if sent_choice == prompt {
-                Ok(())
+                Ok(None)
             } else {
                 Err("provider_choice_already_sent".to_string())
             };
@@ -1802,7 +1781,7 @@ async fn send_remote_prompt_with_idempotency(
                     .expect("queue item object")
                     .remove("provider_choice_pending");
                 crate::utils::queue::save_items(&persisted)?;
-                Ok(())
+                Ok(None)
             }
             Err(error) => {
                 if error.retry_safe {
@@ -1818,10 +1797,16 @@ async fn send_remote_prompt_with_idempotency(
         };
     }
 
-    crate::control::deliver_prompt_to_agent(Some(app), state, target, prompt, input_mode)
-        .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    crate::control::deliver_prompt_to_agent_with_chat_receipt(
+        Some(app),
+        state,
+        target,
+        prompt,
+        input_mode,
+    )
+    .await
+    .map(|detail| detail.chat_receipt)
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -2949,7 +2934,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_agent_chat_transcript_returns_normalized_messages() {
+    async fn remote_agent_chat_page_reads_published_messages_without_capture() {
         let _home = TestWardianHome::new_async().await;
         let state = AppState::new();
         let agent = test_agent("agent-1", "CoderOne", "Coder", "Idle");
@@ -2966,15 +2951,28 @@ mod tests {
         }
         insert_agent(&state, agent).await;
 
-        let transcript = remote_agent_chat_transcript(&state, "agent-1")
+        crate::commands::chat::archive_agent_chat_events_for_state(&state, "agent-1")
             .await
-            .expect("remote chat transcript");
+            .expect("background publishes the watch transcript");
+        let _blocked_capture = state.conversation_capture_policy_lock.lock().await;
+        let page = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            remote_agent_chat_page(&state, "agent-1", None, None, None),
+        )
+        .await
+        .expect("normal read does not await capture")
+        .expect("remote chat page");
 
-        assert!(transcript.iter().any(|event| {
+        assert!(page.events.iter().any(|event| {
             event.kind == wardian_core::models::chat::AgentChatEventKind::Message
                 && event.role == Some(wardian_core::models::chat::AgentChatRole::Assistant)
                 && event.text.as_deref() == Some("Use the shared chat transcript model.")
         }));
+        let unchanged = remote_agent_chat_page(&state, "agent-1", None, Some(page.revision), None)
+            .await
+            .expect("unchanged bounded page");
+        assert!(unchanged.unchanged);
+        assert!(unchanged.events.is_empty());
     }
 
     #[test]
@@ -2997,67 +2995,6 @@ mod tests {
                 "read": true
             })
         ));
-    }
-
-    #[test]
-    fn remote_agent_chat_pages_keep_the_newest_events_and_a_stable_older_cursor() {
-        let events: Vec<AgentChatEvent> = (1..=85)
-            .map(|sequence| AgentChatEvent {
-                id: format!("event-{sequence}"),
-                session_id: "agent-1".to_string(),
-                provider: "mock".to_string(),
-                kind: wardian_core::models::chat::AgentChatEventKind::Message,
-                role: Some(wardian_core::models::chat::AgentChatRole::Assistant),
-                text: Some(format!("Message {sequence}")),
-                title: None,
-                status: None,
-                turn_id: None,
-                source: None,
-                command: None,
-                exit_code: None,
-                path: None,
-                language: None,
-                created_at: None,
-                sequence: Some(sequence),
-                metadata: serde_json::json!({}),
-            })
-            .collect();
-
-        let latest = page_remote_agent_chat_events(events.clone(), None, 40);
-
-        assert_eq!(latest.events.len(), 40);
-        assert_eq!(
-            latest.events.first().map(|event| event.id.as_str()),
-            Some("event-46")
-        );
-        assert_eq!(
-            latest.events.last().map(|event| event.id.as_str()),
-            Some("event-85")
-        );
-        assert!(latest.has_older);
-        assert_eq!(latest.next_before, Some(45));
-
-        let older = page_remote_agent_chat_events(events.clone(), latest.next_before, 40);
-        assert_eq!(older.events.len(), 40);
-        assert_eq!(
-            older.events.first().map(|event| event.id.as_str()),
-            Some("event-6")
-        );
-        assert_eq!(
-            older.events.last().map(|event| event.id.as_str()),
-            Some("event-45")
-        );
-        assert!(older.has_older);
-        assert_eq!(older.next_before, Some(5));
-
-        let first_page = page_remote_agent_chat_events(events, older.next_before, 40);
-        assert_eq!(first_page.events.len(), 5);
-        assert_eq!(
-            first_page.events.first().map(|event| event.id.as_str()),
-            Some("event-1")
-        );
-        assert!(!first_page.has_older);
-        assert_eq!(first_page.next_before, None);
     }
 
     #[tokio::test]

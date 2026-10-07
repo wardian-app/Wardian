@@ -158,6 +158,6 @@ describe("structuredEditFromEvent", () => {
     expect(edit?.added).toBe(STRUCTURED_EDIT_LINE_LIMIT + 50);
     expect(edit?.truncated).toBe(true);
     expect(edit?.hunks[0].added).toHaveLength(STRUCTURED_EDIT_LINE_LIMIT);
-    expect(structuredEditDiffText(edit!)).toContain("Change truncated");
+    expect(structuredEditDiffText(edit!)).toContain("Change preview truncated");
   });
 });

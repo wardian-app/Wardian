@@ -241,11 +241,17 @@ classify provenance before emitting chat events:
 Some providers, including Claude, encode all three cases in native `user`
 records. Consumers must use the normalized role and provenance metadata rather
 than the raw provider role or text to identify prompts and turn boundaries.
-Desktop and remote chat both use the shared backend transcript loader and
-archive replay path, so provider provenance must be corrected there once. The
+Desktop and remote Chat use the shared bounded `load_agent_chat_page` reader;
+full archive replay remains an explicit inspection operation. Provider
+provenance is corrected by the backend owner before display publication. The
 replay boundary also canonicalizes legacy archived roles from their persisted
 `input_origin` metadata; historical archive files do not need a destructive
 rewrite to display the corrected classification.
+
+Page headers retain bounded semantic tool inputs and write evidence. Large
+arguments, patches and artifact output are published through scoped lazy detail
+references, with each detail response limited to 16 KiB. Structured edit totals
+describe the original input; clipped patch totals remain explicitly partial.
 
 Archive replay retains canonical IDs and can enrich provenance from a current,
 source-bound native observation. Capture-enabled repair persists verified

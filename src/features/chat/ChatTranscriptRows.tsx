@@ -1,7 +1,8 @@
 import { Check, ChevronRight } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import type { AgentChatEvent, AgentChatRole } from "../../types";
+import type { AgentChatDetail, AgentChatEvent, AgentChatRole } from "../../types";
+import { utf8Window } from "./chatReadState";
 import {
   isGenericActivityTitle,
   isLowSignalActivityTitle,
@@ -69,6 +70,7 @@ export interface ChatTranscriptRowProps {
   onOpenFile?: (path: string) => void;
   /** The one approval a response can still reach; null when none is pending. */
   liveApprovalId?: string | null;
+  onLoadDetail?: (reference: string) => Promise<AgentChatDetail>;
 }
 
 /** Dispatches a derived transcript row to its renderer. */
@@ -80,11 +82,12 @@ export function ChatTranscriptRow({
   onApprovalSubmit,
   onOpenFile,
   liveApprovalId = null,
+  onLoadDetail,
 }: ChatTranscriptRowProps) {
   if (row.kind === "turn_change_summary") return <TurnChangeCard onOpenFile={onOpenFile} row={row} />;
-  if (row.kind === "work_group") return <WorkGroupRow agentIsWorking={agentIsWorking} row={row} />;
-  if (row.event.kind === "memory") return <MemoryRow event={row.event} linkHandling={linkHandling} />;
-  return row.event.kind === "message" ? (
+  const content = row.kind === "work_group" ? <WorkGroupRow agentIsWorking={agentIsWorking} row={row} />
+    : row.event.kind === "memory" ? <MemoryRow event={row.event} linkHandling={linkHandling} />
+    : row.event.kind === "message" ? (
     <MessageRow event={row.event} linkHandling={linkHandling} />
   ) : (
     <ActivityEvent
@@ -96,6 +99,77 @@ export function ChatTranscriptRow({
       onApprovalSubmit={onApprovalSubmit}
     />
   );
+  const events = row.kind === "work_group" ? row.entries.flatMap((entry) => [entry.primary_event, ...entry.merged_result_events]) : [row.event];
+  return <>
+    {content}
+    {onLoadDetail ? events.filter((event) => typeof event.metadata.chat_detail_ref === "string" || event.metadata.chat_body_pending === true || event.metadata.chat_body_unavailable === true).map((event) => (
+      <ChatBodyDetails event={event} key={typeof event.metadata.chat_display_key === "string" ? event.metadata.chat_display_key : event.id} load={onLoadDetail} />
+    )) : null}
+  </>;
+}
+
+function ChatBodyDetails({ event, load }: { event: AgentChatEvent; load: (reference: string) => Promise<AgentChatDetail> }) {
+  const unavailable = event.metadata.chat_body_unavailable === true;
+  const initial = typeof event.metadata.chat_detail_ref === "string" ? event.metadata.chat_detail_ref : null;
+  const [next, setNext] = useState(initial);
+  const [text, setText] = useState("");
+  const [opened, setOpened] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const scope = useRef(0);
+  const identity = useRef(event.id);
+  const binding = useRef(event.metadata.chat_body_binding);
+  const consumed = useRef(0);
+  const skip = useRef(0);
+  const latestInitial = useRef(initial);
+  latestInitial.current = initial;
+  useEffect(() => {
+    const aliased = identity.current !== event.id;
+    const changedBody = binding.current !== undefined && event.metadata.chat_body_binding !== undefined && binding.current !== event.metadata.chat_body_binding;
+    if (aliased || changedBody) {
+      scope.current += 1;
+      if (changedBody) { setText(""); consumed.current = 0; }
+      skip.current = consumed.current;
+      setNext(initial); setError(""); setBusy(false);
+    }
+    identity.current = event.id; binding.current = event.metadata.chat_body_binding;
+  }, [event.id, event.metadata.chat_body_binding, initial]);
+  useEffect(() => () => { scope.current += 1; }, []);
+  // A header whose body was initially pending becomes openable after a later
+  // checkpoint without discarding chunks already requested by the reader.
+  useEffect(() => { if (consumed.current === 0 && initial) setNext(initial); }, [initial]);
+  const readMore = async () => {
+    if (!next || busy) return;
+    const epoch = scope.current;
+    setBusy(true); setOpened(true); setError("");
+    try {
+      const chunk = await load(next);
+      if (scope.current !== epoch || chunk.event_id !== event.id) return;
+      // Keep a bounded body window. Each click reads the next chunk rather
+      // than retaining an arbitrarily large tool payload in the browser.
+      const bytes = new TextEncoder().encode(chunk.text);
+      let omit = Math.min(skip.current, bytes.length);
+      while (omit < bytes.length && (bytes[omit] & 0xc0) === 0x80) omit += 1;
+      skip.current = Math.max(0, skip.current - omit);
+      const addition = new TextDecoder().decode(bytes.subarray(omit));
+      consumed.current += bytes.length - omit;
+      setText((current) => utf8Window(current + addition, 64 * 1024));
+      setNext(chunk.next);
+    } catch (reason) {
+      if (scope.current === epoch) {
+        setError(String(reason));
+        if (latestInitial.current !== next) { skip.current = consumed.current; setNext(latestInitial.current); }
+      }
+    }
+    finally { if (scope.current === epoch) setBusy(false); }
+  };
+  return <div className="px-3 py-1 text-xs text-muted-neutral">
+    {opened && (text || !unavailable) ? <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words text-primary">{text || "Details are updating."}</pre> : null}
+    {next ? <button type="button" className="underline hover:text-primary" disabled={busy} onClick={() => void readMore()}>{busy ? "Loading details..." : text ? "Read more" : "Show full details"}</button>
+      : !unavailable && event.metadata.chat_body_pending === true ? <span>Details are updating.</span> : null}
+    {unavailable ? <span role="status" className="ml-2">Saved details are unavailable.</span>
+      : error ? <span role="status" className="ml-2">Details are updating. Retry when history is ready.</span> : null}
+  </div>;
 }
 
 function MemoryRow({
@@ -449,6 +523,7 @@ export function ActivityRow({
         output={output}
         presentation={presentation}
         structuredEdit={structuredEdit}
+        inputTruncated={event.metadata.chat_tool_input_truncated === true}
       />
     </article>
   );
@@ -474,12 +549,14 @@ export function ToolBody({
   output,
   presentation,
   structuredEdit,
+  inputTruncated = false,
 }: {
   block: ActivityBlockModel;
   content: string;
   output: string;
   presentation: ToolPresentation;
   structuredEdit?: StructuredEdit | null;
+  inputTruncated?: boolean;
 }) {
   const safeContent = content.trimEnd() || "No activity content";
 
@@ -519,6 +596,7 @@ export function ToolBody({
 
   if (presentation.kind === "diff") {
     const stats = diffStats((output || safeContent).trimEnd());
+    if (inputTruncated) stats.counts_unknown = true;
     // An edit tool's *result* is usually a plain acknowledgement carrying no
     // patch at all. Framing that as a diff panel headed "Patch +0 -0" invents
     // a change summary for text that has none.
@@ -529,6 +607,7 @@ export function ToolBody({
       <div className="mt-2 rounded border border-wardian-light bg-[var(--color-wardian-sidebar-primary)]" data-testid="tool-diff-panel">
         <div className="flex flex-wrap items-center gap-2 border-b border-wardian-light px-2 py-1 text-[11px] leading-4 text-muted-neutral">
           <span>{stats.files.length > 0 ? `${stats.files.length} ${stats.files.length === 1 ? "file" : "files"}` : "Patch"}</span>
+          {inputTruncated ? <span>Input preview</span> : null}
           {stats.counts_unknown && stats.added === 0 && stats.removed === 0 ? (
             // Every named file is header-only, so the patch supplies no counts
             // at all. "+0 -0" would be a claim about the file's size.

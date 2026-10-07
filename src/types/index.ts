@@ -3,7 +3,17 @@ export type UserFacingProviderName = "claude" | "codex" | "gemini" | "antigravit
 
 export type GridCardDisplayMode = "terminal" | "chat";
 
-export interface PromptDeliveryDetail {
+/** Optional identity of the generated row committed by this submission. */
+export interface ChatInputReceipt {
+    chat_event_id: string;
+    chat_agent_id: string;
+    chat_conversation_id: string;
+    chat_source_epoch: string | null;
+}
+
+export type ChatReceiptFields = Partial<{ [K in keyof ChatInputReceipt]: ChatInputReceipt[K] | null }>;
+
+export interface PromptDeliveryDetail extends ChatReceiptFields {
     uuid: string;
     name: string;
     provider: string;
@@ -62,6 +72,31 @@ export interface AgentChatEvent {
     created_at: string | null;
     sequence: number | null;
     metadata: Record<string, unknown>;
+}
+
+export interface AgentChatPage {
+    session_id: string;
+    conversation_id: string | null;
+    generation: string | null;
+    source_epoch: string | null;
+    revision: string;
+    events: AgentChatEvent[];
+    next_before: string | null;
+    unchanged: boolean;
+    reset: boolean;
+    progress: string;
+    aliases: { observation_id: string; canonical_id: string }[];
+    removed_ids: string[];
+    detail: AgentChatDetail | null;
+    bytes_read: number;
+    records_decoded: number;
+}
+
+export interface AgentChatDetail {
+    event_id: string;
+    text: string;
+    next: string | null;
+    complete: boolean;
 }
 
 export interface ProviderReadiness {

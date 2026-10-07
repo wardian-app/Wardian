@@ -47,6 +47,12 @@
       ]
     },
     {
+      "reason": "Public full-transcript IPC retained for explicit full-history compatibility and existing native diagnostic and stale-session assertions. Normal Chat uses bounded pages; these native callers can migrate separately without changing that reader contract.",
+      "entries": [
+        "tauri-command::load_agent_chat_transcript"
+      ]
+    },
+    {
       "reason": "Commands with no caller outside unit tests, E2E IPC mocks, or the docs app mock; triage in #1536.",
       "entries": [
         "tauri-command::deploy_skill",
@@ -74,7 +80,6 @@
         "src-tauri/src/state/agent_watch.rs::WatchCursor.sequence",
         "src-tauri/src/state/artifact_runtime.rs::ArtifactRuntime.pending_count",
         "src-tauri/src/state/browser_session/actor.rs::BrowserSessionEvent.browser_id",
-        "src-tauri/src/state/capture_policy_gate.rs::CapturePolicyGate.try_lock",
         "src-tauri/src/state/conversation_archive/mod.rs::ConversationArchiveState.append_chat_events",
         "src-tauri/src/state/conversation_archive/mod.rs::ConversationArchiveState.append_delivered_input",
         "src-tauri/src/state/conversation_archive/mod.rs::ConversationArchiveState.append_lifecycle_boundary",

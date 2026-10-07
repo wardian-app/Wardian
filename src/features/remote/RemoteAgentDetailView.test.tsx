@@ -1,8 +1,8 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { RemoteAgentSummary } from "../../types";
+import type { AgentChatEvent, AgentChatPage, RemoteAgentSummary } from "../../types";
 import { RemoteAgentDetailView } from "./RemoteAgentDetailView";
 import { remoteClient } from "./remoteClient";
 import { useRemoteStore } from "./useRemoteStore";
@@ -16,6 +16,31 @@ const agent: RemoteAgentSummary = {
   status: "Idle",
   latest_text: null,
 };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+function chatMessage(id: string, text: string, sequence: number, sessionId = "agent-1"): AgentChatEvent {
+  return {
+    id, session_id: sessionId, provider: "codex", kind: "message", role: "assistant", text,
+    title: null, status: null, turn_id: null, source: null, command: null, exit_code: null,
+    path: null, language: null, created_at: null, sequence, metadata: {},
+  };
+}
+
+function olderReadPage(overrides: Partial<AgentChatPage> = {}): AgentChatPage {
+  return {
+    session_id: "agent-1", conversation_id: "saved-conversation", generation: "saved-generation",
+    source_epoch: null, revision: "saved-revision", events: [], next_before: "saved-before",
+    unchanged: false, reset: false, progress: "indexing", aliases: [], removed_ids: [], detail: null,
+    bytes_read: 16097, records_decoded: 7,
+    ...overrides,
+  };
+}
 
 class DetailSocket {
   readyState = WebSocket.OPEN;
@@ -96,7 +121,13 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
       terminalLoading: false,
       terminalError: "",
       chatEvents: [],
+      activeAgentId: "agent-1",
       chatLoading: false,
+      chatLoadingOlder: false,
+      chatBrowsingOlder: false,
+      chatHasOlder: false,
+      chatNextBefore: null,
+      chatPage: null,
       chatError: "",
       sending: false,
       remoteTerminalFontSize: 11,
@@ -104,8 +135,145 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it.each(["ready", "indexing"] as const)("shows a Chat-local failure and retry without a misleading %s transcript", async (progress) => {
+    const retry = vi.fn().mockResolvedValue(undefined);
+    const originalRefresh = useRemoteStore.getState().refreshActiveAgentChat;
+    useRemoteStore.setState({ activeAgentViewMode: "chat", chatPage: olderReadPage({ progress, next_before: null }),
+      chatError: "Chat history did not finish loading.", refreshActiveAgentChat: retry });
+    try {
+      render(<RemoteAgentDetailView agent={agent} />);
+      expect(screen.getByRole("alert")).toHaveTextContent("Chat history did not finish loading.");
+      expect(screen.queryByText("No chat transcript yet.")).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Retry Chat" }));
+      expect(retry).toHaveBeenCalledTimes(1);
+    } finally {
+      act(() => useRemoteStore.setState({ refreshActiveAgentChat: originalRefresh }));
+    }
+  });
+
+  it("shows an empty transcript after a successful ready response", () => {
+    useRemoteStore.setState({ activeAgentViewMode: "chat", chatPage: olderReadPage({ progress: "ready", next_before: null }) });
+    render(<RemoteAgentDetailView agent={agent} />);
+    expect(screen.getByText("No chat transcript yet.")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry Chat" })).not.toBeInTheDocument();
+  });
+
+  it("shows indexing progress while an empty read is unfinished", () => {
+    useRemoteStore.setState({ activeAgentViewMode: "chat", chatPage: olderReadPage({ progress: "indexing", next_before: null }) });
+    render(<RemoteAgentDetailView agent={agent} />);
+    expect(screen.getByRole("status")).toHaveTextContent("History is updating.");
+    expect(screen.queryByText("No chat transcript yet.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("retains loaded rows and retry when Chat fails", () => {
+    const recent = chatMessage("retained", "Retained reply", 1);
+    useRemoteStore.setState({ activeAgentViewMode: "chat", chatEvents: [recent],
+      chatPage: olderReadPage({ progress: "ready", next_before: null, events: [recent] }),
+      chatError: "Chat history did not finish loading." });
+    render(<RemoteAgentDetailView agent={agent} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Chat history did not finish loading.");
+    expect(screen.getByText("Retained reply")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry Chat" })).toBeEnabled();
+    expect(screen.queryByText("No chat transcript yet.")).not.toBeInTheDocument();
+  });
+
+  it.each(["empty indexing page", "failed read"])("preserves the prepended viewport through %s continuation", async (outcome) => {
+    if (outcome === "empty indexing page") vi.useFakeTimers();
+    const firstOlder = deferred<AgentChatPage>();
+    const secondOlder = deferred<AgentChatPage>();
+    const recent = chatMessage("recent-row", "recent row", 2);
+    const load = vi.spyOn(remoteClient, "loadAgentChatPage")
+      .mockReturnValueOnce(firstOlder.promise).mockReturnValueOnce(secondOlder.promise);
+    useRemoteStore.setState({ status: "ready", activeAgentViewMode: "chat", chatEvents: [recent],
+      chatPage: olderReadPage({ events: [recent] }), chatHasOlder: true, chatNextBefore: "saved-before" });
+    render(<RemoteAgentDetailView agent={agent} />);
+    const scroll = screen.getByRole("region", { name: "Coder chat" });
+    const row = scroll.querySelector<HTMLElement>("[data-chat-row-key]")!;
+    vi.spyOn(row, "getBoundingClientRect").mockImplementation(() => ({
+      top: screen.queryByText("older row") ? 350 : 50,
+      bottom: screen.queryByText("older row") ? 370 : 70,
+    } as DOMRect));
+    scroll.scrollTop = 100;
+    fireEvent.scroll(scroll);
+    fireEvent.scroll(scroll);
+    expect(load).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      if (outcome === "failed read") firstOlder.reject(new Error("Older read failed"));
+      else firstOlder.resolve(olderReadPage());
+    });
+    expect(scroll.scrollTop).toBe(100);
+    if (outcome === "failed read") expect(screen.getByRole("alert")).toHaveTextContent("Chat could not be loaded.");
+    if (outcome === "empty indexing page") {
+      expect(useRemoteStore.getState().chatLoadingOlder).toBe(true);
+      await act(async () => { await vi.advanceTimersByTimeAsync(750); });
+    } else fireEvent.scroll(scroll);
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(load.mock.calls[1]?.slice(0, 2)).toEqual(["agent-1", "saved-before"]);
+    await act(async () => secondOlder.resolve(olderReadPage({
+      events: [chatMessage("older-row", "older row", 1)], next_before: null, progress: "ready",
+    })));
+    expect(screen.getByText("older row")).toBeInTheDocument();
+    expect(scroll.scrollTop).toBe(400);
+    vi.useRealTimers();
+  });
+
+  it("allows another older scroll after an inactive-agent attempt skips without a loading transition", async () => {
+    const recent = chatMessage("recent-row", "recent row", 2);
+    const load = vi.spyOn(remoteClient, "loadAgentChatPage").mockResolvedValue(olderReadPage({
+      events: [chatMessage("older-row", "older row", 1)], next_before: null,
+    }));
+    useRemoteStore.setState({ activeAgentViewMode: "chat", activeAgentId: null, chatEvents: [recent],
+      chatPage: olderReadPage({ events: [recent] }), chatHasOlder: true, chatNextBefore: "saved-before" });
+    render(<RemoteAgentDetailView agent={agent} />);
+    const scroll = screen.getByRole("region", { name: "Coder chat" });
+    scroll.scrollTop = 100;
+    await act(async () => { fireEvent.scroll(scroll); });
+    expect(load).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Load older transcript" })).toBeEnabled();
+    act(() => useRemoteStore.setState({ activeAgentId: "agent-1" }));
+    await act(async () => { fireEvent.scroll(scroll); });
+    expect(load).toHaveBeenCalledOnce();
+    expect(screen.getByText("older row")).toBeInTheDocument();
+  });
+
+  it("ignores an old agent's older completion while the new agent is preserving its viewport", async () => {
+    const firstOlder = deferred<AgentChatPage>();
+    const secondOlder = deferred<AgentChatPage>();
+    const load = vi.spyOn(remoteClient, "loadAgentChatPage")
+      .mockReturnValueOnce(firstOlder.promise).mockReturnValueOnce(secondOlder.promise);
+    const recent = chatMessage("recent-row", "recent row", 2);
+    useRemoteStore.setState({ activeAgentViewMode: "chat", chatEvents: [recent],
+      chatPage: olderReadPage({ events: [recent] }), chatHasOlder: true, chatNextBefore: "saved-before" });
+    const { rerender } = render(<RemoteAgentDetailView agent={agent} />);
+    fireEvent.scroll(screen.getByRole("region", { name: "Coder chat" }));
+    const nextRecent = chatMessage("next-recent", "next recent", 2, "agent-2");
+    act(() => useRemoteStore.setState({ activeAgentId: "agent-2", chatLoadingOlder: false, chatEvents: [nextRecent],
+      chatPage: olderReadPage({ session_id: "agent-2", events: [nextRecent] }) }));
+    rerender(<RemoteAgentDetailView agent={{ ...agent, session_id: "agent-2", session_name: "Next" }} />);
+    const scroll = screen.getByRole("region", { name: "Next chat" });
+    const row = scroll.querySelector<HTMLElement>("[data-chat-row-key]")!;
+    vi.spyOn(row, "getBoundingClientRect").mockImplementation(() => ({
+      top: screen.queryByText("next older") ? 350 : 50,
+      bottom: screen.queryByText("next older") ? 370 : 70,
+    } as DOMRect));
+    scroll.scrollTop = 100;
+    fireEvent.scroll(scroll);
+    await act(async () => firstOlder.resolve(olderReadPage()));
+    expect(scroll.scrollTop).toBe(100);
+    fireEvent.scroll(scroll);
+    expect(load).toHaveBeenCalledTimes(2);
+    await act(async () => secondOlder.resolve(olderReadPage({
+      session_id: "agent-2", next_before: null, events: [chatMessage("next-older", "next older", 1, "agent-2")],
+    })));
+    expect(screen.getByText("next older")).toBeInTheDocument();
+    expect(scroll.scrollTop).toBe(400);
   });
 
   it("uses the desktop Antigravity terminal palette and contrast floor on mobile", async () => {

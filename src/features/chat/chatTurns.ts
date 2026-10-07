@@ -169,7 +169,8 @@ function patchChanges(patch: string): TurnChangeFile[] {
 function changesFromEvent(event: AgentChatEvent): TurnChangeFile[] {
   const patch = toolPatchText(event) ?? (isDiffEvent(event) ? (event.text ?? "") : "");
   const patched = patch ? patchChanges(patch) : [];
-  if (patched.length > 0) return patched;
+  if (patched.length > 0) return event.metadata.chat_tool_input_truncated === true
+    ? patched.map((file) => ({ ...file, counts_unknown: true })) : patched;
 
   const edit = structuredEditFromEvent(event);
   if (edit?.file_path) {
@@ -329,6 +330,6 @@ export function withTurnChangeSummaries(
 }
 
 export function chatTranscriptRowKey(row: ChatTranscriptRowModel): string {
-  if (row.kind === "event") return row.event.id;
+  if (row.kind === "event") return typeof row.event.metadata.chat_display_key === "string" ? row.event.metadata.chat_display_key : row.event.id;
   return row.id;
 }

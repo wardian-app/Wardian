@@ -55,6 +55,10 @@ pub(crate) async fn admit_background_capture(
     }
     // The live roster cannot replace this witness between validation and
     // admission. The coordinator never acquires the roster in reverse order.
+    let force = force
+        || state
+            .conversation_archive
+            .has_deferred_chat_summaries(&request.session_id);
     state.background_capture.admit(request, force)
 }
 
