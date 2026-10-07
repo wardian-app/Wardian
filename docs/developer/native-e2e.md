@@ -123,6 +123,8 @@ The path must be under the OS temp directory and begin with
 `wardian-e2e-native`, or sit under `.tmp/e2e-native` in the repository. The
 harness resets the home it is given, and that guard is what stops a reset from
 reaching an unrelated directory.
+The harness checks this guard before acquiring the home lock. Rejecting an
+unsafe path leaves its directories, contents, and existing lock unchanged.
 
 A run writes `.native-e2e-lock/owner.json` into its home and removes it on exit.
 The harness snapshots the lock object returned by `acquireHomeLock(...).lock`.
