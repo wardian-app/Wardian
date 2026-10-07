@@ -194,6 +194,38 @@ test('protected target ancestor and child both deny claim and prune', (t) => {
   }
 });
 
+for (const boundary of ['claim', 'ancestor', 'descendant']) {
+  test(`protected claim ${boundary} denies ownership before any write`, (t) => {
+    const f = fixture(t);
+    const protectedPath = boundary === 'claim' ? f.layout.claim : boundary === 'ancestor'
+      ? path.dirname(f.layout.claim) : path.join(f.layout.claim, 'owner.json');
+    const manifest = path.join(f.root, 'protected-claim.json');
+    writeFileSync(manifest, JSON.stringify({ files: [{ path: protectedPath }] }));
+    const env = { ...f.env, WARDIAN_PROTECTED_INPUT_MANIFESTS: JSON.stringify([manifest]) };
+    assert.throws(() => claimTarget(f.layout, env), /Rust cache claim overlaps a protected input/);
+    assert.equal(existsSync(f.layout.target), false, 'The target was not created');
+    assert.equal(existsSync(path.dirname(f.layout.claim)), false, 'The claim parent was not created');
+  });
+}
+
+test('owned release preserves a claim that becomes protected', (t) => {
+  const f = fixture(t);
+  const env = { ...f.env };
+  const lease = claimTarget(f.layout, env);
+  const ownerPath = path.join(f.layout.claim, 'owner.json');
+  const originalOwner = readFileSync(ownerPath);
+  const manifest = path.join(f.root, 'protected-owner.json');
+  writeFileSync(manifest, JSON.stringify({ files: [{ path: ownerPath }] }));
+  env.WARDIAN_PROTECTED_INPUT_MANIFESTS = JSON.stringify([manifest]);
+  try {
+    assert.throws(() => lease.release(), /Rust cache claim overlaps a protected input/);
+    assert.deepEqual(readFileSync(ownerPath), originalOwner);
+  } finally {
+    delete env.WARDIAN_PROTECTED_INPUT_MANIFESTS;
+    if (existsSync(f.layout.claim)) lease.release();
+  }
+});
+
 test('prune skips claimed outputs and removes only positively marked inactive generation', (t) => {
   const f = fixture(t);
   const lease = claimTarget(f.layout, f.env);
