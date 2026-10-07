@@ -5,6 +5,11 @@ worktree a distinct central compiler target. Use the launcher for ordinary
 checks and tests; a source checkout's running release artifacts are never a
 compiler target for a worktree.
 
+Protected-input manifests cover both the compiler target and its sibling claim
+directory. Overlapping protection rejects a claim before either directory is
+created. Cleanup and owned release recheck protection; a claim that becomes
+protected remains intact rather than being removed.
+
 ```bash
 npm run rust:check
 npm run rust:test
