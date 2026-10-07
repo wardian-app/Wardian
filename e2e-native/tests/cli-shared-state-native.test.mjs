@@ -619,10 +619,11 @@ test("native CLI control commands operate through the running app", { timeout: 1
       "action_required",
       "--timeout",
       "30s",
-      "--field",
-      "status",
     ]);
-    assert.equal(waitResult.stdout, "action_required\n");
+    const waited = JSON.parse(waitResult.stdout);
+    assert.equal(waited.schema, 1);
+    assert.equal(waited.agent.uuid, source.uuid);
+    assert.equal(waited.agent.status, "action_required");
 
     const updatedWorkspace = path.join(harness.repoRoot, "crates");
     const updateResult = runCliOk(cliPath, harness, [
@@ -687,11 +688,21 @@ test("native CLI control commands operate through the running app", { timeout: 1
     await setAgentStatus(session.driver, cloneAgent.uuid, "action_required");
     await waitForCliField(cliPath, harness, CONTROL_CLONE_NAME, "status", "action_required");
 
-    await watchStep(harness, `Killing ${CONTROL_CLONE_NAME} through the CLI`);
-    runCliOk(cliPath, harness, ["agent", "kill", CONTROL_CLONE_NAME, "--confirm"]);
-    const killedShow = runCli(cliPath, harness, ["agent", CONTROL_CLONE_NAME]);
-    assert.equal(killedShow.status, 2, killedShow.stderr);
-    assert.match(killedShow.stderr, /"code":"not_found"/);
+    await watchStep(harness, `Deleting ${CONTROL_CLONE_NAME} through the CLI`);
+    const deleteResult = runCliOk(cliPath, harness, [
+      "agent",
+      "delete",
+      CONTROL_CLONE_NAME,
+      "--confirm",
+      CONTROL_CLONE_NAME,
+      "--force",
+    ]);
+    const deleted = JSON.parse(deleteResult.stdout);
+    assert.equal(deleted.deleted, true);
+    assert.equal(deleted.target, CONTROL_CLONE_NAME);
+    const deletedShow = runCli(cliPath, harness, ["agent", CONTROL_CLONE_NAME]);
+    assert.equal(deletedShow.status, 2, deletedShow.stderr);
+    assert.match(deletedShow.stderr, /"code":"not_found"/);
 
 
   });
