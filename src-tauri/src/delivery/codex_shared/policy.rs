@@ -112,6 +112,40 @@ impl ExpectedPolicy {
         self.thread_params(json!({"threadId": thread_id}))
     }
 
+    /// Observe the saved reviewer only during private initial preparation.
+    /// Ordinary cold background loads keep the explicit captured reviewer.
+    pub(super) fn initial_resume_params(&self, thread_id: &str) -> Value {
+        let mut params = self.background_resume_params(thread_id);
+        params
+            .as_object_mut()
+            .expect("thread parameters")
+            .remove("approvalsReviewer");
+        params
+    }
+
+    pub(super) fn initial_reviewer_needs_update(
+        &self,
+        response: &Value,
+    ) -> Result<bool, CodexSharedError> {
+        self.validate_fields(response, true)?;
+        if !self
+            .0
+            .iter()
+            .any(|(key, value)| key == "approvalsReviewer" && value == "user")
+        {
+            return Err(CodexSharedError::unsupported(
+                "initial checkpoint requires captured user reviewer",
+            ));
+        }
+        match response["approvalsReviewer"].as_str() {
+            Some("user") => Ok(false),
+            Some("auto_review") => Ok(true),
+            _ => Err(CodexSharedError::unsupported(
+                "saved Codex reviewer is unsupported for initial checkpoint",
+            )),
+        }
+    }
+
     fn thread_params(&self, mut params: Value) -> Value {
         for (key, value) in &self.0 {
             match key.as_str() {
@@ -149,7 +183,18 @@ impl ExpectedPolicy {
     }
 
     pub(super) fn validate(&self, response: &Value) -> Result<(), CodexSharedError> {
+        self.validate_fields(response, false)
+    }
+
+    fn validate_fields(
+        &self,
+        response: &Value,
+        omit_reviewer: bool,
+    ) -> Result<(), CodexSharedError> {
         for (key, expected) in &self.0 {
+            if omit_reviewer && key == "approvalsReviewer" {
+                continue;
+            }
             let expected = if key == "sandbox" {
                 match expected.as_str() {
                     "danger-full-access" => "dangerFullAccess",

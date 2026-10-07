@@ -10,6 +10,8 @@ use tokio::process::{Child, Command};
 
 #[path = "attachment.rs"]
 mod attachment;
+#[path = "initial_checkpoint.rs"]
+pub(super) mod initial_checkpoint;
 #[path = "policy.rs"]
 mod policy;
 #[cfg(test)]
@@ -42,6 +44,7 @@ pub(super) struct OwnerStartTimings {
     proxy_connect: std::time::Duration,
     initialize: std::time::Duration,
     launch_model: std::time::Duration,
+    reviewer_checkpoint: std::time::Duration,
     total: std::time::Duration,
 }
 
@@ -213,7 +216,7 @@ impl OwnerStartTimings {
 habitat_ms={} codex_home_ms={} compact_home_ms={} codex_projection_ms={} messaging_ms={} \
             socket_recovery_ms={} launch_config_ms={} child_spawn_ms={} \
             stderr_diagnostic={} socket_wait_ms={} \
-            socket_wait_diagnostic={} socket_wait_resources={} proxy_connect_ms={} initialize_ms={} launch_model_ms={}",
+            socket_wait_diagnostic={} socket_wait_resources={} proxy_connect_ms={} initialize_ms={} launch_model_ms={} reviewer_checkpoint_ms={}",
             self.total.as_millis(),
             self.quiescent.as_millis(),
             self.habitat_workspace.as_millis(),
@@ -231,6 +234,7 @@ habitat_ms={} codex_home_ms={} compact_home_ms={} codex_projection_ms={} messagi
             self.proxy_connect.as_millis(),
             self.initialize.as_millis(),
             self.launch_model.as_millis(),
+            self.reviewer_checkpoint.as_millis(),
         ));
     }
 }
@@ -280,7 +284,8 @@ fn prepare_owner_habitat(
     Ok((habitat, codex_home))
 }
 
-/// Launch identity only. The ordinary TUI must be the first thread loader.
+/// Launch identity only. After any private saved-reviewer checkpoint is evicted,
+/// the ordinary TUI cold-loads the thread before attachment is published.
 #[derive(Clone)]
 pub struct CodexTuiAttachment {
     pub expected_resume_id: Option<String>,
@@ -341,6 +346,13 @@ impl CodexSharedOwner {
         let mut args = crate::providers::CodexProvider::new()
             .shared_server_args(&spec.config)
             .map_err(CodexSharedError::unsupported)?;
+        let needs_reviewer_checkpoint = !spec.config.is_off && spec.config.resume_session.is_some();
+        if needs_reviewer_checkpoint {
+            // Observe eviction before the ordinary TUI's cold load. Set the
+            // resource-lifetime option before this fresh daemon; the owned
+            // launch overlay restores it after attachment or cleanup.
+            args.extend(["-c".into(), "thread_unload_delay_secs=0".into()]);
+        }
         let mut policy = policy::ExpectedPolicy::from_server_args(&args)?;
         let permission_args = policy.tui_permission_args()?;
         let wardian_home = crate::utils::get_wardian_home()
@@ -498,6 +510,7 @@ impl CodexSharedOwner {
             ).await?;
             timings.proxy_connect = proxy_connect_at.elapsed();
             connected = Some(client.clone());
+            let initialization_deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
             let initialize = async {
                 let initialize_at = std::time::Instant::now();
                 let observed_version = if spec.config.is_off {
@@ -509,7 +522,7 @@ impl CodexSharedOwner {
                 attachment::require_local_version(&observed_version)?;
                 attachment::child_alive(&mut child)?;
                 owned_socket = Some(attachment::OwnedSocket::capture(&socket)?);
-                // Fresh private owner: the interactive TUI alone may load a thread.
+                // No unrelated live thread may share this private startup owner.
                 attachment::require_empty(&client).await?;
                 let launch_model_at = std::time::Instant::now();
                 model_override = super::launch_model::resolve_launch_model(
@@ -518,8 +531,20 @@ impl CodexSharedOwner {
                 ).await?;
                 timings.launch_model = launch_model_at.elapsed();
                 policy.expect_launch_model(model_override.as_deref())?;
-                // Read-only preference lookup must not take the first-loader role.
+                // Read-only preference lookup must not load a thread.
                 attachment::require_empty(&client).await?;
+                if needs_reviewer_checkpoint {
+                    let checkpoint_at = std::time::Instant::now();
+                    let result = initial_checkpoint::prepare_saved_resume(
+                        &client, &policy,
+                        spec.config.resume_session.as_deref().expect("saved resume"),
+                        &mut || attachment::child_alive(&mut child),
+                        initialization_deadline,
+                        &observed_version,
+                    ).await;
+                    timings.reviewer_checkpoint = checkpoint_at.elapsed();
+                    result?;
+                }
                 if spec.config.is_off {
                     let response = policy.load_background_thread(
                         &client, spec.config.resume_session.as_deref(), &spec.workspace,
