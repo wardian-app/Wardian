@@ -19,27 +19,29 @@ async fn shared_dispatch_disconnect_before_ack_persists_uncertainty_without_repl
 
 async fn assert_shared_submission_failure(after_write: bool, fail_persistence: bool) {
     let _lock = crate::utils::wardian_test_env_lock_async().await;
+    // Cold schema creation and admission are fixture setup, so their disk cost
+    // must not consume the bounded dispatch and no-replay assertion window.
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("state.db");
+    wardian_core::db::init_db_at_path(&db_path).unwrap();
+    let broker = NativeDeliveryBroker::new();
+    let record = broker
+        .admit(NativeDeliveryAdmission {
+            interaction_id: "shared-failure".into(),
+            message_id: "native-message-id".into(),
+            target_agent_id: "agent".into(),
+            sender_agent_id: None,
+            provider: "codex".into(),
+            generation: 7,
+            operation: NativeMessageOperation::StartTurn,
+            caller_idempotency_key: None,
+            parent_interaction_id: None,
+            deadline_at: None,
+            body: "literal ordinary input".into(),
+        })
+        .await
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        let temp = tempfile::tempdir().unwrap();
-        let db_path = temp.path().join("state.db");
-        wardian_core::db::init_db_at_path(&db_path).unwrap();
-        let broker = NativeDeliveryBroker::new();
-        let record = broker
-            .admit(NativeDeliveryAdmission {
-                interaction_id: "shared-failure".into(),
-                message_id: "native-message-id".into(),
-                target_agent_id: "agent".into(),
-                sender_agent_id: None,
-                provider: "codex".into(),
-                generation: 7,
-                operation: NativeMessageOperation::StartTurn,
-                caller_idempotency_key: None,
-                parent_interaction_id: None,
-                deadline_at: None,
-                body: "literal ordinary input".into(),
-            })
-            .await
-            .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("ws://{}", listener.local_addr().unwrap());
         let (server_error_tx, mut server_error_rx) =
