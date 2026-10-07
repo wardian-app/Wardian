@@ -10,6 +10,11 @@ mod storage;
 #[cfg(test)]
 mod tests;
 mod tree;
+mod upstream;
+#[cfg(test)]
+mod upstream_tests;
+
+pub(crate) use upstream::resolve_upstream_home;
 
 pub(crate) use cleanup::cleanup_managed_home;
 pub(crate) use habitat_alias::{

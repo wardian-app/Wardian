@@ -232,10 +232,29 @@ as a successful answer.
 
 Codex must run with the real project workspace as its effective working root. Wardian now enforces this by passing `--cd <real workspace>` for interactive spawn, headless resume, and bootstrap session creation.
 
+Normal managed provider-home preparation, periodic index publication, and
+rollout lookup use the Wardian application's standard `CODEX_HOME` when it names an existing
+directory. Wardian canonicalizes that explicit upstream directory. An unset or
+empty value retains the native user profile's `.codex` default. An invalid
+explicit home fails preparation and index publication; rollout lookup returns
+no source instead of falling back to the user profile.
+
 Wardian still keeps Codex state in a per-agent habitat:
 
 - final agent home: `.wardian/agents/<wardian-agent-id>/habitat/.codex`
 - legacy fallback bootstrap home: `.wardian/provider-bootstrap/codex/session-*/.codex`
+
+During normal managed startup, each provider child receives its own managed home
+as `CODEX_HOME`. Its active
+and archived session links and Wardian's central index, history, and lock writes
+use the same application-selected upstream home. With an explicit home, Wardian
+checks both existing session links before migrating either namespace. A foreign
+link or projection failure stops preparation. The default home retains optional
+projection and its existing local-tree fallback.
+
+The unchanged legacy bootstrap fallback still imports from the native user
+profile's `.codex` home. The explicit-upstream guarantee covers the normal managed
+preparation, periodic publication, and rollout lookup paths described above.
 
 The critical rule is: **trust should bind to the real workspace, not to the bootstrap directory or habitat path**.
 
