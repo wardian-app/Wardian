@@ -27,6 +27,66 @@ and examples. Documentation tests run separately because `--all-targets` does
 not include them. The command-contract tests in `src/verify-ci.test.ts` pin
 this coverage and exercise invalid arguments and workflow declarations.
 
+## Protected compiler inputs
+
+Schedulers can supply `WARDIAN_PROTECTED_INPUT_MANIFESTS` as a JSON array of
+absolute manifest paths. Each manifest is either an array of records with an
+absolute `path`, or an object containing that array in `files`. Length and hash
+fields remain the scheduler's integrity contract. The admission guard uses
+only the explicit path inventory; it does not discover protected artifacts.
+
+Normal `verify:ci` execution checks admission immediately before spawning a
+Cargo step. It rejects any protected path within
+the compiler target or intermediate build tree. Existing ancestors resolve
+through filesystem symlinks and Windows junctions; missing suffixes are
+appended without creating directories. Windows comparisons ignore case and
+containment uses path segments. A target containing ordinary reusable output
+is allowed when it is disjoint, or when no inventory is supplied.
+
+The shared entry `scripts/compiler-input-guard.mjs` also admits a wrapper's
+actual executable, argument vector, environment and working directory. It
+prints a JSON admission result and exits nonzero on rejection. It never starts
+Cargo. With the carrier set, a POSIX wrapper can call:
+
+```sh
+node scripts/compiler-input-guard.mjs --cwd '<absolute-workspace-path>' --program cargo -- check --workspace
+```
+
+PowerShell, with the wrapper's selected `$program` and `$arguments`:
+
+```powershell
+$guardArguments = @('--cwd', $sourceRoot, '--program', $program, '--') + $arguments
+& node (Join-Path $sourceRoot 'scripts/compiler-input-guard.mjs') @guardArguments
+if ($LASTEXITCODE -ne 0) { throw 'Compiler protected-input admission rejected.' }
+```
+
+The carrier must be set before admission and inherited by `verify:ci` children.
+The scheduler owns inventory completeness and must keep the admitted argv,
+environment, cwd, paths and links stable until compiler launch. This is a
+prelaunch path check, not a sandbox for build scripts or arbitrary file writes.
+
+Root derivation supports literal Cargo target arguments, target/build environment
+settings, hierarchical Cargo config and simple `--config` path settings, using
+[Cargo's path bases](https://doc.rust-lang.org/cargo/reference/config.html#config-relative-paths).
+A workspace-root default is supported. Unknown placement fails before spawn:
+this includes ambiguous paths, config includes or unsupported TOML, compiler
+wrappers/extra flags, build-directory templates, conflicting special target
+environment overrides and member/package defaults without an explicit target.
+Without an inventory, existing execution behavior is unchanged. The focused
+Node suite in `scripts/compiler-input-guard.test.mjs` is also run by
+`src/verify-ci.test.ts` during frontend unit verification.
+
+For `npm run check:rust-deadcode`, the guard derives the metadata target from
+the original cwd/environment/config without invoking metadata. The subsequent
+check explicitly passes `--target-dir <metadata-target-dir>`;
+`<metadata-target-dir>/rust-deadcode/<hash>` is its copied source cwd. Thus the
+metadata target tree covers both compiler output and the source copy. The same
+guard checks the actual metadata exec, admits the returned target before
+source-copy writes, and checks the actual Cargo check argv/environment/config
+from its copied cwd immediately before dispatch. Unknown placement fails closed
+at each boundary. Ordinary known disjoint metadata targets are admitted, and
+no-inventory behavior is unchanged.
+
 ## Dead-code gates
 
 Two [knip](https://knip.dev) passes over `src/` run in the frontend job:

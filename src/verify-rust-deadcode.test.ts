@@ -1,4 +1,5 @@
-import { mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -234,11 +235,56 @@ describe('Rust dead-code gate', () => {
     }
   });
 
+  it('returns a physical copy cwd when the compiler target uses an alias', () => {
+    const targetDir = mkdtempSync(path.join(os.tmpdir(), 'rust-deadcode-target-'));
+    const aliasDir = mkdtempSync(path.join(os.tmpdir(), 'rust-deadcode-alias-'));
+    const targetAlias = path.join(aliasDir, 'target');
+    try {
+      symlinkSync(targetDir, targetAlias, 'junction');
+      const copyRoot = prepareCopyRoot(targetAlias, 'physical');
+      expect(copyRoot).toBe(path.join(realpathSync.native(targetDir), 'rust-deadcode', 'physical'));
+      expect(copyRoot).toBe(realpathSync.native(copyRoot));
+      expect(copyRoot).not.toBe(path.join(targetAlias, 'rust-deadcode', 'physical'));
+      // The same target still exists through the caller's short/aliased spelling.
+      expect(realpathSync.native(targetAlias)).toBe(realpathSync.native(targetDir));
+    } finally {
+      rmSync(aliasDir, { recursive: true, force: true });
+      rmSync(targetDir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform !== 'win32')('expands a Windows short target path for the copy cwd', ({ skip }) => {
+    const targetDir = mkdtempSync(path.join(os.tmpdir(), 'rust-deadcode-long-target-'));
+    try {
+      // Query only this fixture. Reject cmd metacharacters before interpolation.
+      expect(targetDir).not.toMatch(/["%!\r\n&|<>^]/);
+      const command = spawnSync('cmd.exe', ['/d', '/s', '/c',
+        `for %I in ("${targetDir}") do @echo %~sI`,
+      ], { encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: true });
+      expect(command.error).toBeUndefined();
+      expect(command.status).toBe(0);
+      const shortTarget = command.stdout.trim();
+      expect(path.isAbsolute(shortTarget)).toBe(true);
+      expect(shortTarget).not.toContain('"');
+      const physicalTarget = realpathSync.native(targetDir);
+      if (shortTarget.toLowerCase() === physicalTarget.toLowerCase()) {
+        skip(); // This volume does not provide an 8.3 alias for the fixture.
+        return;
+      }
+      expect(realpathSync.native(shortTarget)).toBe(physicalTarget);
+      const copyRoot = prepareCopyRoot(shortTarget, 'short-path');
+      expect(copyRoot).toBe(path.join(physicalTarget, 'rust-deadcode', 'short-path'));
+      expect(copyRoot).toBe(realpathSync.native(copyRoot));
+    } finally {
+      rmSync(targetDir, { recursive: true, force: true });
+    }
+  });
+
   it('refuses a copy root that is a link or junction to another directory', () => {
     const targetDir = mkdtempSync(path.join(os.tmpdir(), 'rust-deadcode-target-'));
     const checkout = mkdtempSync(path.join(os.tmpdir(), 'rust-deadcode-checkout-'));
     try {
-      expect(prepareCopyRoot(targetDir, 'plain')).toBe(path.join(path.resolve(targetDir), 'rust-deadcode', 'plain'));
+      expect(prepareCopyRoot(targetDir, 'plain')).toBe(path.join(realpathSync.native(targetDir), 'rust-deadcode', 'plain'));
       symlinkSync(checkout, path.join(targetDir, 'rust-deadcode', 'linked'), 'junction');
       expect(() => prepareCopyRoot(targetDir, 'linked')).toThrow('refusing to use');
 

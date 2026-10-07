@@ -72,15 +72,56 @@ with a recoverable error. The failure must not consume unrelated future input.
 Recovery repairs durable archive observations and their artifacts; it does not
 repair historical user data or invent missing source identity.
 
+The shared JSONL append helper opens the destination before encoding one record
+and its newline into a byte buffer, then writes and explicitly flushes that row.
+Serialization failure leaves existing rows intact. Memory grows with one encoded
+record, including oversized records; it does not grow with the archive. Atomic
+JSONL rewrites stream through an 8 KiB buffer, explicitly flush before the existing
+file fsync, close the temporary file, and then replace the destination. A failed
+encoding, write or flush must not be acknowledged as successful publication.
+
+These helpers preserve serialization, row order and newline framing. They add no
+append fsync, cursor transaction or archive ownership rule. Provider acquisition
+still compares its expected cursor before archive publication and commits the
+next cursor only after publication succeeds. Retries repair durable observations
+and deduplicate them under the existing provenance rules.
+
 ## Startup restoration and configuration ownership
 
 Rename, reorder, and worktree enable/assign/disable acquire the cross-process
-agent roster barrier before locking the in-memory agent map and display order;
-file-lock waits run on the blocking pool. Persistence within these mutations
-uses the already-held barrier. Other roster paths can use a nonblocking
+agent roster barrier before locking the in-memory agent map and display order.
+Admission attempts run on the blocking pool and retry asynchronously, so a
+contended file lock cannot occupy the worker needed by the admitted writer.
+Reorder, worktree updates, pause snapshots, and background Codex identity
+publication capture current configuration after admission, release global
+roster locks, and perform disk I/O on the blocking pool. The physical operation
+owns the barrier and its caller's lifecycle context until completion, including
+when the awaiting caller is cancelled. Background identity publication commits
+the saved resume identity before updating memory under that same exclusion.
+Pause preserves best-effort write errors; background publication returns a
+write error without publishing the identity in memory.
+
+These paths use the already-held barrier. Other roster paths can use a nonblocking
 try/retry, releasing global locks before a contested wait. No roster path may
 wait for the barrier while holding the agent map or order: that can deadlock
 against a concurrent rename.
+
+Runtime identity watchers also use admitted live-roster persistence. Delete
+acquires the barrier before capturing its deletion snapshot and retains it
+through strict filesystem publication, SQLite deletion and cache/map publication.
+An owned continuation retains the per-agent lifecycle guard, exact persisted
+lease acquisition and heartbeat after caller cancellation. The target's config
+`Arc` identifies its incarnation; a stopped runtime generation is insufficient.
+SQLite work runs on the blocking pool while its owned mutation gate remains
+held through cache invalidation. A filesystem or database failure recaptures the
+current live roster under the same barrier and verifies the same incarnation and
+lease before compensation. Map/order/config locks are released before physical
+I/O. Compensation never reuses a pre-admission or pre-delete snapshot.
+This sequencing does not establish crash atomicity
+between the filesystem and SQLite.
+After both durable stores commit, local publication completes under the retained
+lifecycle guard; a later heartbeat failure cannot leave a deleted incarnation
+advertised in the live roster.
 
 Startup restoration uses the same per-agent lifecycle gate as configuration
 updates, pause, and resume. It claims the gate before selecting a saved config

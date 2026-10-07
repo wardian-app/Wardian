@@ -3,7 +3,13 @@ import { Bot, CheckCheck, ChevronDown, ChevronUp, Filter, GitBranch, Inbox, Term
 import type { QueueItem } from "../../types";
 import { parseQueueActionChoices, type QueueActionChoice } from "../queue/actionChoices";
 import { ProviderQuestionDetails } from "../queue/ProviderQuestionDetails";
-import { QUEUE_TONE_CLASSES, queueItemIsAgentEvent, queueItemLabel, queueItemTone } from "../queue/queuePresentation";
+import {
+  QUEUE_TONE_CLASSES,
+  queueCardBodyText,
+  queueItemIsAgentEvent,
+  queueItemLabel,
+  queueItemTone,
+} from "../queue/queuePresentation";
 import { isClearableLegacyCompletion, providerChoiceAcknowledgementUnresolved } from "../queue/queueTriage";
 import { useLazyQueueItems } from "../queue/useLazyQueueItems";
 import { useRemoteStore } from "./useRemoteStore";
@@ -69,7 +75,7 @@ function RemoteInboxCard({ item, onAction, onOpenAgent, onSendAgentPrompt, onRef
     : item.status === "failed" && item.error ? item.error : item.summary;
   const Icon = queueItemIsAgentEvent(item) ? Bot : GitBranch;
   const classes = QUEUE_TONE_CLASSES[queueItemTone(item)];
-  const isExpandable = Boolean(bodyText && (bodyText.length > 220 || bodyText.split("\n").length > 4));
+  const { expandedText, isExpandable } = queueCardBodyText(item, bodyText);
   const summaryId = `remote-queue-item-summary-${item.id}`;
   const isApprovalRequest = item.type === "approval_request";
   const isPendingApproval = Boolean(item.automation_approval || item.notification_status === "awaiting_reply");
@@ -162,7 +168,7 @@ function RemoteInboxCard({ item, onAction, onOpenAgent, onSendAgentPrompt, onRef
           {bodyText && (
             <div className="mt-2 space-y-2">
               <p id={summaryId} data-testid={summaryId} className={`whitespace-pre-wrap break-words text-[13px] leading-5 text-muted ${isExpandable && !isExpanded ? "line-clamp-4" : isExpandable ? "max-h-80 overflow-y-auto pr-2" : ""}`}>
-                {bodyText}
+                {isExpanded ? expandedText : bodyText}
               </p>
               {isExpandable && (
                 <button type="button" aria-controls={summaryId} aria-expanded={isExpanded} aria-label={isExpanded ? "Collapse summary" : "Show full summary"} onClick={(event) => { event.stopPropagation(); setIsExpanded((value) => !value); }} className="inline-flex items-center gap-1 rounded-md text-[11px] font-semibold text-muted-neutral transition-colors hover:text-bright-neutral">

@@ -39,6 +39,7 @@ import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
+import { cargoInvocation, withRustCache } from "./rust-build-cache.mjs";
 
 import {
   IDENT,
@@ -123,7 +124,8 @@ function pruneBaseline(text, stale) {
 // Workspace model
 
 function cargoMetadata() {
-  const output = execFileSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], {
+  const { args } = cargoInvocation(["metadata", "--no-deps", "--format-version", "1"], { cwd: REPO_ROOT });
+  const output = execFileSync("cargo", args, {
     cwd: REPO_ROOT,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
@@ -256,6 +258,9 @@ function resolveInsideCopy(copyRoot, file) {
  * Create `<target-dir>/rust-deadcode/<hash>` and prove it is a plain
  * directory where it claims to be. A link or junction at either component
  * could point the copy at the checkout, so it fails the run instead.
+ * Return the verified physical cwd while retaining the caller's target spelling
+ * for compiler output, which may need a shorter path on Windows.
+ * Native resolution also expands Windows short path components.
  */
 export function prepareCopyRoot(targetDirectory, hash) {
   const base = path.join(path.resolve(targetDirectory), "rust-deadcode");
@@ -269,11 +274,11 @@ export function prepareCopyRoot(targetDirectory, hash) {
       throw new Error(`refusing to use ${directory}: it is a link, not a directory`);
     }
   }
-  const expected = path.join(realpathSync(targetDirectory), "rust-deadcode", hash);
-  const actual = realpathSync(copyRoot);
+  const expected = path.join(realpathSync.native(targetDirectory), "rust-deadcode", hash);
+  const actual = realpathSync.native(copyRoot);
   const same = process.platform === "win32" ? expected.toLowerCase() === actual.toLowerCase() : expected === actual;
   if (!same) throw new Error(`refusing to use ${copyRoot}: it resolves to ${actual}`);
-  return copyRoot;
+  return actual;
 }
 
 function syncCopy(copyRoot, files, transform) {
@@ -365,6 +370,9 @@ function runRustcPass(metadata, workspace, options) {
   const isCopied = (resolved) =>
     copiedRoots.some((dir) => resolved === dir || resolved.startsWith(dir + path.sep));
   const hash = createHash("sha1").update(workspaceRoot).digest("hex").slice(0, 12);
+  // Source-copy writes are inside the metadata target tree. Admit that exact
+  // tree before creating directories or syncing rewritten files into it.
+  cargoInvocation(["check", "--target-dir", metadata.target_directory], { cwd: REPO_ROOT });
   const copyRoot = prepareCopyRoot(metadata.target_directory, hash);
 
   const files = listCopiedFiles(memberDirs);
@@ -392,7 +400,8 @@ function runRustcPass(metadata, workspace, options) {
     metadata.target_directory,
   ];
   if (options.verbose) console.log(`rustc pass: ${written} file(s) synced into ${copyRoot}`);
-  const result = spawnSync("cargo", args, {
+  const invocation = cargoInvocation(args, { cwd: copyRoot });
+  const result = spawnSync("cargo", invocation.args, {
     cwd: copyRoot,
     encoding: "utf8",
     maxBuffer: 512 * 1024 * 1024,
@@ -699,6 +708,10 @@ function checkableOnThisPlatform(entry, workspace) {
 }
 
 export function main(argv = process.argv.slice(2)) {
+  return withRustCache(() => mainWithCache(argv));
+}
+
+function mainWithCache(argv) {
   const options = parseArgs(argv);
   const started = Date.now();
   const timings = [];

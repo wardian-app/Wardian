@@ -615,7 +615,7 @@ pub async fn run_headless_with_options(
     super::apply_managed_cli_path_to_process(&mut cmd);
     super::apply_process_provider_runtime_env(provider_name, &mut cmd)?;
     if let Some(config) = effective_provider_config.as_ref() {
-        for (key, value) in super::worktree_build_env(config) {
+        for (key, value) in super::worktree_build_env(config)? {
             cmd.env(key, value);
         }
     }

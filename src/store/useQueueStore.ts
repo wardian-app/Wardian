@@ -46,12 +46,6 @@ interface QueueState {
   appendAgentEvent: (sessionId: string, data: Record<string, unknown>, agentName?: string) => void;
   appendAgentTerminalOutput: (sessionId: string, data: string, provider?: string) => void;
   hasAgentBufferedContent: (sessionId: string) => boolean;
-  flushAgentCompletion: (
-    sessionId: string,
-    agentName: string,
-    summary?: string | null,
-    evidenceId?: string,
-  ) => void;
   applyPersistedAgentCompletion: (
     item: QueueItem,
   ) => void;
@@ -497,44 +491,6 @@ export const useQueueStore = create<QueueState>((set, get) => ({
 
   hasAgentBufferedContent(sessionId) {
     return (get()._agentBuffers[sessionId] ?? "").trim().length > 0;
-  },
-
-  flushAgentCompletion(sessionId, agentName, summaryOverride, evidenceId) {
-    const { items } = get();
-    const summary = summaryOverride?.trim();
-    if (!summary) return;
-    const recent = items.find(
-      (i) => i.type === "agent_completed"
-        && i.agent_session_id === sessionId
-        && (
-          evidenceId !== undefined
-            ? i.evidence_id === evidenceId
-            : Date.now() - i.timestamp < DEDUP_WINDOW_MS
-        ),
-    );
-    if (recent) return;
-
-    const item: QueueItem = {
-      id: evidenceId
-        ? `agent-completed:${sessionId}:${evidenceId}`
-        : crypto.randomUUID(),
-      type: "agent_completed",
-      timestamp: Date.now(),
-      read: false,
-      agent_session_id: sessionId,
-      agent_name: agentName,
-      summary: boundSummary(summary),
-      evidence_id: evidenceId,
-      evidence_source: evidenceId ? "provider_runtime" : undefined,
-    };
-
-    queueMutationRevision += 1;
-    set((s) => {
-      const next = [item, ...s.items];
-      persistItems(next, s._readNotificationIds, s._dismissedAutomationRuns);
-      notifyForItem(item, s.preferences);
-      return { items: next, _agentBuffers: { ...s._agentBuffers, [sessionId]: "" } };
-    });
   },
 
   applyPersistedAgentCompletion(item) {

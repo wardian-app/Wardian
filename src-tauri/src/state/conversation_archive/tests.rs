@@ -3490,6 +3490,311 @@ fn provider_log_cursor_commits_only_after_archive_append_and_rejects_stale_state
     assert_eq!(stale_error.kind(), std::io::ErrorKind::WouldBlock);
 }
 
+#[test]
+fn buffered_jsonl_acquisition_retries_partial_archive_before_cursor_commit() {
+    use crate::commands::provider_log_acquisition::acquire_provider_log_batch;
+
+    let (_guard, temp) = isolated_home();
+    let log_path = temp.path().join("buffered-provider.jsonl");
+    let row = |text: &str, timestamp: &str| {
+        serde_json::json!({"timestamp":timestamp,"type":"response_item",
+            "payload":{"type":"message","role":"assistant","content":text}})
+    };
+    wardian_core::conversations::append_jsonl_record(
+        &log_path,
+        &row("seed λ observation", "2026-06-15T00:00:00.000Z"),
+    )
+    .expect("write seed provider row");
+    let source_key = "codex:session:buffered";
+    let seed = acquire_provider_log_batch("agent-1", "codex", &log_path, source_key, None, true)
+        .expect("acquire seed through production reader");
+    assert_eq!(seed.events.len(), 1);
+    let archive = ConversationArchiveState::default();
+    let context = archive_context("buffered");
+    archive
+        .append_provider_log_batch_with_context(context.clone(), &seed.events, None, &seed.next)
+        .expect("seed archive and cursor");
+    let conversation_id = archive.active_conversation_id_for_test("agent-1").unwrap();
+    let conversation_path = agent_conversation_dir("agent-1", &conversation_id).unwrap();
+    let sources_path = conversation_path.join("sources.jsonl");
+    let saved_sources = temp.path().join("buffered-sources.saved");
+
+    wardian_core::conversations::append_jsonl_record(
+        &log_path,
+        &row(
+            "repair 雪 \"literal\"\nsecond line",
+            "2026-06-15T00:00:01.000Z",
+        ),
+    )
+    .expect("append next provider row");
+    let next = acquire_provider_log_batch(
+        "agent-1",
+        "codex",
+        &log_path,
+        source_key,
+        Some(seed.next.clone()),
+        true,
+    )
+    .expect("acquire next row");
+    assert_eq!(next.events.len(), 1);
+    assert!(next.next.committed_offset > seed.next.committed_offset);
+    let event_id = next.events[0].id.clone();
+
+    std::fs::rename(&sources_path, &saved_sources).expect("retain source snapshot");
+    std::fs::create_dir(&sources_path).expect("obstruct source replacement");
+    archive
+        .append_provider_log_batch_with_context(
+            context.clone(),
+            &next.events,
+            next.previous.as_ref(),
+            &next.next,
+        )
+        .expect_err("partial archive publication must not acknowledge cursor");
+    assert_eq!(
+        archive
+            .provider_log_capture_state("agent-1", source_key)
+            .unwrap(),
+        Some(seed.next.clone()),
+    );
+    let events_path = conversation_path.join("events.jsonl");
+    let partial: Vec<AgentChatEvent> = read_jsonl_records(&events_path).unwrap();
+    assert_eq!(
+        partial.iter().filter(|event| event.id == event_id).count(),
+        1
+    );
+
+    let retry = acquire_provider_log_batch(
+        "agent-1",
+        "codex",
+        &log_path,
+        source_key,
+        archive
+            .provider_log_capture_state("agent-1", source_key)
+            .unwrap(),
+        true,
+    )
+    .expect("reacquire from unchanged committed cursor");
+    assert_eq!(retry.next, next.next);
+    assert_eq!(
+        serde_json::to_value(&retry.events).unwrap(),
+        serde_json::to_value(&next.events).unwrap()
+    );
+    std::fs::remove_dir(&sources_path).expect("remove only the empty test obstruction");
+    std::fs::rename(&saved_sources, &sources_path).expect("restore source snapshot");
+    archive
+        .append_provider_log_batch_with_context(
+            context.clone(),
+            &retry.events,
+            retry.previous.as_ref(),
+            &retry.next,
+        )
+        .expect("repair durable observation before committing cursor");
+    assert_eq!(
+        archive
+            .provider_log_capture_state("agent-1", source_key)
+            .unwrap(),
+        Some(retry.next.clone())
+    );
+
+    let events: Vec<AgentChatEvent> = read_jsonl_records(&events_path).unwrap();
+    let records: Vec<ConversationNarrativeRecord> =
+        read_jsonl_records(&conversation_path.join("conversation.jsonl")).unwrap();
+    let sources: Vec<ConversationSourceRecord> = read_jsonl_records(&sources_path).unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events.iter().filter(|event| event.id == event_id).count(),
+        1
+    );
+    let owners = records
+        .iter()
+        .filter(|record| record.event_refs.contains(&event_id))
+        .collect::<Vec<_>>();
+    assert_eq!(owners.len(), 1);
+    assert_eq!(
+        owners[0].text.as_deref(),
+        Some("repair 雪 \"literal\"\nsecond line")
+    );
+    assert_eq!(owners[0].source_refs.len(), 1);
+    assert!(sources
+        .iter()
+        .any(|source| owners[0].source_refs.contains(&source.source_id)));
+
+    let mut paths = [
+        "events.jsonl",
+        "sources.jsonl",
+        "conversation.jsonl",
+        "turns.jsonl",
+        "manifest.json",
+    ]
+    .map(|name| conversation_path.join(name))
+    .to_vec();
+    paths.push(
+        agent_conversations_dir("agent-1")
+            .unwrap()
+            .join("index.jsonl"),
+    );
+    paths.push(
+        agent_conversations_dir("agent-1")
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("conversation-capture.json"),
+    );
+    let before = paths
+        .iter()
+        .map(|path| std::fs::read(path).unwrap())
+        .collect::<Vec<_>>();
+    archive
+        .append_provider_log_batch_with_context(
+            context.clone(),
+            &retry.events,
+            Some(&retry.next),
+            &retry.next,
+        )
+        .expect("already archived observations deduplicate under current cursor");
+    let stale = archive
+        .append_provider_log_batch_with_context(
+            context,
+            &next.events,
+            next.previous.as_ref(),
+            &next.next,
+        )
+        .expect_err("stale nonempty batch must fail before any archive write");
+    assert_eq!(stale.kind(), std::io::ErrorKind::WouldBlock);
+    for (path, expected) in paths.iter().zip(before) {
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            expected,
+            "retry/stale CAS changed {}",
+            path.display()
+        );
+    }
+    let eof = acquire_provider_log_batch(
+        "agent-1",
+        "codex",
+        &log_path,
+        source_key,
+        Some(retry.next),
+        true,
+    )
+    .expect("read settled cursor");
+    assert!(eof.events.is_empty());
+    assert_eq!(eof.consumed_bytes, 0);
+}
+
+#[test]
+// Run the bounded production-prefix assertions normally; timings are informational.
+fn buffered_jsonl_acquire_archive_prefix_metrics() {
+    use crate::commands::provider_log_acquisition::acquire_provider_log_batch;
+
+    let (_guard, temp) = isolated_home();
+    let log_path = temp.path().join("metrics-provider.jsonl");
+    // Fixture creation is outside either timer. This synthetic prefix exercises
+    // the current acquisition/archive path; it is not the frozen fe3 trace.
+    for seq in 0..450 {
+        wardian_core::conversations::append_jsonl_record(
+            &log_path,
+            &serde_json::json!({
+                "timestamp":format!("2026-06-15T00:{:02}:{:02}.000Z",seq/60,seq%60),
+                "type":"response_item","payload":{"type":"message","role":"assistant",
+                    "content":format!("row-{seq:04} λ 雪 {}","bounded-prefix ".repeat(8))}
+            }),
+        )
+        .unwrap();
+    }
+    let archive = ConversationArchiveState::default();
+    let context = archive_context("metrics");
+    let source_key = "codex:session:metrics";
+    let mut previous = None;
+    let mut acquisition = std::time::Duration::ZERO;
+    let mut publication = std::time::Duration::ZERO;
+    let mut batches = 0;
+    let mut acquired = 0;
+    let mut settled = false;
+    for _ in 0..16 {
+        let started = std::time::Instant::now();
+        let batch = acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &log_path,
+            source_key,
+            previous.clone(),
+            true,
+        )
+        .unwrap();
+        acquisition += started.elapsed();
+        acquired += batch.events.len();
+        let started = std::time::Instant::now();
+        archive
+            .append_provider_log_batch_with_context(
+                context.clone(),
+                &batch.events,
+                batch.previous.as_ref(),
+                &batch.next,
+            )
+            .unwrap();
+        publication += started.elapsed();
+        batches += 1;
+        let more = batch.continue_immediately;
+        previous = Some(batch.next);
+        if !more {
+            settled = true;
+            break;
+        }
+    }
+    assert!(
+        settled,
+        "bounded synthetic prefix did not settle within16 batches"
+    );
+    let committed = archive
+        .provider_log_capture_state("agent-1", source_key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(Some(&committed), previous.as_ref());
+    let conversation_id = archive.active_conversation_id_for_test("agent-1").unwrap();
+    let path = agent_conversation_dir("agent-1", &conversation_id).unwrap();
+    let events: Vec<AgentChatEvent> = read_jsonl_records(&path.join("events.jsonl")).unwrap();
+    let records: Vec<ConversationNarrativeRecord> =
+        read_jsonl_records(&path.join("conversation.jsonl")).unwrap();
+    assert_eq!(events.len(), 450);
+    let messages = records
+        .iter()
+        .filter(|record| record.kind == ConversationRecordKind::Message)
+        .collect::<Vec<_>>();
+    assert_eq!(messages.len(), 450);
+    assert!(messages
+        .first()
+        .unwrap()
+        .text
+        .as_deref()
+        .unwrap()
+        .starts_with("row-0000 λ 雪 "));
+    assert!(messages
+        .last()
+        .unwrap()
+        .text
+        .as_deref()
+        .unwrap()
+        .starts_with("row-0449 λ 雪 "));
+    let snapshot = std::fs::read(path.join("conversation.jsonl")).unwrap();
+    let stale = archive
+        .append_provider_log_batch_with_context(context, &events[..1], None, &committed)
+        .unwrap_err();
+    assert_eq!(stale.kind(), std::io::ErrorKind::WouldBlock);
+    assert_eq!(
+        std::fs::read(path.join("conversation.jsonl")).unwrap(),
+        snapshot
+    );
+    eprintln!(
+        "{}",
+        serde_json::json!({"fixture":"synthetic394_prefix","input_rows":450,
+        "input_bytes":std::fs::metadata(&log_path).unwrap().len(),"batches":batches,
+        "acquired_events":acquired,"archived_events":events.len(),"narrative_rows":records.len(),
+        "committed_offset":committed.committed_offset,"acquisition_ms":acquisition.as_secs_f64()*1000.0,
+        "archive_publication_ms":publication.as_secs_f64()*1000.0,"stale_cas_rejected":true})
+    );
+}
+
 fn isolated_home() -> (tokio::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
     let guard = crate::utils::wardian_test_env_lock();
     let temp = tempfile::tempdir().expect("temp dir");

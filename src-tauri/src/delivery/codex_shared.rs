@@ -195,6 +195,21 @@ pub(crate) struct Observation {
     closed: bool,
     stopped: bool,
     completions: completion::TurnCompletions,
+    finished_turns: std::collections::VecDeque<FinishedTurn>,
+    finished_sequence: u64,
+}
+
+/// Bound on finished turns retained for observers that wake after several
+/// turns were coalesced into one notification.
+const FINISHED_TURN_HISTORY: usize = 64;
+
+/// One turn's terminal outcome, numbered in completion order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FinishedTurn {
+    pub(crate) sequence: u64,
+    pub(crate) turn_id: String,
+    pub(crate) status: String,
+    pub(crate) answer: String,
 }
 
 /// Activity comes from the bound owner's runtime status, with exact turn events
@@ -212,6 +227,17 @@ pub(crate) enum CodexTurnActivity {
 }
 
 impl Observation {
+    /// Finished turns after `cursor`, oldest first; sequences start at 1. A watch receiver sees only
+    /// the latest observation, so this lets it report every turn that
+    /// finished between two wake-ups.
+    pub(crate) fn finished_turns_after(&self, cursor: u64) -> Vec<FinishedTurn> {
+        self.finished_turns
+            .iter()
+            .filter(|turn| turn.sequence > cursor)
+            .cloned()
+            .collect()
+    }
+
     fn has_terminal_evidence(&self, turn_id: &str) -> bool {
         self.completions.contains(turn_id)
             && self
@@ -325,7 +351,18 @@ impl Observation {
                         .remove(turn_id)
                         .unwrap_or_default()
                         .answer();
-                    self.completions.finish(turn_id, status, &answer);
+                    if self.completions.finish(turn_id, status, &answer) {
+                        self.finished_sequence += 1;
+                        self.finished_turns.push_back(FinishedTurn {
+                            sequence: self.finished_sequence,
+                            turn_id: turn_id.to_owned(),
+                            status: status.to_owned(),
+                            answer,
+                        });
+                        if self.finished_turns.len() > FINISHED_TURN_HISTORY {
+                            self.finished_turns.pop_front();
+                        }
+                    }
                 }
             }
             _ => {}
@@ -1444,6 +1481,47 @@ mod tests {
         ] {
             assert!(validate_endpoint(endpoint).is_err(), "{endpoint}");
         }
+    }
+
+    #[test]
+    fn coalesced_observers_recover_every_finished_turn_once() {
+        let mut state = Observation {
+            thread_id: Some("owned".into()),
+            ..Default::default()
+        };
+        let cursor = 0;
+        for (turn, answer) in [("first", "first answer"), ("second", "second answer")] {
+            state.observe(
+                &json!({"method":"turn/started","params":{"threadId":"owned","turn":{"id":turn}}}),
+            );
+            state.observe(&json!({
+                "method":"item/completed",
+                "params":{"threadId":"owned","turnId":turn,"item":{"id":format!("{turn}-item"),"type":"agentMessage","phase":"final_answer","text":answer}}
+            }));
+            state.observe(&json!({"method":"turn/completed","params":{"threadId":"owned","turn":{"id":turn,"status":"completed"}}}));
+        }
+        // A repeated terminal notification is not a second completion.
+        state.observe(&json!({"method":"turn/completed","params":{"threadId":"owned","turn":{"id":"second","status":"completed"}}}));
+
+        // One wake-up after both turns finished still sees the first turn,
+        // although the live activity now only names the second.
+        assert_eq!(state.activity(), CodexTurnActivity::Idle("second".into()));
+        let finished = state.finished_turns_after(cursor);
+        assert_eq!(
+            finished
+                .iter()
+                .map(|turn| (
+                    turn.turn_id.as_str(),
+                    turn.status.as_str(),
+                    turn.answer.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("first", "completed", "first answer"),
+                ("second", "completed", "second answer"),
+            ]
+        );
+        assert!(state.finished_turns_after(finished[1].sequence).is_empty());
     }
 
     #[test]
