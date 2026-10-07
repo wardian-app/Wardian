@@ -55,7 +55,7 @@ pub(super) fn fresh_provider_session_for_initial_capture(
     config: &wardian_core::models::AgentConfig,
     actual_resume: Option<&str>,
 ) -> Option<String> {
-    if !matches!(config.provider.as_str(), "claude" | "codex" | "pi") {
+    if !matches!(config.provider.as_str(), "claude" | "codex" | "pi" | "mock") {
         return None;
     }
     let fresh_provider_session_id = config
@@ -105,7 +105,7 @@ pub(super) fn promote_fresh_provider_session_fields(
     else {
         return false;
     };
-    if !matches!(provider, "claude" | "codex" | "pi") {
+    if !matches!(provider, "claude" | "codex" | "pi" | "mock") {
         config.resume_session = Some(fresh_provider_session_id);
         config.fresh_provider_session_id = None;
         return true;
