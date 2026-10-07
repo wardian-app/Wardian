@@ -432,6 +432,26 @@ through `--ask-for-approval`; **Approve for me** is translated to Codex's
 `--approve-for-me` flag, which selects the workspace-write sandbox and automatic
 review. It is never passed as an argument value to `--ask-for-approval`.
 
+Shared local Codex launches capture effective policy once for their runtime
+generation. The ordinary TUI receives direct `--sandbox` and
+`--ask-for-approval` choices, or the equivalent bypass flag, before its first
+thread load. Cold background starts and resumes send the same captured policy
+as explicit per-thread parameters alongside model and reasoning effort.
+Supported policies explicitly capture the stock `user` approval-review route.
+Both cold background requests carry that reviewer. The ordinary TUI has no
+direct reviewer override; attachment rejects a saved, missing, or mismatched
+reviewer before publishing a capable owner.
+Attachment still rejects missing or mismatched effective policy and unavailable
+direct-input capability. Rejoining a loaded TUI does not rewrite its policy.
+Rejection diagnostics report only whitelisted policy words.
+
+The shared local path currently rejects a non-user approval reviewer,
+including **Approve for me**, before owner home preparation or process
+launch. Its stock preset produces config overrides that prevent ordinary
+local-daemon adoption, and equivalence between Wardian's `guardian_subagent`
+setting and stock automatic review has not been established. The standalone
+`codex exec` adapter retains its preset translation.
+
 Codex emits several different event shapes across live PTY output and persisted session logs.
 
 Wardian treats these as the important lifecycle markers:

@@ -10,6 +10,8 @@ use tokio::process::{Child, Command};
 
 #[path = "attachment.rs"]
 mod attachment;
+#[path = "policy.rs"]
+mod policy;
 #[cfg(test)]
 #[path = "owner_preparation_tests.rs"]
 mod preparation_tests;
@@ -284,6 +286,8 @@ pub struct CodexTuiAttachment {
     pub expected_resume_id: Option<String>,
     /// Effective launch preference; never written into AgentConfig.model.
     pub model_override: Option<String>,
+    /// Captured from this owner's policy before launch; never reread settings.
+    pub(crate) permission_args: Vec<String>,
     pub codex_home: PathBuf,
     pub generation: u64,
 }
@@ -299,7 +303,7 @@ pub struct CodexSharedOwner {
     process_group_id: u32,
     interactive: bool,
     initial_context: String,
-    policy: attachment::ExpectedPolicy,
+    policy: policy::ExpectedPolicy,
     socket: attachment::OwnedSocket,
     launch_config: Mutex<Option<super::launch_config::LaunchConfigGuard>>,
     settings_operation: Mutex<()>,
@@ -332,6 +336,13 @@ impl CodexSharedOwner {
             spec.config.resume_session.as_deref(),
         )
         .map_err(CodexSharedError::unsupported)?;
+        // Capture once for this generation, before any home/overlay/process
+        // side effects. Both clients must use these same effective choices.
+        let mut args = crate::providers::CodexProvider::new()
+            .shared_server_args(&spec.config)
+            .map_err(CodexSharedError::unsupported)?;
+        let mut policy = policy::ExpectedPolicy::from_server_args(&args)?;
+        let permission_args = policy.tui_permission_args()?;
         let wardian_home = crate::utils::get_wardian_home()
             .ok_or_else(|| CodexSharedError::unsupported("Wardian home unavailable"))?;
         // Reports on drop, so every exit from this function is measured.
@@ -358,11 +369,7 @@ impl CodexSharedOwner {
         })?;
         let provider = ProviderFactory::resolve("codex").map_err(CodexSharedError::unsupported)?;
         let (program, prefix_args) = provider.get_executable();
-        let mut args = crate::providers::CodexProvider::new()
-            .shared_server_args(&spec.config)
-            .map_err(CodexSharedError::unsupported)?;
         append_runtime_context(&mut args, spec, &habitat, &codex_home)?;
-        let mut policy = attachment::ExpectedPolicy::from_server_args(&args)?;
         let configured_effort = spec.config.codex_config().reasoning_effort;
         let mut model_override = None;
         let generated_args = args.clone();
@@ -514,11 +521,9 @@ impl CodexSharedOwner {
                 // Read-only preference lookup must not take the first-loader role.
                 attachment::require_empty(&client).await?;
                 if spec.config.is_off {
-                    let response = if let Some(id) = spec.config.resume_session.as_deref().filter(|id| !id.is_empty()) {
-                        client.resume_metadata(policy.background_resume_params(id)).await?
-                    } else {
-                        client.request_with_timeout("thread/start", json!({"cwd":spec.workspace}), STARTUP_TIMEOUT).await?
-                    };
+                    let response = policy.load_background_thread(
+                        &client, spec.config.resume_session.as_deref(), &spec.workspace,
+                    ).await?;
                     policy.validate(&response)?;
                     let thread_id = client.bind(&response)?;
                     if spec.config.resume_session.as_deref().is_some_and(|id| id != thread_id) {
@@ -546,6 +551,7 @@ impl CodexSharedOwner {
                 observed_version,
                 attachment: CodexTuiAttachment {
                     model_override,
+                    permission_args,
                     expected_resume_id: spec
                         .config
                         .resume_session
