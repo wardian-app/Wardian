@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { FROZEN_BIN_DIR, freezeArtifact, freezeRunArtifacts } from "../lib/frozenArtifacts.mjs";
+import { resolveExistingCliPath } from "../lib/native-artifact-resolution.mjs";
 
 function scratch(label) {
   const dir = path.join(os.tmpdir(), `wardian-e2e-native-frozen-${label}-${process.pid}`);
@@ -182,16 +183,18 @@ test("each run freezes into its own home, so runs cannot share a binary", () => 
     const cli = path.join(sharedTarget, "wardian-cli.exe");
     fs.writeFileSync(app, "app build");
     fs.writeFileSync(cli, "cli build");
+    fs.mkdirSync(path.join(sharedTarget, "resources", "bin"), { recursive: true });
+    fs.writeFileSync(path.join(sharedTarget, "resources", "bin", "wardian-cli.exe"), "cli build");
 
-    const a = freezeRunArtifacts({ home: homeA, appPath: app, cliPath: cli });
-    const b = freezeRunArtifacts({ home: homeB, appPath: app, cliPath: cli });
+    const a = freezeRunArtifacts({ home: homeA, appPath: app, cliPath: cli, platform: "win32" });
+    const b = freezeRunArtifacts({ home: homeB, appPath: app, cliPath: cli, platform: "win32" });
 
     assert.notEqual(a.app.path, b.app.path);
     assert.notEqual(a.cli.path, b.cli.path);
     assert.equal(a.app.sha256, b.app.sha256, "same source yields the same identity");
     assert.equal(path.dirname(a.app.path), path.join(homeA, FROZEN_BIN_DIR));
 
-    // The CLI is frozen too: consumers resolve it from the same shared target.
+    // Each app-backed run carries its matching packaged CLI.
     assert.equal(fs.readFileSync(a.cli.path, "utf8"), "cli build");
   } finally {
     for (const dir of [sharedTarget, homeA, homeB]) {
@@ -232,6 +235,83 @@ test("an explicit paired freeze imports only the app runtime and checks the froz
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("default app-backed freeze uses the packaged CLI after a standalone debug build", () => {
+  const root = scratch("default-pair");
+  try {
+    const target = path.join(root, "target");
+    const appDir = path.join(target, "debug");
+    const app = path.join(appDir, "Wardian.exe");
+    const debugCli = path.join(appDir, "wardian-cli.exe");
+    const packaged = path.join(appDir, "resources", "bin", "wardian-cli.exe");
+    fs.mkdirSync(path.dirname(packaged), { recursive: true });
+    fs.mkdirSync(path.join(target, "release"));
+    fs.writeFileSync(app, "debug app");
+    fs.writeFileSync(debugCli, "later standalone debug CLI");
+    fs.writeFileSync(path.join(target, "release", "wardian-cli.exe"), "packaged release CLI");
+    fs.writeFileSync(packaged, "packaged release CLI");
+    const selected = resolveExistingCliPath({ repoRoot: root, env: {}, platform: "win32",
+      spawnSyncImpl: () => ({ status: 0, stdout: JSON.stringify({ target_directory: target }), stderr: "" }),
+    });
+    assert.equal(selected, debugCli, "Standalone Cargo selection retains its debug preference");
+    const frozen = freezeRunArtifacts({ home: path.join(root, "app-home"), appPath: app, cliPath: selected, platform: "win32" });
+    assert.equal(frozen.cli.source, fs.realpathSync(packaged));
+    assert.equal(fs.readFileSync(frozen.cli.path, "utf8"), "packaged release CLI");
+    assert.equal(fs.readFileSync(path.join(frozen.dir, "resources", "bin", "wardian-cli.exe"), "utf8"), "packaged release CLI");
+    fs.writeFileSync(packaged, "a subsequent app build");
+    assert.equal(fs.readFileSync(frozen.cli.path, "utf8"), "packaged release CLI", "Owned bytes survive later staging");
+    const standalone = freezeRunArtifacts({ home: path.join(root, "cli-home"), cliPath: selected });
+    assert.equal(standalone.app, null);
+    assert.equal(standalone.cli.source, debugCli);
+    assert.equal(fs.readFileSync(standalone.cli.path, "utf8"), "later standalone debug CLI");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("default app-backed freeze rejects missing, nonregular and conflicting CLI packages before copying", () => {
+  for (const condition of ["missing", "directory", "broken-link", "conflicting"]) {
+    const root = scratch(`default-pair-${condition}`);
+    try {
+      const appDir = path.join(root, "app");
+      const app = path.join(appDir, "Wardian.exe");
+      const direct = path.join(appDir, "bin", "wardian-cli.exe");
+      const nested = path.join(appDir, "resources", "bin", "wardian-cli.exe");
+      const cargo = path.join(root, "wardian-cli.exe");
+      const home = path.join(root, "home");
+      fs.mkdirSync(appDir);
+      fs.writeFileSync(app, "app");
+      fs.writeFileSync(cargo, "available Cargo CLI is not a fallback");
+      if (condition !== "missing") {
+        fs.mkdirSync(path.dirname(direct), { recursive: true });
+        fs.mkdirSync(path.dirname(nested), { recursive: true });
+        fs.writeFileSync(nested, "packaged CLI");
+        if (condition === "directory") fs.mkdirSync(direct);
+        else if (condition === "broken-link") fs.symlinkSync(path.join(root, "missing-cli.exe"), direct, "file");
+        else fs.writeFileSync(direct, "conflicting packaged CLI");
+      }
+      const expected = condition === "missing" || condition === "broken-link" ? "PAIRED_CLI_PACKAGED_MISSING"
+        : condition === "directory" ? "PAIRED_CLI_PACKAGED_NOT_FILE" : "PAIRED_CLI_PACKAGED_AMBIGUOUS";
+      assert.throws(() => freezeRunArtifacts({ home, appPath: app, cliPath: cargo, platform: "win32" }),
+        (error) => error.code === expected);
+      assert.equal(fs.existsSync(home), false, "Invalid input fails before the run's binaries or runtime are copied");
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
+test("default pair validation rejects stale copied resources", () => {
+  const root = scratch("default-pair-stale-copy");
+  try {
+    const app = path.join(root, "app", "Wardian.exe");
+    const packaged = path.join(root, "app", "resources", "bin", "wardian-cli.exe");
+    const home = path.join(root, "home");
+    fs.mkdirSync(path.dirname(packaged), { recursive: true });
+    fs.writeFileSync(app, "app");
+    fs.writeFileSync(packaged, "original packaged CLI");
+    freezeRunArtifacts({ home, appPath: app, platform: "win32" });
+    fs.writeFileSync(packaged, "newly staged CLI");
+    assert.throws(() => freezeRunArtifacts({ home, appPath: app, platform: "win32" }),
+      (error) => error.code === "PAIRED_CLI_MISMATCH");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("a paired app-file symlink freezes canonical runtime rather than alias-directory files", () => {
   const root = scratch("paired-file-link");
   try {
@@ -261,9 +341,9 @@ test("a paired app-file symlink freezes canonical runtime rather than alias-dire
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("paired POSIX bundles retain the app loader's resource layout in the owned home", () => {
-  for (const platform of ["linux", "darwin"]) {
-    const root = scratch(`paired-${platform}`);
+test("explicit and default POSIX pairs retain the app loader's resource layout in the owned home", () => {
+  for (const [platform, pairedCli] of [["linux", true], ["linux", false], ["darwin", true], ["darwin", false]]) {
+    const root = scratch(`paired-${platform}-${pairedCli}`);
     try {
       const appDir = platform === "darwin" ? path.join(root, "Wardian.app", "Contents", "MacOS")
         : path.join(root, "usr", "bin");
@@ -278,7 +358,7 @@ test("paired POSIX bundles retain the app loader's resource layout in the owned 
       fs.writeFileSync(app, "paired app");
       fs.writeFileSync(cli, "paired cli");
       fs.writeFileSync(path.join(resources, "bin", "wardian-cli"), "paired cli");
-      const frozen = freezeRunArtifacts({ home, appPath: app, cliPath: cli, pairedCli: true, platform });
+      const frozen = freezeRunArtifacts({ home, appPath: app, cliPath: cli, pairedCli, platform });
       const resourceDest = platform === "darwin" ? path.join(home, "Resources") : path.join(home, "lib", "Wardian");
       assert.equal(fs.readFileSync(path.join(resourceDest, "bin", "wardian-cli"), "utf8"), "paired cli");
       assert.equal(fs.readFileSync(frozen.cli.path, "utf8"), "paired cli");

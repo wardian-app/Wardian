@@ -14,6 +14,7 @@ import {
   resolveExistingCliPath,
   resolveExplicitNativeApp,
   resolveNativeAppArtifact,
+  resolvePackagedNativePair,
   resolvePackageEntry,
   resolveCargoTargetDirectory,
 } from "../lib/native-artifact-resolution.mjs";
@@ -170,6 +171,27 @@ test("explicit CLI validates the paired app's supported POSIX resource layouts",
       assert.equal(resolveExistingCliPath({ repoRoot: root, platform, env: pair.env,
         spawnSyncImpl: () => { throw new Error("Explicit pairing must not probe Cargo"); },
       }), fs.realpathSync(pair.cli));
+    } finally { removeFixture(root); }
+  }
+});
+
+test("default packaged pairs support each resource layout and equivalent direct copies", () => {
+  for (const platform of ["win32", "linux", "darwin"]) {
+    const root = fixtureRoot(`default-packaged-${platform}`);
+    try {
+      const pair = pairedFixture(root, platform);
+      const nested = resolvePackagedNativePair({ appPath: pair.app, platform });
+      assert.equal(nested.cliPath, fs.realpathSync(pair.packagedCli));
+      const direct = path.join(nested.resourceDir, "bin", commandName("wardian-cli", platform));
+      fs.mkdirSync(path.dirname(direct), { recursive: true });
+      fs.writeFileSync(direct, "paired cli");
+      assert.equal(resolvePackagedNativePair({ appPath: pair.app, platform }).cliPath, fs.realpathSync(direct));
+      fs.writeFileSync(pair.packagedCli, "conflicting nested CLI");
+      assert.throws(() => resolvePackagedNativePair({ appPath: pair.app, platform }),
+        (error) => error.code === "PAIRED_CLI_PACKAGED_AMBIGUOUS");
+      assert.equal(resolveExistingCliPath({ repoRoot: root, platform, env: pair.env,
+        spawnSyncImpl: () => { throw new Error("An explicit pair must retain its selection without probing Cargo"); },
+      }), fs.realpathSync(pair.cli), "Explicit pairing retains the app loader's direct-path contract");
     } finally { removeFixture(root); }
   }
 });

@@ -52,8 +52,13 @@ For a prebuilt app and its matching CLI, also set `WARDIAN_NATIVE_CLI` and
 `WARDIAN_NATIVE_SKIP_BUILD=1`. The CLI must have the platform executable name
 (`wardian-cli.exe` on Windows, `wardian-cli` on POSIX) and match the CLI in the
 app's packaged resources. Invalid pairs stop before Cargo metadata, isolated
-home preparation, or driver startup. Omitting `WARDIAN_NATIVE_CLI` preserves
-the normal Cargo target selection, including its preference for a debug CLI.
+home preparation, or driver startup. App-backed runs without this override
+freeze the CLI packaged with the app, then validate the copied pair before
+launch. A later Cargo debug build cannot replace an app's staged release CLI.
+Missing, nonregular, or conflicting packaged CLIs fail before copying the run's
+binaries. Equivalent direct and nested copies retain the app loader's direct
+path precedence. CLI-only runs and explicit post-build CLI freezing retain
+Cargo's effective target selection, including its preference for a debug CLI.
 
 POSIX shell:
 

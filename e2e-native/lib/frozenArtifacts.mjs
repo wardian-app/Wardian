@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { validatePairedNativeCli } from "./native-artifact-resolution.mjs";
+import { resolvePackagedNativePair, validatePairedNativeCli } from "./native-artifact-resolution.mjs";
 
 /** Directory inside a run's home holding that run's private binaries. */
 export const FROZEN_BIN_DIR = ".frozen-bin";
@@ -103,11 +103,13 @@ export function freezeArtifact(sourcePath, destDir, { includeRuntime = true } = 
  *
  * The home is per-run and is removed with the run, so the copies are cleaned up
  * without any extra bookkeeping.
- * An explicit pair is checked before freezing and again against the copied
- * packaged CLI. Its CLI source directory never contributes runtime files.
+ * App-backed runs use the app's prelaunch packaged CLI. An explicit pair keeps
+ * its caller-selected CLI and must match that package. Both copied pairs are
+ * checked again; a standalone CLI source never contributes to an app runtime.
  */
 export function freezeRunArtifacts({ home, appPath, cliPath, pairedCli = false, platform = process.platform }) {
-  const pair = pairedCli ? validatePairedNativeCli({ appPath, cliPath, platform }) : null;
+  const pair = pairedCli ? validatePairedNativeCli({ appPath, cliPath, platform })
+    : appPath ? resolvePackagedNativePair({ appPath, platform }) : null;
   const destDir = path.join(home, FROZEN_BIN_DIR);
   const app = freezeArtifact(pair?.appPath ?? appPath, destDir);
   if (pair) {
@@ -136,7 +138,7 @@ export function freezeRunArtifacts({ home, appPath, cliPath, pairedCli = false, 
   // The paired app supplies the runtime. Importing the CLI's adjacent files
   // would silently mix builds even when the CLI executable itself matches.
   const cliSource = pair?.cliPath ?? cliPath;
-  const cli = cliSource ? freezeArtifact(cliSource, destDir, { includeRuntime: !pairedCli }) : null;
+  const cli = cliSource ? freezeArtifact(cliSource, destDir, { includeRuntime: !pair }) : null;
   if (pair) validatePairedNativeCli({ appPath: app.path, cliPath: cli.path, platform });
   return { dir: destDir, app, cli };
 }

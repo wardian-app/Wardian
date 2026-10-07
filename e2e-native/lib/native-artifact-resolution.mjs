@@ -77,6 +77,38 @@ export function validatePairedNativeCli({ appPath, cliPath, platform = process.p
   return { appPath: app, cliPath: cli, resourceDir, bundledCliPath };
 }
 
+/**
+ * Bind an app-backed run to the CLI its app will install before launching it.
+ * A later standalone Cargo build can differ from the CLI staged for the app.
+ * Equivalent direct/nested copies retain the loader's direct-path precedence;
+ * conflicting copies cannot establish one qualified default pair.
+ */
+export function resolvePackagedNativePair({ appPath, platform = process.platform }) {
+  const app = canonicalRegularFile(appPath, "PACKAGED_APP");
+  const resourceDir = appResourceDirectory(app, platform);
+  const expectedName = commandName("wardian-cli", platform);
+  const candidates = [path.join(resourceDir, "bin", expectedName),
+    path.join(resourceDir, "resources", "bin", expectedName)].filter((candidate) => {
+    try { fs.lstatSync(candidate); return true; } catch (error) {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return false;
+      throw error;
+    }
+  });
+  if (!candidates.length) {
+    throw new NativeArtifactResolutionError("The app's packaged CLI is missing; an app-backed run cannot use a Cargo or PATH fallback.", {
+      code: "PAIRED_CLI_PACKAGED_MISSING",
+    });
+  }
+  const packaged = candidates.map((candidate) => canonicalRegularFile(candidate, "PAIRED_CLI_PACKAGED"));
+  const hashes = new Set(packaged.map((candidate) => createHash("sha256").update(fs.readFileSync(candidate)).digest("hex")));
+  if (hashes.size !== 1) {
+    throw new NativeArtifactResolutionError("The app's direct and nested packaged CLIs differ; its default CLI pair is ambiguous.", {
+      code: "PAIRED_CLI_PACKAGED_AMBIGUOUS",
+    });
+  }
+  return validatePairedNativeCli({ appPath: app, cliPath: packaged[0], platform });
+}
+
 /** An explicit paired CLI is read-only input and must never trigger a Cargo probe or build. */
 function resolveExplicitNativeCli({ repoRoot, env = process.env, platform = process.platform }) {
   if (!Object.prototype.hasOwnProperty.call(env, "WARDIAN_NATIVE_CLI")) return null;
