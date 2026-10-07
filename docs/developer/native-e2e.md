@@ -4,6 +4,10 @@ Wardian uses a native Tauri/WebDriver harness for tests that must exercise real 
 
 ## Setup
 
+Use Node.js 24 LTS for the native suite. Canonical state evidence checks use
+the built-in `node:sqlite` module, which is unavailable in Node.js 20. The
+nightly workflow verifies SQLite support before building the app.
+
 Run the cross-platform setup command:
 
 ```bash
