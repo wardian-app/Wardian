@@ -611,7 +611,7 @@ pub async fn ensure_user_terminal(
     let (existing_master, current_session_id) = {
         let mut session = state.user_terminal.lock().await;
         if session.as_ref().is_some_and(user_terminal_exited) {
-            session.take();
+            UserTerminalSession::take_for_replacement(&mut session).await?;
         }
 
         if let Some(terminal) = session.as_ref() {
@@ -714,7 +714,7 @@ pub async fn restart_user_terminal(
 ) -> Result<String, String> {
     {
         let mut session = state.user_terminal.lock().await;
-        session.take();
+        UserTerminalSession::take_for_replacement(&mut session).await?;
     }
     ensure_user_terminal(cols, rows, state, app).await
 }

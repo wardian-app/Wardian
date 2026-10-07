@@ -62,6 +62,11 @@ app termination closes them and stops their members. Failed containment or
 thread identity checks reject the launch and join only the retained child
 handle. Managed launches fail closed if the outer app job cannot be installed.
 
+Windows user-terminal Restart and automatic replacement after PTY exit also
+verify the original child, retained job members, and empty job before removing
+the old session. A stop error or cancellation retains that session and prevents
+replacement. PTY output EOF alone does not prove that its descendants exited.
+
 The outer app job permits explicit breakaway for updater handoff. Ordinary
 owned descendants cannot use that exception because their nested job forbids
 breakaway. External applications and updater handoffs bypass the managed
