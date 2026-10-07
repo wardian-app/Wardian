@@ -25,6 +25,7 @@ mod final_items;
 mod launch_config;
 mod launch_model;
 mod owner;
+use owner::initial_checkpoint;
 mod proxy;
 #[cfg(test)]
 mod startup_tests;
@@ -380,6 +381,8 @@ pub struct CodexSharedClient {
     observation: watch::Sender<Observation>,
     settings_sequence: Arc<AtomicU64>,
     settings_notifications: broadcast::Sender<CodexSettingsNotification>,
+    initial_notifications: broadcast::Sender<initial_checkpoint::Event>,
+    initial_activity_sequence: Arc<AtomicU64>,
     reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
     proxy: Option<proxy::OwnedProxy>,
 }
@@ -461,11 +464,15 @@ impl CodexSharedClient {
             Arc::new(StdMutex::new(HashMap::new()));
         let (observation, _) = watch::channel(Observation::default());
         let (settings_notifications, _) = broadcast::channel(SETTINGS_NOTIFICATION_CAPACITY);
+        let (initial_notifications, _) = broadcast::channel(SETTINGS_NOTIFICATION_CAPACITY);
+        let initial_activity_sequence = Arc::new(AtomicU64::new(0));
         let settings_sequence = Arc::new(AtomicU64::new(0));
         let replies = pending.clone();
         let observations = observation.clone();
         let notification_sender = settings_notifications.clone();
         let notification_sequence = settings_sequence.clone();
+        let initial_sender = initial_notifications.clone();
+        let initial_activity = initial_activity_sequence.clone();
         let proxy_stop = proxy.as_ref().map(proxy::OwnedProxy::stop_signal);
         let task = tokio::spawn(async move {
             let mut close_reason = "provider connection ended".to_owned();
@@ -482,6 +489,18 @@ impl CodexSharedClient {
                         let Ok(value) = serde_json::from_str::<Value>(&text) else {
                             break;
                         };
+                        let sequence = if value.get("method").is_some() {
+                            notification_sequence.fetch_add(1, Ordering::AcqRel) + 1
+                        } else {
+                            0
+                        };
+                        if let Some(event) = initial_checkpoint::Event::from_value(&value, sequence)
+                        {
+                            if event.blocks_update() {
+                                initial_activity.fetch_add(1, Ordering::AcqRel);
+                            }
+                            let _ = initial_sender.send(event);
+                        }
                         if let Some(id) = value["id"].as_str() {
                             // Server requests (approvals) are deliberately not answered.
                             if value.get("method").is_none() {
@@ -499,10 +518,9 @@ impl CodexSharedClient {
                                 }
                             }
                         } else {
-                            if let Some(notification) = CodexSettingsNotification::from_value(
-                                &value,
-                                notification_sequence.fetch_add(1, Ordering::AcqRel) + 1,
-                            ) {
+                            if let Some(notification) =
+                                CodexSettingsNotification::from_value(&value, sequence)
+                            {
                                 let _ = notification_sender.send(notification);
                             }
                             observations.send_modify(|current| current.observe(&value));
@@ -513,6 +531,7 @@ impl CodexSharedClient {
                 }
             }
             observations.send_modify(Observation::close);
+            let _ = initial_sender.send(initial_checkpoint::Event::Disconnected);
             for (_, reply) in replies.lock().unwrap().drain() {
                 let _ = reply.send(Err(CodexSharedError::uncertain(close_reason.clone())));
             }
@@ -528,6 +547,8 @@ impl CodexSharedClient {
             observation,
             settings_sequence,
             settings_notifications,
+            initial_notifications,
+            initial_activity_sequence,
             reader: Mutex::new(Some(task)),
             proxy,
         })
@@ -808,6 +829,20 @@ impl CodexSharedClient {
         timeout: Option<Duration>,
         expected_activity: Option<&CodexTurnActivity>,
     ) -> Result<Value, CodexSharedError> {
+        self.request_with_fences(method, params, timeout, expected_activity, None)
+            .await
+    }
+
+    /// Initial private settings writes also fence activity observed while
+    /// waiting for the writer. They never temporarily bind a startup client.
+    async fn request_with_fences(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Option<Duration>,
+        expected_activity: Option<&CodexTurnActivity>,
+        initial_activity: Option<u64>,
+    ) -> Result<Value, CodexSharedError> {
         if self.observation.borrow().closed {
             return Err(CodexSharedError::unsupported(
                 "provider connection is closed",
@@ -820,6 +855,15 @@ impl CodexSharedClient {
         let deadline = tokio::time::Instant::now() + timeout.unwrap_or(STARTUP_TIMEOUT);
         let written = tokio::time::timeout_at(deadline, async {
             let mut writer = self.writer.lock().await;
+            if initial_activity.is_some_and(|expected| {
+                self.initial_activity_sequence.load(Ordering::Acquire) != expected
+                    || self.observation.borrow().thread_id.is_some()
+                    || self.observation.borrow().closed
+            }) {
+                return Err(CodexSharedError::unsupported(
+                    "Codex initial checkpoint changed before write; not replayed",
+                ));
+            }
             if expected_activity
                 .is_some_and(|expected| self.observation.borrow().activity() != *expected)
             {

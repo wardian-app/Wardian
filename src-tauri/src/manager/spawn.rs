@@ -275,10 +275,12 @@ impl RegistrationPublicationState {
 /// Codex's ordinary local-daemon discovery for both fresh and resumed threads.
 pub(super) fn codex_shared_tui_args(
     mut prefix_args: Vec<String>,
+    permission_args: &[String],
     model_override: Option<&str>,
     expected_resume_id: Option<&str>,
     workspace: &std::path::Path,
 ) -> Vec<String> {
+    prefix_args.extend_from_slice(permission_args);
     if let Some(model) = model_override {
         prefix_args.extend(["--model".into(), model.into()]);
     }
@@ -2561,6 +2563,7 @@ async fn spawn_agent_inner(
         // requires no CLI key/value config overrides and no --remote mode.
         provider_args = codex_shared_tui_args(
             provider.get_executable().1,
+            &attachment.permission_args,
             attachment.model_override.as_deref(),
             attachment.expected_resume_id.as_deref(),
             &provider_cwd,

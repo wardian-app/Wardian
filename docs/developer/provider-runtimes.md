@@ -452,6 +452,45 @@ through `--ask-for-approval`; **Approve for me** is translated to Codex's
 `--approve-for-me` flag, which selects the workspace-write sandbox and automatic
 review. It is never passed as an argument value to `--ask-for-approval`.
 
+Shared local Codex launches capture effective policy once for their runtime
+generation. The ordinary TUI receives direct `--sandbox` and
+`--ask-for-approval` choices, or the equivalent bypass flag, before its first
+thread load. Cold background starts and resumes send the same captured policy
+as explicit per-thread parameters alongside model and reasoning effort.
+Supported policies explicitly capture the stock `user` approval-review route.
+Both cold background requests carry that reviewer. The ordinary TUI has no
+direct reviewer override. Initial saved resumes therefore prepare the captured
+policy in the fresh private daemon before starting a TUI or registering its
+PTY/input runtime. This preparatory resume alone omits the reviewer to inspect
+the saved route. Saved `user` needs no setter; saved `auto_review` requires a
+typed `thread/settings/update` to `user`, its applied notification and strict
+policy readback. Other saved reviewers and busy or mismatched threads reject.
+This checkpoint requires the initialized stable CLI version to be at least
+`0.160.0`, the qualified compatibility floor for this path. Earlier or unknown
+versions reject before its preload/settings requests. Fresh, background and
+ready warm paths retain the existing shared-version floor; eligibility alone
+does not establish provider acceptance.
+
+The owned startup overlay sets stock `thread_unload_delay_secs=0` before daemon
+start. Preparation unsubscribes, requires the actual matching `thread/closed`
+event and verifies an empty loaded set before ordinary TUI cold resume of the
+same native ID. An unsubscribe acknowledgement is insufficient. Closure alone
+does not prove successful persistence: stock rejects a retained live writer on
+new cold load, and final attachment still requires the persisted `user` policy.
+The checkpoint shares the initialization deadline and records its elapsed time;
+it adds no model turn or input replay. Fresh sessions and ready warm rejoins
+retain their existing paths. Overlay recovery restores the prior unload value.
+Attachment still rejects missing or mismatched effective policy and unavailable
+direct-input capability. Rejoining a loaded TUI does not rewrite its policy.
+Rejection diagnostics report only whitelisted policy words.
+
+The shared local path currently rejects a non-user approval reviewer,
+including **Approve for me**, before owner home preparation or process
+launch. Its stock preset produces config overrides that prevent ordinary
+local-daemon adoption, and equivalence between Wardian's `guardian_subagent`
+setting and stock automatic review has not been established. The standalone
+`codex exec` adapter retains its preset translation.
+
 Codex emits several different event shapes across live PTY output and persisted session logs.
 
 Wardian treats these as the important lifecycle markers:

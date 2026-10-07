@@ -5,6 +5,43 @@ use crate::utils::fs::{habitat_codex_home, prepare_habitat_workspace, prepare_pr
 use crate::utils::{codex_home::TEST_ROOTS, codex_messaging::TEST_NATIVE_HOME};
 use std::path::PathBuf;
 
+#[tokio::test]
+async fn unsupported_reviewer_is_rejected_before_owner_home_preparation() {
+    let _lock = crate::utils::wardian_test_env_lock_async().await;
+    let fixture = Fixture::new();
+    let agent_id = "01234567-89ab-4cde-8f01-23456789abcd";
+    let config = wardian_core::models::AgentConfig {
+        session_id: agent_id.into(),
+        provider: "codex".into(),
+        provider_config: wardian_core::models::ProviderConfig::Codex(
+            wardian_core::models::CodexProviderConfig {
+                approval_policy: Some("approve-for-me".into()),
+                sandbox_mode: Some("workspace-write".into()),
+                full_auto: Some(false),
+                ..Default::default()
+            },
+        ),
+        ..Default::default()
+    };
+    let spec = crate::delivery::native_broker::NativeSessionSpec {
+        target_agent_id: agent_id.into(),
+        provider: "codex".into(),
+        generation: 7,
+        workspace: fixture.workspace.clone(),
+        config,
+    };
+    let error = super::CodexSharedOwner::start(&spec, std::future::pending())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "unsupported");
+    assert!(error.message.contains("reviewer"));
+    assert!(!error.provider_boundary_crossed);
+    assert!(!crate::utils::get_wardian_home()
+        .unwrap()
+        .join("agents")
+        .exists());
+}
+
 const JOURNAL: &str = ".wardian-launch-config.json";
 const GLOBAL: &str = "model = 'current-global'\n[mcp_servers.fixture]\ncommand = 'inert'\n";
 
