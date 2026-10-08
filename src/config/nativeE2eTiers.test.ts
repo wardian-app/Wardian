@@ -40,6 +40,7 @@ describe("native E2E tiers", () => {
     expect(ci).toEqual([
       "canonical-messaging.test.mjs",
       "http-fixture-cleanup.test.mjs",
+      "mock-startup.test.mjs",
       "remote-gateway-native.test.mjs",
       "terminal-presentation-broker-native.test.mjs",
       "workbench-persistence-native.test.mjs",
