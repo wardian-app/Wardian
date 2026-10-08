@@ -133,10 +133,10 @@ function overlaps(first, second) {
   return rel === '' || (!path.isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${path.sep}`));
 }
 
-function assertUnprotected(target, env) {
+function assertUnprotected(target, env, kind = 'target') {
   const actual = canonicalPath(target);
   for (const input of readProtectedInputs(env) ?? []) {
-    if (overlaps(actual, input) || overlaps(input, actual)) throw new Error('Rust cache target overlaps a protected input');
+    if (overlaps(actual, input) || overlaps(input, actual)) throw new Error(`Rust cache ${kind} overlaps a protected input`);
   }
 }
 
@@ -156,11 +156,17 @@ function assertMarker(layout) {
   if (JSON.stringify(saved) !== JSON.stringify(marker(layout))) throw new Error('Rust cache ownership marker mismatch');
 }
 
-/** Hold a per-target exclusive claim; crashed/foreign claims are never reclaimed automatically. */
+/**
+ * Hold a per-target exclusive claim; crashed/foreign claims are never reclaimed
+ * automatically. Both the target and its sibling claim must be unprotected;
+ * cleanup and release recheck manifests that another owner may have updated.
+ */
 export function claimTarget(layout, env = process.env) {
   assertPlainTree(layout.target);
   assertPlainTree(layout.claim);
   assertUnprotected(layout.target, env);
+  // Claims are siblings of compiler output, so the target guard cannot protect them.
+  assertUnprotected(layout.claim, env, 'claim');
   mkdirSync(path.dirname(layout.claim), { recursive: true });
   try { mkdirSync(layout.claim); } catch (error) {
     if (error.code === 'EEXIST') throw new Error('Rust cache target is claimed; use inspect, never automatic stale-claim removal', { cause: error });
@@ -175,6 +181,7 @@ export function claimTarget(layout, env = process.env) {
     if (!existsSync(path.join(layout.target, MARKER))) writeFileSync(path.join(layout.target, MARKER), JSON.stringify(marker(layout)));
     assertMarker(layout);
   } catch (error) {
+    assertUnprotected(layout.claim, env, 'claim');
     rmSync(layout.claim, { recursive: true });
     throw error;
   }
@@ -182,6 +189,7 @@ export function claimTarget(layout, env = process.env) {
     assertPlainTree(layout.claim);
     const owner = JSON.parse(readFileSync(path.join(layout.claim, 'owner.json'), 'utf8'));
     if (owner.token !== token) throw new Error('Rust cache claim changed; refusing release');
+    assertUnprotected(layout.claim, env, 'claim');
     rmSync(layout.claim, { recursive: true });
   } };
 }

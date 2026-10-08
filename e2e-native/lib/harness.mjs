@@ -351,13 +351,6 @@ export function ensureNativeAppBuilt(
 }
 
 export function prepareIsolatedHome(harness) {
-  // Claim by run id, not pid. The runner claims the home and then spawns this
-  // process, so a pid comparison would see the live parent as a foreign holder
-  // and make the run refuse its own home.
-  harness.homeLock = acquireHomeLock({
-    home: harness.isolatedHome,
-    runId: harness.runId,
-  }).lock;
   if (!isSafeNativeE2EHome(harness.isolatedHome)) {
     throw new Error(
       `Refusing to reset unsafe native E2E home: ${harness.isolatedHome}. ` +
@@ -365,6 +358,14 @@ export function prepareIsolatedHome(harness) {
         `or a path under ${path.join(repoRoot, ".tmp", "e2e-native")}.`,
     );
   }
+
+  // Validate before claiming: acquisition creates directories and may replace
+  // a stale lock. An unsafe path must be rejected without either side effect.
+  // Claim by run id so the runner and its child retain the same ownership.
+  harness.homeLock = acquireHomeLock({
+    home: harness.isolatedHome,
+    runId: harness.runId,
+  }).lock;
 
   let lastError = null;
   for (let attempt = 0; attempt < 5; attempt += 1) {

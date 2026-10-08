@@ -3,6 +3,24 @@
 //! eligibility never means that a future release has passed provider acceptance.
 use super::CodexSharedError;
 
+/// Eligibility for the qualified immediate-eviction saved-reviewer path.
+/// Other shared paths retain their existing floor; protocol proof is still required.
+pub(super) fn require_initial_checkpoint_version(version: &str) -> Result<(), CodexSharedError> {
+    let validated = supported_version(&format!("wardian/{version}"))?;
+    let core = validated.split('+').next().unwrap_or_default();
+    let numbers = core
+        .split('.')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>();
+    if numbers.is_ok_and(|numbers| {
+        numbers.len() == 3 && (numbers[0], numbers[1], numbers[2]) >= (0, 160, 0)
+    }) {
+        Ok(())
+    } else {
+        Err(CodexSharedError::unsupported("initial saved-reviewer checkpoint requires qualified stable CLI >=0.160.0; no preload written"))
+    }
+}
+
 /// Application additionalContext on turn/steer requires the stable capability floor.
 /// Earlier eligible owners retain idle tasks and information injection.
 pub(super) fn require_steer_version(version: Option<&str>) -> Result<(), CodexSharedError> {
@@ -84,6 +102,20 @@ pub(super) fn supported_version(user_agent: &str) -> Result<String, CodexSharedE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initial_checkpoint_floor_preserves_other_shared_paths() {
+        for version in ["0.154.0", "0.154.0-alpha.6", "0.159.99"] {
+            assert!(supported_version(&format!("wardian/{version}")).is_ok());
+            assert!(require_initial_checkpoint_version(version).is_err());
+        }
+        for version in ["0.160.0", "0.160.0+build.1", "0.161.0", "1.0.0"] {
+            assert!(require_initial_checkpoint_version(version).is_ok());
+        }
+        for version in ["0.160.0-alpha.1", "0.160.0+", "unknown", "00.160.0"] {
+            assert!(require_initial_checkpoint_version(version).is_err());
+        }
+    }
 
     #[test]
     fn active_task_floor_preserves_older_owner_eligibility() {

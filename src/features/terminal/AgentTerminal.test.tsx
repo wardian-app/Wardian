@@ -216,6 +216,7 @@ describe("AgentTerminal scrollback", () => {
         }),
         clear: vi.fn(),
         onData: vi.fn(),
+        onKey: vi.fn(),
         onBinary: vi.fn(),
         onTitleChange: vi.fn(),
         onResize: vi.fn((handler: (size: { cols: number; rows: number }) => void) => {
@@ -1443,7 +1444,7 @@ describe("AgentTerminal scrollback", () => {
     expect(mockInvoke).not.toHaveBeenCalledWith("resize_terminal_presentation", expect.anything());
   });
 
-  it("requests only one automatic repaint snapshot after degraded geometry until explicit recovery", async () => {
+  it("retries the repaint snapshot after owner input when its first frame is degraded", async () => {
     const listeners = new Map<string, (event: { payload: unknown }) => void>();
     const initial = { ...modernSnapshot(), terminal_state_base64: btoa("old frame") };
     const geometry = { cols: 100, rows: 30 };
@@ -1484,6 +1485,10 @@ describe("AgentTerminal scrollback", () => {
         };
       }
       if (command === "request_terminal_snapshot") return requests++ === 0 ? degraded : recovered;
+      if (command === "send_terminal_presentation_input") return {
+        status: "accepted", reason: null, runtime_generation: 1, lease_epoch: 1,
+        owner_presentation_id: presentationId,
+      };
       if (command === "ack_terminal_events") return undefined;
       if (command === "report_terminal_presentation_viewport") return modernRegistrationResult(presentationId).presentation;
       if (command === "unregister_terminal_presentation") return broker;
@@ -1506,7 +1511,11 @@ describe("AgentTerminal scrollback", () => {
       request: expect.objectContaining({ applied_sequence: 3 }),
     })));
     expect(requests).toBe(1);
-    fireEvent.click(screen.getByRole("button", { name: "Enable keyboard input" }));
+    const onData = renderer.onData.mock.calls[0]?.[0] as (data: string) => void;
+    onData("a");
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("send_terminal_presentation_input", expect.objectContaining({
+      request: expect.objectContaining({ input: "a" }),
+    })));
     act(() => ready({ payload: { session_id: "modern-agent", runtime_generation: 1, latest_sequence: 4 } }));
     await waitFor(() => expect(renderer.write).toHaveBeenCalledWith("repainted frame", expect.any(Function)));
     expect(requests).toBe(2);
@@ -1517,7 +1526,7 @@ describe("AgentTerminal scrollback", () => {
   it("settles a geometry change from the broker frame when the provider never repaints", async () => {
     // An Ink-style prompt has nothing new to draw after a vertical-only resize,
     // so no output follows the geometry event. Without a bound, the terminal
-    // stays letterboxed at the old size under "Waiting for terminal repaint".
+    // stays letterboxed at the old size while the owner input remains usable.
     const listeners = new Map<string, (event: { payload: unknown }) => void>();
     const initial = { ...modernSnapshot(), terminal_state_base64: btoa("old frame") };
     const settled = {
@@ -1555,7 +1564,7 @@ describe("AgentTerminal scrollback", () => {
     const ready = listeners.get("terminal-session-events-ready");
     if (!ready) throw new Error("expected broker event listener");
     act(() => ready({ payload: { session_id: "modern-agent", runtime_generation: 1, latest_sequence: 1 } }));
-    await screen.findByText("Waiting for terminal repaint");
+    expect(screen.queryByTestId("terminal-snapshot-status")).toBeNull();
     expect(mockInvoke).not.toHaveBeenCalledWith("request_terminal_snapshot", expect.anything());
 
     await waitFor(() => expect(renderer.write).toHaveBeenCalledWith("settled frame", expect.any(Function)), {
@@ -1568,7 +1577,7 @@ describe("AgentTerminal scrollback", () => {
     expect(mockInvoke).not.toHaveBeenCalledWith("send_terminal_presentation_input", expect.anything());
   });
 
-  it("keeps an owner pending without repaint output and revokes manual keyboard recovery on transfer", async () => {
+  it("keeps owner keyboard input live during quiet resize and revokes it on lease transfer", async () => {
     const listeners = new Map<string, (event: { payload: unknown }) => void>();
     const initial = { ...modernSnapshot(), terminal_state_base64: btoa("old owner frame") };
     const broker = modernBrokerState("pane-owner-pending");
@@ -1607,27 +1616,91 @@ describe("AgentTerminal scrollback", () => {
     await waitFor(() => expect(getLatestTerminalInstance().write).toHaveBeenCalledWith("old owner frame", expect.any(Function)));
     const renderer = getLatestTerminalInstance();
     const onData = renderer.onData.mock.calls[0]?.[0] as (data: string) => void;
+    const onKey = renderer.onKey.mock.calls[0]?.[0] as (event: { key: string; domEvent: KeyboardEvent }) => void;
+    const readyPrivateCpr = "\x1b[?24;80R";
+    const readyPrivateC1Cpr = "\x9b?24;80R";
+    onData(readyPrivateCpr);
+    onData(readyPrivateC1Cpr);
+    onData("ready-coordinate-sentinel");
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+      "send_terminal_presentation_input",
+      expect.objectContaining({ request: expect.objectContaining({ input: readyPrivateC1Cpr }) }),
+    ));
+    const sentWithReadyFrame = mockInvoke.mock.calls
+      .filter(([command]) => command === "send_terminal_presentation_input")
+      .map(([, args]) => (args as { request: { input: string } }).request.input);
+    expect(sentWithReadyFrame).toEqual(expect.arrayContaining([readyPrivateCpr, readyPrivateC1Cpr]));
+    mockInvoke.mockClear();
+
     const ready = listeners.get("terminal-session-events-ready");
     if (!ready) throw new Error("expected broker event listener");
     act(() => ready({ payload: { session_id: "modern-agent", runtime_generation: 1, latest_sequence: 1 } }));
-    await screen.findByText("Waiting for terminal repaint");
+    expect(screen.queryByTestId("terminal-snapshot-status")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Enable keyboard input" })).toBeNull();
     expect(renderer.cols).toBe(80);
     expect(mockInvoke).not.toHaveBeenCalledWith("request_terminal_snapshot", expect.anything());
     onData("a");
-    expect(mockInvoke).not.toHaveBeenCalledWith("send_terminal_presentation_input", expect.anything());
-    fireEvent.click(screen.getByRole("button", { name: "Enable keyboard input" }));
-    onData("a");
-    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("send_terminal_presentation_input", expect.objectContaining({
-      request: expect.objectContaining({ input: "a" }),
-    })));
+    onData("\x1b[A");
+    onData("\x1b");
+    onData("\x1b[200~draft\x1b[201~");
+    const ordinaryInputs = ["a", "\x1b[A", "\x1b", "\x1b[200~draft\x1b[201~"];
+    await waitFor(() => {
+      const inputs = mockInvoke.mock.calls
+        .filter(([command]) => command === "send_terminal_presentation_input")
+        .map(([, args]) => (args as { request: { input: string } }).request.input);
+      expect(inputs).toEqual(expect.arrayContaining(ordinaryInputs));
+    });
+    mockInvoke.mockClear();
+
+    const ctrlF3 = "\x1b[1;5R";
+    const shiftF3 = "\x1b[1;2R";
+    // These bytes are also valid CPR responses, so origin must come from the
+    // adjacent xterm keyboard callback rather than the sequence alone.
+    onData(ctrlF3);
+    onData(shiftF3);
+    onData("origin-check-sentinel");
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+      "send_terminal_presentation_input",
+      expect.objectContaining({ request: expect.objectContaining({ input: "origin-check-sentinel" }) }),
+    ));
+    const sentBeforeKeyboardEvents = mockInvoke.mock.calls
+      .filter(([command]) => command === "send_terminal_presentation_input")
+      .map(([, args]) => (args as { request: { input: string } }).request.input);
+    expect(sentBeforeKeyboardEvents).toEqual(["origin-check-sentinel"]);
+    expect(sentBeforeKeyboardEvents).not.toContain(ctrlF3);
+    expect(sentBeforeKeyboardEvents).not.toContain(shiftF3);
+    onKey({ key: ctrlF3, domEvent: new KeyboardEvent("keydown") });
+    onData(ctrlF3);
+    onKey({ key: shiftF3, domEvent: new KeyboardEvent("keydown") });
+    onData(shiftF3);
+    await waitFor(() => {
+      const inputs = mockInvoke.mock.calls
+        .filter(([command]) => command === "send_terminal_presentation_input")
+        .map(([, args]) => (args as { request: { input: string } }).request.input);
+      expect(inputs).toEqual(expect.arrayContaining([ctrlF3, shiftF3]));
+    });
     mockInvoke.mockClear();
     onData("\x1b[<0;1;1M");
     onData("\x1b[0;1;1M");
     onData("\x1b[24;80R");
-    expect(mockInvoke).not.toHaveBeenCalledWith("send_terminal_presentation_input", expect.anything());
+    onData("\x9b24;80R");
+    onData("\x1b[?24;80R");
+    onData("\x9b?24;80R");
+    onData("coordinate-check-sentinel");
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith(
+      "send_terminal_presentation_input",
+      expect.objectContaining({ request: expect.objectContaining({ input: "coordinate-check-sentinel" }) }),
+    ));
+    const sentDuringCoordinateGate = mockInvoke.mock.calls
+      .filter(([command]) => command === "send_terminal_presentation_input")
+      .map(([, args]) => (args as { request: { input: string } }).request.input);
+    expect(sentDuringCoordinateGate).toEqual(["coordinate-check-sentinel"]);
     act(() => ready({ payload: { session_id: "modern-agent", runtime_generation: 1, latest_sequence: 2 } }));
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Enable keyboard input" })).toBeNull());
-    onData("b");
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("ack_terminal_events", expect.objectContaining({
+      request: expect.objectContaining({ applied_sequence: 2 }),
+    })));
+    mockInvoke.mockClear();
+    onData("after-transfer");
     expect(mockInvoke).not.toHaveBeenCalledWith("send_terminal_presentation_input", expect.anything());
   });
 
@@ -1693,7 +1766,7 @@ describe("AgentTerminal scrollback", () => {
       if (!resizeCallback) throw new Error("expected resize observer");
       act(() => resizeCallback!([], {} as ResizeObserver));
       await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("resize_terminal_presentation", expect.anything()));
-      await screen.findByText("Waiting for terminal repaint");
+      expect(screen.queryByTestId("terminal-snapshot-status")).toBeNull();
       expect(renderer.cols).toBe(80);
       expect(renderer.reset).not.toHaveBeenCalled();
       expect(renderer.write).not.toHaveBeenCalledWith(expect.stringContaining("old Codex frame"), expect.any(Function));
@@ -1751,13 +1824,32 @@ describe("AgentTerminal scrollback", () => {
     const renderer = getLatestTerminalInstance();
     expect(renderer.write).toHaveBeenCalledWith("plain degraded view", expect.any(Function));
     const onData = renderer.onData.mock.calls[0]?.[0] as (data: string) => void;
+    const onBinary = renderer.onBinary.mock.calls[0]?.[0] as (data: string) => void;
+    const coordinateInputs = [
+      "\x1b[<0;1;1M", "\x1b[0;1;1M", "\x1b[24;80R", "\x9b24;80R",
+      "\x1b[?24;80R", "\x9b?24;80R",
+    ];
     onData("a");
-    expect(mockInvoke).not.toHaveBeenCalledWith("send_terminal_presentation_input", expect.anything());
-    fireEvent.click(screen.getByRole("button", { name: "Enable keyboard input" }));
-    onData("a");
-    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("send_terminal_presentation_input", expect.objectContaining({
-      request: expect.objectContaining({ input: "a" }),
-    })));
+    onData("\x1b[A");
+    onData("\x1b");
+    onData("\x1b[200~draft\x1b[201~");
+    for (const input of coordinateInputs) onData(input);
+    onBinary("abc");
+    onData("degraded-coordinate-sentinel");
+    await waitFor(() => {
+      const inputs = mockInvoke.mock.calls
+        .filter(([command]) => command === "send_terminal_presentation_input")
+        .map(([, args]) => (args as { request: { input: string } }).request.input);
+      expect(inputs).toEqual(expect.arrayContaining([
+        "a", "\x1b[A", "\x1b", "\x1b[200~draft\x1b[201~", "degraded-coordinate-sentinel",
+      ]));
+    });
+    const inputs = mockInvoke.mock.calls
+      .filter(([command]) => command === "send_terminal_presentation_input")
+      .map(([, args]) => (args as { request: { input: string } }).request.input);
+    expect(mockInvoke).not.toHaveBeenCalledWith("send_terminal_presentation_binary", expect.anything());
+    for (const input of coordinateInputs) expect(inputs).not.toContain(input);
+    expect(screen.queryByRole("button", { name: "Enable keyboard input" })).toBeNull();
   });
 
   it("keeps an accurate same-generation frame when a later broker snapshot loses formatting", async () => {
@@ -4004,7 +4096,7 @@ describe("AgentTerminal scrollback", () => {
     expect(fallback).not.toHaveBeenCalled();
   });
 
-  it("keeps first owner keys after a failed resize, then requires recovery after degraded repaint", async () => {
+  it("preserves owner keyboard input across resize and snapshot recovery while gating stale coordinates", async () => {
     const brokerState = modernBrokerState("initial-owner");
     const reportViewport = vi.fn()
       .mockRejectedValueOnce(new Error("first viewport report failed"))
@@ -4026,10 +4118,10 @@ describe("AgentTerminal scrollback", () => {
       applyingCanonicalGeometry: false,
       pendingForceResize: false,
       repaintRequestedForGeometry: false,
-      ownerGeometryTransitionSettled: false,
       pendingGeometry: false,
       snapshotStatus: "ready",
-      allowPendingKeyboard: false,
+      geometrySettleEpoch: 0,
+      presentationBindingEpoch: 0,
       disposed: false,
       frameGeometry: { cols: 116, rows: 43 },
       frameGeneration: 1,
@@ -4039,7 +4131,6 @@ describe("AgentTerminal scrollback", () => {
     expect(reportViewport).toHaveBeenCalledTimes(1);
     expect(resize).not.toHaveBeenCalled();
     expect(entry.snapshotStatus).toBe("ready");
-    expect(entry.ownerGeometryTransitionSettled).toBe(false);
 
     await __terminalTesting.reportTerminalSize(entry, 116, 43);
     expect(resize).toHaveBeenCalledTimes(1);
@@ -4048,8 +4139,14 @@ describe("AgentTerminal scrollback", () => {
 
     expect(__terminalTesting.canSendTerminalInput(entry, "before-clear")).toBe(true);
     expect(__terminalTesting.canSendTerminalInput(entry, "\r")).toBe(true);
+    expect(__terminalTesting.canSendTerminalInput(entry, "\x1b[A")).toBe(true);
+    expect(__terminalTesting.canSendTerminalInput(entry, "\x1b")).toBe(true);
+    expect(__terminalTesting.canSendTerminalInput(entry, "\x1b[200~draft\x1b[201~")).toBe(true);
+    expect(__terminalTesting.canSendTerminalInput(entry, "\x1b[1;5R")).toBe(false);
+    expect(__terminalTesting.canSendTerminalInput(entry, "\x1b[1;5R", true)).toBe(true);
     expect(__terminalTesting.canSendTerminalInput(entry, "\x1b[<0;1;1M")).toBe(false);
     expect(__terminalTesting.canSendTerminalInput(entry, "\x1b[24;80R")).toBe(false);
+    expect(__terminalTesting.canSendTerminalInput(entry, "\x9b24;80R")).toBe(false);
     expect(__terminalTesting.canSendTerminalInput(entry)).toBe(false);
 
     const degraded = {
@@ -4059,20 +4156,22 @@ describe("AgentTerminal scrollback", () => {
     };
     await __terminalTesting.applyBrokerSnapshot("initial-owner", entry, degraded);
     expect(entry.snapshotStatus).toBe("degraded");
-    expect(entry.ownerGeometryTransitionSettled).toBe(true);
     entry.pendingGeometry = true;
     entry.snapshotStatus = "pending";
-    expect(__terminalTesting.canSendTerminalInput(entry, "later resize")).toBe(false);
-    entry.allowPendingKeyboard = true;
-    expect(__terminalTesting.canSendTerminalInput(entry, "manual recovery")).toBe(true);
+    expect(__terminalTesting.canSendTerminalInput(entry, "later resize")).toBe(true);
+    expect(__terminalTesting.canSendTerminalInput(entry, "\x1b[B")).toBe(true);
+    expect(__terminalTesting.canSendTerminalInput(entry, "\x1b[200~pasted draft\x1b[201~")).toBe(true);
     expect(__terminalTesting.canSendTerminalInput(entry, "\x1b[<0;1;1M")).toBe(false);
-    entry.allowPendingKeyboard = false;
-    entry.ownerGeometryTransitionSettled = false;
     entry.brokerState!.geometry = { cols: 117, rows: 43 };
-    expect(__terminalTesting.canSendTerminalInput(entry, "unacknowledged size")).toBe(false);
+    expect(__terminalTesting.canSendTerminalInput(entry, "unacknowledged size")).toBe(true);
     entry.brokerState!.geometry = { cols: 116, rows: 43 };
     entry.brokerState!.owner_presentation_id = "another-owner";
     expect(__terminalTesting.canSendTerminalInput(entry, "transferred lease")).toBe(false);
+    entry.brokerState!.owner_presentation_id = "initial-owner";
+    entry.brokerState!.runtime_generation += 1;
+    expect(__terminalTesting.canSendTerminalInput(entry, "stale generation")).toBe(false);
+    entry.brokerState = { ...entry.brokerState!, runtime_generation: entry.generation, runtime_state: "paused" };
+    expect(__terminalTesting.canSendTerminalInput(entry, "inactive runtime")).toBe(false);
   });
 
   function ownerEntryForResize(
@@ -4093,10 +4192,10 @@ describe("AgentTerminal scrollback", () => {
       applyingCanonicalGeometry: false,
       pendingForceResize: false,
       repaintRequestedForGeometry: false,
-      ownerGeometryTransitionSettled: false,
       pendingGeometry: false,
       snapshotStatus: "ready",
-      allowPendingKeyboard: false,
+      geometrySettleEpoch: 0,
+      presentationBindingEpoch: 0,
       disposed: false,
       frameGeometry: geometry,
       frameGeneration: 1,
@@ -4140,6 +4239,223 @@ describe("AgentTerminal scrollback", () => {
     expect(resize).toHaveBeenCalledTimes(1);
     expect(entry.pendingGeometry).toBe(false);
     expect(entry.snapshotStatus).toBe("ready");
+  });
+
+  it("keeps a prior pending transition recoverable after a rejected resize", async () => {
+    vi.useFakeTimers();
+    const resize = vi.fn().mockResolvedValue({ decision: { status: "rejected" } });
+    const requestPresentationSnapshot = vi.fn().mockResolvedValue(undefined);
+    const entry = ownerEntryForResize({ cols: 80, rows: 24 }, resize, {
+      pendingGeometry: true,
+      snapshotStatus: "pending",
+      terminalClient: {
+        reportViewport: vi.fn().mockResolvedValue(undefined),
+        resize,
+        requestPresentationSnapshot,
+      },
+    });
+
+    try {
+      await __terminalTesting.reportTerminalSize(entry, 116, 43);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(entry.snapshotStatus).toBe("pending");
+      expect(entry.pendingGeometry).toBe(true);
+      expect(requestPresentationSnapshot).toHaveBeenCalledWith(
+        "resize-owner",
+        expect.any(Function),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries transient geometry snapshot failures three times at most", async () => {
+    vi.useFakeTimers();
+    const resize = vi.fn().mockResolvedValue({
+      decision: { status: "accepted" },
+      geometry: { cols: 116, rows: 43 },
+      snapshot: null,
+    });
+    const requestPresentationSnapshot = vi.fn().mockRejectedValue(new Error("snapshot unavailable"));
+    const entry = ownerEntryForResize({ cols: 80, rows: 24 }, resize, {
+      terminalClient: {
+        reportViewport: vi.fn().mockResolvedValue(undefined),
+        resize,
+        requestPresentationSnapshot,
+      },
+    });
+
+    try {
+      await __terminalTesting.reportTerminalSize(entry, 116, 43);
+      await vi.advanceTimersByTimeAsync(1_750);
+
+      expect(requestPresentationSnapshot).toHaveBeenCalledTimes(3);
+      expect(entry.pendingGeometry).toBe(true);
+      expect(entry.snapshotStatus).toBe("pending");
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("invalidates an in-flight geometry snapshot when the lease changes", async () => {
+    vi.useFakeTimers();
+    let firstShouldApplySnapshot: (() => boolean) | undefined;
+    let finishFirstSnapshot: (() => void) | undefined;
+    let secondShouldApplySnapshot: (() => boolean) | undefined;
+    const resize = vi.fn().mockResolvedValue({
+      decision: { status: "accepted" },
+      geometry: { cols: 116, rows: 43 },
+      snapshot: null,
+    });
+    const requestPresentationSnapshot = vi.fn()
+      .mockImplementationOnce((_presentationId: string, shouldApply: () => boolean) => {
+        firstShouldApplySnapshot = shouldApply;
+        return new Promise<void>((resolve) => {
+          finishFirstSnapshot = resolve;
+        });
+      })
+      .mockImplementationOnce((_presentationId: string, shouldApply: () => boolean) => {
+        secondShouldApplySnapshot = shouldApply;
+        return Promise.resolve(undefined);
+      });
+    const entry = ownerEntryForResize({ cols: 80, rows: 24 }, resize, {
+      terminalClient: {
+        reportViewport: vi.fn().mockResolvedValue(undefined),
+        resize,
+        requestPresentationSnapshot,
+      },
+    });
+
+    try {
+      await __terminalTesting.reportTerminalSize(entry, 116, 43);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(requestPresentationSnapshot).toHaveBeenCalledTimes(1);
+      expect(firstShouldApplySnapshot?.()).toBe(true);
+
+      __terminalTesting.setEntryBrokerState(entry, {
+        ...entry.brokerState!,
+        lease_epoch: entry.brokerState!.lease_epoch + 1,
+        owner_presentation_id: "another-owner",
+      });
+
+      expect(firstShouldApplySnapshot?.()).toBe(false);
+      finishFirstSnapshot?.();
+      await Promise.resolve();
+      expect(entry.pendingGeometry).toBe(true);
+      expect(entry.snapshotStatus).toBe("pending");
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(requestPresentationSnapshot).toHaveBeenCalledTimes(2);
+      expect(secondShouldApplySnapshot?.()).toBe(true);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("invalidates a quiet-settle snapshot when its presentation binding is replaced", async () => {
+    vi.useFakeTimers();
+    let shouldApplySnapshot: (() => boolean) | undefined;
+    let finishSnapshot: (() => void) | undefined;
+    const resize = vi.fn().mockResolvedValue({
+      decision: { status: "accepted" },
+      geometry: { cols: 116, rows: 43 },
+      snapshot: null,
+    });
+    const requestPresentationSnapshot = vi.fn((_presentationId: string, shouldApply: () => boolean) => {
+      shouldApplySnapshot = shouldApply;
+      return new Promise<void>((resolve) => {
+        finishSnapshot = resolve;
+      });
+    });
+    const entry = ownerEntryForResize({ cols: 80, rows: 24 }, resize, {
+      terminalClient: {
+        reportViewport: vi.fn().mockResolvedValue(undefined),
+        resize,
+        requestPresentationSnapshot,
+      },
+    });
+
+    try {
+      await __terminalTesting.reportTerminalSize(entry, 116, 43);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(shouldApplySnapshot?.()).toBe(true);
+
+      entry.presentationBindingEpoch += 1;
+      __terminalTesting.invalidateGeometrySettle(entry);
+
+      expect(shouldApplySnapshot?.()).toBe(false);
+      finishSnapshot?.();
+      await Promise.resolve();
+      expect(entry.pendingGeometry).toBe(true);
+      expect(entry.snapshotStatus).toBe("pending");
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a scheduled quiet-settle timer when its session is disposed", async () => {
+    vi.useFakeTimers();
+    const resize = vi.fn().mockResolvedValue({
+      decision: { status: "accepted" },
+      geometry: { cols: 116, rows: 43 },
+      snapshot: null,
+    });
+    const requestPresentationSnapshot = vi.fn().mockResolvedValue(undefined);
+    const entry = ownerEntryForResize({ cols: 80, rows: 24 }, resize, {
+      terminalClient: {
+        reportViewport: vi.fn().mockResolvedValue(undefined),
+        resize,
+        requestPresentationSnapshot,
+      },
+    });
+
+    try {
+      await __terminalTesting.reportTerminalSize(entry, 116, 43);
+      expect(entry.geometrySettleTimer).not.toBeNull();
+
+      entry.disposed = true;
+      __terminalTesting.cancelGeometrySettle(entry);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(requestPresentationSnapshot).not.toHaveBeenCalled();
+      expect(entry.geometrySettleTimer).toBeNull();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not roll back pending geometry when an in-flight rejected resize loses its lease", async () => {
+    vi.useFakeTimers();
+    let rejectResize: ((result: { decision: { status: "rejected" } }) => void) | undefined;
+    const resize = vi.fn(() => new Promise<{ decision: { status: "rejected" } }>((resolve) => {
+      rejectResize = resolve;
+    }));
+    const entry = ownerEntryForResize({ cols: 80, rows: 24 }, resize);
+
+    try {
+      const resizeOperation = __terminalTesting.reportTerminalSize(entry, 116, 43);
+      await Promise.resolve();
+      expect(resize).toHaveBeenCalledTimes(1);
+
+      __terminalTesting.setEntryBrokerState(entry, {
+        ...entry.brokerState!,
+        lease_epoch: entry.brokerState!.lease_epoch + 1,
+        owner_presentation_id: "another-owner",
+      });
+      rejectResize?.({ decision: { status: "rejected" } });
+      await resizeOperation;
+
+      expect(entry.pendingGeometry).toBe(true);
+      expect(entry.snapshotStatus).toBe("pending");
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   it("still waits for a repaint when the broker commits a new geometry", async () => {

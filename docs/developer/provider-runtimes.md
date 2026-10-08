@@ -23,6 +23,7 @@ records are acknowledged only after the corresponding Inbox item is persisted.
 - Regular visible agents use the global `Regular agent sessions` setting unless the agent config sets `session_persistence` to `fresh` or `resume`. The agent-level `default` value inherits the global setting.
 - The regular-agent context menu **New Session** action archives the closing provider log before forcing a fresh provider launch. It clears both the backend PTY output buffer and frontend terminal scrollback cache while retaining the Wardian agent, habitat, and saved history. If the archive cannot be updated safely, replacement stops and Wardian shows the failure detail. A repeated request while a New Session is running for the same agent is refused at once with an explanatory message, and every outcome (finished, failed, or refused) is written to `<wardian-home>/wardian_debug.log`.
 - Claude provider-log archive ownership prefers the exact raw-line observation ID. A legacy alias can recover an older row only when no exact owner exists; multiple alias owners fail closed, preserving their distinct history rows and source positions instead of joining them by matching prompt text. Other providers retain their provider-specific alias reconciliation.
+- Fresh Mock sessions retain their launch-owned session ID through registration so enabled conversation capture includes the first request. Prefix trust requires the matching runtime-only ID; restored sessions and disabled logging spans remain excluded from initial capture.
 - Ordinary telemetry observations of eligible stopped agents schedule durable JSONL capture independently of the status parser's modification watermark. Background capture from telemetry, restored startup, and status changes shares an incarnation-bound coordinator; Chat reads retain one bounded pass and lifecycle boundaries retain their priority lane. Each background pass revalidates the agent, provider conversation, and opened source identity after acquiring the capture policy gate. Pending records, request roots, and incomplete sources keep their acquisition reasons. Errors and cancellation retry on a later eligible observation, while quiet serviced sources do not repeatedly drain. Disabled logging records its existing cutoff and excluded span, then suspends background draining until a later policy or source observation.
 - Provider delivery profiles are responsible for translating Wardian input into the provider's native submit behavior, including short prompts, pasted multiline prompts, long prompts, slash-command-shaped text, and inputs that already end with a newline.
 - Delivery recognizers must fail closed. If Wardian cannot recognize that a provider prompt is ready, that a paste bracket has settled, or that a command was submitted, it should avoid sending more input instead of guessing and corrupting the provider TUI state.
@@ -232,10 +233,29 @@ as a successful answer.
 
 Codex must run with the real project workspace as its effective working root. Wardian now enforces this by passing `--cd <real workspace>` for interactive spawn, headless resume, and bootstrap session creation.
 
+Normal managed provider-home preparation, periodic index publication, and
+rollout lookup use the Wardian application's standard `CODEX_HOME` when it names an existing
+directory. Wardian canonicalizes that explicit upstream directory. An unset or
+empty value retains the native user profile's `.codex` default. An invalid
+explicit home fails preparation and index publication; rollout lookup returns
+no source instead of falling back to the user profile.
+
 Wardian still keeps Codex state in a per-agent habitat:
 
 - final agent home: `.wardian/agents/<wardian-agent-id>/habitat/.codex`
 - legacy fallback bootstrap home: `.wardian/provider-bootstrap/codex/session-*/.codex`
+
+During normal managed startup, each provider child receives its own managed home
+as `CODEX_HOME`. Its active
+and archived session links and Wardian's central index, history, and lock writes
+use the same application-selected upstream home. With an explicit home, Wardian
+checks both existing session links before migrating either namespace. A foreign
+link or projection failure stops preparation. The default home retains optional
+projection and its existing local-tree fallback.
+
+The unchanged legacy bootstrap fallback still imports from the native user
+profile's `.codex` home. The explicit-upstream guarantee covers the normal managed
+preparation, periodic publication, and rollout lookup paths described above.
 
 The critical rule is: **trust should bind to the real workspace, not to the bootstrap directory or habitat path**.
 
@@ -431,6 +451,45 @@ explicit per-agent overrides. `on-request`, `untrusted`, and `never` are passed
 through `--ask-for-approval`; **Approve for me** is translated to Codex's
 `--approve-for-me` flag, which selects the workspace-write sandbox and automatic
 review. It is never passed as an argument value to `--ask-for-approval`.
+
+Shared local Codex launches capture effective policy once for their runtime
+generation. The ordinary TUI receives direct `--sandbox` and
+`--ask-for-approval` choices, or the equivalent bypass flag, before its first
+thread load. Cold background starts and resumes send the same captured policy
+as explicit per-thread parameters alongside model and reasoning effort.
+Supported policies explicitly capture the stock `user` approval-review route.
+Both cold background requests carry that reviewer. The ordinary TUI has no
+direct reviewer override. Initial saved resumes therefore prepare the captured
+policy in the fresh private daemon before starting a TUI or registering its
+PTY/input runtime. This preparatory resume alone omits the reviewer to inspect
+the saved route. Saved `user` needs no setter; saved `auto_review` requires a
+typed `thread/settings/update` to `user`, its applied notification and strict
+policy readback. Other saved reviewers and busy or mismatched threads reject.
+This checkpoint requires the initialized stable CLI version to be at least
+`0.160.0`, the qualified compatibility floor for this path. Earlier or unknown
+versions reject before its preload/settings requests. Fresh, background and
+ready warm paths retain the existing shared-version floor; eligibility alone
+does not establish provider acceptance.
+
+The owned startup overlay sets stock `thread_unload_delay_secs=0` before daemon
+start. Preparation unsubscribes, requires the actual matching `thread/closed`
+event and verifies an empty loaded set before ordinary TUI cold resume of the
+same native ID. An unsubscribe acknowledgement is insufficient. Closure alone
+does not prove successful persistence: stock rejects a retained live writer on
+new cold load, and final attachment still requires the persisted `user` policy.
+The checkpoint shares the initialization deadline and records its elapsed time;
+it adds no model turn or input replay. Fresh sessions and ready warm rejoins
+retain their existing paths. Overlay recovery restores the prior unload value.
+Attachment still rejects missing or mismatched effective policy and unavailable
+direct-input capability. Rejoining a loaded TUI does not rewrite its policy.
+Rejection diagnostics report only whitelisted policy words.
+
+The shared local path currently rejects a non-user approval reviewer,
+including **Approve for me**, before owner home preparation or process
+launch. Its stock preset produces config overrides that prevent ordinary
+local-daemon adoption, and equivalence between Wardian's `guardian_subagent`
+setting and stock automatic review has not been established. The standalone
+`codex exec` adapter retains its preset translation.
 
 Codex emits several different event shapes across live PTY output and persisted session logs.
 

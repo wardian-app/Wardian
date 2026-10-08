@@ -5,6 +5,43 @@ use crate::utils::fs::{habitat_codex_home, prepare_habitat_workspace, prepare_pr
 use crate::utils::{codex_home::TEST_ROOTS, codex_messaging::TEST_NATIVE_HOME};
 use std::path::PathBuf;
 
+#[tokio::test]
+async fn unsupported_reviewer_is_rejected_before_owner_home_preparation() {
+    let _lock = crate::utils::wardian_test_env_lock_async().await;
+    let fixture = Fixture::new();
+    let agent_id = "01234567-89ab-4cde-8f01-23456789abcd";
+    let config = wardian_core::models::AgentConfig {
+        session_id: agent_id.into(),
+        provider: "codex".into(),
+        provider_config: wardian_core::models::ProviderConfig::Codex(
+            wardian_core::models::CodexProviderConfig {
+                approval_policy: Some("approve-for-me".into()),
+                sandbox_mode: Some("workspace-write".into()),
+                full_auto: Some(false),
+                ..Default::default()
+            },
+        ),
+        ..Default::default()
+    };
+    let spec = crate::delivery::native_broker::NativeSessionSpec {
+        target_agent_id: agent_id.into(),
+        provider: "codex".into(),
+        generation: 7,
+        workspace: fixture.workspace.clone(),
+        config,
+    };
+    let error = super::CodexSharedOwner::start(&spec, std::future::pending())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "unsupported");
+    assert!(error.message.contains("reviewer"));
+    assert!(!error.provider_boundary_crossed);
+    assert!(!crate::utils::get_wardian_home()
+        .unwrap()
+        .join("agents")
+        .exists());
+}
+
 const JOURNAL: &str = ".wardian-launch-config.json";
 const GLOBAL: &str = "model = 'current-global'\n[mcp_servers.fixture]\ncommand = 'inert'\n";
 
@@ -12,6 +49,7 @@ struct Fixture {
     _temp: tempfile::TempDir,
     workspace: PathBuf,
     old_home: Option<std::ffi::OsString>,
+    old_codex_home: Option<std::ffi::OsString>,
     old_source: Option<PathBuf>,
     old_roots: Option<Vec<PathBuf>>,
 }
@@ -43,13 +81,17 @@ impl Fixture {
         )
         .unwrap();
         let old_home = std::env::var_os("WARDIAN_HOME");
+        let old_codex_home = std::env::var_os("CODEX_HOME");
         std::env::set_var("WARDIAN_HOME", &home);
+        // Keep default preparation bound to the private native-home fixture.
+        std::env::remove_var("CODEX_HOME");
         let old_source = TEST_NATIVE_HOME.with(|source| source.replace(Some(native)));
         let old_roots = TEST_ROOTS.with(|roots| roots.replace(Some(vec![temp.path().join("c")])));
         Self {
             _temp: temp,
             workspace,
             old_home,
+            old_codex_home,
             old_source,
             old_roots,
         }
@@ -74,6 +116,10 @@ impl Drop for Fixture {
         match self.old_home.take() {
             Some(home) => std::env::set_var("WARDIAN_HOME", home),
             None => std::env::remove_var("WARDIAN_HOME"),
+        }
+        match self.old_codex_home.take() {
+            Some(home) => std::env::set_var("CODEX_HOME", home),
+            None => std::env::remove_var("CODEX_HOME"),
         }
     }
 }
