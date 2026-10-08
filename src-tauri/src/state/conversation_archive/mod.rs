@@ -28,7 +28,7 @@ mod turns;
 use records::{
     current_rfc3339_millis, generated_event_from_record, generated_sources_from_record,
     matching_delivered_input_record_index, record_kind_from_chat_event_kind,
-    source_record_from_chat_event,
+    source_record_for_retry, source_record_from_chat_event,
 };
 pub use records::{lifecycle_record, narrative_from_chat_event, narrative_from_delivered_input};
 use repair::{
@@ -795,7 +795,11 @@ impl ConversationArchiveState {
             }
             if let Some(record_index) = matching_record {
                 let record_seq = existing_records[record_index].seq;
-                let source_record = source_record_from_chat_event(event, record_seq);
+                let source_record = source_record_for_retry(
+                    event,
+                    record_seq,
+                    existing_event_index.and_then(|index| existing_events.get(index)),
+                );
                 let mut record_changed = false;
                 record_changed |= refresh_codex_completion_narrative(
                     &mut existing_records[record_index],

@@ -7,6 +7,120 @@ use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatRo
 use wardian_core::paths::agent_conversation_dir;
 
 #[test]
+fn watch_retry_preserves_legacy_fallback_cursor_after_reopening() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let context = archive_context();
+    archive
+        .append_delivered_input_with_context(context.clone(), "seed", None)
+        .expect("seed narrative ordinal");
+    let event = watch_event();
+    archive
+        .append_chat_events_with_context(context.clone(), std::slice::from_ref(&event))
+        .expect("publish watch observation");
+    let conversation_id = archive
+        .active_conversation_id_for_test("agent-1")
+        .expect("active conversation");
+    let directory = agent_conversation_dir("agent-1", &conversation_id).expect("directory");
+    let sources_path = directory.join("sources.jsonl");
+    let original_sources = std::fs::read(&sources_path).expect("published source bytes");
+    let records: Vec<ConversationNarrativeRecord> =
+        read_jsonl_records(&directory.join("conversation.jsonl")).expect("narrative");
+    let record = records
+        .iter()
+        .find(|record| record.event_refs.contains(&event.id))
+        .expect("watch narrative");
+    assert_ne!(
+        record.seq, 5,
+        "legacy cursor differs from narrative ordinal"
+    );
+    drop(archive);
+
+    let reopened = ConversationArchiveState::default();
+    let mut retry = event.clone();
+    retry.sequence = Some(9);
+    retry.metadata["transcript_cursor"] = serde_json::json!("agent-1:0000000000000009");
+    reopened
+        .append_chat_events_with_context(context, &[retry])
+        .expect("same observation survives a changed presentation ordinal");
+    assert_eq!(
+        std::fs::read(&sources_path).expect("source readback"),
+        original_sources,
+        "retry preserves the exact published source, without rewriting or duplicating it"
+    );
+    let sources: Vec<ConversationSourceRecord> =
+        read_jsonl_records(&sources_path).expect("sources");
+    assert_eq!(
+        sources
+            .iter()
+            .find(|source| source.source_kind == "model")
+            .expect("watch source")
+            .cursor
+            .as_deref(),
+        Some("5")
+    );
+}
+
+#[test]
+fn watch_retry_rejects_changed_explicit_provider_cursor() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let context = archive_context();
+    let mut event = watch_event();
+    event.metadata["cursor"] = serde_json::json!("physical-row-17");
+    archive
+        .append_chat_events_with_context(context.clone(), std::slice::from_ref(&event))
+        .expect("publish explicit source cursor");
+    event.sequence = Some(9);
+    event.metadata["cursor"] = serde_json::json!("physical-row-19");
+    let error = archive
+        .append_chat_events_with_context(context, &[event])
+        .expect_err("an explicit source cursor conflict must remain rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("conflicting source identity"));
+}
+
+#[test]
+fn non_watch_retry_rejects_changed_fallback_cursor() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let context = archive_context();
+    let mut event = source_event("native-observation", "Native answer");
+    event.sequence = Some(5);
+    archive
+        .append_chat_events_with_context(context.clone(), std::slice::from_ref(&event))
+        .expect("publish non-watch observation");
+    event.sequence = Some(9);
+    let error = archive
+        .append_chat_events_with_context(context, &[event])
+        .expect_err("a non-watch fallback cursor conflict remains rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("conflicting source identity"));
+}
+
+#[test]
+fn watch_retry_rejects_changed_native_log_path() {
+    let (_guard, _temp) = isolated_home();
+    let archive = ConversationArchiveState::default();
+    let context = archive_context();
+    let mut event = watch_event();
+    event.source = Some("event_msg".to_string());
+    event.metadata["provider_log"] = serde_json::json!(true);
+    event.metadata["provider_session_id"] = serde_json::json!("session-one");
+    event.metadata["log_path"] = serde_json::json!("original-session.jsonl");
+    archive
+        .append_chat_events_with_context(context.clone(), std::slice::from_ref(&event))
+        .expect("publish source-bound watch observation");
+    event.sequence = Some(9);
+    event.metadata["log_path"] = serde_json::json!("other-session.jsonl");
+    let error = archive
+        .append_chat_events_with_context(context, &[event])
+        .expect_err("matching native session does not permit changing the source path");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("conflicting source identity"));
+}
+
+#[test]
 fn source_failure_retries_the_same_raw_event_and_preserves_large_artifact() {
     let (_guard, temp) = isolated_home();
     let archive = ConversationArchiveState::default();
@@ -954,6 +1068,17 @@ fn source_row(source_id: &str) -> ConversationSourceRecord {
         hash: None,
         artifact_ref: None,
     }
+}
+
+fn watch_event() -> AgentChatEvent {
+    let mut event = source_event("agent-1:0000000000000006:model", "Completed the change.");
+    event.source = Some("model".to_string());
+    event.sequence = Some(5);
+    event.metadata = serde_json::json!({
+        "transcript_cursor": "agent-1:0000000000000006",
+        "raw_role": "assistant",
+    });
+    event
 }
 
 fn archive_context() -> ConversationArchiveContext {

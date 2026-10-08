@@ -2801,6 +2801,65 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn watch_archive_retry_survives_provider_event_growth() {
+        let env_lock = crate::utils::wardian_test_env_lock_async().await;
+        let temp = tempfile::tempdir().expect("isolated archive home");
+        let _home_guard = WardianHomeGuard::set(&env_lock, temp.path());
+        let watch_transcript = transcript(vec![WatchTranscriptMessage {
+            role: "assistant".to_string(),
+            text: "Completed the requested change.".to_string(),
+            provider: "mock".to_string(),
+            turn_id: None,
+            source: Some("model".to_string()),
+            provider_provenance: None,
+        }]);
+        let observation = message_event_from_transcript(
+            "agent-1",
+            "mock",
+            6,
+            &watch_transcript.messages[0],
+            &watch_transcript,
+        );
+        let first = merge_chat_events(vec![observation.clone()], Vec::new());
+        let mut provider_tool = observation.clone();
+        provider_tool.id = "agent-1:provider:tool-1".to_string();
+        provider_tool.kind = AgentChatEventKind::ToolCall;
+        provider_tool.role = None;
+        provider_tool.text = None;
+        provider_tool.title = Some("Read".to_string());
+        provider_tool.source = Some("tool_call".to_string());
+        provider_tool.metadata = serde_json::json!({"cursor": "physical-tool-1"});
+        let repeated = merge_chat_events(vec![observation], vec![provider_tool]);
+        let same_message = repeated
+            .iter()
+            .find(|event| event.id == first[0].id)
+            .expect("same watch observation remains present");
+        assert_eq!(same_message.text, first[0].text);
+        assert_ne!(
+            same_message.sequence, first[0].sequence,
+            "the presentation sequence changes when another event precedes it"
+        );
+
+        let archive = crate::state::conversation_archive::ConversationArchiveState::default();
+        archive
+            .append_chat_events("agent-1", &first)
+            .expect("first observation publishes");
+        archive
+            .append_chat_events("agent-1", &repeated)
+            .expect("reordering the same observation must not conflict with its published source");
+        let archived = archive
+            .chat_events_for_agent("agent-1")
+            .expect("read archive");
+        assert_eq!(
+            archived
+                .iter()
+                .filter(|event| event.id == first[0].id)
+                .count(),
+            1
+        );
+    }
+
     #[test]
     fn projects_only_bound_codex_watch_messages_as_provider_observations() {
         let bound = WatchTranscriptMessage {

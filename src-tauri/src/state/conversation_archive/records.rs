@@ -133,6 +133,47 @@ pub(super) fn source_record_from_chat_event(
     })
 }
 
+/// Retain an unbound watch observation's published fallback cursor on retry.
+///
+/// Merging provider events renumbers the live presentation sequence. The
+/// uniquely matched durable observation keeps the ordinal first published,
+/// including older archives where it differs from the narrative sequence.
+/// Observations with native source evidence retain the strict cursor check.
+/// Explicit cursors and every other provenance field still come from `event`.
+pub(super) fn source_record_for_retry(
+    event: &AgentChatEvent,
+    seq: u64,
+    archived_event: Option<&AgentChatEvent>,
+) -> Option<ConversationSourceRecord> {
+    let mut source = source_record_from_chat_event(event, seq)?;
+    let Some(archived) = archived_event else {
+        return Some(source);
+    };
+    if source.source_id.starts_with("src_")
+        && event.kind == AgentChatEventKind::Message
+        && archived.id == event.id
+        && archived.session_id == event.session_id
+        && archived.provider == event.provider
+        && archived.kind == event.kind
+        && archived.source == event.source
+        && metadata_string(&event.metadata, "transcript_cursor").is_some()
+        && metadata_string(&archived.metadata, "transcript_cursor").is_some()
+        && event.metadata.get("cursor").is_none()
+        && archived.metadata.get("cursor").is_none()
+        && event.metadata["provider_log"] != true
+        && archived.metadata["provider_log"] != true
+        && source.source_path.is_none()
+        && source.offset.is_none()
+        && source.row_id.is_none()
+        && source.provider_event_type.is_none()
+        && source.hash.is_none()
+        && source.artifact_ref.is_none()
+    {
+        source.cursor = archived.sequence.map(|sequence| sequence.to_string());
+    }
+    Some(source)
+}
+
 pub(super) fn matching_delivered_input_record_index(
     records: &[ConversationNarrativeRecord],
     event: &AgentChatEvent,
