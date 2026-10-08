@@ -111,6 +111,106 @@ describe("AgentChatView", () => {
     writeTextMock.mockReset();
   });
 
+  it("blocks every mutating Chat action on read-only surfaces while history remains readable", async () => {
+    invokeMock.mockImplementation((command) => {
+      if (command === "load_agent_chat_page") return Promise.resolve([event({
+        id: "approval-required", kind: "approval", title: "Approval required",
+        text: "Requesting permission", status: "action_required", sequence: 1,
+      })]);
+      if (command === "list_provider_model_catalog") return Promise.resolve({
+        provider: "codex", models: [{ id: "model-b", display_name: "Model B", effort_options: ["low", "high"], default_effort: "low", is_default: false }],
+        refresh_error: null,
+      });
+      return Promise.reject(new Error(`Unexpected read-only mutation: ${command}`));
+    });
+    const agent = { session_name: "Alpha", agent_class: "Coder", provider: "codex" };
+    const view = render(<AgentChatView sessionId="agent-1" agent={agent} status="Processing" readOnly />);
+
+    expect(await screen.findByText("Approval required")).toBeInTheDocument();
+    const approval = screen.getByRole("button", { name: "Send approval response y: Yes" });
+    expect(approval).toBeDisabled();
+    fireEvent.click(approval);
+    const message = screen.getByRole("textbox", { name: "Message agent" });
+    expect(message).toBeDisabled();
+    fireEvent.change(message, { target: { value: "Do not send" } });
+    fireEvent.keyDown(message, { key: "Enter" });
+    expect(screen.getByRole("button", { name: "Attach files" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Choose model" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Choose model" }));
+    const action = screen.getByRole("button", { name: "Interrupt agent" });
+    expect(action).toBeDisabled();
+    fireEvent.click(action);
+    fireEvent.submit(message.closest("form")!);
+    view.rerender(<AgentChatView sessionId="agent-1" agent={agent} status="Processing" readOnly />);
+    fireEvent.change(message, { target: { value: "" } });
+    const interrupt = screen.getByRole("button", { name: "Interrupt agent" });
+    expect(interrupt).toBeDisabled();
+    fireEvent.click(interrupt);
+    expect(invokeMock.mock.calls.every(([command]) => command === "load_agent_chat_page")).toBe(true);
+  });
+
+  it("defers history model discovery until keyboard activation and keeps normal model saves", async () => {
+    const savedConfig: AgentConfig = {
+      session_id: "agent-1", session_name: "Alpha", agent_class: "Coder",
+      provider: "codex", folder: "/workspace", is_off: true, model: "model-b",
+    };
+    invokeMock.mockImplementation((command) => {
+      if (command === "load_agent_chat_page") return Promise.resolve([]);
+      if (command === "list_provider_model_catalog") return Promise.resolve({
+        provider: "codex", refresh_error: null,
+        models: [{ id: "model-b", display_name: "Model B", effort_options: [], is_default: false }],
+      });
+      if (command === "update_agent_model_selection") return Promise.resolve({
+        config: savedConfig, live_application: "deferred", live_error: null,
+      });
+      return Promise.reject(new Error(`Unexpected history command: ${command}`));
+    });
+    const onAgentConfigUpdated = vi.fn();
+    render(<AgentChatView sessionId="agent-1" agent={{ ...savedConfig, model: "saved-model" }}
+      deferModelDiscovery onAgentConfigUpdated={onAgentConfigUpdated} />);
+    const picker = screen.getByRole("button", { name: "Choose model" });
+    expect(picker).toHaveTextContent("saved-model");
+    fireEvent.focus(picker);
+    expect(invokeMock).not.toHaveBeenCalledWith("list_provider_model_catalog", expect.anything());
+    const user = userEvent.setup();
+    picker.focus();
+    await user.keyboard("{Enter}");
+    await screen.findByRole("option", { name: "Model B" });
+    expect(invokeMock).toHaveBeenCalledWith("list_provider_model_catalog", { provider: "codex", forceRefresh: false });
+    await user.selectOptions(screen.getByLabelText("Model"), "model-b");
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("update_agent_model_selection", {
+      sessionId: "agent-1", model: "model-b", reasoningEffort: null,
+    }));
+    expect(onAgentConfigUpdated).toHaveBeenCalledWith(savedConfig);
+  });
+
+  it("keeps deferred provider catalogs isolated when the session is rebound", async () => {
+    const oldCatalog = deferred<unknown>();
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "load_agent_chat_page") return Promise.resolve([]);
+      if (command === "list_provider_model_catalog") {
+        return (args as { provider: string }).provider === "codex" ? oldCatalog.promise : Promise.resolve({
+          provider: "claude", models: [{ id: "claude-model", display_name: "New Claude model", effort_options: [], is_default: true }],
+          refresh_error: null,
+        });
+      }
+      return Promise.reject(new Error(`Unexpected command: ${command}`));
+    });
+    const view = render(<AgentChatView key="agent-1" sessionId="agent-1"
+      agent={{ session_name: "Alpha", agent_class: "Coder", provider: "codex" }} deferModelDiscovery />);
+    fireEvent.click(screen.getByRole("button", { name: "Choose model" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("list_provider_model_catalog", { provider: "codex", forceRefresh: false }));
+    view.rerender(<AgentChatView key="agent-2" sessionId="agent-2"
+      agent={{ session_name: "Beta", agent_class: "Coder", provider: "claude", model: "claude-model" }} deferModelDiscovery />);
+    expect(screen.getByRole("button", { name: "Choose model" })).toHaveTextContent("claude-model");
+    await act(async () => oldCatalog.resolve({
+      provider: "codex", models: [{ id: "old-model", display_name: "Old Codex model", effort_options: [], is_default: true }], refresh_error: null,
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose model" }));
+    expect(await screen.findByRole("option", { name: "New Claude model" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Old Codex model" })).not.toBeInTheDocument();
+  });
+
   it("loads and renders chat messages and activity blocks", async () => {
     invokeMock.mockResolvedValue([
       event({

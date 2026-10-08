@@ -26,6 +26,17 @@ In the searchable list, select a surface name to open it in the captured pane, o
 
 The **Agent Session** choice needs one selected agent in the right roster. For a faster agent-specific path, use the roster actions described in [Watchlists](./watchlists.md).
 
+Agent Session tabs have a **Terminal** / **Chat** switch. Live agents open in
+Terminal; Off agents open in Chat so you can read saved history without starting
+their provider. Reading, scrolling, and expanding history use the bounded Chat
+page API. Sending a message is an explicit action and retains the usual delivery
+behavior, including headless delivery for Off agents. Unsent text stays with its
+agent when you switch views or rebind the tab. Read-only presentations allow
+history browsing and disable message, approval, interrupt, and model changes.
+The history model picker and an Off agent's configuration show the saved model
+or provider default until you choose **Choose model**. That explicit action
+discovers available models; opening history or selecting an Off agent does not.
+
 ## Work with Tabs and Panes
 
 Each pane has its own tab strip and active surface. Every tab includes a compact type icon shared with the surface chooser, so different tools and agent sessions remain recognizable when titles are truncated. Top-edge strips form the window chrome; strips in downward splits remain local. The **+** sits immediately after the tabs, while **…** remains at the far edge.

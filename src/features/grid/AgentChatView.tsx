@@ -49,6 +49,10 @@ interface AgentChatViewBaseProps {
   className?: string;
   workspacePath?: string | null;
   refreshIntervalMs?: number;
+  /** Blocks chat mutations for explicitly read-only presentations; history still pages normally. */
+  readOnly?: boolean;
+  /** Discover provider models only after an explicit picker activation on history-first surfaces. */
+  deferModelDiscovery?: boolean;
   autoFocusComposer?: boolean;
   onComposerAutoFocused?: () => void;
   onAgentConfigUpdated?: (agent: AgentConfig) => void;
@@ -81,6 +85,8 @@ export function AgentChatView({
   className = "",
   workspacePath,
   refreshIntervalMs = CHAT_REFRESH_INTERVAL_MS,
+  readOnly = false,
+  deferModelDiscovery = false,
   autoFocusComposer = false,
   draft,
   onComposerAutoFocused,
@@ -179,7 +185,7 @@ export function AgentChatView({
   const latestVisibleRowKey = visibleChatRows.length > 0 ? chatTranscriptRowKey(visibleChatRows[visibleChatRows.length - 1]) : "";
   const hasActionRequired = mergedEvents.some((event) => event.status === "action_required");
   const liveApprovalId = useMemo(() => liveApprovalEventId(sortTranscriptEvents(mergedEvents)), [mergedEvents]);
-  const disabledReason = inputDisabledReason(isSubmitting);
+  const disabledReason = readOnly ? "Read only" : inputDisabledReason(isSubmitting);
   const openChangedFile = useMemo(() => {
     const workspace = workspacePath?.trim();
     if (!workbenchNavigation || !workspace) return undefined;
@@ -305,7 +311,7 @@ export function AgentChatView({
   };
 
   const handleInterrupt = async () => {
-    if (isInterrupting || !showThinking) return;
+    if (readOnly || isInterrupting || !showThinking) return;
     setInterruptRequested(true);
     setIsInterrupting(true);
     setSubmitError(null);
@@ -400,7 +406,7 @@ export function AgentChatView({
               <li key={chatTranscriptRowKey(row)} data-chat-row-key={chatTranscriptRowKey(row)}>
                 <ChatTranscriptRow
                   agentIsWorking={showThinking}
-                  isSubmitting={isSubmitting}
+                  isSubmitting={isSubmitting || readOnly}
                   linkHandling={markdownLinkHandling}
                   onApprovalSubmit={handleApprovalSubmit}
                   liveApprovalId={liveApprovalId}
@@ -422,6 +428,8 @@ export function AgentChatView({
         isExecuting={isExecutionActive}
         isInterrupting={isInterrupting}
         isSubmitting={isSubmitting}
+        readOnly={readOnly}
+        deferModelDiscovery={deferModelDiscovery}
         attachments={attachments}
         onAutoFocused={onComposerAutoFocused}
         onAgentConfigUpdated={onAgentConfigUpdated}
@@ -451,6 +459,8 @@ function ChatComposer({
   isExecuting,
   isInterrupting,
   isSubmitting,
+  readOnly,
+  deferModelDiscovery,
   onAutoFocused,
   onAgentConfigUpdated,
   onAttachmentsChange,
@@ -469,6 +479,8 @@ function ChatComposer({
   isExecuting: boolean;
   isInterrupting: boolean;
   isSubmitting: boolean;
+  readOnly: boolean;
+  deferModelDiscovery: boolean;
   onAutoFocused?: () => void;
   onAgentConfigUpdated?: (agent: AgentConfig) => void;
   onAttachmentsChange: (attachments: ChatAttachment[]) => void;
@@ -823,13 +835,15 @@ function ChatComposer({
         <div className="ml-auto flex min-w-0 items-center gap-1">
           <ChatModelSelection
             agent={agent}
+            readOnly={readOnly}
+            deferDiscovery={deferModelDiscovery}
             onAgentConfigUpdated={onAgentConfigUpdated}
             sessionId={sessionId}
           />
           <button
             aria-label={isInterrupting ? "Interrupting agent" : isSubmitting ? "Sending message" : isInterruptAction ? "Interrupt agent" : isExecuting ? "Queue message" : "Send message"}
             className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[var(--color-wardian-accent)] bg-[var(--color-wardian-accent)] text-[var(--color-wardian-accent-contrast)] transition-colors hover:opacity-85 disabled:cursor-not-allowed disabled:border-transparent disabled:bg-transparent disabled:text-[var(--color-wardian-text-muted-neutral)] disabled:opacity-50"
-            disabled={isInterrupting || isSubmitting || (!isExecuting && !canSubmit)}
+            disabled={Boolean(disabledReason) || isInterrupting || isSubmitting || (!isExecuting && !canSubmit)}
             onClick={isInterruptAction ? onInterrupt : undefined}
             title={isInterruptAction ? "Interrupt agent" : isSubmitting ? "Sending message" : isExecuting ? "Queue message" : "Send message"}
             type={isInterruptAction ? "button" : "submit"}
@@ -855,17 +869,22 @@ function ChatComposer({
 
 function ChatModelSelection({
   agent,
+  readOnly,
+  deferDiscovery,
   onAgentConfigUpdated,
   sessionId,
 }: {
   agent?: Pick<AgentConfig, "session_name" | "agent_class" | "provider" | "model" | "provider_config">;
+  readOnly: boolean;
+  deferDiscovery: boolean;
   onAgentConfigUpdated?: (agent: AgentConfig) => void;
   sessionId: string;
 }) {
   const provider = agent?.provider;
+  const configuredEffort = reasoningEffortForConfig(agent ?? {});
   const [selection, setSelection] = useState<ModelSelection>(() => ({
     model: agent?.model,
-    reasoning_effort: reasoningEffortForConfig(agent ?? {}),
+    reasoning_effort: configuredEffort,
   }));
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveNotice, setSaveNotice] = useState<string | null>(null);
@@ -878,17 +897,18 @@ function ChatModelSelection({
   useEffect(() => {
     const nextSelection = {
       model: agent?.model,
-      reasoning_effort: reasoningEffortForConfig(agent ?? {}),
+      reasoning_effort: configuredEffort,
     };
     selectionRef.current = nextSelection;
     setSelection(nextSelection);
     setSaveError(null);
     setSaveNotice(null);
-  }, [agent?.model, agent?.provider_config, sessionId]);
+  }, [agent?.model, configuredEffort, sessionId]);
 
   if (!provider?.trim()) return null;
 
   const saveSelection = async (nextSelection: ModelSelection) => {
+    if (readOnly) return;
     const previousSelection = selectionRef.current;
     selectionRef.current = nextSelection;
     let persisted = false;
@@ -937,7 +957,8 @@ function ChatModelSelection({
     <div className="min-w-0 shrink-0">
       <ProviderModelSelector
         compact
-        disabled={isSaving}
+        deferDiscovery={readOnly || deferDiscovery}
+        disabled={readOnly || isSaving}
         idPrefix={`chat-${sessionId}`}
         provider={provider}
         selection={selection}
