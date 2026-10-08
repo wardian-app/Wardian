@@ -19,6 +19,7 @@ import {
   createNativeHarness,
   ensureNativeAppBuilt,
   freezeBuiltCliForRun,
+  prebuiltCliForRun,
   invokeTauri,
   prepareIsolatedHome,
   startNativeSession,
@@ -151,9 +152,8 @@ const composerTaskProviders = parseCommaList(
 );
 
 function buildCli(harness) {
-  if (skipNativeBuild) {
-    return freezeBuiltCliForRun(harness);
-  }
+  const prebuilt = prebuiltCliForRun(harness, skipNativeBuild);
+  if (prebuilt) return prebuilt;
   const result = spawnSync(
     "cargo",
     ["build", "-p", "wardian-cli", "--bin", "wardian-cli"],
