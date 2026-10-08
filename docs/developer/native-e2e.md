@@ -186,7 +186,15 @@ The CLI shared-state smoke can be run directly:
 npm run test:e2e:native:fast -- e2e-native/tests/cli-shared-state-native.test.mjs
 ```
 
-It starts the native app with an isolated `WARDIAN_HOME`, creates agents through both Tauri IPC and live CLI control, then runs the local `wardian-cli` binary against the same home. The smoke asserts live app state is readable, explicit `agent spawn --provider --class` works, `send --wait-until` can drive a mock action-required turn to idle, and lifecycle commands affect the running app. The CLI still falls back to `state.db` when the desktop app is not running.
+It starts the native app with an isolated `WARDIAN_HOME`, creates agents through both Tauri IPC and live CLI control, then runs the local `wardian-cli` binary against the same home. The smoke asserts live app state is readable, explicit `agent spawn --provider --class` works, `agent wait --until` observes the requested status, and lifecycle commands affect the running app. The CLI still falls back to `state.db` when the desktop app is not running.
+
+The control fixture captures Mock Init events before each spawn, clone and
+resume. It requires the launch's agent and provider identities, a fresh Init,
+and release of persisted conversation exclusion before seeding status or
+exercising lifecycle commands. A seeded visible status does not prove startup
+completion. Skip-build and explicit paired runs consume the harness's frozen
+CLI without another Cargo build; the control case records the consumed app and
+CLI hashes and sizes.
 
 ### Workbench and Terminal Presentation Package
 
