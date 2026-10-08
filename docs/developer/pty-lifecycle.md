@@ -14,6 +14,14 @@ Legacy versions without this protocol must be closed explicitly. This lock
 does not prove provider exit or release prior-provider holds. See
 [Desktop Home Ownership](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-10-02-desktop-home-ownership.md).
 
+Codex owner startup and background index observation share a process-local,
+per-home and per-agent preparation turn. Observation skips absent SDK homes and
+yields to queued startup. Startup awaits an active local observation within its
+original startup deadline and cancellation signal, before preparing the
+habitat. The existing nonblocking OS preparation lock still rejects competing
+owners in other processes. Observation revalidates the managed-home mapping
+under that OS lock; an earlier existence check never authorizes a stale tree.
+
 ## 🌉 Cross-Platform PTY Layer
 Wardian utilizes the `portable-pty` crate to provide a consistent PTY interface across different operating systems.
 
