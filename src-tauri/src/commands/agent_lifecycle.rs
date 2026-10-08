@@ -330,7 +330,7 @@ where
     guard.begin_stop().wait().await
 }
 
-/// Finite launch/registration guard: uncommitted Codex runtimes transfer their
+/// Finite launch/registration guard: uncommitted Codex and Pi runtimes transfer their
 /// child handles and exact terminal generation into retained cancellation cleanup.
 /// Installed ActiveAgent Drop is unchanged.
 pub(super) struct PendingRuntime {
@@ -344,13 +344,15 @@ impl PendingRuntime {
         config: &wardian_core::models::AgentConfig,
         terminal_sessions: &std::sync::Arc<crate::state::terminal_session::TerminalSessionBroker>,
     ) -> Result<Self, String> {
-        let registration = if config.provider == "codex" {
+        let registration = if matches!(config.provider.as_str(), "codex" | "pi") {
             let home =
                 crate::utils::fs::get_wardian_home().ok_or("Could not locate Wardian home")?;
-            Some(
+            let registration = if config.provider == "pi" {
+                crate::manager::codex_stop::prepare_pi_stop(&home, &config.session_id)?
+            } else {
                 crate::manager::codex_stop::prepare_stop(&home, &config.session_id)?
-                    .with_terminal_cleanup(terminal_sessions.clone())?,
-            )
+            };
+            Some(registration.with_terminal_cleanup(terminal_sessions.clone())?)
         } else {
             None
         };
@@ -431,7 +433,10 @@ impl PendingStop {
     pub(super) async fn failure(self, error: String) -> String {
         if let Some(handle) = self.0 {
             if let Err(stop_error) = handle.wait().await {
-                return format!("{error}; Codex cleanup retained: {stop_error}");
+                return format!(
+                    "{error}; {} cleanup retained: {stop_error}",
+                    handle.provider_label()
+                );
             }
         }
         error
