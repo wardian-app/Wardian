@@ -21,8 +21,11 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 24
           cache: "npm"
+      - name: Verify native SQLite runtime
+        run: |
+          node --input-type=module -e "import { DatabaseSync } from 'node:sqlite'; const db = new DatabaseSync(':memory:'); try { const row = db.prepare('SELECT 1 AS ready').get(); if (row.ready !== 1) throw new Error('Native SQLite preflight failed'); console.log(process.version + ': node:sqlite ready'); } finally { db.close(); }"
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Rust Cache

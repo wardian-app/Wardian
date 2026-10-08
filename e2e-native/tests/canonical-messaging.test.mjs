@@ -3,12 +3,71 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   correlatedReply,
+  offAgentNativeBinding,
   assertDetachedTerminal,
   assertNativeSession,
   assertOpenCodeHttpSession,
   assertOpenCodeCompletedAnswer,
   assertBusyTaskDeferred,
 } from "../lib/canonical-messaging.mjs";
+
+test("Off mock capability observation preserves the exact unsupported contract before and after information", () => {
+  const errorPayload = { schema: 1, error: {
+    code: "not_supported", message: "mock has no Wardian native transport", hint: null,
+  } };
+  let calls = 0;
+  const executeSync = (cli, args, options) => {
+    calls++;
+    assert.equal(cli, "fixture-cli");
+    assert.deepEqual(args, ["delivery", "capabilities", "peer"]);
+    assert.equal(options.cwd, "fixture-cwd");
+    assert.equal(options.env.WARDIAN_HOME, "fixture-home");
+    assert.equal(Object.hasOwn(options.env, "WARDIAN_SESSION_ID"), false);
+    throw Object.assign(new Error("CLI capability rejection"), {
+      status: 1, signal: null, stdout: "", stderr: `${JSON.stringify(errorPayload)}\n`,
+    });
+  };
+  const before = offAgentNativeBinding("fixture-cli", "fixture-home", "fixture-cwd", "peer", "mock", executeSync);
+  const after = offAgentNativeBinding("fixture-cli", "fixture-home", "fixture-cwd", "peer", "mock", executeSync);
+  assert.deepEqual(before, { provider: "mock", native_supported: false, binding: null,
+    capability_error: errorPayload.error });
+  assert.deepEqual(after, before);
+  assert.equal(calls, 2, "Each observation must execute the capability command exactly once");
+});
+
+test("Off mock capability observation fails closed on unrelated errors and unexpected success", () => {
+  const known = { schema: 1, error: {
+    code: "not_supported", message: "mock has no Wardian native transport", hint: null,
+  } };
+  const failure = (patch = {}) => Object.assign(new Error("CLI failure"), {
+    status: 1, signal: null, stdout: "", stderr: JSON.stringify(known), ...patch,
+  });
+  const payloads = [
+    { ...known, schema: 2 },
+    { ...known, binding: null },
+    { ...known, error: { ...known.error, code: "permission_denied" } },
+    { ...known, error: { ...known.error, code: "app_not_running" } },
+    { ...known, error: { ...known.error, message: "codex has no Wardian native transport" } },
+    { ...known, error: { ...known.error, hint: "unexpected recovery" } },
+  ];
+  const failures = [
+    ...payloads.map((payload) => failure({ stderr: JSON.stringify(payload) })),
+    failure({ status: 2 }), failure({ status: null, code: "ETIMEDOUT" }),
+    failure({ signal: "SIGTERM" }), failure({ stdout: "unexpected output" }),
+    failure({ stderr: "not JSON" }), failure({ stderr: "x".repeat(64 * 1024 + 1) }),
+    failure({ stderr: undefined }), failure({ status: undefined, code: "ECONNREFUSED" }),
+  ];
+  for (const error of failures) {
+    assert.throws(() => offAgentNativeBinding("fixture-cli", "fixture-home", "fixture-cwd", "peer", "mock",
+      () => { throw error; }), `Unexpected failure must not become a null binding: ${error.code ?? error.status}`);
+  }
+  assert.throws(() => offAgentNativeBinding("fixture-cli", "fixture-home", "fixture-cwd", "peer", "mock",
+    () => JSON.stringify({ schema: 1, binding: null })), /unexpectedly returned/);
+  let calls = 0;
+  assert.throws(() => offAgentNativeBinding("fixture-cli", "fixture-home", "fixture-cwd", "peer", "codex",
+    () => { calls++; }), /retain its mock provider/);
+  assert.equal(calls, 0, "A changed provider is rejected before querying its runtime");
+});
 
 test("canonical reply requires task correlation, peer and completed status", () => {
   const reply = { interaction_id: "reply-1", kind: "reply", parent_interaction_id: "task-1", sender: "peer", reply_status: "done", message: "marker" };

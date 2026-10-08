@@ -4,6 +4,10 @@ Wardian uses a native Tauri/WebDriver harness for tests that must exercise real 
 
 ## Setup
 
+Use Node.js 24 LTS for the native suite. Canonical state evidence checks use
+the built-in `node:sqlite` module, which is unavailable in Node.js 20. The
+nightly workflow verifies SQLite support before building the app.
+
 Run the cross-platform setup command:
 
 ```bash
@@ -47,6 +51,50 @@ PowerShell:
 $env:WARDIAN_NATIVE_APP = '<artifact-path>'
 npm run test:e2e:native:fast -- <native-test-file>
 ```
+
+For a prebuilt app and its matching CLI, also set `WARDIAN_NATIVE_CLI` and
+`WARDIAN_NATIVE_SKIP_BUILD=1`. The CLI must have the platform executable name
+(`wardian-cli.exe` on Windows, `wardian-cli` on POSIX) and match the CLI in the
+app's packaged resources. Invalid pairs stop before Cargo metadata, isolated
+home preparation, or driver startup. App-backed runs without this override
+freeze the CLI packaged with the app, then validate the copied pair before
+launch. A later Cargo debug build cannot replace an app's staged release CLI.
+Missing, nonregular, or conflicting packaged CLIs fail before copying the run's
+binaries. Equivalent direct and nested copies retain the app loader's direct
+path precedence. CLI-only runs and explicit post-build CLI freezing retain
+Cargo's effective target selection, including its preference for a debug CLI.
+
+POSIX shell:
+
+```bash
+WARDIAN_NATIVE_SKIP_BUILD=1 \
+WARDIAN_NATIVE_APP='<absolute-app-path>' \
+WARDIAN_NATIVE_CLI='<absolute-paired-cli-path>' \
+npm run test:e2e:native:fast -- <native-test-file>
+```
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_NATIVE_SKIP_BUILD = '1'
+$env:WARDIAN_NATIVE_APP = '<absolute-app-path>'
+$env:WARDIAN_NATIVE_CLI = '<absolute-paired-cli-path>'
+npm run test:e2e:native:fast -- <native-test-file>
+```
+
+Pair validation follows the app's maintained resource loader: Windows uses
+the executable directory; macOS bundles use `Contents/Resources`; Linux
+bundles carry `usr/lib/Wardian` alongside `usr/bin`. Ordinary Cargo
+`target/<profile>` and `target/<triple>/<profile>` outputs with `.cargo-lock`
+use the executable directory. Within the resource root, the installed CLI is
+selected from `bin/` first, then `resources/bin/`. Isolated POSIX pairs must
+carry their own resources rather than use a separate system installation.
+The run freezes the app's runtime and the CLI file, then checks the copied
+pair. Libraries or resources adjacent to the separate CLI are not imported.
+Windows pairs also retain the declared `agent_prompts/` and `_up_/scripts/`
+folders at their original relative paths. Repeated freezes preserve existing
+resource files and copy missing leaves; unrelated compiler outputs stay outside
+the frozen runtime.
 
 `e2e-native/tests/artifact-presentation-native.test.mjs` proves the artifact
 control path with real IPC: an isolated mock agent presents an authorized

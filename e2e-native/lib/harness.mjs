@@ -10,7 +10,9 @@ import { Builder, By, Capabilities, until } from "selenium-webdriver";
 import {
   resolveBuiltCliPath,
   resolveExistingCliPath,
+  resolveExplicitNativeApp,
   resolveNativeAppArtifact,
+  validatePairedNativeCli,
 } from "./native-artifact-resolution.mjs";
 
 import { allocateSessionPorts, assertPortOwnedBy, portIsFree } from "./sessionPorts.mjs";
@@ -135,6 +137,9 @@ export function resolveSharedCliPath() {
  * this run's private home before a caller starts using it.
  */
 export function freezeBuiltCliForRun(harness) {
+  if (harness.pairedCli) {
+    throw new Error("An explicit paired CLI cannot be replaced by a compiler output.");
+  }
   const sourcePath = resolveBuiltCliPath({
     repoRoot: harness.repoRoot,
     env: process.env,
@@ -216,7 +221,12 @@ function compactText(value, maxLength = 1200) {
 export async function createNativeHarness() {
   const watchMode = readBooleanEnv("WARDIAN_E2E_WATCH");
   const runId = process.env.WARDIAN_E2E_RUN_ID || nativeRunId();
-  const appPath = resolveAppPath();
+  const pairedCli = Object.prototype.hasOwnProperty.call(process.env, "WARDIAN_NATIVE_CLI");
+  // Resolve the pair first: default app resolution can invoke Cargo metadata.
+  const explicitCli = pairedCli ? resolveSharedCliPath() : null;
+  const appPath = pairedCli ? validatePairedNativeCli({
+    appPath: resolveExplicitNativeApp({ repoRoot, env: process.env }), cliPath: explicitCli,
+  }).appPath : resolveAppPath();
   return {
     runId,
     repoRoot,
@@ -227,7 +237,8 @@ export async function createNativeHarness() {
     // Where the CLI is built by consumers that use the shared target. Frozen
     // per run alongside the app so a concurrent rebuild cannot replace it
     // mid-run either.
-    sharedCliPath: resolveSharedCliPath(),
+    sharedCliPath: explicitCli ?? resolveSharedCliPath(),
+    pairedCli,
     ownsGeneratedHome: ownsGeneratedHome(),
     isolatedHome: resolveIsolatedHome(runId),
     tauriDriverPath: resolveTauriDriverPath(),
@@ -309,6 +320,9 @@ export function ensureNativeAppBuilt(
     resolveAppPathImpl = resolveAppPath,
   } = {},
 ) {
+  if (harness.pairedCli) {
+    throw new Error("Explicit paired native artifacts require skip-build operation.");
+  }
   const build = spawnSyncImpl(
     buildInvocation.command,
     buildInvocation.args,
@@ -391,6 +405,7 @@ export function prepareIsolatedHome(harness) {
     home: harness.isolatedHome,
     appPath: harness.appPath,
     cliPath: harness.sharedCliPath,
+    pairedCli: harness.pairedCli,
   });
   if (harness.frozenArtifacts.app) {
     harness.appPath = harness.frozenArtifacts.app.path;
