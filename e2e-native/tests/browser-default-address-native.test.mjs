@@ -11,6 +11,7 @@ import {
   createNativeHarness,
   ensureNativeAppBuilt,
   freezeBuiltCliForRun,
+  prebuiltCliForRun,
   invokeTauri,
   prepareIsolatedHome,
   startNativeSession,
@@ -58,8 +59,10 @@ async function serveFixture(t) {
   return server.address().port;
 }
 
-/** Builds `wardian-cli` and returns its path, matching the other native tests. */
+/** Return this run's CLI, preserving prebuilt inputs before the ordinary build. */
 function buildCli(harness) {
+  const prebuilt = prebuiltCliForRun(harness, skipNativeBuild);
+  if (prebuilt) return prebuilt;
   const build = spawnSync("cargo", ["build", "-p", "wardian-cli", "--bin", "wardian-cli"], {
     cwd: harness.repoRoot,
     encoding: "utf8",

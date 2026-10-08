@@ -11,6 +11,7 @@ import {
   createNativeHarness,
   ensureNativeAppBuilt,
   freezeBuiltCliForRun,
+  prebuiltCliForRun,
   invokeTauri,
   prepareIsolatedHome,
   startNativeSession,
@@ -24,6 +25,8 @@ const MODEL_TOKEN_SUFFIX = RUN_ID.replace(/\D/g, "");
 const SCREENSHOT_DATE = "2026-08-23";
 
 function buildCli(harness) {
+  const prebuilt = prebuiltCliForRun(harness, skipNativeBuild);
+  if (prebuilt) return prebuilt;
   const result = spawnSync("cargo", ["build", "-p", "wardian-cli", "--bin", "wardian-cli"], {
     cwd: harness.repoRoot,
     encoding: "utf8",

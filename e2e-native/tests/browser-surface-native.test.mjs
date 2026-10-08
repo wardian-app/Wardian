@@ -11,6 +11,7 @@ import {
   createNativeHarness,
   ensureNativeAppBuilt,
   freezeBuiltCliForRun,
+  prebuiltCliForRun,
   invokeTauri,
   invokeTauriResult,
   prepareIsolatedHome,
@@ -96,6 +97,8 @@ async function requireInvoke(driver, command, args = {}) {
 
 /** Builds `wardian-cli` and returns its path, matching the CLI shared-state test. */
 function buildCli(harness) {
+  const prebuilt = prebuiltCliForRun(harness, skipNativeBuild);
+  if (prebuilt) return prebuilt;
   const build = spawnSync("cargo", ["build", "-p", "wardian-cli", "--bin", "wardian-cli"], {
     cwd: harness.repoRoot,
     encoding: "utf8",
