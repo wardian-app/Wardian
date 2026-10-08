@@ -39,6 +39,7 @@ describe("native E2E tiers", () => {
     const ci = nativeTests().filter((test) => test.tier === "ci").map((test) => test.file);
     expect(ci).toEqual([
       "canonical-messaging.test.mjs",
+      "http-fixture-cleanup.test.mjs",
       "mock-startup.test.mjs",
       "native-cli-consumer.test.mjs",
       "remote-gateway-native.test.mjs",

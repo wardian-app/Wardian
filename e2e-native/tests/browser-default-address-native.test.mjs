@@ -18,6 +18,7 @@ import {
   waitForAppShell,
 } from "../lib/harness.mjs";
 import { waitForWorkbenchReady } from "../lib/workbench.mjs";
+import { closeHttpFixture } from "../lib/httpFixture.mjs";
 
 /**
  * Proves that `wardian browser open` with no URL lands on the workspace's
@@ -55,7 +56,7 @@ async function serveFixture(t) {
     response.end(FIXTURE);
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise((resolve) => server.close(resolve)));
+  t.after(() => closeHttpFixture(server));
   return server.address().port;
 }
 

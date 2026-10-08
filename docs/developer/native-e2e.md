@@ -137,6 +137,28 @@ You can also target a specific file:
 npm run test:e2e:native:fast -- e2e-native/tests/opencode-native.test.mjs
 ```
 
+### HTTP fixture cleanup
+
+Browser fixtures use `closeHttpFixture` from `e2e-native/lib/httpFixture.mjs`
+to stop their HTTP listener and close only that server's accepted HTTP connections.
+The close starts before the connections are drained. A live browser can keep a
+socket open without sending a request, so awaiting `server.close()` alone can
+block the later after hook that stops the browser. Register cleanup after the
+fixture starts; call it after the fixture's assertions have completed.
+
+The CI-tier connection and after-hook regression runs without Tauri or a
+provider. Run it directly with Node:
+
+```sh
+node --test e2e-native/tests/http-fixture-cleanup.test.mjs
+```
+
+PowerShell:
+
+```powershell
+node --test e2e-native/tests/http-fixture-cleanup.test.mjs
+```
+
 ### Concurrent runs
 
 Two native runs can execute at the same time. Every run claims its own
