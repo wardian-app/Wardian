@@ -273,13 +273,45 @@ mod tests {
 
     struct Fixture {
         _temp: tempfile::TempDir,
+        _cache_root: FixtureCacheRoot,
         source: PathBuf,
+        cache_root: PathBuf,
+    }
+
+    struct FixtureCacheRoot {
+        _env_lock: tokio::sync::MutexGuard<'static, ()>,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl FixtureCacheRoot {
+        fn new(root: &Path) -> Self {
+            let env_lock = crate::utils::wardian_test_env_lock();
+            let previous = std::env::var_os("WARDIAN_RUST_CACHE_ROOT");
+            std::env::set_var("WARDIAN_RUST_CACHE_ROOT", root);
+            Self {
+                _env_lock: env_lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for FixtureCacheRoot {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(root) => std::env::set_var("WARDIAN_RUST_CACHE_ROOT", root),
+                None => std::env::remove_var("WARDIAN_RUST_CACHE_ROOT"),
+            }
+        }
     }
 
     impl Fixture {
         fn new(config: Option<&str>) -> Self {
             let temp = tempfile::tempdir().unwrap();
             let source = temp.path().join("project");
+            // The supported compiler launcher may set a cache-root override.
+            // Keep each synthetic repository on its own sibling cache instead.
+            let cache_root = source.with_file_name("project.cargo-cache");
+            let cache_root_guard = FixtureCacheRoot::new(&cache_root);
             fs::create_dir_all(&source).unwrap();
             fs::write(source.join("Cargo.toml"), "[workspace]\n").unwrap();
             let cwd = source.to_str().unwrap();
@@ -300,7 +332,9 @@ mod tests {
             .unwrap();
             Self {
                 _temp: temp,
+                _cache_root: cache_root_guard,
                 source: absolute_existing_path(&source).unwrap(),
+                cache_root,
             }
         }
 
@@ -321,6 +355,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fixture_cache_root_restores_inherited_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("fixture-cache");
+        let override_root = FixtureCacheRoot::new(&root);
+        let inherited = override_root.previous.clone();
+        assert_eq!(
+            std::env::var_os("WARDIAN_RUST_CACHE_ROOT"),
+            Some(root.into_os_string())
+        );
+        drop(override_root);
+        assert_eq!(std::env::var_os("WARDIAN_RUST_CACHE_ROOT"), inherited);
+    }
+
     fn config_target(worktree: &Path) -> PathBuf {
         let document = fs::read_to_string(worktree.join(".cargo/config.toml"))
             .unwrap()
@@ -336,11 +384,12 @@ mod tests {
         let f = Fixture::new(None);
         let tree = f.create("first");
         let target = config_target(&tree);
-        assert!(target.starts_with(
-            f.source
-                .with_file_name("project.cargo-cache")
-                .join("direct-targets")
-        ));
+        // Windows canonicalizes the source path but preserves the override's lexical spelling.
+        let fixture_target_root = f.cache_root.join("direct-targets");
+        assert!(
+            target.starts_with(&fixture_target_root),
+            "managed target {target:?} is outside configured fixture root {fixture_target_root:?}"
+        );
         assert_eq!(
             target,
             managed_worktree_cargo_target(&f.source, &tree)

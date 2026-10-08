@@ -82,9 +82,9 @@ pub(super) async fn observe_codex_task(
     timeout: Duration,
 ) -> Result<(Option<store::Replied>, String), ControlError> {
     let result = client
-        .wait_for_final_result(&binding.provider_turn_id, timeout)
+        .wait_for_task_final_result(&binding.provider_turn_id, timeout)
         .await;
-    let (status, answer) = match result {
+    let (status, answer, eligible) = match result {
         Ok(result) => result,
         Err(error) => {
             interactions
@@ -94,6 +94,9 @@ pub(super) async fn observe_codex_task(
             return Err(ControlError::coded("submitted_unconfirmed", error.message));
         }
     };
+    if !eligible {
+        return Ok((None, answer));
+    }
     let Some((status, body)) = terminal_reply(&status, &answer) else {
         interactions
             .mark_agent_task_turn_uncertain(binding)

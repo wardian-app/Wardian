@@ -49,9 +49,13 @@ acknowledge its consumption. The timeout flag remains false.
 Reply takes `request_id`, `status` (`done`, `blocked`, or `failed`), and
 `message`. The request determines the destination. A committed explicit reply
 suppresses automatic final-result publication. Canonical tasks dispatched to
-an exact native Codex turn return that turn's final result to their requester
-automatically. Manual receive, composer delivery, and providers without an
-exact native completion boundary still require explicit `reply`.
+an exact native Codex turn can return that turn's final result automatically
+only when the task started a new turn from idle and that turn stayed task-only.
+Same-turn user input, a synchronous `UserPromptSubmit` hook, context
+compaction, a user-shell command, a second task sharing the turn, or lost
+observation continuity leaves the request without an automatic result; use an
+explicit `reply`. Manual receive, composer delivery, and providers without an
+exact native completion boundary also require explicit `reply`.
 
 Only an assigned task with an explicit `request_id` may use MCP `reply`.
 An ordinary human chat message completes through the agent's assistant
@@ -95,14 +99,15 @@ versions retain idle and information delivery. No terminal paste or Return key
 is involved. Acceptance persists an exact request/claim/generation/thread/turn
 binding before a completion observer can publish a result.
 
-An exact completed turn returns its final assistant item as `done`. Commentary
+An eligible task-only turn returns its final assistant item as `done`. Commentary
 is excluded. When a model omits message phases, the last completed assistant
-item with an unknown phase supplies the compatibility result. An interrupted
-turn returns an attributed Wardian `blocked` notice; a failed turn returns
-`failed`. Missing final text or output exceeding the 64 KiB reply limit returns
-an attributed `blocked` notice. Unknown outcomes and lost observations remain
+item with an unknown phase supplies the compatibility result. An eligible
+interrupted turn returns an attributed Wardian `blocked` notice; an eligible
+failed turn returns `failed`. Missing final text or output exceeding the 64 KiB
+reply limit returns an attributed `blocked` notice. Mixed or unproven turns
+remain awaiting explicit replies. Unknown outcomes and lost observations remain
 uncertain and are never replayed. Several tasks accepted into the same active
-turn each return its shared final result to their own requester.
+turn require separate explicit replies for each request.
 
 A recognized stale-turn rejection or a writer-fence activity change confirms
 that no task was admitted. Its claim is released before current activity is

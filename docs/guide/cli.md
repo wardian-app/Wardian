@@ -489,11 +489,15 @@ settles a request by its exact request ID, and `message interrupt` requests
 interruption only where the provider bridge supports it.
 
 For tasks dispatched through Wardian's native Codex owner, the bound provider
-turn's final answer automatically completes the request and returns to its
-requester. An explicit `message reply` that completed the request takes
-precedence. Multiple tasks admitted into the same turn receive that turn's
-shared final answer. Manual inbox delivery, composer delivery, and other
-providers still require an explicit reply.
+turn's final answer automatically completes the request only when the task
+started a new turn from idle and that turn stayed task-only. Same-turn user
+input, a synchronous `UserPromptSubmit` hook, context compaction, a user-shell
+command, a second task sharing the turn, or lost observation continuity leaves
+the request awaiting an explicit `message reply`. An explicit reply that
+completed the request takes precedence. Multiple tasks admitted into the same
+turn require a separate explicit reply for each request. Manual inbox
+delivery, composer delivery, and other providers still require an explicit
+reply.
 
 `message wait --timeout-ms 60000` waits for mailbox activity, including
 completion results, without returning or acknowledging inbox records. Follow it
@@ -765,9 +769,10 @@ impersonate another agent. Targets are one exact agent name or UUID.
   pass `ack_cursor` only for a page already consumed. An empty wait does not cancel
   a task, consume a reply, or authorize a resend.
 - `message reply <request-id> --status done|blocked|failed` completes that request
-  as its authorized recipient. Native Codex task turns also publish their bound
-  final result automatically. Other delivery paths require an explicit reply;
-  echoed IDs and Idle status alone never complete a request.
+  as its authorized recipient. Native Codex publishes a bound final result only
+  for an eligible task-only turn; mixed or shared turns require an explicit
+  reply. Other delivery paths also require an explicit reply; echoed IDs and
+  Idle status alone never complete a request.
 - `message interrupt <target>` explicitly requests interruption when supported.
 
 Send, follow-up and reply bodies accept literal text, `--stdin`, or `--file`.
