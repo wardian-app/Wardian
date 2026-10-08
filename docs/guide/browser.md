@@ -49,7 +49,8 @@ and the site's own responsive breakpoints answer to the pane you sized.
 that opened it, and a **Close popup** button appears next to the address. Use
 it to go back: the popup has its own history, and there is no Back entry for
 the page behind it. A popup that closes itself, which is what most sign-in
-windows do, returns you there on its own.
+windows do, returns you there on its own. Returning does not wait for a title
+or load reply from the closed window, and the opener's pending requests continue.
 
 **Dialogs.** When a page calls `alert`, `confirm`, or `prompt`, or asks you to
 confirm leaving, the page stops until you answer, and the surface shows the
