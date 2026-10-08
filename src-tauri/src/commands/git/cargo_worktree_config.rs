@@ -275,6 +275,7 @@ mod tests {
         _temp: tempfile::TempDir,
         _cache_root: FixtureCacheRoot,
         source: PathBuf,
+        cache_root: PathBuf,
     }
 
     struct FixtureCacheRoot {
@@ -309,7 +310,8 @@ mod tests {
             let source = temp.path().join("project");
             // The supported compiler launcher may set a cache-root override.
             // Keep each synthetic repository on its own sibling cache instead.
-            let cache_root = FixtureCacheRoot::new(&source.with_file_name("project.cargo-cache"));
+            let cache_root = source.with_file_name("project.cargo-cache");
+            let cache_root_guard = FixtureCacheRoot::new(&cache_root);
             fs::create_dir_all(&source).unwrap();
             fs::write(source.join("Cargo.toml"), "[workspace]\n").unwrap();
             let cwd = source.to_str().unwrap();
@@ -330,8 +332,9 @@ mod tests {
             .unwrap();
             Self {
                 _temp: temp,
-                _cache_root: cache_root,
+                _cache_root: cache_root_guard,
                 source: absolute_existing_path(&source).unwrap(),
+                cache_root,
             }
         }
 
@@ -381,11 +384,12 @@ mod tests {
         let f = Fixture::new(None);
         let tree = f.create("first");
         let target = config_target(&tree);
-        assert!(target.starts_with(
-            f.source
-                .with_file_name("project.cargo-cache")
-                .join("direct-targets")
-        ));
+        // Windows canonicalizes the source path but preserves the override's lexical spelling.
+        let fixture_target_root = f.cache_root.join("direct-targets");
+        assert!(
+            target.starts_with(&fixture_target_root),
+            "managed target {target:?} is outside configured fixture root {fixture_target_root:?}"
+        );
         assert_eq!(
             target,
             managed_worktree_cargo_target(&f.source, &tree)
