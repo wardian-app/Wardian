@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{mpsc, oneshot, watch, Notify};
 
 use crate::utils::logging::log_debug;
 use wardian_core::native_transport::{
@@ -50,6 +50,15 @@ pub struct PiBridgeBinding {
     pub generation: u64,
     pub session_id: String,
     pub session_file: String,
+}
+
+/// Startup is terminal once authenticated or failed; later transport closure
+/// does not retroactively turn a successful startup into a launch failure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PiBridgeStartup {
+    Pending,
+    Ready,
+    Failed(String),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -253,6 +262,7 @@ impl PiBridgeLaunchPlan {
             process_id: AtomicU32::new(0),
             closed: AtomicBool::new(false),
             ready: AtomicBool::new(false),
+            startup: watch::channel(PiBridgeStartup::Pending).0,
         });
         let listener_owner = Arc::clone(&owner);
         tokio::spawn(async move {
@@ -304,6 +314,7 @@ pub struct PiBridgeOwner {
     process_id: AtomicU32,
     closed: AtomicBool,
     ready: AtomicBool,
+    startup: watch::Sender<PiBridgeStartup>,
 }
 
 impl fmt::Debug for PiBridgeOwner {
@@ -320,6 +331,25 @@ impl fmt::Debug for PiBridgeOwner {
 }
 
 impl PiBridgeOwner {
+    pub(crate) fn startup(&self) -> watch::Receiver<PiBridgeStartup> {
+        self.startup.subscribe()
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.binding.generation
+    }
+
+    fn fail_startup(&self, reason: String) {
+        self.startup.send_if_modified(|state| {
+            if matches!(state, PiBridgeStartup::Pending) {
+                *state = PiBridgeStartup::Failed(reason);
+                true
+            } else {
+                false
+            }
+        });
+    }
+
     pub fn is_ready(&self) -> bool {
         !self.closed.load(Ordering::Acquire) && self.ready.load(Ordering::Acquire)
     }
@@ -331,6 +361,7 @@ impl PiBridgeOwner {
     }
 
     pub fn close(&self) {
+        self.fail_startup("Pi bridge closed before authenticated readiness".into());
         self.closed.store(true, Ordering::Release);
         self.ready.store(false, Ordering::Release);
         self.close_notify.notify_waiters();
@@ -426,6 +457,7 @@ async fn run_listener(
         accepted = tokio::time::timeout(HANDSHAKE_TIMEOUT, listener.accept()) => accepted,
     };
     let Ok(Ok((mut stream, _peer))) = accepted else {
+        owner.fail_startup("Pi bridge listener failed or timed out before connection".into());
         owner.close();
         return;
     };
@@ -444,11 +476,20 @@ async fn run_listener(
             log_debug(&format!(
                 "[Wardian] Pi bridge authentication failed stage={stage} code={code}"
             ));
+            owner.fail_startup(format!("Pi bridge authentication failed ({stage}/{code})"));
             owner.close();
             return;
         }
     };
     owner.ready.store(true, Ordering::Release);
+    owner.startup.send_if_modified(|state| {
+        if matches!(state, PiBridgeStartup::Pending) {
+            *state = PiBridgeStartup::Ready;
+            true
+        } else {
+            false
+        }
+    });
 
     while owner.is_ready() {
         if let Some(message_id) = session.awaiting_settled.clone() {

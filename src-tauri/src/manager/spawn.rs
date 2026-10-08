@@ -229,6 +229,7 @@ impl Drop for SpawnPublicationDisposition {
 struct SpawnPublicationGate {
     unpublished_failure: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     registration: Option<std::sync::Arc<RegistrationPublicationState>>,
+    pi_bridge: Option<std::sync::Arc<crate::delivery::pi_bridge::PiBridgeOwner>>,
 }
 
 /// Registration may put a runtime in the map before its roster and provider
@@ -1947,8 +1948,27 @@ fn release_provider_spawn_lease_after_readiness<R: tauri::Runtime>(
     bootstrap_complete: std::sync::Arc<std::sync::atomic::AtomicBool>,
     app: AppHandle<R>,
     runtime_generation: u64,
-    gate: SpawnPublicationGate,
+    mut gate: SpawnPublicationGate,
 ) -> tokio::task::JoinHandle<()> {
+    if let Some(bridge) = gate.pi_bridge.take() {
+        // The returned handle observes completion. Aborting that observer must
+        // not drop the owned lease or cancel retained child cleanup.
+        let worker = tokio::spawn(pi_startup::monitor(
+            lease,
+            pi_startup::PiStartupContext {
+                status: current_status,
+                session_id,
+                bootstrap: bootstrap_complete,
+                app,
+                runtime_generation,
+                gate,
+                bridge,
+            },
+        ));
+        return tokio::spawn(async move {
+            let _ = worker.await;
+        });
+    }
     tokio::spawn(async move {
         let owner = lease.owner().clone();
         let mut last_renewal = std::time::Instant::now();
@@ -2083,6 +2103,7 @@ pub async fn spawn_agent(
         SpawnPublicationGate {
             unpublished_failure: Some(unpublished_failure),
             registration: None,
+            ..Default::default()
         },
     )
     .await?
@@ -2109,6 +2130,7 @@ pub async fn spawn_agent_with_lease(
         SpawnPublicationGate {
             unpublished_failure: Some(unpublished_failure),
             registration: None,
+            ..Default::default()
         },
     )
     .await?
@@ -2132,6 +2154,7 @@ pub(crate) async fn spawn_agent_provisionally(
         SpawnPublicationGate {
             unpublished_failure: None,
             registration: Some(registration),
+            ..Default::default()
         },
     )
     .await
@@ -2152,6 +2175,7 @@ pub(crate) async fn spawn_agent_for_registration(
         SpawnPublicationGate {
             unpublished_failure: None,
             registration: Some(registration),
+            ..Default::default()
         },
     )
     .await?
@@ -2165,7 +2189,7 @@ async fn spawn_agent_inner(
     initial_timestamp: Option<String>,
     publication: SpawnPublication,
     inherited_lease: Option<wardian_core::conversation_lease::PersistedConversationLeaseGuard>,
-    gate: SpawnPublicationGate,
+    mut gate: SpawnPublicationGate,
 ) -> Result<SpawnedAgent, String> {
     let spawn_started_at = std::time::Instant::now();
     super::validate_session_values_for_launch(
@@ -2174,6 +2198,10 @@ async fn spawn_agent_inner(
     )?;
     let provider = ProviderFactory::resolve(&config.provider)?;
     crate::providers::readiness::ensure_provider_available_for_launch(&config.provider)?;
+    if config.provider == "pi" {
+        let home = crate::utils::fs::get_wardian_home().ok_or("Could not locate Wardian home")?;
+        super::codex_stop::await_quiescent(&home, &config.session_id).await?;
+    }
 
     let cwd = crate::utils::fs::resolve_cwd(&config.folder, &config.session_id);
     let antigravity_database_baseline = if config.provider == "antigravity"
@@ -2579,11 +2607,9 @@ async fn spawn_agent_inner(
                 ) {
                     Ok(path) => Some(path),
                     Err(error) => {
-                        log_debug(&format!(
-                            "[Wardian] Pi bridge unavailable for {}: {}",
-                            config.session_id, error
+                        return Err(format!(
+                            "Pi bridge preparation failed before launch: {error}"
                         ));
-                        None
                     }
                 };
             if let Some(extension_path) = extension_path {
@@ -2604,11 +2630,9 @@ async fn spawn_agent_inner(
                 {
                     Ok(plan) => Some(plan),
                     Err(error) => {
-                        log_debug(&format!(
-                            "[Wardian] Pi bridge unavailable for {}: {}",
-                            config.session_id, error
+                        return Err(format!(
+                            "Pi bridge preparation failed before launch: {error}"
                         ));
-                        None
                     }
                 }
             } else {
@@ -4918,6 +4942,7 @@ async fn spawn_agent_inner(
             })
         });
     }
+    gate.pi_bridge = pi_attachment.as_ref().map(|plan| plan.owner());
     release_provider_spawn_lease_after_readiness(
         spawn_lease,
         current_status,
@@ -4978,6 +5003,13 @@ pub async fn resize_pty(
         Err(error) => Err(error.to_string()),
     }
 }
+
+#[cfg(test)]
+#[path = "spawn/pi_startup_tests.rs"]
+mod pi_startup_tests;
+
+#[path = "spawn/pi_startup.rs"]
+mod pi_startup;
 
 #[cfg(test)]
 mod tests {
@@ -5779,6 +5811,7 @@ mod tests {
             SpawnPublicationGate {
                 unpublished_failure: Some(failed.clone()),
                 registration: None,
+                ..Default::default()
             },
         );
         assert!(acquire_provider_spawn_lease(&config).is_err());
@@ -5844,6 +5877,7 @@ mod tests {
                 SpawnPublicationGate {
                     unpublished_failure: Some(disposition.failure_signal()),
                     registration: None,
+                    ..Default::default()
                 },
             );
             ready.send(watcher).unwrap();
@@ -5904,6 +5938,7 @@ mod tests {
                 SpawnPublicationGate {
                     unpublished_failure: None,
                     registration: Some(publication.clone()),
+                    ..Default::default()
                 },
             );
             tokio::time::sleep(std::time::Duration::from_millis(350)).await;
@@ -6223,7 +6258,7 @@ mod tests {
             .any(|message| message.text == "old"));
     }
 
-    fn agent_without_pty() -> crate::state::ActiveAgent {
+    pub(super) fn agent_without_pty() -> crate::state::ActiveAgent {
         crate::state::ActiveAgent {
             config: std::sync::Arc::new(std::sync::Mutex::new(AgentConfig::default())),
             child_process: None,
