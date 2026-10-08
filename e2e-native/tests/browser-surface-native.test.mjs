@@ -18,6 +18,7 @@ import {
   waitForAppShell,
 } from "../lib/harness.mjs";
 import { openWorkbenchSurface, waitForWorkbenchReady } from "../lib/workbench.mjs";
+import { closeHttpFixture } from "../lib/httpFixture.mjs";
 
 /**
  * Exercises the browser surface against a real Chromium.
@@ -86,7 +87,7 @@ async function serveFixture(t) {
     response.end(body);
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise((resolve) => server.close(resolve)));
+  t.after(() => closeHttpFixture(server));
   return `http://127.0.0.1:${server.address().port}/`;
 }
 
