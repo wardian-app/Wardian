@@ -1,4 +1,4 @@
-//! Retained stop fences for captured Codex PTY/background runtimes.
+//! Retained stop fences for captured Codex and Pi PTY/background runtimes.
 //! Lifecycle callers register synchronously before their first await. A waiter
 //! never owns the child handles; only observed exit releases the process fence.
 use crate::state::terminal_session::{TerminalBrokerError, TerminalSessionBroker};
@@ -36,6 +36,10 @@ struct Entry {
     status: watch::Sender<Status>,
     timeout: Duration,
     terminal: Option<TerminalCleanup>,
+    provider: &'static str,
+    generation: Option<u64>,
+    status_arc: Arc<Mutex<String>>,
+    terminal_complete: std::sync::atomic::AtomicBool,
 }
 
 struct TerminalCleanup {
@@ -65,6 +69,13 @@ pub(crate) fn prepare_stop(home: &Path, agent_id: &str) -> Result<StopRegistrati
     prepare_with_timeout(home, agent_id, Duration::from_secs(5))
 }
 
+/// Pi cleanup uses only captured child handles, never a discovered PID tree.
+pub(crate) fn prepare_pi_stop(home: &Path, agent_id: &str) -> Result<StopRegistration, String> {
+    let mut registration = prepare_stop(home, agent_id)?;
+    registration.provider = "pi";
+    Ok(registration)
+}
+
 fn prepare_with_timeout(
     home: &Path,
     agent_id: &str,
@@ -74,6 +85,7 @@ fn prepare_with_timeout(
         key: key(home, agent_id)?,
         timeout,
         terminal: None,
+        provider: "codex",
     })
 }
 
@@ -82,6 +94,7 @@ pub(crate) struct StopRegistration {
     key: Key,
     timeout: Duration,
     terminal: Option<(Arc<TerminalSessionBroker>, tokio::runtime::Handle)>,
+    provider: &'static str,
 }
 
 impl StopRegistration {
@@ -114,10 +127,14 @@ impl StopRegistration {
         });
         let entry = Arc::new(Entry {
             keys: vec![self.key],
+            generation: agent.runtime_generation,
+            status_arc: agent.current_status.clone(),
             runtime: Mutex::new(Some(agent)),
             status,
             timeout: self.timeout,
             terminal,
+            provider: self.provider,
+            terminal_complete: std::sync::atomic::AtomicBool::new(false),
         });
         let guard = StopGuard(Some(entry.clone()));
         let mut map = registry().lock().unwrap_or_else(|error| error.into_inner());
@@ -151,11 +168,74 @@ impl Drop for StopGuard {
 pub(crate) struct StopHandle(Arc<Entry>);
 
 impl StopHandle {
+    pub(crate) fn provider_label(&self) -> &'static str {
+        if self.0.provider == "pi" {
+            "Pi"
+        } else {
+            "Codex"
+        }
+    }
+
     /// Cancellation only drops this observer. The registry and cleanup worker
     /// retain the runtime, including after timeout, kill/wait error or panic.
     pub(crate) async fn wait(&self) -> Result<(), String> {
-        wait(&self.0).await
+        wait(&self.0).await?;
+        // A cancelled Pi registration can await cleanup before its startup
+        // owner observes capture. Preserve the exact exit receipt for that owner.
+        if self.0.provider != "pi" {
+            release(&self.0);
+        }
+        Ok(())
     }
+
+    /// Observe a later exit after an uncertain stop, without issuing another
+    /// kill. Failed terminal cleanup still requires an explicit lifecycle retry.
+    pub(crate) fn observe_exit(&self) -> Result<bool, String> {
+        let entry = &self.0;
+        if matches!(*entry.status.borrow(), Status::Exited) {
+            release(entry);
+            return Ok(true);
+        }
+        if !matches!(*entry.status.borrow(), Status::Failed(_))
+            || !entry
+                .terminal_complete
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(false);
+        }
+        let mut runtime = match entry.runtime.try_lock() {
+            Ok(runtime) => runtime,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+        };
+        if let Some(agent) = runtime.as_mut() {
+            if !poll_exited(agent)? {
+                return Ok(false);
+            }
+        }
+        drop(runtime.take());
+        release(entry);
+        entry.status.send_replace(Status::Exited);
+        Ok(true)
+    }
+}
+
+/// Cancellation can capture before the startup observer sees roster publication.
+/// Match the retained incarnation even after exit cleared its runtime fields.
+pub(crate) fn matching_pi_stop(
+    home: &Path,
+    agent_id: &str,
+    generation: u64,
+    status_arc: &Arc<Mutex<String>>,
+) -> Result<Option<StopHandle>, String> {
+    Ok(entries(&key(home, agent_id)?)
+        .into_iter()
+        .find(|entry| {
+            entry.provider == "pi"
+                && entry.generation == Some(generation)
+                && Arc::ptr_eq(&entry.status_arc, status_arc)
+        })
+        .map(StopHandle))
 }
 
 /// Call before new launch/migration/deletion under existing lifecycle exclusion.
@@ -170,6 +250,7 @@ pub(crate) async fn await_quiescent(home: &Path, agent_id: &str) -> Result<(), S
         }
         for entry in entries {
             wait(&entry).await?;
+            release(&entry);
         }
         // Re-read after waiting so another captured incarnation is not erased.
     }
@@ -249,14 +330,15 @@ fn start(entry: &Arc<Entry>, allow_captured: bool) {
             if let Some(agent) = runtime.as_mut() {
                 {
                     let config = agent.config.lock().unwrap_or_else(|error| error.into_inner());
-                    if config.session_id != worker.keys[0].1 || config.provider != "codex" {
+                    if config.session_id != worker.keys[0].1 || config.provider != worker.provider {
                         return Err("Captured runtime does not match the reserved Codex identity; runtime retained".into());
                     }
                 }
                 if let Some(terminal) = &worker.terminal {
                     terminal.terminate(&worker.keys[0].1)?;
                 }
-                stop_and_join(agent, worker.timeout)?;
+                worker.terminal_complete.store(true, std::sync::atomic::Ordering::Release);
+                stop_and_join(agent, worker.timeout, worker.provider == "pi")?;
             }
             // Terminal cleanup (when captured) and every child exit completed
             // before ActiveAgent Drop and release of the retained stop fence.
@@ -266,7 +348,11 @@ fn start(entry: &Arc<Entry>, allow_captured: bool) {
         match result {
             Ok(()) => {
                 // Remove only this exact entry; a later capture is independent.
-                release(&worker);
+                // Pi startup may observe a cancelled registration after its
+                // worker exits. Preserve that exact completion until observed.
+                if worker.provider != "pi" {
+                    release(&worker);
+                }
                 worker.status.send_replace(Status::Exited);
             }
             Err(error) => { worker.status.send_replace(Status::Failed(error)); }
@@ -291,21 +377,21 @@ fn release(entry: &Arc<Entry>) {
     }
 }
 
-fn stop_and_join(agent: &mut ActiveAgent, timeout: Duration) -> Result<(), String> {
-    if agent.child_process.is_none()
-        && (agent.process_id.is_some() || agent.runtime_generation.is_some())
-    {
-        return Err(
-            "Cannot prove Codex TUI exit: captured child handle is missing; fence retained".into(),
-        );
-    }
+fn stop_and_join(
+    agent: &mut ActiveAgent,
+    timeout: Duration,
+    retained_only: bool,
+) -> Result<(), String> {
+    // Preserve Pi's retained-child policy on retries as well as initial cleanup.
+    #[cfg(not(windows))]
+    let _ = retained_only;
     if poll_exited(agent)? {
         return Ok(());
     }
     let mut failure = None;
     if let Some(child) = agent.child_process.as_mut() {
         #[cfg(windows)]
-        if let Some(pid) = child.process_id() {
+        if let Some(pid) = child.process_id().filter(|_| !retained_only) {
             if let Err(error) = crate::utils::process::force_kill_process_tree(pid) {
                 failure = Some(error);
             }
@@ -316,8 +402,10 @@ fn stop_and_join(agent: &mut ActiveAgent, timeout: Duration) -> Result<(), Strin
     }
     for child in &mut agent.background_processes {
         #[cfg(windows)]
-        if let Err(error) = crate::utils::process::force_kill_process_tree(child.id()) {
-            failure = Some(error);
+        if !retained_only {
+            if let Err(error) = crate::utils::process::force_kill_process_tree(child.id()) {
+                failure = Some(error);
+            }
         }
         if let Err(error) = child.kill() {
             failure = Some(error.to_string());
@@ -325,7 +413,9 @@ fn stop_and_join(agent: &mut ActiveAgent, timeout: Duration) -> Result<(), Strin
     }
     #[cfg(windows)]
     {
-        agent.job_object.take();
+        if !retained_only {
+            agent.job_object.take();
+        }
     }
     let deadline = Instant::now() + timeout;
     loop {
@@ -347,6 +437,16 @@ fn stop_and_join(agent: &mut ActiveAgent, timeout: Duration) -> Result<(), Strin
 }
 
 fn poll_exited(agent: &mut ActiveAgent) -> Result<bool, String> {
+    // Every exit observer must reject a missing retained TUI handle. Empty
+    // fields alone cannot prove a runtime with a live identity has exited.
+    if agent.child_process.is_none()
+        && (agent.process_id.is_some() || agent.runtime_generation.is_some())
+    {
+        return Err(
+            "Cannot prove provider TUI exit: captured child handle is missing; fence retained"
+                .into(),
+        );
+    }
     if let Some(child) = agent.child_process.as_mut() {
         if child
             .try_wait()

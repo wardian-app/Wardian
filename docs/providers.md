@@ -347,6 +347,12 @@ input acceptance. A receipt matches the submitted plain text and the current
 launch, provider session, and terminal generation. It confirms input acceptance,
 not model completion. User extensions remain enabled.
 
+If the messaging bridge fails during a resumed Pi startup, Wardian stops the
+owned runtime and preserves the saved session and history. This failure reports
+`Error` once cleanup observes child exit. `Action Needed` with a startup cleanup failure means exit is
+still unverified and conversation ownership remains fenced. An `Idle` terminal
+event alone cannot release ownership before bridge authentication completes.
+
 Wardian serializes managed submissions. Identical text entered manually at the
 same time remains ambiguous; avoid concurrent manual input while waiting for a
 managed receipt. Commands, extension-handled input, and transformed text cannot

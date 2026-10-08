@@ -453,7 +453,7 @@ struct PreparedAgentClear {
     status_arc: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
-fn take_agent_runtime_for_termination(agent: &mut ActiveAgent) -> ActiveAgent {
+pub(crate) fn take_agent_runtime_for_termination(agent: &mut ActiveAgent) -> ActiveAgent {
     ActiveAgent {
         config: agent.config.clone(),
         child_process: agent.child_process.take(),

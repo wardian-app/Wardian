@@ -11,6 +11,7 @@ import {
   createNativeHarness,
   ensureNativeAppBuilt,
   freezeBuiltCliForRun,
+  prebuiltCliForRun,
   invokeTauri,
   invokeTauriResult,
   prepareIsolatedHome,
@@ -18,6 +19,7 @@ import {
   waitForAppShell,
 } from "../lib/harness.mjs";
 import { openWorkbenchSurface, waitForWorkbenchReady } from "../lib/workbench.mjs";
+import { closeHttpFixture } from "../lib/httpFixture.mjs";
 
 /**
  * Exercises the browser surface against a real Chromium.
@@ -86,7 +88,7 @@ async function serveFixture(t) {
     response.end(body);
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise((resolve) => server.close(resolve)));
+  t.after(() => closeHttpFixture(server));
   return `http://127.0.0.1:${server.address().port}/`;
 }
 
@@ -96,6 +98,8 @@ async function requireInvoke(driver, command, args = {}) {
 
 /** Builds `wardian-cli` and returns its path, matching the CLI shared-state test. */
 function buildCli(harness) {
+  const prebuilt = prebuiltCliForRun(harness, skipNativeBuild);
+  if (prebuilt) return prebuilt;
   const build = spawnSync("cargo", ["build", "-p", "wardian-cli", "--bin", "wardian-cli"], {
     cwd: harness.repoRoot,
     encoding: "utf8",

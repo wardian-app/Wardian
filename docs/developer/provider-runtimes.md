@@ -674,6 +674,16 @@ footer may wrap or truncate a long workspace path; readiness still requires its
 workspace and model context. Loading, error, and stale historical frames cannot
 release queued input.
 
+For resumed TUI sessions with the Wardian messaging bridge, startup conversation
+exclusion also waits for the authenticated bridge handshake. A terminal bridge
+failure transfers the exact runtime into retained child cleanup. Successful
+termination requests and terminal EOF do not prove exit. Wardian publishes
+`Error` and releases the exact lease acquisition only after observing every
+captured child exit. Failed or uncertain cleanup publishes `Action Needed` and
+keeps the retained runtime fence and lease; later exit observation may complete
+cleanup without another termination request. Cancelling a startup observer does
+not cancel cleanup. Saved session identity and history are preserved.
+
 Pi's `--approve` and `--no-approve` flags control project-local configuration,
 extensions, and skills. They do not sandbox the shell tool or extensions.
 

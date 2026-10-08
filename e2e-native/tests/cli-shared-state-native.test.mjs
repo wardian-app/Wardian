@@ -11,6 +11,7 @@ import {
   createNativeHarness,
   ensureNativeAppBuilt,
   freezeBuiltCliForRun,
+  prebuiltCliForRun,
   prepareIsolatedHome,
   startNativeSession,
   waitForAppShell,
@@ -32,10 +33,8 @@ const WRITE_RECEIPT_SESSION_NAME = `E2E-NATIVE-WRITE-RECEIPT-${RUN_ID}`;
 const WATCH_READABLE_SESSION_NAME = `E2E-CLI-WATCH-READABLE-${RUN_ID}`;
 
 function buildCli(harness) {
-  if (skipNativeBuild || harness.pairedCli) {
-    assert.ok(harness.cliPath, "skip-build control tests require the harness's frozen CLI");
-    return harness.cliPath;
-  }
+  const prebuilt = prebuiltCliForRun(harness, skipNativeBuild);
+  if (prebuilt) return prebuilt;
   const result = spawnSync(
     "cargo",
     ["build", "-p", "wardian-cli", "--bin", "wardian-cli"],
