@@ -7,9 +7,15 @@ import { once } from "node:events";
 
 import { closeHttpFixture } from "../lib/httpFixture.mjs";
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((complete) => { resolve = complete; });
+  return { promise, resolve };
+}
+
 async function connectedFixture() {
   const server = http.createServer((_request, response) => response.end("fixture"));
-  const accepted = Promise.withResolvers();
+  const accepted = deferred();
   server.once("connection", (socket) => accepted.resolve(socket));
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -40,7 +46,7 @@ async function releaseFixture(fixture) {
 test("HTTP fixture cleanup releases its live connection before a later client shutdown hook", { timeout: 5000 }, async (t) => {
   const fixture = await connectedFixture();
   const foreign = await connectedFixture();
-  const closeIssued = Promise.withResolvers();
+  const closeIssued = deferred();
   const trace = [];
   let child;
   t.signal.addEventListener("abort", () => {
