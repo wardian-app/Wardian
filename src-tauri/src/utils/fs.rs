@@ -1070,19 +1070,11 @@ pub(crate) fn observe_codex_indexes() {
     };
     for entry in entries.flatten() {
         let session_id = entry.file_name().to_string_lossy().into_owned();
-        let Ok(_preparation) = super::codex_home::acquire_preparation(&wardian_home, &session_id)
-        else {
-            continue;
-        };
-        let Ok(projected_home) =
-            super::codex_home::resolve_managed_home(&wardian_home, &session_id)
-        else {
-            continue;
-        };
-        if !projected_home.is_dir() {
-            continue;
-        }
-        if let Err(error) = sync_codex_home_indexes(&projected_home) {
+        if let Some(Err(error)) = super::codex_home::with_index_observation(
+            &wardian_home,
+            &session_id,
+            sync_codex_home_indexes,
+        ) {
             log_debug(&format!(
                 "[Wardian] Failed to observe Codex indexes for {session_id}: {error}"
             ));
