@@ -4,7 +4,7 @@
 //! target sessions, and an event stream. The connection owns one websocket and
 //! two background tasks; every caller talks to it through [`CdpConnection`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -142,7 +142,24 @@ pub(crate) fn classify_frame(text: &str) -> InboundFrame {
     }
 }
 
-type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, (i64, String)>>>>>;
+#[derive(Debug)]
+struct PendingCall {
+    session_id: Option<String>,
+    attachment_target: Option<String>,
+    reply: oneshot::Sender<Result<Value, (i64, String)>>,
+}
+
+#[derive(Debug, Default)]
+struct PendingCalls {
+    requests: HashMap<u64, PendingCall>,
+    /// Recorded from successful attach replies before waking their callers,
+    /// including targets that are still being equipped by the actor.
+    target_sessions: HashMap<String, String>,
+    retired_targets: HashSet<String>,
+    retired_sessions: HashSet<String>,
+}
+
+type PendingMap = Arc<Mutex<PendingCalls>>;
 
 /// An open DevTools Protocol connection to one browser process.
 #[derive(Debug)]
@@ -165,7 +182,7 @@ impl CdpConnection {
         let (mut sink, mut source) = stream.split();
         let (outbound, mut outbound_rx) = mpsc::unbounded_channel::<Message>();
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let pending: PendingMap = Arc::new(Mutex::new(PendingCalls::default()));
 
         let connection = Arc::new(Self {
             next_id: AtomicU64::new(1),
@@ -200,8 +217,18 @@ impl CdpConnection {
                 };
                 match classify_frame(&text) {
                     InboundFrame::Reply { id, result } => {
-                        if let Some(sender) = pending.lock().await.remove(&id) {
-                            let _ = sender.send(result);
+                        let mut pending = pending.lock().await;
+                        if let Some(call) = pending.requests.remove(&id) {
+                            if let (Some(target), Ok(body)) = (&call.attachment_target, &result) {
+                                if let Some(session_id) =
+                                    body.get("sessionId").and_then(Value::as_str)
+                                {
+                                    pending
+                                        .target_sessions
+                                        .insert(target.clone(), session_id.to_string());
+                                }
+                            }
+                            let _ = call.reply.send(result);
                         }
                     }
                     InboundFrame::Event(event) => {
@@ -213,8 +240,8 @@ impl CdpConnection {
             // Fail every in-flight call rather than leaving callers to time out
             // one by one after the socket is already gone.
             connection_closed.closed.store(true, Ordering::Release);
-            for (_, sender) in pending.lock().await.drain() {
-                let _ = sender.send(Err((-1, "connection closed".to_string())));
+            for (_, call) in pending.lock().await.requests.drain() {
+                let _ = call.reply.send(Err((-1, "connection closed".to_string())));
             }
             let _ = events.send(CdpEvent {
                 session_id: None,
@@ -251,6 +278,51 @@ impl CdpConnection {
         self.closed.load(Ordering::Acquire)
     }
 
+    /// Fails calls belonging to one destroyed target without closing its browser.
+    ///
+    /// Retirement and dispatch registration share a lock: a call either enters
+    /// before retirement and is failed here, or sees the retired identity and
+    /// fails before enqueueing. Attach requests carry their target identity so
+    /// destruction also covers the interval before a flattened session exists.
+    /// Tombstones prevent later work on those identities; late replies have no
+    /// pending recipient. Other target and browser-scoped calls stay live.
+    pub(super) async fn retire_target(&self, target_id: &str) {
+        let mut pending = self.pending.lock().await;
+        pending.retired_targets.insert(target_id.to_string());
+        let session_id = pending.target_sessions.remove(target_id);
+        if let Some(session_id) = &session_id {
+            pending.retired_sessions.insert(session_id.clone());
+        }
+        let ids: Vec<_> = pending
+            .requests
+            .iter()
+            .filter_map(|(id, call)| {
+                (call.attachment_target.as_deref() == Some(target_id)
+                    || session_id
+                        .as_deref()
+                        .is_some_and(|session_id| call.session_id.as_deref() == Some(session_id)))
+                .then_some(*id)
+            })
+            .collect();
+        for id in ids {
+            if let Some(call) = pending.requests.remove(&id) {
+                let _ = call
+                    .reply
+                    .send(Err((-32000, "target session is closed".to_string())));
+            }
+        }
+    }
+
+    /// Whether destruction has already retired this target, including an
+    /// attach that completed before the actor could publish its stack entry.
+    pub(super) async fn target_is_retired(&self, target_id: &str) -> bool {
+        self.pending
+            .lock()
+            .await
+            .retired_targets
+            .contains(target_id)
+    }
+
     async fn dispatch(
         &self,
         method: &str,
@@ -258,6 +330,10 @@ impl CdpConnection {
         session_id: Option<&str>,
     ) -> Result<Value, CdpError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let attachment_target = (method == "Target.attachToTarget")
+            .then(|| params.get("targetId").and_then(Value::as_str))
+            .flatten()
+            .map(str::to_string);
         let mut envelope = json!({ "id": id, "method": method, "params": params });
         if let Some(session_id) = session_id {
             envelope["sessionId"] = json!(session_id);
@@ -273,15 +349,35 @@ impl CdpConnection {
             if self.is_closed() {
                 return Err(CdpError::Disconnected);
             }
-            pending.insert(id, sender);
-        }
-        if self
-            .outbound
-            .send(Message::Text(envelope.to_string().into()))
-            .is_err()
-        {
-            self.pending.lock().await.remove(&id);
-            return Err(CdpError::Disconnected);
+            if session_id.is_some_and(|session_id| pending.retired_sessions.contains(session_id))
+                || attachment_target
+                    .as_ref()
+                    .is_some_and(|target_id| pending.retired_targets.contains(target_id))
+            {
+                return Err(CdpError::Protocol {
+                    method: method.to_string(),
+                    code: -32000,
+                    message: "target session is closed".to_string(),
+                });
+            }
+            pending.requests.insert(
+                id,
+                PendingCall {
+                    session_id: session_id.map(str::to_string),
+                    attachment_target,
+                    reply: sender,
+                },
+            );
+            // Enqueueing is synchronous, so retirement cannot fall between
+            // registration and enqueueing and leave new work on a dead target.
+            if self
+                .outbound
+                .send(Message::Text(envelope.to_string().into()))
+                .is_err()
+            {
+                pending.requests.remove(&id);
+                return Err(CdpError::Disconnected);
+            }
         }
 
         match timeout(CDP_CALL_TIMEOUT, receiver).await {
@@ -293,7 +389,7 @@ impl CdpConnection {
             }),
             Ok(Err(_)) => Err(CdpError::Disconnected),
             Err(_) => {
-                self.pending.lock().await.remove(&id);
+                self.pending.lock().await.requests.remove(&id);
                 Err(CdpError::Timeout {
                     method: method.to_string(),
                 })
@@ -317,6 +413,259 @@ pub fn required_str(method: &str, value: &Value, field: &str) -> Result<String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_async;
+
+    #[tokio::test]
+    async fn retirement_preserves_live_calls_and_rejects_new_dead_session_calls() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let endpoint = format!("ws://{}", listener.local_addr().expect("address"));
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut socket = accept_async(stream).await.expect("websocket");
+            let Some(Ok(Message::Text(text))) = socket.next().await else {
+                panic!("attach request");
+            };
+            let attach: Value = serde_json::from_str(text.as_ref()).expect("attach JSON");
+            assert_eq!(attach["params"]["targetId"], "popup-target");
+            socket
+                .send(Message::Text(
+                    json!({ "id": attach["id"], "result": { "sessionId": "popup-session" } })
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .expect("attach reply");
+            let mut requests = Vec::new();
+            for _ in 0..4 {
+                let Some(Ok(Message::Text(text))) = socket.next().await else {
+                    panic!("held request");
+                };
+                requests.push(serde_json::from_str::<Value>(text.as_ref()).expect("request JSON"));
+            }
+            ready_tx.send(()).expect("ready receipt");
+            release_rx.await.expect("release replies");
+            // Popup replies arrive after retirement; they cannot resurrect callers.
+            requests.sort_by_key(|request| request["sessionId"] != "popup-session");
+            for request in requests {
+                socket
+                    .send(Message::Text(
+                        json!({ "id": request["id"], "result": { "method": request["method"] } })
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .expect("late/live reply");
+            }
+            let Some(Ok(Message::Text(text))) = socket.next().await else {
+                panic!("fresh live request");
+            };
+            let fresh: Value = serde_json::from_str(text.as_ref()).expect("fresh JSON");
+            assert_eq!(fresh["sessionId"], "base-session");
+            assert_eq!(fresh["method"], "Fake.fresh");
+            socket
+                .send(Message::Text(
+                    json!({ "id": fresh["id"], "result": { "live": true } })
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .expect("fresh reply");
+            socket.close(None).await.expect("close");
+        });
+        let connection = CdpConnection::connect(&endpoint).await.expect("connect");
+        connection
+            .call(
+                "Target.attachToTarget",
+                json!({ "targetId": "popup-target", "flatten": true }),
+            )
+            .await
+            .expect("attach");
+        let mut popup_calls = Vec::new();
+        for method in ["Fake.popupOne", "Fake.popupTwo"] {
+            let connection = Arc::clone(&connection);
+            popup_calls.push(tokio::spawn(async move {
+                connection
+                    .call_session("popup-session", method, json!({}))
+                    .await
+            }));
+        }
+        let base_connection = Arc::clone(&connection);
+        let base = tokio::spawn(async move {
+            base_connection
+                .call_session("base-session", "Fake.base", json!({}))
+                .await
+        });
+        let browser_connection = Arc::clone(&connection);
+        let browser =
+            tokio::spawn(async move { browser_connection.call("Fake.browser", json!({})).await });
+        timeout(Duration::from_secs(2), ready_rx)
+            .await
+            .expect("wire receipt")
+            .expect("ready");
+        connection.retire_target("foreign-target").await;
+        assert!(popup_calls.iter().all(|call| !call.is_finished()));
+        assert!(!base.is_finished());
+        assert!(!browser.is_finished());
+        connection.retire_target("popup-target").await;
+        connection.retire_target("popup-target").await;
+        for call in popup_calls {
+            let error = timeout(Duration::from_secs(2), call)
+                .await
+                .expect("retired caller joins")
+                .expect("caller task")
+                .expect_err("retired call");
+            assert!(matches!(error, CdpError::Protocol { code: -32000, .. }));
+            assert!(error.to_string().contains("target session is closed"));
+        }
+        assert!(!base.is_finished());
+        assert!(!browser.is_finished());
+        assert!(matches!(
+            connection
+                .call_session("popup-session", "Fake.mustNotReachWire", json!({}))
+                .await,
+            Err(CdpError::Protocol { code: -32000, .. })
+        ));
+        assert!(matches!(
+            connection
+                .call(
+                    "Target.attachToTarget",
+                    json!({ "targetId": "popup-target" })
+                )
+                .await,
+            Err(CdpError::Protocol { code: -32000, .. })
+        ));
+        release_tx.send(()).expect("release");
+        assert_eq!(
+            timeout(Duration::from_secs(2), base)
+                .await
+                .expect("base joins")
+                .expect("task")
+                .expect("base reply")["method"],
+            "Fake.base"
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(2), browser)
+                .await
+                .expect("browser joins")
+                .expect("task")
+                .expect("browser reply")["method"],
+            "Fake.browser"
+        );
+        let fresh = timeout(
+            Duration::from_secs(2),
+            connection.call_session("base-session", "Fake.fresh", json!({})),
+        )
+        .await
+        .expect("fresh response")
+        .expect("fresh live call");
+        assert_eq!(fresh["live"], true);
+        timeout(Duration::from_secs(2), server)
+            .await
+            .expect("server joins")
+            .expect("server task");
+        assert!(connection.pending.lock().await.requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn retirement_before_attach_reply_prevents_late_attachment_registration() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let endpoint = format!("ws://{}", listener.local_addr().expect("address"));
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut socket = accept_async(stream).await.expect("websocket");
+            let Some(Ok(Message::Text(text))) = socket.next().await else {
+                panic!("attach request")
+            };
+            let attach: Value = serde_json::from_str(text.as_ref()).expect("JSON");
+            ready_tx.send(()).expect("wire receipt");
+            release_rx.await.expect("release");
+            socket
+                .send(Message::Text(
+                    json!({ "id": attach["id"], "result": { "sessionId": "late-session" } })
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .expect("late reply");
+            let Some(Ok(Message::Text(text))) = socket.next().await else {
+                panic!("live browser request")
+            };
+            let live: Value = serde_json::from_str(text.as_ref()).expect("JSON");
+            assert_eq!(live["method"], "Fake.browserStillLive");
+            socket
+                .send(Message::Text(
+                    json!({ "id": live["id"], "result": { "live": true } })
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .expect("live reply");
+            socket.close(None).await.expect("close");
+        });
+        let connection = CdpConnection::connect(&endpoint).await.expect("connect");
+        let attaching_connection = Arc::clone(&connection);
+        let attaching = tokio::spawn(async move {
+            attaching_connection
+                .call(
+                    "Target.attachToTarget",
+                    json!({ "targetId": "closing-target" }),
+                )
+                .await
+        });
+        timeout(Duration::from_secs(2), ready_rx)
+            .await
+            .expect("wire receipt")
+            .expect("ready");
+        connection.retire_target("closing-target").await;
+        assert!(matches!(
+            timeout(Duration::from_secs(2), attaching)
+                .await
+                .expect("attach joins")
+                .expect("caller task"),
+            Err(CdpError::Protocol { code: -32000, .. })
+        ));
+        assert!(matches!(
+            connection
+                .call(
+                    "Target.attachToTarget",
+                    json!({ "targetId": "closing-target" })
+                )
+                .await,
+            Err(CdpError::Protocol { code: -32000, .. })
+        ));
+        // Retirement wins before registration too, without putting an attach on the wire.
+        connection.retire_target("already-gone-target").await;
+        assert!(matches!(
+            connection
+                .call(
+                    "Target.attachToTarget",
+                    json!({ "targetId": "already-gone-target" })
+                )
+                .await,
+            Err(CdpError::Protocol { code: -32000, .. })
+        ));
+        release_tx.send(()).expect("release");
+        let live = timeout(
+            Duration::from_secs(2),
+            connection.call("Fake.browserStillLive", json!({})),
+        )
+        .await
+        .expect("live joins")
+        .expect("live reply");
+        assert_eq!(live["live"], true);
+        timeout(Duration::from_secs(2), server)
+            .await
+            .expect("server joins")
+            .expect("server task");
+        let pending = connection.pending.lock().await;
+        assert!(!pending.target_sessions.contains_key("closing-target"));
+        assert!(pending.requests.is_empty());
+    }
 
     #[test]
     fn classifies_a_successful_reply() {
