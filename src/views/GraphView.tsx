@@ -99,8 +99,8 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
   onSurfaceStateChangeRef.current = props.onSurfaceStateChange;
   // Layout freeze: node positions are captured once topology data is loaded
   // and reused across edge edits, so drawing or deleting edges never moves
-  // nodes. A re-layout (button or node-set change) clears the freeze.
-  const frozenLayoutRef = useRef<{ nodeKey: string; positions: Map<string, { x: number; y: number }> } | null>(null);
+  // nodes. A re-layout (button or node-set change) advances the layout request.
+  const frozenLayoutRef = useRef<{ nodeKey: string; layoutNonce: number; positions: Map<string, { x: number; y: number }> } | null>(null);
   const [layoutNonce, setLayoutNonce] = useState(0);
 
   useEffect(() => {
@@ -115,7 +115,6 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
   }, [enabledReasons, inspectedAgentId, inspectorOpen, pickerSearch, selectedEdgeId, showAllLabels]);
 
   const rerunLayout = () => {
-    frozenLayoutRef.current = null;
     setLayoutNonce((value) => value + 1);
   };
 
@@ -174,7 +173,11 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
     offAgentIds: props.offAgentIds,
     topology: topology ?? undefined,
     pairActivity,
-    frozenPositions: frozenLayoutRef.current?.positions,
+    // A pending effect from the previous commit may still capture its layout.
+    // Only reuse positions captured for this render's layout request.
+    frozenPositions: frozenLayoutRef.current?.layoutNonce === layoutNonce
+      ? frozenLayoutRef.current.positions
+      : undefined,
   }), [
     props.allAgents,
     props.telemetry,
@@ -206,13 +209,14 @@ export const GraphView: React.FC<GraphViewProps> = (props) => {
       setLayoutNonce((value) => value + 1);
       return;
     }
-    if (!frozen) {
+    if (!frozen || frozen.layoutNonce !== layoutNonce) {
       frozenLayoutRef.current = {
         nodeKey,
+        layoutNonce,
         positions: new Map(projection.nodes.map((node) => [node.id, { x: node.x, y: node.y }])),
       };
     }
-  }, [projection.nodes, topology]);
+  }, [layoutNonce, projection.nodes, topology]);
 
   useEffect(() => {
     const selectedIds = Array.from(props.selectedAgentIds);

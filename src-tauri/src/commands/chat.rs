@@ -176,7 +176,7 @@ fn provider_log_source_is_fresh(
     resume_session: Option<&str>,
     fresh_provider_session_id: Option<&str>,
 ) -> bool {
-    if !matches!(provider, "claude" | "codex" | "pi") {
+    if !matches!(provider, "claude" | "codex" | "pi" | "mock") {
         return false;
     }
     let Some(fresh) = fresh_provider_session_id
@@ -2836,6 +2836,29 @@ mod tests {
             "opencode",
             Some("opencode-session"),
             Some("opencode-session")
+        ));
+    }
+
+    #[test]
+    fn mock_prefix_trust_requires_its_runtime_launch_identity() {
+        for (resume, fresh, expected) in [
+            (None, Some("owned"), true),
+            (Some("owned"), Some("owned"), true),
+            (Some(" owned "), Some(" owned "), true),
+            (Some("owned"), None, false),
+            (Some("owned"), Some("foreign"), false),
+            (Some(""), Some("owned"), false),
+            (Some("owned"), Some(""), false),
+        ] {
+            assert_eq!(
+                provider_log_source_is_fresh("mock", resume, fresh),
+                expected
+            );
+        }
+        assert!(!provider_log_source_is_fresh(
+            "gemini",
+            Some("owned"),
+            Some("owned")
         ));
     }
 

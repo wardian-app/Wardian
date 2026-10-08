@@ -4,6 +4,9 @@ mod replay;
 mod snapshot;
 
 #[cfg(test)]
+mod resize_tests;
+
+#[cfg(test)]
 mod tests;
 
 pub use actor::{

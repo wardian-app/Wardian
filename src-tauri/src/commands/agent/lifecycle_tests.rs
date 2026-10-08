@@ -64,6 +64,7 @@ struct Fixture {
     home: PathBuf,
     workspace: PathBuf,
     old_home: Option<std::ffi::OsString>,
+    old_codex_home: Option<std::ffi::OsString>,
     old_roots: Option<Vec<PathBuf>>,
     old_native: Option<PathBuf>,
 }
@@ -78,7 +79,10 @@ impl Fixture {
         std::fs::create_dir(&workspace).unwrap();
         std::fs::create_dir(&native).unwrap();
         let old_home = std::env::var_os("WARDIAN_HOME");
+        let old_codex_home = std::env::var_os("CODEX_HOME");
         std::env::set_var("WARDIAN_HOME", &home);
+        // The default source belongs to the private native-home fixture below.
+        std::env::remove_var("CODEX_HOME");
         // If a regression bypasses the stop gate, the long home and empty root
         // list still reject startup before any provider can be launched.
         let old_roots =
@@ -90,6 +94,7 @@ impl Fixture {
             home,
             workspace,
             old_home,
+            old_codex_home,
             old_roots,
             old_native,
         }
@@ -119,6 +124,10 @@ impl Drop for Fixture {
         match self.old_home.take() {
             Some(home) => std::env::set_var("WARDIAN_HOME", home),
             None => std::env::remove_var("WARDIAN_HOME"),
+        }
+        match self.old_codex_home.take() {
+            Some(home) => std::env::set_var("CODEX_HOME", home),
+            None => std::env::remove_var("CODEX_HOME"),
         }
     }
 }
