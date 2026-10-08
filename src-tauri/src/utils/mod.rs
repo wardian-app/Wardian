@@ -2,7 +2,6 @@ pub mod app_settings;
 pub mod cli_install;
 pub(crate) mod codex_home;
 pub(crate) mod codex_messaging;
-pub(crate) mod codex_thread_state;
 pub mod delivery_profile;
 pub mod delivery_transaction;
 pub(crate) mod desktop_owner;

@@ -21,6 +21,243 @@ async fn persist_agent_config_for_test(
 }
 
 #[test]
+fn mock_launch_identity_survives_promotion_and_registration_only_in_memory() {
+    use super::agent_lifecycle::{
+        promote_fresh_provider_session_fields, sync_registered_provider_session,
+    };
+
+    let mut config = AgentConfig {
+        provider: "mock".to_string(),
+        fresh_provider_session_id: Some("mock-owned-session".to_string()),
+        ..AgentConfig::default()
+    };
+    assert!(promote_fresh_provider_session_fields("mock", &mut config));
+    assert_eq!(
+        config.fresh_provider_session_id.as_deref(),
+        Some("mock-owned-session")
+    );
+    let mut active = config.clone();
+    sync_registered_provider_session(
+        &mut config,
+        &mut active,
+        Some("mock-owned-session".to_string()),
+    );
+    for registered in [&config, &active] {
+        assert_eq!(
+            fresh_provider_session_for_initial_capture(registered, Some("mock-owned-session")),
+            Some("mock-owned-session".to_string())
+        );
+    }
+    let restored: AgentConfig =
+        serde_json::from_value(serde_json::to_value(&config).expect("serialize config"))
+            .expect("restore config");
+    assert_eq!(restored.fresh_provider_session_id, None);
+    assert_eq!(
+        fresh_provider_session_for_initial_capture(&restored, Some("mock-owned-session")),
+        None
+    );
+}
+
+#[test]
+fn mock_initial_capture_rejects_missing_empty_and_foreign_identities() {
+    use super::agent_lifecycle::sync_registered_provider_session;
+
+    for (fresh, resume, actual) in [
+        (None, Some("owned"), Some("owned")),
+        (Some(""), None, Some("owned")),
+        (Some("owned"), None, None),
+        (Some("owned"), None, Some("")),
+        (Some("owned"), None, Some("foreign")),
+        (Some("owned"), Some("foreign"), Some("owned")),
+        (Some("owned"), Some(""), Some("owned")),
+    ] {
+        let mut config = AgentConfig {
+            provider: "mock".to_string(),
+            fresh_provider_session_id: fresh.map(str::to_string),
+            resume_session: resume.map(str::to_string),
+            ..AgentConfig::default()
+        };
+        assert_eq!(
+            fresh_provider_session_for_initial_capture(&config, actual),
+            None
+        );
+        let mut active = config.clone();
+        sync_registered_provider_session(&mut config, &mut active, actual.map(str::to_string));
+        assert_eq!(config.fresh_provider_session_id, None);
+        assert_eq!(active.fresh_provider_session_id, None);
+    }
+}
+
+#[tokio::test]
+async fn mock_initial_archive_capture_preserves_enabled_input_and_excludes_private_spans() {
+    use crate::commands::chat::{
+        agent_archive_capture_snapshot, archive_agent_chat_events_until_stable_for_state,
+        conversation_archive_context_from_snapshot, record_provider_log_policy_for_snapshot,
+    };
+    use std::io::Write as _;
+
+    let _guard = crate::utils::wardian_test_env_lock_async().await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    std::env::set_var("WARDIAN_HOME", temp.path());
+    let _home = WardianHomeGuard;
+    wardian_core::db::init_db_at_path(&temp.path().join("state.db"))
+        .expect("initialize isolated state database");
+
+    // Observe the nightly failure's prefix boundary before appending the rest
+    // of the two turns. No acquisition occurs until all policy changes finish.
+    for (case, fresh, initially_enabled, disable_before_capture, expect_first) in [
+        ("fresh-enabled", true, true, false, true),
+        ("restored", false, true, false, false),
+        ("initially-disabled", true, false, false, false),
+        ("globally-disabled", true, false, false, false),
+        ("disabled-backlog", true, true, true, true),
+    ] {
+        crate::utils::save_shell_settings(&crate::utils::ShellSettings {
+            conversation_logging: if case == "globally-disabled" {
+                ConversationLoggingSetting::Disabled
+            } else {
+                ConversationLoggingSetting::Enabled
+            },
+            ..Default::default()
+        })
+        .expect("save global logging policy");
+        let log_path = temp.path().join(format!("{case}.jsonl"));
+        std::fs::write(
+            &log_path,
+            concat!(
+                "{\"type\":\"init\",\"session_id\":\"mock-owned-session\"}\n",
+                "{\"type\":\"user\",\"content\":\"Lower the work-log grouping threshold and record a spec.\"}\n"
+            ),
+        )
+        .expect("write initial Mock prefix");
+        let state = AppState::new();
+        let agent = make_test_agent();
+        {
+            let mut config = agent.config.lock().expect("agent config");
+            config.session_id = case.to_string();
+            config.session_name = case.to_string();
+            config.provider = "mock".to_string();
+            config.reset_provider_config_for_provider();
+            config.folder = temp.path().to_string_lossy().to_string();
+            config.resume_session = Some("mock-owned-session".to_string());
+            config.fresh_provider_session_id = fresh.then(|| "mock-owned-session".to_string());
+            config.conversation_logging = if initially_enabled || case == "globally-disabled" {
+                AgentConversationLoggingSetting::Default
+            } else {
+                AgentConversationLoggingSetting::Disabled
+            };
+        }
+        *agent.log_path.lock().expect("agent log path") = Some(log_path.clone());
+        state.agents.lock().await.insert(case.to_string(), agent);
+        state.agent_order.lock().await.push(case.to_string());
+        let snapshot = agent_archive_capture_snapshot(&state, case)
+            .await
+            .expect("capture snapshot");
+        record_provider_log_policy_for_snapshot(&state, &snapshot, initially_enabled)
+            .expect("observe policy before first acquisition");
+
+        if disable_before_capture {
+            let mut disabled = lifecycle_config_for_session(&state, case).await.unwrap();
+            disabled.conversation_logging = AgentConversationLoggingSetting::Disabled;
+            persist_agent_config_for_test(disabled, &state)
+                .await
+                .expect("disable before acquisition");
+        }
+        if !initially_enabled || disable_before_capture {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log_path)
+                .expect("open disabled log");
+            writeln!(file, r#"{{"type":"user","content":"SECRET_DISABLED"}}"#)
+                .expect("append disabled input");
+            drop(file);
+            if case == "globally-disabled" {
+                crate::commands::settings::save_shell_settings_for_state(
+                    &state,
+                    crate::utils::ShellSettingsDocument {
+                        schema_version: 2,
+                        settings: crate::utils::ShellSettings {
+                            conversation_logging: ConversationLoggingSetting::Enabled,
+                            ..Default::default()
+                        },
+                        overrides: crate::utils::ShellSettingsOverrides {
+                            conversation_logging: Some(ConversationLoggingSetting::Enabled),
+                            ..Default::default()
+                        },
+                    },
+                )
+                .await
+                .expect("enable global capture before first acquisition");
+            } else {
+                let mut enabled = lifecycle_config_for_session(&state, case).await.unwrap();
+                enabled.conversation_logging = AgentConversationLoggingSetting::Enabled;
+                persist_agent_config_for_test(enabled, &state)
+                    .await
+                    .expect("enable before first acquisition");
+            }
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .expect("open enabled log");
+        file.write_all(concat!(
+            "{\"type\":\"tool_call\",\"call_id\":\"edit-first\",\"tool_name\":\"Edit\",\"input\":{\"file_path\":\"first.ts\"}}\n",
+            "{\"type\":\"user\",\"content\":\"Now widen the change kinds.\"}\n",
+            "{\"type\":\"tool_call\",\"call_id\":\"edit-second\",\"tool_name\":\"Edit\",\"input\":{\"file_path\":\"second.ts\"}}\n"
+        ).as_bytes()).expect("append remaining turns");
+        drop(file);
+        archive_agent_chat_events_until_stable_for_state(&state, case)
+            .await
+            .expect("capture Mock log");
+        let context = conversation_archive_context_from_snapshot(&snapshot);
+        let events = state
+            .conversation_archive
+            .chat_events_for_capture(&context)
+            .expect("read captured events");
+        let users = events
+            .iter()
+            .filter(|event| event.role == Some(wardian_core::models::chat::AgentChatRole::User))
+            .filter_map(|event| event.text.as_deref())
+            .collect::<Vec<_>>();
+        let expected = if expect_first {
+            vec![
+                "Lower the work-log grouping threshold and record a spec.",
+                "Now widen the change kinds.",
+            ]
+        } else {
+            vec!["Now widen the change kinds."]
+        };
+        assert_eq!(users, expected, "{case}");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.metadata["tool_name"] == "Edit")
+                .count(),
+            2,
+            "{case}"
+        );
+    }
+}
+
+pub(crate) async fn register_capture_test_agent(
+    state: &AppState,
+    config: &AgentConfig,
+    active: crate::state::ActiveAgent,
+) -> Result<(), String> {
+    let pending = super::PendingRuntime::prepare(config, &state.terminal_sessions)?.attach(active);
+    let mut completion = None;
+    super::codex_onboarding::commit_registered_agent(
+        state,
+        &config.session_id,
+        pending,
+        &mut completion,
+        super::AgentOrderPlacement::Top,
+    )
+    .await
+    .map_err(|(_, error)| error)
+}
+
+#[test]
 fn pi_fresh_provider_session_promotion_retains_launch_provenance() {
     let mut new_active = make_test_agent();
     {

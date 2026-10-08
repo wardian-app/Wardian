@@ -86,7 +86,11 @@ async fn load_workbench_state_for_home(
     home: &Path,
     state: &AppState,
 ) -> Result<WorkbenchLoadResult, String> {
-    let _io_guard = state.workbench_io_lock.lock().await;
+    let home = home.to_path_buf();
+    run_workbench_io(state, move || load_workbench_state_sync_for_home(&home)).await
+}
+
+fn load_workbench_state_sync_for_home(home: &Path) -> Result<WorkbenchLoadResult, String> {
     let mut loaded = load_workbench_for_home(home).map_err(|error| error.to_string())?;
     let mut migrate_surface_types = false;
     if let Some(document) = loaded.document.as_mut() {
@@ -158,8 +162,11 @@ async fn save_workbench_state_for_home(
     request: WorkbenchSaveRequest,
     state: &AppState,
 ) -> Result<WorkbenchSaveResult, String> {
-    let _io_guard = state.workbench_io_lock.lock().await;
-    save_workbench_for_home(home, request).map_err(|error| error.to_string())
+    let home = home.to_path_buf();
+    run_workbench_io(state, move || {
+        save_workbench_for_home(&home, request).map_err(|error| error.to_string())
+    })
+    .await
 }
 
 async fn reset_workbench_state_for_home(
@@ -167,9 +174,55 @@ async fn reset_workbench_state_for_home(
     request: WorkbenchResetRequest,
     state: &AppState,
 ) -> Result<WorkbenchResetResult, String> {
-    let _io_guard = state.workbench_io_lock.lock().await;
-    reset_workbench_for_home(home, request).map_err(|error| error.to_string())
+    let home = home.to_path_buf();
+    run_workbench_io(state, move || {
+        reset_workbench_for_home(&home, request).map_err(|error| error.to_string())
+    })
+    .await
 }
+
+/// Keep blocking persistence off the executor, including load migration.
+/// The operation owns exclusion until I/O finishes even if its caller is cancelled.
+async fn run_workbench_io<T: Send + 'static>(
+    state: &AppState,
+    operation: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let io_guard = state.workbench_io_lock.clone().lock_owned().await;
+    #[cfg(test)]
+    let probe = WORKBENCH_IO_PROBE
+        .try_with(|probe| probe.borrow_mut().take())
+        .ok()
+        .flatten();
+    let operation = move || {
+        let _io_guard = io_guard;
+        #[cfg(test)]
+        if let Some(probe) = probe {
+            let _ = probe.started.send(());
+            let _ = probe.entered.send(());
+            probe.release.recv().map_err(|error| error.to_string())?;
+        }
+        operation()
+    };
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|error| format!("Workbench I/O task failed: {error}"))?
+}
+
+#[cfg(test)]
+struct WorkbenchIoProbe {
+    entered: tokio::sync::oneshot::Sender<()>,
+    started: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static WORKBENCH_IO_PROBE: std::cell::RefCell<Option<WorkbenchIoProbe>>;
+}
+
+#[cfg(test)]
+#[path = "workbench/liveness_tests.rs"]
+mod liveness_tests;
 
 #[cfg(test)]
 mod tests {

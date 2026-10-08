@@ -24,6 +24,8 @@ records are acknowledged only after the corresponding Inbox item is persisted.
 - The regular-agent context menu **New Session** action archives the closing provider log before forcing a fresh provider launch. It clears both the backend PTY output buffer and frontend terminal scrollback cache while retaining the Wardian agent, habitat, and saved history. If the archive cannot be updated safely, replacement stops and Wardian shows the failure detail. A repeated request while a New Session is running for the same agent is refused at once with an explanatory message, and every outcome (finished, failed, or refused) is written to `<wardian-home>/wardian_debug.log`.
 - Claude provider-log archive ownership prefers the exact raw-line observation ID. A legacy alias can recover an older row only when no exact owner exists; multiple alias owners fail closed, preserving their distinct history rows and source positions instead of joining them by matching prompt text. Other providers retain their provider-specific alias reconciliation.
 - Fallback JSONL events without a proven native per-event ID include their absolute source-row byte offset in the stable archive ID. Turn and request IDs can group several rows, so they do not qualify on their own. Identical rows at different offsets remain distinct across forward acquisition and full-tail projection; retries of the same row keep the same ID. Older pending capture states recover missing offsets by reverse-counting at most 16 MiB of source rows and validating the original raw line and row boundary. Capture fails closed without cursor advancement when that proof is unavailable. Existing Codex user-mirror identity remains turn- or sequence-bound, and fallback events do not claim ambiguous pre-offset hashes as legacy aliases.
+- Fresh Mock sessions retain their launch-owned session ID through registration so enabled conversation capture includes the first request. Prefix trust requires the matching runtime-only ID; restored sessions and disabled logging spans remain excluded from initial capture.
+- Ordinary telemetry observations of eligible stopped agents schedule durable JSONL capture independently of the status parser's modification watermark. Background capture from telemetry, restored startup, and status changes shares an incarnation-bound coordinator; Chat reads retain one bounded pass and lifecycle boundaries retain their priority lane. Each background pass revalidates the agent, provider conversation, and opened source identity after acquiring the capture policy gate. Pending records, request roots, and incomplete sources keep their acquisition reasons. Errors and cancellation retry on a later eligible observation, while quiet serviced sources do not repeatedly drain. Disabled logging records its existing cutoff and excluded span, then suspends background draining until a later policy or source observation.
 - Provider delivery profiles are responsible for translating Wardian input into the provider's native submit behavior, including short prompts, pasted multiline prompts, long prompts, slash-command-shaped text, and inputs that already end with a newline.
 - Delivery recognizers must fail closed. If Wardian cannot recognize that a provider prompt is ready, that a paste bracket has settled, or that a command was submitted, it should avoid sending more input instead of guessing and corrupting the provider TUI state.
 - Approval prompt state must be fresh. A stale recognizer hit, old transcript event, or previous terminal buffer line must not keep an agent in `action_required` or trigger a delivery retry for a new turn.
@@ -233,10 +235,29 @@ as a successful answer.
 
 Codex must run with the real project workspace as its effective working root. Wardian now enforces this by passing `--cd <real workspace>` for interactive spawn, headless resume, and bootstrap session creation.
 
+Normal managed provider-home preparation, periodic index publication, and
+rollout lookup use the Wardian application's standard `CODEX_HOME` when it names an existing
+directory. Wardian canonicalizes that explicit upstream directory. An unset or
+empty value retains the native user profile's `.codex` default. An invalid
+explicit home fails preparation and index publication; rollout lookup returns
+no source instead of falling back to the user profile.
+
 Wardian still keeps Codex state in a per-agent habitat:
 
 - final agent home: `.wardian/agents/<wardian-agent-id>/habitat/.codex`
 - legacy fallback bootstrap home: `.wardian/provider-bootstrap/codex/session-*/.codex`
+
+During normal managed startup, each provider child receives its own managed home
+as `CODEX_HOME`. Its active
+and archived session links and Wardian's central index, history, and lock writes
+use the same application-selected upstream home. With an explicit home, Wardian
+checks both existing session links before migrating either namespace. A foreign
+link or projection failure stops preparation. The default home retains optional
+projection and its existing local-tree fallback.
+
+The unchanged legacy bootstrap fallback still imports from the native user
+profile's `.codex` home. The explicit-upstream guarantee covers the normal managed
+preparation, periodic publication, and rollout lookup paths described above.
 
 The critical rule is: **trust should bind to the real workspace, not to the bootstrap directory or habitat path**.
 
@@ -252,11 +273,13 @@ Current model:
 - the user's `config.toml` is a managed base, not a shared home. Wardian
   reconciles missing base policy values into the agent's own `config.toml` and
   preserves agent model choices, project trust, and local overrides.
-- Codex projects `sessions/**` from the native Codex home into each agent home
+- Codex projects `sessions/**` and `archived_sessions/**` from the native Codex
+  home into each agent home
   through a directory link (a Windows junction on Windows). Existing local
   rollouts are copied first without changing their filenames. If link creation
-  fails, the local sessions tree is restored and the provider continues in
-  local-only mode.
+  fails, that namespace's local tree is restored and the provider continues with
+  the available roots. Active and archived files retain their original identity
+  and metadata; archives are not converted to active sessions.
 - Telemetry resolves the shared Codex session catalog from an explicit absolute
   `CODEX_HOME` when the Wardian process has one. Without that override, it uses
   the native user profile's `.codex` home.
@@ -331,6 +354,28 @@ Current sequence:
    Wardian requires that exact thread to appear in the owned daemon before
    subscribing and enabling peer delivery. No model bootstrap turn is required.
 
+#### App-server startup stderr
+
+The owner drains app-server stderr from spawn onward and retains at most 16 KiB
+until startup completes. It adds only sanitized text, capped at 1,024 characters
+plus an optional three-character ellipsis when shortened, to the startup timing
+log. Credential-like environment values, token-shaped text, private paths,
+invalid text, and truncated captures are replaced with fixed omission markers.
+Raw provider stderr is never written to general logs. After successful startup
+the owner keeps draining and discards later stderr. Startup failure and owner
+shutdown terminate the process tree, then wait up to 500 ms for stderr EOF before
+aborting the reader if a descendant still holds the pipe open.
+
+The startup timing line also carries `socket_wait_resources`. On Windows the
+owner retains a query-only duplicate of its daemon's process handle and samples
+CPU time and I/O counters around the socket wait. It logs elapsed sampling time,
+kernel and user CPU time in microseconds, and read/write/other operation and byte
+deltas. An unavailable query, changed identity, counter rollback, or unsupported
+platform produces `null`. Sampling preserves the original socket deadline and
+does not retry provider work. These are process accounting counters, including
+device and pipe I/O, not disk throughput or a backfill phase diagnosis. They
+exclude descendant processes and contain no paths or provider text.
+
 The ordinary TUI startup overlay also sets
 `check_for_update_on_startup = false` so an interactive update notice cannot
 block attachment. The guarded journal restores the prior setting after the TUI
@@ -359,57 +404,26 @@ Arc after attachment admission. A newer accepted intent supersedes an older
 queue entry; rejected attempts do not. Value commits have a separate revision
 so a same-value status report does not invalidate an already staged observation.
 
-#### Shared thread index
+#### Private thread indexes
 
-`codex app-server` migrates legacy rollout files into paginated thread history
-before it opens its control socket. Every agent home projects the same central
-`sessions/` tree but starts with an empty thread database, so without help each
-new agent repeats the whole migration; on a large history that dominates spawn
-latency.
+Codex owns each agent home's private thread database. Wardian projects both
+active and archived rollout roots but does not clone thread databases between
+homes. The former shared-index optimization published snapshots under
+`<wardian-home>/codex/thread-state/`; the runtime no longer reads or writes those
+snapshots. Existing cache files and private provider databases are left intact.
 
-Wardian publishes one snapshot of an already-migrated thread database to
-`<wardian-home>/codex/thread-state/` and seeds it into homes that do not have
-one yet. Both halves are best effort: a home that cannot be seeded, or a
-snapshot that cannot be published, costs a rebuild and never a failed launch.
+The optimization was removed because the SDK does not provide a supported
+checkpoint that certifies shared snapshot metadata against current rollout
+contents. Any future cloning implementation requires that coherence contract.
 
-- **Seeded** under the agent's preparation lock, before its daemon starts, and
-  only into a home with no `state_<generation>.sqlite`. An existing provider
-  database is never replaced.
-- **Published** after a successful owner start, at most once every six hours per
-  generation. A stale snapshot is harmless because the provider migrates only
-  the rollouts it has not already indexed.
-- **Captured** with SQLite `VACUUM INTO`, because resident daemons hold the
-  database open with a write-ahead log.
-- **Filtered** through an allow-list of tables that describe the shared rollout
-  history. A table the writer has not been taught about stops publication rather
-  than travelling between agents.
-- **Canonicalized** so `threads.rollout_path` names the central tree every home
-  projects. As the provider writes it, that column names the *publishing*
-  agent's own projected directory, which would otherwise point every seeded
-  agent at one agent's home and dangle when that agent is removed.
+A new home lets the SDK build its own index through normal startup. Existing
+provider-owned indexes remain unchanged. This correctness change does not
+establish the cold-start latency target; [the startup performance work](https://github.com/wardian-app/Wardian/issues/1214)
+remains open and requires measurement of the normal path.
 
-The snapshot is named after the generation it holds
-(`snapshot-state_<generation>.sqlite`), so a provider upgrade republishes rather
-than seeding a database the new provider will not open; superseded snapshots are
-removed as part of publishing the replacement.
-
-The projection can fall back to a private local `sessions/` directory when a
-link cannot be created, and a home in that state has indexed almost nothing
-while its migration-state rows still claim completion. Both sides guard against
-it: such a home never publishes, and a home that has already been seeded when
-its `sessions` entry turns out not to resolve to the central tree discards the
-seed and lets the provider rebuild. Without the publishing guard one badly
-projected home would seed every later agent with an empty history and suppress
-the rebuild that would repair it.
-
-Publication also refuses outright if any row's rollout path cannot be rewritten
-to the central tree. Dropping those rows instead would strand them: the
-migration-state tables travel with the snapshot and would tell a seeded home
-they had already been indexed, so they would be lost rather than rebuilt.
-
-A skipped seed records which of the reasons applied — the provider already owns
-a database, nothing usable is published, or a publication holds the cache — so
-a cache that has quietly stopped working is distinguishable from an empty one.
+Source lookup checks the original session metadata ID in both rollout roots.
+Archived discovery preserves archive classification and retains the SDK's
+normal unarchive prerequisite before resume.
 
 If Codex starts asking for trust every launch again, first verify that the session was born with the real workspace as `cwd`, not the bootstrap path.
 
@@ -439,6 +453,45 @@ explicit per-agent overrides. `on-request`, `untrusted`, and `never` are passed
 through `--ask-for-approval`; **Approve for me** is translated to Codex's
 `--approve-for-me` flag, which selects the workspace-write sandbox and automatic
 review. It is never passed as an argument value to `--ask-for-approval`.
+
+Shared local Codex launches capture effective policy once for their runtime
+generation. The ordinary TUI receives direct `--sandbox` and
+`--ask-for-approval` choices, or the equivalent bypass flag, before its first
+thread load. Cold background starts and resumes send the same captured policy
+as explicit per-thread parameters alongside model and reasoning effort.
+Supported policies explicitly capture the stock `user` approval-review route.
+Both cold background requests carry that reviewer. The ordinary TUI has no
+direct reviewer override. Initial saved resumes therefore prepare the captured
+policy in the fresh private daemon before starting a TUI or registering its
+PTY/input runtime. This preparatory resume alone omits the reviewer to inspect
+the saved route. Saved `user` needs no setter; saved `auto_review` requires a
+typed `thread/settings/update` to `user`, its applied notification and strict
+policy readback. Other saved reviewers and busy or mismatched threads reject.
+This checkpoint requires the initialized stable CLI version to be at least
+`0.160.0`, the qualified compatibility floor for this path. Earlier or unknown
+versions reject before its preload/settings requests. Fresh, background and
+ready warm paths retain the existing shared-version floor; eligibility alone
+does not establish provider acceptance.
+
+The owned startup overlay sets stock `thread_unload_delay_secs=0` before daemon
+start. Preparation unsubscribes, requires the actual matching `thread/closed`
+event and verifies an empty loaded set before ordinary TUI cold resume of the
+same native ID. An unsubscribe acknowledgement is insufficient. Closure alone
+does not prove successful persistence: stock rejects a retained live writer on
+new cold load, and final attachment still requires the persisted `user` policy.
+The checkpoint shares the initialization deadline and records its elapsed time;
+it adds no model turn or input replay. Fresh sessions and ready warm rejoins
+retain their existing paths. Overlay recovery restores the prior unload value.
+Attachment still rejects missing or mismatched effective policy and unavailable
+direct-input capability. Rejoining a loaded TUI does not rewrite its policy.
+Rejection diagnostics report only whitelisted policy words.
+
+The shared local path currently rejects a non-user approval reviewer,
+including **Approve for me**, before owner home preparation or process
+launch. Its stock preset produces config overrides that prevent ordinary
+local-daemon adoption, and equivalence between Wardian's `guardian_subagent`
+setting and stock automatic review has not been established. The standalone
+`codex exec` adapter retains its preset translation.
 
 Codex emits several different event shapes across live PTY output and persisted session logs.
 

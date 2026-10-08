@@ -5,9 +5,10 @@ use crate::delivery::native_broker::{
     log_opencode_dispatch_diagnostic, OpenCodeDispatchDiagnosticReason,
     OpenCodeDispatchDiagnosticStage,
 };
+use tokio::sync::watch;
 use wardian_core::agent_messaging::{
     AgentMessagingError, AgentMessagingRequest as Request, AgentMessagingResponse as Response,
-    MAX_RECEIVE_ITEMS, MAX_RECEIVE_TIMEOUT_MS,
+    MAX_RECEIVE_ITEMS, MAX_RECEIVE_TIMEOUT_MS, MAX_WAIT_AGENT_TIMEOUT_MS,
 };
 use wardian_core::db::agent_messaging as store;
 mod native;
@@ -17,6 +18,75 @@ pub(super) async fn push_native_information(
     recipient: &str,
 ) -> Result<(), ControlError> {
     native::push_pending_information(state, recipient).await
+}
+
+async fn wait_agent_after_subscribe(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    sender: &str,
+    timeout_ms: u64,
+    mut mailbox: watch::Receiver<crate::state::interactions::AgentMailboxSignal>,
+) -> Result<Response, ControlError> {
+    // Keep notifications since subscription unseen until the durable query
+    // finishes. A competing receiver may acknowledge an item first.
+    let observed = *mailbox.borrow();
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        authenticate(state, sender).await?;
+        let recovered = state
+            .interactions
+            .recover_agent_task_results()
+            .await
+            .map_err(control_error)?;
+        if let Some(app) = app {
+            for reply in recovered {
+                for recipient in &reply.record.target_session_ids {
+                    native::spawn_information(app, recipient);
+                }
+            }
+        }
+        let unread = state
+            .interactions
+            .has_unacknowledged_agent_messages(sender)
+            .await
+            .map_err(control_error)?;
+        let current = *mailbox.borrow();
+        if current.deleted {
+            return Err(ControlError::coded("unauthorized", "Receiver was deleted."));
+        }
+        let changed = mailbox
+            .has_changed()
+            .map_err(|_| ControlError::coded("mailbox_unavailable", "Mailbox wait ended."))?;
+        if unread || current.revision != observed.revision || changed {
+            authenticate(state, sender).await?;
+            return Ok(Response::WaitAgent { timed_out: false });
+        }
+        if timeout_ms == 0 || tokio::time::Instant::now() >= deadline {
+            return Ok(Response::WaitAgent { timed_out: true });
+        }
+        // The durable query and revision check above happen with no database or
+        // lifecycle lock held while changed() is awaited.
+        match tokio::time::timeout_at(deadline, mailbox.changed()).await {
+            Ok(Ok(())) => {
+                if mailbox.borrow().deleted {
+                    return Err(ControlError::coded("unauthorized", "Receiver was deleted."));
+                }
+                authenticate(state, sender).await?;
+                return Ok(Response::WaitAgent { timed_out: false });
+            }
+            Ok(Err(_)) => {
+                return Err(ControlError::coded(
+                    "mailbox_unavailable",
+                    "Mailbox wait ended.",
+                ));
+            }
+            Err(_) => {
+                // Recheck durable and unseen watch state after deadline races
+                // before reporting a timeout.
+                continue;
+            }
+        }
+    }
 }
 
 pub(super) async fn handle(
@@ -182,6 +252,17 @@ async fn handle_in_state(
                     continue;
                 }
             }
+        }
+        Request::WaitAgent { timeout_ms } => {
+            let timeout = timeout_ms.unwrap_or(MAX_WAIT_AGENT_TIMEOUT_MS);
+            if timeout > MAX_WAIT_AGENT_TIMEOUT_MS {
+                return Err(ControlError::coded(
+                    "invalid_wait_bounds",
+                    "timeout_ms must be 0..60000.",
+                ));
+            }
+            let mailbox = state.interactions.subscribe_agent_mailbox(&sender).await;
+            wait_agent_after_subscribe(app, state, &sender, timeout, mailbox).await
         }
     }
 }

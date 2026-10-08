@@ -10,11 +10,14 @@
 //! Discovery is separated from execution so the mapping from agents to sources
 //! can be tested without an app, a database, or a provider.
 
+mod codex_lifecycle;
+mod codex_worker_runtime;
+mod worker_events;
+
 use crate::manager::opencode::opencode_database_path;
 use crate::state::AppState;
 use crate::utils::fs::get_wardian_home;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tauri::Manager;
@@ -884,111 +887,12 @@ pub async fn agent_descriptors(state: &AppState) -> Vec<AgentDescriptor> {
         .collect()
 }
 
-const CODEX_META_BYTES: u64 = 256 * 1024;
-const CODEX_TAIL_BYTES: u64 = 256 * 1024;
-
 #[derive(Debug, Clone)]
 struct CodexRolloutMeta {
     thread_id: String,
     parent_thread_id: Option<String>,
     path: PathBuf,
-    state: wardian_core::temporary_workers::TemporaryWorkerState,
-    outcome: Option<String>,
     requested_at: Option<String>,
-    terminal_at: Option<String>,
-}
-
-fn read_codex_rollout_meta(path: &Path) -> Option<CodexRolloutMeta> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut first_line = String::new();
-    reader
-        .by_ref()
-        .take(CODEX_META_BYTES + 1)
-        .read_line(&mut first_line)
-        .ok()?;
-    if first_line.len() as u64 > CODEX_META_BYTES || !first_line.ends_with('\n') {
-        return None;
-    }
-    let meta: serde_json::Value = serde_json::from_str(first_line.trim()).ok()?;
-    if meta.get("type").and_then(|value| value.as_str()) != Some("session_meta") {
-        return None;
-    }
-    let payload = meta.get("payload")?;
-    let requested_at = meta
-        .get("timestamp")
-        .and_then(|value| value.as_str())
-        .map(str::to_string);
-    let thread_id = payload.get("id")?.as_str()?.trim().to_string();
-    if thread_id.is_empty() {
-        return None;
-    }
-    let parent_thread_id = payload
-        .get("source")
-        .and_then(|source| source.get("subagent"))
-        .and_then(|subagent| subagent.get("thread_spawn"))
-        .and_then(|spawn| spawn.get("parent_thread_id"))
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-
-    let mut state = wardian_core::temporary_workers::TemporaryWorkerState::Unknown;
-    let mut outcome = None;
-    let mut terminal_at = None;
-    let mut file = reader.into_inner();
-    let len = file.metadata().ok()?.len();
-    let start = len.saturating_sub(CODEX_TAIL_BYTES);
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut tail = String::new();
-    file.take(CODEX_TAIL_BYTES).read_to_string(&mut tail).ok()?;
-    for (index, line) in tail.lines().enumerate() {
-        if start > 0 && index == 0 {
-            continue;
-        }
-        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let event_type = event.get("type").and_then(|value| value.as_str());
-        let payload_type = event
-            .get("payload")
-            .and_then(|payload| payload.get("type"))
-            .and_then(|value| value.as_str());
-        match (event_type, payload_type) {
-            (Some("event_msg"), Some("user_message" | "user_message_event")) => {
-                state = wardian_core::temporary_workers::TemporaryWorkerState::Running;
-                outcome = None;
-                terminal_at = None;
-            }
-            (Some("event_msg"), Some("task_complete")) | (Some("turn.completed"), _) => {
-                state = wardian_core::temporary_workers::TemporaryWorkerState::Succeeded;
-                outcome = Some("completed".to_string());
-                terminal_at = event
-                    .get("timestamp")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string);
-            }
-            (Some("event_msg"), Some("turn_aborted")) => {
-                state = wardian_core::temporary_workers::TemporaryWorkerState::Cancelled;
-                outcome = Some("aborted".to_string());
-                terminal_at = event
-                    .get("timestamp")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string);
-            }
-            _ => {}
-        }
-    }
-
-    Some(CodexRolloutMeta {
-        thread_id,
-        parent_thread_id,
-        path: canonical_path(path),
-        state,
-        outcome,
-        requested_at,
-        terminal_at,
-    })
 }
 
 fn temporary_worker_descriptors() -> Vec<AgentDescriptor> {
@@ -1009,175 +913,12 @@ fn temporary_worker_descriptors() -> Vec<AgentDescriptor> {
         .collect()
 }
 
-fn reconcile_codex_children(permanent: &[AgentDescriptor], catalog: &MachineCatalog) {
-    let automation_roots =
-        wardian_core::temporary_workers::codex_automation_roots().unwrap_or_default();
-    let mut candidate_paths: HashSet<PathBuf> = catalog
-        .shared_codex
-        .values()
-        .map(|path| canonical_path(path))
-        .collect();
-    for agent in permanent.iter().filter(|agent| agent.provider == "codex") {
-        candidate_paths.extend(
-            catalog
-                .codex_rollouts(agent)
-                .into_iter()
-                .map(|path| canonical_path(&path)),
-        );
-    }
-    for root in &automation_roots {
-        let descriptor = AgentDescriptor {
-            session_id: root.runtime_session_id.clone(),
-            provider: root.provider.clone(),
-            provider_session_id: root.provider_session_id.clone(),
-            workspace: Some(root.workspace.clone()),
-            is_off: root.state.is_terminal(),
-            verified_source_paths: Vec::new(),
-        };
-        candidate_paths.extend(
-            catalog
-                .codex_rollouts(&descriptor)
-                .into_iter()
-                .map(|path| canonical_path(&path)),
-        );
-    }
-
-    let metas: Vec<CodexRolloutMeta> = candidate_paths
-        .iter()
-        .filter_map(|path| read_codex_rollout_meta(path))
-        .collect();
-
-    for agent in permanent.iter().filter(|agent| agent.provider == "codex") {
-        let roots = known_session_ids(agent);
-        reconcile_codex_tree(
-            &metas,
-            roots,
-            Some(agent.session_id.as_str()),
-            None,
-            &agent.session_id,
-            agent.workspace.as_deref().unwrap_or_default(),
-            None,
-        );
-    }
-    for root in automation_roots {
-        let Some(provider_session_id) = root.provider_session_id.as_deref() else {
-            continue;
-        };
-        if let Some(meta) = metas
-            .iter()
-            .find(|meta| meta.thread_id == provider_session_id)
-        {
-            let _ = wardian_core::temporary_workers::attach_verified_source(
-                &root.worker_id,
-                &meta.path.to_string_lossy(),
-                "codex_rollout_verified",
-            );
-        }
-        let Some(origin) = root
-            .blueprint_id
-            .as_ref()
-            .zip(root.run_id.as_ref())
-            .zip(root.node_id.as_ref())
-            .map(|((blueprint_id, run_id), node_id)| {
-                wardian_core::temporary_workers::AutomationWorkerOrigin {
-                    blueprint_id: blueprint_id.clone(),
-                    run_id: run_id.clone(),
-                    node_id: node_id.clone(),
-                }
-            })
-        else {
-            continue;
-        };
-        reconcile_codex_tree(
-            &metas,
-            [provider_session_id.to_string()].into_iter().collect(),
-            None,
-            Some(root.worker_id.as_str()),
-            &root.runtime_session_id,
-            &root.workspace,
-            Some(&origin),
-        );
-    }
-}
-
-fn reconcile_codex_tree(
-    metas: &[CodexRolloutMeta],
-    roots: BTreeSet<String>,
-    root_agent_id: Option<&str>,
-    root_worker_id: Option<&str>,
-    runtime_session_id: &str,
-    workspace: &str,
-    automation_origin: Option<&wardian_core::temporary_workers::AutomationWorkerOrigin>,
-) {
-    let descendants = verified_codex_descendants(metas, &roots);
-    let mut worker_by_provider_session: HashMap<String, Option<String>> = roots
-        .into_iter()
-        .map(|root| (root, root_worker_id.map(str::to_string)))
-        .collect();
-    for (parent_provider_session_id, child) in descendants {
-        let parent_worker_id = worker_by_provider_session
-            .get(&parent_provider_session_id)
-            .and_then(|worker| worker.as_deref());
-        let registered = wardian_core::temporary_workers::register_provider_child(
-            wardian_core::temporary_workers::RegisterProviderChild {
-                provider: "codex",
-                workspace,
-                root_agent_id,
-                parent_worker_id,
-                parent_provider_session_id: &parent_provider_session_id,
-                runtime_session_id,
-                provider_session_id: &child.thread_id,
-                automation_origin,
-                state: child.state,
-                outcome: child.outcome.as_deref(),
-                source_path: &child.path.to_string_lossy(),
-                coverage: "codex_parent_thread_id_verified",
-                requested_at: child.requested_at.as_deref(),
-                terminal_at: child.terminal_at.as_deref(),
-            },
-        );
-        if let Ok(worker) = registered {
-            worker_by_provider_session.insert(child.thread_id.clone(), Some(worker.worker_id));
-        }
-    }
-}
-
-fn verified_codex_descendants<'a>(
-    metas: &'a [CodexRolloutMeta],
-    roots: &BTreeSet<String>,
-) -> Vec<(String, &'a CodexRolloutMeta)> {
-    let mut children: HashMap<&str, Vec<&CodexRolloutMeta>> = HashMap::new();
-    for meta in metas {
-        if let Some(parent) = meta.parent_thread_id.as_deref() {
-            children.entry(parent).or_default().push(meta);
-        }
-    }
-    let mut queue: Vec<String> = roots.iter().cloned().collect();
-    let mut visited = HashSet::new();
-    let mut descendants = Vec::new();
-    while let Some(parent_provider_session_id) = queue.pop() {
-        if !visited.insert(parent_provider_session_id.clone()) {
-            continue;
-        }
-        for child in children
-            .get(parent_provider_session_id.as_str())
-            .into_iter()
-            .flatten()
-        {
-            descendants.push((parent_provider_session_id.clone(), *child));
-            queue.push(child.thread_id.clone());
-        }
-    }
-    descendants
-}
-
 /// Run one full cycle: snapshot agents, resolve sources, advance them.
 pub async fn run_ingest_cycle(state: &AppState) -> IngestPassReport {
     let agents = agent_descriptors(state).await;
     tokio::task::spawn_blocking(move || {
         let catalog = MachineCatalog::new();
         let _ = wardian_core::temporary_workers::reconcile_stale_automation_owners();
-        reconcile_codex_children(&agents, &catalog);
         let _ = wardian_core::temporary_workers::apply_detail_retention();
         let mut agents = agents;
         agents.extend(temporary_worker_descriptors());
@@ -1254,6 +995,7 @@ fn unreported_failures<'a>(
 /// after a long headless stretch shows that work without a minute of blank
 /// Dashboard.
 pub fn start_telemetry_ingest(app_handle: tauri::AppHandle) {
+    codex_worker_runtime::start(app_handle.clone());
     tauri::async_runtime::spawn(async move {
         let mut discovery_cache = BackgroundDiscoveryCache::default();
         let mut last_worker_reconcile = None;
@@ -1271,9 +1013,7 @@ pub fn start_telemetry_ingest(app_handle: tauri::AppHandle) {
 
             let pass = tokio::task::spawn_blocking(move || {
                 if reconcile_due {
-                    let catalog = MachineCatalog::new();
                     let _ = wardian_core::temporary_workers::reconcile_stale_automation_owners();
-                    reconcile_codex_children(&permanent_descriptors, &catalog);
                 }
                 let _ = wardian_core::temporary_workers::apply_detail_retention();
                 let mut descriptors = permanent_descriptors;
@@ -1340,6 +1080,117 @@ pub fn start_telemetry_ingest(app_handle: tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+
+    const CODEX_META_BYTES: u64 = 256 * 1024;
+
+    enum CodexHeaderRead {
+        Complete(Option<CodexRolloutMeta>, usize),
+        Deferred(usize),
+    }
+
+    fn read_codex_rollout_header(path: &Path, byte_limit: usize) -> CodexHeaderRead {
+        let Ok(file) = std::fs::File::open(path) else {
+            return CodexHeaderRead::Complete(None, 0);
+        };
+        let file_len = file.metadata().ok().map(|metadata| metadata.len());
+        let limit = byte_limit.min(CODEX_META_BYTES as usize);
+        if limit == 0 {
+            return CodexHeaderRead::Deferred(0);
+        }
+        let mut bytes = Vec::new();
+        let bytes_read = match file.take(limit as u64).read_to_end(&mut bytes) {
+            Ok(bytes_read) => bytes_read,
+            Err(_) => return CodexHeaderRead::Complete(None, bytes.len()),
+        };
+        let Some(end) = bytes.iter().position(|byte| *byte == b'\n') else {
+            return if file_len.is_some_and(|len| len > bytes_read as u64) {
+                CodexHeaderRead::Deferred(bytes_read)
+            } else {
+                CodexHeaderRead::Complete(None, bytes_read)
+            };
+        };
+        let Ok(first_line) = std::str::from_utf8(&bytes[..end]) else {
+            return CodexHeaderRead::Complete(None, bytes_read);
+        };
+        let Ok(meta) = serde_json::from_str::<serde_json::Value>(first_line.trim()) else {
+            return CodexHeaderRead::Complete(None, bytes_read);
+        };
+        if meta.get("type").and_then(|value| value.as_str()) != Some("session_meta") {
+            return CodexHeaderRead::Complete(None, bytes_read);
+        }
+        let Some(payload) = meta.get("payload") else {
+            return CodexHeaderRead::Complete(None, bytes_read);
+        };
+        let requested_at = meta
+            .get("timestamp")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let Some(thread_id) = payload.get("id").and_then(|value| value.as_str()) else {
+            return CodexHeaderRead::Complete(None, bytes_read);
+        };
+        let thread_id = thread_id.trim().to_string();
+        if thread_id.is_empty() {
+            return CodexHeaderRead::Complete(None, bytes_read);
+        }
+        let parent_thread_id = payload
+            .get("source")
+            .and_then(|source| source.get("subagent"))
+            .and_then(|subagent| subagent.get("thread_spawn"))
+            .and_then(|spawn| spawn.get("parent_thread_id"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        CodexHeaderRead::Complete(
+            Some(CodexRolloutMeta {
+                thread_id,
+                parent_thread_id,
+                path: canonical_path(path),
+                requested_at,
+            }),
+            bytes_read,
+        )
+    }
+
+    fn read_codex_rollout_meta(path: &Path) -> Option<CodexRolloutMeta> {
+        let (meta, bytes_read) = match read_codex_rollout_header(path, CODEX_META_BYTES as usize) {
+            CodexHeaderRead::Complete(meta, bytes_read) => (meta, bytes_read),
+            CodexHeaderRead::Deferred(bytes_read) => (None, bytes_read),
+        };
+        assert!(bytes_read <= CODEX_META_BYTES as usize);
+        meta
+    }
+
+    fn verified_codex_descendants<'a>(
+        metas: &'a [CodexRolloutMeta],
+        roots: &BTreeSet<String>,
+    ) -> Vec<(String, &'a CodexRolloutMeta)> {
+        let mut children: HashMap<&str, Vec<&CodexRolloutMeta>> = HashMap::new();
+        for meta in metas {
+            if let Some(parent) = meta.parent_thread_id.as_deref() {
+                children.entry(parent).or_default().push(meta);
+            }
+        }
+        let mut queue: Vec<String> = roots.iter().cloned().collect();
+        let mut visited = HashSet::new();
+        let mut descendants = Vec::new();
+        while let Some(parent_provider_session_id) = queue.pop() {
+            if !visited.insert(parent_provider_session_id.clone()) {
+                continue;
+            }
+            for child in children
+                .get(parent_provider_session_id.as_str())
+                .into_iter()
+                .flatten()
+            {
+                descendants.push((parent_provider_session_id.clone(), *child));
+                queue.push(child.thread_id.clone());
+            }
+        }
+        descendants
+    }
 
     fn failures(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| item.to_string()).collect()
@@ -1811,10 +1662,7 @@ mod tests {
             thread_id: thread_id.to_string(),
             parent_thread_id: parent_thread_id.map(str::to_string),
             path: PathBuf::from(format!("{thread_id}.jsonl")),
-            state: wardian_core::temporary_workers::TemporaryWorkerState::Unknown,
-            outcome: None,
             requested_at: None,
-            terminal_at: None,
         };
         let metas = vec![
             meta("root", None),
@@ -1833,7 +1681,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_rollout_meta_reads_raw_thread_spawn_shape_and_terminal_state() {
+    fn codex_rollout_meta_reads_only_header_identity_and_parent() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("rollout.jsonl");
         std::fs::write(
@@ -1849,11 +1697,7 @@ mod tests {
 
         assert_eq!(meta.thread_id, "child");
         assert_eq!(meta.parent_thread_id.as_deref(), Some("root"));
-        assert_eq!(
-            meta.state,
-            wardian_core::temporary_workers::TemporaryWorkerState::Succeeded
-        );
-        assert_eq!(meta.terminal_at.as_deref(), Some("2026-09-13T00:01:00Z"));
+        assert_eq!(meta.requested_at, None);
     }
 
     #[test]

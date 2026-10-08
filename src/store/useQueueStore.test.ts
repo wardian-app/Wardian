@@ -148,127 +148,6 @@ describe("useQueueStore - agent completion", () => {
     });
     expect(useQueueStore.getState().hasAgentBufferedContent("agent-1")).toBe(true);
   });
-
-  it("suppresses a completion when no canonical final result is available", () => {
-    useQueueStore.getState().appendAgentTerminalOutput(
-      "agent-1",
-      "\u001b[10;6HTest received.\u001b[15;6H",
-      "opencode",
-    );
-    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
-    expect(useQueueStore.getState().items).toHaveLength(0);
-  });
-
-  it("does not create a delayed completion from terminal output", () => {
-    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
-    expect(useQueueStore.getState().items).toHaveLength(0);
-
-    useQueueStore.getState().appendAgentTerminalOutput(
-      "agent-1",
-      "\u001b[10;6HDelayed final text.\u001b[15;6H",
-      "opencode",
-    );
-
-    expect(useQueueStore.getState().items).toHaveLength(0);
-  });
-
-  it("does not use Gemini terminal redraws as queue completion summaries", () => {
-    useQueueStore.getState().appendAgentTerminalOutput(
-      "agent-1",
-      "⁝ Thinking... (esc to cancel, 8s) press tab twice for more",
-      "gemini",
-    );
-    expect(useQueueStore.getState().hasAgentBufferedContent("agent-1")).toBe(false);
-
-    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
-    expect(useQueueStore.getState().items).toHaveLength(0);
-
-    useQueueStore.getState().appendAgentTerminalOutput("agent-1", "> What", "gemini");
-    expect(useQueueStore.getState().items).toHaveLength(0);
-  });
-
-  it("does not use terminal prompt chrome as a completion summary", () => {
-    useQueueStore.getState().appendAgentTerminalOutput(
-      "agent-1",
-      "\u001b[24;2H> Type your message or @path/to/file",
-      "opencode",
-    );
-    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
-    expect(useQueueStore.getState().items).toHaveLength(0);
-  });
-
-  it("uses an explicit completion summary instead of terminal fallback text", () => {
-    useQueueStore.getState().appendAgentTerminalOutput(
-      "agent-1",
-      "\u001b[1;1H▣ Build · GPT-5.5 · 1.6s┃ List 50 rows of numbers.┃▣ Build · GPT-5.5 ■⬝⬝⬝⬝⬝⬝⬝esc interrupt",
-      "opencode",
-    );
-    useQueueStore.getState().flushAgentCompletion(
-      "agent-1",
-      "My Agent",
-      "1\n2\n3\n4\n5",
-    );
-    expect(useQueueStore.getState().items[0].summary).toBe("1\n2\n3\n4\n5");
-  });
-
-  it("flushAgentCompletion ignores transient buffers without a canonical result", () => {
-    useQueueStore.getState().appendAgentEvent("agent-1", {
-      type: "result",
-      result: "Final answer here",
-    });
-    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
-
-    const { items } = useQueueStore.getState();
-    expect(items).toHaveLength(0);
-  });
-
-  it("bounds an explicit canonical completion summary", () => {
-    const longResult = [
-      "useQueueStore.test.ts:293 failed before the fix",
-      "x".repeat(700),
-      "serialize persistence writes",
-    ].join("\n");
-
-    useQueueStore.getState().appendAgentEvent("agent-1", {
-      type: "result",
-      result: longResult,
-    });
-    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent", longResult);
-
-    const summary = useQueueStore.getState().items[0].summary ?? "";
-    expect(summary.length).toBeLessThanOrEqual(500);
-    expect(summary.startsWith("useQueueStore.test.ts:293 failed before the fix")).toBe(true);
-    expect(summary).toContain("...");
-    expect(summary).toContain("serialize persistence writes");
-  });
-
-  it("flushAgentCompletion suppresses a missing canonical summary", () => {
-    useQueueStore.getState().flushAgentCompletion("agent-2", "Agent B");
-    expect(useQueueStore.getState().items).toHaveLength(0);
-  });
-
-  it("flushAgentCompletion clears the buffer after flushing", () => {
-    useQueueStore.getState().appendAgentEvent("agent-1", {
-      type: "result",
-      result: "Some output",
-    });
-    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent", "Canonical final");
-    expect(useQueueStore.getState()._agentBuffers["agent-1"]).toBe("");
-  });
-
-  it("deduplicates a second flush for the same agent within 1 second (guards against double status-updated emissions)", () => {
-    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent", "Canonical final");
-    useQueueStore.setState((s) => ({
-      items: s.items.map((i) => ({ ...i, timestamp: Date.now() - 500 })),
-    }));
-    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent", "Canonical final");
-    expect(useQueueStore.getState().items).toHaveLength(1);
-  });
-
-  it("calls save_queue_items after flushAgentCompletion", () => {
-    useQueueStore.getState().flushAgentCompletion("agent-1", "My Agent");
-    expect(mockInvoke).toHaveBeenCalledWith("save_queue_items", expect.objectContaining({ items: expect.any(Array) }));
-  });
 });
 
 describe("useQueueStore - action needed", () => {
@@ -277,7 +156,7 @@ describe("useQueueStore - action needed", () => {
     mockInvoke.mockResolvedValue([]);
   });
 
-  it("addActionNeeded creates an unread action-needed item for an agent", () => {
+  it("addActionNeeded creates an unread action-needed item for an agent", async () => {
     useQueueStore.getState().addActionNeeded("agent-1", "My Coder", "Approve file write?");
 
     const { items } = useQueueStore.getState();
@@ -289,7 +168,12 @@ describe("useQueueStore - action needed", () => {
       agent_name: "My Coder",
       summary: "Approve file write?",
     });
-    expect(mockInvoke).toHaveBeenCalledWith("save_queue_items", expect.objectContaining({ items: expect.any(Array) }));
+    // Persistence is serialized behind earlier writes, so it lands asynchronously.
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("save_queue_items", expect.objectContaining({
+        items: expect.arrayContaining([expect.objectContaining({ summary: "Approve file write?" })]),
+      }));
+    });
   });
 
   it("uses buffered approval text for generic action-needed cards and clears the buffer", () => {

@@ -133,6 +133,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn signal_after_subscription_survives_initial_snapshot_read() {
+        let state = InteractionState::default();
+        let mut receiver = state.subscribe_agent_mailbox("recipient").await;
+        let published = state.notify_agent_mailbox("recipient", false).await;
+
+        assert_eq!(*receiver.borrow(), published);
+        assert!(receiver.has_changed().unwrap());
+        assert_eq!(changed(&mut receiver).await, published);
+    }
+
+    #[tokio::test]
     async fn simultaneous_waiters_each_observe_the_same_signal() {
         let state = InteractionState::default();
         let mut first = state.subscribe_agent_mailbox("recipient").await;
@@ -211,7 +222,7 @@ mod tests {
         let _guard = crate::utils::wardian_test_env_lock_async().await;
         let test_home = tempfile::tempdir().unwrap();
         wardian_core::db::init_db_at_path(&test_home.path().join("state.db")).unwrap();
-        let state = InteractionState::default();
+        let state = std::sync::Arc::new(InteractionState::default());
         let mut first = state.subscribe_agent_mailbox("recipient").await;
         let mut second = state.subscribe_agent_mailbox("recipient").await;
         state.notify_agent_mailbox("recipient", true).await;
@@ -251,7 +262,7 @@ mod tests {
         let _guard = crate::utils::wardian_test_env_lock_async().await;
         let test_home = tempfile::tempdir().unwrap();
         wardian_core::db::init_db_at_path(&test_home.path().join("state.db")).unwrap();
-        let state = InteractionState::default();
+        let state = std::sync::Arc::new(InteractionState::default());
         let mut existing = state.subscribe_agent_mailbox("recipient").await;
         state.notify_agent_mailbox("recipient", true).await;
         state.delete_agent_durable_state("recipient").await.unwrap();

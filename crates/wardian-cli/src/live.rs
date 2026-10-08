@@ -1,5 +1,8 @@
 pub(crate) mod messaging;
 
+#[cfg(windows)]
+mod windows_pipe;
+
 use std::{
     fmt, io,
     time::{Duration, Instant},
@@ -1371,12 +1374,9 @@ async fn send_request(req: ControlRequest) -> io::Result<serde_json::Value> {
 
 #[cfg(windows)]
 async fn send_request_windows(req: ControlRequest) -> io::Result<serde_json::Value> {
-    use tokio::net::windows::named_pipe::ClientOptions;
-
     let pipe_name = wardian_core::control::pipe_name()
         .ok_or_else(|| io::Error::other("could not resolve Wardian control pipe"))?;
-    let mut stream = ClientOptions::new().open(pipe_name)?;
-    exchange_json(&mut stream, req).await
+    windows_pipe::send_request(&pipe_name, req).await
 }
 
 #[cfg(unix)]

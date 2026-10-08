@@ -65,10 +65,6 @@ impl OpenCodeHttpLaunchPlan {
         self.generation
     }
 
-    pub fn runtime_generation(&self) -> u64 {
-        self.runtime_generation
-    }
-
     pub fn endpoint(&self) -> &reqwest::Url {
         &self.endpoint
     }
@@ -210,32 +206,8 @@ impl OpenCodeHttpBinding {
         self.runtime_generation
     }
 
-    pub fn endpoint(&self) -> &reqwest::Url {
-        &self.endpoint
-    }
-
-    pub fn agent_id(&self) -> &str {
-        &self.agent_id
-    }
-
     pub fn provider_session_id(&self) -> &str {
         &self.provider_session_id
-    }
-
-    pub fn process_identity(&self) -> &str {
-        &self.process_identity
-    }
-
-    pub fn listener_identity(&self) -> &str {
-        &self.listener_identity
-    }
-
-    pub fn workspace(&self) -> &std::path::Path {
-        &self.workspace
-    }
-
-    pub fn config_fingerprint(&self) -> &str {
-        &self.config_fingerprint
     }
 }
 
@@ -402,12 +374,6 @@ impl OpenCodeStoredMessage {
                 part.get("type").and_then(Value::as_str) == Some("text")
                     && part.get("text").and_then(Value::as_str) == Some(prompt.text.as_str())
             })
-    }
-
-    pub fn is_assistant_child_of(&self, session_id: &str, user_message_id: &str) -> bool {
-        self.info.get("sessionID").and_then(Value::as_str) == Some(session_id)
-            && self.info.get("role").and_then(Value::as_str) == Some("assistant")
-            && self.info.get("parentID").and_then(Value::as_str) == Some(user_message_id)
     }
 }
 

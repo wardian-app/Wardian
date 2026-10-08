@@ -384,16 +384,6 @@ pub fn series(
     series_impl(conn, dimension, from, to, false)
 }
 
-/// Per-bucket series with verified provider-child facts grouped under roots.
-pub fn grouped_series(
-    conn: &Connection,
-    dimension: Dimension,
-    from: &str,
-    to: &str,
-) -> rusqlite::Result<Vec<SeriesPoint>> {
-    series_impl(conn, dimension, from, to, true)
-}
-
 fn series_impl(
     conn: &Connection,
     dimension: Dimension,

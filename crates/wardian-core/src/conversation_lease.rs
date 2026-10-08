@@ -453,31 +453,12 @@ pub fn release_lease_owner_persisted(owner: &ConversationLeaseOwner) -> Result<(
         .map_err(|error| format!("failed to save conversation lease release: {error}"))
 }
 
-/// Extends a currently-owned lease without ever reviving one that has expired.
+/// Renews exactly one acquisition attempt without ever reviving an expired
+/// lease.
 ///
 /// Returning `Ok(false)` means the owner no longer has an active lease and the
 /// caller must stop using the provider conversation before another operation
 /// can overlap it.
-pub fn renew_owner_persisted(
-    owner_kind: &str,
-    owner_id: &str,
-    heartbeat_at: &str,
-    expires_at: &str,
-) -> Result<bool, String> {
-    renew_lease_owner_persisted(
-        &ConversationLeaseOwner {
-            owner_kind: owner_kind.to_string(),
-            owner_id: owner_id.to_string(),
-            acquisition_id: String::new(),
-        },
-        heartbeat_at,
-        expires_at,
-    )
-}
-
-/// Renews exactly one acquisition attempt without ever reviving an expired
-/// lease. Callers that started provider work must use this fenced form rather
-/// than the legacy owner-id-only helper above.
 pub fn renew_lease_owner_persisted(
     owner: &ConversationLeaseOwner,
     heartbeat_at: &str,

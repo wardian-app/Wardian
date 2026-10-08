@@ -104,7 +104,7 @@ relations.
 
 ## Graph Layout
 
-The graph positions agents using force-directed layout over communication edges: connected agents settle closer together, while disconnected subgraphs are laid out independently and placed side by side, so unrelated clusters never overlap. Agents with no edges at all form an evenly spaced ring around the connected core. To keep editing calm, node positions are **frozen while you work** — drawing or deleting edges updates the edges immediately but never moves nodes. Press the **Re-run layout** button in the toolbar (next to Reset view) when you're done linking to apply your edits to node positions. The layout also re-runs automatically when agents enter or leave the visible scope. Dormant edges remain fully visible so topology structure is always inspectable — only the *activity* state (recency, particles) varies.
+The graph positions agents using force-directed layout over communication edges: connected agents settle closer together, while disconnected subgraphs are laid out independently and placed side by side, so unrelated clusters never overlap. Agents with no edges at all form an evenly spaced ring around the connected core. To keep editing calm, node positions are **frozen while you work** — drawing or deleting edges updates the edges immediately but never moves nodes. Press the **Re-run layout** button in the toolbar (next to Reset view) when you're done linking to apply the latest communication edges to node positions, including edits arriving as you press the button. The layout also re-runs automatically when agents enter or leave the visible scope. Dormant edges remain fully visible so topology structure is always inspectable — only the *activity* state (recency, particles) varies.
 
 ## Legacy Lenses
 

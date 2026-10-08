@@ -27,6 +27,66 @@ and examples. Documentation tests run separately because `--all-targets` does
 not include them. The command-contract tests in `src/verify-ci.test.ts` pin
 this coverage and exercise invalid arguments and workflow declarations.
 
+## Protected compiler inputs
+
+Schedulers can supply `WARDIAN_PROTECTED_INPUT_MANIFESTS` as a JSON array of
+absolute manifest paths. Each manifest is either an array of records with an
+absolute `path`, or an object containing that array in `files`. Length and hash
+fields remain the scheduler's integrity contract. The admission guard uses
+only the explicit path inventory; it does not discover protected artifacts.
+
+Normal `verify:ci` execution checks admission immediately before spawning a
+Cargo step. It rejects any protected path within
+the compiler target or intermediate build tree. Existing ancestors resolve
+through filesystem symlinks and Windows junctions; missing suffixes are
+appended without creating directories. Windows comparisons ignore case and
+containment uses path segments. A target containing ordinary reusable output
+is allowed when it is disjoint, or when no inventory is supplied.
+
+The shared entry `scripts/compiler-input-guard.mjs` also admits a wrapper's
+actual executable, argument vector, environment and working directory. It
+prints a JSON admission result and exits nonzero on rejection. It never starts
+Cargo. With the carrier set, a POSIX wrapper can call:
+
+```sh
+node scripts/compiler-input-guard.mjs --cwd '<absolute-workspace-path>' --program cargo -- check --workspace
+```
+
+PowerShell, with the wrapper's selected `$program` and `$arguments`:
+
+```powershell
+$guardArguments = @('--cwd', $sourceRoot, '--program', $program, '--') + $arguments
+& node (Join-Path $sourceRoot 'scripts/compiler-input-guard.mjs') @guardArguments
+if ($LASTEXITCODE -ne 0) { throw 'Compiler protected-input admission rejected.' }
+```
+
+The carrier must be set before admission and inherited by `verify:ci` children.
+The scheduler owns inventory completeness and must keep the admitted argv,
+environment, cwd, paths and links stable until compiler launch. This is a
+prelaunch path check, not a sandbox for build scripts or arbitrary file writes.
+
+Root derivation supports literal Cargo target arguments, target/build environment
+settings, hierarchical Cargo config and simple `--config` path settings, using
+[Cargo's path bases](https://doc.rust-lang.org/cargo/reference/config.html#config-relative-paths).
+A workspace-root default is supported. Unknown placement fails before spawn:
+this includes ambiguous paths, config includes or unsupported TOML, compiler
+wrappers/extra flags, build-directory templates, conflicting special target
+environment overrides and member/package defaults without an explicit target.
+Without an inventory, existing execution behavior is unchanged. The focused
+Node suite in `scripts/compiler-input-guard.test.mjs` is also run by
+`src/verify-ci.test.ts` during frontend unit verification.
+
+For `npm run check:rust-deadcode`, the guard derives the metadata target from
+the original cwd/environment/config without invoking metadata. The subsequent
+check explicitly passes `--target-dir <metadata-target-dir>`;
+`<metadata-target-dir>/rust-deadcode/<hash>` is its copied source cwd. Thus the
+metadata target tree covers both compiler output and the source copy. The same
+guard checks the actual metadata exec, admits the returned target before
+source-copy writes, and checks the actual Cargo check argv/environment/config
+from its copied cwd immediately before dispatch. Unknown placement fails closed
+at each boundary. Ordinary known disjoint metadata targets are admitted, and
+no-inventory behavior is unchanged.
+
 ## Dead-code gates
 
 Two [knip](https://knip.dev) passes over `src/` run in the frontend job:
@@ -84,3 +144,69 @@ Pages configuration, artifact upload, and deployment remain disabled for PRs.
 Both workflows retain `main`-only push triggers, and the docs workflow retains
 its manual `workflow_dispatch` trigger. Routing and Pages guards are pinned in
 `src/config/ciWorkflow.test.ts`.
+
+## Rust dead code
+
+`npm run check:rust-deadcode` fails when Rust production code contains an item
+that no production code uses. It is the Rust counterpart of
+`check:deadcode` (knip). It runs in the Windows backend job and in
+`verify:ci -- --only backend`. Tests never count as callers: an item that only
+tests call is dead in production. `telemetry::maintain` (#1082) had tests and
+no production caller.
+
+The script runs three checks:
+
+| Check | Scope | Method |
+| --- | --- | --- |
+| rustc | The `src-tauri` library | The script copies the workspace under `<cargo-target-dir>/rust-deadcode/`. In the copy, every `pub` item in `src-tauri/src` becomes `pub(crate)`, except the functions that `main.rs` calls (`run`). Then it runs `cargo check --workspace --lib` without `cfg(test)`. Each `dead_code` warning that rustc then reports is a finding. |
+| Token search | Shared library crates (`wardian-core`) | An item is dead when production code cannot reach it by name. Production code in another workspace crate, and crate code outside any item (for example a trait impl), are the roots. A name used inside an item counts only once that item is reachable, so a chain or cycle of items that only call each other is dead. Definitions, `impl` headers, `use` declarations, comments, `#[cfg(test)]` code, tests, and examples do not count. |
+| Commands | `tauri::generate_handler!` | Every registered command must be invoked by name from non-test frontend code or Rust production code. Frontend names are string literals found with the TypeScript parser, so a name in a comment never counts. A `debug_*` command can also be invoked from `e2e/`, `e2e-native/`, or `scripts/`. |
+
+The script never writes to the checkout. It updates the copy in place and
+rewrites only files whose content changed, so cargo reuses its incremental
+state. When nothing changed, a run takes a few seconds. After a change to
+`src-tauri` or `wardian-core`, the script checks the copy's crates again.
+
+**Platform.** CI runs the check on Windows, and the baseline is recorded on
+Windows. rustc cannot see a caller that the current platform compiles out,
+such as `#[cfg(unix)]` code on Windows. If compiled-out code names a reported
+item, the check sets that item aside. For a method, field, or variant, the
+compiled-out code must also name the item's type. `--verbose` lists the items
+set aside. A baseline entry whose item this platform compiles out is never
+reported as stale. On Linux or macOS, the check can report `#[cfg(unix)]`
+items that the Windows CI run does not see.
+
+### When the check fails
+
+The output names each item and the exact baseline entry it would need. Do one
+of the following:
+
+1. Delete the item. This is the expected fix for code that nothing calls.
+2. Call the item from production code, if a call is missing. A cleanup or
+   retention function with no caller is often a missing call.
+3. Keep a test-only helper next to the tests that use it. Put it inside the
+   test module (`#[cfg(test)] mod tests { ... }`), or in a test-support module
+   declared once as `#[cfg(test)] mod test_support;`. Do not add
+   `#[cfg(test)]` to the function itself. `check:budgets` counts a
+   `#[cfg(test)]` attribute directly on a `fn` in production files as a
+   test seam, and fails when that count rises.
+4. Add the entry to `scripts/rust-deadcode-baseline.json`. Use this option
+   only when the item must stay and none of the options above applies, for
+   example a field that holds a resource until `Drop`. Add the entry to the
+   group whose reason matches, or add a new group with a one-line reason. The
+   reviewer must accept the reason.
+
+`#[allow(dead_code)]` also silences rustc. Prefer the baseline, because the
+baseline keeps each kept item and its reason in one reviewed file.
+
+### Shrinking the baseline
+
+When you delete or start calling a baselined item, the check fails until you
+remove its entry. Remove the entry by hand, or run:
+
+```sh
+npm run check:rust-deadcode -- --prune
+```
+
+`--prune` removes only entries that match no finding on this platform. It
+never adds entries.

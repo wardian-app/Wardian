@@ -25,9 +25,11 @@ mod final_items;
 mod launch_config;
 mod launch_model;
 mod owner;
+use owner::initial_checkpoint;
 mod proxy;
 #[cfg(test)]
 mod startup_tests;
+mod stderr_capture;
 mod task_delivery;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -194,6 +196,21 @@ pub(crate) struct Observation {
     closed: bool,
     stopped: bool,
     completions: completion::TurnCompletions,
+    finished_turns: std::collections::VecDeque<FinishedTurn>,
+    finished_sequence: u64,
+}
+
+/// Bound on finished turns retained for observers that wake after several
+/// turns were coalesced into one notification.
+const FINISHED_TURN_HISTORY: usize = 64;
+
+/// One turn's terminal outcome, numbered in completion order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FinishedTurn {
+    pub(crate) sequence: u64,
+    pub(crate) turn_id: String,
+    pub(crate) status: String,
+    pub(crate) answer: String,
 }
 
 /// Activity comes from the bound owner's runtime status, with exact turn events
@@ -211,6 +228,17 @@ pub(crate) enum CodexTurnActivity {
 }
 
 impl Observation {
+    /// Finished turns after `cursor`, oldest first; sequences start at 1. A watch receiver sees only
+    /// the latest observation, so this lets it report every turn that
+    /// finished between two wake-ups.
+    pub(crate) fn finished_turns_after(&self, cursor: u64) -> Vec<FinishedTurn> {
+        self.finished_turns
+            .iter()
+            .filter(|turn| turn.sequence > cursor)
+            .cloned()
+            .collect()
+    }
+
     fn has_terminal_evidence(&self, turn_id: &str) -> bool {
         self.completions.contains(turn_id)
             && self
@@ -324,7 +352,18 @@ impl Observation {
                         .remove(turn_id)
                         .unwrap_or_default()
                         .answer();
-                    self.completions.finish(turn_id, status, &answer);
+                    if self.completions.finish(turn_id, status, &answer) {
+                        self.finished_sequence += 1;
+                        self.finished_turns.push_back(FinishedTurn {
+                            sequence: self.finished_sequence,
+                            turn_id: turn_id.to_owned(),
+                            status: status.to_owned(),
+                            answer,
+                        });
+                        if self.finished_turns.len() > FINISHED_TURN_HISTORY {
+                            self.finished_turns.pop_front();
+                        }
+                    }
                 }
             }
             _ => {}
@@ -342,6 +381,8 @@ pub struct CodexSharedClient {
     observation: watch::Sender<Observation>,
     settings_sequence: Arc<AtomicU64>,
     settings_notifications: broadcast::Sender<CodexSettingsNotification>,
+    initial_notifications: broadcast::Sender<initial_checkpoint::Event>,
+    initial_activity_sequence: Arc<AtomicU64>,
     reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
     proxy: Option<proxy::OwnedProxy>,
 }
@@ -423,11 +464,15 @@ impl CodexSharedClient {
             Arc::new(StdMutex::new(HashMap::new()));
         let (observation, _) = watch::channel(Observation::default());
         let (settings_notifications, _) = broadcast::channel(SETTINGS_NOTIFICATION_CAPACITY);
+        let (initial_notifications, _) = broadcast::channel(SETTINGS_NOTIFICATION_CAPACITY);
+        let initial_activity_sequence = Arc::new(AtomicU64::new(0));
         let settings_sequence = Arc::new(AtomicU64::new(0));
         let replies = pending.clone();
         let observations = observation.clone();
         let notification_sender = settings_notifications.clone();
         let notification_sequence = settings_sequence.clone();
+        let initial_sender = initial_notifications.clone();
+        let initial_activity = initial_activity_sequence.clone();
         let proxy_stop = proxy.as_ref().map(proxy::OwnedProxy::stop_signal);
         let task = tokio::spawn(async move {
             let mut close_reason = "provider connection ended".to_owned();
@@ -444,6 +489,18 @@ impl CodexSharedClient {
                         let Ok(value) = serde_json::from_str::<Value>(&text) else {
                             break;
                         };
+                        let sequence = if value.get("method").is_some() {
+                            notification_sequence.fetch_add(1, Ordering::AcqRel) + 1
+                        } else {
+                            0
+                        };
+                        if let Some(event) = initial_checkpoint::Event::from_value(&value, sequence)
+                        {
+                            if event.blocks_update() {
+                                initial_activity.fetch_add(1, Ordering::AcqRel);
+                            }
+                            let _ = initial_sender.send(event);
+                        }
                         if let Some(id) = value["id"].as_str() {
                             // Server requests (approvals) are deliberately not answered.
                             if value.get("method").is_none() {
@@ -461,10 +518,9 @@ impl CodexSharedClient {
                                 }
                             }
                         } else {
-                            if let Some(notification) = CodexSettingsNotification::from_value(
-                                &value,
-                                notification_sequence.fetch_add(1, Ordering::AcqRel) + 1,
-                            ) {
+                            if let Some(notification) =
+                                CodexSettingsNotification::from_value(&value, sequence)
+                            {
                                 let _ = notification_sender.send(notification);
                             }
                             observations.send_modify(|current| current.observe(&value));
@@ -475,6 +531,7 @@ impl CodexSharedClient {
                 }
             }
             observations.send_modify(Observation::close);
+            let _ = initial_sender.send(initial_checkpoint::Event::Disconnected);
             for (_, reply) in replies.lock().unwrap().drain() {
                 let _ = reply.send(Err(CodexSharedError::uncertain(close_reason.clone())));
             }
@@ -490,6 +547,8 @@ impl CodexSharedClient {
             observation,
             settings_sequence,
             settings_notifications,
+            initial_notifications,
+            initial_activity_sequence,
             reader: Mutex::new(Some(task)),
             proxy,
         })
@@ -770,6 +829,20 @@ impl CodexSharedClient {
         timeout: Option<Duration>,
         expected_activity: Option<&CodexTurnActivity>,
     ) -> Result<Value, CodexSharedError> {
+        self.request_with_fences(method, params, timeout, expected_activity, None)
+            .await
+    }
+
+    /// Initial private settings writes also fence activity observed while
+    /// waiting for the writer. They never temporarily bind a startup client.
+    async fn request_with_fences(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Option<Duration>,
+        expected_activity: Option<&CodexTurnActivity>,
+        initial_activity: Option<u64>,
+    ) -> Result<Value, CodexSharedError> {
         if self.observation.borrow().closed {
             return Err(CodexSharedError::unsupported(
                 "provider connection is closed",
@@ -782,6 +855,15 @@ impl CodexSharedClient {
         let deadline = tokio::time::Instant::now() + timeout.unwrap_or(STARTUP_TIMEOUT);
         let written = tokio::time::timeout_at(deadline, async {
             let mut writer = self.writer.lock().await;
+            if initial_activity.is_some_and(|expected| {
+                self.initial_activity_sequence.load(Ordering::Acquire) != expected
+                    || self.observation.borrow().thread_id.is_some()
+                    || self.observation.borrow().closed
+            }) {
+                return Err(CodexSharedError::unsupported(
+                    "Codex initial checkpoint changed before write; not replayed",
+                ));
+            }
             if expected_activity
                 .is_some_and(|expected| self.observation.borrow().activity() != *expected)
             {
@@ -1443,6 +1525,47 @@ mod tests {
         ] {
             assert!(validate_endpoint(endpoint).is_err(), "{endpoint}");
         }
+    }
+
+    #[test]
+    fn coalesced_observers_recover_every_finished_turn_once() {
+        let mut state = Observation {
+            thread_id: Some("owned".into()),
+            ..Default::default()
+        };
+        let cursor = 0;
+        for (turn, answer) in [("first", "first answer"), ("second", "second answer")] {
+            state.observe(
+                &json!({"method":"turn/started","params":{"threadId":"owned","turn":{"id":turn}}}),
+            );
+            state.observe(&json!({
+                "method":"item/completed",
+                "params":{"threadId":"owned","turnId":turn,"item":{"id":format!("{turn}-item"),"type":"agentMessage","phase":"final_answer","text":answer}}
+            }));
+            state.observe(&json!({"method":"turn/completed","params":{"threadId":"owned","turn":{"id":turn,"status":"completed"}}}));
+        }
+        // A repeated terminal notification is not a second completion.
+        state.observe(&json!({"method":"turn/completed","params":{"threadId":"owned","turn":{"id":"second","status":"completed"}}}));
+
+        // One wake-up after both turns finished still sees the first turn,
+        // although the live activity now only names the second.
+        assert_eq!(state.activity(), CodexTurnActivity::Idle("second".into()));
+        let finished = state.finished_turns_after(cursor);
+        assert_eq!(
+            finished
+                .iter()
+                .map(|turn| (
+                    turn.turn_id.as_str(),
+                    turn.status.as_str(),
+                    turn.answer.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("first", "completed", "first answer"),
+                ("second", "completed", "second answer"),
+            ]
+        );
+        assert!(state.finished_turns_after(finished[1].sequence).is_empty());
     }
 
     #[test]

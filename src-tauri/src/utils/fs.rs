@@ -609,17 +609,15 @@ pub(crate) fn ensure_codex_home_projection(
     workspace_root: &std::path::Path,
     agent_id: &str,
 ) -> Result<(), String> {
-    let real_codex_home = dirs::home_dir()
-        .ok_or("Could not find user home directory")?
-        .join(".codex");
-    #[cfg(test)]
-    let real_codex_home = super::codex_messaging::TEST_NATIVE_HOME
-        .with(|home| home.borrow().clone())
-        .unwrap_or(real_codex_home);
+    let upstream = super::codex_home::resolve_upstream_home()?;
     let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
     let projected_home = super::codex_home::resolve_managed_home(&wardian_home, agent_id)?;
     let wardian_skills = habitat_root.join(".agents").join("skills");
-    sync_codex_agent_home(&real_codex_home, &projected_home, &wardian_skills)?;
+    if upstream.explicit {
+        sync_codex_agent_home_with_policy(&upstream.path, &projected_home, &wardian_skills, true)?;
+    } else {
+        sync_codex_agent_home(&upstream.path, &projected_home, &wardian_skills)?;
+    }
 
     if crate::utils::load_codex_runtime_policy()
         .map(|policy| policy.trust_workspaces)
@@ -636,10 +634,28 @@ pub(crate) fn sync_codex_agent_home(
     projected_home: &std::path::Path,
     wardian_skills: &std::path::Path,
 ) -> Result<(), String> {
+    sync_codex_agent_home_with_policy(real_codex_home, projected_home, wardian_skills, false)
+}
+
+fn sync_codex_agent_home_with_policy(
+    real_codex_home: &std::path::Path,
+    projected_home: &std::path::Path,
+    wardian_skills: &std::path::Path,
+    strict_projection: bool,
+) -> Result<(), String> {
+    // Validate both namespaces before migrating either one or publishing indexes.
+    // Otherwise a valid active tree could be moved before a foreign archive link
+    // is discovered, leaving the child attached to an unintended upstream home.
+    if strict_projection {
+        validate_codex_upstream_projection(real_codex_home, projected_home)?;
+    }
     std::fs::create_dir_all(projected_home).map_err(|e| e.to_string())?;
     remove_legacy_codex_global_hardlinks(real_codex_home, projected_home)?;
 
     if let Err(error) = ensure_codex_sessions_projection(real_codex_home, projected_home) {
+        if strict_projection {
+            return Err(error);
+        }
         // A visibility projection is optional. A provider must still be able
         // to start with its existing local session tree when the host cannot
         // create a junction or when migration finds an unresolved conflict.
@@ -648,13 +664,18 @@ pub(crate) fn sync_codex_agent_home(
             projected_home.display(),
             error
         ));
-        let local_sessions = projected_home.join("sessions");
-        if !local_sessions.exists() && local_sessions.symlink_metadata().is_err() {
-            let _ = std::fs::create_dir_all(local_sessions);
+        for name in ["sessions", "archived_sessions"] {
+            let local_sessions = projected_home.join(name);
+            if !local_sessions.exists() && local_sessions.symlink_metadata().is_err() {
+                let _ = std::fs::create_dir_all(local_sessions);
+            }
         }
     }
 
     if let Err(error) = sync_codex_home_indexes_from(real_codex_home, projected_home) {
+        if strict_projection {
+            return Err(error);
+        }
         log_debug(&format!(
             "[Wardian] Codex central index sync unavailable for {}: {}",
             projected_home.display(),
@@ -769,6 +790,34 @@ fn target_preserves_cached_codex_records(
     }
 }
 
+/// Reject foreign active/archive links before an explicit-home caller reads,
+/// migrates, or writes either namespace. Missing and ordinary local trees can
+/// still be projected during preparation; the default-home policy stays optional.
+pub(crate) fn validate_codex_upstream_projection(
+    upstream: &std::path::Path,
+    projected_home: &std::path::Path,
+) -> Result<(), String> {
+    for name in ["sessions", "archived_sessions"] {
+        let projected = projected_home.join(name);
+        let metadata = match projected.symlink_metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        if is_directory_link(&metadata) {
+            if !projected_link_matches_target(&projected, &upstream.join(name)) {
+                return Err(format!(
+                    "{} is a directory link outside explicit CODEX_HOME",
+                    projected.display()
+                ));
+            }
+        } else if !metadata.is_dir() {
+            return Err(format!("{} is not a directory", projected.display()));
+        }
+    }
+    Ok(())
+}
+
 fn ensure_codex_sessions_projection(
     real_codex_home: &std::path::Path,
     projected_home: &std::path::Path,
@@ -788,7 +837,24 @@ fn ensure_codex_sessions_projection_with_linker<F>(
 where
     F: Fn(&std::path::Path, &std::path::Path) -> Result<(), String>,
 {
-    let central_sessions = real_codex_home.join("sessions");
+    for name in ["sessions", "archived_sessions"] {
+        ensure_codex_session_root_projection(real_codex_home, projected_home, name, &linker)?;
+    }
+    Ok(())
+}
+
+/// Project each SDK namespace independently so archive moves remain visible
+/// without merging conflicting local files or sharing private runtime state.
+fn ensure_codex_session_root_projection<F>(
+    real_codex_home: &std::path::Path,
+    projected_home: &std::path::Path,
+    name: &str,
+    linker: &F,
+) -> Result<(), String>
+where
+    F: Fn(&std::path::Path, &std::path::Path) -> Result<(), String>,
+{
+    let central_sessions = real_codex_home.join(name);
     std::fs::create_dir_all(&central_sessions).map_err(|error| {
         format!(
             "could not create central sessions directory {}: {error}",
@@ -796,12 +862,12 @@ where
         )
     })?;
 
-    let projected_sessions = projected_home.join("sessions");
+    let projected_sessions = projected_home.join(name);
     if projected_link_matches_target(&projected_sessions, &central_sessions) {
         return Ok(());
     }
 
-    let migration_backup = projected_home.join(".sessions.wardian-migration");
+    let migration_backup = projected_home.join(format!(".{name}.wardian-migration"));
     if !projected_sessions.exists() && projected_sessions.symlink_metadata().is_err() {
         if migration_backup.exists() || migration_backup.symlink_metadata().is_ok() {
             std::fs::rename(&migration_backup, &projected_sessions).map_err(|error| {
@@ -988,10 +1054,11 @@ pub(crate) fn copy_codex_session_file(
 /// Codex home. The provider remains the writer of the local source; Wardian
 /// serializes all outbound writes and never copies credentials outward.
 pub(crate) fn sync_codex_home_indexes(projected_home: &std::path::Path) -> Result<(), String> {
-    let real_codex_home = dirs::home_dir()
-        .ok_or("Could not find user home directory")?
-        .join(".codex");
-    sync_codex_home_indexes_from(&real_codex_home, projected_home)
+    let upstream = super::codex_home::resolve_upstream_home()?;
+    if upstream.explicit {
+        validate_codex_upstream_projection(&upstream.path, projected_home)?;
+    }
+    sync_codex_home_indexes_from(&upstream.path, projected_home)
 }
 
 pub(crate) fn observe_codex_indexes() {
@@ -2384,6 +2451,104 @@ mod tests {
     }
 
     #[test]
+    fn issue1214_home_projection_preserves_active_and_archived_identity_parity() {
+        let temp = tempfile::tempdir().expect("private catalogue fixture");
+        let central = temp.path().join("native");
+        let agent = temp.path().join("agent");
+        let records = [
+            (
+                "sessions/2026/10/04/active.jsonl",
+                "active-id",
+                "cli",
+                "openai",
+            ),
+            (
+                "archived_sessions/archived.jsonl",
+                "archived-id",
+                "vscode",
+                "other-provider",
+            ),
+        ];
+        for (relative, id, source, model_provider) in records {
+            let file = central.join(relative);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            let header = serde_json::json!({"type":"session_meta","payload":{
+                "id":id,"cwd":temp.path().join(id),"source":source,
+                "model_provider":model_provider
+            }});
+            std::fs::write(file, format!("{header}\n")).unwrap();
+        }
+
+        sync_codex_agent_home(&central, &agent, &temp.path().join("skills"))
+            .expect("normal home projection");
+        for name in ["sessions", "archived_sessions"] {
+            assert_eq!(
+                std::fs::canonicalize(agent.join(name)).expect("both roots are exposed"),
+                std::fs::canonicalize(central.join(name)).unwrap()
+            );
+        }
+        for (relative, _, _, _) in records {
+            assert_eq!(
+                std::fs::read(agent.join(relative)).expect("every input remains visible"),
+                std::fs::read(central.join(relative)).unwrap(),
+                "UUID, CWD, source and model provider must survive projection"
+            );
+        }
+        sync_codex_agent_home(&central, &agent, &temp.path().join("skills"))
+            .expect("idempotent repeat");
+        assert_eq!(
+            std::fs::read_dir(central.join("archived_sessions"))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn issue1214_archive_projection_preserves_local_files_on_link_failure_or_conflict() {
+        for conflict in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let central = temp.path().join("native");
+            let agent = temp.path().join("agent");
+            let local = agent.join("archived_sessions/rollout-local.jsonl");
+            let target = central.join("archived_sessions/rollout-local.jsonl");
+            std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+            std::fs::write(&local, "original archive").unwrap();
+            if conflict {
+                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                std::fs::write(&target, "different central archive").unwrap();
+            }
+            let result =
+                ensure_codex_sessions_projection_with_linker(&central, &agent, |target, link| {
+                    if link.ends_with("archived_sessions") {
+                        Err("archive link denied".into())
+                    } else {
+                        crate::utils::fs::create_directory_link(target, link)
+                    }
+                });
+            assert!(result.is_err());
+            assert_eq!(std::fs::read_to_string(&local).unwrap(), "original archive");
+            assert_eq!(
+                std::fs::read_to_string(&target).unwrap(),
+                if conflict {
+                    "different central archive"
+                } else {
+                    "original archive"
+                }
+            );
+            assert!(projected_link_matches_target(
+                &agent.join("sessions"),
+                &central.join("sessions")
+            ));
+            assert!(!projected_link_matches_target(
+                &agent.join("archived_sessions"),
+                &central.join("archived_sessions")
+            ));
+            assert!(!agent.join(".archived_sessions.wardian-migration").exists());
+        }
+    }
+
+    #[test]
     fn codex_sessions_projection_migrates_without_renaming_and_is_idempotent() {
         let root = unique_temp_dir("codex-sessions-projection");
         let real_home = root.join("real-codex-home");
@@ -2833,9 +2998,23 @@ mod tests {
         let wardian_home = root.join(".wardian");
         let user_home = root.join("user-home");
         let workspace = root.join("RestTrace");
-        let previous_wardian_home = std::env::var_os("WARDIAN_HOME");
-        let previous_userprofile = std::env::var_os("USERPROFILE");
-        let previous_home = std::env::var_os("HOME");
+        struct Environment(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for Environment {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let environment = Environment(
+            ["WARDIAN_HOME", "CODEX_HOME"]
+                .into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect(),
+        );
 
         std::fs::create_dir_all(wardian_home.join("settings")).expect("create settings");
         std::fs::create_dir_all(user_home.join(".codex")).expect("create real codex home");
@@ -2853,8 +3032,7 @@ mod tests {
 
         unsafe {
             std::env::set_var("WARDIAN_HOME", &wardian_home);
-            std::env::set_var("USERPROFILE", &user_home);
-            std::env::set_var("HOME", &user_home);
+            std::env::set_var("CODEX_HOME", user_home.join(".codex"));
         }
 
         let habitat_root = prepare_provider_habitat("codex", &workspace, "Coder", Some("agent-1"))
@@ -2868,20 +3046,7 @@ mod tests {
             .parse::<toml_edit::DocumentMut>()
             .expect("parse projected config");
 
-        unsafe {
-            match previous_wardian_home {
-                Some(value) => std::env::set_var("WARDIAN_HOME", value),
-                None => std::env::remove_var("WARDIAN_HOME"),
-            }
-            match previous_userprofile {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-            match previous_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
+        drop(environment);
 
         assert_eq!(
             projected_document["projects"][trusted_key.as_str()]["trust_level"].as_str(),

@@ -275,10 +275,12 @@ impl RegistrationPublicationState {
 /// Codex's ordinary local-daemon discovery for both fresh and resumed threads.
 pub(super) fn codex_shared_tui_args(
     mut prefix_args: Vec<String>,
+    permission_args: &[String],
     model_override: Option<&str>,
     expected_resume_id: Option<&str>,
     workspace: &std::path::Path,
 ) -> Vec<String> {
+    prefix_args.extend_from_slice(permission_args);
     if let Some(model) = model_override {
         prefix_args.extend(["--model".into(), model.into()]);
     }
@@ -2050,14 +2052,18 @@ fn line_event_status_for_pty_provider(
     )
 }
 
-fn persist_runtime_agent_configs(app: &AppHandle) {
+/// Persists the admitted live roster after an identity watcher releases its config lock.
+pub(crate) fn persist_runtime_agent_configs<R: tauri::Runtime>(app: &AppHandle<R>) {
     let state = app.state::<AppState>();
-    let snapshot = tauri::async_runtime::block_on(async {
-        let agents = state.agents.lock().await;
-        let order = state.agent_order.lock().await;
-        super::state_configs_snapshot(&agents, &order)
-    });
-    super::save_state_snapshot(app, &snapshot);
+    // Identity watchers run after releasing configuration locks. Admission must
+    // precede the live snapshot so a queued watcher cannot overwrite newer state.
+    if let Err(error) =
+        tauri::async_runtime::block_on(super::roster_io::save_live_state(&state, ()))
+    {
+        super::log_debug(&format!(
+            "[WARDIAN] Failed to persist runtime agent configs: {error}"
+        ));
+    }
 }
 
 pub async fn spawn_agent(
@@ -2557,6 +2563,7 @@ async fn spawn_agent_inner(
         // requires no CLI key/value config overrides and no --remote mode.
         provider_args = codex_shared_tui_args(
             provider.get_executable().1,
+            &attachment.permission_args,
             attachment.model_override.as_deref(),
             attachment.expected_resume_id.as_deref(),
             &provider_cwd,
@@ -2655,7 +2662,7 @@ async fn spawn_agent_inner(
             capability.token(),
         );
     }
-    for (key, value) in super::worktree_build_env(&config) {
+    for (key, value) in super::worktree_build_env(&config)? {
         cmd.env(key, value);
     }
 
@@ -2742,6 +2749,8 @@ async fn spawn_agent_inner(
     } else {
         None
     };
+    // Provider records written after this instant belong to this runtime.
+    let provider_launched_at_ms = chrono::Utc::now().timestamp_millis();
     let child_result = pair.slave.spawn_command(cmd);
     let child = match child_result {
         Ok(child) => child,
@@ -3818,6 +3827,7 @@ async fn spawn_agent_inner(
         super::codex_shared::observe_turn_activity(
             app.clone(),
             config.session_id.clone(),
+            runtime_generation,
             current_status.clone(),
             observations,
         );
@@ -3833,6 +3843,10 @@ async fn spawn_agent_inner(
         let watcher_config = config_lock.clone();
         let watcher_watch_state = watch_state.clone();
         let watcher_skip_existing_log = is_restored;
+        let watcher_runtime_generation = runtime_generation;
+        // A resumed rollout is re-read from its start; only turns finishing
+        // after this runtime launched are new Inbox completions.
+        let watcher_completions_since = provider_launched_at_ms;
         let wardian_agent_dir = get_wardian_home()
             .map(|home| home.join("agents").join(&watcher_session))
             .filter(|path| path.exists())
@@ -3933,6 +3947,20 @@ async fn spawn_agent_inner(
                                     let raw_line = parsed.to_string();
                                     let event = watcher_provider.parse_output(&raw_line);
                                     codex_watch_binding.observe_record(&raw_line, event.as_ref());
+                                    if let Some(completion) =
+                                        super::turn_completion::codex_rollout_turn_completion(
+                                            &parsed,
+                                            watcher_completions_since,
+                                        )
+                                    {
+                                        super::turn_completion::publish_turn_completion(
+                                            &watcher_app,
+                                            &watcher_session,
+                                            "codex",
+                                            Some(watcher_runtime_generation),
+                                            completion,
+                                        );
+                                    }
                                     if let Some(message) =
                                         codex_watch_binding.extract_message(&raw_line)
                                     {

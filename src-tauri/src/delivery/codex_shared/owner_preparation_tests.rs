@@ -5,6 +5,43 @@ use crate::utils::fs::{habitat_codex_home, prepare_habitat_workspace, prepare_pr
 use crate::utils::{codex_home::TEST_ROOTS, codex_messaging::TEST_NATIVE_HOME};
 use std::path::PathBuf;
 
+#[tokio::test]
+async fn unsupported_reviewer_is_rejected_before_owner_home_preparation() {
+    let _lock = crate::utils::wardian_test_env_lock_async().await;
+    let fixture = Fixture::new();
+    let agent_id = "01234567-89ab-4cde-8f01-23456789abcd";
+    let config = wardian_core::models::AgentConfig {
+        session_id: agent_id.into(),
+        provider: "codex".into(),
+        provider_config: wardian_core::models::ProviderConfig::Codex(
+            wardian_core::models::CodexProviderConfig {
+                approval_policy: Some("approve-for-me".into()),
+                sandbox_mode: Some("workspace-write".into()),
+                full_auto: Some(false),
+                ..Default::default()
+            },
+        ),
+        ..Default::default()
+    };
+    let spec = crate::delivery::native_broker::NativeSessionSpec {
+        target_agent_id: agent_id.into(),
+        provider: "codex".into(),
+        generation: 7,
+        workspace: fixture.workspace.clone(),
+        config,
+    };
+    let error = super::CodexSharedOwner::start(&spec, std::future::pending())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "unsupported");
+    assert!(error.message.contains("reviewer"));
+    assert!(!error.provider_boundary_crossed);
+    assert!(!crate::utils::get_wardian_home()
+        .unwrap()
+        .join("agents")
+        .exists());
+}
+
 const JOURNAL: &str = ".wardian-launch-config.json";
 const GLOBAL: &str = "model = 'current-global'\n[mcp_servers.fixture]\ncommand = 'inert'\n";
 
@@ -12,6 +49,7 @@ struct Fixture {
     _temp: tempfile::TempDir,
     workspace: PathBuf,
     old_home: Option<std::ffi::OsString>,
+    old_codex_home: Option<std::ffi::OsString>,
     old_source: Option<PathBuf>,
     old_roots: Option<Vec<PathBuf>>,
 }
@@ -43,13 +81,17 @@ impl Fixture {
         )
         .unwrap();
         let old_home = std::env::var_os("WARDIAN_HOME");
+        let old_codex_home = std::env::var_os("CODEX_HOME");
         std::env::set_var("WARDIAN_HOME", &home);
+        // Keep default preparation bound to the private native-home fixture.
+        std::env::remove_var("CODEX_HOME");
         let old_source = TEST_NATIVE_HOME.with(|source| source.replace(Some(native)));
         let old_roots = TEST_ROOTS.with(|roots| roots.replace(Some(vec![temp.path().join("c")])));
         Self {
             _temp: temp,
             workspace,
             old_home,
+            old_codex_home,
             old_source,
             old_roots,
         }
@@ -74,6 +116,10 @@ impl Drop for Fixture {
         match self.old_home.take() {
             Some(home) => std::env::set_var("WARDIAN_HOME", home),
             None => std::env::remove_var("WARDIAN_HOME"),
+        }
+        match self.old_codex_home.take() {
+            Some(home) => std::env::set_var("CODEX_HOME", home),
+            None => std::env::remove_var("CODEX_HOME"),
         }
     }
 }
@@ -194,6 +240,85 @@ fn owner_prepares_a_new_home_without_config_or_journal() {
     );
     assert!(home.join(".wardian-messaging.json").is_file());
     assert!(!home.join(JOURNAL).exists());
+}
+
+#[test]
+fn issue1214_normal_owner_preparation_preserves_private_state_without_shared_cache() {
+    let _lock = crate::utils::wardian_test_env_lock();
+    for retained in [false, true] {
+        let fixture = Fixture::new();
+        let wardian = fixture._temp.path().join("wardian");
+        let native = fixture._temp.path().join("native");
+        let cache = wardian.join("codex/thread-state");
+        std::fs::create_dir_all(&cache).unwrap();
+        let snapshot = cache.join("snapshot-state_5.sqlite");
+        let meta = cache.join("snapshot.json");
+        let cache_bytes = b"obsolete shared index fixture";
+        let metadata = serde_json::json!({
+            "version":1, "database":"state_5.sqlite", "threads":1,
+            "captured_at":chrono::Utc::now().to_rfc3339()
+        })
+        .to_string();
+        std::fs::write(&snapshot, cache_bytes).unwrap();
+        std::fs::write(&meta, &metadata).unwrap();
+        std::fs::write(native.join("state_5.sqlite"), b"native private index").unwrap();
+        std::fs::write(native.join("auth.json"), b"inert auth fixture").unwrap();
+        for root in ["sessions", "archived_sessions"] {
+            std::fs::create_dir_all(native.join(root)).unwrap();
+        }
+        let initial = habitat_codex_home(&fixture.neutral());
+        std::fs::create_dir_all(&initial).unwrap();
+        if retained {
+            std::fs::write(initial.join("state_5.sqlite"), b"owned private index").unwrap();
+            std::fs::write(initial.join("logs_2.sqlite"), b"owned private log").unwrap();
+        }
+
+        let (_, home) = prepare_owner_habitat(
+            &fixture.workspace,
+            "",
+            "agent",
+            &mut OwnerStartTimings::default(),
+        )
+        .unwrap();
+        if retained {
+            assert_eq!(
+                std::fs::read(home.join("state_5.sqlite")).unwrap(),
+                b"owned private index"
+            );
+            assert_eq!(
+                std::fs::read(home.join("logs_2.sqlite")).unwrap(),
+                b"owned private log"
+            );
+        } else {
+            assert!(
+                !home.join("state_5.sqlite").exists(),
+                "the SDK creates its own new index"
+            );
+        }
+        for root in ["sessions", "archived_sessions"] {
+            assert_eq!(
+                std::fs::canonicalize(home.join(root)).unwrap(),
+                std::fs::canonicalize(native.join(root)).unwrap()
+            );
+        }
+        assert!(!home
+            .join("auth.json")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        std::fs::write(home.join("auth.json"), b"owned auth fixture").unwrap();
+        assert_eq!(
+            std::fs::read(native.join("auth.json")).unwrap(),
+            b"inert auth fixture"
+        );
+        assert_eq!(
+            std::fs::read(native.join("state_5.sqlite")).unwrap(),
+            b"native private index"
+        );
+        assert_eq!(std::fs::read(&snapshot).unwrap(), cache_bytes);
+        assert_eq!(std::fs::read_to_string(&meta).unwrap(), metadata);
+    }
 }
 
 #[test]

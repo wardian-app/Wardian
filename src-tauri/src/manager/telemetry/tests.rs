@@ -12,6 +12,8 @@ fn test_snapshot(status: &str) -> AgentSnapshot {
         folder: "D:/work".to_string(),
         is_off: false,
         resume_session: None,
+        conversation_logging: wardian_core::conversations::AgentConversationLoggingSetting::Default,
+        capture_conversation: None,
         provider_generation: 0,
         process_id: Some(1234),
         query_count: Arc::new(Mutex::new(0)),
@@ -36,7 +38,7 @@ fn test_snapshot(status: &str) -> AgentSnapshot {
     }
 }
 
-fn test_active_agent(
+pub(super) fn test_active_agent(
     session_id: &str,
     provider: &str,
     status: &str,
@@ -84,6 +86,11 @@ fn test_snapshot_from_agent(
         folder: config.folder.clone(),
         is_off: config.is_off,
         resume_session: super::opencode_telemetry_session_id(&config),
+        conversation_logging: config.conversation_logging,
+        capture_conversation: config
+            .resume_session
+            .clone()
+            .or(config.fresh_provider_session_id.clone()),
         provider_generation,
         process_id: agent.process_id,
         query_count: agent.query_count.clone(),
@@ -465,6 +472,96 @@ async fn an_observation_without_a_staged_transition_is_not_deferred() {
     .expect("the metrics tick must not wait out a lifecycle operation");
 
     assert!(follow_up.deferred.is_empty());
+}
+
+#[tokio::test]
+async fn terminal_aliases_restore_provider_readiness_and_schedule_one_wakeup() {
+    let _home = crate::control::test_support::TestWardianHome::new_async().await;
+    let inbox: serde_json::Value = serde_json::from_str(include_str!(
+        "../../providers/fixtures/codex-0.153.4-inbox-output.json"
+    ))
+    .unwrap();
+    for terminal in [
+        "turn_failed",
+        "turn_aborted",
+        "turn_cancelled",
+        "turn_canceled",
+        "turn_interrupted",
+    ] {
+        let session_id = format!("agent-{terminal}");
+        let state = crate::state::AppState::new();
+        wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+            session_id: &session_id,
+            session_name: &session_id,
+            description: "",
+            agent_class: "Coder",
+            provider: "codex",
+            workspace: None,
+            project: None,
+            is_off: false,
+            created_at: None,
+        })
+        .unwrap();
+        let generation = state
+            .interactions
+            .start_provider_input_generation(
+                &session_id,
+                wardian_core::control::ProviderInputReadiness::Busy,
+                None,
+            )
+            .await
+            .generation;
+        let agent = test_active_agent(&session_id, "codex", "Processing...", Some(1234));
+        agent
+            .watch_state
+            .lock()
+            .unwrap()
+            .set_codex_attachment_ready(true);
+        let current_status = agent.current_status.clone();
+        let snapshot = test_snapshot_from_agent(&agent, generation, &state);
+        state.agents.lock().await.insert(session_id.clone(), agent);
+        let status = super::codex_status_from_log(&[
+            serde_json::json!({"type":"response_item","payload":{"type":"reasoning"}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":terminal}}),
+            inbox.clone(),
+        ])
+        .unwrap();
+        super::set_snapshot_status_from_log(&snapshot, &status, false);
+        let observation = snapshot.provider_status_observation(false);
+        let follow_up = super::apply_provider_status_observations(
+            &state,
+            std::slice::from_ref(&observation),
+            &mut [],
+        )
+        .await;
+        assert_eq!(*current_status.lock().unwrap(), "Idle");
+        let input = state
+            .interactions
+            .provider_input_state(&session_id)
+            .await
+            .unwrap();
+        assert_eq!(input.generation, generation);
+        assert_eq!(
+            input.state,
+            wardian_core::control::ProviderInputReadiness::Ready
+        );
+        assert_eq!(
+            input.ready_evidence,
+            Some(wardian_core::control::ProviderReadyEvidence::ProviderEvent)
+        );
+        assert_eq!(follow_up.wake_sessions, vec![session_id]);
+        assert!(follow_up.deferred.is_empty());
+        let repeated = super::apply_provider_status_observations(
+            &state,
+            std::slice::from_ref(&observation),
+            &mut [],
+        )
+        .await;
+        assert!(
+            repeated.wake_sessions.is_empty(),
+            "the same terminal observation must not wake twice"
+        );
+    }
 }
 
 #[tokio::test]

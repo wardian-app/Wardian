@@ -3,6 +3,7 @@ pub mod agent_reach;
 pub mod agent_roster;
 pub mod artifacts;
 pub mod automation;
+pub(crate) mod background_capture;
 pub mod browser;
 pub mod change_review;
 pub mod change_snapshot;

@@ -6,19 +6,15 @@ mod habitat_alias;
 mod migration;
 mod platform;
 
-/// Private-root creation and validation, shared with the thread-state cache so
-/// every Wardian-owned Codex artifact meets the same ownership rules.
-pub(crate) fn create_private_root(path: &Path) -> Result<(), String> {
-    platform::create_private_root(path)
-}
-
-pub(crate) fn validate_private_root(path: &Path) -> Result<(), String> {
-    platform::validate_private_root(path)
-}
 mod storage;
 #[cfg(test)]
 mod tests;
 mod tree;
+mod upstream;
+#[cfg(test)]
+mod upstream_tests;
+
+pub(crate) use upstream::resolve_upstream_home;
 
 pub(crate) use cleanup::cleanup_managed_home;
 pub(crate) use habitat_alias::{

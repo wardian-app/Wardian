@@ -14,6 +14,7 @@ use crate::providers::chat_transcript::{
     PROVIDER_RAW_LINE_METADATA_KEY,
 };
 use crate::providers::pi::PiProvider;
+use crate::state::background_capture::{CaptureRequest, CaptureStop};
 use crate::state::conversation_archive::{
     effective_conversation_logging, ConversationArchiveContext,
 };
@@ -65,6 +66,7 @@ pub(crate) struct ArchiveCaptureResult {
     pub(crate) events: Vec<AgentChatEvent>,
     pub(crate) context: ConversationArchiveContext,
     pub(crate) continue_immediately: bool,
+    pub(crate) background_stop: CaptureStop,
 }
 
 fn provider_log_source_is_fresh(
@@ -72,7 +74,7 @@ fn provider_log_source_is_fresh(
     resume_session: Option<&str>,
     fresh_provider_session_id: Option<&str>,
 ) -> bool {
-    if !matches!(provider, "claude" | "codex" | "pi") {
+    if !matches!(provider, "claude" | "codex" | "pi" | "mock") {
         return false;
     }
     let Some(fresh) = fresh_provider_session_id
@@ -315,6 +317,14 @@ pub(crate) async fn agent_archive_capture_snapshot(
     state: &AppState,
     session_id: &str,
 ) -> Result<AgentArchiveCaptureSnapshot, String> {
+    agent_archive_capture_snapshot_bound(state, session_id, None).await
+}
+
+async fn agent_archive_capture_snapshot_bound(
+    state: &AppState,
+    session_id: &str,
+    incarnation: Option<&Arc<Mutex<String>>>,
+) -> Result<AgentArchiveCaptureSnapshot, String> {
     let session_id = session_id.trim().to_string();
     if session_id.is_empty() {
         return Err("session_id is required".to_string());
@@ -324,6 +334,9 @@ pub(crate) async fn agent_archive_capture_snapshot(
     let agent = agents
         .get(&session_id)
         .ok_or_else(|| format!("agent not found: {session_id}"))?;
+    if incarnation.is_some_and(|expected| !Arc::ptr_eq(&agent.current_status, expected)) {
+        return Err("background capture incarnation retired".to_string());
+    }
     let config = agent
         .config
         .lock()
@@ -491,6 +504,7 @@ fn collect_agent_chat_events_with_provider_events(
         events,
         context,
         continue_immediately,
+        background_stop: CaptureStop::More,
     })
 }
 
@@ -518,6 +532,15 @@ async fn archive_agent_chat_events_for_state_with_stage(
     session_id: &str,
     lane: CaptureLane,
 ) -> Result<ArchiveCaptureResult, AgentChatTranscriptFailure> {
+    archive_agent_chat_events_bound(state, session_id, lane, None).await
+}
+
+async fn archive_agent_chat_events_bound(
+    state: &AppState,
+    session_id: &str,
+    lane: CaptureLane,
+    expected: Option<&CaptureRequest>,
+) -> Result<ArchiveCaptureResult, AgentChatTranscriptFailure> {
     // Lock order is policy gate, then the roster snapshot, then the archive's
     // per-agent gate. The snapshot must follow the gate: a pass that waits for
     // the gate through a lifecycle boundary would otherwise replay the old
@@ -539,12 +562,37 @@ async fn archive_agent_chat_events_for_state_with_stage(
             policy_wait.elapsed().as_millis()
         ));
     }
-    let snapshot = agent_archive_capture_snapshot(state, session_id)
-        .await
-        .map_err(|message| AgentChatTranscriptFailure {
-            stage: ChatTranscriptFailureStage::AgentSnapshot,
-            message,
-        })?;
+    let snapshot = agent_archive_capture_snapshot_bound(
+        state,
+        session_id,
+        expected.map(|request| &request.incarnation),
+    )
+    .await
+    .map_err(|message| AgentChatTranscriptFailure {
+        stage: ChatTranscriptFailureStage::AgentSnapshot,
+        message,
+    })?;
+    if let Some(expected) = expected {
+        if snapshot.provider != expected.provider
+            || snapshot
+                .resume_session
+                .as_ref()
+                .or(snapshot.fresh_provider_session_id.as_ref())
+                != expected.conversation.as_ref()
+            || snapshot.log_path != expected.source_path
+        {
+            return Err(AgentChatTranscriptFailure {
+                stage: ChatTranscriptFailureStage::AgentSnapshot,
+                message: "background capture provider/conversation/source retired".to_string(),
+            });
+        }
+        if expected.source_path.is_some() && expected.source.is_none() {
+            return Err(AgentChatTranscriptFailure {
+                stage: ChatTranscriptFailureStage::ProviderLogCapture,
+                message: "background provider source observation unavailable".to_string(),
+            });
+        }
+    }
     let global_conversation_logging = crate::utils::shell::load_shell_settings()
         .unwrap_or_default()
         .conversation_logging;
@@ -570,18 +618,20 @@ async fn archive_agent_chat_events_for_state_with_stage(
                 stage: ChatTranscriptFailureStage::ProviderLogCapture,
                 message: format!("provider-log capture state read failed: {error}"),
             })?;
-        let policy =
-            super::provider_log_acquisition::observe_provider_log_policy_with_initial_absence(
-                path,
-                provider_source_key,
-                previous.clone(),
-                logging_enabled,
-                trust_source_from_start,
-            )
-            .map_err(|error| AgentChatTranscriptFailure {
-                stage: ChatTranscriptFailureStage::ProviderLogCapture,
-                message: format!("provider-log policy observation failed: {error}"),
-            })?;
+        let policy = super::provider_log_acquisition::observe_provider_log_policy_with_identity(
+            path,
+            provider_source_key,
+            previous.clone(),
+            logging_enabled,
+            trust_source_from_start,
+            expected
+                .and_then(|request| request.source.as_ref())
+                .map(|source| &source.native_identity),
+        )
+        .map_err(|error| AgentChatTranscriptFailure {
+            stage: ChatTranscriptFailureStage::ProviderLogCapture,
+            message: format!("provider-log policy observation failed: {error}"),
+        })?;
         if let Some(policy) = policy {
             if previous.as_ref() != Some(&policy.next) {
                 state
@@ -597,15 +647,50 @@ async fn archive_agent_chat_events_for_state_with_stage(
                         message: format!("provider-log policy commit failed: {error}"),
                     })?;
             }
-            let mut batch = super::provider_log_acquisition::acquire_provider_log_batch(
-                &snapshot.session_id,
-                &snapshot.provider,
-                path,
-                provider_source_key,
-                Some(policy.next),
-                trust_source_from_start,
-            )
-            .map_err(|error| AgentChatTranscriptFailure {
+            if expected.is_some() && !logging_enabled {
+                // The background owner observes the existing disabled span
+                // and watch cutoff, then suspends. Enabled backlog stays at
+                // its cursor until a later policy observation re-enables it.
+                let mut result =
+                    collect_agent_chat_events_with_provider_events(&snapshot, Vec::new(), false)
+                        .map_err(|message| AgentChatTranscriptFailure {
+                            stage: ChatTranscriptFailureStage::ProviderProjection,
+                            message,
+                        })?;
+                state
+                    .conversation_archive
+                    .discard_agent_with_context(context, &result.events)
+                    .map_err(|error| AgentChatTranscriptFailure {
+                        stage: ChatTranscriptFailureStage::ArchiveWrite,
+                        message: format!("conversation archive disabled cutoff failed: {error}"),
+                    })?;
+                result.background_stop = CaptureStop::Disabled;
+                return Ok(result);
+            }
+            let batch = if let Some(expected) = expected {
+                super::provider_log_acquisition::acquire_provider_log_batch_for_identity(
+                    &snapshot.session_id,
+                    &snapshot.provider,
+                    path,
+                    provider_source_key,
+                    Some(policy.next),
+                    trust_source_from_start,
+                    expected
+                        .source
+                        .as_ref()
+                        .map(|source| &source.native_identity),
+                )
+            } else {
+                super::provider_log_acquisition::acquire_provider_log_batch(
+                    &snapshot.session_id,
+                    &snapshot.provider,
+                    path,
+                    provider_source_key,
+                    Some(policy.next),
+                    trust_source_from_start,
+                )
+            };
+            let mut batch = batch.map_err(|error| AgentChatTranscriptFailure {
                 stage: ChatTranscriptFailureStage::ProviderLogCapture,
                 message: format!("provider-log acquisition failed: {error}"),
             })?;
@@ -649,7 +734,17 @@ async fn archive_agent_chat_events_for_state_with_stage(
                 // policy suppresses new durable rows.
                 batch.events.extend(canonical_db_events);
             }
-            let result = collect_agent_chat_events_with_provider_events(
+            let background_stop = if !logging_enabled {
+                CaptureStop::Disabled
+            } else if batch.continue_immediately {
+                CaptureStop::More
+            } else {
+                CaptureStop::Observed {
+                    status: batch.next.status.clone(),
+                    reason: batch.next.reason.clone(),
+                }
+            };
+            let mut result = collect_agent_chat_events_with_provider_events(
                 &snapshot,
                 batch.events,
                 batch.continue_immediately,
@@ -658,6 +753,7 @@ async fn archive_agent_chat_events_for_state_with_stage(
                 stage: ChatTranscriptFailureStage::ProviderProjection,
                 message,
             })?;
+            result.background_stop = background_stop;
             let watch_only = result
                 .events
                 .iter()
@@ -683,14 +779,30 @@ async fn archive_agent_chat_events_for_state_with_stage(
             }
             return Ok(result);
         }
+        if expected.is_some() {
+            return Ok(ArchiveCaptureResult {
+                events: Vec::new(),
+                context,
+                continue_immediately: false,
+                background_stop: CaptureStop::Retired,
+            });
+        }
     }
 
-    let result = collect_agent_chat_events_for_archive(&snapshot).map_err(|message| {
+    let mut result = collect_agent_chat_events_for_archive(&snapshot).map_err(|message| {
         AgentChatTranscriptFailure {
             stage: ChatTranscriptFailureStage::ProviderProjection,
             message,
         }
     })?;
+    result.background_stop = if logging_enabled {
+        CaptureStop::Observed {
+            status: "projection".to_string(),
+            reason: Some("provider_log_unavailable".to_string()),
+        }
+    } else {
+        CaptureStop::Disabled
+    };
     if logging_enabled {
         state
             .conversation_archive
@@ -712,21 +824,8 @@ async fn archive_agent_chat_events_for_state_with_stage(
     Ok(result)
 }
 
-/// Drains consecutive bounded provider-log batches for owners that already
-/// run outside the UI request path. Each pass yields before reacquiring policy
-/// and per-agent gates so settings transitions and other agents can proceed.
-pub(crate) async fn archive_agent_chat_events_until_stable_for_state(
-    state: &AppState,
-    session_id: &str,
-) -> Result<ArchiveCaptureResult, String> {
-    loop {
-        let result = archive_agent_chat_events_for_state(state, session_id).await?;
-        if !result.continue_immediately {
-            return Ok(result);
-        }
-        tokio::task::yield_now().await;
-    }
-}
+#[cfg(test)]
+pub(crate) use tests::archive_agent_chat_events_until_stable_for_state;
 
 /// Drains the closing provider log for a lifecycle boundary (New Session, fresh
 /// resume). Unlike the best-effort syncs above it does not queue behind them: it
@@ -766,6 +865,64 @@ fn append_only_provider_log_path(snapshot: &AgentArchiveCaptureSnapshot) -> Opti
         None
     } else {
         Some(path)
+    }
+}
+
+/// Build an incarnation-bound request without reading or seeding the archive.
+pub(crate) async fn background_capture_request(
+    state: &AppState,
+    session_id: &str,
+) -> Result<Option<CaptureRequest>, String> {
+    let incarnation = match state.agents.lock().await.get(session_id) {
+        Some(agent) => agent.current_status.clone(),
+        None => return Ok(None),
+    };
+    let snapshot =
+        agent_archive_capture_snapshot_bound(state, session_id, Some(&incarnation)).await?;
+    // An absent source is bound watch-only capture. Observation failure is a
+    // bound retry request, never permission for unbound provider acquisition.
+    let source = snapshot
+        .log_path
+        .as_deref()
+        .and_then(|path| super::provider_log_acquisition::observe_provider_log_source(path).ok());
+    let global_logging = crate::utils::shell::load_shell_settings()
+        .unwrap_or_default()
+        .conversation_logging;
+    Ok(Some(CaptureRequest {
+        session_id: snapshot.session_id,
+        incarnation,
+        provider: snapshot.provider,
+        conversation: snapshot
+            .resume_session
+            .or(snapshot.fresh_provider_session_id),
+        source_path: snapshot.log_path,
+        source,
+        logging_enabled: effective_conversation_logging(
+            global_logging,
+            snapshot.agent_conversation_logging,
+        ) == ConversationLoggingSetting::Enabled,
+    }))
+}
+
+/// Each bounded pass revalidates after the policy gate. A disabled policy or
+/// pending/invalid acquisition state suspends; none is inferred from a boolean.
+pub(crate) async fn archive_background_capture_pass(
+    state: &AppState,
+    request: &CaptureRequest,
+) -> Result<CaptureStop, String> {
+    match archive_agent_chat_events_bound(
+        state,
+        &request.session_id,
+        CaptureLane::Background,
+        Some(request),
+    )
+    .await
+    {
+        Ok(result) => Ok(result.background_stop),
+        Err(failure) if failure.stage == ChatTranscriptFailureStage::AgentSnapshot => {
+            Ok(CaptureStop::Retired)
+        }
+        Err(failure) => Err(failure.message),
     }
 }
 
@@ -2486,6 +2643,22 @@ fn event_id(session_id: &str, sequence: u64, source: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Drains consecutive bounded provider-log batches for owners that already
+    /// run outside the UI request path. Each pass yields before reacquiring policy
+    /// and per-agent gates so settings transitions and other agents can proceed.
+    pub(crate) async fn archive_agent_chat_events_until_stable_for_state(
+        state: &AppState,
+        session_id: &str,
+    ) -> Result<ArchiveCaptureResult, String> {
+        loop {
+            let result = archive_agent_chat_events_for_state(state, session_id).await?;
+            if !result.continue_immediately {
+                return Ok(result);
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
     struct WardianHomeGuard<'a> {
         _env_lock: &'a tokio::sync::MutexGuard<'static, ()>,
         previous_home: Option<std::ffi::OsString>,
@@ -2583,6 +2756,29 @@ mod tests {
             "opencode",
             Some("opencode-session"),
             Some("opencode-session")
+        ));
+    }
+
+    #[test]
+    fn mock_prefix_trust_requires_its_runtime_launch_identity() {
+        for (resume, fresh, expected) in [
+            (None, Some("owned"), true),
+            (Some("owned"), Some("owned"), true),
+            (Some(" owned "), Some(" owned "), true),
+            (Some("owned"), None, false),
+            (Some("owned"), Some("foreign"), false),
+            (Some(""), Some("owned"), false),
+            (Some("owned"), Some(""), false),
+        ] {
+            assert_eq!(
+                provider_log_source_is_fresh("mock", resume, fresh),
+                expected
+            );
+        }
+        assert!(!provider_log_source_is_fresh(
+            "gemini",
+            Some("owned"),
+            Some("owned")
         ));
     }
 
