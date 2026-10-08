@@ -84,6 +84,16 @@ process.stdin.resume();
   await waitForAppShell(driver, 20_000);
   await waitForWorkbenchReady(driver);
   await driver.manage().window().setRect({ width: 1600, height: 900 });
+  // Restored Off sessions default to history. Select the normal Terminal view
+  // before the runtime arrives; late ownership must still settle by itself.
+  const modeSwitch = await driver.wait(() => driver.findElements(By.css(
+    `[data-testid="agent-session-surface"][data-resource-key="${agent.session_id}"] button[title="Switch to Terminal"]`,
+  )).then(elements => elements[0] ?? false), 20_000, "Restored Off session did not default to Chat");
+  assert.equal(await modeSwitch.isDisplayed(), true);
+  assert.equal((await driver.findElements(By.css(
+    `[data-testid="agent-terminal-host"][data-terminal-session-id="${agent.session_id}"]`,
+  ))).length, 0, "Off history must not mount a hidden terminal");
+  await modeSwitch.click();
   await driver.wait(() => driver.findElements(By.css(
     `[data-testid="agent-terminal-host"][data-terminal-session-id="${agent.session_id}"]`,
   )).then(elements => elements.length > 0), 20_000);
@@ -92,7 +102,7 @@ process.stdin.resume();
     return host && getComputedStyle(host).visibility === "visible";
   }, agent.session_id), 20_000, "Off terminal did not finish its initial registration attempt");
   await invoke(driver, "resume_agent", { sessionId: agent.session_id });
-  // No tab/terminal click or DOM focus after restart. The restored view must
+  // No tab/terminal click or DOM focus after resume. The selected view must
   // complete the normal ownership handshake and resize by itself.
   const restored = await driver.wait(async () => {
     const state = await workbenchSnapshot(driver);
