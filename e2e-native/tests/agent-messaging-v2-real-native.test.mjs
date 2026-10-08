@@ -13,13 +13,18 @@
 // tools in the two already auto-registered private agent homes, before any turn.
 // WARDIAN_E2E_MESSAGING_V2_LIFECYCLE=1 additionally tests idle information and
 // one active-turn interrupt in attached_tui mode, with one extra provider task.
+// WARDIAN_E2E_MESSAGING_V2_AUTO_FINAL=1 adds a task-only idle turn;
+// WARDIAN_E2E_MESSAGING_V2_MIXED_STEER=1 adds same-turn TUI input and proves
+// only an explicit reply settles that task.
+// Both require attached_tui, exact Codex CLI 0.160.0, an absolute native
+// executable and SHA-256 pin, plus the current supported gpt-6-luna/low pair
+// confirmed by the live catalogue. These cases have no older-runtime fallback.
 // WARDIAN_E2E_MESSAGING_V2_MODE=background (default), attached_tui, or without_pty.
 // without_pty removes both owned terminal runtimes before info/task admission;
 // it adds one bounded idle task and one busy task with correlated replies,
 // but no interrupt/continuity add-ons. Native execution remains opt-in.
-// Upgraded runs require WARDIAN_E2E_CODEX_EXPECTED_VERSION=0.154.0-alpha.6
-// and WARDIAN_E2E_CODEX_EXECUTABLE=<absolute-native-executable>. These are
-// evidence pins, not product executable overrides; readiness must match them.
+// Existing upgraded runs require an exact version and absolute native
+// executable pin. Automatic-final/mixed runs require 0.160.0 specifically.
 // Each invocation owns fresh agents. Never use a skip as real acceptance.
 // Test-only WARDIAN_E2E_MESSAGING_V2_TRUST_FIXTURE_WORKSPACES=0 leaves the
 // isolated Git roots untrusted for diagnostics; default/1 explicitly trusts them.
@@ -40,13 +45,32 @@ import { startStdioRpc } from "../lib/stdio-json-rpc.mjs";
 import { compactHomeEvidence, cleanupAgentCredentials, cleanupFixtureCredential } from "../lib/codex-compact-home-evidence.mjs";
 import { HOME_LOCK_DIRECTORY, HOME_LOCK_FILE, lockHolderAlive, readHomeLock } from "../lib/sessionHome.mjs";
 
-const MODEL = "gpt-5.6-luna";
-const EFFORT = "low";
+const AUTO_FINAL_CODEX_VERSION = "0.160.0";
+const AUTO_FINAL_MODEL = "gpt-6-luna";
+const AUTO_FINAL_EFFORT = "low";
+const AUTO_FINAL_CODEX_SHA256 = "c033af36278a6bc30856e4f6f4d11097b22ea584086923978b07e30c0ab42107";
+const AUTO_FINAL_EXECUTABLE_SHA256_ENV = "WARDIAN_E2E_CODEX_EXPECTED_SHA256";
+const EMPTY_REPLY_POLL_CACHE = null;
+const LEGACY_MODEL = "gpt-5.6-luna";
+const LEGACY_EFFORT = "low";
 const BASELINE_VERSION = "0.153.4";
 const TESTED_ALPHA_VERSION = "0.154.0-alpha.6";
 const TOOLS = ["send_message", "followup_task", "receive_messages", "reply", "interrupt_agent", "list_agents"];
 const execute = promisify(execFile);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function automaticFinalProfileRequested(env = process.env) {
+  return env.WARDIAN_E2E_MESSAGING_V2_AUTO_FINAL === "1" ||
+    env.WARDIAN_E2E_MESSAGING_V2_MIXED_STEER === "1";
+}
+
+export function messagingProfile(env = process.env) {
+  return automaticFinalProfileRequested(env)
+    ? { model: AUTO_FINAL_MODEL, effort: AUTO_FINAL_EFFORT }
+    : { model: LEGACY_MODEL, effort: LEGACY_EFFORT };
+}
+
+const { model: MODEL, effort: EFFORT } = messagingProfile();
 const SOURCES = [
   "Cargo.toml", "Cargo.lock", "src-tauri/Cargo.toml", "crates/wardian-cli/Cargo.toml", "crates/wardian-core/Cargo.toml",
   "e2e-native/tests/agent-messaging-v2-real-native.test.mjs", "e2e-native/lib/harness.mjs",
@@ -118,6 +142,20 @@ async function sha256(file) {
   return hash.digest("hex");
 }
 
+function normalizeExpectedCodexSha256(value) {
+  assert.ok(typeof value === "string" && /^[a-f0-9]{64}$/iu.test(value),
+    `${AUTO_FINAL_EXECUTABLE_SHA256_ENV} must be an exact 64-character SHA-256 pin`);
+  return value.toLowerCase();
+}
+
+export function assertCodexExecutableSha256(actual, expected) {
+  assert.ok(typeof actual === "string" && /^[a-f0-9]{64}$/iu.test(actual),
+    "Observed Codex executable SHA-256 is malformed");
+  assert.equal(actual.toLowerCase(), normalizeExpectedCodexSha256(expected),
+    "Codex executable bytes differ from the exact acceptance pin");
+  return actual.toLowerCase();
+}
+
 export function expectedTestVersion(env = process.env) {
   const pin = env.WARDIAN_E2E_CODEX_EXPECTED_VERSION;
   const executable = env.WARDIAN_E2E_CODEX_EXECUTABLE;
@@ -126,9 +164,20 @@ export function expectedTestVersion(env = process.env) {
     assert.ok(pin, "An executable pin requires explicit WARDIAN_E2E_CODEX_EXPECTED_VERSION");
   }
   const version = pin ?? BASELINE_VERSION;
-  assert.ok([BASELINE_VERSION, TESTED_ALPHA_VERSION].includes(version),
-    "Harness trace contracts are pinned to 0.153.4 or exact 0.154.0-alpha.6; other releases need separate validation");
+  assert.ok([BASELINE_VERSION, TESTED_ALPHA_VERSION, AUTO_FINAL_CODEX_VERSION].includes(version),
+    "Harness trace contracts require an explicitly supported exact Codex CLI version");
   if (version !== BASELINE_VERSION) assert.ok(executable, "Upgraded runs require WARDIAN_E2E_CODEX_EXECUTABLE evidence pin");
+  if (automaticFinalProfileRequested(env)) {
+    messagingProfile(env);
+    assert.equal(version, AUTO_FINAL_CODEX_VERSION,
+      "Automatic-final/mixed acceptance requires the exact stable Codex CLI 0.160.0 profile");
+    assert.ok(executable, "Automatic-final/mixed acceptance requires an exact native Codex executable pin");
+    assert.equal(normalizeExpectedCodexSha256(env[AUTO_FINAL_EXECUTABLE_SHA256_ENV]), AUTO_FINAL_CODEX_SHA256,
+      "Automatic-final/mixed acceptance requires the reviewed Codex CLI 0.160.0 executable bytes");
+  } else {
+    assert.notEqual(version, AUTO_FINAL_CODEX_VERSION,
+      "Codex CLI 0.160.0 is reserved for the explicitly selected automatic-final/mixed profile");
+  }
   return version;
 }
 
@@ -149,6 +198,22 @@ export function executableIdentity(executable, header, expectedVersion, platform
     native_binary_identity: nativeCodex ? "selected_path_and_hash" : "unresolved_from_readiness" };
 }
 
+async function preflightAutomaticCodexExecutable(expectedVersion, env = process.env) {
+  if (!automaticFinalProfileRequested(env)) return null;
+  assert.equal(expectedVersion, AUTO_FINAL_CODEX_VERSION);
+  const executablePin = env.WARDIAN_E2E_CODEX_EXECUTABLE;
+  assert.ok(path.isAbsolute(executablePin ?? ""), "Automatic-final executable path pin must be absolute");
+  const executable = await fs.realpath(executablePin);
+  const file = await fs.open(executable, "r");
+  const header = Buffer.alloc(4);
+  try { await file.read(header, 0, header.length, 0); } finally { await file.close(); }
+  const identity = executableIdentity(executable, header, expectedVersion);
+  assert.equal(identity.identity_kind, "native_codex_file",
+    "Automatic-final acceptance requires the exact native Codex executable before app startup");
+  const digest = assertCodexExecutableSha256(await sha256(executable), env[AUTO_FINAL_EXECUTABLE_SHA256_ENV]);
+  return { source: executable, sha256: digest, expected_version: expectedVersion, ...identity };
+}
+
 async function executableEvidence(driver, expectedVersion) {
   const readiness = (await invokeTauri(driver, "list_provider_readiness")).find((entry) => entry.provider === "codex");
   assert.ok(readiness?.available && path.isAbsolute(readiness.executable ?? ""), "Codex readiness must identify its executable");
@@ -163,7 +228,11 @@ async function executableEvidence(driver, expectedVersion) {
     assert.equal(executable, await fs.realpath(process.env.WARDIAN_E2E_CODEX_EXECUTABLE),
       "Product executable selection differs from the evidence pin; check isolated process PATH discovery before running");
   }
-  const evidence = { source: executable, selected_path: readiness.executable, sha256: await sha256(executable),
+  const digest = await sha256(executable);
+  if (automaticFinalProfileRequested()) {
+    assertCodexExecutableSha256(digest, process.env[AUTO_FINAL_EXECUTABLE_SHA256_ENV]);
+  }
+  const evidence = { source: executable, selected_path: readiness.executable, sha256: digest,
     expected_version: expectedVersion, version_source: "forced_live_provider_catalog", ...identity };
   return evidence;
 }
@@ -692,6 +761,486 @@ export function canonicalProof(DatabaseSync, home, sender, receiver, taskId, exp
   } finally { db.close(); }
 }
 
+function readTaskTurnBinding(DatabaseSync, home, requestId) {
+  const db = new DatabaseSync(path.join(home, "state.db"), { readOnly: true });
+  try {
+    const binding = db.prepare(`SELECT request_id,recipient,generation,provider,provider_session_id,
+      provider_turn_id,admission_mode,settlement FROM agent_message_task_turns WHERE request_id=?`).get(requestId);
+    assert.ok(binding, "The exact canonical task must retain its native turn binding");
+    return binding;
+  } finally { db.close(); }
+}
+
+function exactTaskDelivery(trace, requestId, requesterId, receiverId, prompt) {
+  const deliveries = trace.host_deliveries.filter((delivery) =>
+    delivery.frame_type === "canonical_task" && delivery.message_id === requestId);
+  assert.equal(deliveries.length, 1, "The exact task must appear once in the owned provider rollout");
+  const delivery = deliveries[0];
+  const context = hostContext(delivery);
+  assert.equal(context.kind, "task");
+  assert.equal(context.request_id, requestId);
+  assert.equal(context.sender, requesterId);
+  assert.equal(context.recipient, receiverId);
+  assert.equal(hostBody(context), prompt);
+  assert.ok(delivery.turn_id);
+  return delivery;
+}
+
+function observeReplyPoll(retained, canonical, page, requestId, sender, expectedBody) {
+  const matching = page.messages.filter((message) => message.parent_interaction_id === requestId);
+  assert.ok(matching.length <= 1, "Requester page contains duplicate completions for this task");
+  let next = retained;
+  if (matching.length) {
+    assert.equal(retained, null, "The same task completion appeared on more than one receive page");
+    assert.equal(matching[0].kind, "reply");
+    const reply = correlatedReply(page, requestId, sender, expectedBody);
+    assert.ok(reply);
+    next = { reply, page };
+  }
+  let joined = null;
+  if (canonical?.reply_id && next) {
+    assert.equal(canonical.request_id, requestId);
+    assert.equal(canonical.parent_interaction_id, requestId);
+    assert.equal(canonical.reply_id, next.reply.interaction_id,
+      "Canonical reply ID must match the exact requester page retained from an earlier poll");
+    joined = { canonical, reply: next.reply, page: next.page };
+  }
+  return { retained: next, joined };
+}
+
+function proveAutomaticFinal({ requestId, requesterId, receiverId, prompt, marker, receipt,
+  beforeTrace, providerTrace, binding, canonical, receivedEvidence }) {
+  assert.equal(receipt.operation, "followup_task");
+  assert.equal(receipt.request_id, requestId);
+  assert.equal(providerTrace.evidence_source, "owned_provider_rollout");
+  assert.equal(providerTrace.provider_thread_id, beforeTrace.provider_thread_id);
+  assert.equal(providerTrace.generation, beforeTrace.generation);
+  assert.ok(beforeTrace.turns.length > 0 && beforeTrace.turns.every((turn) =>
+    ["completed", "failed", "interrupted"].includes(turn.status)), "The receiver must be idle before task admission");
+  const delivery = exactTaskDelivery(providerTrace, requestId, requesterId, receiverId, prompt);
+  const turnId = delivery.turn_id;
+  assert.equal(binding.request_id, requestId);
+  assert.equal(binding.recipient, receiverId);
+  assert.equal(binding.provider, "codex");
+  assert.equal(binding.provider_session_id, providerTrace.provider_thread_id);
+  assert.equal(binding.generation, providerTrace.generation);
+  assert.equal(binding.provider_turn_id, turnId);
+  assert.equal(binding.admission_mode, "start");
+  assert.equal(binding.settlement, "published");
+  assert.ok(!beforeTrace.turns.some((turn) => turn.turn_id === turnId), "Idle task must start a new exact provider turn");
+  const terminal = providerTrace.turns.filter((turn) => turn.turn_id === turnId);
+  assert.equal(terminal.length, 1);
+  assert.equal(terminal[0].status, "completed");
+  const finals = providerTrace.items.filter((item) =>
+    item.type === "agentMessage" && item.channel === "final" && item.turn_id === turnId);
+  assert.equal(finals.length, 1, "The exact task turn must have one provider-authored final item");
+  assert.equal(finals[0].text, marker);
+  assert.equal(providerTrace.items.filter((item) =>
+    item.tool === "reply" && item.arguments?.request_id === requestId).length, 0,
+  "Automatic completion must not be attributed to an explicit reply tool call");
+  const modelContext = providerTrace.contexts.find((entry) => entry.turn_id === turnId);
+  assert.ok(modelContext, "The exact provider turn must retain its actual model context");
+  assert.equal(modelContext.model, MODEL);
+  assert.equal(modelContext.effort, EFFORT);
+  assert.equal(canonical.request_id, requestId);
+  assert.equal(canonical.task_state, "completed");
+  assert.equal(canonical.task_body, prompt);
+  assert.ok(canonical.reply_id);
+  assert.equal(canonical.parent_interaction_id, requestId);
+  assert.equal(canonical.reply_body, marker);
+  assert.ok(receivedEvidence);
+  assert.equal(receivedEvidence.canonical.reply_id, canonical.reply_id);
+  assert.equal(receivedEvidence.reply.interaction_id, canonical.reply_id);
+  const replies = receivedEvidence.page.messages.filter((message) => message.parent_interaction_id === requestId);
+  assert.equal(replies.length, 1, "Requester must receive exactly one correlated completion");
+  assert.equal(replies[0].interaction_id, canonical.reply_id);
+  assert.equal(replies[0].kind, "reply");
+  assert.equal(replies[0].sender, receiverId);
+  assert.equal(replies[0].reply_status, "done");
+  assert.equal(replies[0].message, marker);
+  return { request_id: requestId, provider_turn_id: turnId, reply_interaction_id: canonical.reply_id };
+}
+
+function proveMixedTaskAwaitingReply({ requestId, requesterId, receiverId, prompt, humanMarker,
+  beforeIdleTrace, beforeTaskTrace, providerTrace, binding, canonical, receivedPage }) {
+  assert.equal(providerTrace.evidence_source, "owned_provider_rollout");
+  assert.equal(beforeIdleTrace.evidence_source, "owned_provider_rollout");
+  assert.equal(beforeIdleTrace.provider_thread_id, beforeTaskTrace.provider_thread_id);
+  assert.equal(beforeIdleTrace.generation, beforeTaskTrace.generation);
+  assert.equal(providerTrace.provider_thread_id, beforeTaskTrace.provider_thread_id);
+  assert.equal(providerTrace.generation, beforeTaskTrace.generation);
+  const beforeDelivery = exactTaskDelivery(beforeTaskTrace, requestId, requesterId, receiverId, prompt);
+  const turnId = beforeDelivery.turn_id;
+  assert.ok(beforeIdleTrace.turns.length > 0 && beforeIdleTrace.turns.every((turn) =>
+    ["completed", "failed", "interrupted"].includes(turn.status)));
+  assert.ok(!beforeIdleTrace.turns.some((turn) => turn.turn_id === turnId), "Mixed task must start a fresh idle turn");
+  assert.ok(beforeTaskTrace.turns.some((turn) => turn.turn_id === turnId && turn.status === "inProgress"),
+    "The task-start turn must still be active before TUI input");
+  assert.ok(!beforeTaskTrace.items.some((item) => item.type === "userMessage" && item.turn_id === turnId &&
+    item.text.includes(humanMarker)), "The marked human input must arrive after task admission");
+  const delivery = exactTaskDelivery(providerTrace, requestId, requesterId, receiverId, prompt);
+  assert.equal(delivery.turn_id, turnId, "The human input must share the exact task-start turn");
+  assert.ok(providerTrace.items.some((item) => item.type === "userMessage" && item.turn_id === turnId &&
+    item.text.includes(humanMarker)), "Actual TUI user input must precede terminal completion on the bound turn");
+  assert.ok(providerTrace.turns.some((turn) => turn.turn_id === turnId && turn.status === "completed"));
+  const modelContext = providerTrace.contexts.find((entry) => entry.turn_id === turnId);
+  assert.ok(modelContext, "Mixed-turn provider context must be retained for the bound task turn");
+  assert.equal(modelContext.model, MODEL);
+  assert.equal(modelContext.effort, EFFORT);
+  assert.equal(providerTrace.items.filter((item) => item.type === "agentMessage" && item.channel === "final" &&
+    item.turn_id === turnId).length, 1, "Mixed turn must have an exact provider final before checking settlement");
+  assert.equal(binding.request_id, requestId);
+  assert.equal(binding.recipient, receiverId);
+  assert.equal(binding.provider, "codex");
+  assert.equal(binding.provider_session_id, providerTrace.provider_thread_id);
+  assert.equal(binding.provider_turn_id, turnId);
+  assert.equal(binding.generation, providerTrace.generation);
+  assert.equal(binding.admission_mode, "start", "The task must register its candidate before the human steer");
+  assert.equal(binding.settlement, "bound", "Mixed input must invalidate automatic settlement");
+  assert.equal(providerTrace.items.filter((item) =>
+    item.tool === "reply" && item.arguments?.request_id === requestId).length, 0);
+  assert.equal(canonical.request_id, requestId);
+  assert.equal(canonical.task_state, "awaiting_reply");
+  assert.equal(canonical.reply_id, null);
+  assert.equal(canonical.task_body, prompt);
+  assert.equal(receivedPage.messages.filter((message) => message.parent_interaction_id === requestId).length, 0,
+    "No fabricated completion may reach the requester before explicit reply");
+  return { request_id: requestId, provider_turn_id: turnId, state: "awaiting_reply", reply_id: null };
+}
+
+function proveExplicitResolution({ requestId, receiverId, explicitMarker, receipt, canonical, receivedEvidence }) {
+  assert.equal(receipt.operation, "reply");
+  assert.equal(receipt.request_id, requestId);
+  assert.ok(receipt.interaction_id);
+  assert.equal(canonical.request_id, requestId);
+  assert.equal(canonical.task_state, "completed");
+  assert.equal(canonical.reply_id, receipt.interaction_id);
+  assert.equal(canonical.parent_interaction_id, requestId);
+  assert.equal(canonical.reply_body, explicitMarker, "Explicit reply body must match the exact reply");
+  assert.ok(receivedEvidence);
+  assert.equal(receivedEvidence.canonical.reply_id, receipt.interaction_id);
+  assert.equal(receivedEvidence.reply.interaction_id, receipt.interaction_id);
+  const replies = receivedEvidence.page.messages.filter((message) => message.parent_interaction_id === requestId);
+  assert.equal(replies.length, 1, "Exactly one explicit reply must reach the requester");
+  assert.equal(replies[0].interaction_id, receipt.interaction_id);
+  assert.equal(replies[0].sender, receiverId);
+  assert.equal(replies[0].reply_status, "done");
+  assert.equal(replies[0].message, explicitMarker, "Explicit result body must match the exact reply");
+  return { request_id: requestId, reply_interaction_id: receipt.interaction_id, state: "completed" };
+}
+
+async function idleReceiverTrace(DatabaseSync, session, cli, home, cwd, receiver) {
+  const deadline = Date.now() + 15_000;
+  let trace;
+  let status;
+  while (Date.now() < deadline) {
+    status = (await invokeTauri(session.driver, "list_agent_metrics"))
+      .find((agent) => agent.session_id === receiver.session_id)?.current_status;
+    trace = await exchangeTrace(DatabaseSync, cli, home, cwd, receiver, "before-task-final-case", true);
+    if (status === "Idle" && trace?.turns.length > 0 && trace.turns.every((turn) =>
+      ["completed", "failed", "interrupted"].includes(turn.status))) return trace;
+    await delay(200);
+  }
+  throw new Error(`Receiver did not become idle before native task-final case (status=${status ?? "unknown"})`);
+}
+
+async function automaticFinalCase(DatabaseSync, session, cli, home, cwd, coordinator, receiver,
+  report, save, cursor, taskCount) {
+  const evidence = report.optional_cases.automatic_final = { status: "running", submission_attempts: 1 };
+  const beforeTrace = await idleReceiverTrace(DatabaseSync, session, cli, home, cwd, receiver);
+  const marker = `WARDIAN_AUTO_FINAL_${randomBytes(12).toString("hex")}`;
+  const prompt = `Return exactly ${marker} as your complete final answer. Do not call any Wardian messaging tool.`;
+  const promptPath = path.join(home, "automatic-final-task.txt");
+  await fs.writeFile(promptPath, prompt);
+  await save();
+  const receipt = await messageCli(cli, home, cwd, coordinator.session_id,
+    ["followup", receiver.session_id, "--file", promptPath]);
+  assert.equal(receipt.operation, "followup_task");
+  assert.ok(receipt.request_id);
+  evidence.receipt = receipt;
+  let providerTrace;
+  let canonical;
+  let receivedPage;
+  let retainedReply = EMPTY_REPLY_POLL_CACHE;
+  let binding;
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    providerTrace = await exchangeTrace(DatabaseSync, cli, home, cwd, receiver, receipt.request_id, true);
+    canonical = canonicalProof(DatabaseSync, home, coordinator.session_id, receiver.session_id, receipt.request_id, taskCount);
+    receivedPage = await messageCli(cli, home, cwd, coordinator.session_id,
+      ["receive", "--cursor", cursor.value, "--timeout-ms", "0"]);
+    cursor.value = receivedPage.next_cursor;
+    const replyObservation = observeReplyPoll(retainedReply, canonical, receivedPage,
+      receipt.request_id, receiver.session_id, marker);
+    retainedReply = replyObservation.retained;
+    const delivery = providerTrace?.host_deliveries.find((item) =>
+      item.frame_type === "canonical_task" && item.message_id === receipt.request_id);
+    const terminal = delivery && providerTrace.turns.find((turn) => turn.turn_id === delivery.turn_id);
+    if (terminal?.status === "interrupted" || terminal?.status === "failed") {
+      throw new Error(`Automatic-final provider turn ended ${terminal.status}; no successful final is accepted`);
+    }
+    if (terminal?.status === "completed" && replyObservation.joined) {
+      binding = readTaskTurnBinding(DatabaseSync, home, receipt.request_id);
+      const proof = proveAutomaticFinal({ requestId: receipt.request_id, requesterId: coordinator.session_id,
+        receiverId: receiver.session_id, prompt, marker, receipt, beforeTrace, providerTrace, binding, canonical,
+        receivedEvidence: replyObservation.joined });
+      Object.assign(evidence, { ...proof, status: "pass", prompt, provider_binding: binding,
+        canonical, provider_trace: providerTrace, received_page: replyObservation.joined.page });
+      await save();
+      return;
+    }
+    await delay(200);
+  }
+  evidence.provider_trace = providerTrace;
+  evidence.canonical = canonical;
+  evidence.last_received_page = receivedPage;
+  evidence.retained_reply = retainedReply;
+  throw new Error("Idle task did not produce one exact correlated automatic final before the bounded deadline; no replay was made");
+}
+
+async function mixedSteerCase(DatabaseSync, session, cli, home, cwd, coordinator, receiver,
+  report, save, cursor, taskCount) {
+  assert.equal(process.env.WARDIAN_E2E_MESSAGING_V2_MODE, "attached_tui");
+  const evidence = report.optional_cases.mixed_steering = { status: "running", task_submission_attempts: 1, explicit_reply_attempts: 0 };
+  const beforeTrace = await idleReceiverTrace(DatabaseSync, session, cli, home, cwd, receiver);
+  const taskMarker = `WARDIAN_MIXED_TASK_${randomBytes(12).toString("hex")}`;
+  const prompt = `Use your shell tool to sleep for 25 seconds. Then finish the task. Do not call any Wardian messaging tool. Task marker: ${taskMarker}`;
+  const receipt = await messageCli(cli, home, cwd, coordinator.session_id,
+    ["followup", receiver.session_id, prompt]);
+  assert.equal(receipt.operation, "followup_task");
+  assert.ok(receipt.request_id);
+  evidence.receipt = receipt;
+  let beforeTaskTrace;
+  let binding;
+  let turnId;
+  const activeDeadline = Date.now() + 45_000;
+  while (Date.now() < activeDeadline) {
+    beforeTaskTrace = await exchangeTrace(DatabaseSync, cli, home, cwd, receiver, receipt.request_id, true);
+    const delivery = beforeTaskTrace?.host_deliveries.find((item) =>
+      item.frame_type === "canonical_task" && item.message_id === receipt.request_id);
+    turnId = delivery?.turn_id;
+    if (turnId && beforeTaskTrace.turns.some((turn) => turn.turn_id === turnId && turn.status === "inProgress")) {
+      binding = readTaskTurnBinding(DatabaseSync, home, receipt.request_id);
+      break;
+    }
+    await delay(150);
+  }
+  assert.ok(turnId && binding, "Task must create an observed active provider turn before human TUI input");
+  assert.equal(binding.admission_mode, "start", "The candidate must be registered from an idle task start");
+  const humanMarker = `WARDIAN_HUMAN_STEER_${randomBytes(12).toString("hex")}`;
+  const humanInput = `Human follow-up: include ${humanMarker} in your final answer.`;
+  evidence.human_input_attempts = 1;
+  await save();
+  await invokeTauri(session.driver, "send_input_to_agent", { sessionId: receiver.session_id, input: `${humanInput}\r` });
+  let providerTrace;
+  let canonical;
+  let receivedPage;
+  const steerDeadline = Date.now() + 20_000;
+  while (Date.now() < steerDeadline) {
+    providerTrace = await exchangeTrace(DatabaseSync, cli, home, cwd, receiver, receipt.request_id, true);
+    if (providerTrace?.items.some((item) => item.type === "userMessage" && item.turn_id === turnId &&
+      item.text.includes(humanMarker))) break;
+    await delay(150);
+  }
+  assert.ok(providerTrace?.items.some((item) => item.type === "userMessage" && item.turn_id === turnId &&
+    item.text.includes(humanMarker)), "TUI input must be provider-observed on the exact active task turn");
+  const terminalDeadline = Date.now() + 90_000;
+  while (Date.now() < terminalDeadline) {
+    providerTrace = await exchangeTrace(DatabaseSync, cli, home, cwd, receiver, receipt.request_id, true);
+    canonical = canonicalProof(DatabaseSync, home, coordinator.session_id, receiver.session_id, receipt.request_id, taskCount);
+    receivedPage = await messageCli(cli, home, cwd, coordinator.session_id,
+      ["receive", "--cursor", cursor.value, "--timeout-ms", "0"]);
+    cursor.value = receivedPage.next_cursor;
+    assert.equal(canonical.reply_id, null, "Mixed-turn task settled before the explicit reply step");
+    assert.equal(receivedPage.messages.filter((message) => message.parent_interaction_id === receipt.request_id).length, 0,
+      "Mixed-turn task produced a requester-visible completion before explicit reply");
+    const terminal = providerTrace?.turns.find((turn) => turn.turn_id === turnId);
+    if (terminal?.status === "interrupted" || terminal?.status === "failed") {
+      throw new Error(`Mixed task turn ended ${terminal.status}; acceptance requires a completed-but-unresolved turn`);
+    }
+    if (terminal?.status === "completed") break;
+    await delay(200);
+  }
+  assert.ok(providerTrace?.turns.some((turn) => turn.turn_id === turnId && turn.status === "completed"),
+    "Mixed task turn did not reach its exact terminal result before the bounded deadline");
+  binding = readTaskTurnBinding(DatabaseSync, home, receipt.request_id);
+  const awaiting = proveMixedTaskAwaitingReply({ requestId: receipt.request_id, requesterId: coordinator.session_id,
+    receiverId: receiver.session_id, prompt, humanMarker, beforeIdleTrace: beforeTrace, beforeTaskTrace, providerTrace,
+    binding, canonical, receivedPage });
+  evidence.awaiting_reply = { ...awaiting, human_input: humanInput, provider_binding: binding,
+    canonical, provider_trace: providerTrace, received_page: receivedPage };
+  evidence.explicit_reply_attempts = 1;
+  const explicitMarker = `WARDIAN_EXPLICIT_${randomBytes(12).toString("hex")}`;
+  await save();
+  const explicitReceipt = await messageCli(cli, home, cwd, receiver.session_id,
+    ["reply", receipt.request_id, "--status", "done", explicitMarker]);
+  let canonicalAfter;
+  let receivedAfter;
+  let retainedReply = EMPTY_REPLY_POLL_CACHE;
+  let replyEvidence;
+  const explicitDeadline = Date.now() + 30_000;
+  while (Date.now() < explicitDeadline) {
+    canonicalAfter = canonicalProof(DatabaseSync, home, coordinator.session_id, receiver.session_id, receipt.request_id, taskCount);
+    receivedAfter = await messageCli(cli, home, cwd, coordinator.session_id,
+      ["receive", "--cursor", cursor.value, "--timeout-ms", "0"]);
+    cursor.value = receivedAfter.next_cursor;
+    const replyObservation = observeReplyPoll(retainedReply, canonicalAfter, receivedAfter,
+      receipt.request_id, receiver.session_id, explicitMarker);
+    retainedReply = replyObservation.retained;
+    if (replyObservation.joined) { replyEvidence = replyObservation.joined; break; }
+    await delay(150);
+  }
+  assert.ok(replyEvidence,
+    "The one explicit reply must become canonical and requester-visible before the bounded deadline");
+  const explicit = proveExplicitResolution({ requestId: receipt.request_id, receiverId: receiver.session_id,
+    explicitMarker, receipt: explicitReceipt, canonical: canonicalAfter, receivedEvidence: replyEvidence });
+  Object.assign(evidence, { ...explicit, status: "pass", explicit_receipt: explicitReceipt,
+    canonical_after: canonicalAfter, received_page_after: replyEvidence.page });
+  await save();
+}
+
+function taskFinalFixture() {
+  const requestId = "task-1";
+  const requesterId = "requester-1";
+  const receiverId = "receiver-1";
+  const prompt = "Return the exact task marker.";
+  const marker = "TASK_FINAL_7B2D";
+  const turnId = "turn-2";
+  const taskDelivery = { frame_type: "canonical_task", message_id: requestId, turn_id: turnId,
+    context: { kind: "task", request_id: requestId, sender: requesterId, recipient: receiverId, body: prompt } };
+  const beforeTrace = { evidence_source: "owned_provider_rollout", provider_thread_id: "thread-1", generation: 4,
+    turns: [{ turn_id: "turn-1", status: "completed" }], items: [], host_deliveries: [], contexts: [] };
+  const providerTrace = { evidence_source: "owned_provider_rollout", provider_thread_id: "thread-1", generation: 4,
+    turns: [{ turn_id: "turn-1", status: "completed" }, { turn_id: turnId, status: "completed" }],
+    host_deliveries: [taskDelivery],
+    items: [{ type: "agentMessage", channel: "final", turn_id: turnId, text: marker }],
+    contexts: [{ turn_id: turnId, model: MODEL, effort: EFFORT }] };
+  const binding = { request_id: requestId, recipient: receiverId, provider: "codex", provider_session_id: "thread-1",
+    generation: 4, provider_turn_id: turnId, admission_mode: "start", settlement: "published" };
+  const canonical = { request_id: requestId, task_state: "completed", task_body: prompt,
+    reply_id: "reply-1", parent_interaction_id: requestId, reply_body: marker };
+  const receivedPage = { messages: [{ interaction_id: "reply-1", parent_interaction_id: requestId,
+    kind: "reply", sender: receiverId, reply_status: "done", message: marker }] };
+  const receipt = { operation: "followup_task", request_id: requestId };
+  return { requestId, requesterId, receiverId, prompt, marker, turnId, taskDelivery,
+    beforeTrace, providerTrace, binding, canonical, receivedPage, receipt };
+}
+
+test("automatic-final evidence requires exact task binding, provider final, and one canonical completion", async (t) => {
+  await t.test("accepts the exact task-only idle turn", () => {
+    const fixture = taskFinalFixture();
+    assert.deepEqual(proveAutomaticFinal({ requestId: fixture.requestId, requesterId: fixture.requesterId,
+      receiverId: fixture.receiverId, prompt: fixture.prompt, marker: fixture.marker, receipt: fixture.receipt,
+      beforeTrace: fixture.beforeTrace, providerTrace: fixture.providerTrace, binding: fixture.binding,
+      canonical: fixture.canonical, receivedEvidence: { canonical: fixture.canonical,
+        reply: fixture.receivedPage.messages[0], page: fixture.receivedPage } }),
+    { request_id: fixture.requestId, provider_turn_id: fixture.turnId, reply_interaction_id: "reply-1" });
+  });
+  await t.test("actual poll cache joins a reply after an empty page and before later canonical completion", () => {
+    const fixture = taskFinalFixture();
+    const awaiting = { request_id: fixture.requestId, parent_interaction_id: fixture.requestId,
+      task_state: "awaiting_reply", reply_id: null };
+    let retainedReply = EMPTY_REPLY_POLL_CACHE;
+    const emptyFirstPage = observeReplyPoll(retainedReply, awaiting, { messages: [] }, fixture.requestId,
+      fixture.receiverId, fixture.marker);
+    assert.equal(emptyFirstPage.retained, EMPTY_REPLY_POLL_CACHE,
+      "An empty first receive page must preserve the same empty cache used by native callers");
+    assert.equal(emptyFirstPage.joined, null);
+    retainedReply = emptyFirstPage.retained;
+
+    const matchingReplyPage = observeReplyPoll(retainedReply, awaiting, fixture.receivedPage, fixture.requestId,
+      fixture.receiverId, fixture.marker);
+    assert.ok(matchingReplyPage.retained, "The exact reply page must survive while canonical state has no reply ID");
+    assert.equal(matchingReplyPage.joined, null);
+    retainedReply = matchingReplyPage.retained;
+
+    const completedCanonical = observeReplyPoll(retainedReply, fixture.canonical, { messages: [] }, fixture.requestId,
+      fixture.receiverId, fixture.marker);
+    assert.deepEqual(completedCanonical.joined, { canonical: fixture.canonical,
+      reply: fixture.receivedPage.messages[0], page: fixture.receivedPage });
+    assert.deepEqual(proveAutomaticFinal({ requestId: fixture.requestId, requesterId: fixture.requesterId,
+      receiverId: fixture.receiverId, prompt: fixture.prompt, marker: fixture.marker, receipt: fixture.receipt,
+      beforeTrace: fixture.beforeTrace, providerTrace: fixture.providerTrace, binding: fixture.binding,
+      canonical: fixture.canonical, receivedEvidence: completedCanonical.joined }),
+    { request_id: fixture.requestId, provider_turn_id: fixture.turnId, reply_interaction_id: "reply-1" });
+
+    assert.throws(() => observeReplyPoll(retainedReply, fixture.canonical, fixture.receivedPage,
+      fixture.requestId, fixture.receiverId, fixture.marker), /more than one receive page/u);
+    assert.throws(() => observeReplyPoll(retainedReply, { ...fixture.canonical, reply_id: "reply-other" },
+      { messages: [] }, fixture.requestId, fixture.receiverId, fixture.marker), /Canonical reply ID must match/u);
+  });
+  await t.test("rejects explicit-tool, mixed-turn, wrong-binding, and duplicate-reply evidence", () => {
+    const fixture = taskFinalFixture();
+    const explicitTool = structuredClone(fixture.providerTrace);
+    explicitTool.items.push({ tool: "reply", arguments: { request_id: fixture.requestId } });
+    assert.throws(() => proveAutomaticFinal({ ...fixture, providerTrace: explicitTool }), /explicit reply/u);
+    const duplicateFinal = structuredClone(fixture.providerTrace);
+    duplicateFinal.items.push(duplicateFinal.items[0]);
+    assert.throws(() => proveAutomaticFinal({ ...fixture, providerTrace: duplicateFinal }), /one provider-authored final/u);
+    assert.throws(() => proveAutomaticFinal({ ...fixture, binding: { ...fixture.binding, admission_mode: "steer" } }), /start/u);
+    assert.throws(() => proveAutomaticFinal({ ...fixture, providerTrace: { ...fixture.providerTrace,
+      turns: fixture.providerTrace.turns.map((turn) => turn.turn_id === fixture.turnId ? { ...turn, turn_id: "foreign-turn" } : turn) } }));
+    assert.throws(() => proveAutomaticFinal({ ...fixture, receivedEvidence: { canonical: fixture.canonical,
+      reply: fixture.receivedPage.messages[0], page: { messages: [
+        ...fixture.receivedPage.messages, fixture.receivedPage.messages[0]] } } }), /exactly one correlated/u);
+  });
+});
+
+test("mixed-turn evidence stays awaiting until the exact explicit reply", async (t) => {
+  const requestId = "task-mixed";
+  const requesterId = "requester-1";
+  const receiverId = "receiver-1";
+  const prompt = "Sleep, then finish this task.";
+  const humanMarker = "HUMAN_STEER_91AC";
+  const turnId = "turn-mixed";
+  const taskDelivery = { frame_type: "canonical_task", message_id: requestId, turn_id: turnId,
+    context: { kind: "task", request_id: requestId, sender: requesterId, recipient: receiverId, body: prompt } };
+  const beforeTaskTrace = { evidence_source: "owned_provider_rollout", provider_thread_id: "thread-1", generation: 4,
+    turns: [{ turn_id: turnId, status: "inProgress" }], host_deliveries: [taskDelivery], items: [] };
+  const providerTrace = { evidence_source: "owned_provider_rollout", provider_thread_id: "thread-1", generation: 4,
+    turns: [{ turn_id: turnId, status: "completed" }], host_deliveries: [taskDelivery],
+    items: [{ type: "userMessage", turn_id: turnId, text: `Include ${humanMarker}.` },
+      { type: "agentMessage", channel: "final", turn_id: turnId, text: "mixed provider final" }],
+    contexts: [{ turn_id: turnId, model: MODEL, effort: EFFORT }] };
+  const beforeIdleTrace = { evidence_source: "owned_provider_rollout", provider_thread_id: "thread-1", generation: 4,
+    turns: [{ turn_id: "turn-old", status: "completed" }], items: [] };
+  const binding = { request_id: requestId, recipient: receiverId, provider: "codex", provider_session_id: "thread-1",
+    generation: 4, provider_turn_id: turnId, admission_mode: "start", settlement: "bound" };
+  const canonical = { request_id: requestId, task_state: "awaiting_reply", task_body: prompt, reply_id: null };
+  const receivedPage = { messages: [] };
+  await t.test("accepts a same-turn human input with no automatic canonical outcome", () => {
+    assert.deepEqual(proveMixedTaskAwaitingReply({ requestId, requesterId, receiverId, prompt, humanMarker,
+      beforeIdleTrace, beforeTaskTrace, providerTrace, binding, canonical, receivedPage }),
+    { request_id: requestId, provider_turn_id: turnId, state: "awaiting_reply", reply_id: null });
+  });
+  await t.test("rejects wrong-turn input and any fabricated pre-explicit result", () => {
+    const wrongTurn = structuredClone(providerTrace);
+    wrongTurn.items[0].turn_id = "turn-other";
+    assert.throws(() => proveMixedTaskAwaitingReply({ requestId, requesterId, receiverId, prompt, humanMarker,
+      beforeIdleTrace, beforeTaskTrace, providerTrace: wrongTurn, binding, canonical, receivedPage }), /Actual TUI user input/u);
+    assert.throws(() => proveMixedTaskAwaitingReply({ requestId, requesterId, receiverId, prompt, humanMarker,
+      beforeIdleTrace, beforeTaskTrace, providerTrace, binding,
+      canonical: { ...canonical, task_state: "completed" }, receivedPage }), /awaiting_reply/u);
+    assert.throws(() => proveMixedTaskAwaitingReply({ requestId, requesterId, receiverId, prompt, humanMarker,
+      beforeIdleTrace, beforeTaskTrace, providerTrace, binding, canonical,
+      receivedPage: { messages: [{ parent_interaction_id: requestId }] } }), /No fabricated completion/u);
+  });
+  await t.test("accepts only the exact subsequent explicit reply", () => {
+    const explicitMarker = "EXPLICIT_ANSWER_52C0";
+    const receipt = { operation: "reply", request_id: requestId, interaction_id: "reply-explicit" };
+    const after = { request_id: requestId, task_state: "completed", reply_id: receipt.interaction_id,
+      parent_interaction_id: requestId, reply_body: explicitMarker };
+    const page = { messages: [{ interaction_id: receipt.interaction_id, parent_interaction_id: requestId,
+      sender: receiverId, reply_status: "done", message: explicitMarker }] };
+    assert.deepEqual(proveExplicitResolution({ requestId, receiverId, explicitMarker, receipt, canonical: after,
+      receivedEvidence: { canonical: after, reply: page.messages[0], page } }),
+      { request_id: requestId, reply_interaction_id: receipt.interaction_id, state: "completed" });
+    assert.throws(() => proveExplicitResolution({ requestId, receiverId, explicitMarker, receipt,
+      canonical: { ...after, reply_body: "provider final" },
+      receivedEvidence: { canonical: after, reply: page.messages[0], page } }), /exact reply/u);
+  });
+});
+
 function hostBody(context) {
   if (typeof context === "string") {
     try { context = JSON.parse(context); } catch { return context; }
@@ -1197,10 +1746,13 @@ test("baseline launchers remain eligible while upgraded evidence requires a nati
     assert.deepEqual(executableIdentity(executable, header, BASELINE_VERSION, "win32"),
       { identity_kind: "selected_launcher", native_binary_identity: "unresolved_from_readiness" });
     assert.throws(() => executableIdentity(executable, header, TESTED_ALPHA_VERSION, "win32"));
+    assert.throws(() => executableIdentity(executable, header, AUTO_FINAL_CODEX_VERSION, "win32"));
   }
   assert.equal(executableIdentity("codex.exe", nativeHeader, TESTED_ALPHA_VERSION, "win32").identity_kind, "native_codex_file");
+  assert.equal(executableIdentity("codex.exe", nativeHeader, AUTO_FINAL_CODEX_VERSION, "win32").identity_kind, "native_codex_file");
   assert.equal(executableIdentity("codex", Buffer.from("#!/u"), BASELINE_VERSION, "darwin").identity_kind, "selected_launcher");
   assert.throws(() => executableIdentity("codex", Buffer.from("#!/u"), TESTED_ALPHA_VERSION, "darwin"));
+  assert.throws(() => executableIdentity("codex", Buffer.from("#!/u"), AUTO_FINAL_CODEX_VERSION, "darwin"));
 });
 
 test("upgraded test pins fail closed before any native startup", () => {
@@ -1208,16 +1760,45 @@ test("upgraded test pins fail closed before any native startup", () => {
   assert.equal(expectedTestVersion({}), BASELINE_VERSION);
   assert.equal(expectedTestVersion({ WARDIAN_E2E_CODEX_EXPECTED_VERSION: BASELINE_VERSION }), BASELINE_VERSION);
   assert.equal(expectedTestVersion({ WARDIAN_E2E_CODEX_EXPECTED_VERSION: TESTED_ALPHA_VERSION, WARDIAN_E2E_CODEX_EXECUTABLE: executable }), TESTED_ALPHA_VERSION);
+  const automaticProfile = { WARDIAN_E2E_MESSAGING_V2_AUTO_FINAL: "1" };
+  const automaticPins = { ...automaticProfile,
+    WARDIAN_E2E_CODEX_EXPECTED_VERSION: AUTO_FINAL_CODEX_VERSION,
+    WARDIAN_E2E_CODEX_EXECUTABLE: executable,
+    [AUTO_FINAL_EXECUTABLE_SHA256_ENV]: AUTO_FINAL_CODEX_SHA256 };
+  assert.deepEqual(messagingProfile(automaticProfile), { model: "gpt-6-luna", effort: "low" });
+  assert.deepEqual(messagingProfile({}), { model: LEGACY_MODEL, effort: LEGACY_EFFORT });
+  assert.equal(expectedTestVersion(automaticPins), AUTO_FINAL_CODEX_VERSION);
+  const mixedPins = { WARDIAN_E2E_MESSAGING_V2_MIXED_STEER: "1",
+    WARDIAN_E2E_CODEX_EXPECTED_VERSION: AUTO_FINAL_CODEX_VERSION,
+    WARDIAN_E2E_CODEX_EXECUTABLE: executable,
+    [AUTO_FINAL_EXECUTABLE_SHA256_ENV]: AUTO_FINAL_CODEX_SHA256 };
+  assert.deepEqual(messagingProfile(mixedPins), { model: "gpt-6-luna", effort: "low" });
+  assert.equal(expectedTestVersion(mixedPins), AUTO_FINAL_CODEX_VERSION);
+  assert.equal(assertCodexExecutableSha256(AUTO_FINAL_CODEX_SHA256.toUpperCase(), AUTO_FINAL_CODEX_SHA256.toUpperCase()),
+    AUTO_FINAL_CODEX_SHA256);
+  assert.throws(() => assertCodexExecutableSha256("not-a-digest", AUTO_FINAL_CODEX_SHA256), /malformed/u);
+  assert.throws(() => assertCodexExecutableSha256("a".repeat(64), AUTO_FINAL_CODEX_SHA256), /differ/u);
   for (const env of [
     { WARDIAN_E2E_CODEX_EXECUTABLE: executable },
     { WARDIAN_E2E_CODEX_EXPECTED_VERSION: TESTED_ALPHA_VERSION },
     { WARDIAN_E2E_CODEX_EXPECTED_VERSION: TESTED_ALPHA_VERSION, WARDIAN_E2E_CODEX_EXECUTABLE: "relative.exe" },
+    { ...automaticProfile },
+    { ...automaticPins, WARDIAN_E2E_CODEX_EXPECTED_VERSION: BASELINE_VERSION },
+    { ...automaticPins, WARDIAN_E2E_CODEX_EXPECTED_VERSION: TESTED_ALPHA_VERSION },
+    { ...automaticPins, WARDIAN_E2E_CODEX_EXECUTABLE: undefined },
+    { ...automaticPins, [AUTO_FINAL_EXECUTABLE_SHA256_ENV]: undefined },
+    { ...automaticPins, [AUTO_FINAL_EXECUTABLE_SHA256_ENV]: "not-a-digest" },
+    { ...automaticPins, [AUTO_FINAL_EXECUTABLE_SHA256_ENV]: "a".repeat(64) },
+    { WARDIAN_E2E_CODEX_EXPECTED_VERSION: AUTO_FINAL_CODEX_VERSION, WARDIAN_E2E_CODEX_EXECUTABLE: executable,
+      [AUTO_FINAL_EXECUTABLE_SHA256_ENV]: AUTO_FINAL_CODEX_SHA256 },
     ...["", " 0.153.4", "0.154.0", "0.153.5", "0.154.0-alpha.5", "0.154.0-alpha.7", "0.154.0-alpha.6+build.1"].map((version) =>
       ({ WARDIAN_E2E_CODEX_EXPECTED_VERSION: version, WARDIAN_E2E_CODEX_EXECUTABLE: executable })),
   ]) assert.throws(() => expectedTestVersion(env));
   assert.equal(assertExecutableVersion("codex-cli 0.154.0-alpha.6", TESTED_ALPHA_VERSION), TESTED_ALPHA_VERSION);
+  assert.equal(assertExecutableVersion(`codex-cli ${AUTO_FINAL_CODEX_VERSION}`, AUTO_FINAL_CODEX_VERSION), AUTO_FINAL_CODEX_VERSION);
   for (const version of [null, "0.154.0-alpha.6", "codex-cli 0.154.0-alpha.7", "codex-cli 0.153.4"])
     assert.throws(() => assertExecutableVersion(version, TESTED_ALPHA_VERSION));
+  assert.throws(() => assertExecutableVersion("codex-cli 0.160.1", AUTO_FINAL_CODEX_VERSION));
 });
 
 for (const version of [BASELINE_VERSION, TESTED_ALPHA_VERSION]) {
@@ -1726,12 +2307,19 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
   }
   const expectedVersion = expectedTestVersion();
   const mode = process.env.WARDIAN_E2E_MESSAGING_V2_MODE ?? "background";
+  const runAutomaticFinal = process.env.WARDIAN_E2E_MESSAGING_V2_AUTO_FINAL === "1";
+  const runMixedSteer = process.env.WARDIAN_E2E_MESSAGING_V2_MIXED_STEER === "1";
   assert.ok(["background", "attached_tui", "without_pty"].includes(mode), "Unknown messaging mode; no provider was launched");
   if (process.env.WARDIAN_E2E_MESSAGING_V2_LIFECYCLE === "1") assert.equal(mode, "attached_tui");
+  if (runAutomaticFinal || runMixedSteer) {
+    assert.equal(mode, "attached_tui", "Automatic-final conformance requires the original attached Codex TUI");
+    assert.notEqual(process.env.WARDIAN_E2E_MESSAGING_V2_LIFECYCLE, "1", "Keep this bounded acceptance separate from lifecycle add-ons");
+  }
   assert.equal(process.env.WARDIAN_NATIVE_SKIP_BUILD, "1", "This test never builds");
   const requestedCli = process.env.WARDIAN_E2E_MESSAGING_CLI;
   const authSource = process.env.WARDIAN_E2E_CODEX_AUTH_HOME;
   for (const file of [requestedCli, authSource, process.env.WARDIAN_NATIVE_APP]) assert.ok(path.isAbsolute(file ?? ""), "Explicit absolute frozen artifact/auth paths required");
+  const codexPreflight = await preflightAutomaticCodexExecutable(expectedVersion);
   const harness = await createNativeHarness();
   harness.watchMode = false; // Acceptance cleanup cannot wait for interactive input.
   const runId = harness.runId;
@@ -1765,16 +2353,21 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
     runtime_payloads: runtimePayloads,
     isolation: { run_id: runId, home, home_lock: runnerLock,
       lock_release_owner: "upstream_runner_finally_after_supervised_child_exit" },
-    model_selection: {
+    model_selection: automaticFinalProfileRequested() ? {
+      basis: "Exact pinned native task-final conformance profile; checked against the live Codex catalogue below",
+      model: MODEL, effort: EFFORT,
+    } : {
       basis: "Lowest published standard Codex credit rates among the available general-purpose models",
       checked_at: "2026-09-08", source: "https://learn.chatgpt.com/docs/pricing",
       credits_per_million_tokens: { input: 5, cached_input: 0.5, output: 30 },
       special_purpose_and_unpriced_models_ranked: false,
     },
     expected_codex_version: expectedVersion, requested_codex_executable: process.env.WARDIAN_E2E_CODEX_EXECUTABLE ?? null,
+    codex_executable_preflight: codexPreflight,
     cases: { correlated_real_exchange: { status: "running" } }, sources: {}, artifacts: {}, agents: [],
     attached_tui: mode === "attached_tui" ? "pending" : "not_run_in_background_mode",
-    optional_cases: { idle_information: "not_run", active_interrupt: "not_run" }, cleanup: [] };
+    optional_cases: { idle_information: "not_run", active_interrupt: "not_run",
+      automatic_final: "not_run", mixed_steering: "not_run" }, cleanup: [] };
   const reportPath = path.join(home, "real-messaging-v2-report.json");
   const save = () => fs.writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`);
   const previousEnv = new Map();
@@ -1824,16 +2417,23 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
     report.isolation.webdriver_session_id = (await session.driver.getSession()).getId();
     await save();
     report.artifacts.codex = await executableEvidence(session.driver, expectedVersion);
+    if (codexPreflight) {
+      assert.equal(report.artifacts.codex.source, codexPreflight.source,
+        "Product readiness selected a different Codex executable than preflight");
+      assert.equal(report.artifacts.codex.sha256, codexPreflight.sha256,
+        "Codex executable bytes changed after preflight");
+    }
     await save();
     const catalog = await invokeTauri(session.driver, "list_provider_model_catalog", { provider: "codex", forceRefresh: true });
     report.artifacts.codex.version_output = catalog.version;
     await save();
     report.artifacts.codex.actual_version = assertExecutableVersion(catalog.version, expectedVersion);
+    assert.equal(catalog.provider, "codex", "The pinned live catalogue must belong to Codex");
     assert.equal(catalog.source, "live_catalog");
     assert.ok(!catalog.refresh_error, "Fresh Codex catalogue unavailable; no substitution");
     const selected = catalog.models?.find((model) => model.id === MODEL);
     assert.ok(selected, `${MODEL} absent from live catalogue; do not pick another model`);
-    assert.ok(selected.effort_options.includes(EFFORT), "Low effort absent from live catalogue");
+    assert.ok(selected.effort_options.includes(EFFORT), `${EFFORT} effort absent from live catalogue`);
     report.catalogue = { provider: catalog.provider, version: catalog.version, source: catalog.source, selected };
     const fixtureWorkspaces = await prepareFixtureWorkspaces(home);
     const trustFixtures = fixtureTrustEnabled();
@@ -1921,7 +2521,7 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
     assert.equal(sent.operation, "followup_task");
     assert.ok(sent.request_id);
     const { DatabaseSync } = await import("node:sqlite");
-    const deadline = Date.parse(report.started_at) + 820_000;
+    const deadline = Date.parse(report.started_at) + (runAutomaticFinal || runMixedSteer ? 360_000 : 820_000);
     let passed = false;
     while (Date.now() < deadline) {
       report.sender_trace = await exchangeTrace(DatabaseSync, cli, home, harness.repoRoot, sender, sent.request_id, mode === "attached_tui");
@@ -1996,6 +2596,26 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
           "The requester's final answer must also reach its original attached TUI");
       }
       report.attached_tui = "pass_same_owner_thread_and_original_terminals";
+    }
+    if (runAutomaticFinal || runMixedSteer) {
+      const cursor = { value: replyCursor };
+      let coordinatorTaskCount = 1;
+      if (runAutomaticFinal) {
+        coordinatorTaskCount += 1;
+        await t.test("real idle followup settles from one exact final without a reply tool", async () => {
+          await automaticFinalCase(DatabaseSync, session, cli, home, harness.repoRoot, report.coordinator,
+            receiver, report, save, cursor, coordinatorTaskCount);
+        });
+        assert.equal(report.optional_cases.automatic_final.status, "pass", "Automatic-final native case failed");
+      }
+      if (runMixedSteer) {
+        coordinatorTaskCount += 1;
+        await t.test("real same-turn TUI input stays awaiting until one explicit reply", async () => {
+          await mixedSteerCase(DatabaseSync, session, cli, home, harness.repoRoot, report.coordinator,
+            receiver, report, save, cursor, coordinatorTaskCount);
+        });
+        assert.equal(report.optional_cases.mixed_steering.status, "pass", "Mixed-turn native case failed");
+      }
     }
     if (process.env.WARDIAN_E2E_MESSAGING_V2_LIFECYCLE === "1") {
       assert.equal(mode, "attached_tui", "Lifecycle acceptance requires a retained attached owner");
