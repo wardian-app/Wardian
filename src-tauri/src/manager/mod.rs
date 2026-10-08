@@ -699,7 +699,7 @@ async fn status_observation_belongs_to_current_agent(
     })
 }
 
-async fn record_provider_input_from_status_state(
+pub(crate) async fn record_provider_input_from_status_state(
     state: &AppState,
     session_id: &str,
     next_status: &str,
