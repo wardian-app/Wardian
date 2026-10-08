@@ -133,6 +133,23 @@ export function resolveSharedCliPath() {
 }
 
 /**
+ * Return the already-frozen, packaged CLI for a prebuilt run before any Cargo
+ * entry or replacement. The ordinary build route receives null. Revalidate
+ * the app/CLI bytes so a missing or changed input cannot become a build fallback.
+ */
+export function prebuiltCliForRun(harness, skipBuild = false) {
+  if (!skipBuild && !harness.pairedCli) return null;
+  if (!harness.cliPath) {
+    throw new Error("A prebuilt run requires the harness's frozen CLI.");
+  }
+  return validatePairedNativeCli({
+    appPath: harness.appPath,
+    cliPath: harness.cliPath,
+    platform: harness.platform ?? process.platform,
+  }).cliPath;
+}
+
+/**
  * Resolve a just-built CLI from Cargo's configured target and freeze it into
  * this run's private home before a caller starts using it.
  */
