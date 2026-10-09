@@ -4,12 +4,55 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
 
+#[cfg(all(test, windows))]
+thread_local! {
+    static SHARING_CONFLICT_OBSERVER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Observes one real sharing violation on the current test thread. Removing the
+/// callback on return or unwind prevents one fixture from affecting another.
+#[cfg(all(test, windows))]
+pub(super) fn with_first_sharing_conflict_observer<T>(
+    observer: impl FnOnce() + 'static,
+    publish: impl FnOnce() -> T,
+) -> T {
+    struct ResetObserver;
+
+    impl Drop for ResetObserver {
+        fn drop(&mut self) {
+            let unused = SHARING_CONFLICT_OBSERVER.with(|slot| slot.borrow_mut().take());
+            drop(unused);
+        }
+    }
+
+    SHARING_CONFLICT_OBSERVER.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "sharing observer already installed"
+        );
+        *slot.borrow_mut() = Some(Box::new(observer));
+    });
+    let _reset = ResetObserver;
+    publish()
+}
+
+#[cfg(all(test, windows))]
+fn observe_first_sharing_conflict() {
+    let observer = SHARING_CONFLICT_OBSERVER.with(|slot| slot.borrow_mut().take());
+    if let Some(observer) = observer {
+        observer();
+    }
+}
+
 // Windows readers may deny delete sharing even though the file is writable.
 // Bound the wait to 200 ms per mutation; never bypass the snapshot checks.
 fn retry_sharing_conflict(error: &std::io::Error, retries: &mut u8) -> bool {
     #[cfg(windows)]
     if matches!(error.raw_os_error(), Some(5 | 32 | 33)) && *retries < 8 {
         *retries += 1;
+        #[cfg(all(test, windows))]
+        observe_first_sharing_conflict();
         std::thread::sleep(std::time::Duration::from_millis(25));
         return true;
     }
