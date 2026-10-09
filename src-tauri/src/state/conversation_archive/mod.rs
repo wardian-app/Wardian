@@ -1472,17 +1472,6 @@ impl ConversationArchiveState {
         Ok(appended)
     }
 
-    #[cfg(test)]
-    pub(crate) fn fail_next_chat_cursor_commit_for_test(&self) {
-        self.fail_next_chat_cursor_commit
-            .store(true, Ordering::SeqCst);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fail_compatibility_stage_for_test(&self, stage: u8) {
-        self.fail_compatibility_stage.store(stage, Ordering::SeqCst);
-    }
-
     pub fn append_delivered_input(
         &self,
         agent_id: &str,

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::atomic::Ordering};
 
 use super::{
     derive_turn_records, effective_conversation_logging, index_records_by_sequence,
@@ -20,6 +20,17 @@ use wardian_core::models::chat::{
     AgentChatEvent, AgentChatEventKind, AgentChatRole, AgentChatStatus,
 };
 use wardian_core::paths::{agent_conversation_dir, agent_conversations_dir};
+
+impl ConversationArchiveState {
+    pub(crate) fn fail_next_chat_cursor_commit_for_test(&self) {
+        self.fail_next_chat_cursor_commit
+            .store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn fail_compatibility_stage_for_test(&self, stage: u8) {
+        self.fail_compatibility_stage.store(stage, Ordering::SeqCst);
+    }
+}
 
 #[test]
 fn user_chat_message_converts_to_primary_narrative_record() {

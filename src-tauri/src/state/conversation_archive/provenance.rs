@@ -730,11 +730,19 @@ fn is_codex_stream_completion_pair(mirror: &AgentChatEvent, completion: &AgentCh
 }
 
 #[cfg(test)]
-pub(crate) fn codex_stream_completion_pair(
-    first: &AgentChatEvent,
-    second: &AgentChatEvent,
-) -> bool {
-    is_codex_stream_completion_pair(first, second) || is_codex_stream_completion_pair(second, first)
+pub(crate) use test_support::codex_stream_completion_pair;
+
+#[cfg(test)]
+mod test_support {
+    use super::{is_codex_stream_completion_pair, AgentChatEvent};
+
+    pub(crate) fn codex_stream_completion_pair(
+        first: &AgentChatEvent,
+        second: &AgentChatEvent,
+    ) -> bool {
+        is_codex_stream_completion_pair(first, second)
+            || is_codex_stream_completion_pair(second, first)
+    }
 }
 
 /// A mirror cannot establish ownership when distinct identified completions
