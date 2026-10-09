@@ -1,5 +1,6 @@
 use std::io;
 
+use sha2::{Digest, Sha256};
 use wardian_core::conversations::{
     ConversationBoundaryReason, ConversationInputOrigin, ConversationNarrativeRecord,
     ConversationRecordKind, ConversationSourceRecord, ConversationSpeakerType, CONVERSATION_SCHEMA,
@@ -93,9 +94,24 @@ pub(super) fn source_record_from_chat_event(
         .clone()
         .or_else(|| metadata_source_kind(&event.provider, &event.metadata))?;
 
+    let source_id =
+        if event.provider.eq_ignore_ascii_case("codex") && event.metadata["provider_log"] == true {
+            let digest = Sha256::digest(event.id.as_bytes());
+            format!(
+                "src_codex_observation_{}",
+                digest
+                    .iter()
+                    .take(12)
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<Vec<_>>()
+                    .join("")
+            )
+        } else {
+            format!("src_{seq}")
+        };
     Some(ConversationSourceRecord {
         schema: CONVERSATION_SCHEMA,
-        source_id: format!("src_{seq}"),
+        source_id,
         provider: event.provider.clone(),
         provider_session_id: metadata_string(&event.metadata, "opencode_session_id")
             .or_else(|| metadata_string(&event.metadata, "provider_session_id")),
@@ -115,6 +131,47 @@ pub(super) fn source_record_from_chat_event(
         hash: metadata_string(&event.metadata, "hash"),
         artifact_ref: metadata_string(&event.metadata, "artifact_ref"),
     })
+}
+
+/// Retain an unbound watch observation's published fallback cursor on retry.
+///
+/// Merging provider events renumbers the live presentation sequence. The
+/// uniquely matched durable observation keeps the ordinal first published,
+/// including older archives where it differs from the narrative sequence.
+/// Observations with native source evidence retain the strict cursor check.
+/// Explicit cursors and every other provenance field still come from `event`.
+pub(super) fn source_record_for_retry(
+    event: &AgentChatEvent,
+    seq: u64,
+    archived_event: Option<&AgentChatEvent>,
+) -> Option<ConversationSourceRecord> {
+    let mut source = source_record_from_chat_event(event, seq)?;
+    let Some(archived) = archived_event else {
+        return Some(source);
+    };
+    if source.source_id.starts_with("src_")
+        && event.kind == AgentChatEventKind::Message
+        && archived.id == event.id
+        && archived.session_id == event.session_id
+        && archived.provider == event.provider
+        && archived.kind == event.kind
+        && archived.source == event.source
+        && metadata_string(&event.metadata, "transcript_cursor").is_some()
+        && metadata_string(&archived.metadata, "transcript_cursor").is_some()
+        && event.metadata.get("cursor").is_none()
+        && archived.metadata.get("cursor").is_none()
+        && event.metadata["provider_log"] != true
+        && archived.metadata["provider_log"] != true
+        && source.source_path.is_none()
+        && source.offset.is_none()
+        && source.row_id.is_none()
+        && source.provider_event_type.is_none()
+        && source.hash.is_none()
+        && source.artifact_ref.is_none()
+    {
+        source.cursor = archived.sequence.map(|sequence| sequence.to_string());
+    }
+    Some(source)
 }
 
 pub(super) fn matching_delivered_input_record_index(
