@@ -1,4 +1,4 @@
-//! Capture-only reservations for historically persisted Claude raw-line owners.
+//! Capture-only reservations for historically persisted provider-log owners.
 //! The private checkpoint publishes prepared roots before advancing its cursor.
 use super::chat_read_store::{digest, valid_ref, Store, READ_OBJECTS};
 use super::*;
@@ -26,6 +26,10 @@ struct Claim {
     native_uuid: String,
     request_root_id: String,
     end: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    codex_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    codex_owner_digest: Option<String>,
 }
 
 fn load(store: &mut Store, checkpoint: Option<&Checkpoint>) -> io::Result<Root> {
@@ -212,6 +216,7 @@ fn reserve(store: &mut Store, root: &mut Root, owner_key: &str, claim: &Claim) -
 
 /// Prepare immutable claims using only archive data already loaded by its writer.
 /// The returned overlay is private until the caller commits cursor and policy.
+#[derive(Clone, Copy)]
 pub(super) struct Preparation<'a> {
     pub(super) context: &'a ConversationArchiveContext,
     pub(super) conversation_id: &'a str,
@@ -221,6 +226,343 @@ pub(super) struct Preparation<'a> {
     pub(super) events: &'a [AgentChatEvent],
     pub(super) previous: Option<&'a ProviderLogCaptureState>,
     pub(super) next: &'a ProviderLogCaptureState,
+    pub(super) source_proof:
+        Option<&'a crate::commands::provider_log_acquisition::ProviderLogSourceProof>,
+}
+
+fn codex_capture_scope_matches(input: &Preparation<'_>) -> bool {
+    input.context.provider == "codex"
+        && !input.context.provider_session_ids.is_empty()
+        && input.manifest.is_some_and(|manifest| {
+            manifest.provider == "codex"
+                && manifest.agent_id == input.context.agent_id
+                && manifest.conversation_id == input.conversation_id
+                && manifest.provider_source_key == input.context.provider_source_key
+                && manifest.provider_session_ids == input.context.provider_session_ids
+        })
+        && input.previous.is_some_and(|previous| {
+            previous.path == input.next.path
+                && previous.provider_source_key == input.next.provider_source_key
+                && previous.native_identity == input.next.native_identity
+                && previous.policy_generation == input.next.policy_generation
+                && previous.committed_offset <= input.next.committed_offset
+        })
+        && input.context.provider_source_key.as_deref()
+            == Some(input.next.provider_source_key.as_str())
+}
+
+fn codex_scope_matches(input: &Preparation<'_>) -> bool {
+    codex_capture_scope_matches(input)
+        && input.previous.is_some_and(|previous| {
+            previous.unknown_before_offset.is_none()
+                && previous.disabled_spans.is_empty()
+                && previous.open_disabled_from.is_none()
+                && matches!(previous.status.as_str(), "complete" | "pending")
+                && matches!(
+                    previous.reason.as_deref(),
+                    None | Some("provider_log_waiting_for_request_root")
+                )
+        })
+        && qualified(input.next)
+}
+
+fn codex_owner_matches(
+    old: &AgentChatEvent,
+    current: &AgentChatEvent,
+    input: &Preparation<'_>,
+) -> bool {
+    let canonical_role = |event: &AgentChatEvent| {
+        let mut event = event.clone();
+        provenance::canonicalize_role(&mut event);
+        event.role
+    };
+    old.provider == "codex"
+        && current.provider == "codex"
+        && old.session_id == input.context.agent_id
+        && old.session_id == current.session_id
+        && old.kind == current.kind
+        && canonical_role(old) == canonical_role(current)
+        && old.source == current.source
+        && old.turn_id == current.turn_id
+        && old.text == current.text
+        && old.sequence.is_some()
+        && old.sequence == current.sequence
+        && old.metadata["provider_log"] == true
+        && current.metadata["provider_log"] == true
+        && old.metadata["generated"] != true
+        && current.metadata["generated"] != true
+        && crate::commands::chat::archive_identity::requires_provider_log_row_identity(current)
+        // Legacy IDs hashed the declared path. Canonical paths independently
+        // prove native ownership below; substituting their bytes changes an
+        // existing ID on Windows (including the verbatim path prefix).
+        && old.metadata["log_path"] == current.metadata["log_path"]
+        && current.metadata["log_path"].as_str().is_some_and(|path| {
+            event_identity_ids(old).contains(
+                &crate::commands::chat::archive_identity::legacy_provider_log_event_id(
+                    current, std::path::Path::new(path),
+                ).as_str(),
+            )
+        })
+        && [old, current].into_iter().all(|event| {
+            event.metadata["log_path"]
+                .as_str()
+                .and_then(|path| std::fs::canonicalize(path).ok())
+                .is_some_and(|path| path.to_string_lossy() == input.next.path)
+                && event.metadata["provider_session_id"]
+                    .as_str()
+                    .is_none_or(|session| {
+                        input
+                            .context
+                            .provider_session_ids
+                            .iter()
+                            .any(|known| known == session)
+                    })
+        })
+        && [
+            "provider_turn_id",
+            "provider_event_id",
+            "input_origin",
+            "raw_type",
+            "tool_name",
+            "tool_input",
+            "tool_input_text",
+        ]
+        .iter()
+        .all(|key| old.metadata.get(*key) == current.metadata.get(*key))
+        && admitted(current, input.next)
+}
+
+/// Bind immutable Codex reservations to semantic owner fields, independent of
+/// canonical role normalization and the source frame added during migration.
+fn codex_owner_digest(event: &AgentChatEvent) -> io::Result<String> {
+    let mut canonical = event.clone();
+    provenance::canonicalize_role(&mut canonical);
+    Ok(digest(
+        &serde_json::to_vec(&serde_json::json!({
+            "id": event.id, "session": event.session_id, "provider": event.provider,
+            "kind": event.kind, "role": canonical.role, "sequence": event.sequence,
+            "source": event.source, "turn": event.turn_id, "created": event.created_at,
+            "title": event.title, "command": event.command, "text": event.text,
+            "log_path": event.metadata.get("log_path"),
+            "provider_session": event.metadata.get("provider_session_id"),
+            "provider_turn": event.metadata.get("provider_turn_id"),
+            "provider_event": event.metadata.get("provider_event_id"),
+            "request_root": event.metadata.get("request_root_id"),
+            "input_origin": event.metadata.get("input_origin"),
+            "raw_type": event.metadata.get("raw_type"),
+            "tool_name": event.metadata.get("tool_name"),
+            "tool_input": event.metadata.get("tool_input"),
+            "tool_input_text": event.metadata.get("tool_input_text"),
+        }))
+        .map_err(io::Error::other)?,
+    ))
+}
+
+fn codex_progress_qualified(source: &ProviderLogCaptureState) -> bool {
+    matches!(source.status.as_str(), "complete" | "pending")
+        && matches!(
+            source.reason.as_deref(),
+            None | Some(
+                "provider_log_waiting_for_request_root"
+                    | "provider_log_batch_limit"
+                    | "provider_log_partial_record"
+            )
+        )
+        && source.unknown_before_offset.is_none()
+        && source.disabled_spans.is_empty()
+        && source.open_disabled_from.is_none()
+}
+
+/// Cursor publication follows the durable frame upgrade. Recover that exact
+/// owner without asking a later acquisition to re-observe already-consumed bytes.
+/// An uncommitted cursor or unframed owner still needs the original sealed row.
+fn committed_codex_owner(
+    input: &Preparation<'_>,
+    store: &mut Store,
+    root: &Root,
+    reservation: (&str, &str),
+    claim: &Claim,
+    old: &AgentChatEvent,
+) -> io::Result<bool> {
+    let (pending_key, reference) = reservation;
+    let Some(previous) = input.previous else {
+        return Ok(false);
+    };
+    if claim.end > previous.committed_offset || !old.metadata["chat_source_ref"].is_string() {
+        return Ok(false);
+    }
+    let coordinate_key =
+        digest(format!("coordinate:{}:{}", claim.scope, claim.coordinate).as_bytes());
+    if !codex_capture_scope_matches(input)
+        || !codex_progress_qualified(previous)
+        || !codex_progress_qualified(input.next)
+        || claim.scope != scope(input.context, input.conversation_id, previous)?
+        || claim.scope != scope(input.context, input.conversation_id, input.next)?
+        || pending_key != owner_key(input.context, input.conversation_id, &claim.canonical_id)
+        || store.get(&root.owners, pending_key)?.as_deref() != Some(reference)
+        || store.get(&root.owners, &coordinate_key)?.as_deref() != Some(reference)
+        || old.id != claim.canonical_id
+        || old.provider != "codex"
+        || old.session_id != input.context.agent_id
+        || old.sequence != claim.codex_sequence
+        || old.metadata["provider_log"] != true
+        || old.metadata["generated"] == true
+        || old.metadata["chat_source_ref"].as_str() != Some(claim.coordinate.as_str())
+        || old.metadata["chat_source_end"].as_u64() != Some(claim.end)
+        || old.metadata["provider_log_row_offset"].as_u64().is_none()
+        || old.metadata["provider_log_row_offset"].as_u64()
+            != old.metadata["chat_source_start"].as_u64()
+        || !admitted(old, previous)
+        || !claim.native_uuid.is_empty()
+        || !claim.request_root_id.is_empty()
+        || claim.codex_owner_digest.as_deref() != Some(codex_owner_digest(old)?.as_str())
+        || !old.metadata["log_path"]
+            .as_str()
+            .and_then(|path| std::fs::canonicalize(path).ok())
+            .is_some_and(|path| path.to_string_lossy() == previous.path)
+        || old.metadata["provider_session_id"]
+            .as_str()
+            .is_some_and(|session| {
+                !input
+                    .context
+                    .provider_session_ids
+                    .iter()
+                    .any(|known| known == session)
+            })
+        || input
+            .archived
+            .iter()
+            .filter(|event| {
+                event.metadata["chat_source_ref"].as_str() == Some(claim.coordinate.as_str())
+            })
+            .count()
+            != 1
+        || input
+            .records
+            .iter()
+            .filter(|record| record.event_refs.contains(&claim.canonical_id))
+            .count()
+            != 1
+    {
+        return Err(io::Error::other(
+            "committed Codex reservation owner changed",
+        ));
+    }
+    Ok(true)
+}
+
+fn codex_upgraded_owner(
+    old: &AgentChatEvent,
+    current: &AgentChatEvent,
+) -> io::Result<AgentChatEvent> {
+    let mut display = old.clone();
+    for key in [
+        "chat_source_ref",
+        "chat_source_start",
+        "chat_source_end",
+        "chat_source_epoch",
+        "provider_log_row_offset",
+    ] {
+        display.metadata[key] = current.metadata[key].clone();
+    }
+    let mut upgraded = vec![display];
+    provenance::refresh_events(&mut upgraded, std::slice::from_ref(current))?;
+    if !provenance::same_observation(&upgraded[0], current) {
+        return Err(io::Error::other("reserved Codex ownership changed"));
+    }
+    Ok(upgraded.remove(0))
+}
+
+/// Reserve a historical Codex owner only through a sealed acquisition receipt.
+/// The shared alias matcher never treats an alias as a physical source proof.
+fn prepare_codex_claims(
+    input: &Preparation<'_>,
+    store: &mut Store,
+    root: &mut Root,
+    current_scope: &str,
+) -> io::Result<()> {
+    if input.context.provider != "codex" {
+        return Ok(());
+    }
+    for event in input.events {
+        let aliases = event_identity_ids(event);
+        let matches = input
+            .archived
+            .iter()
+            .filter(|old| {
+                old.id != event.id
+                    && aliases.contains(&old.id.as_str())
+                    && !old.metadata["chat_source_ref"].is_string()
+            })
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            continue;
+        }
+        let Some(proof) = input.source_proof else {
+            return Err(io::Error::other(
+                "Codex legacy coordinate needs source recovery proof",
+            ));
+        };
+        if !codex_scope_matches(input)
+            || !proof.matches_capture(input.previous, input.next)?
+            || !proof.proves(event)
+            || matches.len() != 1
+            || input
+                .events
+                .iter()
+                .filter(|candidate| {
+                    candidate.metadata["chat_source_ref"] == event.metadata["chat_source_ref"]
+                })
+                .count()
+                != 1
+        {
+            return Err(io::Error::other(
+                "unqualified Codex legacy coordinate owner",
+            ));
+        }
+        let old = matches[0];
+        if !codex_owner_matches(old, event, input)
+            || ["chat_source_start", "chat_source_end", "chat_source_epoch"]
+                .iter()
+                .any(|key| old.metadata.get(*key).is_some())
+            || input
+                .archived
+                .iter()
+                .filter(|candidate| candidate.id == old.id)
+                .count()
+                != 1
+            || input
+                .records
+                .iter()
+                .filter(|record| record.event_refs.contains(&old.id))
+                .count()
+                != 1
+        {
+            return Err(io::Error::other(
+                "conflicting Codex historical coordinate owner",
+            ));
+        }
+        let claim = Claim {
+            scope: current_scope.to_string(),
+            canonical_id: old.id.clone(),
+            coordinate: event.metadata["chat_source_ref"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+            native_uuid: String::new(),
+            request_root_id: String::new(),
+            end: event.metadata["chat_source_end"].as_u64().unwrap(),
+            codex_sequence: old.sequence,
+            codex_owner_digest: Some(codex_owner_digest(&codex_upgraded_owner(old, event)?)?),
+        };
+        reserve(
+            store,
+            root,
+            &owner_key(input.context, input.conversation_id, &old.id),
+            &claim,
+        )?;
+    }
+    Ok(())
 }
 
 /// Persist a bounded pending seek root with the unchanged source cursor.
@@ -228,6 +570,11 @@ pub(super) fn prepare(
     input: Preparation<'_>,
     state: &mut ConversationCaptureState,
 ) -> io::Result<(Vec<AgentChatEvent>, HashMap<String, AgentChatEvent>)> {
+    let mut store = Store::writer(&objects(&input.context.agent_id)?);
+    let mut root = load(&mut store, state.compatibility_claims.as_ref())?;
+    let current_scope = scope(input.context, input.conversation_id, input.next)?;
+    prepare_codex_claims(&input, &mut store, &mut root, &current_scope)?;
+    let codex_scope = codex_scope_matches(&input);
     let Preparation {
         context,
         conversation_id,
@@ -237,9 +584,8 @@ pub(super) fn prepare(
         events,
         previous,
         next,
+        source_proof,
     } = input;
-    let mut store = Store::writer(&objects(&context.agent_id)?);
-    let mut root = load(&mut store, state.compatibility_claims.as_ref())?;
     let mut owners: HashMap<&str, Vec<&AgentChatEvent>> = HashMap::new();
     for event in archived {
         owners.entry(&event.id).or_default().push(event);
@@ -255,7 +601,6 @@ pub(super) fn prepare(
             && next.status == "complete"
             && qualified(next)
     });
-    let current_scope = scope(context, conversation_id, next)?;
     let mut remaining = Vec::new();
     for event in events {
         let Some(id) = event.metadata["chat_compatibility_raw_id"].as_str() else {
@@ -301,6 +646,8 @@ pub(super) fn prepare(
                 .unwrap()
                 .to_string(),
             end: event.metadata["chat_source_end"].as_u64().unwrap(),
+            codex_sequence: None,
+            codex_owner_digest: None,
         };
         let key = owner_key(context, conversation_id, &old.id);
         if let Some(reference) = store.get(&root.owners, &key)? {
@@ -317,8 +664,64 @@ pub(super) fn prepare(
         return Err(io::Error::other("compatibility pending budget exhausted"));
     }
     let mut overlay = HashMap::new();
-    for (_, reference) in pending {
+    for (key, reference) in pending {
         let claim: Claim = store.read(&reference)?;
+        if let Some(sequence) = claim.codex_sequence {
+            let old = owners
+                .get(claim.canonical_id.as_str())
+                .filter(|matches| matches.len() == 1)
+                .ok_or_else(|| io::Error::other("nonunique reserved Codex owner"))?[0];
+            if committed_codex_owner(&input, &mut store, &root, (&key, &reference), &claim, old)? {
+                overlay.insert(claim.canonical_id, old.clone());
+                continue;
+            }
+            let Some(proof) = source_proof else {
+                return Err(io::Error::other("missing reserved Codex source proof"));
+            };
+            if !codex_scope
+                || claim.scope != current_scope
+                || !proof.matches_capture(previous, next)?
+            {
+                return Err(io::Error::other("reserved Codex source changed"));
+            }
+            let current = events
+                .iter()
+                .filter(|event| {
+                    event.sequence == Some(sequence)
+                        && event.metadata["chat_source_ref"].as_str()
+                            == Some(claim.coordinate.as_str())
+                        && event.metadata["chat_source_end"].as_u64() == Some(claim.end)
+                        && proof.proves(event)
+                })
+                .collect::<Vec<_>>();
+            if current.len() != 1
+                || old.sequence != Some(sequence)
+                || old.metadata["generated"] == true
+            {
+                return Err(io::Error::other("reserved Codex row changed"));
+            }
+            if !codex_owner_matches(old, current[0], &input)
+                || old.metadata["chat_source_ref"]
+                    .as_str()
+                    .is_some_and(|coordinate| coordinate != claim.coordinate)
+                || old.metadata["chat_source_epoch"]
+                    .as_str()
+                    .is_some_and(|epoch| {
+                        current[0].metadata["chat_source_epoch"].as_str() != Some(epoch)
+                    })
+                || old.metadata["provider_log_row_offset"]
+                    .as_u64()
+                    .is_some_and(|offset| {
+                        current[0].metadata["provider_log_row_offset"].as_u64() != Some(offset)
+                    })
+            {
+                return Err(io::Error::other(
+                    "conflicting reserved Codex source coordinate",
+                ));
+            }
+            overlay.insert(claim.canonical_id, codex_upgraded_owner(old, current[0])?);
+            continue;
+        }
         if !stored_scope || !continuity || claim.scope != current_scope {
             continue;
         }
