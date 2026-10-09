@@ -34,7 +34,7 @@ import test from "node:test";
 import { messageCli, correlatedReply, assertDetachedTerminal, assertNativeSession, assertBusyTaskDeferred } from "../lib/canonical-messaging.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
-import { createReadStream } from "node:fs";
+import { constants as fsConstants, createReadStream } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -92,6 +92,8 @@ const SOURCES = [
   "src-tauri/src/control/codex_background.rs", "src-tauri/src/control/headless_delivery.rs",
   "src-tauri/src/delivery/native_broker.rs", "src-tauri/src/delivery/native_session.rs",
   "src-tauri/src/delivery/codex_shared.rs", "src-tauri/src/delivery/codex_shared/owner.rs",
+  "src-tauri/src/delivery/codex_shared/task_delivery.rs",
+  "src-tauri/src/control/agent_messaging/native/completion.rs",
   "src-tauri/src/delivery/codex_shared/attachment.rs",
   "src-tauri/src/delivery/codex_shared/launch_config.rs",
   "src-tauri/src/delivery/codex_shared/launch_model.rs",
@@ -140,6 +142,301 @@ async function sha256(file) {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(file)) hash.update(chunk);
   return hash.digest("hex");
+}
+
+const WINDOWS_AUTH_OWNER_PATH_ENV = "WARDIAN_E2E_AUTH_OWNER_PATH";
+const WINDOWS_SID = /^S-1-(?:\d+-)+\d+$/u;
+
+function safeTransportCode(error) {
+  const code = error && typeof error === "object" ? error.code : undefined;
+  if (typeof code === "string" && /^[A-Z][A-Z0-9_]{0,31}$/u.test(code)) return code;
+  if (Number.isInteger(code) && code >= 0 && code <= 65_535) return `EXIT_${code}`;
+  return "UNAVAILABLE";
+}
+
+function sanitizedTransportCause(error) {
+  const cause = new Error("Underlying credential operation failed");
+  cause.code = safeTransportCode(error);
+  return cause;
+}
+
+async function windowsFileOwnerSids(file) {
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    `$acl = Get-Acl -LiteralPath $env:${WINDOWS_AUTH_OWNER_PATH_ENV}`,
+    "$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value",
+    "$current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+    "[Console]::Out.WriteLine($owner + [char]10 + $current)",
+  ].join("; ");
+  const childEnv = Object.fromEntries(["PATH", "SystemRoot", "WINDIR", "PSModulePath", "TEMP", "TMP"]
+    .filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
+  childEnv[WINDOWS_AUTH_OWNER_PATH_ENV] = file;
+  const { stdout } = await execute("powershell.exe",
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+    { env: childEnv, timeout: 10_000, windowsHide: true, maxBuffer: 4096 });
+  const [ownerSid, currentSid] = stdout.trim().split(/\r?\n/u);
+  if (!WINDOWS_SID.test(ownerSid ?? "") || !WINDOWS_SID.test(currentSid ?? "")) throw new Error("invalid owner SID result");
+  return { ownerSid, currentSid };
+}
+
+function credentialMetadata(stat) {
+  return {
+    dev: stat.dev, ino: stat.ino, mode: BigInt(stat.mode), nlink: BigInt(stat.nlink), size: stat.size,
+    mtimeNs: stat.mtimeNs, ctimeNs: stat.ctimeNs,
+    uid: stat.uid === undefined ? null : BigInt(stat.uid),
+    gid: stat.gid === undefined ? null : BigInt(stat.gid),
+  };
+}
+
+function sameCredentialMetadata(left, right) {
+  return ["dev", "ino", "mode", "nlink", "size", "mtimeNs", "ctimeNs", "uid", "gid"]
+    .every((key) => left[key] === right[key]);
+}
+
+function assertCredentialFileStat(stat) {
+  if (!stat.isFile() || stat.isSymbolicLink() || BigInt(stat.nlink) !== 1n) {
+    throw new Error("Credential source must be a regular, non-linked, single-link file");
+  }
+}
+
+async function credentialOwnerIdentity(file, stat, {
+  platform = process.platform,
+  getUid = process.getuid,
+  readWindowsOwnerSids = windowsFileOwnerSids,
+  } = {}) {
+  if (platform === "win32") {
+    const lookup = await Promise.resolve().then(() => readWindowsOwnerSids(file)).then(
+      (ownerIdentity) => ({ ownerIdentity }),
+      (error) => ({ failureCode: safeTransportCode(error) }));
+    if (lookup.failureCode) {
+      throw new Error("Credential source owner SID qualification is unsupported; refusing credential read",
+        { cause: sanitizedTransportCause({ code: lookup.failureCode }) });
+    }
+    const { ownerIdentity } = lookup;
+    const { ownerSid, currentSid } = ownerIdentity;
+    if (!WINDOWS_SID.test(ownerSid ?? "") || !WINDOWS_SID.test(currentSid ?? "") || ownerSid !== currentSid) {
+      throw new Error("Credential source owner SID does not match the current Windows user");
+    }
+    return ownerSid;
+  }
+  const uid = getUid?.();
+  if (!Number.isInteger(uid) || stat.uid === undefined || BigInt(uid) !== BigInt(stat.uid)) {
+    throw new Error("Credential source owner UID does not match the current user");
+  }
+  return `uid:${uid}`;
+}
+
+async function hashCredentialHandle(handle) {
+  const hash = createHash("sha256");
+  for await (const chunk of handle.createReadStream({ autoClose: false })) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+async function captureCredentialSnapshot(file, dependencies = {}) {
+  const lstat = dependencies.lstat ?? fs.lstat.bind(fs);
+  const open = dependencies.open ?? fs.open.bind(fs);
+  const platform = dependencies.platform ?? process.platform;
+  const ownerOptions = {
+    platform,
+    getUid: dependencies.getUid ?? process.getuid,
+    readWindowsOwnerSids: dependencies.readWindowsOwnerSids ?? windowsFileOwnerSids,
+  };
+  let before;
+  try { before = await lstat(file, { bigint: true }); }
+  catch { throw new Error("Credential source could not be qualified before reading"); }
+  assertCredentialFileStat(before);
+  const beforeMetadata = credentialMetadata(before);
+  const owner = await credentialOwnerIdentity(file, before, ownerOptions);
+  let handle;
+  let snapshot;
+  let failure;
+  try {
+    const flags = platform === "win32" ? "r" : fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW;
+    if (platform !== "win32" && typeof fsConstants.O_NOFOLLOW !== "number") {
+      throw new Error("no-follow open is unsupported");
+    }
+    handle = await open(file, flags);
+    const opened = await handle.stat({ bigint: true });
+    if (!opened.isFile() || !sameCredentialMetadata(beforeMetadata, credentialMetadata(opened))) {
+      throw new Error("Credential source identity changed while opening");
+    }
+    const digest = await hashCredentialHandle(handle);
+    const afterHandle = await handle.stat({ bigint: true });
+    const afterPath = await lstat(file, { bigint: true });
+    assertCredentialFileStat(afterPath);
+    if (!sameCredentialMetadata(beforeMetadata, credentialMetadata(afterHandle)) ||
+      !sameCredentialMetadata(beforeMetadata, credentialMetadata(afterPath)) ||
+      await credentialOwnerIdentity(file, afterPath, ownerOptions) !== owner) {
+      throw new Error("Credential source changed while being read");
+    }
+    snapshot = { file, identity: beforeMetadata, owner, sha256: digest, platform };
+  } catch (error) {
+    failure = {
+      message: error instanceof Error && /^(Credential source|no-follow open)/u.test(error.message)
+        ? error.message : "Credential source could not be safely read",
+      code: safeTransportCode(error),
+    };
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+  if (failure) throw new Error(failure.message, { cause: sanitizedTransportCause({ code: failure.code }) });
+  return snapshot;
+}
+
+async function assertCredentialSnapshotUnchanged(snapshot, dependencies = {}) {
+  const current = await captureCredentialSnapshot(snapshot.file, { ...dependencies, platform: snapshot.platform });
+  if (!sameCredentialMetadata(snapshot.identity, current.identity) || snapshot.owner !== current.owner || snapshot.sha256 !== current.sha256) {
+    throw new Error("Credential source identity or bytes changed");
+  }
+}
+
+function createCredentialCopyAttempt(destination) {
+  return {
+    destination,
+    sourceSnapshot: null,
+    destinationSnapshot: null,
+    copyAttempted: false,
+    copyCompleted: false,
+    cleanupEligible: false,
+    providerMayHaveStarted: false,
+    state: "not_attempted",
+    copyFailureCode: null,
+    destinationFailureCode: null,
+    sourceStableAfterCopy: null,
+  };
+}
+
+async function assertCredentialDestinationUnchanged(snapshot, dependencies = {}) {
+  let current;
+  try { current = await captureCredentialSnapshot(snapshot.file, { ...dependencies, platform: snapshot.platform }); }
+  catch { throw new Error("Credential copy could not be requalified"); }
+  if (!sameCredentialMetadata(snapshot.identity, current.identity) ||
+    snapshot.owner !== current.owner || snapshot.sha256 !== current.sha256) {
+    throw new Error("Credential copy identity or bytes changed");
+  }
+}
+
+async function stageCredentialSnapshot(source, destination, attempt, dependencies = {}) {
+  attempt.state = "source_qualification_failed";
+  const snapshot = await captureCredentialSnapshot(source, dependencies);
+  attempt.sourceSnapshot = snapshot;
+  attempt.state = "source_qualified";
+  const copyFile = dependencies.copyFile ?? fs.copyFile.bind(fs);
+  const hashDestination = dependencies.hashDestination ?? sha256;
+  attempt.copyAttempted = true;
+  attempt.state = "copy_attempted_uncertain";
+  const copyOutcome = await Promise.resolve().then(
+    () => copyFile(source, destination, fsConstants.COPYFILE_EXCL),
+  ).then(() => ({ copied: true }), (error) => ({ failureCode: safeTransportCode(error) }));
+  if (copyOutcome.failureCode) {
+    attempt.copyFailureCode = copyOutcome.failureCode;
+    attempt.state = "copy_failed_uncertain";
+    throw new Error("Credential copy failed; destination state is uncertain",
+      { cause: sanitizedTransportCause({ code: copyOutcome.failureCode }) });
+  }
+  attempt.copyCompleted = true;
+  attempt.state = "copy_completed_unverified";
+  try {
+    const destinationSnapshot = await captureCredentialSnapshot(destination, dependencies);
+    attempt.destinationSnapshot = destinationSnapshot;
+    if (destinationSnapshot.sha256 !== snapshot.sha256 ||
+      await hashDestination(destination) !== snapshot.sha256) {
+      attempt.destinationFailureCode = "CONTENT_MISMATCH";
+      attempt.state = "destination_mismatch_retained";
+      throw new Error("Credential copy differs from its pre-copy snapshot");
+    }
+    attempt.cleanupEligible = true;
+    attempt.state = "destination_authenticated";
+  } catch (error) {
+    if (attempt.state !== "destination_mismatch_retained") {
+      attempt.destinationFailureCode = safeTransportCode(error);
+      attempt.state = "destination_unqualified_retained";
+    }
+    throw error;
+  }
+  try {
+    await assertCredentialSnapshotUnchanged(snapshot, dependencies);
+    attempt.sourceStableAfterCopy = true;
+    attempt.state = "staged";
+  } catch (error) {
+    attempt.sourceStableAfterCopy = false;
+    attempt.state = "source_changed_after_copy";
+    throw error;
+  }
+  return { ...snapshot, destination, destinationSnapshot: attempt.destinationSnapshot };
+}
+
+async function startWithCredentialSnapshot(snapshot, start, dependencies = {}) {
+  const hashDestination = dependencies.hashDestination ?? sha256;
+  await assertCredentialDestinationUnchanged(snapshot.destinationSnapshot, dependencies);
+  if (await hashDestination(snapshot.destination) !== snapshot.sha256) throw new Error("Credential copy changed before provider startup");
+  await assertCredentialSnapshotUnchanged(snapshot, dependencies);
+  dependencies.onProviderStart?.();
+  return start();
+}
+
+async function inspectCredentialDestination(destination, dependencies = {}) {
+  const lstat = dependencies.lstat ?? fs.lstat.bind(fs);
+  let stat;
+  try { stat = await lstat(destination, { bigint: true }); }
+  catch (error) {
+    if (error?.code === "ENOENT") return { status: "absent", stat: null };
+    return { status: "unknown", stat: null };
+  }
+  if (stat.isSymbolicLink()) return { status: "linked_unqualified", stat };
+  if (!stat.isFile()) return { status: "nonregular_unqualified", stat };
+  if (BigInt(stat.nlink) !== 1n) return { status: "linked_unqualified", stat };
+  try {
+    await credentialOwnerIdentity(destination, stat, {
+      platform: dependencies.platform ?? process.platform,
+      getUid: dependencies.getUid ?? process.getuid,
+      readWindowsOwnerSids: dependencies.readWindowsOwnerSids ?? windowsFileOwnerSids,
+    });
+    return { status: "owner_qualified_present", stat };
+  } catch {
+    return { status: "owner_unqualified", stat };
+  }
+}
+
+async function cleanupFixtureCredentialAttempt(attempt, home, fixtureHome, {
+  processesStopped,
+  homeLockStillOwned,
+  cleanup = cleanupFixtureCredential,
+  ...dependencies
+}) {
+  const presence = await inspectCredentialDestination(attempt.destination, dependencies);
+  if (presence.status === "absent") return { status: "already_absent", removed: false };
+  if (!processesStopped || !homeLockStillOwned) return { status: "retained_owner_unconfirmed", removed: false };
+  if (!attempt.cleanupEligible || !attempt.destinationSnapshot || presence.status !== "owner_qualified_present") {
+    return { status: `retained_${presence.status}`, removed: false };
+  }
+  if (!attempt.providerMayHaveStarted) {
+    try { await assertCredentialDestinationUnchanged(attempt.destinationSnapshot, dependencies); }
+    catch { return { status: "retained_destination_changed", removed: false }; }
+  }
+  try {
+    const result = await cleanup(home, fixtureHome);
+    const removed = Boolean(result.fixture_credential_removed);
+    return { status: removed ? "removed" : "removed_elsewhere", removed };
+  } catch (error) {
+    return { status: "cleanup_failed_retained", removed: false, failure_code: safeTransportCode(error) };
+  }
+}
+
+async function closeSessionAndVerifyCredential(session, snapshot, onSourceChange = () => {}, dependencies = {}) {
+  let processesStopped = !session;
+  if (session) {
+    try { await session.close(); processesStopped = true; }
+    catch { return { processesStopped: false, sourceUnchanged: null }; }
+  }
+  if (!snapshot) return { processesStopped, sourceUnchanged: null };
+  try {
+    await assertCredentialSnapshotUnchanged(snapshot, dependencies);
+    return { processesStopped, sourceUnchanged: true };
+  } catch {
+    onSourceChange();
+    return { processesStopped, sourceUnchanged: false };
+  }
 }
 
 function normalizeExpectedCodexSha256(value) {
@@ -2301,6 +2598,281 @@ test("real messaging setup accepts only the runner's fresh matching home lock", 
   assert.equal(await fs.readFile(path.join(home, "retained-evidence.json"), "utf8"), "retained");
 });
 
+async function credentialSnapshotFixture(t) {
+  const tempParent = await fs.realpath(os.tmpdir());
+  const root = await fs.mkdtemp(path.join(tempParent, "messaging-auth-snapshot-"));
+  t.after(async () => {
+    within(tempParent, root);
+    assert.equal(await fs.realpath(root), root);
+    await fs.rm(root, { recursive: true });
+  });
+  const home = root;
+  const source = path.join(root, "source", "auth.json");
+  const fixtureCodex = path.join(home, "fixture-profile", ".codex");
+  const destination = path.join(fixtureCodex, "auth.json");
+  await fs.mkdir(path.dirname(source), { recursive: true });
+  await fs.mkdir(path.dirname(destination), { recursive: true });
+  await fs.writeFile(source, "synthetic-auth-source-only");
+  return { root, home, fixtureCodex, source, destination };
+}
+
+function syntheticOwnerDependencies(overrides = {}) {
+  return {
+    platform: "win32",
+    readWindowsOwnerSids: async () => ({ ownerSid: "S-1-5-21-100", currentSid: "S-1-5-21-100" }),
+    ...overrides,
+  };
+}
+
+test("native credential source is qualified, stable through startup and closure, and race-fails before provider launch", async (t) => {
+  const stable = await credentialSnapshotFixture(t);
+  const owner = syntheticOwnerDependencies();
+  const stableAttempt = createCredentialCopyAttempt(stable.destination);
+  const stableSnapshot = await stageCredentialSnapshot(stable.source, stable.destination, stableAttempt, owner);
+  let providerStarts = 0;
+  const started = await startWithCredentialSnapshot(stableSnapshot, async () => {
+    providerStarts += 1;
+    return "provider-started";
+  }, { ...owner, onProviderStart: () => { stableAttempt.providerMayHaveStarted = true; } });
+  assert.equal(started, "provider-started");
+  assert.equal(providerStarts, 1);
+  const stableClose = await closeSessionAndVerifyCredential({ close: async () => {} }, stableSnapshot, () => {}, owner);
+  assert.deepEqual(stableClose, { processesStopped: true, sourceUnchanged: true });
+
+  const changed = await credentialSnapshotFixture(t);
+  const changedAttempt = createCredentialCopyAttempt(changed.destination);
+  const changedSnapshot = await stageCredentialSnapshot(changed.source, changed.destination, changedAttempt, owner);
+  await fs.writeFile(changed.source, "synthetic-auth-changed-after-copy");
+  providerStarts = 0;
+  await assert.rejects(startWithCredentialSnapshot(changedSnapshot, async () => {
+    providerStarts += 1;
+  }, owner), /Credential source identity or bytes changed/u);
+  assert.equal(providerStarts, 0, "An observed source race must stop before native provider startup");
+});
+
+test("native credential source changes during owned closure fail while cleanup still runs", async (t) => {
+  const fixture = await credentialSnapshotFixture(t);
+  const owner = syntheticOwnerDependencies();
+  const attempt = createCredentialCopyAttempt(fixture.destination);
+  const snapshot = await stageCredentialSnapshot(fixture.source, fixture.destination, attempt, owner);
+  let failed = false;
+  const outcome = await closeSessionAndVerifyCredential({
+    close: async () => fs.writeFile(fixture.source, "synthetic-auth-changed-during-close"),
+  }, snapshot, () => { failed = true; }, owner);
+  const cleanup = await cleanupFixtureCredentialAttempt(attempt, fixture.home, fixture.fixtureCodex, {
+    ...owner, processesStopped: outcome.processesStopped, homeLockStillOwned: true,
+  });
+  assert.deepEqual(outcome, { processesStopped: true, sourceUnchanged: false });
+  assert.equal(failed, true);
+  assert.deepEqual(cleanup, { status: "removed", removed: true }, "Source mismatch must not bypass owned fixture credential cleanup");
+  await assert.rejects(fs.lstat(fixture.destination), { code: "ENOENT" });
+});
+
+test("native credential staging preserves cleanup eligibility when post-copy source validation fails", async (t) => {
+  const fixture = await credentialSnapshotFixture(t);
+  const owner = syntheticOwnerDependencies();
+  const attempt = createCredentialCopyAttempt(fixture.destination);
+  let assignedSnapshot;
+  let providerStarts = 0;
+  await assert.rejects(async () => {
+    assignedSnapshot = await stageCredentialSnapshot(fixture.source, fixture.destination, attempt, {
+      ...owner,
+      copyFile: async (source, destination, flags) => {
+        await fs.copyFile(source, destination, flags);
+        await fs.writeFile(source, "synthetic-source-mutated-after-copy");
+      },
+    });
+    await startWithCredentialSnapshot(assignedSnapshot, async () => { providerStarts += 1; }, owner);
+  }, /Credential source identity or bytes changed/u);
+  assert.equal(assignedSnapshot, undefined, "The actual assignment remains unset when post-copy validation throws");
+  assert.equal(providerStarts, 0, "A post-copy source race must prevent provider startup");
+  assert.equal(attempt.copyCompleted, true);
+  assert.equal(attempt.cleanupEligible, true, "The authenticated destination must outlive source-stability failure");
+  assert.equal(attempt.sourceStableAfterCopy, false);
+  const close = await closeSessionAndVerifyCredential(null, attempt.sourceSnapshot, () => {}, owner);
+  const beforeShutdown = await cleanupFixtureCredentialAttempt(attempt, fixture.home, fixture.fixtureCodex, {
+    ...owner, processesStopped: false, homeLockStillOwned: true,
+  });
+  assert.deepEqual(beforeShutdown, { status: "retained_owner_unconfirmed", removed: false });
+  await fs.lstat(fixture.destination);
+  const beforeClaim = await cleanupFixtureCredentialAttempt(attempt, fixture.home, fixture.fixtureCodex, {
+    ...owner, processesStopped: close.processesStopped, homeLockStillOwned: false,
+  });
+  assert.deepEqual(beforeClaim, { status: "retained_owner_unconfirmed", removed: false });
+  await fs.lstat(fixture.destination);
+  const cleanup = await cleanupFixtureCredentialAttempt(attempt, fixture.home, fixture.fixtureCodex, {
+    ...owner, processesStopped: close.processesStopped, homeLockStillOwned: true,
+  });
+  assert.deepEqual(cleanup, { status: "removed", removed: true }, "The actual guarded fixture cleanup must remove the authenticated copy");
+  await assert.rejects(fs.lstat(fixture.destination), { code: "ENOENT" });
+});
+
+test("native credential cleanup retains unverified, changed, linked, and foreign destinations", async (t) => {
+  const owner = syntheticOwnerDependencies();
+
+  const mismatch = await credentialSnapshotFixture(t);
+  const mismatchAttempt = createCredentialCopyAttempt(mismatch.destination);
+  await assert.rejects(stageCredentialSnapshot(mismatch.source, mismatch.destination, mismatchAttempt, {
+    ...owner,
+    copyFile: async (source, destination, flags) => {
+      await fs.copyFile(source, destination, flags);
+      await fs.writeFile(destination, "synthetic-destination-mismatch");
+    },
+  }), /Credential copy differs/u);
+  assert.equal(mismatchAttempt.cleanupEligible, false);
+  const mismatchCleanup = await cleanupFixtureCredentialAttempt(mismatchAttempt, mismatch.home, mismatch.fixtureCodex, {
+    ...owner, processesStopped: true, homeLockStillOwned: true,
+  });
+  assert.deepEqual(mismatchCleanup, { status: "retained_owner_qualified_present", removed: false });
+  assert.equal(await fs.readFile(mismatch.destination, "utf8"), "synthetic-destination-mismatch");
+
+  const changed = await credentialSnapshotFixture(t);
+  const changedAttempt = createCredentialCopyAttempt(changed.destination);
+  await stageCredentialSnapshot(changed.source, changed.destination, changedAttempt, owner);
+  await fs.writeFile(changed.destination, "synthetic-destination-changed-before-start");
+  const changedCleanup = await cleanupFixtureCredentialAttempt(changedAttempt, changed.home, changed.fixtureCodex, {
+    ...owner, processesStopped: true, homeLockStillOwned: true,
+  });
+  assert.deepEqual(changedCleanup, { status: "retained_destination_changed", removed: false });
+  assert.equal(await fs.readFile(changed.destination, "utf8"), "synthetic-destination-changed-before-start");
+
+  const partial = await credentialSnapshotFixture(t);
+  const partialAttempt = createCredentialCopyAttempt(partial.destination);
+  let stageError;
+  await assert.rejects(stageCredentialSnapshot(partial.source, partial.destination, partialAttempt, {
+    ...owner,
+    copyFile: async (source, destination) => {
+      await fs.writeFile(destination, "synthetic-partial-copy");
+      const error = new Error("private path, stdout, stderr and credential contents must not escape");
+      error.code = "EIO";
+      error.stdout = "synthetic-secret-output";
+      error.stderr = "synthetic-secret-error";
+      error.path = "synthetic-private-path";
+      throw error;
+    },
+  }), (error) => {
+    stageError = error;
+    return /destination state is uncertain/u.test(error.message);
+  });
+  assert.equal(partialAttempt.copyCompleted, false);
+  assert.equal(partialAttempt.cleanupEligible, false);
+  assert.equal(partialAttempt.copyFailureCode, "EIO");
+  assert.equal(stageError.cause.code, "EIO");
+  assert.equal(stageError.cause.message, "Underlying credential operation failed");
+  assert.equal("stdout" in stageError.cause, false);
+  assert.equal("stderr" in stageError.cause, false);
+  assert.equal("path" in stageError.cause, false);
+  assert.doesNotMatch(`${stageError.message} ${stageError.cause.message}`, /synthetic-secret|synthetic-private/u);
+  const partialCleanup = await cleanupFixtureCredentialAttempt(partialAttempt, partial.home, partial.fixtureCodex, {
+    ...owner, processesStopped: true, homeLockStillOwned: true,
+  });
+  assert.deepEqual(partialCleanup, { status: "retained_owner_qualified_present", removed: false });
+  assert.equal(await fs.readFile(partial.destination, "utf8"), "synthetic-partial-copy");
+
+  const linked = await credentialSnapshotFixture(t);
+  const unrelated = path.join(linked.root, "unrelated-auth.json");
+  await fs.writeFile(unrelated, "synthetic-foreign-link");
+  await fs.link(unrelated, linked.destination);
+  const linkedAttempt = createCredentialCopyAttempt(linked.destination);
+  await assert.rejects(stageCredentialSnapshot(linked.source, linked.destination, linkedAttempt, owner),
+    /destination state is uncertain/u);
+  assert.equal(linkedAttempt.copyFailureCode, "EEXIST");
+  const linkedCleanup = await cleanupFixtureCredentialAttempt(linkedAttempt, linked.home, linked.fixtureCodex, {
+    ...owner, processesStopped: true, homeLockStillOwned: true,
+  });
+  assert.deepEqual(linkedCleanup, { status: "retained_linked_unqualified", removed: false });
+  assert.equal(await fs.readFile(unrelated, "utf8"), "synthetic-foreign-link");
+
+  const unowned = await credentialSnapshotFixture(t);
+  const unownedAttempt = createCredentialCopyAttempt(unowned.destination);
+  await assert.rejects(stageCredentialSnapshot(unowned.source, unowned.destination, unownedAttempt, {
+    ...owner,
+    readWindowsOwnerSids: async (file) => file === unowned.destination
+      ? { ownerSid: "S-1-5-18", currentSid: "S-1-5-21-100" }
+      : { ownerSid: "S-1-5-21-100", currentSid: "S-1-5-21-100" },
+  }), /owner SID does not match/u);
+  assert.equal(unownedAttempt.cleanupEligible, false);
+  const unownedCleanup = await cleanupFixtureCredentialAttempt(unownedAttempt, unowned.home, unowned.fixtureCodex, {
+    ...owner,
+    readWindowsOwnerSids: async (file) => file === unowned.destination
+      ? { ownerSid: "S-1-5-18", currentSid: "S-1-5-21-100" }
+      : { ownerSid: "S-1-5-21-100", currentSid: "S-1-5-21-100" },
+    processesStopped: true, homeLockStillOwned: true,
+  });
+  assert.deepEqual(unownedCleanup, { status: "retained_owner_unqualified", removed: false });
+  assert.equal(await fs.readFile(unowned.destination, "utf8"), "synthetic-auth-source-only");
+});
+
+test("native credential qualification rejects linked, nonregular, multiply linked, and unowned files before copy", async (t) => {
+  const fixture = await credentialSnapshotFixture(t);
+  const actual = await fs.lstat(fixture.source, { bigint: true });
+  const cases = [
+    { name: "symbolic link", isFile: true, isSymbolicLink: true, nlink: 1n, error: /regular, non-linked/u },
+    { name: "nonregular file", isFile: false, isSymbolicLink: false, nlink: 1n, error: /regular, non-linked/u },
+    { name: "multiple hard links", isFile: true, isSymbolicLink: false, nlink: 2n, error: /regular, non-linked/u },
+  ];
+  for (const item of cases) {
+    let reads = 0;
+    let copies = 0;
+    const stat = {
+      dev: actual.dev, ino: actual.ino, mode: actual.mode, nlink: item.nlink, size: actual.size,
+      mtimeNs: actual.mtimeNs, ctimeNs: actual.ctimeNs, uid: actual.uid, gid: actual.gid,
+      isFile: () => item.isFile, isSymbolicLink: () => item.isSymbolicLink,
+    };
+    const attempt = createCredentialCopyAttempt(fixture.destination);
+    await assert.rejects(stageCredentialSnapshot(fixture.source, fixture.destination, attempt, {
+      ...syntheticOwnerDependencies(),
+      lstat: async () => stat,
+      open: async () => { reads += 1; throw new Error("must not read rejected source"); },
+      copyFile: async () => { copies += 1; },
+    }), item.error, item.name);
+    assert.equal(reads, 0, `${item.name} must fail before content read`);
+    assert.equal(copies, 0, `${item.name} must fail before copy`);
+  }
+
+  for (const ownerFailure of [
+    { label: "Windows SID mismatch", deps: syntheticOwnerDependencies({
+      readWindowsOwnerSids: async () => ({ ownerSid: "S-1-5-18", currentSid: "S-1-5-21-100" }),
+    }), error: /owner SID does not match/u },
+    { label: "unsupported Windows SID qualification", deps: syntheticOwnerDependencies({
+      readWindowsOwnerSids: async () => { throw new Error("unavailable"); },
+    }), error: /unsupported/u },
+  ]) {
+    let reads = 0;
+    let copies = 0;
+    const attempt = createCredentialCopyAttempt(fixture.destination);
+    await assert.rejects(stageCredentialSnapshot(fixture.source, fixture.destination, attempt, {
+      ...ownerFailure.deps,
+      open: async (...args) => { reads += 1; return fs.open(...args); },
+      copyFile: async (...args) => { copies += 1; return fs.copyFile(...args); },
+    }), ownerFailure.error, ownerFailure.label);
+    assert.equal(reads, 0, `${ownerFailure.label} must fail before content read`);
+    assert.equal(copies, 0, `${ownerFailure.label} must fail before copy`);
+  }
+
+  await assert.rejects(credentialOwnerIdentity(fixture.source, { uid: 41n }, {
+    platform: "linux", getUid: () => 42,
+  }), /owner UID does not match/u, "POSIX owner mismatch must not be inferred from Windows uid values");
+
+  const ownerError = new Error("private stdout, stderr, auth contents, SID and path");
+  ownerError.code = "EACCES";
+  ownerError.stdout = "synthetic-secret-output";
+  ownerError.stderr = "synthetic-secret-error";
+  ownerError.path = "synthetic-private-path";
+  await assert.rejects(credentialOwnerIdentity(fixture.source, { uid: 41n }, {
+    platform: "win32", readWindowsOwnerSids: async () => { throw ownerError; },
+  }), (error) => {
+    assert.match(error.message, /owner SID qualification is unsupported/u);
+    assert.equal(error.cause.code, "EACCES");
+    assert.equal(error.cause.message, "Underlying credential operation failed");
+    assert.equal("stdout" in error.cause, false);
+    assert.equal("stderr" in error.cause, false);
+    assert.equal("path" in error.cause, false);
+    assert.doesNotMatch(`${error.message} ${error.cause.message}`, /synthetic-secret|synthetic-private/u);
+    return true;
+  });
+});
+
 test("real Codex sender assigns one task, receiver replies, and sender receives the correlated reply", { timeout: 1_020_000 }, async (t) => {
   if (process.env.WARDIAN_E2E_REAL_MESSAGING_V2 !== "1") {
     return t.skip("Real case NOT RUN: requires WARDIAN_E2E_REAL_MESSAGING_V2=1 and coordinator runner/artifact authorization");
@@ -2373,7 +2945,9 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
   const previousEnv = new Map();
   let session;
   let cleanupFailed = false;
-  let fixtureAuthHash;
+  let sourceChangedDuringAcceptance = false;
+  const fixtureAuthAttempt = createCredentialCopyAttempt(path.join(fixtureCodex, "auth.json"));
+  let fixtureAuthSnapshot;
   try {
     await save();
     for (const source of SOURCES) {
@@ -2395,9 +2969,7 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
     // No MCP entry is seeded here: normal managed startup must create it.
     const fixtureConfig = `model = "${MODEL}"\nmodel_reasoning_effort = "${EFFORT}"\napproval_policy = "never"\nsandbox_mode = "read-only"\n[features]\napps = false\nmulti_agent = false\nskip_host_skill_discovery = true\n[agents]\nenabled = false\n`;
     await fs.writeFile(path.join(fixtureCodex, "config.toml"), fixtureConfig);
-    fixtureAuthHash = await sha256(path.join(authSource, "auth.json")); // Initial copy integrity only; refreshed credentials remain cleanup-authorized by the mapping.
-    await fs.copyFile(path.join(authSource, "auth.json"), path.join(fixtureCodex, "auth.json"));
-    assert.equal(await sha256(path.join(fixtureCodex, "auth.json")), fixtureAuthHash);
+    fixtureAuthSnapshot = await stageCredentialSnapshot(path.join(authSource, "auth.json"), fixtureAuthAttempt.destination, fixtureAuthAttempt);
     report.fixture_config = fixtureConfig;
     report.permissions = process.env.WARDIAN_E2E_MESSAGING_V2_APPROVE_TOOLS === "1" ? "six_named_tools_in_private_agent_homes" : "provider_policy_unchanged";
     const overrides = fixtureEnvironmentOverrides(profile, fixtureCodex);
@@ -2405,7 +2977,9 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
       previousEnv.set(key, process.env[key]);
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
-    session = await startNativeSession(harness);
+    session = await startWithCredentialSnapshot(fixtureAuthSnapshot, () => startNativeSession(harness), {
+      onProviderStart: () => { fixtureAuthAttempt.providerMayHaveStarted = true; },
+    });
     assert.equal(harness.driverPortOwnership?.verified, true, "WebDriver listener ownership was not established");
     assert.equal(harness.nativeDriverPortOwnership?.verified, true, "Native driver listener ownership was not established");
     report.isolation.ports = { driver: harness.driverPort, native_driver: harness.nativeDriverPort,
@@ -2640,26 +3214,27 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
     await save();
     throw error;
   } finally {
-    let processesStopped = !session;
     if (session) {
       for (const agent of [...report.agents, ...(report.coordinator ? [report.coordinator] : [])].reverse()) {
         try { await invokeTauri(session.driver, "pause_agent", { sessionId: agent.session_id }); report.cleanup.push({ agent_id: agent.session_id, paused: true }); }
         catch { report.cleanup.push({ agent_id: agent.session_id, paused: false }); }
       }
-      try { await session.close(); processesStopped = true; }
-      catch { report.cleanup.push({ app_closed: false }); }
     }
+    const closeOutcome = await closeSessionAndVerifyCredential(session, fixtureAuthAttempt.sourceSnapshot, () => {
+      sourceChangedDuringAcceptance = true;
+      report.status = "fail";
+      report.cleanup.push({ credential_source_unchanged: false, retained_reason: "Credential source identity or bytes changed during acceptance" });
+    });
+    const processesStopped = closeOutcome.processesStopped;
+    if (session && !processesStopped) report.cleanup.push({ app_closed: false });
     const currentLock = readHomeLock(home);
     const lockStillOwned = currentLock?.runId === runnerLock.runId && currentLock?.pid === runnerLock.pid;
     if (!lockStillOwned) cleanupFailed = true;
     report.cleanup.push({ home_lock_still_owned: lockStillOwned, lock_release_owner: "upstream_runner_after_test_exit" });
     // The child never releases the runner's claim. The runner's finally runs
     // after this test's credential cleanup and the supervised process exit.
-    if (fixtureAuthHash) {
-      if (!processesStopped || !lockStillOwned) {
-        cleanupFailed = true;
-        report.cleanup.push({ credential_copies_removed: false, retained_reason: "Owned process shutdown or runner home ownership was not confirmed" });
-      } else {
+    if (fixtureAuthAttempt.copyAttempted || report.agents.length > 0) {
+      if (processesStopped && lockStillOwned) {
         for (const agent of report.agents) {
           try { report.cleanup.push(await cleanupAgentCredentials(home, agent.session_id)); }
           catch {
@@ -2668,12 +3243,35 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
               retained_reason: "Mapping, directory identity, or test-created credential copy could not be authenticated" });
           }
         }
-        try { report.cleanup.push(await cleanupFixtureCredential(home, fixtureCodex)); }
-        catch {
-          cleanupFailed = true;
-          report.cleanup.push({ fixture_credential_removed: false, retained_reason: "Exact test-created fixture credential could not be authenticated" });
-        }
       }
+    }
+    const fixtureCredentialCleanup = await cleanupFixtureCredentialAttempt(fixtureAuthAttempt, home, fixtureCodex, {
+      processesStopped,
+      homeLockStillOwned: lockStillOwned,
+    });
+    if (fixtureAuthAttempt.copyAttempted && (!processesStopped || !lockStillOwned)) cleanupFailed = true;
+    report.cleanup.push({ fixture_credential_attempt: {
+      copy_attempted: fixtureAuthAttempt.copyAttempted,
+      copy_completed: fixtureAuthAttempt.copyCompleted,
+      destination_authenticated: fixtureAuthAttempt.cleanupEligible,
+      source_stable_after_copy: fixtureAuthAttempt.sourceStableAfterCopy,
+      source_unchanged_after_closure: closeOutcome.sourceUnchanged,
+      provider_may_have_started: fixtureAuthAttempt.providerMayHaveStarted,
+      state: fixtureAuthAttempt.state,
+      copy_failure_code: fixtureAuthAttempt.copyFailureCode,
+      destination_failure_code: fixtureAuthAttempt.destinationFailureCode,
+      cleanup_authorized: processesStopped && lockStillOwned,
+      cleanup_status: fixtureCredentialCleanup.status,
+      removed: fixtureCredentialCleanup.removed,
+    } });
+    if (fixtureCredentialCleanup.status.startsWith("retained_") ||
+      fixtureCredentialCleanup.status === "cleanup_failed_retained") {
+      cleanupFailed = true;
+      report.cleanup.push({ fixture_credential_removed: false,
+        retained_reason: "Fixture credential destination was not authenticated for cleanup" });
+    }
+    if (fixtureCredentialCleanup.status === "cleanup_failed_retained") {
+      report.cleanup.push({ fixture_credential_cleanup_failure_code: fixtureCredentialCleanup.failure_code });
     }
     if (cleanupFailed) report.status = "fail";
     for (const [key, value] of previousEnv) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
@@ -2681,5 +3279,6 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
     await save();
     t.diagnostic(`Real Codex messaging: ${report.status}; actual cases passed=${report.actual_cases_passed}; report=${reportPath}`);
   }
+  if (sourceChangedDuringAcceptance) throw new Error("Credential source changed during acceptance");
   if (cleanupFailed) throw new Error("Credential cleanup failed closed; inspect the private report and retained paths");
 });
