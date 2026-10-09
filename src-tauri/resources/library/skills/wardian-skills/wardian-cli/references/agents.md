@@ -87,6 +87,13 @@ the empty value through Windows command wrappers. Run
 workspace. Restart preserves the Wardian agent, habitat, and saved session
 history. Do not use it to move a managed-worktree agent.
 
+Use `agent new-session <target>` for the desktop **New Session** operation. It
+archives the current conversation and starts a fresh provider session, preserving
+the Wardian agent identity, provider, model, workspace, habitat, and archived
+history. Off agents start immediately; no separate resume is required. This
+requires a desktop app that supports the command. Offline or unsupported-app
+errors remain errors; there is no automatic fresh-session or resume fallback.
+
 Use `agent rename` to change the live and persisted agent name without
 restarting its provider. The new name is available to `send`, `ask`, and other
 targeted commands as soon as the command succeeds; names must be unique and
