@@ -83,13 +83,15 @@ pub(crate) async fn update_agent_config_inner<R: tauri::Runtime>(
     normalize_complete_config_settings(&mut new_config)?;
     let session_id = new_config.session_id.clone();
     update_agent_settings(state.inner(), &session_id, move |current| {
+        let mut config = new_config.clone();
+        preserve_pi_session_identity_for_settings(current, &mut config);
         let model =
             setting_change_from_config(current.model.as_deref(), new_config.model.as_deref());
         let effort = setting_change_from_config(
             agent_reasoning_effort(current),
             agent_reasoning_effort(&new_config),
         );
-        Ok((new_config.clone(), model, effort))
+        Ok((config, model, effort))
     })
     .await
 }
@@ -176,6 +178,15 @@ pub(crate) async fn update_agent_model_selection_inner(
 struct AgentSettingChange {
     intent: AgentSettingIntent,
     desired_value: Option<String>,
+}
+
+/// An editor opened before Pi's first flush can submit a stale pending tuple.
+/// Settings do not rotate conversations; preserve the backend's current identity.
+fn preserve_pi_session_identity_for_settings(current: &AgentConfig, config: &mut AgentConfig) {
+    if current.provider == "pi" && config.provider == "pi" {
+        config.resume_session = current.resume_session.clone();
+        config.fresh_provider_session_id = current.fresh_provider_session_id.clone();
+    }
 }
 
 fn normalize_complete_config_settings(config: &mut AgentConfig) -> Result<(), String> {
@@ -752,6 +763,170 @@ pub(crate) fn normalized_optional_agent_setting(value: Option<String>) -> Option
 mod tests {
     use super::*;
     use crate::providers::models::ProviderModelOption;
+
+    #[tokio::test]
+    async fn pi_complete_config_save_preserves_backend_identity_in_live_and_durable_roster() {
+        use tauri::Manager;
+        let home = crate::control::test_support::TestWardianHome::new_async().await;
+        let app = tauri::test::mock_app();
+        app.manage(AppState::new());
+        let state = app.state::<AppState>();
+        let agent = super::super::tests::make_test_agent();
+        let config = agent.config.clone();
+        state.agents.lock().await.insert("agent-1".into(), agent);
+        state.agent_order.lock().await.push("agent-1".into());
+        for (resume, fresh) in [
+            (None, Some("reserved")),
+            (Some("confirmed"), Some("confirmed")),
+            (Some("legacy"), None),
+        ] {
+            let current = AgentConfig {
+                provider: "pi".into(),
+                session_id: "agent-1".into(),
+                is_off: true,
+                resume_session: resume.map(str::to_owned),
+                fresh_provider_session_id: fresh.map(str::to_owned),
+                provider_config: ProviderConfig::Pi(Default::default()),
+                ..Default::default()
+            };
+            for submitted in [Some("stale-reservation"), None] {
+                *config.lock().unwrap() = current.clone();
+                let request = AgentConfig {
+                    resume_session: None,
+                    fresh_provider_session_id: submitted.map(str::to_owned),
+                    session_name: "Updated name".into(),
+                    ..current.clone()
+                };
+                update_agent_config_inner(request, app.state(), app.handle().clone())
+                    .await
+                    .unwrap();
+                let live = config.lock().unwrap().clone();
+                assert_eq!(live.resume_session, current.resume_session);
+                assert_eq!(
+                    live.fresh_provider_session_id,
+                    current.fresh_provider_session_id
+                );
+                assert_eq!(live.session_name, "Updated name");
+                let saved: Vec<AgentConfig> = serde_json::from_str(
+                    &std::fs::read_to_string(home.path().join("settings/state.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(saved[0].resume_session, current.resume_session);
+                assert_eq!(
+                    saved[0].pending_pi_session_id(),
+                    current.pending_pi_session_id()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pi_config_save_rebuilds_with_confirmed_identity_after_validation_snapshot_changes() {
+        let _home = crate::control::test_support::TestWardianHome::new_async().await;
+        let state = std::sync::Arc::new(AppState::new());
+        let agent = super::super::tests::make_test_agent();
+        let config = agent.config.clone();
+        let pending = AgentConfig {
+            provider: "pi".into(),
+            session_id: "agent-1".into(),
+            is_off: true,
+            fresh_provider_session_id: Some("reserved".into()),
+            provider_config: ProviderConfig::Pi(Default::default()),
+            ..Default::default()
+        };
+        *config.lock().unwrap() = pending.clone();
+        state.agents.lock().await.insert("agent-1".into(), agent);
+        state.agent_order.lock().await.push("agent-1".into());
+        let lifecycle = state.lock_agent_lifecycle("agent-1").await;
+        let (built, received) = tokio::sync::oneshot::channel();
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let task_state = state.clone();
+        let task_count = count.clone();
+        let task = tokio::spawn(async move {
+            let mut built = Some(built);
+            update_agent_settings(&task_state, "agent-1", move |current| {
+                task_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut request = pending.clone();
+                preserve_pi_session_identity_for_settings(current, &mut request);
+                if let Some(built) = built.take() {
+                    let _ = built.send(());
+                }
+                Ok((
+                    request,
+                    setting_change_from_config(None, None),
+                    setting_change_from_config(None, None),
+                ))
+            })
+            .await
+        });
+        received.await.unwrap();
+        // Model the owned watcher publishing while this settings plan waits
+        // for admission. Revalidation must rebuild from the current tuple.
+        config.lock().unwrap().resume_session = Some("reserved".into());
+        drop(lifecycle);
+        tokio::time::timeout(std::time::Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            config.lock().unwrap().resume_session.as_deref(),
+            Some("reserved")
+        );
+    }
+
+    #[test]
+    fn pi_settings_preserve_pending_confirmed_and_unbound_backend_identities() {
+        for (resume, fresh) in [
+            (None, Some("reserved")),
+            (Some("confirmed"), Some("confirmed")),
+            (Some("legacy"), None),
+            (None, None),
+        ] {
+            let current = AgentConfig {
+                provider: "pi".into(),
+                resume_session: resume.map(str::to_owned),
+                fresh_provider_session_id: fresh.map(str::to_owned),
+                ..Default::default()
+            };
+            // This can be an old pending editor, or a client that omitted the
+            // backend marker. Neither may replace the current native identity.
+            for submitted in [Some("stale-reservation"), None] {
+                let mut config = AgentConfig {
+                    provider: "pi".into(),
+                    model: Some("desired-model".into()),
+                    fresh_provider_session_id: submitted.map(str::to_owned),
+                    ..Default::default()
+                };
+                preserve_pi_session_identity_for_settings(&current, &mut config);
+                assert_eq!(config.resume_session, current.resume_session);
+                assert_eq!(
+                    config.fresh_provider_session_id,
+                    current.fresh_provider_session_id
+                );
+                assert_eq!(config.model.as_deref(), Some("desired-model"));
+            }
+        }
+    }
+
+    #[test]
+    fn pi_settings_identity_guard_leaves_other_providers_and_provider_switches_unchanged() {
+        for (before, after) in [("codex", "codex"), ("pi", "claude"), ("claude", "pi")] {
+            let current = AgentConfig {
+                provider: before.into(),
+                resume_session: Some("previous".into()),
+                ..Default::default()
+            };
+            let mut config = AgentConfig {
+                provider: after.into(),
+                resume_session: Some("desired".into()),
+                ..Default::default()
+            };
+            preserve_pi_session_identity_for_settings(&current, &mut config);
+            assert_eq!(config.resume_session.as_deref(), Some("desired"));
+        }
+    }
 
     fn catalog(provider: &str) -> ProviderModelCatalog {
         ProviderModelCatalog {

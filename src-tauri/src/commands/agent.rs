@@ -2219,7 +2219,7 @@ fn add_antigravity_cleared_conversation(conversations: &mut Vec<String>, convers
 
 fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
     let mut prepared = config.clone();
-    prepare_resume_config_in_place(&mut prepared)?;
+    agent_lifecycle::prepare_resume_config_in_place(&mut prepared)?;
     *config = prepared;
     Ok(())
 }
@@ -2231,44 +2231,6 @@ fn resolved_session_persistence(config: &AgentConfig) -> AgentSessionPersistence
         AgentSessionPersistenceOverride::Fresh => AgentSessionPersistence::Fresh,
         AgentSessionPersistenceOverride::Resume => AgentSessionPersistence::Resume,
     }
-}
-
-fn prepare_resume_config_in_place(config: &mut AgentConfig) -> Result<(), String> {
-    manager::validate_config_for_launch(config)?;
-
-    let resolved_persistence = resolved_session_persistence(config);
-
-    config.fresh_provider_session_id = None;
-    if resolved_persistence == AgentSessionPersistence::Fresh {
-        config.is_off = false;
-        config.resume_session = None;
-        if provider_uses_manual_session_id(&config.provider) {
-            config.fresh_provider_session_id = Some(uuid::Uuid::new_v4().to_string());
-        }
-        return Ok(());
-    }
-
-    restore_antigravity_workspace_conversation(config)?;
-
-    let Some(resume_session) = config
-        .resume_session
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        if provider_allows_deferred_session_identity(&config.provider) {
-            config.is_off = false;
-            return Ok(());
-        }
-        return Err(format!(
-            "{} cannot resume without an exact provider session identity",
-            config.provider
-        ));
-    };
-    let provider = config.provider.clone();
-    manager::apply_provider_identity(&provider, config, &resume_session)?;
-    config.is_off = false;
-
-    Ok(())
 }
 
 fn restore_antigravity_workspace_conversation(config: &mut AgentConfig) -> Result<(), String> {
@@ -3969,11 +3931,10 @@ async fn clear_agent_session_inner(
 
     {
         let mut new_config = new_active.config.lock().unwrap();
-        if provider_uses_manual_session_id(&prepared.config.provider) {
-            if let Some(fresh_provider_session_id) = new_config.fresh_provider_session_id.take() {
-                new_config.resume_session = Some(fresh_provider_session_id);
-            }
-        }
+        agent_lifecycle::finalize_clear_provider_session_fields(
+            &prepared.config.provider,
+            &mut new_config,
+        );
     }
 
     let new_config = new_active.config.lock().unwrap().clone();
@@ -4863,7 +4824,8 @@ mod tests {
         }
     }
 
-    fn use_isolated_resume_setting() -> (tokio::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
+    pub(super) fn use_isolated_resume_setting(
+    ) -> (tokio::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
         let guard = crate::utils::wardian_test_env_lock();
         let temp = tempfile::tempdir().expect("temp dir");
         std::env::set_var("WARDIAN_HOME", temp.path());
