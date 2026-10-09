@@ -1,3 +1,4 @@
+mod agent_lifecycle;
 mod pi_startup;
 use pi_startup::pi_output_has_startup_ready_prompt;
 
@@ -424,33 +425,13 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             })
         }
 
-        ControlRequest::AgentRestart { target } => {
-            let uuid = resolve_target_uuid(app, &target)
-                .await
-                .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
-            crate::commands::agent::resume_agent(uuid, app.state::<AppState>(), app.clone())
-                .await
-                .map_err(ControlError::request_failed)?;
-            ok_json(&OkResponse::new())
+        ControlRequest::AgentRestart { target } | ControlRequest::AgentResume { target } => {
+            agent_lifecycle::resume(app, &target).await
         }
-
-        ControlRequest::AgentPause { target } => {
-            let uuid = resolve_target_uuid(app, &target)
-                .await
-                .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
-            handle_agent_pause(app, &uuid).await?;
-            ok_json(&OkResponse::new())
+        ControlRequest::AgentNewSession { target } => {
+            agent_lifecycle::new_session(app, &target).await
         }
-
-        ControlRequest::AgentResume { target } => {
-            let uuid = resolve_target_uuid(app, &target)
-                .await
-                .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
-            crate::commands::agent::resume_agent(uuid, app.state::<AppState>(), app.clone())
-                .await
-                .map_err(ControlError::request_failed)?;
-            ok_json(&OkResponse::new())
-        }
+        ControlRequest::AgentPause { target } => agent_lifecycle::pause(app, &target).await,
 
         ControlRequest::AgentModels {
             provider,

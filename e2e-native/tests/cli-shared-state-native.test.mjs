@@ -484,6 +484,67 @@ test("native app-created off agent is readable through the CLI", { timeout: 1800
   assert.equal(statusResult.stdout, "off\n");
 });
 
+test("native CLI New Session starts an Off agent and preserves its configuration", { timeout: 180000 }, async (t) => {
+  await withMockScenario("action_needed", async () => {
+    const harness = await createNativeHarness();
+    if (!skipNativeBuild) ensureNativeAppBuilt(harness);
+    prepareIsolatedHome(harness);
+    const cliPath = buildCli(harness);
+    const session = await startNativeSession(harness);
+    t.after(async () => session.close());
+    await waitForAppShell(session.driver, 20000);
+    const agent = await createMockAgent(session.driver, harness.repoRoot, {
+      sessionId: null,
+      sessionName: `E2E-CLI-NEW-${RUN_ID}`,
+      isOff: true,
+    });
+    const readConfig = () => JSON.parse(
+      readFileSync(path.join(harness.isolatedHome, "settings", "state.json"), "utf8"),
+    ).find((config) => config.session_id === agent.session_id);
+    const original = readConfig();
+    assert.equal(original.is_off, true);
+    // Public Mock spawn assigns a provider identity even while Off. The null
+    // request means no identity was supplied by this fixture.
+    assert.ok(original.resume_session);
+    const missing = runCli(cliPath, harness, ["agent", "new-session", "missing-new-session-agent"]);
+    assert.equal(missing.status, 2, missing.stderr);
+    assert.match(missing.stderr, /"code":"not_found"/);
+    assert.deepEqual(readConfig(), original);
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const previous = readConfig();
+      const archives = JSON.parse(runCliOk(cliPath, harness, [
+        "conversation", "list", "--agent", agent.session_id,
+      ]).stdout).conversations;
+      const priorIds = archives.map((entry) => entry.conversation_id);
+      const result = await runCliWithMockStartup(cliPath, harness, session.driver,
+        ["agent", "new-session", agent.session_id], agent.session_id);
+      assert.equal(JSON.parse(result.stdout).ok, true);
+      const current = readConfig();
+      for (const field of ["session_id", "session_name", "provider", "agent_class", "folder", "model", "provider_config"]) {
+        assert.deepEqual(current[field], original[field], `New Session changed ${field}`);
+      }
+      assert.equal(current.is_off, false);
+      assert.ok(current.resume_session);
+      assert.notEqual(current.resume_session, previous.resume_session);
+      const after = JSON.parse(runCliOk(cliPath, harness, [
+        "conversation", "list", "--agent", agent.session_id,
+      ]).stdout).conversations;
+      for (const id of priorIds) {
+        assert.ok(after.some((entry) => entry.conversation_id === id), `lost archive ${id}`);
+      }
+      const live = JSON.parse(runCliOk(cliPath, harness, ["agent", "show", agent.session_id]).stdout).agent;
+      assert.equal(live.uuid, agent.session_id);
+      assert.notEqual(live.status, "off");
+      runCliOk(cliPath, harness, ["agent", "pause", agent.session_id]);
+      await waitForCliField(cliPath, harness, agent.session_id, "status", "off");
+    }
+    t.diagnostic(JSON.stringify({ consumed_artifacts: {
+      app: consumedArtifact(harness.appPath), cli: consumedArtifact(cliPath),
+    } }));
+  });
+});
+
 test("native automations run off agents headlessly for resumed and fresh conversations", { timeout: 180000 }, async (t) => {
   await withMockScenario("headless_delayed", async () => {
     const harness = await createNativeHarness();

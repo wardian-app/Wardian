@@ -364,6 +364,7 @@ wardian agent show [name-or-uuid]
 wardian agent list
 wardian agent list --scope all
 wardian agent restart <name-or-uuid>
+wardian agent new-session <name-or-uuid>
 wardian agent rename <name-or-uuid> <new-name>
 wardian agent delete <name-or-uuid> --confirm <current-agent-name>
 wardian agent delete <name-or-uuid> --confirm <current-agent-name> --force
@@ -468,6 +469,15 @@ Model IDs and reasoning efforts are provider-discovered; use
 `wardian agent models --provider <provider>` to inspect the currently exposed
 catalog rather than relying on a fixed CLI list. Provider-specific live
 selection may reject a model/effort pair that is not present in that catalog.
+
+`agent new-session` runs the desktop **New Session** operation. It archives the
+current conversation and starts a fresh provider session, preserving the Wardian
+agent identity, provider, model, workspace, habitat, and archived history. An Off
+agent starts immediately; no separate `resume` command is required. The operation
+uses the same lifecycle leases and error handling as the desktop UI. It requires
+a desktop app that supports this control command. An older app's rejection or an
+unavailable endpoint remains an error; Wardian does not retry with `resume` or
+silently replace another operation with a fresh session.
 
 `agent restart` restarts the provider while preserving the Wardian agent, its
 habitat, and saved session history. Use it after `agent update` when the update
