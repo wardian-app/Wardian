@@ -2,6 +2,10 @@
 use super::*;
 use std::fs::{File, OpenOptions};
 use std::os::windows::fs::OpenOptionsExt;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 fn reader_without_delete_sharing(path: &Path) -> File {
@@ -56,18 +60,20 @@ fn launch_publication_rechecks_peer_after_windows_contention() {
     let peer_before = storage::read_snapshot(&peer).unwrap();
     let held = reader_without_delete_sharing(&path);
     let changed_peer = peer.clone();
-    let release = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(75));
-        fs::write(changed_peer, "external intent").unwrap();
-        drop(held);
-    });
-    let result = storage::publish(
-        &path,
-        &before,
-        b"model = 'new'\n",
-        Some((&peer, &peer_before)),
+    let result = storage::with_first_sharing_conflict_observer(
+        move || {
+            fs::write(changed_peer, "external intent").unwrap();
+            drop(held);
+        },
+        || {
+            storage::publish(
+                &path,
+                &before,
+                b"model = 'new'\n",
+                Some((&peer, &peer_before)),
+            )
+        },
     );
-    release.join().unwrap();
     assert!(result
         .unwrap_err()
         .to_string()
@@ -84,18 +90,95 @@ fn launch_publication_preserves_destination_edit_during_windows_contention() {
     let before = storage::read_snapshot(&path).unwrap();
     let held = reader_without_delete_sharing(&path);
     let edited = path.clone();
-    let release = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(75));
-        fs::write(edited, "model = 'external'\n").unwrap();
-        drop(held);
-    });
-    let result = storage::publish(&path, &before, b"model = 'new'\n", None);
-    release.join().unwrap();
+    let result = storage::with_first_sharing_conflict_observer(
+        move || {
+            fs::write(edited, "model = 'external'\n").unwrap();
+            drop(held);
+        },
+        || storage::publish(&path, &before, b"model = 'new'\n", None),
+    );
     assert!(result
         .unwrap_err()
         .to_string()
         .contains("changed during preparation"));
     assert_eq!(fs::read_to_string(path).unwrap(), "model = 'external'\n");
+}
+
+#[test]
+fn sharing_conflict_observer_is_one_shot_and_thread_local() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("config.toml");
+    fs::write(&path, "model = 'old'\n").unwrap();
+    let before = storage::read_snapshot(&path).unwrap();
+    let held = reader_without_delete_sharing(&path);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = Arc::clone(&calls);
+    let child_path = path.clone();
+    let child_before = before.clone();
+    let result = storage::with_first_sharing_conflict_observer(
+        move || {
+            observed_calls.fetch_add(1, Ordering::SeqCst);
+        },
+        || {
+            std::thread::spawn(move || {
+                storage::publish(&child_path, &child_before, b"model = 'new'\n", None)
+            })
+            .join()
+            .unwrap()
+            .unwrap_err();
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            storage::publish(&path, &before, b"model = 'new'\n", None)
+        },
+    );
+    result.unwrap_err();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fs::read_to_string(path).unwrap(), "model = 'old'\n");
+    drop(held);
+}
+
+#[test]
+fn sharing_conflict_observer_is_cleared_after_return() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("config.toml");
+    fs::write(&path, "model = 'old'\n").unwrap();
+    let before = storage::read_snapshot(&path).unwrap();
+    let held = reader_without_delete_sharing(&path);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = Arc::clone(&calls);
+    storage::with_first_sharing_conflict_observer(
+        move || {
+            observed_calls.fetch_add(1, Ordering::SeqCst);
+        },
+        || (),
+    );
+    storage::publish(&path, &before, b"model = 'new'\n", None).unwrap_err();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fs::read_to_string(path).unwrap(), "model = 'old'\n");
+    drop(held);
+}
+
+#[test]
+fn sharing_conflict_observer_is_cleared_after_panic() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("config.toml");
+    fs::write(&path, "model = 'old'\n").unwrap();
+    let before = storage::read_snapshot(&path).unwrap();
+    let held = reader_without_delete_sharing(&path);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = Arc::clone(&calls);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        storage::with_first_sharing_conflict_observer(
+            move || {
+                observed_calls.fetch_add(1, Ordering::SeqCst);
+            },
+            || panic!("publication scope stopped"),
+        );
+    }));
+    assert!(panic.is_err());
+    storage::publish(&path, &before, b"model = 'new'\n", None).unwrap_err();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fs::read_to_string(path).unwrap(), "model = 'old'\n");
+    drop(held);
 }
 
 #[test]
