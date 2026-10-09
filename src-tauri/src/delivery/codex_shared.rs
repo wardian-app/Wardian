@@ -103,103 +103,6 @@ pub struct CodexSharedReceipt {
     pub message_id: Option<String>,
 }
 
-#[derive(Clone, Copy)]
-enum TaskAdmission<'a> {
-    IdleStart(&'a str),
-    ActiveSteer(&'a str),
-}
-
-#[derive(Debug, Default)]
-enum TaskFinalScope {
-    #[default]
-    Unproven,
-    CandidatePendingAck(String),
-    CandidateConfirmed(String),
-    Ineligible,
-}
-
-impl TaskFinalScope {
-    fn associate(&mut self, request_id: &str) {
-        match self {
-            Self::Unproven => *self = Self::CandidatePendingAck(request_id.to_owned()),
-            Self::CandidatePendingAck(existing) | Self::CandidateConfirmed(existing)
-                if existing == request_id => {}
-            _ => *self = Self::Ineligible,
-        }
-    }
-
-    fn confirm(&mut self, request_id: &str) -> bool {
-        match self {
-            Self::Unproven => {
-                *self = Self::CandidateConfirmed(request_id.to_owned());
-                true
-            }
-            Self::CandidatePendingAck(existing) if existing == request_id => {
-                *self = Self::CandidateConfirmed(request_id.to_owned());
-                true
-            }
-            Self::CandidateConfirmed(existing) if existing == request_id => true,
-            Self::Ineligible => false,
-            _ => {
-                *self = Self::Ineligible;
-                false
-            }
-        }
-    }
-
-    fn invalidate(&mut self) {
-        *self = Self::Ineligible;
-    }
-
-    fn evidence(&self) -> TaskFinalEvidence {
-        match self {
-            Self::CandidatePendingAck(request_id) => TaskFinalEvidence {
-                request_id: Some(request_id.clone()),
-                eligible: false,
-            },
-            Self::CandidateConfirmed(request_id) => TaskFinalEvidence {
-                request_id: Some(request_id.clone()),
-                eligible: true,
-            },
-            Self::Unproven | Self::Ineligible => TaskFinalEvidence::default(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct TaskFinalEvidence {
-    request_id: Option<String>,
-    eligible: bool,
-}
-
-impl TaskFinalEvidence {
-    pub(super) fn is_eligible(&self) -> bool {
-        self.eligible
-    }
-
-    pub(super) fn confirm(&mut self, request_id: &str) -> bool {
-        if self.request_id.as_deref() == Some(request_id) {
-            self.eligible = true;
-            true
-        } else {
-            false
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct TurnCapture {
-    messages: final_items::CompletedMessages,
-    task_final_scope: TaskFinalScope,
-}
-
-#[derive(Debug)]
-struct PendingTaskStart {
-    request_id: String,
-    turn_id: Option<String>,
-    eligible: bool,
-}
-
 const SETTINGS_NOTIFICATION_CAPACITY: usize = 32;
 
 /// The exact provider/thread/client identity captured before a settings write.
@@ -289,8 +192,7 @@ pub(crate) struct Observation {
     active_turn: Option<String>,
     idle_reconciled_turn: Option<String>,
     completed_turn: Option<(String, String)>,
-    turn_answers: HashMap<String, TurnCapture>,
-    pending_task_start: Option<PendingTaskStart>,
+    turn_answers: HashMap<String, final_items::CompletedMessages>,
     closed: bool,
     stopped: bool,
     completions: completion::TurnCompletions,
@@ -355,172 +257,7 @@ impl Observation {
     }
     fn close(&mut self) {
         self.closed = true;
-        self.pending_task_start = None;
-        for capture in self.turn_answers.values_mut() {
-            capture.task_final_scope.invalidate();
-        }
         self.completions.close();
-    }
-
-    fn register_task_admission(&mut self, admission: TaskAdmission<'_>) {
-        match admission {
-            TaskAdmission::IdleStart(request_id) => {
-                if let Some(previous) = self.pending_task_start.take() {
-                    if let Some(turn_id) = previous.turn_id {
-                        self.mark_task_scope_ineligible(&turn_id);
-                    }
-                } else {
-                    self.pending_task_start = Some(PendingTaskStart {
-                        request_id: request_id.to_owned(),
-                        turn_id: None,
-                        eligible: true,
-                    });
-                }
-            }
-            TaskAdmission::ActiveSteer(turn_id) => {
-                self.associate_pending_task_start(turn_id);
-                self.mark_task_scope_ineligible(turn_id);
-                if let Some(pending) = &mut self.pending_task_start {
-                    pending.eligible = false;
-                }
-            }
-        }
-    }
-
-    fn abandon_task_start(&mut self, request_id: &str) {
-        if self
-            .pending_task_start
-            .as_ref()
-            .is_some_and(|pending| pending.request_id == request_id)
-        {
-            if let Some(pending) = self.pending_task_start.take() {
-                if let Some(turn_id) = pending.turn_id {
-                    self.mark_task_scope_ineligible(&turn_id);
-                }
-            }
-        }
-    }
-
-    fn abandon_task_admission(&mut self, admission: TaskAdmission<'_>) {
-        if let TaskAdmission::IdleStart(request_id) = admission {
-            self.abandon_task_start(request_id);
-        }
-    }
-
-    fn associate_pending_task_start(&mut self, turn_id: &str) {
-        let association = {
-            let Some(pending) = &mut self.pending_task_start else {
-                return;
-            };
-            match pending.turn_id.as_deref() {
-                None => {
-                    pending.turn_id = Some(turn_id.to_owned());
-                    Some((pending.request_id.clone(), pending.eligible, None))
-                }
-                Some(existing) if existing == turn_id => {
-                    Some((pending.request_id.clone(), pending.eligible, None))
-                }
-                Some(existing) => {
-                    pending.eligible = false;
-                    Some((pending.request_id.clone(), false, Some(existing.to_owned())))
-                }
-            }
-        };
-        if let Some((request_id, eligible, previous_turn)) = association {
-            if eligible {
-                self.turn_answers
-                    .entry(turn_id.to_owned())
-                    .or_default()
-                    .task_final_scope
-                    .associate(&request_id);
-            } else {
-                self.mark_task_scope_ineligible(turn_id);
-            }
-            if let Some(previous_turn) = previous_turn {
-                self.mark_task_scope_ineligible(&previous_turn);
-            }
-        }
-    }
-
-    fn confirm_task_start(&mut self, request_id: &str, turn_id: &str) {
-        if self.has_terminal_evidence(turn_id) {
-            self.completions.confirm_task_final(turn_id, request_id);
-            return;
-        }
-
-        let pending = self.pending_task_start.take();
-        let eligible = match pending {
-            Some(pending)
-                if pending.request_id == request_id
-                    && pending.eligible
-                    && pending
-                        .turn_id
-                        .as_deref()
-                        .is_none_or(|observed| observed == turn_id) =>
-            {
-                true
-            }
-            Some(pending) => {
-                if let Some(observed_turn) = pending.turn_id {
-                    self.mark_task_scope_ineligible(&observed_turn);
-                }
-                false
-            }
-            None => false,
-        };
-
-        if eligible {
-            let confirmed = self
-                .turn_answers
-                .entry(turn_id.to_owned())
-                .or_default()
-                .task_final_scope
-                .confirm(request_id);
-            if !confirmed {
-                self.mark_task_scope_ineligible(turn_id);
-            }
-        } else {
-            self.mark_task_scope_ineligible(turn_id);
-        }
-    }
-
-    fn mark_task_scope_ineligible(&mut self, turn_id: &str) {
-        if self.has_terminal_evidence(turn_id) {
-            return;
-        }
-        if let Some(capture) = self.turn_answers.get_mut(turn_id) {
-            capture.task_final_scope.invalidate();
-        }
-    }
-
-    fn invalidate_for_item(&mut self, turn_id: &str, item: &Value) {
-        let invalidates = item["type"] == "userMessage"
-            || item["type"] == "contextCompaction"
-            || (item["type"] == "commandExecution" && item["source"] == "userShell");
-        if invalidates {
-            self.associate_pending_task_start(turn_id);
-            if let Some(pending) = &mut self.pending_task_start {
-                pending.eligible = false;
-            }
-            self.mark_task_scope_ineligible(turn_id);
-        }
-    }
-
-    fn invalidate_for_prompt_submit_hook(&mut self, params: &Value) {
-        if params["run"]["eventName"] != "UserPromptSubmit" {
-            return;
-        }
-        let Some(turn_id) = params["turnId"].as_str() else {
-            return;
-        };
-        if self.has_terminal_evidence(turn_id) {
-            return;
-        }
-        self.associate_pending_task_start(turn_id);
-        if let Some(pending) = &mut self.pending_task_start {
-            pending.eligible = false;
-        }
-        self.mark_task_scope_ineligible(turn_id);
     }
 
     fn set_thread_runtime_status(&mut self, status: ThreadRuntimeStatus) {
@@ -565,31 +302,21 @@ impl Observation {
         if params["threadId"].as_str() != self.thread_id.as_deref() || self.thread_id.is_none() {
             return;
         }
-        let method = value["method"].as_str().unwrap_or_default();
-        if matches!(method, "hook/started" | "hook/completed") {
-            self.invalidate_for_prompt_submit_hook(params);
-            return;
-        }
         if value["method"] == "thread/status/changed" {
             if let Some(status) = thread_runtime_status(&params["status"]) {
                 self.set_thread_runtime_status(status);
             }
             return;
         }
-        if matches!(method, "item/started" | "item/completed") {
+        if value["method"] == "item/completed" {
             if let Some(turn_id) = params["turnId"].as_str() {
                 if self.has_terminal_evidence(turn_id) {
                     return;
                 }
-                self.associate_pending_task_start(turn_id);
-                self.invalidate_for_item(turn_id, &params["item"]);
-                if method == "item/completed" {
-                    self.turn_answers
-                        .entry(turn_id.to_owned())
-                        .or_default()
-                        .messages
-                        .observe(&params["item"]);
-                }
+                self.turn_answers
+                    .entry(turn_id.to_owned())
+                    .or_default()
+                    .observe(&params["item"]);
             }
             return;
         }
@@ -601,7 +328,6 @@ impl Observation {
                 if self.has_terminal_evidence(turn_id) {
                     return;
                 }
-                self.associate_pending_task_start(turn_id);
                 self.completions.start(turn_id);
                 self.completed_turn = None;
                 self.set_thread_runtime_status(ThreadRuntimeStatus::Active);
@@ -609,10 +335,6 @@ impl Observation {
                 self.turn_answers.entry(turn_id.to_owned()).or_default();
             }
             Some("turn/completed") => {
-                if self.has_terminal_evidence(turn_id) {
-                    return;
-                }
-                self.associate_pending_task_start(turn_id);
                 let was_active = self.active_turn.as_deref() == Some(turn_id);
                 if let Some(status) = params["turn"]["status"].as_str() {
                     if was_active {
@@ -625,13 +347,12 @@ impl Observation {
                         self.completed_turn = Some((turn_id.to_owned(), status.to_owned()));
                         self.idle_reconciled_turn = None;
                     }
-                    let capture = self.turn_answers.remove(turn_id).unwrap_or_default();
-                    let answer = capture.messages.answer();
-                    let task_final = capture.task_final_scope.evidence();
-                    if self
-                        .completions
-                        .finish(turn_id, status, &answer, task_final)
-                    {
+                    let answer = self
+                        .turn_answers
+                        .remove(turn_id)
+                        .unwrap_or_default()
+                        .answer();
+                    if self.completions.finish(turn_id, status, &answer) {
                         self.finished_sequence += 1;
                         self.finished_turns.push_back(FinishedTurn {
                             sequence: self.finished_sequence,
@@ -642,11 +363,6 @@ impl Observation {
                         if self.finished_turns.len() > FINISHED_TURN_HISTORY {
                             self.finished_turns.pop_front();
                         }
-                    }
-                    if self.pending_task_start.as_ref().is_some_and(|pending| {
-                        !pending.eligible || pending.turn_id.as_deref() == Some(turn_id)
-                    }) {
-                        self.pending_task_start = None;
                     }
                 }
             }
@@ -683,16 +399,6 @@ impl std::fmt::Debug for CodexSharedClient {
 impl CodexSharedClient {
     pub(crate) fn observations(&self) -> watch::Receiver<Observation> {
         self.observation.subscribe()
-    }
-
-    pub(super) fn confirm_task_start(&self, request_id: &str, turn_id: &str) {
-        self.observation
-            .send_modify(|state| state.confirm_task_start(request_id, turn_id));
-    }
-
-    pub(super) fn abandon_task_start(&self, request_id: &str) {
-        self.observation
-            .send_modify(|state| state.abandon_task_start(request_id));
     }
 
     /// Connect only to the caller's already-created IPv4 loopback endpoint.
@@ -1137,45 +843,6 @@ impl CodexSharedClient {
         expected_activity: Option<&CodexTurnActivity>,
         initial_activity: Option<u64>,
     ) -> Result<Value, CodexSharedError> {
-        self.request_with_fences_and_task(
-            method,
-            params,
-            timeout,
-            expected_activity,
-            initial_activity,
-            None,
-        )
-        .await
-    }
-
-    async fn request_with_task_admission(
-        &self,
-        method: &str,
-        params: Value,
-        timeout: Option<Duration>,
-        expected_activity: Option<&CodexTurnActivity>,
-        task_admission: TaskAdmission<'_>,
-    ) -> Result<Value, CodexSharedError> {
-        self.request_with_fences_and_task(
-            method,
-            params,
-            timeout,
-            expected_activity,
-            None,
-            Some(task_admission),
-        )
-        .await
-    }
-
-    async fn request_with_fences_and_task(
-        &self,
-        method: &str,
-        params: Value,
-        timeout: Option<Duration>,
-        expected_activity: Option<&CodexTurnActivity>,
-        initial_activity: Option<u64>,
-        task_admission: Option<TaskAdmission<'_>>,
-    ) -> Result<Value, CodexSharedError> {
         if self.observation.borrow().closed {
             return Err(CodexSharedError::unsupported(
                 "provider connection is closed",
@@ -1186,7 +853,6 @@ impl CodexSharedClient {
         self.pending.lock().unwrap().insert(id.clone(), tx);
         let payload = json!({"id":id,"method":method,"params":params});
         let deadline = tokio::time::Instant::now() + timeout.unwrap_or(STARTUP_TIMEOUT);
-        let mut task_admission_registered = false;
         let written = tokio::time::timeout_at(deadline, async {
             let mut writer = self.writer.lock().await;
             if initial_activity.is_some_and(|expected| {
@@ -1207,11 +873,6 @@ impl CodexSharedClient {
                     provider_boundary_crossed: false,
                 });
             }
-            if let Some(admission) = task_admission {
-                self.observation
-                    .send_modify(|state| state.register_task_admission(admission));
-                task_admission_registered = true;
-            }
             writer
                 .send(Message::Text(payload.to_string().into()))
                 .await
@@ -1222,61 +883,41 @@ impl CodexSharedClient {
         .await;
         if !matches!(written, Ok(Ok(()))) {
             self.pending.lock().unwrap().remove(&id);
-            if task_admission_registered {
-                if let Some(admission) = task_admission {
-                    self.observation
-                        .send_modify(|state| state.abandon_task_admission(admission));
-                }
-            }
             return Err(match written {
                 Ok(Err(error)) => error,
                 _ => CodexSharedError::uncertain("provider request write timed out; not replayed"),
             });
         }
         let result = if timeout.is_some() {
-            match tokio::time::timeout_at(deadline, rx).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(_)) => Err(CodexSharedError::uncertain("provider reply channel ended")),
-                Err(_) => Err(CodexSharedError::uncertain(
-                    "provider acknowledgement timed out; not replayed",
-                )),
-            }
+            tokio::time::timeout_at(deadline, rx).await.map_err(|_| {
+                CodexSharedError::uncertain("provider acknowledgement timed out; not replayed")
+            })
         } else {
-            match rx.await {
-                Ok(result) => result,
-                Err(_) => Err(CodexSharedError::uncertain("provider reply channel ended")),
-            }
+            Ok(rx.await)
         };
         self.pending.lock().unwrap().remove(&id);
-        let result = result.and_then(|value| {
-            if let Some(error) = value.get("error") {
-                if value.get("result").is_none()
-                    && diagnostics::stale_steer_rejection(method, &payload["params"], error)
-                {
-                    return Err(CodexSharedError {
-                        code: "stale_turn_rejected".into(),
-                        message: "Codex rejected steering because the requested turn is no longer active; not replayed".into(),
-                        provider_boundary_crossed: false,
-                    });
-                }
+        let value =
+            result?.map_err(|_| CodexSharedError::uncertain("provider reply channel ended"))??;
+        if let Some(error) = value.get("error") {
+            if value.get("result").is_none()
+                && diagnostics::stale_steer_rejection(method, &payload["params"], error)
+            {
                 return Err(CodexSharedError {
-                    code: "provider_rejected".into(),
-                    message: diagnostics::rejection_message(method, error).into(),
-                    provider_boundary_crossed: true,
+                    code: "stale_turn_rejected".into(),
+                    message: "Codex rejected steering because the requested turn is no longer active; not replayed".into(),
+                    provider_boundary_crossed: false,
                 });
             }
-            value
-                .get("result")
-                .cloned()
-                .ok_or_else(|| CodexSharedError::uncertain("provider reply has no result"))
-        });
-        if task_admission_registered && result.is_err() {
-            if let Some(admission) = task_admission {
-                self.observation
-                    .send_modify(|state| state.abandon_task_admission(admission));
-            }
+            return Err(CodexSharedError {
+                code: "provider_rejected".into(),
+                message: diagnostics::rejection_message(method, error).into(),
+                provider_boundary_crossed: true,
+            });
         }
-        result
+        value
+            .get("result")
+            .cloned()
+            .ok_or_else(|| CodexSharedError::uncertain("provider reply has no result"))
     }
 
     pub(crate) fn receipt(&self, state: &str) -> Result<CodexSharedReceipt, CodexSharedError> {
@@ -1353,39 +994,6 @@ impl CodexSharedClient {
         turn_id: &str,
         timeout: Duration,
     ) -> Result<(String, String), CodexSharedError> {
-        let outcome = self.wait_for_completion(turn_id, timeout).await?;
-        Ok((outcome.status, outcome.answer))
-    }
-
-    /// Retain exact task-origin evidence on the same bounded completion slot.
-    pub(crate) async fn wait_for_task_final_result(
-        &self,
-        turn_id: &str,
-        timeout: Duration,
-    ) -> Result<(String, String, bool), CodexSharedError> {
-        // Pin this bounded slot while the generic waiter preserves its public result contract.
-        let mut completed = self.observation.borrow().completions.subscribe(turn_id)?;
-        let (status, answer) = self.wait_for_final_result(turn_id, timeout).await?;
-        let eligible = {
-            let latest = completed.borrow_and_update();
-            match latest.as_ref() {
-                Some(Ok(outcome)) => outcome.task_final_evidence.is_eligible(),
-                Some(Err(error)) => return Err(error.clone()),
-                None => {
-                    return Err(CodexSharedError::uncertain(
-                        "completion observation ended before task evidence was available",
-                    ));
-                }
-            }
-        };
-        Ok((status, answer, eligible))
-    }
-
-    async fn wait_for_completion(
-        &self,
-        turn_id: &str,
-        timeout: Duration,
-    ) -> Result<completion::TurnOutcome, CodexSharedError> {
         let mut completed = self.observation.borrow().completions.subscribe(turn_id)?;
         tokio::time::timeout(timeout, async {
             loop {
@@ -1985,11 +1593,10 @@ mod tests {
             "params":{"threadId":"owned","turnId":"current","item":{"id":"current-item","type":"agentMessage","text":"current answer"}}
         }));
         state.observe(&json!({"method":"turn/completed","params":{"threadId":"owned","turn":{"id":"old","status":"interrupted"}}}));
-        let old = state.completions.subscribe("old").unwrap();
-        let old = old.borrow();
-        let old = old.as_ref().unwrap().as_ref().unwrap();
-        assert_eq!(old.status, "interrupted");
-        assert_eq!(old.answer, "old answer");
+        assert_eq!(
+            state.completions.subscribe("old").unwrap().borrow().clone(),
+            Some(Ok(("interrupted".into(), "old answer".into())))
+        );
         assert_eq!(state.active_turn.as_deref(), Some("current"));
         assert_eq!(
             state.activity(),
@@ -2001,11 +1608,15 @@ mod tests {
             state.completed_turn,
             Some(("current".into(), "interrupted".into()))
         );
-        let current = state.completions.subscribe("current").unwrap();
-        let current = current.borrow();
-        let current = current.as_ref().unwrap().as_ref().unwrap();
-        assert_eq!(current.status, "interrupted");
-        assert_eq!(current.answer, "current answer");
+        assert_eq!(
+            state
+                .completions
+                .subscribe("current")
+                .unwrap()
+                .borrow()
+                .clone(),
+            Some(Ok(("interrupted".into(), "current answer".into())))
+        );
     }
 
     #[test]
@@ -2037,11 +1648,15 @@ mod tests {
             state.completed_turn,
             Some(("current".into(), "completed".into()))
         );
-        let current = state.completions.subscribe("current").unwrap();
-        let current = current.borrow();
-        let current = current.as_ref().unwrap().as_ref().unwrap();
-        assert_eq!(current.status, "completed");
-        assert!(current.answer.is_empty());
+        assert_eq!(
+            state
+                .completions
+                .subscribe("current")
+                .unwrap()
+                .borrow()
+                .clone(),
+            Some(Ok(("completed".into(), String::new())))
+        );
     }
 
     #[test]

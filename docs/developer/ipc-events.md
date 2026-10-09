@@ -248,6 +248,18 @@ replay boundary also canonicalizes legacy archived roles from their persisted
 `input_origin` metadata; historical archive files do not need a destructive
 rewrite to display the corrected classification.
 
+Normal Chat publications and cold archive checkpoints stage intermediate AVL
+nodes in a bounded, private checkpoint buffer. Only nodes reachable from the
+final schema-defined roots
+are persisted; user text and metadata never determine object reachability.
+Every final node completes the existing write, sync, and rename sequence before
+the head pointer is published. Rows and body payloads retain immediate durable
+writes. Cold selection checkpoints flush their seen tree before publishing a
+selection pointer, and queued body jobs retain explicit chunk-root dependencies.
+A failed flush or pointer write preserves the previous published and in-memory
+heads so the
+owner can retry the unpublished work.
+
 Page headers retain bounded semantic tool inputs and write evidence. Large
 arguments, patches and artifact output are published through scoped lazy detail
 references, with each detail response limited to 16 KiB. Structured edit totals

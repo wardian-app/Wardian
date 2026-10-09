@@ -1999,6 +1999,33 @@ describe("RemoteMobileApp", () => {
     expect(await screen.findByText("No chat transcript yet.")).toBeVisible();
   });
 
+  it("retains visible full tool output when an older mobile page crosses the work-group threshold", async () => {
+    const chatEvents: AgentChatEvent[] = Array.from({ length: 45 }, (_, i) => ({
+      id: `row-${i + 1}`, session_id: "agent-1", provider: "codex", kind: i >= 4 && i <= 6 ? "tool_result" : "message",
+      role: i >= 4 && i <= 6 ? "tool" : "assistant", text: i >= 4 && i <= 6 ? `Full output ${i + 1}\nVisible second line` : `Message ${i + 1}`,
+      title: null, status: "succeeded", turn_id: `turn-${i}`, source: "provider_log", command: null,
+      exit_code: 0, path: null, language: null, created_at: null, sequence: i + 1, metadata: {},
+    }));
+    mockRemoteAgentDetailFetch("codex", { chatEvents });
+    render(<RemoteMobileApp />);
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+    await screen.findByText("Message 45");
+    const first = document.querySelector<HTMLElement>('[data-chat-row-key="row-6"]')!;
+    const second = document.querySelector<HTMLElement>('[data-chat-row-key="row-7"]')!;
+    const scroll = first.closest("section")!;
+    scroll.getBoundingClientRect = () => new DOMRect(0, 0, 390, 600);
+    first.getBoundingClientRect = () => new DOMRect(0, 20, 390, 294);
+    second.getBoundingClientRect = () => new DOMRect(0, 320, 390, 40);
+    const originalContent = first.textContent;
+    await userEvent.click(screen.getByRole("button", { name: "Load older transcript" }));
+    await screen.findByText("Message 1");
+    expect(document.querySelector('[data-chat-row-key="row-6"]')).toBe(first);
+    expect(first.textContent).toBe(originalContent);
+    expect(first.getBoundingClientRect().height).toBe(294);
+    expect(screen.queryByTestId("chat-work-group")).not.toBeInTheDocument();
+  });
+
   it("loads older remote chat pages from the latest transcript window", async () => {
     const chatEvents: AgentChatEvent[] = Array.from({ length: 85 }, (_, index) => ({
       id: `message-${index + 1}`,

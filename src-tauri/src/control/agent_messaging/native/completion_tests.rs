@@ -143,23 +143,6 @@ impl Fixture {
             accept,
         );
         let client = client.expect("connect exact generation-bound client");
-        let mut peer = Peer {
-            socket,
-            task_starts: 0,
-        };
-        let expected_home = std::env::current_dir().expect("test workspace");
-        let initialize_peer = async {
-            let request = peer.read().await;
-            assert_eq!(request["method"], "initialize");
-            peer.send(json!({"id":request["id"],"result":{
-                "userAgent":"wardian/0.159.2",
-                "codexHome":expected_home.to_string_lossy()
-            }}))
-            .await;
-        };
-        let (version, ()) = tokio::join!(client.initialize(&expected_home), initialize_peer);
-        assert_eq!(version.expect("loopback initialize version"), "0.159.2");
-        assert_eq!(peer.read().await["method"], "initialized");
         client
             .bind(&json!({"thread":{
                 "id":THREAD,"canAcceptDirectInput":true,"status":{"type":"idle"},"turns":[]
@@ -168,21 +151,15 @@ impl Fixture {
         Self {
             state,
             client,
-            peer,
+            peer: Peer {
+                socket,
+                task_starts: 0,
+            },
             generation,
         }
     }
 
     async fn task(&mut self, turn: &str, early: bool) -> store::TaskTurnBinding {
-        self.task_with_early_human_input(turn, early, false).await
-    }
-
-    async fn task_with_early_human_input(
-        &mut self,
-        turn: &str,
-        early: bool,
-        human_input_before_ack: bool,
-    ) -> store::TaskTurnBinding {
         let response = handle_in_state(
             None,
             &self.state,
@@ -219,85 +196,33 @@ impl Fixture {
         })
         .unwrap();
         let context = serde_json::to_string(&frame).unwrap();
-        let active_turn = match self.client.observations().borrow().activity() {
-            crate::delivery::codex_shared::CodexTurnActivity::Processing(turn_id) => Some(turn_id),
-            _ => None,
-        };
-        if let Some(active_turn) = &active_turn {
-            assert_eq!(
-                active_turn, turn,
-                "steered task stays on its exact active turn"
-            );
-        }
         let provider = async {
             let request = self.peer.read().await;
+            assert_eq!(request["method"], "turn/start");
             assert_eq!(request["params"]["threadId"], THREAD);
-            if active_turn.is_some() {
-                assert_eq!(request["method"], "turn/steer");
-                assert_eq!(request["params"]["expectedTurnId"], turn);
-                assert_eq!(
-                    request["params"]["input"],
-                    json!([{"type":"text","text":"literal task λ\r\n"}])
-                );
-                assert!(request["params"].get("toolOutput").is_none());
-            } else {
-                assert_eq!(request["method"], "turn/start");
-                assert_eq!(request["params"]["input"], json!([]));
-                let written: Value = serde_json::from_str(
-                    request["params"]["toolOutput"]["output"].as_str().unwrap(),
-                )
-                .unwrap();
-                assert_eq!(written, serde_json::to_value(&frame).unwrap());
-                assert_eq!(written["request_id"], request_id);
-            }
-            if human_input_before_ack {
-                let user_message = json!({
-                    "type":"userMessage",
-                    "id":format!("human-{turn}"),
-                    "content":[{"type":"text","text":"same-turn TUI input"}]
-                });
-                self.peer
-                    .send(json!({
-                        "method":"item/started",
-                        "params":{"threadId":THREAD,"turnId":turn,"item":user_message}
-                    }))
-                    .await;
-                self.peer
-                    .send(json!({
-                        "method":"item/completed",
-                        "params":{"threadId":THREAD,"turnId":turn,"item":user_message}
-                    }))
-                    .await;
-            }
+            assert_eq!(request["params"]["input"], json!([]));
+            let written: Value =
+                serde_json::from_str(request["params"]["toolOutput"]["output"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(written, serde_json::to_value(&frame).unwrap());
+            assert_eq!(written["request_id"], request_id);
             if early {
                 // Both events precede the RPC response in the reader's stream.
                 self.peer.complete(THREAD, turn, FINAL).await;
-            } else if active_turn.is_none() {
+            } else {
                 self.peer
                     .send(json!({"method":"turn/started","params":{
                         "threadId":THREAD,"turn":{"id":turn}
                     }}))
                     .await;
             }
-            let result = if active_turn.is_some() {
-                json!({"turnId":turn})
-            } else {
-                json!({"turn":{"id":turn}})
-            };
             self.peer
-                .send(json!({"id":request["id"],"result":result}))
+                .send(json!({"id":request["id"],"result":{"turn":{"id":turn}}}))
                 .await;
         };
         let (receipt, ()) = tokio::join!(self.client.followup(&request_id, &context), provider);
         let receipt = receipt.expect("exact task acknowledgement");
-        assert_eq!(
-            receipt.admission_mode.as_deref(),
-            Some(if active_turn.is_some() {
-                "steer"
-            } else {
-                "start"
-            })
-        );
+        assert_eq!(receipt.admission_mode.as_deref(), Some("start"));
         let binding = bind_codex_task(&self.state, &claim, &receipt)
             .await
             .unwrap();
@@ -590,361 +515,6 @@ async fn exact_completion_before_ack_is_available_to_late_coordinator_observer()
                 );
             }
             fixture.assert_no_process_start(1).await;
-        })
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn task_final_exclusivity_rejects_same_turn_human_input() {
-    scenario(|fixture| {
-        Box::pin(async move {
-            let binding = fixture.task("mixed", false).await;
-            let (reply, answer) = {
-                let observer = observe_codex_task(
-                    &fixture.state.interactions,
-                    &fixture.client,
-                    &binding,
-                    WAIT,
-                );
-                tokio::pin!(observer);
-                assert_pending(observer.as_mut()).await;
-
-                let user_message = json!({
-                    "type":"userMessage",
-                    "id":"human-steer",
-                    "content":[{"type":"text","text":"continue with this context"}]
-                });
-                fixture
-                    .peer
-                    .send(json!({
-                        "method":"item/started",
-                        "params":{"threadId":THREAD,"turnId":"mixed","item":user_message}
-                    }))
-                    .await;
-                fixture
-                    .peer
-                    .send(json!({
-                        "method":"item/completed",
-                        "params":{"threadId":THREAD,"turnId":"mixed","item":user_message}
-                    }))
-                    .await;
-                fixture.peer.barrier(&fixture.client).await;
-                assert_pending(observer.as_mut()).await;
-
-                fixture.peer.complete(THREAD, "mixed", FINAL).await;
-                fixture.peer.barrier(&fixture.client).await;
-                observer.await.unwrap()
-            };
-            assert_eq!(answer, FINAL);
-            assert!(reply.is_none(), "mixed task/human turn cannot auto-reply");
-            assert_eq!(
-                store::with_db(|conn| store::load(conn, &binding.request_id))
-                    .unwrap()
-                    .status,
-                InteractionStatus::AwaitingReply,
-                "mixed evidence leaves the canonical task awaiting an explicit reply"
-            );
-            assert!(fixture
-                .state
-                .interactions
-                .structured_reply(&binding.request_id)
-                .await
-                .is_none());
-
-            let explicit = handle_in_state(
-                None,
-                &fixture.state,
-                Request::Reply {
-                    request_id: binding.request_id.clone(),
-                    status: ReplyStatus::Done,
-                    message: "explicit result".into(),
-                },
-                origin(RECIPIENT),
-            )
-            .await
-            .unwrap();
-            assert!(matches!(
-                explicit,
-                Response::Reply {
-                    duplicate: false,
-                    ..
-                }
-            ));
-            let page = receive(&fixture.state, REQUESTER, 0, None, None)
-                .await
-                .unwrap();
-            assert_reply(
-                &page,
-                &binding.request_id,
-                ReplyStatus::Done,
-                "explicit result",
-            );
-            fixture.assert_no_process_start(1).await;
-        })
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn task_final_exclusivity_rejects_human_input_before_ack_and_terminal() {
-    scenario(|fixture| {
-        Box::pin(async move {
-            let binding = fixture
-                .task_with_early_human_input("mixed-before-ack", true, true)
-                .await;
-            let (reply, answer) =
-                observe_codex_task(&fixture.state.interactions, &fixture.client, &binding, WAIT)
-                    .await
-                    .unwrap();
-            assert_eq!(answer, FINAL);
-            assert!(reply.is_none());
-            assert_eq!(
-                store::with_db(|conn| store::load(conn, &binding.request_id))
-                    .unwrap()
-                    .status,
-                InteractionStatus::AwaitingReply
-            );
-            fixture.assert_no_process_start(1).await;
-        })
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn two_tasks_steered_into_one_turn_both_require_explicit_replies() {
-    scenario(|fixture| {
-        Box::pin(async move {
-            let first = fixture.task("shared-turn", false).await;
-            let second = fixture.task("shared-turn", false).await;
-            assert_ne!(first.request_id, second.request_id);
-
-            let (first_result, second_result) = {
-                let first_observer =
-                    observe_codex_task(&fixture.state.interactions, &fixture.client, &first, WAIT);
-                let second_observer =
-                    observe_codex_task(&fixture.state.interactions, &fixture.client, &second, WAIT);
-                tokio::pin!(first_observer, second_observer);
-                assert_pending(first_observer.as_mut()).await;
-                assert_pending(second_observer.as_mut()).await;
-                fixture.peer.complete(THREAD, "shared-turn", FINAL).await;
-                fixture.peer.barrier(&fixture.client).await;
-                tokio::join!(first_observer, second_observer,)
-            };
-            let (first_reply, first_answer) = first_result.unwrap();
-            let (second_reply, second_answer) = second_result.unwrap();
-            assert_eq!(first_answer, FINAL);
-            assert_eq!(second_answer, FINAL);
-            assert!(first_reply.is_none());
-            assert!(second_reply.is_none());
-            for request_id in [&first.request_id, &second.request_id] {
-                assert_eq!(
-                    store::with_db(|conn| store::load(conn, request_id))
-                        .unwrap()
-                        .status,
-                    InteractionStatus::AwaitingReply
-                );
-            }
-            fixture.assert_no_process_start(1).await;
-        })
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn prompt_submit_hook_compaction_and_user_shell_invalidate_task_scope() {
-    scenario(|fixture| {
-        Box::pin(async move {
-            for (turn, invalidation) in [
-                (
-                    "prompt-hook",
-                    json!({
-                        "method":"hook/started",
-                        "params":{"threadId":THREAD,"turnId":"prompt-hook",
-                            "run":{"eventName":"UserPromptSubmit"}}
-                    }),
-                ),
-                (
-                    "context-compaction",
-                    json!({
-                        "method":"item/started",
-                        "params":{"threadId":THREAD,"turnId":"context-compaction",
-                            "item":{"type":"contextCompaction","id":"compact-1"}}
-                    }),
-                ),
-                (
-                    "user-shell",
-                    json!({
-                        "method":"item/started",
-                        "params":{"threadId":THREAD,"turnId":"user-shell",
-                            "item":{"type":"commandExecution","source":"userShell","id":"shell-1"}}
-                    }),
-                ),
-            ] {
-                let binding = fixture.task(turn, false).await;
-                let observer = observe_codex_task(
-                    &fixture.state.interactions,
-                    &fixture.client,
-                    &binding,
-                    WAIT,
-                );
-                tokio::pin!(observer);
-                assert_pending(observer.as_mut()).await;
-                fixture.peer.send(invalidation.clone()).await;
-                if turn == "prompt-hook" {
-                    fixture
-                        .peer
-                        .send(json!({
-                            "method":"hook/completed",
-                            "params":{"threadId":THREAD,"turnId":turn,
-                                "run":{"eventName":"UserPromptSubmit"}}
-                        }))
-                        .await;
-                } else if turn == "context-compaction" {
-                    fixture
-                        .peer
-                        .send(json!({
-                            "method":"item/completed",
-                            "params":{"threadId":THREAD,"turnId":turn,
-                                "item":{"type":"contextCompaction","id":"compact-1"}}
-                        }))
-                        .await;
-                } else {
-                    fixture.peer.send(json!({
-                        "method":"item/completed",
-                        "params":{"threadId":THREAD,"turnId":turn,
-                            "item":{"type":"commandExecution","source":"userShell","id":"shell-1"}}
-                    })).await;
-                }
-                fixture.peer.barrier(&fixture.client).await;
-                assert_pending(observer.as_mut()).await;
-                fixture.peer.complete(THREAD, turn, FINAL).await;
-                fixture.peer.barrier(&fixture.client).await;
-                let (reply, answer) = observer.await.unwrap();
-                assert_eq!(answer, FINAL);
-                assert!(reply.is_none(), "{turn} invalidates exclusive task scope");
-                assert_eq!(
-                    store::with_db(|conn| store::load(conn, &binding.request_id))
-                        .unwrap()
-                        .status,
-                    InteractionStatus::AwaitingReply
-                );
-            }
-
-            let binding = fixture.task("agent-command", false).await;
-            fixture
-                .peer
-                .send(json!({
-                    "method":"item/started",
-                    "params":{"threadId":THREAD,"turnId":"agent-command",
-                        "item":{"type":"commandExecution","source":"agent","id":"agent-command-1"}}
-                }))
-                .await;
-            fixture
-                .peer
-                .send(json!({
-                    "method":"item/completed",
-                    "params":{"threadId":THREAD,"turnId":"agent-command",
-                        "item":{"type":"commandExecution","source":"agent","id":"agent-command-1"}}
-                }))
-                .await;
-            fixture
-                .peer
-                .send(json!({
-                    "method":"item/completed",
-                    "params":{"threadId":THREAD,"turnId":"agent-command",
-                        "item":{"type":"context","id":"builtin-context"}}
-                }))
-                .await;
-            fixture.peer.complete(THREAD, "agent-command", FINAL).await;
-            fixture.peer.barrier(&fixture.client).await;
-            let (reply, answer) =
-                observe_codex_task(&fixture.state.interactions, &fixture.client, &binding, WAIT)
-                    .await
-                    .unwrap();
-            assert_eq!(answer, FINAL);
-            assert!(
-                reply.is_some(),
-                "agent tools and builtin context preserve eligibility"
-            );
-            fixture.assert_no_process_start(4).await;
-        })
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn later_turn_input_does_not_mutate_frozen_task_completion_scope() {
-    scenario(|fixture| {
-        Box::pin(async move {
-            let binding = fixture.task("frozen-task", true).await;
-            fixture
-                .peer
-                .send(json!({
-                    "method":"turn/started",
-                    "params":{"threadId":THREAD,"turn":{"id":"later-human-turn"}}
-                }))
-                .await;
-            fixture
-                .peer
-                .send(json!({
-                    "method":"item/started",
-                    "params":{"threadId":THREAD,"turnId":"later-human-turn",
-                        "item":{"type":"userMessage","id":"later-input","content":[]}}
-                }))
-                .await;
-            fixture
-                .peer
-                .send(json!({
-                    "method":"turn/completed",
-                    "params":{"threadId":THREAD,
-                        "turn":{"id":"later-human-turn","status":"interrupted"}}
-                }))
-                .await;
-            fixture.peer.barrier(&fixture.client).await;
-            let (reply, answer) =
-                observe_codex_task(&fixture.state.interactions, &fixture.client, &binding, WAIT)
-                    .await
-                    .unwrap();
-            assert_eq!(answer, FINAL);
-            assert!(
-                reply.is_some(),
-                "the earlier exact terminal scope stays frozen"
-            );
-            fixture.assert_no_process_start(1).await;
-        })
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn disconnect_before_terminal_keeps_task_unsettled_and_never_replays() {
-    scenario(|fixture| {
-        Box::pin(async move {
-            let binding = fixture.task("disconnect-before-terminal", false).await;
-            let observer =
-                observe_codex_task(&fixture.state.interactions, &fixture.client, &binding, WAIT);
-            tokio::pin!(observer);
-            assert_pending(observer.as_mut()).await;
-            fixture.peer.socket.close(None).await.unwrap();
-            let error = match observer.await {
-                Ok(_) => panic!("disconnect cannot produce an automatic task result"),
-                Err(error) => error,
-            };
-            assert_eq!(error.code, "submitted_unconfirmed");
-            assert_eq!(
-                store::with_db(|conn| store::load(conn, &binding.request_id))
-                    .unwrap()
-                    .status,
-                InteractionStatus::AwaitingReply
-            );
-            assert!(fixture
-                .state
-                .interactions
-                .structured_reply(&binding.request_id)
-                .await
-                .is_none());
-            assert_eq!(fixture.peer.task_starts, 1);
         })
     })
     .await;

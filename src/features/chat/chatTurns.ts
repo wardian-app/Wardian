@@ -1,6 +1,7 @@
 import type { AgentChatEvent } from "../../types";
 import { changedPathsFromEvents, type PresentedChatRow } from "../grid/workLogPresentation";
 import { toolPatchText } from "./chatPresentation";
+import { chatEventDisplayKey } from "./chatEventIdentity";
 import { structuredEditFromEvent } from "./structuredEdit";
 
 /**
@@ -330,6 +331,6 @@ export function withTurnChangeSummaries(
 }
 
 export function chatTranscriptRowKey(row: ChatTranscriptRowModel): string {
-  if (row.kind === "event") return typeof row.event.metadata.chat_display_key === "string" ? row.event.metadata.chat_display_key : row.event.id;
+  if (row.kind === "event") return chatEventDisplayKey(row.event);
   return row.id;
 }

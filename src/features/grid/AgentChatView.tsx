@@ -19,6 +19,7 @@ import { ChatTranscriptRow } from "../chat/ChatTranscriptRows";
 import { useChatPages, type ChatPageLoader } from "../chat/useChatPages";
 import { chatReadProgress, submittedChatEvent } from "../chat/chatReadState";
 import { captureChatScrollAnchor, restoreChatScrollAnchor, type ChatScrollAnchor } from "../chat/chatScrollAnchor";
+import { useChatReadingPresentation } from "../chat/useChatReadingPresentation";
 import { matchingSlashCommands } from "../chat/slashCommands";
 import {
   isProcessingAgentStatus,
@@ -177,9 +178,11 @@ export function AgentChatView({
       ),
     [agent?.provider, mergedEvents, provider, sessionId, showThinking],
   );
+  const presentationScope = JSON.stringify([sessionId, provider ?? agent?.provider, page?.conversation_id, page?.generation, page?.source_epoch]);
+  const readingPresentation = useChatReadingPresentation(presentationScope, displayEvents, page !== null);
   const chatRows = useMemo<ChatTranscriptRowModel[]>(
-    () => withTurnChangeSummaries(derivePresentedChatRows(displayEvents.filter(shouldShowChatEvent))),
-    [displayEvents],
+    () => withTurnChangeSummaries(derivePresentedChatRows(displayEvents.filter(shouldShowChatEvent), readingPresentation.boundaries)),
+    [displayEvents, readingPresentation.boundaries],
   );
   const visibleChatRows = chatRows;
   const latestVisibleRowKey = visibleChatRows.length > 0 ? chatTranscriptRowKey(visibleChatRows[visibleChatRows.length - 1]) : "";
@@ -240,8 +243,8 @@ export function AgentChatView({
   }, [sessionId]);
 
   useLayoutEffect(() => {
-    if (scrollSessionRef.current !== sessionId) {
-      scrollSessionRef.current = sessionId;
+    if (scrollSessionRef.current !== presentationScope) {
+      scrollSessionRef.current = presentationScope;
       prependScrollSnapshotRef.current = null;
       stickToLatestRef.current = true;
     }
@@ -261,7 +264,7 @@ export function AgentChatView({
       scrollRegion.scrollTop = scrollRegion.scrollHeight;
       stickToLatestRef.current = true;
     }
-  }, [latestVisibleRowKey, loadState, visibleChatRows.length, sessionId, settledPrependSnapshot]);
+  }, [latestVisibleRowKey, loadState, visibleChatRows.length, presentationScope, settledPrependSnapshot]);
 
   const submitPrompt = async (
     promptValue: string,
@@ -275,6 +278,7 @@ export function AgentChatView({
     const submittedPrompt = promptWithChatAttachments(prompt, selectedAttachments);
 
     stickToLatestRef.current = true;
+    readingPresentation.clear();
     if (chat.browsingOlder) chat.jumpToLatest();
     setInterruptRequested(false);
     setIsSubmitting(true);
@@ -331,7 +335,18 @@ export function AgentChatView({
     const scrollRegion = transcriptScrollRef.current;
     if (!scrollRegion || prependScrollSnapshotRef.current) return;
     stickToLatestRef.current = isNearTranscriptBottom(scrollRegion);
-    if (scrollRegion.scrollTop <= 160 && page?.next_before && !loadingOlder) void handleLoadOlderRows();
+    if (scrollRegion.scrollTop <= 160 && page?.next_before && !loadingOlder) {
+      void handleLoadOlderRows();
+      return;
+    }
+    if (stickToLatestRef.current) readingPresentation.clear();
+    else if (readingPresentation.active) {
+      const snapshot = captureChatScrollAnchor(scrollRegion);
+      if (readingPresentation.retainVisible(visibleChatRows, scrollRegion)) {
+        prependScrollSnapshotRef.current = snapshot;
+        setSettledPrependSnapshot(snapshot);
+      }
+    }
   };
 
   const handleLoadOlderRows = async () => {
@@ -339,6 +354,7 @@ export function AgentChatView({
     const scrollRegion = transcriptScrollRef.current;
     const snapshot = scrollRegion ? captureChatScrollAnchor(scrollRegion) : null;
     if (snapshot) {
+      readingPresentation.retainVisible(visibleChatRows, scrollRegion!);
       prependScrollSnapshotRef.current = snapshot;
       stickToLatestRef.current = false;
     }
@@ -385,7 +401,10 @@ export function AgentChatView({
                   type="button"
                   className="w-full rounded border border-wardian-light bg-[var(--color-wardian-card-bg-muted)] px-2.5 py-1.5 text-[11px] font-semibold leading-5 text-muted-neutral hover:text-primary"
                   onClick={() => {
-                    prependScrollSnapshotRef.current = null; stickToLatestRef.current = true; chat.jumpToLatest();
+                    prependScrollSnapshotRef.current = null;
+                    stickToLatestRef.current = true;
+                    readingPresentation.clear();
+                    chat.jumpToLatest();
                   }}
                 >Jump to latest</button>
               </li>
@@ -403,7 +422,7 @@ export function AgentChatView({
               </li>
             ) : null}
             {visibleChatRows.map((row) => (
-              <li key={chatTranscriptRowKey(row)} data-chat-row-key={chatTranscriptRowKey(row)}>
+              <li key={`${sessionId}:${readingPresentation.rowEpoch}:${chatTranscriptRowKey(row)}`} data-chat-row-key={chatTranscriptRowKey(row)}>
                 <ChatTranscriptRow
                   agentIsWorking={showThinking}
                   isSubmitting={isSubmitting || readOnly}

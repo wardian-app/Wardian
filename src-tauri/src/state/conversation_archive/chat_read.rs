@@ -14,7 +14,7 @@ use wardian_core::conversations::write_json_atomic;
 use wardian_core::models::chat::{AgentChatEvent, AgentChatPage};
 use wardian_core::paths::agent_conversations_dir;
 
-use super::chat_read_store::{digest, valid_ref, Store};
+use super::chat_read_store::{digest, valid_ref, Dependency, Store};
 use super::ConversationArchiveContext;
 
 #[path = "chat_archive_bootstrap.rs"]
@@ -196,6 +196,36 @@ pub(crate) struct Head {
     row_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bootstrap: Option<cold_bootstrap::Progress>,
+}
+
+impl Head {
+    fn checkpoint_dependencies(&self) -> Vec<Dependency> {
+        let mut roots = self
+            .root
+            .iter()
+            .chain(self.identities.iter())
+            .map(|root| Dependency::Node(root.clone()))
+            .collect::<Vec<_>>();
+        roots.extend(
+            self.logical
+                .node_roots()
+                .map(|root| Dependency::Node(root.to_owned())),
+        );
+        if let Some(bootstrap) = &self.bootstrap {
+            roots.extend(
+                bootstrap
+                    .node_roots()
+                    .map(|root| Dependency::Node(root.to_owned())),
+            );
+        }
+        roots.extend(
+            self.changes
+                .iter()
+                .chain(self.parent.iter())
+                .map(|reference| Dependency::Object(reference.clone())),
+        );
+        roots
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1070,7 +1100,7 @@ impl ProjectionOwner {
             return Ok(false);
         }
         let (head_path, objects) = locations(agent_id)?;
-        let mut store = Store::writer(&objects);
+        let mut store = Store::checkpoint_writer(&objects);
         let limit = if work.bodies.is_empty() {
             PAGE_ROWS
         } else {
@@ -1217,6 +1247,9 @@ impl ProjectionOwner {
             head.parent = None;
         }
         head.changes = changes.into_values().take(PAGE_ROWS).collect();
+        #[cfg(test)]
+        self.checkpoint_fault(4)?;
+        store.finish_checkpoint(&head.checkpoint_dependencies())?;
         let reference = store.put(&head)?;
         // LAST fallible publication: failed writes leave every queued job and
         // the previous roots available to retry the same unpublished changes.
@@ -1283,11 +1316,12 @@ impl ProjectionOwner {
         }
         let (event, extent) = write()?;
         let (_, objects) = locations(&context.agent_id)?;
-        let mut store = Store::writer(&objects);
+        let mut store = Store::checkpoint_writer(&objects);
+        let mut head = work.head.clone();
         let mut row = Row {
             agent_id: context.agent_id.clone(),
             conversation_id: conversation_id.into(),
-            key: format!("{:020}", work.head.row_count),
+            key: format!("{:020}", head.row_count),
             event: header(&event),
             body: None,
             relation: None,
@@ -1313,14 +1347,20 @@ impl ProjectionOwner {
             body.complete = true;
             row.body = Some(body);
         }
-        let reference = insert_row(&mut store, &mut work.head, &row)?;
-        work.head.parent = work.published.clone();
-        work.head.changes = vec![reference];
-        work.head.row_count += 1;
-        work.head.recent_start = work.head.row_count.saturating_sub(PAGE_ROWS);
-        work.head.committed_output_bytes = extent;
-        let reference = store.put(&work.head)?;
+        let reference = insert_row(&mut store, &mut head, &row)?;
+        head.parent = work.published.clone();
+        head.changes = vec![reference];
+        head.row_count += 1;
+        head.recent_start = head.row_count.saturating_sub(PAGE_ROWS);
+        head.committed_output_bytes = extent;
+        #[cfg(test)]
+        self.checkpoint_fault(4)?;
+        store.finish_checkpoint(&head.checkpoint_dependencies())?;
+        let reference = store.put(&head)?;
+        #[cfg(test)]
+        self.checkpoint_fault(3)?;
         write_json_atomic(&locations(&context.agent_id)?.0, &reference)?;
+        work.head = head;
         work.published = Some(reference);
         work.signatures.push((event.id.clone(), String::new()));
         if !work.candidate.events.is_empty() {
@@ -1336,7 +1376,14 @@ impl ProjectionOwner {
 }
 
 fn insert_row(store: &mut Store, head: &mut Head, row: &Row) -> io::Result<String> {
-    let reference = store.put(row)?;
+    let dependencies = row
+        .body
+        .as_ref()
+        .and_then(|body| body.root.as_ref())
+        .map(|root| Dependency::Node(root.clone()))
+        .into_iter()
+        .collect();
+    let reference = store.put_linked(row, dependencies)?;
     head.root = Some(store.insert(&head.root, &row.key, &reference)?);
     head.identities = Some(store.insert(
         &head.identities,

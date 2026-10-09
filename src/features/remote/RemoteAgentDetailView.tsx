@@ -14,6 +14,7 @@ import { formatAgentStatusLabel } from "../../utils/statusUtils";
 import { ChatTranscriptRow } from "../chat/ChatTranscriptRows";
 import { chatReadProgress } from "../chat/chatReadState";
 import { captureChatScrollAnchor, restoreChatScrollAnchor, type ChatScrollAnchor } from "../chat/chatScrollAnchor";
+import { useChatReadingPresentation } from "../chat/useChatReadingPresentation";
 import type { ChatMarkdownLinkHandling } from "../grid/markdown/ChatMarkdown";
 import {
   isProcessingAgentStatus,
@@ -455,6 +456,9 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
   const jumpToLatestChat = useRemoteStore((state) => state.jumpToLatestActiveAgentChat);
   const chatError = useRemoteStore((state) => state.chatError);
   const chatProgress = useRemoteStore((state) => state.chatPage?.progress ?? "indexing");
+  const chatPresentationScope = useRemoteStore((state) => JSON.stringify([agent.session_id, agent.provider,
+    state.chatPage?.conversation_id, state.chatPage?.generation, state.chatPage?.source_epoch]));
+  const chatScopeReady = useRemoteStore((state) => state.chatPage !== null);
   const loadChatDetail = useRemoteStore((state) => state.loadActiveAgentChatDetail);
   const sending = useRemoteStore((state) => state.sending);
   const closeAgent = useRemoteStore((state) => state.closeAgent);
@@ -564,6 +568,8 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
 
       {activeAgentViewMode === "chat" ? (
         <ChatPane
+          presentationScope={chatPresentationScope}
+          scopeReady={chatScopeReady}
           key={agent.session_id}
           agent={agent}
           visibleEvents={visibleEvents}
@@ -1001,6 +1007,8 @@ function binaryStringToBase64(value: string) {
 }
 
 function ChatPane({
+  presentationScope,
+  scopeReady,
   agent,
   visibleEvents,
   loading,
@@ -1017,6 +1025,8 @@ function ChatPane({
   onLoadDetail,
   progress,
 }: {
+  presentationScope: string;
+  scopeReady: boolean;
   agent: RemoteAgentSummary;
   visibleEvents: AgentChatEvent[];
   loading: boolean;
@@ -1036,11 +1046,15 @@ function ChatPane({
   const scrollRef = useRef<HTMLElement>(null);
   const prepend = useRef<ChatScrollAnchor | null>(null);
   const [settledPrepend, setSettledPrepend] = useState<ChatScrollAnchor | null>(null);
+  const readingPresentation = useChatReadingPresentation(presentationScope, visibleEvents, scopeReady);
   const loadOlder = async () => {
     if (!hasOlder || loadingOlder || prepend.current) return;
     const scroll = scrollRef.current;
     const snapshot = scroll ? captureChatScrollAnchor(scroll) : null;
-    if (snapshot) prepend.current = snapshot;
+    if (snapshot) {
+      readingPresentation.retainVisible(rows, scroll!);
+      prepend.current = snapshot;
+    }
     try {
       await onLoadOlder();
     } finally {
@@ -1049,6 +1063,7 @@ function ChatPane({
       if (snapshot && prepend.current === snapshot) setSettledPrepend(snapshot);
     }
   };
+  useLayoutEffect(() => { prepend.current = null; }, [presentationScope]);
   useLayoutEffect(() => {
     const scroll = scrollRef.current;
     if (scroll && prepend.current && settledPrepend === prepend.current && !loadingOlder) {
@@ -1059,17 +1074,25 @@ function ChatPane({
   const progressText = chatReadProgress(progress);
   const rows = useMemo(
     () =>
-      withTurnChangeSummaries(derivePresentedChatRows(visibleEvents.filter(shouldShowChatEvent)), {
+      withTurnChangeSummaries(derivePresentedChatRows(visibleEvents.filter(shouldShowChatEvent), readingPresentation.boundaries), {
         // Remote pages from the newest end, so while older events remain
         // unloaded the leading rows are the tail of a turn whose earlier edits
         // are off-page. Summarizing them would understate that turn.
         has_older_events: hasOlder,
       }),
-    [hasOlder, visibleEvents],
+    [hasOlder, visibleEvents, readingPresentation.boundaries],
   );
   const liveApprovalId = useMemo(() => liveApprovalEventId(sortTranscriptEvents(visibleEvents)), [visibleEvents]);
   return (
-    <section className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`} ref={scrollRef} onScroll={() => { if ((scrollRef.current?.scrollTop ?? 0) <= 160) loadOlder(); }}>
+    <section className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`} ref={scrollRef} onScroll={() => {
+      const scroll = scrollRef.current;
+      if (!scroll || prepend.current) return;
+      if (scroll.scrollTop <= 160 && hasOlder && !loadingOlder) { void loadOlder(); return; }
+      if (readingPresentation.active) {
+        const snapshot = captureChatScrollAnchor(scroll);
+        if (readingPresentation.retainVisible(rows, scroll)) { prepend.current = snapshot; setSettledPrepend(snapshot); }
+      }
+    }}>
       <div className="chat-transcript-list space-y-3">
         {error && <div role="alert" className="rounded-md border border-wardian-error px-3 py-2 text-xs text-wardian-error">
           <p>{error}</p>
@@ -1092,7 +1115,7 @@ function ChatPane({
           <button
             type="button"
             className="w-full rounded border border-wardian-border bg-wardian-card px-3 py-2 text-xs font-semibold leading-5 text-muted-neutral hover:text-primary"
-            onClick={() => { prepend.current = null; onJumpToLatest(); }}
+            onClick={() => { prepend.current = null; readingPresentation.clear(); onJumpToLatest(); }}
           >Jump to latest</button>
         ) : null}
         {hasOlder ? (
@@ -1106,7 +1129,7 @@ function ChatPane({
           </button>
         ) : null}
         {rows.map((row) => (
-          <div key={chatTranscriptRowKey(row)} data-chat-row-key={chatTranscriptRowKey(row)}>
+          <div key={`${agent.session_id}:${readingPresentation.rowEpoch}:${chatTranscriptRowKey(row)}`} data-chat-row-key={chatTranscriptRowKey(row)}>
             <ChatTranscriptRow
               agentIsWorking={isProcessingAgentStatus(agent.status) || isSubmitting}
               isSubmitting={isSubmitting}

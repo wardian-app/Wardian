@@ -46,6 +46,7 @@ enum ControlOperation {
     AgentDelete,
     AgentRename,
     AgentRestart,
+    AgentNewSession,
     AgentPause,
     AgentResume,
     AgentModels,
@@ -352,6 +353,19 @@ pub fn agent_pause(target: &str) -> io::Result<()> {
         &runtime,
         ControlOperation::AgentPause,
         send_request(ControlRequest::AgentPause {
+            target: target.to_string(),
+        }),
+    )
+    .map(|_| ())
+}
+
+/// Request the desktop New Session lifecycle without a resume fallback.
+pub fn agent_new_session(target: &str) -> io::Result<()> {
+    let runtime = build_runtime()?;
+    timeout_block(
+        &runtime,
+        ControlOperation::AgentNewSession,
+        send_request(ControlRequest::AgentNewSession {
             target: target.to_string(),
         }),
     )
@@ -866,6 +880,7 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         ControlOperation::AgentDelete
         | ControlOperation::AgentRename
         | ControlOperation::AgentRestart
+        | ControlOperation::AgentNewSession
         | ControlOperation::AgentPause
         | ControlOperation::AgentResume
         | ControlOperation::AgentModels
@@ -1436,6 +1451,10 @@ mod tests {
     #[test]
     fn agent_mutations_use_longer_control_timeout() {
         assert!(operation_timeout(&ControlOperation::AgentSpawn) > CONTROL_TIMEOUT);
+        assert_eq!(
+            operation_timeout(&ControlOperation::AgentNewSession),
+            CONTROL_MUTATION_TIMEOUT
+        );
         assert_eq!(
             operation_timeout(&ControlOperation::AgentUpdate),
             CONTROL_MUTATION_TIMEOUT

@@ -48,38 +48,32 @@ impl CodexSharedClient {
                 "Codex task requires positively idle state or exact observed active turn; not written",
             )),
         };
-        let task_admission = expected_turn.as_deref().map_or(
-            TaskAdmission::IdleStart(message_id),
-            TaskAdmission::ActiveSteer,
-        );
         let result = self
-            .request_with_task_admission(
+            .request_with_activity(
                 method,
                 params,
                 Some(Duration::from_secs(30)),
                 Some(&activity),
-                task_admission,
             )
             .await?;
         let turn_id = if let Some(expected) = expected_turn {
             let returned = result["turnId"].as_str();
             if returned != Some(expected.as_str()) {
-                self.abandon_task_start(message_id);
                 return Err(CodexSharedError::uncertain(
                     "turn/steer did not acknowledge expectedTurnId; not replayed",
                 ));
             }
             expected
         } else {
-            let Some(turn_id) = result["turn"]["id"].as_str().filter(|id| !id.is_empty()) else {
-                self.abandon_task_start(message_id);
-                return Err(CodexSharedError::uncertain(
-                    "turn/start returned no exact turn identity; not replayed",
-                ));
-            };
-            let turn_id = turn_id.to_owned();
-            self.confirm_task_start(message_id, &turn_id);
-            turn_id
+            result["turn"]["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    CodexSharedError::uncertain(
+                        "turn/start returned no exact turn identity; not replayed",
+                    )
+                })?
+                .to_owned()
         };
         receipt.provider_turn_id = Some(turn_id);
         receipt.message_id = Some(message_id.to_owned());

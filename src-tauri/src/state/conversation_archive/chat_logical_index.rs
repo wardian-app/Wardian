@@ -140,6 +140,20 @@ impl Admission<'_> {
 }
 
 impl Index {
+    /// Persistent trees only. `before`/`narrative_before` are seek keys, while
+    /// member/bucket fields contain logical IDs and ordinal keys, not roots.
+    pub(super) fn node_roots(&self) -> impl Iterator<Item = &str> {
+        [
+            self.buckets.as_deref(),
+            self.members.as_deref(),
+            self.pending.as_deref(),
+            self.claims.as_deref(),
+            self.narrative_queue.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
     fn bucket(&self, store: &mut Store, key: &str) -> io::Result<Option<Bucket>> {
         store
             .get(&self.buckets, key)?

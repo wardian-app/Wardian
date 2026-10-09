@@ -50,6 +50,15 @@ pub(super) struct Progress {
     body_before: Option<String>,
 }
 
+impl Progress {
+    /// Body/proof indexes are roots; their seek positions and stamps are not.
+    pub(super) fn node_roots(&self) -> impl Iterator<Item = &str> {
+        [self.proofs.as_deref(), self.bodies.as_deref()]
+            .into_iter()
+            .flatten()
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct SelectionScope {
     agent_id: String,
@@ -108,6 +117,22 @@ struct BodyJob {
     event_bytes: u64,
     row: Row,
     offset: u64,
+}
+
+impl BodyJob {
+    /// A queued job owns its chunks even when no current display row refers to
+    /// them. Register the schema-defined body root on every unfinished write.
+    fn put(&self, store: &mut Store) -> io::Result<String> {
+        let dependencies = self
+            .row
+            .body
+            .as_ref()
+            .and_then(|body| body.root.as_ref())
+            .map(|root| Dependency::Node(root.clone()))
+            .into_iter()
+            .collect();
+        store.put_linked(self, dependencies)
+    }
 }
 
 /// Physical line starts are stable private ordering keys. They are deliberately
@@ -284,6 +309,15 @@ fn select(
     }
     selection.index.validate(&index_path)?;
     let pending = selection.before > 0;
+    let roots = selection
+        .seen
+        .iter()
+        .cloned()
+        .map(Dependency::Node)
+        .collect::<Vec<_>>();
+    // A new owner resumes through this pointer, so its seen tree must be durable
+    // before either the selection object or its pointer can publish it.
+    store.finish_checkpoint(&roots)?;
     let reference = store.put(&selection)?;
     write_json_atomic(&pointer, &Some(reference))?;
     Ok((None, pending))
@@ -338,7 +372,7 @@ fn unresolved(event: &mut AgentChatEvent) {
 
 pub(super) fn advance(context: &ConversationArchiveContext) -> io::Result<bool> {
     let (head_path, objects) = locations(&context.agent_id)?;
-    let mut store = Store::bounded_writer(&objects);
+    let mut store = Store::checkpoint_writer(&objects);
     let previous = head(&context.agent_id)?;
     let mut published = match &previous {
         Some(reference) => store.read::<Head>(reference)?,
@@ -504,12 +538,13 @@ pub(super) fn advance(context: &ConversationArchiveContext) -> io::Result<bool> 
                     binding: source.binding()?,
                     ..Default::default()
                 });
-                let job = store.put(&BodyJob {
+                let job = BodyJob {
                     event_start: offset,
                     event_bytes: bytes.len() as u64,
                     row: row.clone(),
                     offset: 0,
-                })?;
+                }
+                .put(&mut store)?;
                 progress.bodies = Some(store.insert(&progress.bodies, &row.key, &job)?);
             }
             published.row_count = published.row_count.max(offset as usize + 1);
@@ -596,7 +631,7 @@ pub(super) fn advance(context: &ConversationArchiveContext) -> io::Result<bool> 
         if complete || job.row.event.metadata["chat_body_unavailable"] == true {
             progress.body_before = Some(key);
         } else {
-            let reference = store.put(&job)?;
+            let reference = job.put(&mut store)?;
             progress.bodies = Some(store.insert(&progress.bodies, &key, &reference)?);
         }
     }
@@ -651,6 +686,7 @@ pub(super) fn advance(context: &ConversationArchiveContext) -> io::Result<bool> 
         .validate(&directory.join("manifest.json"))?;
     progress.narrative.validate(&narrative_path)?;
     progress.events.validate(&event_path)?;
+    store.finish_checkpoint(&published.checkpoint_dependencies())?;
     let reference = store.put(&published)?;
     // LAST: cursors, provenance roots, rows and body chunks are durable together.
     write_json_atomic(&head_path, &reference)?;
@@ -695,7 +731,7 @@ mod tests {
     #[test]
     fn cold_saved_attempted_object_writes_have_a_byte_budget() {
         let temp = tempfile::tempdir().unwrap();
-        let store = Store::bounded_writer(temp.path());
+        let store = Store::checkpoint_writer(temp.path());
         let bytes = vec![0; BODY_BYTES];
         for _ in 0..512 {
             store.put_bytes(&bytes).unwrap();
@@ -705,5 +741,185 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("write budget exhausted"));
+    }
+
+    #[test]
+    fn cold_selection_partial_flush_preserves_pointer_and_restarts() {
+        use crate::state::conversation_archive::tests::isolated_home;
+        use wardian_core::conversations::ConversationBoundaryReason;
+
+        let (_guard, _temp) = isolated_home();
+        let context = ConversationArchiveContext::for_agent_id("cold-selection", "unknown");
+        let entries = (0..26)
+            .map(|index| ConversationIndexEntry {
+                schema: 1,
+                conversation_id: format!("closed-{index}"),
+                agent_id: context.agent_id.clone(),
+                agent_name: context.agent_name.clone(),
+                agent_class: String::new(),
+                workspace: String::new(),
+                provider: context.provider.clone(),
+                provider_session_ids: Vec::new(),
+                started_at: String::new(),
+                ended_at: None,
+                status: ConversationStatus::Closed,
+                boundary_reason: ConversationBoundaryReason::Shutdown,
+                first_prompt_excerpt: None,
+                last_record_excerpt: None,
+                record_count: 0,
+                turn_count: 0,
+                has_turns: false,
+                lifecycle_only: false,
+                artifact_count: 0,
+                path: String::new(),
+            })
+            .collect::<Vec<_>>();
+        let index_path = super::super::super::storage::index_path(&context.agent_id).unwrap();
+        std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+        let journal = entries
+            .iter()
+            .map(|entry| serde_json::to_string(entry).unwrap() + "\n")
+            .collect::<String>();
+        std::fs::write(&index_path, journal).unwrap();
+        let objects = locations(&context.agent_id).unwrap().1;
+        let mut first = Store::checkpoint_writer(&objects);
+        let (selected, pending) = select(&context, &mut first).unwrap();
+        assert!(selected.is_none() && pending);
+        drop(first);
+        let pointer = selection_path(&context).unwrap();
+        let prior_pointer = std::fs::read(&pointer).unwrap();
+        let prior_ref: Option<String> = bounded_json(&pointer).unwrap();
+        let mut restart = Store::new(&objects);
+        let prior: Selection = restart.read(prior_ref.as_ref().unwrap()).unwrap();
+        assert_eq!(restart.page(&prior.seen, None, 80).unwrap().len(), 24);
+
+        // Locate the final node for a real filesystem flush collision. The
+        // previous selection stays published while some new children flush.
+        let mut rehearsal = Store::checkpoint_writer(&objects);
+        let mut final_root = prior.seen.clone();
+        for entry in entries[..2].iter().rev() {
+            let marker = rehearsal.put(&true).unwrap();
+            final_root = Some(
+                rehearsal
+                    .insert(
+                        &final_root,
+                        &digest(entry.conversation_id.as_bytes()),
+                        &marker,
+                    )
+                    .unwrap(),
+            );
+        }
+        let blocked = objects.join(final_root.as_ref().unwrap());
+        assert!(!blocked.exists());
+        drop(rehearsal);
+        std::fs::create_dir(&blocked).unwrap();
+        let files = || {
+            std::fs::read_dir(&objects)
+                .unwrap()
+                .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_file())
+                .count()
+        };
+        let before = files();
+        let mut failing = Store::checkpoint_writer(&objects);
+        assert!(select(&context, &mut failing).is_err());
+        assert!(files() > before, "the failure must follow a partial flush");
+        assert_eq!(std::fs::read(&pointer).unwrap(), prior_pointer);
+        assert_eq!(
+            Store::new(&objects)
+                .page(&prior.seen, None, 80)
+                .unwrap()
+                .len(),
+            24
+        );
+        drop(failing);
+        std::fs::remove_dir(&blocked).unwrap();
+
+        let mut retry = Store::checkpoint_writer(&objects);
+        let (selected, pending) = select(&context, &mut retry).unwrap();
+        assert!(selected.is_none() && !pending);
+        drop(retry);
+        let reference: Option<String> = bounded_json(&pointer).unwrap();
+        let mut reader = Store::new(&objects);
+        let saved: Selection = reader.read(reference.as_ref().unwrap()).unwrap();
+        assert_eq!(saved.before, 0);
+        assert_eq!(reader.page(&saved.seen, None, 80).unwrap().len(), 26);
+        for entry in entries {
+            assert!(reader
+                .get(&saved.seen, &digest(entry.conversation_id.as_bytes()))
+                .unwrap()
+                .is_some());
+        }
+    }
+
+    #[test]
+    fn cold_body_jobs_keep_private_chunks_reachable_without_a_display_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let objects = temp.path().join("objects");
+        let mut first = Store::checkpoint_writer(&objects);
+        let chunk = first.put_bytes(b"first chunk").unwrap();
+        let body_root = first.insert(&None, "00000000000000000000", &chunk).unwrap();
+        let mut job = BodyJob {
+            event_start: 0,
+            event_bytes: 1,
+            row: Row {
+                agent_id: "cold-agent".into(),
+                conversation_id: "saved-conversation".into(),
+                key: "00000000000000000000".into(),
+                event: serde_json::from_value(json!({
+                    "id":"owned-body", "session_id":"cold-agent",
+                    "provider":"unknown", "kind":"message"
+                }))
+                .unwrap(),
+                body: Some(Body {
+                    root: Some(body_root.clone()),
+                    ..Default::default()
+                }),
+                relation: None,
+                removed_display_ids: Vec::new(),
+            },
+            offset: 11,
+        };
+        let reference = job.put(&mut first).unwrap();
+        let jobs = first.insert(&None, &job.row.key, &reference).unwrap();
+        assert!(!objects.join(&body_root).exists());
+        first
+            .finish_checkpoint(&[Dependency::Node(jobs.clone())])
+            .unwrap();
+        drop(first);
+        let mut restart = Store::checkpoint_writer(&objects);
+        let reference = restart.get(&Some(jobs), &job.row.key).unwrap().unwrap();
+        job = restart.read(&reference).unwrap();
+        assert_eq!(
+            job.row.body.as_ref().unwrap().root.as_ref(),
+            Some(&body_root)
+        );
+        assert_eq!(
+            restart
+                .get(&Some(body_root.clone()), "00000000000000000000")
+                .unwrap(),
+            Some(chunk)
+        );
+        let next_chunk = restart.put_bytes(b"next chunk").unwrap();
+        let next_root = restart
+            .insert(&Some(body_root), "00000000000000000011", &next_chunk)
+            .unwrap();
+        job.row.body.as_mut().unwrap().root = Some(next_root.clone());
+        job.offset = 21;
+        let next_job = job.put(&mut restart).unwrap();
+        let jobs = restart.insert(&None, &job.row.key, &next_job).unwrap();
+        assert!(!objects.join(&next_root).exists());
+        restart
+            .finish_checkpoint(&[Dependency::Node(jobs.clone())])
+            .unwrap();
+        drop(restart);
+        let mut reader = Store::new(&objects);
+        let reference = reader.get(&Some(jobs), &job.row.key).unwrap().unwrap();
+        let saved: BodyJob = reader.read(&reference).unwrap();
+        assert_eq!(saved.offset, 21);
+        assert_eq!(
+            saved.row.body.as_ref().unwrap().root.as_ref(),
+            Some(&next_root)
+        );
+        assert_eq!(reader.page(&Some(next_root), None, 2).unwrap().len(), 2);
     }
 }

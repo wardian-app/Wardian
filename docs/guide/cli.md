@@ -364,6 +364,7 @@ wardian agent show [name-or-uuid]
 wardian agent list
 wardian agent list --scope all
 wardian agent restart <name-or-uuid>
+wardian agent new-session <name-or-uuid>
 wardian agent rename <name-or-uuid> <new-name>
 wardian agent delete <name-or-uuid> --confirm <current-agent-name>
 wardian agent delete <name-or-uuid> --confirm <current-agent-name> --force
@@ -469,6 +470,15 @@ Model IDs and reasoning efforts are provider-discovered; use
 catalog rather than relying on a fixed CLI list. Provider-specific live
 selection may reject a model/effort pair that is not present in that catalog.
 
+`agent new-session` runs the desktop **New Session** operation. It archives the
+current conversation and starts a fresh provider session, preserving the Wardian
+agent identity, provider, model, workspace, habitat, and archived history. An Off
+agent starts immediately; no separate `resume` command is required. The operation
+uses the same lifecycle leases and error handling as the desktop UI. It requires
+a desktop app that supports this control command. An older app's rejection or an
+unavailable endpoint remains an error; Wardian does not retry with `resume` or
+silently replace another operation with a fresh session.
+
 `agent restart` restarts the provider while preserving the Wardian agent, its
 habitat, and saved session history. Use it after `agent update` when the update
 reports `restart_required`, including class changes. `agent delete` is
@@ -489,15 +499,11 @@ settles a request by its exact request ID, and `message interrupt` requests
 interruption only where the provider bridge supports it.
 
 For tasks dispatched through Wardian's native Codex owner, the bound provider
-turn's final answer automatically completes the request only when the task
-started a new turn from idle and that turn stayed task-only. Same-turn user
-input, a synchronous `UserPromptSubmit` hook, context compaction, a user-shell
-command, a second task sharing the turn, or lost observation continuity leaves
-the request awaiting an explicit `message reply`. An explicit reply that
-completed the request takes precedence. Multiple tasks admitted into the same
-turn require a separate explicit reply for each request. Manual inbox
-delivery, composer delivery, and other providers still require an explicit
-reply.
+turn's final answer automatically completes the request and returns to its
+requester. An explicit `message reply` that completed the request takes
+precedence. Multiple tasks admitted into the same turn receive that turn's
+shared final answer. Manual inbox delivery, composer delivery, and other
+providers still require an explicit reply.
 
 `message wait --timeout-ms 60000` waits for mailbox activity, including
 completion results, without returning or acknowledging inbox records. Follow it
@@ -769,10 +775,9 @@ impersonate another agent. Targets are one exact agent name or UUID.
   pass `ack_cursor` only for a page already consumed. An empty wait does not cancel
   a task, consume a reply, or authorize a resend.
 - `message reply <request-id> --status done|blocked|failed` completes that request
-  as its authorized recipient. Native Codex publishes a bound final result only
-  for an eligible task-only turn; mixed or shared turns require an explicit
-  reply. Other delivery paths also require an explicit reply; echoed IDs and
-  Idle status alone never complete a request.
+  as its authorized recipient. Native Codex task turns also publish their bound
+  final result automatically. Other delivery paths require an explicit reply;
+  echoed IDs and Idle status alone never complete a request.
 - `message interrupt <target>` explicitly requests interruption when supported.
 
 Send, follow-up and reply bodies accept literal text, `--stdin`, or `--file`.

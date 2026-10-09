@@ -1,13 +1,13 @@
 //! Content-addressed, persistent AVL indexes. Published roots never change.
 //! Readers spend one shared byte/node budget, including failed reads.
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub(super) const READ_BYTES: usize = 1024 * 1024;
 pub(super) const READ_OBJECTS: usize = 512;
@@ -28,6 +28,63 @@ pub(super) struct SeekCache {
     bytes: usize,
 }
 
+/// Only schema-defined links participate in checkpoint reachability. Object
+/// payloads and index keys can contain user text that happens to look like a hash.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(super) enum Dependency {
+    Node(String),
+    Object(String),
+}
+
+impl Dependency {
+    fn reference(&self) -> &str {
+        match self {
+            Self::Node(reference) | Self::Object(reference) => reference,
+        }
+    }
+}
+
+struct PendingNode {
+    bytes: Vec<u8>,
+    order: usize,
+}
+
+struct PendingNodes {
+    nodes: HashMap<String, PendingNode>,
+    links: HashMap<String, Vec<Dependency>>,
+    ram_bytes: usize,
+    ram_limit: usize,
+    object_limit: usize,
+}
+
+impl PendingNodes {
+    fn new(ram_limit: usize, object_limit: usize) -> Self {
+        Self {
+            nodes: HashMap::new(),
+            links: HashMap::new(),
+            ram_bytes: 0,
+            ram_limit,
+            object_limit,
+        }
+    }
+
+    fn reserve(&mut self, bytes: usize) -> io::Result<()> {
+        let next = self
+            .ram_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| io::Error::other("chat pending node RAM budget exhausted"))?;
+        if next > self.ram_limit || self.nodes.len() + self.links.len() >= self.object_limit {
+            return Err(io::Error::other("chat pending node RAM budget exhausted"));
+        }
+        self.ram_bytes = next;
+        Ok(())
+    }
+}
+
+// Reserve traversal/maps as well as actual owned byte/string capacities. This
+// covers the bounded child/value frontier without a second unbounded allocation.
+const PENDING_ENTRY_RAM: usize = 1536;
+
 pub(super) struct Store {
     pub(super) dir: PathBuf,
     pub(super) bytes: usize,
@@ -37,6 +94,7 @@ pub(super) struct Store {
     bounded_writes: bool,
     write_objects: Cell<usize>,
     write_bytes: Cell<usize>,
+    pending: Option<PendingNodes>,
 }
 
 impl Store {
@@ -50,6 +108,7 @@ impl Store {
             bounded_writes: false,
             write_objects: Cell::new(0),
             write_bytes: Cell::new(0),
+            pending: None,
         }
     }
 
@@ -69,6 +128,16 @@ impl Store {
         }
     }
 
+    /// Checkpoint publications stage transient AVL versions privately. Direct row
+    /// and body objects retain immediate durable writes; published roots remain
+    /// immutable, and other writers keep their existing persistence semantics.
+    pub(super) fn checkpoint_writer(dir: &Path) -> Self {
+        let mut store = Self::bounded_writer(dir);
+        let ram_limit = 2 * store.byte_limit + PENDING_ENTRY_RAM * store.object_limit;
+        store.pending = Some(PendingNodes::new(ram_limit, store.object_limit));
+        store
+    }
+
     pub(super) fn checkpoint_due(&self) -> bool {
         self.objects > 5000
             || self.write_objects.get() > 5000
@@ -81,6 +150,22 @@ impl Store {
             return Err(io::Error::other("chat read reference/budget invalid"));
         }
         self.objects += 1;
+        if let Some(node) = self
+            .pending
+            .as_ref()
+            .and_then(|pending| pending.nodes.get(reference))
+        {
+            let len = node.bytes.len();
+            if len > limit || len > self.byte_limit.saturating_sub(self.bytes) {
+                return Err(io::Error::other("chat read byte budget exhausted"));
+            }
+            let bytes = node.bytes.clone();
+            self.bytes += bytes.len();
+            if digest(&bytes) != reference {
+                return Err(io::Error::other("chat read object changed"));
+            }
+            return Ok(bytes);
+        }
         let mut file = fs::File::open(self.dir.join(reference))?;
         let len = usize::try_from(file.metadata()?.len()).map_err(io::Error::other)?;
         if len > limit || len > self.byte_limit.saturating_sub(self.bytes) {
@@ -100,7 +185,7 @@ impl Store {
         serde_json::from_slice(&self.read_bytes(reference, 16 * 1024)?).map_err(io::Error::other)
     }
 
-    pub(super) fn put_bytes(&self, bytes: &[u8]) -> io::Result<String> {
+    fn account_write(&self, bytes: &[u8]) -> io::Result<()> {
         if bytes.len() > 16 * 1024 {
             return Err(io::Error::other("oversized chat index object"));
         }
@@ -113,6 +198,15 @@ impl Store {
             self.write_objects.set(self.write_objects.get() + 1);
             self.write_bytes.set(self.write_bytes.get() + bytes.len());
         }
+        Ok(())
+    }
+
+    pub(super) fn put_bytes(&self, bytes: &[u8]) -> io::Result<String> {
+        self.account_write(bytes)?;
+        self.persist_bytes(bytes)
+    }
+
+    fn persist_bytes(&self, bytes: &[u8]) -> io::Result<String> {
         fs::create_dir_all(&self.dir)?;
         let reference = digest(bytes);
         let target = self.dir.join(&reference);
@@ -135,6 +229,129 @@ impl Store {
         self.put_bytes(&serde_json::to_vec(value).map_err(io::Error::other)?)
     }
 
+    /// Register explicit child roots for a durable payload that can still refer
+    /// to private nodes. Neither serialized metadata nor logical IDs are scanned.
+    pub(super) fn put_linked<T: Serialize>(
+        &mut self,
+        value: &T,
+        dependencies: Vec<Dependency>,
+    ) -> io::Result<String> {
+        let reference = self.put(value)?;
+        let Some(pending) = self.pending.as_mut() else {
+            return Ok(reference);
+        };
+        if dependencies.is_empty() {
+            return Ok(reference);
+        }
+        if dependencies.iter().any(|link| !valid_ref(link.reference())) {
+            return Err(io::Error::other("invalid chat checkpoint dependency"));
+        }
+        if let Some(previous) = pending.links.get(&reference) {
+            if previous != &dependencies {
+                return Err(io::Error::other(
+                    "chat checkpoint payload dependencies changed",
+                ));
+            }
+            return Ok(reference);
+        }
+        let ram = PENDING_ENTRY_RAM
+            + reference.capacity()
+            + dependencies.capacity() * std::mem::size_of::<Dependency>()
+            + dependencies
+                .iter()
+                .map(|link| match link {
+                    Dependency::Node(value) | Dependency::Object(value) => value.capacity(),
+                })
+                .sum::<usize>();
+        pending.reserve(ram)?;
+        pending.links.insert(reference.clone(), dependencies);
+        Ok(reference)
+    }
+
+    /// Durably flush only private nodes reachable through typed final roots.
+    /// Already durable references terminate the walk. All final dependencies
+    /// finish write/sync/rename before the caller can publish its head pointer.
+    /// Errors leave that pointer and caller state unchanged; dropping the store
+    /// discards every remaining transient node, while durable orphans are safe
+    /// for an idempotent retry.
+    pub(super) fn finish_checkpoint(&mut self, roots: &[Dependency]) -> io::Result<()> {
+        let Some(pending) = self.pending.as_ref() else {
+            return Ok(());
+        };
+        let mut frontier = roots.to_vec();
+        let mut seen = HashSet::new();
+        let mut nodes = Vec::new();
+        while let Some(link) = frontier.pop() {
+            if !valid_ref(link.reference()) {
+                return Err(io::Error::other("invalid chat checkpoint dependency"));
+            }
+            if !seen.insert(link.clone()) {
+                continue;
+            }
+            if seen.len() > 3 * self.object_limit + roots.len() {
+                return Err(io::Error::other(
+                    "chat checkpoint dependency budget exhausted",
+                ));
+            }
+            match &link {
+                Dependency::Node(reference) => {
+                    if let Some(saved) = pending.nodes.get(reference) {
+                        let node: Node =
+                            serde_json::from_slice(&saved.bytes).map_err(io::Error::other)?;
+                        frontier.extend(node.left.into_iter().map(Dependency::Node));
+                        frontier.extend(node.right.into_iter().map(Dependency::Node));
+                        frontier.push(Dependency::Object(node.value));
+                        nodes.push((saved.order, reference.clone()));
+                        continue;
+                    }
+                }
+                Dependency::Object(reference) => {
+                    if let Some(links) = pending.links.get(reference) {
+                        frontier.extend(links.iter().cloned());
+                    }
+                }
+            }
+            if !fs::metadata(self.dir.join(link.reference()))?.is_file() {
+                return Err(io::Error::other(
+                    "chat checkpoint dependency is not durable",
+                ));
+            }
+        }
+        // Children are created before their parent versions. Keep that order
+        // while omitting unreachable versions produced by subsequent inserts.
+        nodes.sort_unstable_by_key(|(order, _)| *order);
+        for (_, reference) in nodes {
+            let saved = &pending.nodes[&reference];
+            if digest(&saved.bytes) != reference {
+                return Err(io::Error::other("chat pending node changed"));
+            }
+            match fs::metadata(self.dir.join(&reference)) {
+                Ok(metadata) => {
+                    if !metadata.is_file() || metadata.len() != saved.bytes.len() as u64 {
+                        return Err(io::Error::other("chat checkpoint node is not durable"));
+                    }
+                    let mut bytes = Vec::with_capacity(saved.bytes.len());
+                    File::open(self.dir.join(&reference))?
+                        .take(saved.bytes.len() as u64 + 1)
+                        .read_to_end(&mut bytes)?;
+                    if bytes != saved.bytes {
+                        return Err(io::Error::other("chat checkpoint node changed"));
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            // Attempt accounting happened when this version was created;
+            // flushing it must neither recharge nor enlarge the write budget.
+            self.persist_bytes(&saved.bytes)?;
+        }
+        let pending = self.pending.as_mut().expect("checkpoint writer retained");
+        pending.nodes.clear();
+        pending.links.clear();
+        pending.ram_bytes = 0;
+        Ok(())
+    }
+
     fn node(&mut self, root: &Option<String>) -> io::Result<Option<Node>> {
         root.as_deref()
             .map(|reference| self.read(reference))
@@ -147,7 +364,23 @@ impl Store {
 
     fn save(&mut self, mut node: Node) -> io::Result<String> {
         node.height = 1 + self.height(&node.left)?.max(self.height(&node.right)?);
-        self.put(&node)
+        if self.pending.is_none() {
+            return self.put(&node);
+        }
+        let bytes = serde_json::to_vec(&node).map_err(io::Error::other)?;
+        self.account_write(&bytes)?;
+        let reference = digest(&bytes);
+        let pending = self.pending.as_mut().expect("checkpoint writer retained");
+        // A newly durable body blob may contain exactly these node bytes.
+        // File existence cannot prove that its typed children are durable yet.
+        if !pending.nodes.contains_key(&reference) {
+            pending.reserve(PENDING_ENTRY_RAM + reference.capacity() + bytes.capacity())?;
+            let order = pending.nodes.len();
+            pending
+                .nodes
+                .insert(reference.clone(), PendingNode { bytes, order });
+        }
+        Ok(reference)
     }
 
     fn rotate_left(&mut self, mut node: Node) -> io::Result<String> {
@@ -304,3 +537,7 @@ struct Node {
     right: Option<String>,
     height: u32,
 }
+
+#[cfg(test)]
+#[path = "chat_read_store_tests.rs"]
+mod tests;

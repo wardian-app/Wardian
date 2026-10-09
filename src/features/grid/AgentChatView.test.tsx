@@ -1186,6 +1186,36 @@ describe("AgentChatView", () => {
     expect(await screen.findByText("message 1")).toBeInTheDocument();
   });
 
+  it("preserves a visible full tool row and following answer when older work crosses the group threshold", async () => {
+    const pending = deferred<AgentChatPage>();
+    const work = (id: string, sequence: number) => event({ id, sequence, kind: "tool_result", role: "tool",
+      title: "Tool result", status: "succeeded", text: `Full output ${id}\nVisible second line`, exit_code: 0 });
+    const current = [work("visible-one", 2), work("visible-two", 3), event({ id: "answer", sequence: 4, text: "Following answer" })];
+    invokeMock.mockImplementation((command, args) => command !== "load_agent_chat_page" ? Promise.resolve(undefined)
+      : (args as Record<string, unknown> | undefined)?.cursor ? pending.promise : Promise.resolve(olderReadPage({ events: current, progress: "ready" })));
+    render(<AgentChatView sessionId="agent-1" refreshIntervalMs={60000} />);
+    await screen.findByText("Following answer");
+    const scroll = screen.getByTestId("agent-chat-scroll-region");
+    scroll.getBoundingClientRect = () => new DOMRect(0, 0, 300, 600);
+    Object.defineProperty(scroll, "scrollHeight", { configurable: true, value: 1800 });
+    const first = scroll.querySelector<HTMLElement>('[data-chat-row-key="visible-one"]')!;
+    const second = scroll.querySelector<HTMLElement>('[data-chat-row-key="visible-two"]')!;
+    const answer = scroll.querySelector<HTMLElement>('[data-chat-row-key="answer"]')!;
+    first.getBoundingClientRect = () => new DOMRect(0, 20 + (screen.queryByText(/Full output older/) ? 100 : 0), 300, 294);
+    second.getBoundingClientRect = () => new DOMRect(0, 320, 300, 40);
+    answer.getBoundingClientRect = () => new DOMRect(0, 366, 300, 40);
+    const firstContent = first.textContent;
+    scroll.scrollTop = 100;
+    fireEvent.scroll(scroll);
+    await act(async () => pending.resolve(olderReadPage({ events: [work("older", 1)], progress: "ready", next_before: null })));
+    expect(scroll.querySelector('[data-chat-row-key="visible-one"]')).toBe(first);
+    expect(scroll.querySelector('[data-chat-row-key="answer"]')).toBe(answer);
+    expect(first.textContent).toBe(firstContent);
+    expect(first.getBoundingClientRect().height).toBe(294);
+    expect(scroll.scrollTop).toBe(200);
+    expect(screen.queryByTestId("chat-work-group")).not.toBeInTheDocument();
+  });
+
   it("allows another older scroll after a failed read and preserves the prepended viewport", async () => {
     const firstOlder = deferred<AgentChatPage>();
     const secondOlder = deferred<AgentChatPage>();

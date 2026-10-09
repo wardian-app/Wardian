@@ -813,6 +813,67 @@ fn checkpoint_pointer_failure_retries_all_unpublished_rows() {
     checkpoint_rows_retry_after_fault(3);
 }
 
+#[test]
+fn checkpoint_node_flush_failure_retries_all_unpublished_rows() {
+    checkpoint_rows_retry_after_fault(4);
+}
+
+#[test]
+fn generated_input_pointer_failure_keeps_the_previous_in_memory_head() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    owner
+        .committed(candidate(vec![event("previous", "old")]), "old".into())
+        .unwrap();
+    let ctx = context();
+    let (head_path, _) = locations(&ctx.agent_id).unwrap();
+    let previous_pointer = fs::read(&head_path).unwrap();
+    let (before, previous_revision, fence) = {
+        let works = owner.work.lock().unwrap();
+        let work = &works[&ctx.agent_id];
+        (
+            serde_json::to_vec(&work.head).unwrap(),
+            work.published.clone(),
+            InputFence {
+                conversation_id: work.head.conversation_id.clone(),
+                source_epoch: work.head.source_epoch.clone(),
+                policy_generation: None,
+            },
+        )
+    };
+    // A real final-pointer rename failure exercises the previous mutation bug
+    // without relying on a fault hook introduced by this change.
+    let backup = head_path.with_extension("pointer-backup");
+    fs::rename(&head_path, &backup).unwrap();
+    fs::create_dir(&head_path).unwrap();
+    let text = "🌲".repeat(PREVIEW_BYTES);
+    assert!(owner
+        .commit_input(&ctx, &fence.conversation_id, &fence, || {
+            Ok((event("generated-input", &text), text.len() as u64))
+        })
+        .is_err());
+    {
+        let works = owner.work.lock().unwrap();
+        let work = &works[&ctx.agent_id];
+        assert_eq!(serde_json::to_vec(&work.head).unwrap(), before);
+        assert_eq!(work.published, previous_revision);
+    }
+    fs::remove_dir(&head_path).unwrap();
+    fs::rename(&backup, &head_path).unwrap();
+    assert_eq!(fs::read(&head_path).unwrap(), previous_pointer);
+    owner
+        .commit_input(&ctx, &fence.conversation_id, &fence, || {
+            Ok((event("generated-input", &text), text.len() as u64))
+        })
+        .unwrap()
+        .unwrap();
+    let works = owner.work.lock().unwrap();
+    let work = &works[&ctx.agent_id];
+    assert_eq!(work.head.row_count, 2);
+    assert_eq!(work.head.committed_output_bytes, text.len() as u64);
+    assert_eq!(work.signatures.len(), 2);
+}
+
 fn checkpoint_rows_retry_after_fault(stage: u8) {
     let (_guard, _temp) = isolated_home();
     let owner = ProjectionOwner::default();
