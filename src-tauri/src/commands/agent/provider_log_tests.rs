@@ -571,6 +571,23 @@ async fn identical_fallback_provider_rows_keep_distinct_archive_and_chat_identit
         Some(515)
     );
     assert_ne!(first_event.id, second_event.id);
+    for (event, start, end) in [(&first_event, 311, 515), (&second_event, 515, 719)] {
+        assert_eq!(
+            event.metadata["chat_source_ref"].as_str(),
+            Some(event.id.as_str()),
+            "forward capture uses the qualified source observation"
+        );
+        assert_eq!(event.metadata["chat_source_start"].as_u64(), Some(start));
+        assert_eq!(event.metadata["chat_source_end"].as_u64(), Some(end));
+    }
+    let source_epoch = first_event.metadata["chat_source_epoch"]
+        .as_str()
+        .expect("qualified native file identity");
+    assert_eq!(
+        second_event.metadata["chat_source_epoch"].as_str(),
+        Some(source_epoch),
+        "appending a row retains the native source identity"
+    );
 
     let snapshot = crate::commands::chat::agent_archive_capture_snapshot(&state, "agent-1")
         .await
@@ -590,8 +607,31 @@ async fn identical_fallback_provider_rows_keep_distinct_archive_and_chat_identit
         .iter()
         .find(|event| event.metadata["provider_log_row_offset"].as_u64() == Some(515))
         .expect("second direct-tail observation");
-    assert_eq!(first_tail_event.id, first_event.id);
-    assert_eq!(second_tail_event.id, second_event.id);
+    // Legacy tail projections lack the forward reader's qualified source proof.
+    // Their IDs stay stable within that projection, while canonical archive IDs
+    // retain the exact physical observations checked above.
+    assert_eq!(tail_events.len(), 2);
+    assert_ne!(first_tail_event.id, second_tail_event.id);
+    let repeated_tail = crate::commands::chat::collect_agent_chat_events_for_archive(&snapshot)
+        .expect("repeat the same legacy tail projection");
+    assert_eq!(
+        repeated_tail
+            .events
+            .iter()
+            .filter(|event| event.metadata["provider_log"] == true)
+            .map(|event| (
+                event.metadata["provider_log_row_offset"].as_u64(),
+                &event.id
+            ))
+            .collect::<Vec<_>>(),
+        tail_events
+            .iter()
+            .map(|event| (
+                event.metadata["provider_log_row_offset"].as_u64(),
+                &event.id
+            ))
+            .collect::<Vec<_>>()
+    );
 
     let chat_events = state
         .conversation_archive
