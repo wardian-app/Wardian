@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { once } from 'node:events';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { cacheEnvironment, cacheKey, cacheLayout, cargoInvocation, claimTarget, inspectTargets, main, pruneTargets, withRustCache } from './rust-build-cache.mjs';
 import { verifyDownload } from './setup-rust-build-cache.mjs';
@@ -27,6 +29,91 @@ function fixture(t) {
   const env = { WARDIAN_RUST_CACHE_ROOT: path.join(root, 'cache'), CARGO_HOME: path.join(root, 'cargo-home'), PATH: '' };
   const layout = cacheLayout(workspace, env, source);
   return { root, source, workspace, env, layout };
+}
+
+function hash(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function physicalClosureReceipt(layout, ownerBytes, markerBytes, owner, pid) {
+  return {
+    schema: 1,
+    kind: 'rust-cache-ended-claim-recovery',
+    repo_key: layout.repoKey,
+    worktree_key: layout.worktreeKey,
+    owner_sha256: hash(ownerBytes),
+    owner: { token: owner.token, pid: owner.pid, started: owner.started },
+    marker_sha256: hash(markerBytes),
+    disposition: 'ended',
+    evidence_producer: 'owned-node-test-child-handle',
+    observed_at: new Date().toISOString(),
+    closure: {
+      basis: 'owned-process-handles-joined',
+      complete: true,
+      root: {
+        pid,
+        identity: { basis: 'captured-process-handle' },
+        joined: true,
+        streams: { stdin: 'closed', stdout: 'eof', stderr: 'eof' },
+      },
+      descendants: [],
+    },
+  };
+}
+
+function runNode(args, { cwd, env }) {
+  const child = spawn(process.execPath, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
+  child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+  return once(child, 'close').then(([code, signal]) => ({ child, code, signal, stdout, stderr }));
+}
+
+function fixtureProcessEnv(f) {
+  return {
+    PATH: process.env.PATH ?? '',
+    ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+    WARDIAN_RUST_CACHE_ROOT: f.env.WARDIAN_RUST_CACHE_ROOT,
+    WARDIAN_RUST_CACHE_SOURCE_ROOT: f.source,
+    CARGO_HOME: f.env.CARGO_HOME,
+  };
+}
+
+async function createEndedClaim(f) {
+  const launcher = fileURLToPath(new URL('./rust-build-cache.mjs', import.meta.url));
+  const childCode = `
+    import { readFileSync } from 'node:fs';
+    import { cacheLayout, claimTarget } from ${JSON.stringify(new URL('./rust-build-cache.mjs', import.meta.url).href)};
+    const layout = cacheLayout(process.cwd(), process.env);
+    claimTarget(layout, process.env);
+    const owner = JSON.parse(readFileSync(layout.claim + '/owner.json', 'utf8'));
+    process.stdout.write(JSON.stringify({ pid: process.pid, owner }) + '\\n', () => { process.exitCode = 23; });
+  `;
+  const env = fixtureProcessEnv(f);
+  const processResult = await runNode(['--input-type=module', '-e', childCode], { cwd: f.workspace, env });
+  assert.equal(processResult.code, 23, processResult.stderr);
+  assert.equal(processResult.signal, null);
+  const ownerFromChild = JSON.parse(processResult.stdout.trim());
+  assert.equal(ownerFromChild.pid, processResult.child.pid);
+  assert.equal(ownerFromChild.owner.pid, processResult.child.pid);
+  const ownerBytes = readFileSync(path.join(f.layout.claim, 'owner.json'));
+  const markerBytes = readFileSync(path.join(f.layout.target, '.wardian-rust-target.json'));
+  const receiptPath = path.join(f.root, 'closure-receipt.json');
+  const receiptBytes = Buffer.from(JSON.stringify(physicalClosureReceipt(
+    f.layout, ownerBytes, markerBytes, ownerFromChild.owner, processResult.child.pid,
+  )));
+  writeFileSync(receiptPath, receiptBytes);
+  return { launcher, env, processResult, owner: ownerFromChild.owner, ownerBytes, markerBytes, receiptPath, receiptBytes };
+}
+
+function recoveryArgs(ended) {
+  return ['recover-ended-claim', '--owner-sha256', hash(ended.ownerBytes), '--marker-sha256', hash(ended.markerBytes),
+    '--closure-receipt', ended.receiptPath];
+}
+
+function recoverThroughDispatcher(f, ended, recoveryHooks) {
+  return main(recoveryArgs(ended), { cwd: f.workspace, env: f.env, sourceRoot: f.source, recoveryHooks });
 }
 
 test('central worktree keys are distinct while repository store is shared', (t) => {
@@ -171,6 +258,261 @@ test('claims serialize one target while independent worktrees can both claim', (
   lease.release();
 });
 
+test('public recovery archives an owned crash claim and the ordinary launcher reacquires the same target', async (t) => {
+  const f = fixture(t);
+  const ended = await createEndedClaim(f);
+  const { launcher, env, ownerBytes, markerBytes, receiptBytes } = ended;
+  const markerPath = path.join(f.layout.target, '.wardian-rust-target.json');
+  const sentinel = path.join(f.layout.target, 'preserve-me.bin');
+  writeFileSync(sentinel, 'compiler output stays byte-for-byte');
+  const sentinelBytes = readFileSync(sentinel);
+  const other = path.join(f.root, 'unrelated-worktree');
+  mkdirSync(other);
+  const unrelatedLayout = cacheLayout(other, f.env, f.source);
+  const unrelatedLease = claimTarget(unrelatedLayout, f.env);
+  const unrelatedOwner = readFileSync(path.join(unrelatedLayout.claim, 'owner.json'));
+
+  const inspection = await runNode([launcher, 'inspect'], { cwd: f.workspace, env });
+  assert.equal(inspection.code, 0, inspection.stderr);
+  const targetRecord = JSON.parse(inspection.stdout).targets.find((entry) => entry.key === f.layout.worktreeKey);
+  assert.equal(targetRecord.owner_sha256, hash(ownerBytes));
+  assert.equal(targetRecord.marker_sha256, hash(markerBytes));
+
+  const result = await runNode([launcher, ...recoveryArgs(ended).slice(0)], { cwd: f.workspace, env });
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.signal, null);
+  const outcome = JSON.parse(result.stdout);
+  assert.equal(outcome.status, 'recovered');
+  assert.equal(outcome.closure_basis, 'owned-process-handles-joined');
+  assert.equal(existsSync(f.layout.claim), false);
+  assert.deepEqual(readFileSync(markerPath), markerBytes);
+  assert.deepEqual(readFileSync(sentinel), sentinelBytes);
+  assert.deepEqual(readFileSync(path.join(outcome.archive, 'claim', 'owner.json')), ownerBytes);
+  assert.deepEqual(readFileSync(path.join(outcome.archive, 'receipt.json')), receiptBytes);
+  assert.deepEqual(readFileSync(path.join(unrelatedLayout.claim, 'owner.json')), unrelatedOwner);
+
+  let cargoCalls = 0;
+  assert.equal(main(['cargo', 'check'], {
+    cwd: f.workspace,
+    env: f.env,
+    sourceRoot: f.source,
+    lookup: () => null,
+    spawn(program, args, options) {
+      cargoCalls += 1;
+      assert.equal(program, 'cargo');
+      assert.equal(existsSync(f.layout.claim), true);
+      assert.equal(options.env.WARDIAN_RUST_CACHE_TARGET, f.layout.target);
+      assert.ok(args.includes(f.layout.target));
+      return { status: 0 };
+    },
+  }), 0);
+  assert.equal(cargoCalls, 1);
+  assert.equal(existsSync(f.layout.claim), false);
+  assert.deepEqual(readFileSync(markerPath), markerBytes);
+  assert.deepEqual(readFileSync(sentinel), sentinelBytes);
+
+  const nextLease = claimTarget(f.layout, f.env);
+  const nextOwner = readFileSync(path.join(f.layout.claim, 'owner.json'));
+  const repeated = await runNode([launcher, ...recoveryArgs(ended).slice(0)], { cwd: f.workspace, env });
+  assert.equal(repeated.code, 0, repeated.stderr);
+  const repeatedOutcome = JSON.parse(repeated.stdout);
+  assert.equal(repeatedOutcome.status, 'already_recovered');
+  assert.equal(repeatedOutcome.closure_basis, 'owned-process-handles-joined');
+  assert.deepEqual(readFileSync(path.join(f.layout.claim, 'owner.json')), nextOwner);
+  nextLease.release();
+  unrelatedLease.release();
+});
+
+test('public recovery reports and verifies owned-job-zero in successful and repeated outcomes', async (t) => {
+  const f = fixture(t);
+  claimTarget(f.layout, f.env);
+  const owner = { token: 'synthetic-job-zero-owner', pid: 987654321, started: '2026-01-01T00:00:00.000Z' };
+  const ownerBytes = Buffer.from(JSON.stringify(owner));
+  writeFileSync(path.join(f.layout.claim, 'owner.json'), ownerBytes);
+  const markerBytes = readFileSync(path.join(f.layout.target, '.wardian-rust-target.json'));
+  const receipt = physicalClosureReceipt(f.layout, ownerBytes, markerBytes, owner, owner.pid);
+  receipt.evidence_producer = 'deterministic-job-zero-fixture';
+  receipt.closure.basis = 'owned-job-zero';
+  receipt.closure.root.identity = { basis: 'os-birth', birth_id: 'synthetic-fixture-birth-id' };
+  receipt.closure.job = { observed: true, active_process_count: 0 };
+  const receiptBytes = Buffer.from(JSON.stringify(receipt));
+  const receiptPath = path.join(f.root, 'closure-receipt.json');
+  writeFileSync(receiptPath, receiptBytes);
+  const ended = { ownerBytes, markerBytes, receiptPath };
+  const launcher = fileURLToPath(new URL('./rust-build-cache.mjs', import.meta.url));
+  const env = fixtureProcessEnv(f);
+
+  // This synthetic receipt tests public basis serialization, not physical Job evidence.
+  const result = await runNode([launcher, ...recoveryArgs(ended)], { cwd: f.workspace, env });
+  assert.equal(result.code, 0, result.stderr);
+  const outcome = JSON.parse(result.stdout);
+  assert.equal(outcome.status, 'recovered');
+  assert.equal(outcome.closure_basis, 'owned-job-zero');
+
+  const repeated = await runNode([launcher, ...recoveryArgs(ended)], { cwd: f.workspace, env });
+  assert.equal(repeated.code, 0, repeated.stderr);
+  const repeatedOutcome = JSON.parse(repeated.stdout);
+  assert.equal(repeatedOutcome.status, 'already_recovered');
+  assert.equal(repeatedOutcome.closure_basis, 'owned-job-zero');
+
+  const outcomePath = path.join(outcome.archive, 'outcome.json');
+  writeFileSync(outcomePath, JSON.stringify({ ...outcome, closure_basis: 'owned-process-handles-joined' }));
+  const repeatedWithWrongBasis = await runNode([launcher, ...recoveryArgs(ended)], { cwd: f.workspace, env });
+  assert.notEqual(repeatedWithWrongBasis.code, 0);
+  assert.match(repeatedWithWrongBasis.stderr, /archived closure basis/);
+});
+
+test('recovery refuses live, PID-only and incomplete closure evidence without changing the claim', (t) => {
+  const f = fixture(t);
+  const lease = claimTarget(f.layout, f.env);
+  const ownerBytes = readFileSync(path.join(f.layout.claim, 'owner.json'));
+  const markerBytes = readFileSync(path.join(f.layout.target, '.wardian-rust-target.json'));
+  const owner = JSON.parse(ownerBytes);
+  const receiptPath = path.join(f.root, 'closure-receipt.json');
+  const validShape = physicalClosureReceipt(f.layout, ownerBytes, markerBytes, owner, process.pid);
+  const originalClaim = readFileSync(path.join(f.layout.claim, 'owner.json'));
+  const originalMarker = readFileSync(path.join(f.layout.target, '.wardian-rust-target.json'));
+
+  for (const invalid of [
+    { ...validShape, disposition: 'live' },
+    { ...validShape, closure: { ...validShape.closure, basis: 'pid-only' } },
+    { ...validShape, closure: { ...validShape.closure, complete: false } },
+    { ...validShape, closure: { ...validShape.closure, root: { ...validShape.closure.root, joined: false } } },
+  ]) {
+    writeFileSync(receiptPath, JSON.stringify(invalid));
+    assert.throws(() => recoverThroughDispatcher(f, { ownerBytes, markerBytes, receiptPath }), /Closure receipt/);
+    assert.deepEqual(readFileSync(path.join(f.layout.claim, 'owner.json')), originalClaim);
+    assert.deepEqual(readFileSync(path.join(f.layout.target, '.wardian-rust-target.json')), originalMarker);
+    assert.equal(existsSync(f.layout.recoveryBase), false);
+  }
+  lease.release();
+});
+
+test('recovery rejects changed generations, protected destinations and linked claim metadata', async (t) => {
+  const f = fixture(t);
+  const ended = await createEndedClaim(f);
+  const ownerPath = path.join(f.layout.claim, 'owner.json');
+  const markerPath = path.join(f.layout.target, '.wardian-rust-target.json');
+  const originalOwner = readFileSync(ownerPath);
+  const originalMarker = readFileSync(markerPath);
+
+  writeFileSync(ownerPath, JSON.stringify({ ...JSON.parse(originalOwner), token: 'changed-generation' }));
+  assert.throws(() => recoverThroughDispatcher(f, ended), /owner bytes changed/);
+  assert.equal(existsSync(path.join(f.layout.recoveryBase, hash(originalOwner))), false);
+  writeFileSync(ownerPath, originalOwner);
+
+  writeFileSync(markerPath, JSON.stringify({ ...JSON.parse(originalMarker), kind: 'qualified' }));
+  assert.throws(() => recoverThroughDispatcher(f, ended), /marker is unknown or changed/);
+  writeFileSync(markerPath, originalMarker);
+  const markerLink = path.join(f.root, 'linked-marker.json');
+  linkSync(markerPath, markerLink);
+  assert.throws(() => recoverThroughDispatcher(f, ended), /multiply-linked/);
+  unlinkSync(markerLink);
+
+  const manifest = path.join(f.root, 'protected-recovery.json');
+  writeFileSync(manifest, JSON.stringify({ files: [{ path: f.layout.recoveryBase }] }));
+  const protectedEnv = { ...f.env, WARDIAN_PROTECTED_INPUT_MANIFESTS: JSON.stringify([manifest]) };
+  assert.throws(() => main(recoveryArgs(ended), { cwd: f.workspace, env: protectedEnv, sourceRoot: f.source }), /overlaps a protected input/);
+  assert.equal(existsSync(f.layout.recoveryBase), false);
+  assert.deepEqual(readFileSync(ownerPath), originalOwner);
+  assert.deepEqual(readFileSync(markerPath), originalMarker);
+
+  const link = path.join(f.root, 'linked-owner.json');
+  linkSync(ownerPath, link);
+  assert.throws(() => recoverThroughDispatcher(f, ended), /multiply-linked/);
+  assert.deepEqual(readFileSync(ownerPath), originalOwner);
+  assert.equal(existsSync(f.layout.recoveryBase), false);
+});
+
+test('recovery refuses extra claim files, linked owner files and linked quarantine ancestors', async (t) => {
+  const extra = fixture(t);
+  const extraEnded = await createEndedClaim(extra);
+  writeFileSync(path.join(extra.layout.claim, 'unexpected.json'), '{}');
+  assert.throws(() => recoverThroughDispatcher(extra, extraEnded), /unexpected metadata/);
+  assert.equal(existsSync(path.join(extra.layout.recoveryBase, hash(extraEnded.ownerBytes))), false);
+
+  const linked = fixture(t);
+  const linkedEnded = await createEndedClaim(linked);
+  const linkedOwner = path.join(linked.layout.claim, 'owner.json');
+  const outsideOwner = path.join(linked.root, 'owner-copy.json');
+  writeFileSync(outsideOwner, linkedEnded.ownerBytes);
+  unlinkSync(linkedOwner);
+  symlinkSync(outsideOwner, linkedOwner, 'file');
+  assert.throws(() => recoverThroughDispatcher(linked, linkedEnded), /linked, multiply-linked or non-file/);
+  assert.equal(existsSync(path.join(linked.layout.recoveryBase, hash(linkedEnded.ownerBytes))), false);
+
+  const linkedAncestor = fixture(t);
+  const ancestorEnded = await createEndedClaim(linkedAncestor);
+  mkdirSync(path.dirname(linkedAncestor.layout.recoveryBase), { recursive: true });
+  symlinkSync(linkedAncestor.workspace, linkedAncestor.layout.recoveryBase, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.throws(() => recoverThroughDispatcher(linkedAncestor, ancestorEnded), /linked/);
+  assert.deepEqual(readFileSync(path.join(linkedAncestor.layout.claim, 'owner.json')), ancestorEnded.ownerBytes);
+});
+
+test('one reservation serializes recovery with launch and prune; failed finalization remains fail-closed', async (t) => {
+  const f = fixture(t);
+  const ended = await createEndedClaim(f);
+  const markerPath = path.join(f.layout.target, '.wardian-rust-target.json');
+  const sentinel = path.join(f.layout.target, 'preserve-me.bin');
+  writeFileSync(sentinel, 'unchanged output');
+  const markerBytes = readFileSync(markerPath);
+  const sentinelBytes = readFileSync(sentinel);
+  const archive = path.join(f.layout.recoveryBase, hash(ended.ownerBytes));
+
+  assert.throws(() => recoverThroughDispatcher(f, ended, {
+    afterMove() {
+      assert.throws(() => claimTarget(f.layout, f.env), /recovery is reserved/);
+      assert.throws(() => pruneTargets(f.layout, { keep: 0, maxBytes: 0, env: f.env }), /recovery is reserved/);
+      assert.throws(() => recoverThroughDispatcher(f, ended), /prior recovery attempt is incomplete/);
+    },
+    writeOutcome() { throw new Error('injected receipt finalization failure'); },
+  }), /partially completed.*injected receipt finalization failure/);
+
+  assert.equal(existsSync(f.layout.claim), false);
+  assert.equal(existsSync(f.layout.recoveryReservation), true);
+  assert.deepEqual(readFileSync(path.join(archive, 'claim', 'owner.json')), ended.ownerBytes);
+  assert.deepEqual(readFileSync(path.join(archive, 'receipt.json')), ended.receiptBytes);
+  assert.equal(existsSync(path.join(archive, 'outcome.json')), false);
+  assert.deepEqual(readFileSync(markerPath), markerBytes);
+  assert.deepEqual(readFileSync(sentinel), sentinelBytes);
+  assert.throws(() => recoverThroughDispatcher(f, ended), /prior recovery attempt is incomplete/);
+  assert.equal(existsSync(f.layout.recoveryReservation), true);
+  assert.deepEqual(readFileSync(markerPath), markerBytes);
+  assert.deepEqual(readFileSync(sentinel), sentinelBytes);
+});
+
+test('failed rename preserves the selected claim and repeated recovery refuses the partial archive', async (t) => {
+  const f = fixture(t);
+  const ended = await createEndedClaim(f);
+  const ownerPath = path.join(f.layout.claim, 'owner.json');
+  const markerPath = path.join(f.layout.target, '.wardian-rust-target.json');
+  const originalMarker = readFileSync(markerPath);
+  const archive = path.join(f.layout.recoveryBase, hash(ended.ownerBytes));
+  assert.throws(() => recoverThroughDispatcher(f, ended, {
+    renameClaim() { throw new Error('injected atomic rename failure'); },
+  }), /injected atomic rename failure/);
+  assert.deepEqual(readFileSync(ownerPath), ended.ownerBytes);
+  assert.deepEqual(readFileSync(markerPath), originalMarker);
+  assert.equal(existsSync(path.join(archive, 'claim')), false);
+  assert.equal(existsSync(f.layout.recoveryReservation), false);
+  assert.throws(() => recoverThroughDispatcher(f, ended), /prior recovery attempt is incomplete/);
+  assert.deepEqual(readFileSync(ownerPath), ended.ownerBytes);
+  assert.deepEqual(readFileSync(markerPath), originalMarker);
+});
+
+test('a pre-existing recovery reservation blocks recovery, launch and prune without cleaning it', async (t) => {
+  const f = fixture(t);
+  const ended = await createEndedClaim(f);
+  mkdirSync(f.layout.recoveryReservation, { recursive: true });
+  assert.throws(() => recoverThroughDispatcher(f, ended), /already reserved/);
+  assert.throws(() => claimTarget(f.layout, f.env), /recovery is reserved/);
+  assert.throws(() => pruneTargets(f.layout, { keep: 0, maxBytes: 0, env: f.env }), /recovery is reserved/);
+  assert.deepEqual(readFileSync(path.join(f.layout.claim, 'owner.json')), ended.ownerBytes);
+  assert.deepEqual(readFileSync(path.join(f.layout.target, '.wardian-rust-target.json')), ended.markerBytes);
+  assert.equal(existsSync(f.layout.recoveryReservation), true);
+});
+
 test('existing unowned outputs are never adopted', (t) => {
   const f = fixture(t);
   mkdirSync(f.layout.target, { recursive: true });
@@ -242,6 +584,21 @@ test('retention byte cap can evict even the most recent inactive target', (t) =>
   const f = fixture(t);
   claimTarget(f.layout, f.env).release();
   assert.equal(pruneTargets(f.layout, { keep: 2, maxBytes: 0, env: f.env }).removed.length, 1);
+});
+
+test('prune skips a different worktree while its recovery reservation is active', (t) => {
+  const f = fixture(t);
+  claimTarget(f.layout, f.env).release();
+  const other = path.join(f.root, 'other-worktree');
+  mkdirSync(other);
+  const otherLayout = cacheLayout(other, f.env, f.source);
+  claimTarget(otherLayout, f.env).release();
+  mkdirSync(otherLayout.recoveryReservation, { recursive: true });
+
+  const result = pruneTargets(f.layout, { keep: 0, maxBytes: 0, env: f.env });
+  assert.deepEqual(result.removed, [f.layout.worktreeKey]);
+  assert.equal(existsSync(otherLayout.target), true);
+  assert.ok(result.skipped.some((entry) => entry.key === otherLayout.worktreeKey && entry.recovery_reserved));
 });
 
 test('qualified marker is refused and never pruned', (t) => {
