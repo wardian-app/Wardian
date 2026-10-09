@@ -40,6 +40,27 @@ fn validate_receipt(request: &AgentMessagingRequest, value: &serde_json::Value) 
         serde_json::from_value(value.clone()).map_err(|_| invalid())?;
     let valid = match (request, response) {
         (
+            AgentMessagingRequest::ReadTaskContext {
+                provider_call: expected,
+            },
+            AgentMessagingResponse::ReadTaskContext {
+                agent_id,
+                generation,
+                thread_id,
+                turn_id,
+                provider_call,
+                tasks,
+                ..
+            },
+        ) => {
+            *expected == provider_call
+                && thread_id == expected.thread_id
+                && !agent_id.trim().is_empty()
+                && generation > 0
+                && !turn_id.trim().is_empty()
+                && !tasks.is_empty()
+        }
+        (
             AgentMessagingRequest::SendMessage { .. },
             AgentMessagingResponse::SendMessage { interaction_id, .. },
         ) => !interaction_id.trim().is_empty(),
