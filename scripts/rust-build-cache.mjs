@@ -362,9 +362,60 @@ function cargoCommand(args) {
   throw new Error('Missing supported Cargo command');
 }
 
-/** Route Cargo through arguments so registry dependencies keep reusable environment keys. */
-export function cargoInvocation(args, { cwd = process.cwd(), env = process.env } = {}) {
+/** Recheck the parent capability before deriving child outputs or routing. */
+function activeTarget(env) {
   const target = env.WARDIAN_RUST_CACHE_TARGET;
+  if (!target || !path.isAbsolute(target) || !env.WARDIAN_RUST_CACHE_CLAIM || !env.WARDIAN_RUST_CACHE_TOKEN) {
+    throw new Error('Rust cache output routing requires an active claim');
+  }
+  const repoKey = path.basename(path.dirname(target));
+  const worktreeKey = path.basename(target);
+  const root = path.dirname(path.dirname(path.dirname(target)));
+  const claim = path.join(root, 'claims', repoKey, worktreeKey);
+  if (path.basename(path.dirname(path.dirname(target))) !== 'launcher-targets'
+    || !/^[0-9a-f]{16}$/.test(repoKey) || !/^[0-9a-f]{16}$/.test(worktreeKey)
+    || canonicalPath(env.WARDIAN_RUST_CACHE_CLAIM) !== canonicalPath(claim)) {
+    throw new Error('Rust cache output routing has an invalid claim path');
+  }
+  const saved = readMarker(target);
+  const layout = { target, claim, repoKey, worktreeKey, workspace: saved.workspace,
+    recoveryReservation: path.join(root, 'claim-recovery', repoKey, worktreeKey, '.active') };
+  readOwnedMarker(layout);
+  if (readClaim(layout).owner.token !== env.WARDIAN_RUST_CACHE_TOKEN) throw new Error('Invalid Rust cache output claim token');
+  assertNoRecoveryReservation(layout);
+  assertUnprotected(target, env);
+  assertUnprotected(claim, env, 'claim');
+  return target;
+}
+
+/**
+ * Bind Cargo/Tauri child output to the live callback's owned target without
+ * restoring unique routing variables to the parent compiler environment.
+ * Join every child before the synchronous withRustCache callback returns.
+ */
+export function callbackCargoEnvironment({ cwd = process.cwd(), env = process.env } = {}) {
+  const target = activeTarget(env);
+  for (const key of ['CARGO_TARGET_DIR', 'CARGO_BUILD_TARGET_DIR', 'CARGO_BUILD_BUILD_DIR']) {
+    if (env[key] && canonicalPath(env[key], cwd) !== canonicalPath(target)) {
+      throw new Error(`Rust cache preserves custom ${key}; use direct Cargo or align the managed target`);
+    }
+  }
+  const routed = { ...env, CARGO_TARGET_DIR: target, CARGO_BUILD_TARGET_DIR: target, CARGO_BUILD_BUILD_DIR: target };
+  assertCompilerAdmission({ program: 'cargo', args: ['check'], cwd, env: routed });
+  return routed;
+}
+
+/**
+ * Route Cargo through arguments so registry dependencies keep reusable
+ * environment keys. Managed analysis uses only the closed deadcode leaf under
+ * the same parent claim; direct Cargo retains its explicit output arguments.
+ */
+export function cargoInvocation(args, { cwd = process.cwd(), env = process.env, output = 'normal' } = {}) {
+  if (!['normal', 'deadcode'].includes(output)) throw new Error('Unknown Rust cache output kind');
+  const target = env.WARDIAN_RUST_CACHE_TARGET && output === 'deadcode'
+    ? path.join(activeTarget(env), 'deadcode') : env.WARDIAN_RUST_CACHE_TARGET;
+  if (target && output === 'deadcode') assertPlainTree(target);
+  let outputTarget = target;
   const forwarded = [...args];
   const subcommand = cargoCommand(args);
   const routable = subcommand !== 'fmt';
@@ -374,6 +425,7 @@ export function cargoInvocation(args, { cwd = process.cwd(), env = process.env }
       explicitTarget = true;
       const value = args[index] === '--target-dir' ? args[++index] : args[index].slice('--target-dir='.length);
       if (!value || canonicalPath(value, cwd) !== canonicalPath(target)) throw new Error('Launcher target override escapes its exclusive claim');
+      outputTarget = value;
     }
   }
   if (target && routable && subcommand !== 'metadata' && !explicitTarget) {
@@ -385,7 +437,7 @@ export function cargoInvocation(args, { cwd = process.cwd(), env = process.env }
   const separator = forwarded.indexOf('--');
   const configOffset = separator < 0 ? forwarded.length : separator;
   if (target && subcommand === 'metadata') forwarded.splice(configOffset, 0, '--config', `build.target-dir=${JSON.stringify(target)}`);
-  if (target && routable) forwarded.splice(configOffset, 0, '--config', `build.build-dir=${JSON.stringify(target)}`);
+  if (target && routable) forwarded.splice(configOffset, 0, '--config', `build.build-dir=${JSON.stringify(outputTarget)}`);
   assertCompilerAdmission({ program: 'cargo', args: forwarded, cwd, env });
   return { program: 'cargo', args: forwarded, env, cwd };
 }

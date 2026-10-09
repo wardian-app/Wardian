@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { cacheEnvironment, cacheKey, cacheLayout, cargoInvocation, claimTarget, inspectTargets, main, pruneTargets, withRustCache } from './rust-build-cache.mjs';
+import { cacheEnvironment, cacheKey, cacheLayout, callbackCargoEnvironment, cargoInvocation, claimTarget, inspectTargets, main, pruneTargets, withRustCache } from './rust-build-cache.mjs';
 import { verifyDownload } from './setup-rust-build-cache.mjs';
 
 const testBase = process.env.WARDIAN_RUST_CACHE_TEST_ROOT ?? path.join(process.env.WARDIAN_HOME ?? path.join(homedir(), '.wardian'),
@@ -651,6 +651,72 @@ test('metadata uses global Cargo config instead of unsupported target-dir flag',
   const invocation = cargoInvocation(['metadata', '--no-deps'], { cwd: f.workspace, env: { ...f.env, WARDIAN_RUST_CACHE_TARGET: f.layout.target } });
   assert.equal(invocation.args.includes('--target-dir'), false);
   assert.ok(invocation.args.some((arg) => arg.startsWith('build.target-dir=')));
+});
+
+test('normal and deadcode dispatches share one claim with separate output trees', (t) => {
+  const f = fixture(t);
+  withRustCache(() => {
+    const normal = cargoInvocation(['check'], { cwd: f.workspace });
+    const owner = readFileSync(path.join(f.layout.claim, 'owner.json'));
+    const alias = `${f.layout.target}${path.sep}.${path.sep}deadcode`;
+    const copied = cargoInvocation(['check', '--target-dir', alias], { cwd: f.workspace, output: 'deadcode' });
+    assert.equal(normal.args[normal.args.indexOf('--target-dir') + 1], f.layout.target);
+    assert.equal(copied.args[copied.args.indexOf('--target-dir') + 1], alias);
+    assert.ok(copied.args.includes(`build.build-dir=${JSON.stringify(alias)}`));
+    assert.equal(process.env.WARDIAN_RUST_CACHE_TARGET, f.layout.target);
+    assert.deepEqual(readFileSync(path.join(f.layout.claim, 'owner.json')), owner);
+    for (const output of ['other', 'deadcode/nested', '../deadcode']) {
+      assert.throws(() => cargoInvocation(['check'], { cwd: f.workspace, output }), /output kind/);
+    }
+    for (const target of [f.layout.target, path.join(f.layout.target, 'deadcode', 'nested'), f.source]) {
+      assert.throws(() => cargoInvocation(['check', '--target-dir', target], { cwd: f.workspace, output: 'deadcode' }), /exclusive claim/);
+    }
+    const again = cargoInvocation(['check'], { cwd: f.workspace });
+    assert.deepEqual(again.args, normal.args);
+  }, { cwd: f.workspace, env: f.env, sourceRoot: f.source, lookup: () => null });
+  assert.equal(existsSync(f.layout.claim), false);
+});
+
+test('deadcode output rejects forged claims and linked or protected leaves', (t) => {
+  const f = fixture(t);
+  assert.throws(() => cargoInvocation(['check'], { cwd: f.workspace, output: 'deadcode',
+    env: { ...f.env, WARDIAN_RUST_CACHE_TARGET: f.layout.target } }), /active claim/);
+  withRustCache(() => {
+    assert.throws(() => cargoInvocation(['check'], { cwd: f.workspace, output: 'deadcode',
+      env: { ...process.env, WARDIAN_RUST_CACHE_TOKEN: 'foreign' } }), /claim token/);
+    const inventory = path.join(f.root, 'protected.json');
+    writeFileSync(inventory, JSON.stringify({ files: [{ path: path.join(f.layout.target, 'deadcode', 'preserved.rmeta') }] }));
+    assert.throws(() => cargoInvocation(['check'], { cwd: f.workspace, output: 'deadcode',
+      env: { ...process.env, WARDIAN_PROTECTED_INPUT_MANIFESTS: JSON.stringify([inventory]) } }), /protected input/);
+    symlinkSync(f.source, path.join(f.layout.target, 'deadcode'), process.platform === 'win32' ? 'junction' : 'dir');
+    assert.throws(() => cargoInvocation(['check'], { cwd: f.workspace, output: 'deadcode' }), /linked/);
+  }, { cwd: f.workspace, env: f.env, sourceRoot: f.source, lookup: () => null });
+});
+
+test('callback Cargo environment binds child routing without changing parent compiler keys', (t) => {
+  const f = fixture(t);
+  let saved;
+  // Node's Windows crypto initialization needs OS discovery variables that
+  // the otherwise minimal cache fixture intentionally omits.
+  const platform = Object.fromEntries(Object.entries(process.env)
+    .filter(([key]) => ['systemroot', 'windir', 'systemdrive'].includes(key.toLowerCase())));
+  const env = { ...f.env, ...platform, RUSTC_WRAPPER: '/custom-wrapper', CARGO_INCREMENTAL: '1' };
+  withRustCache(() => {
+    saved = callbackCargoEnvironment({ cwd: f.workspace });
+    for (const key of ['CARGO_TARGET_DIR', 'CARGO_BUILD_TARGET_DIR', 'CARGO_BUILD_BUILD_DIR']) {
+      assert.equal(saved[key], f.layout.target);
+      assert.equal(process.env[key], undefined);
+      assert.throws(() => callbackCargoEnvironment({ cwd: f.workspace, env: { ...process.env, [key]: f.source } }), /preserves custom/);
+    }
+    assert.equal(saved.RUSTC_WRAPPER, env.RUSTC_WRAPPER);
+    assert.equal(saved.CARGO_INCREMENTAL, env.CARGO_INCREMENTAL);
+    assert.equal(saved.WARDIAN_RUST_CACHE_TARGET, f.layout.target);
+    const child = spawnSync(process.execPath, ['-e', 'process.stdout.write(JSON.stringify([process.env.CARGO_TARGET_DIR, process.env.CARGO_BUILD_TARGET_DIR, process.env.CARGO_BUILD_BUILD_DIR, process.env.WARDIAN_RUST_CACHE_TARGET]))'],
+      { cwd: f.workspace, env: saved, encoding: 'utf8', timeout: 10_000, windowsHide: true });
+    assert.equal(child.status, 0, child.stderr);
+    assert.deepEqual(JSON.parse(child.stdout), Array(4).fill(f.layout.target));
+  }, { cwd: f.workspace, env, sourceRoot: f.source, lookup: () => null });
+  assert.throws(() => callbackCargoEnvironment({ cwd: f.workspace, env: saved }), /claim is absent/);
 });
 
 test('custom output overrides are rejected before creating any central targets', (t) => {

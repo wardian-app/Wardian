@@ -90,6 +90,7 @@ root. Copied exports and fixtures must supply an explicit
   sccache-identity.json            setup record
   tools/                          explicit dependency setup attempts
   launcher-targets/<repo-key>/<tree-key>/ claimed, prunable compiler outputs
+    deadcode/                     visibility-copy compiler outputs
   direct-targets/<repo-key>/<tree-key>/   ordinary Cargo outputs, inspect only
   claims/<repo-key>/<tree-key>/    exclusive launcher claims
   pruning/                        explicit prune quarantine
@@ -110,6 +111,25 @@ separate targets and claims. The launcher uses Cargo arguments to select its
 target, removing inherited routing variables only when they agree with that
 target. Conflicting custom targets fail before compilation; use direct Cargo
 for an intentionally different target.
+
+The Rust dead-code pass keeps its rewritten source copy under
+`rust-deadcode/<copy-key>/` and compiles it into the separate `deadcode/` leaf.
+Both remain inside the existing exclusive parent claim. Analysis never reuses
+the normal target's `deps`, fingerprints or incremental outputs. The leaf is
+not a separate target generation or claim, and callers cannot select arbitrary
+descendants. The compiler launcher preserves an explicit target's path spelling
+for both target and build directories after verifying its physical destination.
+
+`withRustCache` removes unique Cargo routing environment variables from the
+parent process. Cargo callbacks should use `cargoInvocation`; it selects the
+normal target through arguments, or the closed analysis leaf with
+`output: 'deadcode'`. Callbacks that launch Cargo indirectly through Tauri can
+use `callbackCargoEnvironment` to set `CARGO_TARGET_DIR`,
+`CARGO_BUILD_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR` on that child only. It
+validates the live target marker and claim token, retains wrapper and incremental
+settings, and rejects conflicting custom routes. Derive artifact lookup from
+the returned child's target directory. Join every child before the synchronous
+callback returns and releases its claim.
 
 The existing machine-wide Cargo home continues to share registry archives,
 unpacked source, and Git dependency caches. No per-worktree Cargo home is

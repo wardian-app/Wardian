@@ -373,6 +373,8 @@ function runRustcPass(metadata, workspace, options) {
   // Source-copy writes are inside the metadata target tree. Admit that exact
   // tree before creating directories or syncing rewritten files into it.
   cargoInvocation(["check", "--target-dir", metadata.target_directory], { cwd: REPO_ROOT });
+  const analysisTarget = path.join(metadata.target_directory, "deadcode");
+  cargoInvocation(["check", "--target-dir", analysisTarget], { cwd: REPO_ROOT, output: "deadcode" });
   const copyRoot = prepareCopyRoot(metadata.target_directory, hash);
 
   const files = listCopiedFiles(memberDirs);
@@ -397,12 +399,13 @@ function runRustcPass(metadata, workspace, options) {
     "--manifest-path",
     path.join(copyRoot, "Cargo.toml"),
     "--target-dir",
-    metadata.target_directory,
+    analysisTarget,
   ];
   if (options.verbose) console.log(`rustc pass: ${written} file(s) synced into ${copyRoot}`);
-  const invocation = cargoInvocation(args, { cwd: copyRoot });
+  const invocation = cargoInvocation(args, { cwd: copyRoot, output: "deadcode" });
   const result = spawnSync("cargo", invocation.args, {
     cwd: copyRoot,
+    env: invocation.env,
     encoding: "utf8",
     maxBuffer: 512 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],

@@ -286,6 +286,12 @@ cp.execFileSync = (program, args, options) => {
 cp.spawnSync = (program, args, options) => {
   if (program !== 'cargo' || args[0] !== 'check') throw new Error('Unexpected spawn');
   harmless('check', args, options.cwd);
+  if (process.env.GUARD_OUTPUT_PROBE) {
+    const output = args[args.indexOf('--target-dir') + 1];
+    originalExec(process.execPath, ['-e',
+      'const fs=require("node:fs"),p=require("node:path"); const [out,cwd]=JSON.parse(process.argv[1]); fs.mkdirSync(p.join(out,"debug","deps"),{recursive:true}); fs.writeFileSync(p.join(out,"debug","deps","core.rmeta"),cwd); fs.writeFileSync(p.join(out,"debug","deps","core.d"),cwd);',
+      JSON.stringify([output, options.cwd])], { env: process.env });
+  }
   return { status: 0, stdout: '', stderr: '' };
 };
 syncBuiltinESMExports();
@@ -335,9 +341,36 @@ test('actual metadata and check dispatches launch harmless children for a known 
   assert.deepEqual(trace.map(({ phase }) => phase), ['metadata', 'check']);
   assert.ok(existsSync(f.marker + '-metadata'));
   assert.ok(existsSync(f.marker + '-check'));
-  assert.equal(trace[1].args[trace[1].args.indexOf('--target-dir') + 1], f.env.CARGO_TARGET_DIR);
+  assert.equal(trace[1].args[trace[1].args.indexOf('--target-dir') + 1], path.join(f.env.CARGO_TARGET_DIR, 'deadcode'));
   assert.equal(path.dirname(path.dirname(trace[1].cwd)), f.env.CARGO_TARGET_DIR);
   assert.ok(existsSync(path.join(trace[1].cwd, 'src-tauri', 'src', 'lib.rs')));
+});
+
+test('visibility-copy dispatch preserves normal artifacts and routes copied metadata separately', (t) => {
+  const f = fixture(t);
+  const target = path.join(f.root, 'disjoint');
+  f.env.CARGO_TARGET_DIR = target;
+  f.env.GUARD_OUTPUT_PROBE = '1';
+  const normalFiles = [
+    ['debug/deps/core.rmeta', 'normal workspace metadata'],
+    ['debug/deps/core.d', f.cwd],
+    ['debug/.fingerprint/core/state', 'normal fingerprint'],
+    ['debug/incremental/core/state', 'normal incremental'],
+  ];
+  for (const [file, text] of normalFiles) {
+    mkdirSync(path.dirname(path.join(target, file)), { recursive: true });
+    writeFileSync(path.join(target, file), text);
+  }
+  const result = nestedRun(f);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const trace = JSON.parse(readFileSync(f.trace));
+  const copied = trace.find(({ phase }) => phase === 'check');
+  assert.equal(copied.args[copied.args.indexOf('--target-dir') + 1], path.join(target, 'deadcode'));
+  assert.equal(readFileSync(path.join(target, 'deadcode', 'debug', 'deps', 'core.rmeta'), 'utf8'), copied.cwd);
+  assert.equal(readFileSync(path.join(target, 'deadcode', 'debug', 'deps', 'core.d'), 'utf8'), copied.cwd);
+  for (const [file, text] of normalFiles) assert.equal(readFileSync(path.join(target, file), 'utf8'), text);
+  // This exercises actual argument dispatch with a harmless compiler stand-in;
+  // the real Cargo normal/copy/normal lineage remains a separate proof.
 });
 
 test('actual copied-cwd Cargo check resolves a protected separate build tree before dispatch', (t) => {
@@ -444,8 +477,9 @@ test('rust-deadcode metadata config/default derivation guards overlaps and rejec
 test('pinned Rust dead-code source distinguishes the copied cwd from the compiler target', () => {
   const text = readFileSync(new URL('./verify-rust-deadcode.mjs', import.meta.url), 'utf8');
   assert.match(text, /const copyRoot = prepareCopyRoot\(metadata\.target_directory, hash\)/);
-  assert.match(text, /"--target-dir",\s*metadata\.target_directory,/);
-  assert.match(text, /const invocation = cargoInvocation\(args, \{ cwd: copyRoot \}\)/);
+  assert.match(text, /const analysisTarget = path\.join\(metadata\.target_directory, "deadcode"\)/);
+  assert.match(text, /"--target-dir",\s*analysisTarget,/);
+  assert.match(text, /const invocation = cargoInvocation\(args, \{ cwd: copyRoot, output: "deadcode" \}\)/);
   assert.match(text, /spawnSync\("cargo", invocation\.args, \{\s*cwd: copyRoot,/);
 });
 
