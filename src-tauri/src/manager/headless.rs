@@ -1011,6 +1011,57 @@ async fn wait_for_headless_child(
     .await
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum HeadlessWaitEvent {
+    Deadline,
+    Cancelled,
+    ProcessPoll,
+    Heartbeat,
+}
+
+/// Observes execution limits independently of OS termination/reaping latency.
+struct HeadlessWaitTiming {
+    deadline: tokio::time::Instant,
+    process_poll: tokio::time::Interval,
+    heartbeat: tokio::time::Interval,
+}
+
+impl HeadlessWaitTiming {
+    fn new(
+        timeout: Duration,
+        process_poll_interval: Duration,
+        heartbeat_interval: Duration,
+    ) -> Self {
+        let now = tokio::time::Instant::now();
+        Self {
+            deadline: now + timeout,
+            process_poll: tokio::time::interval_at(
+                now + process_poll_interval,
+                process_poll_interval,
+            ),
+            heartbeat: tokio::time::interval_at(now + heartbeat_interval, heartbeat_interval),
+        }
+    }
+
+    async fn next_event(
+        &mut self,
+        cancellation_marker: Option<&std::path::Path>,
+        heartbeat_enabled: bool,
+    ) -> HeadlessWaitEvent {
+        tokio::select! {
+            _ = tokio::time::sleep_until(self.deadline) => HeadlessWaitEvent::Deadline,
+            _ = self.process_poll.tick() => {
+                if cancellation_marker.is_some_and(std::path::Path::exists) {
+                    HeadlessWaitEvent::Cancelled
+                } else {
+                    HeadlessWaitEvent::ProcessPoll
+                }
+            }
+            _ = self.heartbeat.tick(), if heartbeat_enabled => HeadlessWaitEvent::Heartbeat,
+        }
+    }
+}
+
 async fn wait_for_headless_child_with_intervals(
     child: &mut tokio::process::Child,
     provider_name: &str,
@@ -1020,37 +1071,36 @@ async fn wait_for_headless_child_with_intervals(
     process_poll_interval: Duration,
     lease_heartbeat_interval: Duration,
 ) -> Result<std::process::ExitStatus, HeadlessRunError> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut process_poll = tokio::time::interval_at(
-        tokio::time::Instant::now() + process_poll_interval,
-        process_poll_interval,
-    );
-    let mut heartbeat = tokio::time::interval_at(
-        tokio::time::Instant::now() + lease_heartbeat_interval,
-        lease_heartbeat_interval,
-    );
+    let mut timing =
+        HeadlessWaitTiming::new(timeout, process_poll_interval, lease_heartbeat_interval);
 
     loop {
-        tokio::select! {
-            _ = tokio::time::sleep_until(deadline) => {
+        match timing
+            .next_event(cancellation_marker, lease_owner.is_some())
+            .await
+        {
+            HeadlessWaitEvent::Deadline => {
                 terminate_headless_child(child).await;
                 return Err(HeadlessRunError::uncertain(format!(
                     "Headless provider {provider_name} exceeded its {} second execution limit",
                     timeout.as_secs()
                 )));
             }
-            _ = process_poll.tick() => {
-                if cancellation_marker.is_some_and(std::path::Path::exists) {
-                    terminate_headless_child(child).await;
-                    return Err(HeadlessRunError::cancelled(format!(
-                        "Headless provider {provider_name} cancelled by its owning automation run"
-                    )));
-                }
-                if let Some(status) = child.try_wait().map_err(|error| HeadlessRunError::uncertain(error.to_string()))? {
+            HeadlessWaitEvent::Cancelled => {
+                terminate_headless_child(child).await;
+                return Err(HeadlessRunError::cancelled(format!(
+                    "Headless provider {provider_name} cancelled by its owning automation run"
+                )));
+            }
+            HeadlessWaitEvent::ProcessPoll => {
+                if let Some(status) = child
+                    .try_wait()
+                    .map_err(|error| HeadlessRunError::uncertain(error.to_string()))?
+                {
                     return Ok(status);
                 }
             }
-            _ = heartbeat.tick(), if lease_owner.is_some() => {
+            HeadlessWaitEvent::Heartbeat => {
                 let owner = lease_owner.expect("lease owner checked by select guard");
                 let now = chrono::Utc::now();
                 let renewed = match wardian_core::conversation_lease::renew_lease_owner_persisted(
@@ -2122,6 +2172,58 @@ mod tests {
         })
         .await
         .expect("wrapper recorded descendant PID")
+    }
+
+    async fn assert_pending<F: std::future::Future>(mut future: std::pin::Pin<&mut F>) {
+        let observed =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(future.as_mut().poll(cx))).await;
+        assert!(
+            observed.is_pending(),
+            "execution observation completed too early"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn headless_wait_observes_deadline_before_the_next_process_poll() {
+        let started = tokio::time::Instant::now();
+        let mut timing = HeadlessWaitTiming::new(
+            Duration::from_millis(25),
+            HEADLESS_PROCESS_POLL_INTERVAL,
+            HEADLESS_LEASE_HEARTBEAT_INTERVAL,
+        );
+        let event = timing.next_event(None, false);
+        tokio::pin!(event);
+        assert_pending(event.as_mut()).await;
+        tokio::time::advance(Duration::from_millis(24)).await;
+        assert_pending(event.as_mut()).await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(event.await, HeadlessWaitEvent::Deadline);
+        assert_eq!(started.elapsed(), Duration::from_millis(25));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn headless_wait_observes_cancellation_at_the_next_process_poll() {
+        let temp = tempfile::tempdir().expect("cancellation marker directory");
+        let marker = temp.path().join("cancel.marker");
+        let started = tokio::time::Instant::now();
+        let mut timing = HeadlessWaitTiming::new(
+            Duration::from_secs(5),
+            HEADLESS_PROCESS_POLL_INTERVAL,
+            HEADLESS_LEASE_HEARTBEAT_INTERVAL,
+        );
+        assert_eq!(
+            timing.next_event(Some(&marker), false).await,
+            HeadlessWaitEvent::ProcessPoll
+        );
+        std::fs::write(&marker, "cancelled").expect("write cancellation marker");
+        let event = timing.next_event(Some(&marker), false);
+        tokio::pin!(event);
+        assert_pending(event.as_mut()).await;
+        tokio::time::advance(HEADLESS_PROCESS_POLL_INTERVAL - Duration::from_millis(1)).await;
+        assert_pending(event.as_mut()).await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(event.await, HeadlessWaitEvent::Cancelled);
+        assert_eq!(started.elapsed(), HEADLESS_PROCESS_POLL_INTERVAL * 2);
     }
 
     #[tokio::test]
