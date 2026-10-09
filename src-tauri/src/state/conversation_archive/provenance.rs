@@ -729,22 +729,6 @@ fn is_codex_stream_completion_pair(mirror: &AgentChatEvent, completion: &AgentCh
     same_log_path && same_provider_turn && provider_sessions_are_compatible
 }
 
-#[cfg(test)]
-pub(crate) use test_support::codex_stream_completion_pair;
-
-#[cfg(test)]
-mod test_support {
-    use super::{is_codex_stream_completion_pair, AgentChatEvent};
-
-    pub(crate) fn codex_stream_completion_pair(
-        first: &AgentChatEvent,
-        second: &AgentChatEvent,
-    ) -> bool {
-        is_codex_stream_completion_pair(first, second)
-            || is_codex_stream_completion_pair(second, first)
-    }
-}
-
 /// A mirror cannot establish ownership when distinct identified completions
 /// match it. Check all known observations, including the pending batch, before
 /// assigning a durable narrative so iteration order cannot choose an owner.
@@ -1155,4 +1139,20 @@ pub(super) fn bind_delivered_inputs(
         events.remove(*native);
     }
     Ok(*events != before)
+}
+
+#[cfg(test)]
+pub(crate) use test_support::codex_stream_completion_pair;
+
+#[cfg(test)]
+mod test_support {
+    use super::{is_codex_stream_completion_pair, AgentChatEvent};
+
+    pub(crate) fn codex_stream_completion_pair(
+        first: &AgentChatEvent,
+        second: &AgentChatEvent,
+    ) -> bool {
+        is_codex_stream_completion_pair(first, second)
+            || is_codex_stream_completion_pair(second, first)
+    }
 }
