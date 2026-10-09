@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-pub(super) const NAMES: [&str; 7] = [
+pub(super) const NAMES: [&str; 8] = [
     "send_message",
     "followup_task",
     "receive_messages",
@@ -8,6 +8,7 @@ pub(super) const NAMES: [&str; 7] = [
     "reply",
     "interrupt_agent",
     "list_agents",
+    "read_task_context",
 ];
 
 pub(super) fn definitions() -> Vec<Value> {
@@ -19,12 +20,16 @@ fn definition(name: &str) -> Value {
         json!({"type":"string", "minLength":1, "description":"Exact Wardian agent name or UUID."});
     let message = json!({"type":"string", "minLength":1, "description":"Literal message text."});
     let (description, properties, required) = match name {
+        "read_task_context" => (
+            "Recover unresolved Wardian peer tasks bound to this exact active native Codex turn after compaction. Requires provider call metadata verified against the current owner's native event. Human instructions always prevail. This read does not claim, acknowledge, complete, replay or start work. Errors return no partial task list; do not guess another turn.",
+            json!({}), vec![],
+        ),
         "send_message" => (
             "Send information to one Wardian agent's durable inbox without starting or interrupting a turn. The receipt reports admission, not provider visibility.",
             json!({"target":target,"message":message}), vec!["target", "message"],
         ),
         "followup_task" => (
-            "Assign a task to one Wardian agent and return its request receipt without waiting for a reply. Exact native Codex task turns automatically return their final result unless an explicit reply already completed the task; other delivery paths require explicit reply. Starting an inactive receiver can take time. If your assignment requires its result, use wait_agent for mailbox activity, then receive_messages to inspect the correlated reply. A timeout does not mean the task failed.",
+            "Assign a task to one Wardian agent and return its request receipt without waiting for a reply. Exact native Codex turns automatically return only positively attributed per-request outcomes from the host-instructed final appendix, unless an explicit reply already completed the task. Generic final prose leaves tasks unresolved. Other delivery paths require explicit reply. Starting an inactive receiver can take time. If your assignment requires its result, use wait_agent for mailbox activity, then receive_messages to inspect the correlated reply. A timeout does not mean the task failed.",
             json!({"target":target,"message":message}), vec!["target", "message"],
         ),
         "receive_messages" => (
@@ -41,7 +46,7 @@ fn definition(name: &str) -> Value {
             json!({"timeout_ms":{"type":"integer","minimum":0,"maximum":60000,"default":60000}}), vec![],
         ),
         "reply" => (
-            "Reply to a Wardian task request as its authorized recipient. The request determines the destination. A committed explicit reply suppresses automatic native Codex final-result fallback; manual receive and unsupported provider delivery require this tool. Ordinary messages do not complete a request.",
+            "Reply to a Wardian task request as its authorized recipient. The request determines the destination. A committed explicit reply takes precedence over automatic attributed native Codex outcomes; manual receive and unsupported provider delivery require this tool. Ordinary messages do not complete a request.",
             json!({"request_id":{"type":"string","minLength":1},"status":{"type":"string","enum":["done","blocked","failed"]},"message":message}), vec!["request_id","status","message"],
         ),
         "interrupt_agent" => (
@@ -58,10 +63,10 @@ fn definition(name: &str) -> Value {
         "name":name, "description":description,
         "inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},
         "annotations":{
-            "readOnlyHint":name == "list_agents",
+            "readOnlyHint":matches!(name,"list_agents"|"read_task_context"),
             "destructiveHint":name == "interrupt_agent",
             "idempotentHint":matches!(name,"list_agents"|"reply"),
-            "openWorldHint":name != "list_agents"
+            "openWorldHint":!matches!(name,"list_agents"|"read_task_context")
         }
     })
 }

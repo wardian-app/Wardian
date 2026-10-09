@@ -8,6 +8,8 @@ use toml_edit::{value, Array, DocumentMut, Item, Table};
 
 const SERVER: &str = "wardian";
 const RECORD: &str = ".wardian-messaging.json";
+mod task_recovery;
+pub(crate) use task_recovery::{ensure_task_recovery, recovery_registration};
 
 /// Preserve every existing local Wardian entry during upstream reconciliation.
 /// This is not an ownership grant: user edits invalidate `owns`, but remain

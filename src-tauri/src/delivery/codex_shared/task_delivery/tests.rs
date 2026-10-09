@@ -95,6 +95,7 @@ async fn exact_active_steer_preserves_body_and_host_only_routing() {
         let routing: Value = serde_json::from_str(context["value"].as_str().unwrap()).unwrap();
         let mut expected_routing = expected.clone();
         expected_routing.as_object_mut().unwrap().remove("body");
+        expected_routing["task_outcome_instructions"] = json!(TASK_OUTCOME_INSTRUCTIONS);
         assert_eq!(routing, expected_routing);
         assert!(!context.to_string().contains("literal peer body"));
         // Completion before acknowledgement must remain available on this client.
@@ -156,8 +157,18 @@ async fn idle_start_keeps_tool_output_for_older_versions_and_cached_terminal_sta
         let provider = async {
             let request = receive(&mut socket).await;
             assert_eq!(request["method"], "turn/start");
+            let contexts = request["params"]["additionalContext"].as_object().unwrap();
+            assert_eq!(contexts.len(), 1);
+            let host_context = contexts.values().next().unwrap();
+            assert_eq!(host_context["kind"], "application");
+            assert_eq!(host_context["value"], TASK_OUTCOME_INSTRUCTIONS);
+            let mut original_params = request["params"].clone();
+            original_params
+                .as_object_mut()
+                .unwrap()
+                .remove("additionalContext");
             assert_eq!(
-                request["params"],
+                original_params,
                 json!({"threadId":"owned","input":[],"toolOutput":{
                     "name":"wardian_task_delivery","namespace":"wardian","output":context
                 }})
@@ -416,5 +427,29 @@ async fn exact_wait_disconnect_and_timeout_remain_uncertain() {
         .unwrap_err();
     assert_eq!(disconnected.code, "submitted_unconfirmed");
     assert!(disconnected.provider_boundary_crossed);
+    client.close().await;
+}
+
+#[tokio::test]
+async fn compaction_notifications_do_not_write_empty_steer_or_start_a_turn() {
+    let (client, mut socket) = connected("0.160.0", json!({"type":"active"})).await;
+    active(&client);
+    let mut observations = client.observations();
+    send(
+        &mut socket,
+        json!({"method":"thread/compacted","params":{"threadId":"owned","turnId":"active"}}),
+    )
+    .await;
+    send(&mut socket, json!({"method":"item/completed","params":{"threadId":"owned","turnId":"active","item":{"type":"contextCompaction","id":"compaction"}}})).await;
+    tokio::time::timeout(Duration::from_secs(1), observations.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_no_write(&mut socket).await;
+    assert!(client.pending.lock().unwrap().is_empty());
+    assert_eq!(
+        client.observation.borrow().active_turn.as_deref(),
+        Some("active")
+    );
     client.close().await;
 }

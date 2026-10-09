@@ -130,6 +130,13 @@ pub fn prepare_provider_habitat(
         {
             log_debug(&format!("[Wardian] Codex messaging unavailable: {reason}"));
         }
+        match super::codex_messaging::ensure_task_recovery(&wardian_home, session_id) {
+            Ok(super::codex_messaging::Registration::Unavailable(reason)) => log_debug(&format!(
+                "[Wardian] Codex task recovery unavailable: {reason}"
+            )),
+            Err(_) => log_debug("[Wardian] Codex task recovery unavailable: preparation failed"),
+            _ => {}
+        }
     }
 
     Ok(Some(habitat_root))
@@ -1361,7 +1368,8 @@ fn merge_codex_hooks_table(
     agent: &mut toml_edit::Item,
     real_codex_home: &std::path::Path,
 ) {
-    let (Some(base_table), Some(agent_table)) = (base.as_table(), agent.as_table_mut()) else {
+    let (Some(base_table), Some(agent_table)) = (base.as_table_like(), agent.as_table_like_mut())
+    else {
         if agent.is_none() {
             *agent = base.clone();
         }
@@ -1369,11 +1377,28 @@ fn merge_codex_hooks_table(
     };
 
     for (key, base_value) in base_table.iter() {
+        let mut local = agent_table
+            .get(key)
+            .cloned()
+            .unwrap_or(toml_edit::Item::None);
         if key == "state" {
-            merge_codex_provider_table(base_value, &mut agent_table[key], false, real_codex_home);
+            // Local trust and disable decisions survive a global refresh;
+            // only distinct global handlers supply missing defaults.
+            if let (Some(base_state), Some(local_state)) =
+                (base_value.as_table_like(), local.as_table_like_mut())
+            {
+                for (handler, policy) in base_state.iter() {
+                    if local_state.get(handler).is_none() {
+                        local_state.insert(handler, policy.clone());
+                    }
+                }
+            } else if local.is_none() {
+                local = base_value.clone();
+            }
         } else {
-            merge_codex_config_items(base_value, &mut agent_table[key], real_codex_home);
+            merge_codex_config_items(base_value, &mut local, real_codex_home);
         }
+        agent_table.insert(key, local);
     }
 }
 
@@ -2824,7 +2849,8 @@ mod tests {
             "{config}"
         );
         assert!(config.contains("last_updated = \"base\""), "{config}");
-        assert!(config.contains("trusted_hash = \"base\""), "{config}");
+        // Global refresh preserves the agent's explicit local hook trust decision.
+        assert!(config.contains("trusted_hash = \"stale\""), "{config}");
         assert!(config.contains("alternate_screen = \"never\""), "{config}");
         assert!(!config.contains("fullscreen_transcript"), "{config}");
         assert!(

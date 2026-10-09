@@ -4,6 +4,51 @@ use wardian_core::agent_messaging::AgentMessagingError;
 use wardian_core::db::agent_messaging as store;
 
 impl InteractionState {
+    /// A fresh, non-consuming snapshot for an exact provider call. The mutation
+    /// boundary excludes concurrent task settlement; native evidence is checked
+    /// again after the canonical lookup. No cursor, claim or reply is changed.
+    pub(crate) async fn read_bound_task_contexts<T>(
+        &self,
+        recipient: &str,
+        generation: u64,
+        thread_id: &str,
+        turn_id: &str,
+        validate_native: impl Fn() -> Result<(), AgentMessagingError>,
+        publish: impl FnOnce(Vec<store::CompactedTaskContext>) -> Result<T, AgentMessagingError>,
+    ) -> Result<T, AgentMessagingError> {
+        let _mutation = self.mutation_lock.lock().await;
+        if self.deleted_sessions.lock().await.contains(recipient)
+            || self.current_provider_input_generation(recipient).await != Some(generation)
+        {
+            return Err(AgentMessagingError::new(
+                "stale_task_context",
+                "Task-context generation or recipient is no longer current.",
+            ));
+        }
+        validate_native()?;
+        let contexts = store::with_db(|conn| {
+            store::compacted_task_contexts(conn, recipient, generation, thread_id, turn_id)
+        })?;
+        validate_native()?;
+        if contexts.is_empty() {
+            return Err(AgentMessagingError::new(
+                "task_context_unavailable",
+                "No unresolved provider-accepted task is bound to this exact native turn.",
+            ));
+        }
+        if contexts.len() > store::MAX_COMPACTED_TASK_CONTEXTS {
+            return Err(AgentMessagingError::new(
+                "task_context_overflow",
+                "Too many tasks are bound to this turn. No partial list was returned.",
+            ));
+        }
+        // Keep settlement excluded through serialization and the final native
+        // check. Provider history publication remains the ordinary MCP path.
+        let response = publish(contexts)?;
+        validate_native()?;
+        Ok(response)
+    }
+
     /// Snapshot provider deliveries for a single pending receive call. Revisions
     /// are process-local wake signals, not durable acknowledgement cursors.
     pub async fn agent_message_provider_revision(&self, recipient: &str) -> u64 {
@@ -349,3 +394,6 @@ impl InteractionState {
         }
     }
 }
+
+#[cfg(test)]
+mod task_context_tests;

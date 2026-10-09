@@ -7,6 +7,7 @@
 
 mod definitions;
 mod messaging;
+mod recovery_pointer;
 #[cfg(test)]
 mod tests;
 
@@ -19,12 +20,23 @@ const VERSION: &str = "2025-11-25";
 
 #[derive(Debug, clap::Subcommand)]
 pub enum McpCommand {
-    /// Serve six agent messaging tools on stdio. Requires a managed sender and running Wardian app.
+    /// Serve agent messaging and recovery tools. Requires a managed sender and running Wardian app.
     Serve,
+    /// Emit the stable SessionStart compact pointer; never reads Wardian task state.
+    RecoveryPointer,
 }
 
 /// Run the explicit server without passing protocol output through CLI rendering.
-pub fn run(_command: &McpCommand) -> i32 {
+pub fn run(command: &McpCommand) -> i32 {
+    if matches!(command, McpCommand::RecoveryPointer) {
+        return match recovery_pointer::run(io::stdin().lock(), io::stdout().lock()) {
+            Ok(()) => 0,
+            Err(_) => {
+                eprintln!("Wardian compact recovery pointer failed.");
+                1
+            }
+        };
+    }
     match serve(
         io::stdin().lock(),
         io::stdout().lock(),
@@ -194,12 +206,13 @@ impl Session {
                 // Keep IDs for the connection's lifetime, including failed calls.
                 // No response cache or eviction can turn uncertainty into a replay.
                 self.calls.insert(call_id.clone());
-                let result = messaging::call(
+                let result = messaging::call_with_metadata(
                     params["name"].as_str().unwrap(),
                     params
                         .get("arguments")
                         .cloned()
                         .unwrap_or_else(|| json!({})),
+                    params.get("_meta"),
                     &format!("{}:{call_id}", self.admission_namespace),
                     backend,
                 );

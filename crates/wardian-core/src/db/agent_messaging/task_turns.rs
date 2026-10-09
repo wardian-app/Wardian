@@ -1,6 +1,15 @@
 //! Exact scheduler admissions and a durable terminal outbox. Never replay provider work.
 use super::*;
 
+mod final_results;
+pub use final_results::{record_task_turn_final, RecordedTaskFinal};
+
+/// Maximum number of admitted task messages restored after a Codex compaction.
+/// The query reads one extra row so callers can fail closed on overflow.
+pub const MAX_COMPACTED_TASK_CONTEXTS: usize = 16;
+
+pub use crate::agent_messaging::RecoveredTaskContext as CompactedTaskContext;
+
 /// Durable identity of one scheduler task admitted to an exact native Codex turn.
 /// Multiple requests may share a turn; each retains its own claim and requester.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,7 +41,16 @@ pub(super) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         CHECK((settlement IN ('bound','uncertain') AND terminal_status IS NULL AND terminal_body IS NULL)
            OR (settlement IN ('outcome_recorded','published') AND terminal_status IS NOT NULL AND terminal_body IS NOT NULL)));
         CREATE INDEX IF NOT EXISTS agent_message_task_turn_settlement
-        ON agent_message_task_turns(settlement);"
+        ON agent_message_task_turns(settlement);
+        CREATE TABLE IF NOT EXISTS agent_message_task_turn_observations (
+        request_id TEXT PRIMARY KEY NOT NULL REFERENCES agent_message_task_turns(request_id) ON DELETE CASCADE,
+        provider_status TEXT NOT NULL CHECK(provider_status IN ('completed','interrupted','failed')),
+        answer_sha256 TEXT NOT NULL CHECK(length(answer_sha256)=64),
+        answer_bytes INTEGER NOT NULL CHECK(answer_bytes>=0),
+        answer_preview TEXT NOT NULL CHECK(length(CAST(answer_preview AS BLOB))<={MAX_MESSAGE_BYTES}),
+        diagnostic TEXT NOT NULL CHECK(length(CAST(diagnostic AS BLOB))<=1024),
+        information_id TEXT UNIQUE,
+        observed_at TEXT NOT NULL);"
     ))
 }
 
@@ -140,17 +158,13 @@ fn settlement(conn: &Connection, binding: &TaskTurnBinding) -> Result<String> {
     Ok(state)
 }
 
-/// Commit known terminal output before attempting reply publication. No provider work occurs.
-/// Identical observations are idempotent; the first committed terminal output is retained.
-pub fn record_task_turn_outcome(
-    conn: &Connection,
+fn record_outcome_in_transaction(
+    tx: &Connection,
     binding: &TaskTurnBinding,
     status: ReplyStatus,
     body: &str,
 ) -> Result<()> {
-    validate_message(body)?;
-    let tx = conn.unchecked_transaction()?;
-    let state = settlement(&tx, binding)?;
+    let state = settlement(tx, binding)?;
     let status = super::super::enum_value(&status)?;
     match state.as_str() {
         "bound" => {
@@ -176,7 +190,6 @@ pub fn record_task_turn_outcome(
             ))
         }
     }
-    tx.commit()?;
     Ok(())
 }
 
@@ -233,13 +246,80 @@ fn bindings_in_state(conn: &Connection, state: &str) -> Result<Vec<TaskTurnBindi
 /// List unresolved admissions for exact continuity checks or marking uncertain.
 /// Recorded outcomes have a separate recovery path; uncertain turns are never retried.
 pub fn pending_task_turn_bindings(conn: &Connection) -> Result<Vec<TaskTurnBinding>> {
-    bindings_in_state(conn, "bound")
+    let mut statement = conn.prepare(
+        "SELECT request_id,claim_token,recipient,generation,provider,provider_session_id,provider_turn_id,admission_mode
+         FROM agent_message_task_turns b WHERE settlement='bound'
+         AND NOT EXISTS(SELECT 1 FROM agent_message_task_turn_observations o WHERE o.request_id=b.request_id)
+         ORDER BY request_id",
+    )?;
+    let rows = statement.query_map([], row_binding)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Return only unresolved, provider-accepted tasks bound to this exact Codex turn.
+/// Availability order describes inbox chronology only. The extra row lets the
+/// caller reject an oversized projection without sending a partial task list.
+pub fn compacted_task_contexts(
+    conn: &Connection,
+    recipient: &str,
+    generation: u64,
+    provider_session_id: &str,
+    provider_turn_id: &str,
+) -> Result<Vec<CompactedTaskContext>> {
+    let mut statement = conn.prepare(
+        "SELECT a.sequence,b.request_id FROM agent_message_availability a
+        JOIN agent_message_task_turns b ON b.request_id=a.interaction_id
+        JOIN agent_message_delivery d ON d.interaction_id=b.request_id
+        JOIN interactions i ON i.id=b.request_id
+        WHERE a.recipient=?1 AND b.recipient=?1 AND b.generation=?2
+          AND b.provider='codex' AND b.provider_session_id=?3 AND b.provider_turn_id=?4
+          AND b.settlement='bound' AND d.owner='provider_accepted'
+          AND d.generation=b.generation AND d.claim_token=b.claim_token
+          AND d.recipient=b.recipient AND d.operation='followup_task'
+          AND i.kind='task' AND i.status='awaiting_reply'
+          AND NOT EXISTS(SELECT 1 FROM structured_replies r WHERE r.request_id=b.request_id)
+          AND NOT EXISTS(SELECT 1 FROM agent_message_task_turn_observations o WHERE o.request_id=b.request_id)
+        ORDER BY a.sequence,b.request_id LIMIT ?5",
+    )?;
+    let rows = statement.query_map(
+        params![
+            recipient,
+            generation,
+            provider_session_id,
+            provider_turn_id,
+            MAX_COMPACTED_TASK_CONTEXTS as i64 + 1,
+        ],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+    )?;
+    let identities = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    identities
+        .into_iter()
+        .map(|(availability_sequence, request_id)| {
+            let record = load(conn, &request_id)?;
+            if record.kind != InteractionKind::Task
+                || record.status != InteractionStatus::AwaitingReply
+                || record.target_session_ids != [recipient.to_owned()]
+            {
+                return Err(Error::new(
+                    "invalid_task",
+                    "Bound task no longer matches its canonical recipient or status.",
+                ));
+            }
+            let context = message_context(conn, &record)?;
+            Ok(CompactedTaskContext {
+                availability_sequence,
+                created_at: record.created_at,
+                message: context,
+            })
+        })
+        .collect()
 }
 
 /// Process-start hydrate retires only observations without a recorded outcome.
 /// Live receive recovery must not retire a turn that the runtime still observes.
 pub fn abandon_task_turn_observations(conn: &Connection) -> Result<()> {
-    conn.execute("UPDATE agent_message_task_turns SET settlement='uncertain' WHERE settlement='bound' AND terminal_status IS NULL AND terminal_body IS NULL", [])?;
+    conn.execute("UPDATE agent_message_task_turns SET settlement='uncertain' WHERE settlement='bound' AND terminal_status IS NULL AND terminal_body IS NULL
+        AND NOT EXISTS(SELECT 1 FROM agent_message_task_turn_observations o WHERE o.request_id=agent_message_task_turns.request_id)", [])?;
     Ok(())
 }
 
@@ -249,6 +329,16 @@ pub fn mark_task_turn_uncertain(conn: &Connection, binding: &TaskTurnBinding) ->
     let tx = conn.unchecked_transaction()?;
     match settlement(&tx, binding)?.as_str() {
         "bound" => {
+            let finished: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agent_message_task_turn_observations WHERE request_id=?1)",
+                [&binding.request_id], |row| row.get(0),
+            )?;
+            if finished {
+                return Err(Error::new(
+                    "invalid_state",
+                    "Known finished turns cannot be discarded as uncertain.",
+                ));
+            }
             tx.execute(
                 "UPDATE agent_message_task_turns SET settlement='uncertain' WHERE request_id=?1",
                 [&binding.request_id],
@@ -282,6 +372,21 @@ pub fn recover_task_turn_outcomes(conn: &Connection) -> Result<Vec<Replied>> {
 mod tests {
     use super::*;
 
+    /// Seed a single outcome for terminal-outbox recovery fixtures.
+    /// Production validates and records the whole final packet through `record_task_turn_final`.
+    fn record_task_turn_outcome(
+        conn: &Connection,
+        binding: &TaskTurnBinding,
+        status: ReplyStatus,
+        body: &str,
+    ) -> Result<()> {
+        validate_message(body)?;
+        let tx = conn.unchecked_transaction()?;
+        record_outcome_in_transaction(&tx, binding, status, body)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     fn database() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::run_migrations(&conn).unwrap();
@@ -306,6 +411,30 @@ mod tests {
 
     fn bind(conn: &Connection, claim: &TaskClaim) -> TaskTurnBinding {
         bind_task_turn(conn, claim, "codex", "session", "turn", "start").unwrap()
+    }
+
+    fn task_for(
+        conn: &Connection,
+        sender: &str,
+        recipient: &str,
+        message: &str,
+        generation: u64,
+    ) -> TaskClaim {
+        admit(
+            conn,
+            Admission {
+                sender,
+                recipient,
+                message,
+                idempotency_key: None,
+                task: true,
+                generation,
+            },
+        )
+        .unwrap();
+        claim_next_task(conn, recipient, generation)
+            .unwrap()
+            .unwrap()
     }
 
     fn count(conn: &Connection, table: &str) -> i64 {
@@ -814,5 +943,144 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn compacted_context_is_exact_ordered_and_excludes_settled_or_unbound_tasks() {
+        let conn = database();
+        let first = task_for(&conn, "requester-a", "receiver", "first task", 7);
+        bind_task_turn(&conn, &first, "codex", "session", "turn", "steer").unwrap();
+        let second = task_for(&conn, "requester-b", "receiver", "second task", 7);
+        bind_task_turn(&conn, &second, "codex", "session", "turn", "steer").unwrap();
+
+        let foreign_session = task_for(&conn, "requester", "receiver", "other session", 7);
+        bind_task_turn(
+            &conn,
+            &foreign_session,
+            "codex",
+            "other-session",
+            "turn",
+            "steer",
+        )
+        .unwrap();
+        let foreign_turn = task_for(&conn, "requester", "receiver", "other turn", 7);
+        bind_task_turn(
+            &conn,
+            &foreign_turn,
+            "codex",
+            "session",
+            "other-turn",
+            "steer",
+        )
+        .unwrap();
+        let foreign_generation = task_for(&conn, "requester", "receiver", "other generation", 8);
+        bind_task_turn(
+            &conn,
+            &foreign_generation,
+            "codex",
+            "session",
+            "turn",
+            "steer",
+        )
+        .unwrap();
+        let foreign_recipient = task_for(&conn, "requester", "other-agent", "other recipient", 7);
+        bind_task_turn(
+            &conn,
+            &foreign_recipient,
+            "codex",
+            "session",
+            "turn",
+            "steer",
+        )
+        .unwrap();
+
+        let completed = task_for(&conn, "requester", "receiver", "already replied", 7);
+        let completed_binding =
+            bind_task_turn(&conn, &completed, "codex", "session", "turn", "steer").unwrap();
+        reply(
+            &conn,
+            "receiver",
+            &completed_binding.request_id,
+            ReplyStatus::Done,
+            "explicit reply",
+        )
+        .unwrap();
+        let uncertain = task_for(&conn, "requester", "receiver", "uncertain", 7);
+        let uncertain_binding =
+            bind_task_turn(&conn, &uncertain, "codex", "session", "turn", "steer").unwrap();
+        mark_task_turn_uncertain(&conn, &uncertain_binding).unwrap();
+        admit(
+            &conn,
+            Admission {
+                sender: "requester",
+                recipient: "receiver",
+                message: "not yet admitted to a turn",
+                idempotency_key: None,
+                task: true,
+                generation: 7,
+            },
+        )
+        .unwrap();
+
+        let contexts = compacted_task_contexts(&conn, "receiver", 7, "session", "turn").unwrap();
+        assert_eq!(contexts.len(), 2);
+        assert!(contexts[0].availability_sequence < contexts[1].availability_sequence);
+        assert_eq!(contexts[0].message.sender, "requester-a");
+        assert_eq!(contexts[0].message.body, "first task");
+        assert_eq!(
+            contexts[0].message.request_id.as_deref(),
+            Some(first.record.id.as_str())
+        );
+        assert_eq!(contexts[1].message.sender, "requester-b");
+        assert_eq!(contexts[1].message.body, "second task");
+        assert_eq!(
+            contexts[1].message.request_id.as_deref(),
+            Some(second.record.id.as_str())
+        );
+        assert!(contexts.iter().all(|context| {
+            context.message.recipient == "receiver"
+                && context.message.kind == InteractionKind::Task
+                && !context.created_at.is_empty()
+        }));
+    }
+
+    #[test]
+    fn compaction_projection_stays_empty_until_durable_turn_binding_commits() {
+        let conn = database();
+        let claim = task_for(&conn, "requester", "receiver", "admitted task", 7);
+        assert!(
+            compacted_task_contexts(&conn, "receiver", 7, "session", "turn")
+                .unwrap()
+                .is_empty()
+        );
+
+        bind_task_turn(&conn, &claim, "codex", "session", "turn", "start").unwrap();
+        let contexts = compacted_task_contexts(&conn, "receiver", 7, "session", "turn").unwrap();
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(
+            contexts[0].message.request_id.as_deref(),
+            Some(claim.record.id.as_str())
+        );
+        assert_eq!(contexts[0].message.body, "admitted task");
+    }
+
+    #[test]
+    fn task_context_read_is_non_consuming_and_count_overflow_is_not_partial() {
+        let conn = database();
+        for index in 0..=MAX_COMPACTED_TASK_CONTEXTS {
+            let claim = task_for(&conn, "requester", "receiver", &format!("task {index}"), 7);
+            bind_task_turn(&conn, &claim, "codex", "thread", "turn", "steer").unwrap();
+        }
+        let before: i64 = conn
+            .query_row("SELECT total_changes()", [], |row| row.get(0))
+            .unwrap();
+        let first = compacted_task_contexts(&conn, "receiver", 7, "thread", "turn").unwrap();
+        let second = compacted_task_contexts(&conn, "receiver", 7, "thread", "turn").unwrap();
+        let after: i64 = conn
+            .query_row("SELECT total_changes()", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(first.len(), MAX_COMPACTED_TASK_CONTEXTS + 1);
+        assert_eq!(first, second);
+        assert_eq!(before, after);
     }
 }

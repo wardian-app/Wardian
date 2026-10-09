@@ -55,10 +55,14 @@ only when its `parent_interaction_id` equals the saved ID. Check `reply_status`:
 terminal text, an empty page, or an unrelated answer.
 
 Canonical tasks dispatched to an exact native Codex turn automatically return
-that turn's final result to the requester unless an explicit reply has already
-completed the task. Tasks acquired through receive, composer delivery, and
+only a task-specific result in the host-instructed final task-outcome appendix,
+unless an explicit reply has already completed the task. Preserve each exact
+request ID. Generic final prose leaves the task awaiting reply; a known finished
+turn sends one informational notification without restarting or replaying work.
+Use explicit `reply` when the human-required output format excludes the appendix.
+Tasks acquired through receive, composer delivery, and
 providers without exact native completion support require explicit reply.
-Several tasks steered into one turn share its final result. Completion wakes
+Several tasks steered into one turn require separate per-request results. Completion wakes
 an existing receive wait without starting a finished requester's turn.
 
 ```bash

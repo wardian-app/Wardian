@@ -347,11 +347,17 @@ mod tests {
                 .unwrap()
                 .unwrap()
         );
-        let environment = crate::manager::worktree_build_env(&f.config(&tree)).unwrap();
+        let environment =
+            crate::manager::worktree_build_env_with_policy(&f.config(&tree), false).unwrap();
         assert_eq!(environment.len(), 2);
         assert!(environment
             .iter()
             .all(|(_, value)| Path::new(value) == target));
+        assert!(
+            crate::manager::worktree_build_env_with_policy(&f.config(&tree), true)
+                .unwrap()
+                .is_empty()
+        );
         assert!(
             !target.exists(),
             "planning must not allocate or claim compiler outputs"
@@ -371,7 +377,7 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(
-            crate::manager::worktree_build_env(&f.config(&tree))
+            crate::manager::worktree_build_env_with_policy(&f.config(&tree), false)
                 .unwrap()
                 .len(),
             2
@@ -395,9 +401,11 @@ mod tests {
             fs::read_to_string(&file).unwrap(),
             format!("{legacy}# user-owned\n")
         );
-        assert!(crate::manager::worktree_build_env(&f.config(&tree))
-            .unwrap()
-            .is_empty());
+        assert!(
+            crate::manager::worktree_build_env_with_policy(&f.config(&tree), false)
+                .unwrap()
+                .is_empty()
+        );
         fs::write(&file, legacy).unwrap();
         setup_worktree_build_caches(&tree, &f.source).unwrap();
         let migrated = fs::read_to_string(&file).unwrap();
@@ -421,9 +429,11 @@ mod tests {
             let file = tree.join(".cargo/config.toml");
             fs::write(&file, custom).unwrap();
             setup_worktree_build_caches(&tree, &f.source).unwrap();
-            assert!(crate::manager::worktree_build_env(&f.config(&tree))
-                .unwrap()
-                .is_empty());
+            assert!(
+                crate::manager::worktree_build_env_with_policy(&f.config(&tree), false)
+                    .unwrap()
+                    .is_empty()
+            );
             remove_generated_cargo_config(&tree, &f.source).unwrap();
             assert_eq!(fs::read_to_string(file).unwrap(), custom);
         }
@@ -438,9 +448,11 @@ mod tests {
             fs::read_to_string(tree.join(".cargo/config.toml")).unwrap(),
             legacy
         );
-        assert!(crate::manager::worktree_build_env(&f.config(&tree))
-            .unwrap()
-            .is_empty());
+        assert!(
+            crate::manager::worktree_build_env_with_policy(&f.config(&tree), false)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -453,16 +465,20 @@ mod tests {
         )
         .unwrap();
         setup_worktree_build_caches(&tree, &f.source).unwrap();
-        assert!(crate::manager::worktree_build_env(&f.config(&tree))
-            .unwrap()
-            .is_empty());
+        assert!(
+            crate::manager::worktree_build_env_with_policy(&f.config(&tree), false)
+                .unwrap()
+                .is_empty()
+        );
         fs::remove_file(tree.join(".cargo/config")).unwrap();
         fs::remove_file(tree.join(".cargo/config.toml")).unwrap();
         setup_worktree_build_caches(&tree, &f.source).unwrap();
         assert!(!tree.join(".cargo/config.toml").exists());
-        assert!(crate::manager::worktree_build_env(&f.config(&tree))
-            .unwrap()
-            .is_empty());
+        assert!(
+            crate::manager::worktree_build_env_with_policy(&f.config(&tree), false)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -664,7 +680,7 @@ mod tests {
         let root = f.source.with_file_name("project.cargo-cache");
         crate::utils::fs::create_directory_link(&f.source, &root).unwrap();
         assert!(setup_worktree_build_caches(&tree, &f.source).is_err());
-        assert!(crate::manager::worktree_build_env(&f.config(&tree)).is_err());
+        assert!(crate::manager::worktree_build_env_with_policy(&f.config(&tree), false).is_err());
         super::super::remove_link_path(&root).unwrap();
     }
 }
