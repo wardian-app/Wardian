@@ -20,6 +20,11 @@ Wardian provides one orchestration layer over five supported CLI providers: Anti
 - Automation Agent nodes choose one run mode: `ephemeral`, `inherit_fresh`, or `inherit_resume`.
 - Wardian keeps user repositories clean by adapting provider-native discovery instead of copying agent-specific instruction and skill files into the project root.
 
+New Windows provider and tool processes share Wardian's lifetime. They stop if
+Wardian exits unexpectedly, and Wardian rejects a launch when it cannot establish
+process containment. Updater handoffs and applications you open separately retain
+their own lifetimes.
+
 ## Model and Effort Selection
 
 Choose a model when you spawn an agent or from **Agent Configuration** for an

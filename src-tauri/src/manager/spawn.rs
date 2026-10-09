@@ -2768,11 +2768,7 @@ async fn spawn_agent_inner(
     // The transition lease acquired before native owner preparation remains
     // held through PTY creation and publication.
     #[cfg(windows)]
-    let contained_job = if config.provider == "claude" {
-        Some(crate::utils::process::RuntimeProcessJob::prepare(&mut cmd)?)
-    } else {
-        None
-    };
+    let contained_job = Some(crate::utils::process::RuntimeProcessJob::prepare(&mut cmd)?);
     // Provider records written after this instant belong to this runtime.
     let provider_launched_at_ms = chrono::Utc::now().timestamp_millis();
     let child_result = pair.slave.spawn_command(cmd);

@@ -14,6 +14,11 @@ before any provider can launch. Inbox completion IDs make replay idempotent;
 records are acknowledged only after the corresponding Inbox item is persisted.
 
 - The Rust backend remains the source of truth for provider process lifecycle, session IDs, PTY ownership, and status telemetry.
+- New Windows managed roots enter non-breakaway containment before execution.
+  Outer app supervision also covers death before nested assignment. A containment
+  failure rejects the launch; updater and external-application paths retain their
+  separate lifetimes. See [PTY lifecycle](./pty-lifecycle.md)
+  for ownership and compatibility limits.
 - Every provider receives Wardian's `system_include_directories`, which are resolved from `common`, `classes/<class>`, and `agents/<session_id>`.
 - Headless execution and interactive execution use the same provider-specific assumptions where possible. Differences should stay explicit in `manager.rs` instead of being hidden in frontend state.
 - Provider-native instruction discovery matters more than Wardian's abstract model. The backend adapts Wardian's files and directories to each CLI instead of expecting the CLI to understand Wardian directly.
