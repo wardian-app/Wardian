@@ -158,22 +158,6 @@ fn settlement(conn: &Connection, binding: &TaskTurnBinding) -> Result<String> {
     Ok(state)
 }
 
-/// Seed a single outcome for terminal-outbox recovery fixtures.
-/// Production validates and records the whole final packet through `record_task_turn_final`.
-#[cfg(test)]
-fn record_task_turn_outcome(
-    conn: &Connection,
-    binding: &TaskTurnBinding,
-    status: ReplyStatus,
-    body: &str,
-) -> Result<()> {
-    validate_message(body)?;
-    let tx = conn.unchecked_transaction()?;
-    record_outcome_in_transaction(&tx, binding, status, body)?;
-    tx.commit()?;
-    Ok(())
-}
-
 fn record_outcome_in_transaction(
     tx: &Connection,
     binding: &TaskTurnBinding,
@@ -387,6 +371,21 @@ pub fn recover_task_turn_outcomes(conn: &Connection) -> Result<Vec<Replied>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Seed a single outcome for terminal-outbox recovery fixtures.
+    /// Production validates and records the whole final packet through `record_task_turn_final`.
+    fn record_task_turn_outcome(
+        conn: &Connection,
+        binding: &TaskTurnBinding,
+        status: ReplyStatus,
+        body: &str,
+    ) -> Result<()> {
+        validate_message(body)?;
+        let tx = conn.unchecked_transaction()?;
+        record_outcome_in_transaction(&tx, binding, status, body)?;
+        tx.commit()?;
+        Ok(())
+    }
 
     fn database() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
