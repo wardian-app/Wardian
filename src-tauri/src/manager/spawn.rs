@@ -30,6 +30,8 @@ use super::codex_onboarding::{
     SpawnPublication, SpawnedAgent, SynchronousCodexFinalizationContext,
 };
 use super::codex_terminal_theme::CodexTerminalThemeProbeResponder;
+#[cfg(windows)]
+use super::conpty_startup::ConptyStartupProbeResponder;
 
 use super::claude::{
     claude_accepted_sessions, claude_log_paths, claude_permission_hook_matches_session,
@@ -3077,6 +3079,8 @@ async fn spawn_agent_inner(
         let mut had_pty_output = false;
         let mut opencode_chunks_logged = 0usize;
         let mut codex_terminal_theme_responder = CodexTerminalThemeProbeResponder::default();
+        #[cfg(windows)]
+        let mut conpty_startup_responder = ConptyStartupProbeResponder::default();
         let mut antigravity_turn_completion_gate = AntigravityTurnCompletionGate::default();
         let mut startup_prompt_pending = true;
         let mut codex_choice_pending = false;
@@ -3093,6 +3097,22 @@ async fn spawn_agent_inner(
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
+                    #[cfg(windows)]
+                    {
+                        let pending = conpty_startup_responder.finish();
+                        if !pending.is_empty() {
+                            let _ = crate::state::terminal_session::forward_terminal_output(
+                                &terminal_sessions,
+                                &sid_for_pty,
+                                reader_runtime_generation,
+                                &pending,
+                            );
+                            let _ = pty_emit_app.emit(
+                                "agent-pty-output-ready",
+                                serde_json::json!({ "session_id": sid_for_pty }),
+                            );
+                        }
+                    }
                     log_terminal_trace_note(&sid_for_pty, &provider_name_for_pty, "pty EOF");
                     if provider_name_for_pty == "opencode" {
                         log_debug(&format!(
@@ -3133,11 +3153,30 @@ async fn spawn_agent_inner(
                         crate::utils::runtime_profile::RuntimeMetric::PtyRead,
                         n as u64,
                     );
+                    #[cfg(windows)]
+                    let (startup_response, presentation_output) =
+                        conpty_startup_responder.process_chunk(&buf[..n]);
+                    #[cfg(not(windows))]
+                    let presentation_output = &buf[..n];
+                    #[cfg(windows)]
+                    if let Some(response) = startup_response {
+                        if let Err(error) = terminal_sessions.send_privileged_input_blocking(
+                            &sid_for_pty,
+                            reader_runtime_generation,
+                            response.to_vec(),
+                        ) {
+                            log_terminal_trace_note(
+                                &sid_for_pty,
+                                &provider_name_for_pty,
+                                &format!("ConPTY startup reply failed: {error}"),
+                            );
+                        }
+                    }
                     if let Err(error) = crate::state::terminal_session::forward_terminal_output(
                         &terminal_sessions,
                         &sid_for_pty,
                         reader_runtime_generation,
-                        &buf[..n],
+                        &presentation_output,
                     ) {
                         log_terminal_trace_note(
                             &sid_for_pty,

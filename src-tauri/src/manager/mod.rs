@@ -5,6 +5,8 @@ pub(crate) mod codex_onboarding;
 pub(crate) mod codex_shared;
 pub(crate) mod codex_stop;
 mod codex_terminal_theme;
+#[cfg(any(windows, test))]
+mod conpty_startup;
 pub(crate) mod headless;
 pub(crate) mod opencode;
 pub(crate) mod pi_receipt;
