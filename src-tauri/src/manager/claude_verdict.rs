@@ -1,18 +1,24 @@
-//! Verified Claude turn completions.
+//! Claude Stop-round settlement evidence.
 //!
 //! Claude Code's interactive `Stop` hook runs before Claude decides whether
-//! the turn continues: any other Stop hook may still block it. A Stop record
-//! alone therefore cannot prove that its `last_assistant_message` is the
-//! final answer. The only supported interactive surface that reports the
-//! decision is the OpenTelemetry log event `claude_code.hook_execution_complete`
-//! for `hook_event = "Stop"`, which Claude emits after every Stop hook of a
-//! round has settled. It carries the round's blocking counts and the prompt
-//! ID, but not the response text.
+//! the turn continues, so a Stop record alone cannot prove that its
+//! `last_assistant_message` is the final answer. The OpenTelemetry log event
+//! `claude_code.hook_execution_complete` for `hook_event = "Stop"` reports,
+//! after every Stop hook of a round has settled, whether any hook blocked or
+//! added context. It carries the prompt ID but not the response text.
 //!
-//! This module joins the two without inferring identity from equal counts
-//! alone. Each launch has its own append-only Stop round log (written by
-//! Wardian's Stop hook) and its own telemetry ledger (written by the loopback
-//! receiver). A prompt is verified only when:
+//! Settled hooks are a necessary condition only. Claude's Stop handler can
+//! still continue a turn without a hook block (brief-mode enforcement, goal
+//! check-ins, structured-output enforcement), or end it through
+//! `continue: false`, and no event follows that decision. A settled prompt is
+//! therefore never a completion verdict on its own. Interactive launches
+//! capture no evidence until a supported provider verdict exists; see
+//! `launch::interactive_turn_verdict`.
+//!
+//! This module joins the two records without inferring identity from equal
+//! counts alone. Each launch has its own append-only Stop round log (written
+//! by Wardian's Stop hook) and its own telemetry ledger (written by the
+//! loopback receiver). A prompt is settled only when:
 //!
 //! - the ledger holds every event sequence number from the prompt's
 //!   `user_prompt` event through the final Stop `hook_execution_complete`;
@@ -25,8 +31,8 @@
 //! - the round log holds exactly one record per round for the prompt, in
 //!   round order, from the same Claude session.
 //!
-//! Anything else is `Pending` (a gap may still be filled by a retried batch)
-//! or `Unknown`. Neither creates an Inbox card.
+//! Missing evidence that a delayed batch may still supply is `Pending`;
+//! anything else is `Unknown`. Neither creates an Inbox card.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -42,9 +48,9 @@ mod tests;
 pub(crate) const STOP_ROUNDS_FILE: &str = "stop-rounds.jsonl";
 /// Per-launch telemetry ledger appended by the loopback receiver.
 pub(crate) const TELEMETRY_FILE: &str = "telemetry.jsonl";
-/// Prompt IDs whose verified completion is durably in the Inbox queue.
+/// Prompt IDs whose settled completion is durably in the Inbox queue.
 pub(crate) const COMMITTED_FILE: &str = "committed.jsonl";
-/// Launch description, including whether verification is available.
+/// Launch description, including whether evidence capture is available.
 pub(crate) const LAUNCH_FILE: &str = "launch.json";
 
 const EVENT_PREFIX: &str = "claude_code.";
@@ -323,21 +329,21 @@ impl StopRoundLog {
     }
 }
 
-/// A provider-verified final answer for one Claude prompt.
+/// The final Stop round of a prompt whose hooks all settled without continuing.
+/// A necessary condition for a completion, not a provider verdict.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct VerifiedCompletion {
+pub(crate) struct SettledCompletion {
     pub(crate) prompt_id: String,
     pub(crate) response_text: String,
     /// `event.timestamp` of the Stop round's `hook_execution_complete`.
     pub(crate) completed_at: Option<String>,
 }
 
-/// Why a prompt with a non-continuing Stop round cannot be verified.
+/// Why a prompt with a non-continuing Stop round cannot settle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UnknownReason {
     LedgerConflict,
     RoundLogMalformed,
-    MissingPromptStart,
     DuplicatePromptStart,
     StopRoundBeforePromptStart,
     UnpairedStopRound,
@@ -351,8 +357,8 @@ pub(crate) enum UnknownReason {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Verdict {
-    Verified(VerifiedCompletion),
-    /// No non-continuing round yet, or a gap a retried batch may still fill.
+    Settled(SettledCompletion),
+    /// No non-continuing round yet, or evidence a delayed batch may still supply.
     Pending,
     Unknown(UnknownReason),
 }
@@ -382,8 +388,9 @@ fn round_settled(start: &HookExecution, complete: &HookExecution) -> bool {
     started == hooks && complete.num_cancelled == Some(0) && settled == Some(hooks)
 }
 
-/// Decides whether `prompt_id` has a provider-verified final answer.
-pub(crate) fn verify_prompt(
+/// Decides whether `prompt_id`'s Stop hooks settled on a final round whose
+/// exact response, session, and prompt identity are proven.
+pub(crate) fn settle_prompt(
     ledger: &TelemetryLedger,
     round_log: &StopRoundLog,
     prompt_id: &str,
@@ -421,8 +428,9 @@ pub(crate) fn verify_prompt(
     let mut starts = ledger
         .events()
         .filter(|event| event.name == USER_PROMPT_EVENT && event.belongs_to(prompt_id));
+    // The start may still arrive in a delayed or retried batch.
     let Some(prompt_start) = starts.next() else {
-        return Verdict::Unknown(UnknownReason::MissingPromptStart);
+        return Verdict::Pending;
     };
     if starts.next().is_some() {
         return Verdict::Unknown(UnknownReason::DuplicatePromptStart);
@@ -500,7 +508,7 @@ pub(crate) fn verify_prompt(
         return Verdict::Unknown(UnknownReason::EmptyResponse);
     };
 
-    Verdict::Verified(VerifiedCompletion {
+    Verdict::Settled(SettledCompletion {
         prompt_id: prompt_id.to_string(),
         response_text: response_text.to_string(),
         completed_at: final_round.timestamp.clone(),

@@ -289,13 +289,13 @@ A card is keyed by provider evidence for its turn, `agent-completed:<agent-sessi
 
 | Provider | Completion source | `evidence_id` |
 | --- | --- | --- |
-| Claude | Final Stop round (`last_assistant_message`) verified by Claude's settled-Stop telemetry | Claude `prompt_id` |
+| Claude | None for interactive turns: Claude Code exposes no supported turn-end verdict | Claude `prompt_id` |
 | Codex | Owned app-server `turn/completed` with its `final_answer`, and the rollout `task_complete` record (`last_agent_message`) | Codex turn ID, shared by both sources |
 | Other providers | The final assistant message of the transcript at the turn boundary | `answer:` plus a digest of the request and its answer |
 
 Two observers of the same turn converge on one card, and a dismissed card stays dismissed. A turn without non-empty final answer text produces no card: interrupted and failed turns, Claude `StopFailure`, provider control commands such as `/login`, and turns whose transcript does not end in an assistant answer to a user request. Rollout records written before the current runtime launched are history and are ignored. A failed queue write is retried while the same agent runtime remains current. Antigravity's transcript marks intermediate planner and script steps as `DONE`, so Wardian reports its turn boundary only when that provider returns to its visible ready prompt, once per active turn.
 
-For interactive Claude sessions, a Stop hook payload is only a candidate: Wardian upserts the card after Claude's `hook_execution_complete` telemetry shows that the prompt's last Stop round settled without continuing, and the per-launch round log and telemetry ledger agree on every round ([Claude Inbox Turn Completions](https://github.com/wardian-app/Wardian/blob/main/docs/specs/claude-inbox-turn-completions.md)). Unverifiable prompts produce no card. Committed prompts are recorded per launch, so startup replay is idempotent. Dismissal marks a durable tombstone; whole-queue snapshots cannot delete or revive backend-owned completion records.
+Interactive Claude turns create no completion card. Claude Code's Stop hook and its `hook_execution_complete` telemetry both precede the turn-end decision, and no supported event reports that decision, so the outcome is unknown ([Claude Inbox Turn Completions](https://github.com/wardian-app/Wardian/blob/main/docs/specs/claude-inbox-turn-completions.md)). Committed prompts are recorded per launch, so startup replay is idempotent. Dismissal marks a durable tombstone; whole-queue snapshots cannot delete or revive backend-owned completion records.
 
 Other queue records, such as action-needed cards, have this shape:
 

@@ -2419,12 +2419,14 @@ async fn spawn_agent_inner(
             std::collections::HashSet::new()
         };
 
-    // A Claude launch records Stop rounds for verification only when it can
-    // also export Claude's post-decision telemetry to Wardian.
+    // A Claude launch records Stop rounds only when Claude supplies a
+    // supported turn verdict and Wardian may own its telemetry export. Claude
+    // Code currently supplies none, so the launch only prunes old records.
     let mut claude_verdict_launch = if config.provider == "claude" {
         Some(super::claude_verdict::launch::VerdictLaunch::prepare(
             &config.session_id,
             &provider_cwd,
+            &claude_accepted_sessions(&config),
         )?)
     } else {
         None
@@ -4481,12 +4483,12 @@ async fn spawn_agent_inner(
                     }
 
                     if let Some(tracker) = verdict_tracker.as_mut() {
-                        for verified in tracker.poll() {
-                            super::emit_verified_claude_completion(
+                        for settled in tracker.poll() {
+                            super::emit_settled_claude_completion(
                                 &hook_app,
                                 &hook_session,
                                 hook_runtime_generation,
-                                &verified,
+                                &settled,
                                 tracker.dir().to_path_buf(),
                             );
                         }

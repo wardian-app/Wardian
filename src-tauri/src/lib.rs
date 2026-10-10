@@ -735,7 +735,7 @@ pub fn run() {
                             // a roster listed from here on is complete.
                             commands::agent_roster::mark_agent_roster_restored(&app_handle);
 
-                            // Replay verified Claude completions before any
+                            // Replay settled Claude completions before any
                             // restored provider watcher starts. This includes
                             // saved-Off agents, whose normal runtime has no
                             // Claude watcher to finish an uncommitted card.
@@ -743,7 +743,7 @@ pub fn run() {
                                 .iter()
                                 .map(|(publication, _, _, _)| publication)
                                 .collect::<Vec<_>>();
-                            manager::replay_verified_claude_completions(
+                            manager::replay_settled_claude_completions(
                                 &app_handle,
                                 &startup_publications,
                             )

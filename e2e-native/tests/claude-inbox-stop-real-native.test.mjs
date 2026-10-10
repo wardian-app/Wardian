@@ -41,7 +41,7 @@ async function waitIdle(driver, sessionId, timeoutMs = 180_000) {
   }, timeoutMs, `Claude session ${sessionId} did not reach idle`);
 }
 
-test("Claude Inbox completion holds the verified post-continuation answer and preserves a workspace hook",
+test("Claude creates no unverifiable Inbox completion after a hook continuation and preserves a workspace hook",
   { timeout: 360_000 }, async (t) => {
     if (process.env[OPT_IN] !== "1") {
       t.skip(`Set ${OPT_IN}=1; no provider turn was submitted`);
@@ -131,7 +131,7 @@ test("Claude Inbox completion holds the verified post-continuation answer and pr
       harness_sha256: createHash("sha256").update(await fs.readFile(new URL(import.meta.url))).digest("hex"),
       started_at: new Date().toISOString(),
       provider_version: null,
-      cases: { catalog: "not_run", user_hook_coexistence: "not_run", continued_stop_to_inbox: "not_run" },
+      cases: { catalog: "not_run", user_hook_coexistence: "not_run", continued_turn_without_verdict: "not_run" },
     };
     const reportPath = path.join(harness.isolatedHome, "claude-inbox-stop-report.json");
     const save = async () => fs.writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
@@ -180,8 +180,9 @@ test("Claude Inbox completion holds the verified post-continuation answer and pr
     const launchRoot = path.join(harness.isolatedHome, "agents", owned.agent.session_id, "claude", "turn-verdicts");
     const launches = (await fs.readdir(launchRoot)).sort();
     const launch = JSON.parse(await fs.readFile(path.join(launchRoot, launches.at(-1), "launch.json"), "utf8"));
-    assert.equal(launch.verification, "available",
-      `Verified completions are unavailable for this launch: ${launch.unavailable_reason}`);
+    // Claude Code exposes no supported interactive turn-end verdict (#1492).
+    assert.equal(launch.verification, "unavailable");
+    assert.match(launch.unavailable_reason, /turn-end verdict/);
 
     const prompt = `No tools. Reply with exactly ${first} and nothing else.`;
     const receipt = await invokeTauri(owned.session.driver, "submit_prompt_to_agent", {
@@ -201,40 +202,31 @@ test("Claude Inbox completion holds the verified post-continuation answer and pr
     }, 180_000, "Claude provider-authored final answer was not observed");
     await waitIdle(owned.session.driver, owned.agent.session_id);
 
-    const queue = await owned.session.driver.wait(async () => {
-      const items = await invokeTauri(owned.session.driver, "load_queue_items");
-      const item = items.find((entry) => entry.type === "agent_completed"
-        && entry.agent_session_id === owned.agent.session_id);
-      return item ? { items, item } : false;
-    }, 30_000, "Claude did not persist a verified Inbox completion");
-    const matches = queue.items.filter((item) => item.id === queue.item.id);
-    assert.equal(matches.length, 1, "one provider turn must create exactly one stable Inbox item");
-    assert.equal(queue.item.response_text.trim(), transcript.answer.text.trim());
-    assert.equal(queue.item.response_text.trim(), expected);
-    assert.equal(queue.item.evidence_source, "provider_runtime");
-    assert.equal(queue.item.timestamp_source, "claude_stop_hooks_settled_event");
-    assert.ok(!queue.items.some((item) => item.response_text?.includes(first)),
-      "the blocked intermediate answer must never become a completion");
-    assert.match(queue.item.evidence_id, /^[0-9a-f-]{36}$/i);
+    // The finished turn still produces no card: nothing proves it final.
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+    const items = await invokeTauri(owned.session.driver, "load_queue_items");
+    assert.ok(!items.some((item) => item.type === "agent_completed"
+      && item.agent_session_id === owned.agent.session_id),
+    "an interactive Claude turn without a provider verdict must not create a completion");
 
     const userEvents = (await fs.readFile(hookOutput, "utf8"))
       .trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+    const finalRound = userEvents.find((event) => event.hook_event_name === "Stop"
+      && event.last_assistant_message?.trim() === expected);
+    assert.ok(finalRound, "the workspace hook must see the final round");
     const rounds = userEvents.filter((event) => event.hook_event_name === "Stop"
-      && event.prompt_id === queue.item.evidence_id);
+      && event.prompt_id === finalRound.prompt_id);
     assert.equal(rounds.length, 2, "the workspace hook must see the blocked and the final round");
     assert.equal(rounds[0].stop_hook_active, false);
     assert.equal(rounds[0].last_assistant_message.trim(), first);
     assert.equal(rounds[1].stop_hook_active, true);
     assert.equal(rounds[1].last_assistant_message.trim(), expected);
     report.cases.user_hook_coexistence = { status: "pass", stop_events: userEvents.length };
-    report.cases.continued_stop_to_inbox = {
+    report.cases.continued_turn_without_verdict = {
       status: "pass",
-      provider_authored_answer: true,
-      canonical_item_count: matches.length,
-      intermediate_answer_excluded: true,
-      exact_final_response_preserved: true,
-      prompt_identity_matches: true,
-      timestamp_source: queue.item.timestamp_source,
+      provider_authored_answer: transcript.answer.text.trim() === expected,
+      verification: launch.verification,
+      completion_items: 0,
     };
     report.cleanup = { status: "pending" };
     await save();

@@ -2,99 +2,108 @@
 
 ## Decision
 
-Wardian creates a Claude Inbox completion only for a prompt whose final
-answer Claude Code itself has settled: every Stop hook of the last round has
-finished, and none of them continued the turn. The card records a completed
+Wardian creates a Claude Inbox completion only from a provider-owned verdict,
+captured after Claude's final continuation decision and correlated to the
+exact session, prompt, and final response. A card records a completed
 provider turn. It does not assert that the user's larger task is complete.
 
-A Stop hook alone cannot provide that verdict. Claude Code runs all matching
-Stop hooks in parallel, before it decides whether to continue, and any of them
-may block the answer (`decision: "block"`, exit code 2, or
-`additionalContext`). The interactive surface exposes the decision only
-through the OpenTelemetry log event `claude_code.hook_execution_complete`
-with `hook_event = "Stop"`. Claude emits that event after every hook of the
-round has settled, with the round's `num_blocking`, `num_cancelled`,
-`additional_context_chars`, `prompt.id`, `session.id`, and a per-process
-`event.sequence`. The SDK `result` message carries an explicit verdict, but
-only in `-p` and Agent SDK sessions, not in the interactive terminal Wardian
-runs. The transcript's `stop_hook_summary` and `turn_duration` records are
-marked internal by Claude Code and are not used.
+Claude Code's interactive surface does not supply that verdict
+([capability record](../research/claude-interactive-turn-verdict.md)):
 
-## Evidence
+- The `Stop` hook runs before the continuation decision, and other Stop hooks
+  may block the answer.
+- The OpenTelemetry event `claude_code.hook_execution_complete` reports only
+  that a round's Stop hooks settled. Claude's Stop handler can still continue
+  the turn with no hook blocking (brief-mode enforcement, goal check-ins,
+  structured-output enforcement), or end it through `continue: false`.
+- No event follows that decision.
 
-Each interactive Claude launch owns
+Interactive Claude turns therefore create **no** Inbox completion. They are
+treated as unknown. Wardian does not infer success from settled hooks, a turn
+duration, a missing `StopFailure`, a hook summary, elapsed time, or the start
+of a later prompt. The verdict exists only in the SDK `result` message
+(`-p` and Agent SDK sessions) and inside the Remote Control bridge, which
+offers no third-party access. The smallest supported options are a
+post-decision interactive signal from Claude Code, or an SDK-engine Claude
+integration. Either one is a separate decision.
+
+## Settlement evidence
+
+The settlement pipeline is retained as the necessary condition that any
+future verdict must also satisfy: the final Stop round settled without a hook
+continuation. It is disabled for interactive launches. `launch.json` records
+`verification: "unavailable"` with the reason, Wardian injects no Stop round
+hook and no telemetry settings, and no receiver runs.
+
+When capture is enabled, each launch owns
 `<wardian-home>/agents/<agent-id>/claude/turn-verdicts/<launch>/`:
 
-- `stop-rounds.jsonl`: Wardian's injected Stop hook appends each invocation's
-  payload, including `prompt_id` and `last_assistant_message`, as one line.
-  The hook's target is passed as an argument, so a lingering earlier process
-  cannot write into a newer launch.
+- `stop-rounds.jsonl`: Wardian's Stop hook appends each invocation's payload
+  as one line. The target is passed as an argument, so a lingering earlier
+  process cannot write into a newer launch.
 - `telemetry.jsonl`: a loopback OTLP/HTTP JSON receiver, bound to 127.0.0.1
-  with a per-launch token in its path, keeps only event name, sequence,
-  prompt ID, session ID, timestamp, and hook counts. It syncs each batch to
-  disk before acknowledging it, answers 503 on a failed write so Claude's
-  exporter retries, and refuses requests over 4 MiB and ledgers over 64 MiB.
+  behind a per-launch token, keeps only event name, sequence, prompt ID,
+  session ID, timestamp, and hook counts.
+  - Each append starts at the last committed newline. A torn tail is
+    discarded, and a failed write rolls back to that boundary before the
+    receiver answers 503 so the exporter retries.
+  - Each batch is synced before acknowledgement.
+  - Requests over 4 MiB and ledgers over 64 MiB are refused.
 - `committed.jsonl`: prompt IDs whose card is durably in the queue.
-- `launch.json`: whether verification is available, and why not.
 
-A prompt is verified only when all of these hold:
+A prompt settles only when all of these hold:
 
 1. The ledger holds every sequence number from the prompt's `user_prompt`
-   event through the final round's completion. Claude numbers events per
-   process, so a lost batch is a gap.
+   event through the final round's completion.
 2. Each Stop round in that window is a `hook_execution_start` followed by its
    `hook_execution_complete`, with every hook settled and none cancelled.
-   Claude awaits every hook before emitting the completion, so no hook of an
-   earlier round can append after a later round begins.
-3. Exactly the last round is non-continuing: no blocking decision and no
-   additional context. No Stop event for the prompt follows it.
+3. Exactly the last round is non-continuing, and no Stop event for the prompt
+   follows it.
 4. The round log holds exactly one line per round for the prompt, in round
-   order, all from the same Claude session as the telemetry, and that session
+   order, from the same Claude session as the telemetry, and that session
    belongs to the agent.
 
-Under these rules, losing a prior round's completion together with the final
-round's Stop record cannot pair the earlier text with the final verdict: the
-lost completion is either a sequence gap or an unpaired round start.
+Losing a prior round's completion together with the final round's Stop record
+cannot pair the earlier text with the final round: the lost completion is
+either a sequence gap or an unpaired round start.
 
-A gap leaves the prompt pending, because a retried batch may still fill it.
-Any other failure makes the prompt unknown: no card is created, and the reason
-is logged. Wardian never infers success from a turn duration, a missing
-`StopFailure`, a hook summary, or elapsed time.
+The tracker consumes complete ledger lines only. A missing prompt start or a
+gap leaves the prompt pending. A prompt that cannot settle is logged once per
+reason and evaluated again when new evidence arrives, so a delayed batch can
+still complete it.
 
 ## Telemetry ownership
 
-Wardian sets the launch's telemetry through its `--settings` `env` block only
-when no telemetry configuration of the user's, the repository's, or the
-organization's applies. It checks Wardian's own environment, which Claude
-inherits, for any `OTEL_*`, `CLAUDE_CODE_ENABLE_TELEMETRY`, or related
-variable. It also checks the managed, user, project, and local settings files
-for those variables or for `otelHeadersHelper`, and checks for any installed
-managed policy (the Windows `Policies\ClaudeCode` registry key or the macOS
-managed preferences file). An unreadable settings file also counts as
-configured. When configuration exists, Wardian leaves it untouched, installs
-no Stop round hook, and records the launch as unavailable. Its collectors,
-headers, and certificates are never redirected or forwarded.
+When capture is enabled, Wardian sets the launch's telemetry through its
+`--settings` `env` block only if no user, repository, or organization
+telemetry configuration applies. It checks:
 
-Wardian's own configuration exports logs only (`http/json`, one-second
-interval). Metrics and traces are off. No prompt, response, or tool content is
-enabled. Server-managed settings that Wardian cannot read may still override
-these variables. Claude then removes Wardian's endpoint, and every prompt in
-that launch stays unknown.
+- Wardian's own environment, which Claude inherits, for any `OTEL_*`,
+  `CLAUDE_CODE_ENABLE_TELEMETRY`, or related variable;
+- the managed, user, project, and local settings files for those variables or
+  `otelHeadersHelper`;
+- any installed managed policy.
+
+An unreadable settings file counts as configured. Existing configuration is
+left untouched, and its collectors, headers, and certificates are never
+redirected or forwarded. Wardian's own configuration exports logs only, with
+metrics, traces, and prompt, response, and tool content off.
 
 ## Delivery and identity
 
 - The stable item ID is `agent-completed:<wardian-session>:<prompt-id>`. The
   item stores the exact final response, a bounded summary, and the timestamp
   of the settled-Stop event (`timestamp_source:
-  "claude_stop_hooks_settled_event"`). Processing time is used only when that
-  timestamp cannot be parsed, and `timestamp_source` records the fallback.
+  "claude_stop_hooks_settled_event"`).
 - Queue persistence is an idempotent upsert that retries while the runtime is
   current. Its commit is then recorded in `committed.jsonl`. Startup replays
-  verified, uncommitted prompts from every retained launch, including those of
-  saved-Off agents, before providers launch. A dismissal tombstone still
-  consumes a replay.
-- Wardian keeps the newest eight launch directories per agent. It deletes only
-  direct children of the agent's `turn-verdicts` directory.
+  settled, uncommitted prompts from every retained launch before providers
+  launch, including saved-Off agents. A dismissal tombstone still consumes a
+  replay.
+- Wardian keeps the newest eight launch directories per agent. A directory
+  that still holds an uncommitted completion is kept beyond that count.
+  Deletion is confined to direct children of the agent's `turn-verdicts`
+  directory.
 - Headless Claude runs install no Stop round hook.
 
 ## Compatibility
@@ -103,21 +112,24 @@ Legacy completion items keep their IDs, including `hook_outbox_mtime`
 timestamps, and remain readable and dismissible. Earlier unverified Stop
 outbox records in `claude/turn-completions/` are no longer converted into
 cards. Claude Code versions before 2.1.280 do not report
-`additional_context_chars`, so their Stop rounds stay unknown.
+`additional_context_chars`, so their Stop rounds cannot settle.
 
 ## Verification boundary
 
 Deterministic backend tests cover:
 
-- the correlator's success, continuation, gap, retry, duplicate, conflict,
-  missing-start, unsettled-round, session, and malformed-log cases;
-- OTLP parsing and the receiver's write and refusal paths;
+- the correlator's settlement, continuation, gap, delayed-start, retry,
+  duplicate, conflict, unsettled-round, session, and malformed-log cases;
+- OTLP parsing, and the receiver's write, refusal, rollback, and torn-tail
+  paths;
+- the tracker's out-of-order delivery and commit-aware retention;
 - the telemetry-ownership checks;
+- the disabled interactive launch;
 - the generated hook script;
 - startup replay.
 
-They cannot prove that the installed Claude Code emits these events in
-interactive sessions or composes Wardian's hook with a workspace hook. The
-opt-in real-provider test `e2e-native/tests/claude-inbox-stop-real-native.test.mjs`
-does that. Its workspace Stop hook blocks the first answer once, and the
-test requires the card to hold only the post-continuation answer.
+The opt-in real-provider test
+`e2e-native/tests/claude-inbox-stop-real-native.test.mjs` checks the
+installed Claude Code. Its workspace Stop hook blocks the first answer once,
+and it requires that the finished turn create no completion and that the
+launch record verification as unavailable.

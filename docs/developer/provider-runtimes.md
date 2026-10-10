@@ -6,7 +6,7 @@ This document captures the practical runtime differences between Wardian's suppo
 
 Startup publishes the saved roster as `Restoring` placeholders and retains each
 agent's lifecycle claim until its provider or failure state is published.
-Verified but uncommitted Claude completions in
+Settled but uncommitted Claude completions in
 `<wardian-home>/agents/<agent-id>/claude/turn-verdicts/` are replayed under
 those existing claims before providers launch, including for saved Off agents.
 Replay must not reacquire a claimed lifecycle gate: doing so blocks startup

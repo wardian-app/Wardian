@@ -774,17 +774,17 @@ pub(crate) fn emit_agent_turn_completed(
     });
 }
 
-/// Persists a verified Claude final answer before projecting it to the UI,
+/// Persists a settled Claude final answer before projecting it to the UI,
 /// then records the commit in the launch directory so startup replay does not
 /// recreate the card. Persistence retries while the runtime stays current.
-pub(crate) fn emit_verified_claude_completion(
+pub(crate) fn emit_settled_claude_completion(
     app: &AppHandle,
     session_id: &str,
     runtime_generation: u64,
-    verified: &claude_verdict::VerifiedCompletion,
+    settled: &claude_verdict::SettledCompletion,
     launch_dir: std::path::PathBuf,
 ) {
-    let Some(completion) = claude_verdict::launch::inbox_completion(verified) else {
+    let Some(completion) = claude_verdict::launch::inbox_completion(settled) else {
         return;
     };
     let completion_app = app.clone();
@@ -839,12 +839,12 @@ fn record_claude_completion_commit(launch_dir: &std::path::Path, prompt_id: &str
     }
 }
 
-/// Replays verified Claude completions that were not yet committed when the
+/// Replays settled Claude completions that were not yet committed when the
 /// app stopped, before saved providers are launched. This covers
 /// intentionally Off agents, which have no watcher to finish the work.
 /// Startup already holds each publication's lifecycle claim; replay borrows
 /// those claims and never tries to acquire the same non-reentrant gate again.
-pub(crate) async fn replay_verified_claude_completions<R: tauri::Runtime>(
+pub(crate) async fn replay_settled_claude_completions<R: tauri::Runtime>(
     app: &AppHandle<R>,
     publications: &[&crate::startup_restore::RestorePublication],
 ) {
@@ -863,8 +863,8 @@ pub(crate) async fn replay_verified_claude_completions<R: tauri::Runtime>(
                 accepted_sessions.clone(),
                 None,
             );
-            for verified in tracker.poll() {
-                let Some(completion) = claude_verdict::launch::inbox_completion(&verified) else {
+            for settled in tracker.poll() {
+                let Some(completion) = claude_verdict::launch::inbox_completion(&settled) else {
                     continue;
                 };
                 let item_id = turn_completion::completion_item_id(

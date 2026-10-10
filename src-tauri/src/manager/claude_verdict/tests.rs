@@ -102,30 +102,30 @@ fn continued_turn() -> Vec<TelemetryEvent> {
     ]
 }
 
-fn verified_text(verdict: Verdict) -> String {
+fn settled_text(verdict: Verdict) -> String {
     match verdict {
-        Verdict::Verified(completion) => completion.response_text,
-        unexpected => panic!("expected a verified completion, got {unexpected:?}"),
+        Verdict::Settled(completion) => completion.response_text,
+        unexpected => panic!("expected a settled completion, got {unexpected:?}"),
     }
 }
 
 #[test]
-fn single_settled_round_verifies_its_response() {
+fn single_settled_round_settles_its_response() {
     let ledger = ledger([
         user_prompt(4, PROMPT),
         other(5),
         stop_start(6, PROMPT, 1),
         stop_complete(7, PROMPT, 1, 0, 0),
     ]);
-    let verdict = verify_prompt(
+    let verdict = settle_prompt(
         &ledger,
         &rounds(&[round(PROMPT, "Done.")]),
         PROMPT,
         &accepted(),
     );
 
-    let Verdict::Verified(completion) = verdict else {
-        panic!("expected verification, got {verdict:?}");
+    let Verdict::Settled(completion) = verdict else {
+        panic!("expected settlement, got {verdict:?}");
     };
     assert_eq!(completion.response_text, "Done.");
     assert_eq!(completion.prompt_id, PROMPT);
@@ -136,16 +136,16 @@ fn single_settled_round_verifies_its_response() {
 }
 
 #[test]
-fn continued_turn_verifies_only_the_final_rounds_response() {
+fn continued_turn_settles_only_the_final_rounds_response() {
     let log = rounds(&[round(PROMPT, "intermediate A"), round(PROMPT, "final B")]);
-    let verdict = verify_prompt(&ledger(continued_turn()), &log, PROMPT, &accepted());
-    assert_eq!(verified_text(verdict), "final B");
+    let verdict = settle_prompt(&ledger(continued_turn()), &log, PROMPT, &accepted());
+    assert_eq!(settled_text(verdict), "final B");
 }
 
 #[test]
 fn a_blocked_round_alone_is_pending() {
     let ledger = ledger(continued_turn().into_iter().take(4));
-    let verdict = verify_prompt(
+    let verdict = settle_prompt(
         &ledger,
         &rounds(&[round(PROMPT, "intermediate A")]),
         PROMPT,
@@ -161,7 +161,7 @@ fn additional_context_continues_the_turn() {
         stop_start(2, PROMPT, 1),
         stop_complete(3, PROMPT, 1, 0, 42),
     ]);
-    let verdict = verify_prompt(
+    let verdict = settle_prompt(
         &ledger,
         &rounds(&[round(PROMPT, "not final")]),
         PROMPT,
@@ -180,7 +180,7 @@ fn dropped_prior_complete_and_final_record_cannot_pair_stale_text() {
         .filter(|event| event.sequence != 13);
     let log = rounds(&[round(PROMPT, "stale A")]);
     assert_eq!(
-        verify_prompt(&ledger(events), &log, PROMPT, &accepted()),
+        settle_prompt(&ledger(events), &log, PROMPT, &accepted()),
         Verdict::Pending
     );
 }
@@ -200,7 +200,7 @@ fn an_unemitted_prior_complete_is_an_unpaired_round() {
         });
     let log = rounds(&[round(PROMPT, "stale A")]);
     assert_eq!(
-        verify_prompt(&ledger(events), &log, PROMPT, &accepted()),
+        settle_prompt(&ledger(events), &log, PROMPT, &accepted()),
         Verdict::Unknown(UnknownReason::UnpairedStopRound)
     );
 }
@@ -209,7 +209,7 @@ fn an_unemitted_prior_complete_is_an_unpaired_round() {
 fn a_missing_final_record_is_a_round_count_mismatch() {
     let log = rounds(&[round(PROMPT, "stale A")]);
     assert_eq!(
-        verify_prompt(&ledger(continued_turn()), &log, PROMPT, &accepted()),
+        settle_prompt(&ledger(continued_turn()), &log, PROMPT, &accepted()),
         Verdict::Unknown(UnknownReason::RoundCountMismatch)
     );
 }
@@ -218,13 +218,13 @@ fn a_missing_final_record_is_a_round_count_mismatch() {
 fn an_extra_record_is_a_round_count_mismatch() {
     let log = rounds(&[round(PROMPT, "A"), round(PROMPT, "B"), round(PROMPT, "C")]);
     assert_eq!(
-        verify_prompt(&ledger(continued_turn()), &log, PROMPT, &accepted()),
+        settle_prompt(&ledger(continued_turn()), &log, PROMPT, &accepted()),
         Verdict::Unknown(UnknownReason::RoundCountMismatch)
     );
 }
 
 #[test]
-fn a_late_batch_fills_the_gap_and_then_verifies() {
+fn a_late_batch_fills_the_gap_and_then_settles() {
     let mut ledger = ledger(
         continued_turn()
             .into_iter()
@@ -232,13 +232,13 @@ fn a_late_batch_fills_the_gap_and_then_verifies() {
     );
     let log = rounds(&[round(PROMPT, "A"), round(PROMPT, "B")]);
     assert_eq!(
-        verify_prompt(&ledger, &log, PROMPT, &accepted()),
+        settle_prompt(&ledger, &log, PROMPT, &accepted()),
         Verdict::Pending
     );
 
     assert_eq!(ledger.insert(other(14)), LedgerInsert::New);
     assert_eq!(
-        verified_text(verify_prompt(&ledger, &log, PROMPT, &accepted())),
+        settled_text(settle_prompt(&ledger, &log, PROMPT, &accepted())),
         "B"
     );
 }
@@ -251,7 +251,7 @@ fn retried_duplicate_events_are_idempotent() {
     }
     let log = rounds(&[round(PROMPT, "A"), round(PROMPT, "B")]);
     assert_eq!(
-        verified_text(verify_prompt(&ledger, &log, PROMPT, &accepted())),
+        settled_text(settle_prompt(&ledger, &log, PROMPT, &accepted())),
         "B"
     );
 }
@@ -262,20 +262,20 @@ fn a_conflicting_event_at_a_known_sequence_poisons_the_launch() {
     assert_eq!(ledger.insert(other(16)), LedgerInsert::Conflict);
     let log = rounds(&[round(PROMPT, "A"), round(PROMPT, "B")]);
     assert_eq!(
-        verify_prompt(&ledger, &log, PROMPT, &accepted()),
+        settle_prompt(&ledger, &log, PROMPT, &accepted()),
         Verdict::Unknown(UnknownReason::LedgerConflict)
     );
 }
 
 #[test]
-fn a_missing_prompt_start_is_unknown() {
+fn a_missing_prompt_start_stays_pending() {
     let events = continued_turn()
         .into_iter()
         .filter(|event| event.sequence != 10);
     let log = rounds(&[round(PROMPT, "A"), round(PROMPT, "B")]);
     assert_eq!(
-        verify_prompt(&ledger(events), &log, PROMPT, &accepted()),
-        Verdict::Unknown(UnknownReason::MissingPromptStart)
+        settle_prompt(&ledger(events), &log, PROMPT, &accepted()),
+        Verdict::Pending
     );
 }
 
@@ -285,7 +285,7 @@ fn a_second_prompt_start_is_unknown() {
     events.push(user_prompt(17, PROMPT));
     let log = rounds(&[round(PROMPT, "A"), round(PROMPT, "B")]);
     assert_eq!(
-        verify_prompt(&ledger(events), &log, PROMPT, &accepted()),
+        settle_prompt(&ledger(events), &log, PROMPT, &accepted()),
         Verdict::Unknown(UnknownReason::DuplicatePromptStart)
     );
 }
@@ -310,7 +310,7 @@ fn a_restarted_process_with_reused_sequences_is_a_separate_ledger() {
         round(OTHER_PROMPT, "C"),
     ]);
     assert_eq!(
-        verify_prompt(&ledger, &log, OTHER_PROMPT, &accepted()),
+        settle_prompt(&ledger, &log, OTHER_PROMPT, &accepted()),
         Verdict::Unknown(UnknownReason::LedgerConflict)
     );
 }
@@ -330,11 +330,11 @@ fn rounds_of_other_prompts_do_not_count() {
     ]);
     let ledger = ledger(events.into_iter().chain((4..10).map(other)));
     assert_eq!(
-        verified_text(verify_prompt(&ledger, &log, PROMPT, &accepted())),
+        settled_text(settle_prompt(&ledger, &log, PROMPT, &accepted())),
         "B"
     );
     assert_eq!(
-        verified_text(verify_prompt(&ledger, &log, OTHER_PROMPT, &accepted())),
+        settled_text(settle_prompt(&ledger, &log, OTHER_PROMPT, &accepted())),
         "earlier answer"
     );
 }
@@ -348,7 +348,7 @@ fn a_cancelled_hook_round_is_unsettled() {
     }
     let log = rounds(&[round(PROMPT, "A"), round(PROMPT, "B")]);
     assert_eq!(
-        verify_prompt(&ledger(events), &log, PROMPT, &accepted()),
+        settle_prompt(&ledger(events), &log, PROMPT, &accepted()),
         Verdict::Unknown(UnknownReason::UnsettledStopRound)
     );
 }
@@ -359,7 +359,7 @@ fn a_round_with_a_different_hook_count_is_unsettled() {
     events[5] = stop_start(15, PROMPT, 3);
     let log = rounds(&[round(PROMPT, "A"), round(PROMPT, "B")]);
     assert_eq!(
-        verify_prompt(&ledger(events), &log, PROMPT, &accepted()),
+        settle_prompt(&ledger(events), &log, PROMPT, &accepted()),
         Verdict::Unknown(UnknownReason::UnsettledStopRound)
     );
 }
@@ -371,7 +371,7 @@ fn a_stop_round_after_the_final_round_is_unknown() {
     events.push(stop_complete(18, PROMPT, 2, 0, 0));
     let log = rounds(&[round(PROMPT, "A"), round(PROMPT, "B"), round(PROMPT, "C")]);
     assert_eq!(
-        verify_prompt(&ledger(events), &log, PROMPT, &accepted()),
+        settle_prompt(&ledger(events), &log, PROMPT, &accepted()),
         Verdict::Unknown(UnknownReason::EventsAfterFinalRound)
     );
 }
@@ -386,7 +386,7 @@ fn a_completion_without_continuation_attributes_is_unknown() {
     }
     let log = rounds(&[round(PROMPT, "A"), round(PROMPT, "B")]);
     assert_eq!(
-        verify_prompt(&ledger(events), &log, PROMPT, &accepted()),
+        settle_prompt(&ledger(events), &log, PROMPT, &accepted()),
         Verdict::Unknown(UnknownReason::MissingContinuationAttribute)
     );
 }
@@ -395,7 +395,7 @@ fn a_completion_without_continuation_attributes_is_unknown() {
 fn a_foreign_session_is_rejected() {
     let log = rounds(&[round(PROMPT, "A"), round(PROMPT, "B")]);
     assert_eq!(
-        verify_prompt(
+        settle_prompt(
             &ledger(continued_turn()),
             &log,
             PROMPT,
@@ -411,7 +411,7 @@ fn telemetry_from_a_different_session_is_rejected() {
     events[6].session_id = Some("other-session".to_string());
     let log = rounds(&[round(PROMPT, "A"), round(PROMPT, "B")]);
     assert_eq!(
-        verify_prompt(&ledger(events), &log, PROMPT, &accepted()),
+        settle_prompt(&ledger(events), &log, PROMPT, &accepted()),
         Verdict::Unknown(UnknownReason::SessionMismatch)
     );
 }
@@ -425,7 +425,7 @@ fn a_malformed_round_line_makes_every_prompt_unknown() {
     ));
     assert!(log.malformed);
     assert_eq!(
-        verify_prompt(&ledger(continued_turn()), &log, PROMPT, &accepted()),
+        settle_prompt(&ledger(continued_turn()), &log, PROMPT, &accepted()),
         Verdict::Unknown(UnknownReason::RoundLogMalformed)
     );
 }
@@ -444,7 +444,7 @@ fn a_partially_appended_final_line_is_left_for_the_next_read() {
 fn an_empty_final_response_is_unknown() {
     let log = rounds(&[round(PROMPT, "A"), round(PROMPT, "   ")]);
     assert_eq!(
-        verify_prompt(&ledger(continued_turn()), &log, PROMPT, &accepted()),
+        settle_prompt(&ledger(continued_turn()), &log, PROMPT, &accepted()),
         Verdict::Unknown(UnknownReason::EmptyResponse)
     );
 }
@@ -471,13 +471,13 @@ fn api_error_interruption_and_control_commands_produce_no_verdict() {
     ]);
     assert!(ledger.stop_prompt_ids().is_empty());
     assert_eq!(
-        verify_prompt(&ledger, &StopRoundLog::default(), PROMPT, &accepted()),
+        settle_prompt(&ledger, &StopRoundLog::default(), PROMPT, &accepted()),
         Verdict::Pending
     );
 }
 
 #[test]
-fn hook_cap_override_never_verifies() {
+fn hook_cap_override_never_settles() {
     // Claude ends the turn after the consecutive block cap even though the
     // last round reported a block, so no round is non-continuing.
     let mut events = vec![user_prompt(1, PROMPT)];
@@ -488,7 +488,7 @@ fn hook_cap_override_never_verifies() {
         lines.push(round(PROMPT, &format!("blocked {index}")));
     }
     assert_eq!(
-        verify_prompt(&ledger(events), &rounds(&lines), PROMPT, &accepted()),
+        settle_prompt(&ledger(events), &rounds(&lines), PROMPT, &accepted()),
         Verdict::Pending
     );
 }

@@ -5,13 +5,13 @@ use std::task::Poll;
 use tauri::Manager;
 use wardian_core::models::{AgentConfig, AgentSessionPersistenceOverride, ProviderConfig};
 
-/// Writes one launch whose single Stop round is verified by Claude's
+/// Writes one launch whose single Stop round settled per Claude's
 /// telemetry, plus a legacy unverified Stop outbox record.
-fn write_verified_launch(home: &std::path::Path, config: &AgentConfig) -> (String, String) {
+fn write_settled_launch(home: &std::path::Path, config: &AgentConfig) -> (String, String) {
     use crate::manager::claude_verdict::{HookExecution, TelemetryEvent};
     let claude_session = config.resume_session.clone().expect("resume session");
     let prompt_id = uuid::Uuid::new_v4().to_string();
-    let answer = format!("verified answer for {}", config.session_name);
+    let answer = format!("settled answer for {}", config.session_name);
     let claude_dir = home.join("agents").join(&config.session_id).join("claude");
     let launch = claude_dir
         .join("turn-verdicts")
@@ -66,7 +66,7 @@ fn write_verified_launch(home: &std::path::Path, config: &AgentConfig) -> (Strin
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn startup_replays_verified_claude_completions_while_restore_claims_remain_held() {
+async fn startup_replays_settled_claude_completions_while_restore_claims_remain_held() {
     let _environment = crate::utils::wardian_test_env_lock_async().await;
     let home = TestHome::new();
     let app = tauri::test::mock_app();
@@ -99,7 +99,7 @@ async fn startup_replays_verified_claude_completions_while_restore_claims_remain
                 ),
             )
             .await;
-        expected.push(write_verified_launch(home.directory.path(), &config));
+        expected.push(write_settled_launch(home.directory.path(), &config));
         configs.push(config);
         publications.push(publication);
     }
@@ -107,15 +107,15 @@ async fn startup_replays_verified_claude_completions_while_restore_claims_remain
     // must not acquire a claim again before the provider-spawn pass can run.
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        crate::manager::replay_verified_claude_completions(
+        crate::manager::replay_settled_claude_completions(
             app.handle(),
             &publications.iter().collect::<Vec<_>>(),
         ),
     )
     .await
-    .expect("verified completion replay must not deadlock startup");
+    .expect("settled completion replay must not deadlock startup");
     let items = crate::utils::queue::load_items();
-    assert_eq!(items.len(), 2, "only verified completions become cards");
+    assert_eq!(items.len(), 2, "only settled completions become cards");
     for (prompt_id, answer) in &expected {
         assert!(items
             .iter()
@@ -128,7 +128,7 @@ async fn startup_replays_verified_claude_completions_while_restore_claims_remain
     crate::utils::queue::save_items(&[]).unwrap();
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        crate::manager::replay_verified_claude_completions(
+        crate::manager::replay_settled_claude_completions(
             app.handle(),
             &publications.iter().collect::<Vec<_>>(),
         ),
