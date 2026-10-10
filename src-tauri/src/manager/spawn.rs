@@ -7,7 +7,6 @@ use crate::providers::claude::{
     effective_claude_permission_mode, ClaudeUserEventKind,
 };
 use crate::providers::codex::CodexProvider;
-use crate::providers::pi::PiProvider;
 use crate::providers::transcript::{
     bind_pi_watch_message, extract_transcript_message, CodexWatchBindingState,
 };
@@ -319,12 +318,6 @@ fn pi_bridge_child_handoff_code(process_id: Option<u32>) -> &'static str {
     }
 }
 
-fn retain_pi_fresh_provider_session(config: &mut AgentConfig) {
-    if let Some(fresh) = config.fresh_provider_session_id.clone() {
-        config.resume_session = Some(fresh);
-    }
-}
-
 impl PiBridgeSpawnGuard {
     fn new(
         broker: std::sync::Arc<crate::delivery::native_broker::NativeDeliveryBroker>,
@@ -588,23 +581,13 @@ struct PiLogCursor {
     boundary: Vec<u8>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PiFileIdentity(u64, u64);
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PiFileIdentity(std::sync::Arc<same_file::Handle>);
 
-fn pi_file_identity(metadata: &std::fs::Metadata) -> Option<PiFileIdentity> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Some(PiFileIdentity(metadata.dev(), metadata.ino()))
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        // Stable Rust does not expose Windows' by-handle file index yet.
-        // Creation time is stable across appends, while the boundary check below
-        // also detects in-place rewrites and same-timestamp replacements.
-        Some(PiFileIdentity(metadata.creation_time(), 0))
-    }
+fn pi_file_identity(file: &std::fs::File) -> Option<PiFileIdentity> {
+    same_file::Handle::from_file(file.try_clone().ok()?)
+        .ok()
+        .map(|identity| PiFileIdentity(std::sync::Arc::new(identity)))
 }
 
 fn pi_log_boundary(file: &mut std::fs::File, offset: u64) -> Option<(u64, Vec<u8>)> {
@@ -627,33 +610,16 @@ fn refresh_pi_log_boundary(file: &mut std::fs::File, cursor: &mut PiLogCursor) -
     Some(())
 }
 
-fn pi_log_baseline(
-    session_dir: &std::path::Path,
-    provider_session_id: &str,
-) -> Option<PiLogBaseline> {
-    let path = PiProvider::session_file(session_dir, provider_session_id)?;
+fn pi_log_baseline_for_path(path: std::path::PathBuf) -> Option<PiLogBaseline> {
     let mut file = std::fs::File::open(&path).ok()?;
     let metadata = file.metadata().ok()?;
     let mut cursor = PiLogCursor {
         offset: metadata.len(),
-        identity: pi_file_identity(&metadata),
+        identity: pi_file_identity(&file),
         ..Default::default()
     };
     refresh_pi_log_boundary(&mut file, &mut cursor)?;
     Some(PiLogBaseline { path, cursor })
-}
-
-fn restored_pi_log_baseline(config: &AgentConfig, is_restored: bool) -> Option<PiLogBaseline> {
-    if !is_restored || config.provider != "pi" {
-        return None;
-    }
-    let provider_session_id = config
-        .resume_session
-        .as_deref()
-        .map(str::trim)
-        .filter(|session_id| !session_id.is_empty())?;
-    let session_dir = PiProvider::session_dir(&config.session_id)?;
-    pi_log_baseline(&session_dir, provider_session_id)
 }
 
 fn open_pi_log_at_cursor(
@@ -662,10 +628,11 @@ fn open_pi_log_at_cursor(
 ) -> Option<std::fs::File> {
     let mut file = std::fs::File::open(path).ok()?;
     let metadata = file.metadata().ok()?;
-    let identity = pi_file_identity(&metadata);
+    let identity = pi_file_identity(&file);
     let identity_changed = cursor
         .identity
-        .zip(identity)
+        .as_ref()
+        .zip(identity.as_ref())
         .is_some_and(|(before, after)| before != after);
     let boundary_changed = if cursor.boundary.is_empty() {
         false
@@ -2290,6 +2257,9 @@ async fn spawn_agent_inner(
         }));
     }
 
+    let mut pi_launch_plan = (config.provider == "pi")
+        .then(|| pi_history::PiLaunchPlan::prepare(&config))
+        .transpose()?;
     let provider_generation = app_state
         .interactions
         .start_provider_input_generation(&config.session_id, ProviderInputReadiness::Booting, None)
@@ -2420,20 +2390,9 @@ async fn spawn_agent_inner(
             }
         }
     }
-    let pi_resume_session_file = if config.provider == "pi" && is_restored {
-        config
-            .resume_session
-            .as_deref()
-            .map(str::trim)
-            .filter(|session_id| !session_id.is_empty())
-            .and_then(|provider_session_id| {
-                PiProvider::session_dir(&config.session_id).and_then(|session_dir| {
-                    PiProvider::session_file(&session_dir, provider_session_id)
-                })
-            })
-    } else {
-        None
-    };
+    let pi_resume_session_file = pi_launch_plan
+        .as_ref()
+        .and_then(|plan| plan.resume_path().map(std::path::Path::to_owned));
     let pi_has_saved_session = is_restored && pi_resume_session_file.is_some();
     let provider_cwd = if config.provider == "pi" {
         pi_session_project_cwd(
@@ -2507,7 +2466,10 @@ async fn spawn_agent_inner(
         .resume_session
         .as_deref()
         .is_some_and(|s| !s.is_empty());
-    let spawn_args = provider.get_spawn_args(&config, is_resume);
+    let mut spawn_args = provider.get_spawn_args(&config, is_resume);
+    if let Some(plan) = &pi_launch_plan {
+        plan.apply_args(&mut spawn_args)?;
+    }
     let spawn_args = finalize_interactive_spawn_args(
         &config.provider,
         is_restored,
@@ -2650,6 +2612,9 @@ async fn spawn_agent_inner(
         provider_args.push("-e".into());
         provider_args.push(attachment.extension_path().to_string_lossy().into_owned());
     }
+    if let Some(plan) = &pi_launch_plan {
+        plan.validate_args(&provider_args)?;
+    }
     let launch_spec = interactive_provider_launch(&config.provider, &bin, &provider_args)?;
     log_debug(&format!(
         "[Wardian] PTY spawn: provider={} exe={} arg_count={} cwd={}",
@@ -2765,7 +2730,20 @@ async fn spawn_agent_inner(
     // A restored Pi process can append its first turn immediately after spawn.
     // Capture the existing transcript boundary while the provider is still
     // unable to write, then start the watcher from that exact byte offset.
-    let pi_log_baseline = restored_pi_log_baseline(&config, is_restored);
+    if let Some(plan) = &mut pi_launch_plan {
+        plan.revalidate()?;
+    }
+    let pi_log_baseline = pi_launch_plan
+        .as_ref()
+        .and_then(|plan| plan.resume_path())
+        .and_then(|path| pi_log_baseline_for_path(path.to_owned()));
+    if pi_launch_plan
+        .as_ref()
+        .is_some_and(|plan| plan.resume_path().is_some())
+        && pi_log_baseline.is_none()
+    {
+        return Err("Pi restored history baseline unavailable".into());
+    }
 
     // The transition lease acquired before native owner preparation remains
     // held through PTY creation and publication.
@@ -4074,6 +4052,7 @@ async fn spawn_agent_inner(
             .as_ref()
             .map(|baseline| baseline.cursor.clone())
             .unwrap_or_default();
+        let watcher_plan = pi_launch_plan.take().expect("Pi launch plan prepared");
 
         let receipt = pi_receipt.clone().expect("Pi receipt prepared");
         let watcher_receipt = receipt.clone();
@@ -4081,6 +4060,8 @@ async fn spawn_agent_inner(
         let receipt_executor = tokio::runtime::Handle::current();
         let watcher = std::thread::spawn(move || {
             let mut cursor = watcher_initial_cursor;
+            let mut history = pi_history::HistoryConfirmation::default();
+            let mut history_path = None;
             loop {
                 let current = watcher_current_status
                     .lock()
@@ -4106,34 +4087,30 @@ async fn spawn_agent_inner(
                     .lock()
                     .ok()
                     .and_then(|config| expected_caller_owned_identity(&config).map(str::to_string));
-                let path = provider_session_id
-                    .as_deref()
-                    .and_then(|provider_session_id| {
-                        let cached = watcher_log_path
-                            .lock()
-                            .ok()
-                            .and_then(|path| path.clone())
-                            .filter(|path| path.is_file());
-                        cached.or_else(|| {
-                            PiProvider::session_dir(&watcher_session).and_then(|session_dir| {
-                                PiProvider::session_file(&session_dir, provider_session_id)
-                            })
-                        })
-                    });
+                let path = provider_session_id.as_deref().and_then(|_| {
+                    let cached = watcher_log_path
+                        .lock()
+                        .ok()
+                        .and_then(|path| path.clone())
+                        .filter(|path| path.is_file())
+                        .filter(|path| watcher_plan.admits(path));
+                    cached.or_else(|| watcher_plan.session_file())
+                });
 
                 if let Some(path) = path {
                     if let Ok(mut stored_path) = watcher_log_path.lock() {
                         *stored_path = Some(path.clone());
                     }
                     if let Some(file) = open_pi_log_at_cursor(&path, &mut cursor) {
+                        if cursor.offset == 0 || history_path.as_ref() != Some(&path) {
+                            history.reset(&path);
+                            history_path = Some(path.clone());
+                        }
                         let mut reader = std::io::BufReader::new(file);
                         let mut line = String::new();
-                        loop {
-                            line.clear();
-                            let read = reader.read_line(&mut line).unwrap_or(0);
-                            if read == 0 {
-                                break;
-                            }
+                        while let Some(read) =
+                            pi_history::read_complete_record(&mut reader, &mut line)
+                        {
                             crate::utils::runtime_profile::record_event(
                                 crate::utils::runtime_profile::RuntimeMetric::ProviderLogRead,
                                 read as u64,
@@ -4148,6 +4125,9 @@ async fn spawn_agent_inner(
                                 continue;
                             };
                             let raw_line = parsed.to_string();
+                            if let Some(id) = provider_session_id.as_deref() {
+                                history.observe(&parsed, id);
+                            }
                             if let Some(mut message) = extract_transcript_message("pi", &raw_line) {
                                 if let Some(provider_session_id) = provider_session_id.as_deref() {
                                     bind_pi_watch_message(
@@ -4168,12 +4148,7 @@ async fn spawn_agent_inner(
                                         &watcher_config,
                                         &watcher_init_timestamp,
                                     ) {
-                                        Ok(_) => {
-                                            if let Ok(mut config) = watcher_config.lock() {
-                                                retain_pi_fresh_provider_session(&mut config);
-                                            }
-                                            persist_runtime_agent_configs(&watcher_app);
-                                        }
+                                        Ok(_) => {}
                                         Err(error) => {
                                             log_debug(&format!(
                                                 "[WARDIAN] Rejected Pi initialization identity: {error}"
@@ -4211,6 +4186,23 @@ async fn spawn_agent_inner(
                         }
                         let mut file = reader.into_inner();
                         let _ = refresh_pi_log_boundary(&mut file, &mut cursor);
+                        if history.confirmed(&path) {
+                            if let Some(id) = provider_session_id.as_deref() {
+                                let state = watcher_app.state::<AppState>();
+                                if let Err(error) =
+                                    receipt_executor.block_on(pi_history::publish_resume_identity(
+                                        &state,
+                                        &watcher_config,
+                                        runtime_generation,
+                                        id,
+                                    ))
+                                {
+                                    log_debug(&format!(
+                                        "[WARDIAN] Pi history publication remains pending: {error}"
+                                    ));
+                                }
+                            }
+                        }
                     }
                 }
                 watcher_profile.finish(0);
@@ -5050,10 +5042,22 @@ mod pi_startup_tests;
 #[path = "spawn/pi_startup.rs"]
 mod pi_startup;
 
+#[path = "spawn/pi_history.rs"]
+mod pi_history;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::pi::PiProvider;
     use wardian_core::models::{AgentProvider, CodexProviderConfig, ProviderConfig};
+
+    fn pi_log_baseline(
+        session_dir: &std::path::Path,
+        provider_session_id: &str,
+    ) -> Option<PiLogBaseline> {
+        let path = PiProvider::session_file(session_dir, provider_session_id)?;
+        pi_log_baseline_for_path(path)
+    }
 
     #[test]
     fn claude_jsonl_reader_waits_for_the_complete_record() {
@@ -6161,24 +6165,6 @@ mod tests {
         assert_eq!(pi_bridge_child_handoff_code(Some(42)), "process_registered");
         assert_eq!(pi_bridge_child_handoff_code(Some(0)), "process_id_zero");
         assert_eq!(pi_bridge_child_handoff_code(None), "process_id_unavailable");
-    }
-
-    #[test]
-    fn pi_fresh_provider_session_promotion_retains_fresh_marker() {
-        let mut config = AgentConfig {
-            provider: "pi".to_string(),
-            session_id: "wardian-session".to_string(),
-            fresh_provider_session_id: Some("pi-fresh-session".to_string()),
-            ..Default::default()
-        };
-
-        retain_pi_fresh_provider_session(&mut config);
-
-        assert_eq!(config.resume_session.as_deref(), Some("pi-fresh-session"));
-        assert_eq!(
-            config.fresh_provider_session_id.as_deref(),
-            Some("pi-fresh-session")
-        );
     }
 
     #[test]

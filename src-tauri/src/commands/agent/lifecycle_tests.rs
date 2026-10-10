@@ -1,6 +1,128 @@
 //! Retained lifecycle cleanup with fake children; no provider processes run.
 use super::super::tests::make_test_agent;
+use super::super::tests::use_isolated_resume_setting;
+use super::super::{
+    prepare_restored_config_for_spawn, prepare_resume_config, prepare_resume_config_for_runtime,
+};
+use wardian_core::models::provider::AgentProvider;
+use wardian_core::models::{AgentConfig, AgentSessionPersistenceOverride};
+
 use super::{stop_native_owner, stop_native_owner_with_before_capture, PendingRuntime};
+
+#[test]
+fn pending_pi_registration_and_spawn_do_not_publish_a_resume_session() {
+    let mut config = wardian_core::models::AgentConfig {
+        provider: "pi".into(),
+        fresh_provider_session_id: Some("reserved".into()),
+        is_off: true,
+        ..Default::default()
+    };
+    let mut active = config.clone();
+    super::sync_registered_provider_session(&mut config, &mut active, Some("reserved".into()));
+    assert_eq!(config.resume_session, None);
+    assert_eq!(active.pending_pi_session_id(), Some("reserved"));
+    assert!(!super::promote_fresh_provider_session_fields(
+        "pi",
+        &mut active
+    ));
+    assert_eq!(active.resume_session, None);
+    // Confirmed sessions retain their launch capture marker without becoming pending.
+    active.resume_session = Some("reserved".into());
+    assert!(super::promote_fresh_provider_session_fields(
+        "pi",
+        &mut active
+    ));
+    assert_eq!(
+        active.fresh_provider_session_id.as_deref(),
+        Some("reserved")
+    );
+    let value = serde_json::to_value(active).unwrap();
+    assert!(value.get("fresh_provider_session_id").is_none());
+}
+
+#[test]
+fn cleared_pi_identity_remains_pending_through_off_reload_until_history_confirmation() {
+    let (_guard, _temp) = use_isolated_resume_setting();
+    let mut config = AgentConfig {
+        provider: "pi".into(),
+        session_id: "wardian-agent".into(),
+        ..Default::default()
+    };
+    super::super::prepare_clear_config(&mut config).unwrap();
+    let reserved = config.fresh_provider_session_id.clone().unwrap();
+    super::finalize_clear_provider_session_fields("pi", &mut config);
+    assert_eq!(config.pending_pi_session_id(), Some(reserved.as_str()));
+    config.is_off = true;
+    let mut restored: AgentConfig =
+        serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
+    prepare_resume_config(&mut restored).unwrap();
+    let provider = crate::providers::pi::PiProvider::new();
+    assert!(provider
+        .get_spawn_args(&restored, true)
+        .windows(2)
+        .any(|pair| pair == ["--session-id", &reserved]));
+    // The owned watcher is the only production transition which confirms this.
+    restored.resume_session = Some(reserved.clone());
+    let mut confirmed: AgentConfig =
+        serde_json::from_value(serde_json::to_value(restored).unwrap()).unwrap();
+    prepare_resume_config(&mut confirmed).unwrap();
+    assert!(provider
+        .get_spawn_args(&confirmed, true)
+        .windows(2)
+        .any(|pair| pair == ["--session", &reserved]));
+    assert_eq!(confirmed.fresh_provider_session_id, None);
+    std::env::remove_var("WARDIAN_HOME");
+}
+
+#[test]
+fn clear_finalization_preserves_other_manual_provider_behavior() {
+    for provider in ["claude", "gemini", "mock"] {
+        let mut config = AgentConfig {
+            provider: provider.into(),
+            fresh_provider_session_id: Some("fresh".into()),
+            ..Default::default()
+        };
+        super::finalize_clear_provider_session_fields(provider, &mut config);
+        assert_eq!(config.resume_session.as_deref(), Some("fresh"));
+        assert_eq!(config.fresh_provider_session_id, None);
+    }
+}
+
+#[test]
+fn pending_pi_wake_recovers_complete_history_written_before_watcher_publication() {
+    let (_guard, _temp) = use_isolated_resume_setting();
+    let config = AgentConfig {
+        provider: "pi".into(),
+        session_id: "agent-1".into(),
+        is_off: true,
+        fresh_provider_session_id: Some("reserved".into()),
+        session_persistence: AgentSessionPersistenceOverride::Resume,
+        ..Default::default()
+    };
+    let dir = crate::providers::pi::PiProvider::session_dir(&config.session_id).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("old-partial.jsonl"),
+        "{\"type\":\"session\",\"id\":\"reserved\"}\n",
+    )
+    .unwrap();
+    let complete = dir.join("complete.jsonl");
+    std::fs::write(&complete, "{\"type\":\"session\",\"id\":\"reserved\"}\n{\"type\":\"message\",\"message\":{\"role\":\"assistant\"}}\n").unwrap();
+    let mut saved: AgentConfig =
+        serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+    prepare_resume_config(&mut saved).unwrap();
+    assert_eq!(saved.resume_session.as_deref(), Some("reserved"));
+    assert_eq!(saved.fresh_provider_session_id.as_deref(), Some("reserved"));
+    let persisted = serde_json::to_value(&saved).unwrap();
+    assert!(persisted.get("fresh_provider_session_id").is_none());
+    assert_eq!(persisted["resume_session"], "reserved");
+    // Repeated preparation is strict and retains the canonical SID, never a path.
+    prepare_resume_config(&mut saved).unwrap();
+    assert_eq!(saved.resume_session.as_deref(), Some("reserved"));
+    std::fs::remove_file(complete).unwrap();
+    assert_eq!(saved.pending_pi_session_id(), None);
+    std::env::remove_var("WARDIAN_HOME");
+}
 use crate::delivery::{codex_shared::CodexSharedOwner, native_broker::NativeSessionSpec};
 use crate::manager::codex_stop::{await_quiescent, retry_stop};
 use crate::state::terminal_session::{
@@ -405,4 +527,68 @@ async fn cancelled_attached_candidate_closes_terminal_before_releasing_stop_fenc
         .expect("replacement remains live");
     terminal.terminate_runtime(id, replacement).await.unwrap();
     assert_terminal_closed(&terminal, id, &mut replacement_input).await;
+}
+
+#[test]
+fn pending_pi_off_reload_and_wake_preserve_reserved_identity_and_fresh_args() {
+    let (_guard, _temp) = use_isolated_resume_setting();
+    let original = AgentConfig {
+        provider: "pi".into(),
+        session_id: "wardian-agent".into(),
+        fresh_provider_session_id: Some("reserved-pi-session".into()),
+        is_off: true,
+        ..Default::default()
+    };
+    for persistence in [
+        AgentSessionPersistenceOverride::Resume,
+        AgentSessionPersistenceOverride::Fresh,
+    ] {
+        let mut config: AgentConfig =
+            serde_json::from_value(serde_json::to_value(&original).unwrap()).unwrap();
+        config.session_persistence = persistence;
+        prepare_restored_config_for_spawn(&mut config).unwrap();
+        assert!(config.is_off);
+        prepare_resume_config_for_runtime(&mut config, 0).unwrap();
+        assert!(!config.is_off);
+        assert_eq!(config.session_id, original.session_id);
+        assert_eq!(config.pending_pi_session_id(), Some("reserved-pi-session"));
+        let args = crate::providers::pi::PiProvider::new().get_spawn_args(&config, true);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--session-id", "reserved-pi-session"]));
+        assert!(!args.contains(&"--session".into()));
+        // A failed start can be saved Off and retried with the same ID.
+        config.is_off = true;
+        let mut retry: AgentConfig =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        prepare_resume_config(&mut retry).unwrap();
+        assert_eq!(
+            retry.pending_pi_session_id(),
+            config.pending_pi_session_id()
+        );
+    }
+    std::env::remove_var("WARDIAN_HOME");
+}
+
+#[test]
+fn confirmed_and_legacy_pi_resume_remain_strict() {
+    let (_guard, _temp) = use_isolated_resume_setting();
+    let mut config = AgentConfig {
+        provider: "pi".into(),
+        session_id: "wardian-agent".into(),
+        resume_session: Some("existing-pi-session".into()),
+        fresh_provider_session_id: Some("existing-pi-session".into()),
+        session_persistence: AgentSessionPersistenceOverride::Resume,
+        ..Default::default()
+    };
+    prepare_resume_config(&mut config).unwrap();
+    let args = crate::providers::pi::PiProvider::new().get_spawn_args(&config, true);
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["--session", "existing-pi-session"]));
+    assert!(!args.contains(&"--session-id".into()));
+    config.resume_session = None;
+    assert!(prepare_resume_config(&mut config).is_err());
+    assert_eq!(config.fresh_provider_session_id, None);
+    std::env::remove_var("WARDIAN_HOME");
 }
