@@ -2212,13 +2212,13 @@ mod tests {
     use super::{
         append_habitat_memory_instructions, build_habitat_skill_projection,
         build_opencode_runtime_config, codex_trusted_project_key, create_directory_link,
-        ensure_claude_permission_hook, ensure_codex_sessions_projection, ClaudeStopRoundCapture,
+        ensure_claude_permission_hook, ensure_codex_sessions_projection,
         ensure_codex_sessions_projection_with_linker, habitat_root_for_session,
         prepare_provider_habitat, project_antigravity_include_directories,
         projected_link_matches_target, provider_uses_projected_workspace,
         resolve_opencode_runtime_roots, resolve_system_include_directories, sync_codex_agent_home,
         sync_codex_home_indexes_from, sync_opencode_config_dir, wardian_memory_instructions,
-        write_habitat_instruction_files,
+        write_habitat_instruction_files, ClaudeStopRoundCapture,
     };
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3557,17 +3557,18 @@ mod tests {
         #[cfg(windows)]
         assert!(command.contains("-File \"") && command.ends_with("stop-rounds.jsonl\""));
 
-        let script_path = paths
-            .event_log_path
-            .parent()
-            .expect("hook root")
-            .join(if cfg!(windows) {
-                "claude-stop-round-hook.ps1"
-            } else {
-                "claude-stop-round-hook.sh"
-            });
+        let script_path =
+            paths
+                .event_log_path
+                .parent()
+                .expect("hook root")
+                .join(if cfg!(windows) {
+                    "claude-stop-round-hook.ps1"
+                } else {
+                    "claude-stop-round-hook.sh"
+                });
         let payloads: [&[u8]; 2] = [
-            b"{\"hook_event_name\":\"Stop\",\n \"last_assistant_message\":\"first \u00e9\"}\n",
+            b"{\"hook_event_name\":\"Stop\",\n \"last_assistant_message\":\"first \\u00e9\"}\n",
             "{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"second é\"}".as_bytes(),
         ];
         for payload in payloads {

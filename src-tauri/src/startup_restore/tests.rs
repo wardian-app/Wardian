@@ -13,7 +13,9 @@ fn write_verified_launch(home: &std::path::Path, config: &AgentConfig) -> (Strin
     let prompt_id = uuid::Uuid::new_v4().to_string();
     let answer = format!("verified answer for {}", config.session_name);
     let claude_dir = home.join("agents").join(&config.session_id).join("claude");
-    let launch = claude_dir.join("turn-verdicts").join("0000000000001-launch");
+    let launch = claude_dir
+        .join("turn-verdicts")
+        .join("0000000000001-launch");
     std::fs::create_dir_all(&launch).unwrap();
     let hook = |complete: bool| HookExecution {
         hook_event: "Stop".into(),
@@ -115,9 +117,11 @@ async fn startup_replays_verified_claude_completions_while_restore_claims_remain
     let items = crate::utils::queue::load_items();
     assert_eq!(items.len(), 2, "only verified completions become cards");
     for (prompt_id, answer) in &expected {
-        assert!(items.iter().any(|item| item["evidence_id"] == prompt_id.as_str()
-            && item["response_text"] == answer.as_str()
-            && item["timestamp_source"] == "claude_stop_hooks_settled_event"));
+        assert!(items
+            .iter()
+            .any(|item| item["evidence_id"] == prompt_id.as_str()
+                && item["response_text"] == answer.as_str()
+                && item["timestamp_source"] == "claude_stop_hooks_settled_event"));
     }
 
     // A committed completion is not recreated, even after the queue is cleared.

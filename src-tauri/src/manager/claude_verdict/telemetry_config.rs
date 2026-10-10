@@ -117,11 +117,13 @@ fn managed_policy_installed() -> bool {
     #[cfg(windows)]
     {
         use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
-        [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER].into_iter().any(|hive| {
-            winreg::RegKey::predef(hive)
-                .open_subkey(r"SOFTWARE\Policies\ClaudeCode")
-                .is_ok()
-        })
+        [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER]
+            .into_iter()
+            .any(|hive| {
+                winreg::RegKey::predef(hive)
+                    .open_subkey(r"SOFTWARE\Policies\ClaudeCode")
+                    .is_ok()
+            })
     }
     #[cfg(target_os = "macos")]
     {
@@ -171,7 +173,12 @@ pub(crate) fn loopback_telemetry_env(endpoint: &str) -> serde_json::Map<String, 
         ("OTEL_TRACES_EXPORTER", "none"),
     ]
     .into_iter()
-    .map(|(key, value)| (key.to_string(), serde_json::Value::String(value.to_string())))
+    .map(|(key, value)| {
+        (
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        )
+    })
     .collect()
 }
 
@@ -224,7 +231,10 @@ mod tests {
                 settings.join("settings.local.json")
             ))
         );
-        assert_eq!(settings_file_telemetry(&settings.join("settings.json")), None);
+        assert_eq!(
+            settings_file_telemetry(&settings.join("settings.json")),
+            None
+        );
     }
 
     #[test]

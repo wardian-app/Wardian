@@ -129,10 +129,12 @@ impl VerdictLaunch {
     /// The Stop round capture for this launch's hook settings, or `None` when
     /// verification is unavailable and Stop records could never be verified.
     pub(crate) fn hook_capture(&self) -> Option<ClaudeStopRoundCapture> {
-        self.receiver.as_ref().map(|receiver| ClaudeStopRoundCapture {
-            round_log: self.dir.join(STOP_ROUNDS_FILE),
-            settings_env: Some(loopback_telemetry_env(receiver.endpoint())),
-        })
+        self.receiver
+            .as_ref()
+            .map(|receiver| ClaudeStopRoundCapture {
+                round_log: self.dir.join(STOP_ROUNDS_FILE),
+                settings_env: Some(loopback_telemetry_env(receiver.endpoint())),
+            })
     }
 
     /// Hands the launch to the watcher; the receiver stops when the tracker
@@ -327,16 +329,15 @@ mod tests {
     }
 
     fn turn(prompt_id: &str) -> Vec<TelemetryEvent> {
-        let event = |sequence: u64, name: &str, hook: Option<super::super::HookExecution>| {
-            TelemetryEvent {
+        let event =
+            |sequence: u64, name: &str, hook: Option<super::super::HookExecution>| TelemetryEvent {
                 sequence,
                 name: name.to_string(),
                 prompt_id: Some(prompt_id.to_string()),
                 session_id: Some("session".to_string()),
                 timestamp: Some("2026-10-10T07:00:00.000Z".to_string()),
                 hook,
-            }
-        };
+            };
         let hook = |complete: bool| super::super::HookExecution {
             hook_event: "Stop".to_string(),
             num_hooks: Some(1),
@@ -403,7 +404,10 @@ mod tests {
         prune_launches(root.path(), 2);
         let remaining = child_dirs(root.path())
             .into_iter()
-            .filter_map(|dir| dir.file_name().map(|name| name.to_string_lossy().into_owned()))
+            .filter_map(|dir| {
+                dir.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
             .collect::<Vec<_>>();
         assert_eq!(remaining, ["0000000000003-launch", "0000000000004-launch"]);
         assert!(outside.path().join("keep.txt").exists());

@@ -117,14 +117,22 @@ fn single_settled_round_verifies_its_response() {
         stop_start(6, PROMPT, 1),
         stop_complete(7, PROMPT, 1, 0, 0),
     ]);
-    let verdict = verify_prompt(&ledger, &rounds(&[round(PROMPT, "Done.")]), PROMPT, &accepted());
+    let verdict = verify_prompt(
+        &ledger,
+        &rounds(&[round(PROMPT, "Done.")]),
+        PROMPT,
+        &accepted(),
+    );
 
     let Verdict::Verified(completion) = verdict else {
         panic!("expected verification, got {verdict:?}");
     };
     assert_eq!(completion.response_text, "Done.");
     assert_eq!(completion.prompt_id, PROMPT);
-    assert_eq!(completion.completed_at.as_deref(), Some("2026-10-10T07:00:07.000Z"));
+    assert_eq!(
+        completion.completed_at.as_deref(),
+        Some("2026-10-10T07:00:07.000Z")
+    );
 }
 
 #[test]
@@ -137,7 +145,12 @@ fn continued_turn_verifies_only_the_final_rounds_response() {
 #[test]
 fn a_blocked_round_alone_is_pending() {
     let ledger = ledger(continued_turn().into_iter().take(4));
-    let verdict = verify_prompt(&ledger, &rounds(&[round(PROMPT, "intermediate A")]), PROMPT, &accepted());
+    let verdict = verify_prompt(
+        &ledger,
+        &rounds(&[round(PROMPT, "intermediate A")]),
+        PROMPT,
+        &accepted(),
+    );
     assert_eq!(verdict, Verdict::Pending);
 }
 
@@ -148,7 +161,12 @@ fn additional_context_continues_the_turn() {
         stop_start(2, PROMPT, 1),
         stop_complete(3, PROMPT, 1, 0, 42),
     ]);
-    let verdict = verify_prompt(&ledger, &rounds(&[round(PROMPT, "not final")]), PROMPT, &accepted());
+    let verdict = verify_prompt(
+        &ledger,
+        &rounds(&[round(PROMPT, "not final")]),
+        PROMPT,
+        &accepted(),
+    );
     assert_eq!(verdict, Verdict::Pending);
 }
 
@@ -198,11 +216,7 @@ fn a_missing_final_record_is_a_round_count_mismatch() {
 
 #[test]
 fn an_extra_record_is_a_round_count_mismatch() {
-    let log = rounds(&[
-        round(PROMPT, "A"),
-        round(PROMPT, "B"),
-        round(PROMPT, "C"),
-    ]);
+    let log = rounds(&[round(PROMPT, "A"), round(PROMPT, "B"), round(PROMPT, "C")]);
     assert_eq!(
         verify_prompt(&ledger(continued_turn()), &log, PROMPT, &accepted()),
         Verdict::Unknown(UnknownReason::RoundCountMismatch)
@@ -211,12 +225,22 @@ fn an_extra_record_is_a_round_count_mismatch() {
 
 #[test]
 fn a_late_batch_fills_the_gap_and_then_verifies() {
-    let mut ledger = ledger(continued_turn().into_iter().filter(|event| event.sequence != 14));
+    let mut ledger = ledger(
+        continued_turn()
+            .into_iter()
+            .filter(|event| event.sequence != 14),
+    );
     let log = rounds(&[round(PROMPT, "A"), round(PROMPT, "B")]);
-    assert_eq!(verify_prompt(&ledger, &log, PROMPT, &accepted()), Verdict::Pending);
+    assert_eq!(
+        verify_prompt(&ledger, &log, PROMPT, &accepted()),
+        Verdict::Pending
+    );
 
     assert_eq!(ledger.insert(other(14)), LedgerInsert::New);
-    assert_eq!(verified_text(verify_prompt(&ledger, &log, PROMPT, &accepted())), "B");
+    assert_eq!(
+        verified_text(verify_prompt(&ledger, &log, PROMPT, &accepted())),
+        "B"
+    );
 }
 
 #[test]
@@ -226,7 +250,10 @@ fn retried_duplicate_events_are_idempotent() {
         assert_eq!(ledger.insert(event), LedgerInsert::Duplicate);
     }
     let log = rounds(&[round(PROMPT, "A"), round(PROMPT, "B")]);
-    assert_eq!(verified_text(verify_prompt(&ledger, &log, PROMPT, &accepted())), "B");
+    assert_eq!(
+        verified_text(verify_prompt(&ledger, &log, PROMPT, &accepted())),
+        "B"
+    );
 }
 
 #[test]
@@ -242,7 +269,9 @@ fn a_conflicting_event_at_a_known_sequence_poisons_the_launch() {
 
 #[test]
 fn a_missing_prompt_start_is_unknown() {
-    let events = continued_turn().into_iter().filter(|event| event.sequence != 10);
+    let events = continued_turn()
+        .into_iter()
+        .filter(|event| event.sequence != 10);
     let log = rounds(&[round(PROMPT, "A"), round(PROMPT, "B")]);
     assert_eq!(
         verify_prompt(&ledger(events), &log, PROMPT, &accepted()),
@@ -275,7 +304,11 @@ fn a_restarted_process_with_reused_sequences_is_a_separate_ledger() {
     for event in restarted {
         ledger.insert(event);
     }
-    let log = rounds(&[round(PROMPT, "A"), round(PROMPT, "B"), round(OTHER_PROMPT, "C")]);
+    let log = rounds(&[
+        round(PROMPT, "A"),
+        round(PROMPT, "B"),
+        round(OTHER_PROMPT, "C"),
+    ]);
     assert_eq!(
         verify_prompt(&ledger, &log, OTHER_PROMPT, &accepted()),
         Verdict::Unknown(UnknownReason::LedgerConflict)
@@ -296,7 +329,10 @@ fn rounds_of_other_prompts_do_not_count() {
         round(PROMPT, "B"),
     ]);
     let ledger = ledger(events.into_iter().chain((4..10).map(other)));
-    assert_eq!(verified_text(verify_prompt(&ledger, &log, PROMPT, &accepted())), "B");
+    assert_eq!(
+        verified_text(verify_prompt(&ledger, &log, PROMPT, &accepted())),
+        "B"
+    );
     assert_eq!(
         verified_text(verify_prompt(&ledger, &log, OTHER_PROMPT, &accepted())),
         "earlier answer"
@@ -359,7 +395,12 @@ fn a_completion_without_continuation_attributes_is_unknown() {
 fn a_foreign_session_is_rejected() {
     let log = rounds(&[round(PROMPT, "A"), round(PROMPT, "B")]);
     assert_eq!(
-        verify_prompt(&ledger(continued_turn()), &log, PROMPT, &["other".to_string()]),
+        verify_prompt(
+            &ledger(continued_turn()),
+            &log,
+            PROMPT,
+            &["other".to_string()]
+        ),
         Verdict::Unknown(UnknownReason::SessionMismatch)
     );
 }
@@ -391,7 +432,10 @@ fn a_malformed_round_line_makes_every_prompt_unknown() {
 
 #[test]
 fn a_partially_appended_final_line_is_left_for_the_next_read() {
-    let log = StopRoundLog::parse(&format!("{}\n{{\"hook_event_name\":\"St", round(PROMPT, "A")));
+    let log = StopRoundLog::parse(&format!(
+        "{}\n{{\"hook_event_name\":\"St",
+        round(PROMPT, "A")
+    ));
     assert!(!log.malformed);
     assert_eq!(log.rounds.len(), 1);
 }
@@ -509,7 +553,10 @@ fn otlp_claude_record_without_sequence_rejects_the_request() {
             ]
         }]}]}]
     });
-    assert_eq!(parse_otlp_logs(&request), Err(OtlpRejection::MissingSequence));
+    assert_eq!(
+        parse_otlp_logs(&request),
+        Err(OtlpRejection::MissingSequence)
+    );
     assert_eq!(
         parse_otlp_logs(&serde_json::json!({ "resourceSpans": [] })),
         Err(OtlpRejection::NotOtlpLogs)

@@ -143,9 +143,7 @@ pub(crate) fn parse_otlp_logs(
     Ok(events)
 }
 
-fn parse_log_record(
-    record: &serde_json::Value,
-) -> Result<Option<TelemetryEvent>, OtlpRejection> {
+fn parse_log_record(record: &serde_json::Value) -> Result<Option<TelemetryEvent>, OtlpRejection> {
     let Some(body_name) = record
         .get("body")
         .and_then(|body| body.get("stringValue"))
@@ -163,15 +161,17 @@ fn parse_log_record(
     }
     let hook = matches!(body_name, HOOK_START_EVENT | HOOK_COMPLETE_EVENT)
         .then(|| {
-            attributes.string("hook_event").map(|hook_event| HookExecution {
-                hook_event,
-                num_hooks: attributes.unsigned("num_hooks"),
-                num_success: attributes.unsigned("num_success"),
-                num_blocking: attributes.unsigned("num_blocking"),
-                num_non_blocking_error: attributes.unsigned("num_non_blocking_error"),
-                num_cancelled: attributes.unsigned("num_cancelled"),
-                additional_context_chars: attributes.unsigned("additional_context_chars"),
-            })
+            attributes
+                .string("hook_event")
+                .map(|hook_event| HookExecution {
+                    hook_event,
+                    num_hooks: attributes.unsigned("num_hooks"),
+                    num_success: attributes.unsigned("num_success"),
+                    num_blocking: attributes.unsigned("num_blocking"),
+                    num_non_blocking_error: attributes.unsigned("num_non_blocking_error"),
+                    num_cancelled: attributes.unsigned("num_cancelled"),
+                    additional_context_chars: attributes.unsigned("additional_context_chars"),
+                })
         })
         .flatten();
     Ok(Some(TelemetryEvent {
@@ -220,11 +220,7 @@ impl<'a> OtlpAttributes<'a> {
                 .as_u64()
                 .or_else(|| int_value.as_str().and_then(|text| text.parse().ok()));
         }
-        value
-            .get("stringValue")?
-            .as_str()?
-            .parse()
-            .ok()
+        value.get("stringValue")?.as_str()?.parse().ok()
     }
 }
 
@@ -484,7 +480,9 @@ pub(crate) fn verify_prompt(
         return Verdict::Unknown(UnknownReason::SessionMismatch);
     };
     let same_session = |value: Option<&str>| value == Some(session_id);
-    if !accepted_sessions.iter().any(|accepted| accepted == session_id)
+    if !accepted_sessions
+        .iter()
+        .any(|accepted| accepted == session_id)
         || !prompt_rounds
             .iter()
             .all(|round| same_session(round.session_id.as_deref()))
