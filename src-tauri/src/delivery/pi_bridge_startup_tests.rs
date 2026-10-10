@@ -72,7 +72,17 @@ impl Fixture {
             serde_json::json!({"task": true, "information": false, "cancel": false, "completion": false}),
         );
         write_frame(stream, &ready).await.unwrap();
-        pump().await;
+        // Socket writes do not imply the listener has published readiness.
+        // Wait for that observable state with a real-time bound, leaving the
+        // virtual protocol clock unchanged.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while self.state() == PiBridgeStartup::Pending {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "readiness was not published"
+            );
+            tokio::task::yield_now().await;
+        }
         assert_eq!(self.state(), PiBridgeStartup::Ready);
         assert!(self.plan.owner.is_ready());
     }
