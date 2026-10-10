@@ -51,6 +51,62 @@ impl TranscriptNormalizationState {
     }
 }
 
+fn pending_codex_context_turn_id(state: &TranscriptNormalizationState) -> Option<String> {
+    let mut turn_id: Option<String> = None;
+    for index in &state.pending_context_indices {
+        let context_turn_id = state
+            .pending_events
+            .get(*index)
+            .and_then(|context| metadata_string(&context.metadata, "provider_turn_id"))?;
+        if turn_id
+            .as_deref()
+            .is_some_and(|known_turn_id| known_turn_id != context_turn_id)
+        {
+            return None;
+        }
+        turn_id.get_or_insert(context_turn_id);
+    }
+    turn_id
+}
+
+fn release_codex_pending_events_before_turn_context(
+    state: &mut TranscriptNormalizationState,
+    next_turn_id: Option<&str>,
+) -> Vec<AgentChatEvent> {
+    let pending_context_indices = state
+        .pending_context_indices
+        .drain(..)
+        .collect::<HashSet<_>>();
+    let mut released = Vec::new();
+    let mut retained = Vec::new();
+    let mut retained_context_indices = Vec::new();
+
+    for (index, mut event) in std::mem::take(&mut state.pending_events)
+        .into_iter()
+        .enumerate()
+    {
+        let is_context = pending_context_indices.contains(&index);
+        let matches_next_turn = next_turn_id.is_some_and(|turn_id| {
+            metadata_string(&event.metadata, "provider_turn_id").as_deref() == Some(turn_id)
+        });
+        if matches_next_turn {
+            if is_context {
+                retained_context_indices.push(retained.len());
+            }
+            retained.push(event);
+        } else {
+            if is_context {
+                event.role = Some(AgentChatRole::System);
+            }
+            released.push(event);
+        }
+    }
+
+    state.pending_events = retained;
+    state.pending_context_indices = retained_context_indices;
+    released
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ToolRequestRootState {
     request_root_id: Option<String>,
@@ -78,6 +134,14 @@ pub(crate) fn normalize_chat_lines_with_state(
     let normalized_provider = normalize_provider(provider);
     let uses_tool_request_roots = normalized_provider == "claude";
     if !uses_tool_request_roots {
+        // Only Claude archive identity is derived from its exact provider
+        // line. Compact legacy pending Codex state before the bounded-size
+        // check so historical copies do not exhaust the continuation budget.
+        for event in &mut state.pending_events {
+            if let Some(metadata) = event.metadata.as_object_mut() {
+                metadata.remove(PROVIDER_RAW_LINE_METADATA_KEY);
+            }
+        }
         // Older saved Codex/Pi/etc. states may contain roots from the former
         // provider-agnostic cache. Clear only that obsolete correlation data;
         // request, pending-event, sequence, and native-turn state remain live.
@@ -97,22 +161,41 @@ pub(crate) fn normalize_chat_lines_with_state(
             None
         };
         let codex_turn_context_id = codex_turn_context.as_ref().and_then(|value| {
-            first_string(&[
-                value.get("turn_id"),
-                value
-                    .get("payload")
-                    .and_then(|payload| payload.get("turn_id")),
-            ])
+            let top_level = value.get("turn_id").and_then(value_to_string);
+            let payload = value
+                .get("payload")
+                .and_then(|payload| payload.get("turn_id"))
+                .and_then(value_to_string);
+            match (top_level, payload) {
+                (Some(top_level), Some(payload)) if top_level != payload => None,
+                (Some(turn_id), _) | (_, Some(turn_id)) => Some(turn_id),
+                (None, None) => None,
+            }
         });
         if normalized_provider == "codex" && codex_turn_context.is_some() {
-            // Every new Codex turn is a fail-closed boundary. A malformed
-            // context record must clear the previous native identity.
-            state.request_root_id = None;
-            state.codex_provider_turn_id = None;
-            state.codex_user_mirror_pending = false;
-            if let Some(turn_id) = codex_turn_context_id {
-                state.codex_provider_turn_id = Some(turn_id);
-                state.codex_user_mirror_pending = true;
+            let pending_context_turn_id = pending_codex_context_turn_id(state);
+            let repeats_current_turn = codex_turn_context_id.as_deref().is_some_and(|turn_id| {
+                state.codex_provider_turn_id.as_deref() == Some(turn_id)
+                    || (state.codex_provider_turn_id.is_none()
+                        && pending_context_turn_id.as_deref() == Some(turn_id))
+            });
+            if !repeats_current_turn {
+                // Keep explicitly matching next-turn rows; the new turn
+                // context may follow its host context in the provider log.
+                events.extend(release_codex_pending_events_before_turn_context(
+                    state,
+                    codex_turn_context_id.as_deref(),
+                ));
+                state.request_root_id = None;
+                state.codex_provider_turn_id = codex_turn_context_id.clone();
+                state.codex_user_mirror_pending = codex_turn_context_id.is_some();
+            } else if state.codex_provider_turn_id.is_none() {
+                // Startup host context can precede its first turn_context.
+                // Its explicit native turn ID is enough to establish this
+                // binding without releasing the pending context.
+                state.request_root_id = None;
+                state.codex_provider_turn_id = codex_turn_context_id.clone();
+                state.codex_user_mirror_pending = codex_turn_context_id.is_some();
             }
         }
         let Some(mut event) =
@@ -120,12 +203,14 @@ pub(crate) fn normalize_chat_lines_with_state(
         else {
             continue;
         };
-        if enforce_limits {
+        if enforce_limits && normalized_provider == "claude" {
             set_metadata_string(
                 &mut event.metadata,
                 PROVIDER_RAW_LINE_METADATA_KEY,
                 raw_line,
             );
+        } else if let Some(metadata) = event.metadata.as_object_mut() {
+            metadata.remove(PROVIDER_RAW_LINE_METADATA_KEY);
         }
 
         if normalized_provider == "gemini"
@@ -187,27 +272,39 @@ pub(crate) fn normalize_chat_lines_with_state(
             }
 
             if normalized_provider == "codex" {
-                let pending_turn_id = state.pending_context_indices.iter().find_map(|index| {
-                    state
-                        .pending_events
-                        .get(*index)
-                        .and_then(|context| metadata_string(&context.metadata, "provider_turn_id"))
-                });
+                let pending_turn_id = pending_codex_context_turn_id(state);
+                let active_provider_turn_id = provider_turn_id
+                    .clone()
+                    .or_else(|| state.codex_provider_turn_id.clone())
+                    .or(pending_turn_id);
                 if let Some(root_id) = root_id {
                     for index in state.pending_context_indices.drain(..) {
                         if let Some(context) = state.pending_events.get_mut(index) {
-                            set_metadata_string(&mut context.metadata, "request_root_id", &root_id);
-                            if metadata_string(&context.metadata, "causal_ref").is_none() {
+                            let same_provider_turn =
+                                active_provider_turn_id.as_deref().is_some_and(|turn_id| {
+                                    metadata_string(&context.metadata, "provider_turn_id")
+                                        .as_deref()
+                                        == Some(turn_id)
+                                });
+                            if same_provider_turn {
                                 set_metadata_string(
                                     &mut context.metadata,
-                                    "causal_ref",
-                                    &format!("request:{root_id}"),
+                                    "request_root_id",
+                                    &root_id,
                                 );
+                                if metadata_string(&context.metadata, "causal_ref").is_none() {
+                                    set_metadata_string(
+                                        &mut context.metadata,
+                                        "causal_ref",
+                                        &format!("request:{root_id}"),
+                                    );
+                                }
+                            } else {
+                                context.role = Some(AgentChatRole::System);
                             }
                         }
                     }
                 }
-                let active_provider_turn_id = provider_turn_id.or(pending_turn_id);
                 state.codex_provider_turn_id = active_provider_turn_id.clone();
                 state.codex_user_mirror_pending = active_provider_turn_id.is_some()
                     && !inherited_provider_turn_id
@@ -2509,6 +2606,102 @@ mod tests {
     }
 
     #[test]
+    fn codex_drops_raw_line_metadata_while_claude_keeps_it_for_stable_ids() {
+        let mut codex_state = TranscriptNormalizationState::default();
+        let codex_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [r#"{"type":"event_msg","payload":{"type":"user_message","message":"request"}}"#],
+            &mut codex_state,
+            true,
+            true,
+        )
+        .expect("normalize Codex line");
+        assert_eq!(codex_events.len(), 1);
+        assert!(codex_events[0]
+            .metadata
+            .get(PROVIDER_RAW_LINE_METADATA_KEY)
+            .is_none());
+
+        let mut claude_state = TranscriptNormalizationState::default();
+        let claude_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "claude",
+            [r#"{"type":"user","message":{"role":"user","content":"request"}}"#],
+            &mut claude_state,
+            true,
+            true,
+        )
+        .expect("normalize Claude line");
+        assert_eq!(claude_events.len(), 1);
+        assert!(claude_events[0]
+            .metadata
+            .get(PROVIDER_RAW_LINE_METADATA_KEY)
+            .is_some());
+    }
+
+    #[test]
+    fn codex_upgrade_compacts_persisted_raw_lines_before_state_size_check() {
+        let mut pending = one(
+            "codex",
+            r#"{"type":"event_msg","payload":{"type":"user_message","message":"pending"}}"#,
+        );
+        set_metadata_string(
+            &mut pending.metadata,
+            PROVIDER_RAW_LINE_METADATA_KEY,
+            &"x".repeat(MAX_NORMALIZATION_STATE_BYTES),
+        );
+        let state = TranscriptNormalizationState {
+            pending_events: vec![pending],
+            ..TranscriptNormalizationState::default()
+        };
+        let persisted = serde_json::to_vec(&state).expect("persist legacy continuation state");
+        let mut restored: TranscriptNormalizationState =
+            serde_json::from_slice(&persisted).expect("restore legacy continuation state");
+
+        normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            std::iter::empty::<&str>(),
+            &mut restored,
+            false,
+            true,
+        )
+        .expect("legacy raw-line metadata is removed before enforcing the state cap");
+
+        assert_eq!(restored.pending_events.len(), 1);
+        assert!(restored.pending_events[0]
+            .metadata
+            .get(PROVIDER_RAW_LINE_METADATA_KEY)
+            .is_none());
+    }
+
+    #[test]
+    fn codex_continuation_state_byte_limit_still_rejects_large_live_state() {
+        let mut pending = one(
+            "codex",
+            r#"{"type":"event_msg","payload":{"type":"user_message","message":"pending"}}"#,
+        );
+        pending.text = Some("x".repeat(MAX_NORMALIZATION_STATE_BYTES));
+        let mut state = TranscriptNormalizationState {
+            pending_events: vec![pending],
+            ..TranscriptNormalizationState::default()
+        };
+
+        let error = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            std::iter::empty::<&str>(),
+            &mut state,
+            false,
+            true,
+        )
+        .expect_err("large live continuation state remains over the cap");
+
+        assert!(error.contains("continuation-state byte limit exceeded"));
+    }
+
+    #[test]
     fn codex_message_tool_and_approval_events_are_normalized() {
         let message = one(
             "codex",
@@ -2679,6 +2872,402 @@ mod tests {
         assert_eq!(assistants.len(), 1);
         assert_eq!(assistants[0].source.as_deref(), Some("event_msg"));
         assert!(assistants[0].metadata.get("provider_turn_id").is_none());
+    }
+
+    #[test]
+    fn codex_distinct_turn_context_releases_pending_events_across_batches_and_retries() {
+        let first_batch = [
+            r#"{"type":"turn_context","payload":{"turn_id":"turn-a"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","id":"context-a","role":"user","content":[{"type":"input_text","text":"Turn A context"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-a","content_item_kinds":["agents_md.instructions"]}}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","id":"assistant-a","role":"assistant","content":[{"type":"output_text","text":"Turn A assistant"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-a"}}}"#,
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-a","name":"shell_command","input":{"command":"true"}}}"#,
+        ];
+        let mut first_state = TranscriptNormalizationState::default();
+        let first_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            first_batch,
+            &mut first_state,
+            false,
+            true,
+        )
+        .expect("normalize first batch");
+        assert!(first_events.is_empty());
+        assert!(first_state.has_pending_events());
+
+        let persisted = serde_json::to_string(&first_state).expect("persist continuation state");
+        let restored: TranscriptNormalizationState =
+            serde_json::from_str(&persisted).expect("restore continuation state");
+        let second_batch = [
+            r#"{"type":"turn_context","payload":{"turn_id":"turn-b"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","id":"request-b","role":"user","content":[{"type":"input_text","text":"Turn B request"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-b","content_item_kinds":["user.text"]}}}"#,
+        ];
+        let mut second_state = restored.clone();
+        let second_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            second_batch,
+            &mut second_state,
+            false,
+            true,
+        )
+        .expect("normalize second batch");
+        let mut retry_state = restored;
+        let retry_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            second_batch,
+            &mut retry_state,
+            false,
+            true,
+        )
+        .expect("retry second batch from the same persisted state");
+
+        assert_eq!(retry_events, second_events);
+        assert_eq!(retry_state, second_state);
+        assert_eq!(second_events.len(), 4);
+        assert_eq!(second_events[0].text.as_deref(), Some("Turn A context"));
+        assert_eq!(second_events[0].role, Some(AgentChatRole::System));
+        assert_eq!(
+            second_events[0].metadata["input_origin"],
+            "context_injection"
+        );
+        assert_eq!(second_events[0].metadata["provider_turn_id"], "turn-a");
+        assert!(second_events[0].metadata.get("request_root_id").is_none());
+        assert_eq!(second_events[0].id, "agent-1:2");
+        assert_eq!(second_events[1].text.as_deref(), Some("Turn A assistant"));
+        assert_eq!(second_events[1].id, "agent-1:3");
+        assert_eq!(second_events[2].kind, AgentChatEventKind::ToolCall);
+        assert_eq!(second_events[2].turn_id.as_deref(), Some("call-a"));
+        assert_eq!(second_events[2].id, "agent-1:4");
+        assert_eq!(second_events[3].text.as_deref(), Some("Turn B request"));
+        assert_eq!(second_events[3].metadata["request_root_id"], "request-b");
+        assert_eq!(second_events[3].id, "agent-1:6");
+        assert!(!second_state.has_pending_events());
+    }
+
+    #[test]
+    fn codex_context_for_next_turn_survives_boundary_after_restart() {
+        let mut state = TranscriptNormalizationState::default();
+        let first_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [
+                r#"{"type":"turn_context","payload":{"turn_id":"turn-a"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"context-a","role":"user","content":[{"type":"input_text","text":"Turn A context"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-a","content_item_kinds":["agents_md.instructions"]}}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"assistant-a","role":"assistant","content":[{"type":"output_text","text":"Turn A answer"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-a"}}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"context-b","role":"user","content":[{"type":"input_text","text":"Turn B context"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-b","content_item_kinds":["agents_md.instructions"]}}}"#,
+            ],
+            &mut state,
+            false,
+            true,
+        )
+        .expect("hold turn A rows and early turn B context");
+        assert!(first_events.is_empty());
+
+        let persisted = serde_json::to_string(&state).expect("persist before turn boundary");
+        let mut restored: TranscriptNormalizationState =
+            serde_json::from_str(&persisted).expect("restore before turn boundary");
+        let boundary_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [r#"{"type":"turn_context","payload":{"turn_id":"turn-b"}}"#],
+            &mut restored,
+            false,
+            true,
+        )
+        .expect("release turn A rows and retain turn B context");
+
+        assert_eq!(boundary_events.len(), 2);
+        assert_eq!(boundary_events[0].text.as_deref(), Some("Turn A context"));
+        assert_eq!(boundary_events[0].role, Some(AgentChatRole::System));
+        assert!(boundary_events[0].metadata.get("request_root_id").is_none());
+        assert_eq!(boundary_events[1].text.as_deref(), Some("Turn A answer"));
+        assert_eq!(boundary_events[0].metadata["provider_turn_id"], "turn-a");
+        assert!(restored.has_pending_events());
+        assert_eq!(restored.pending_context_indices.len(), 1);
+        assert_eq!(
+            restored.pending_events[restored.pending_context_indices[0]]
+                .text
+                .as_deref(),
+            Some("Turn B context")
+        );
+
+        let persisted = serde_json::to_string(&restored).expect("persist turn B context");
+        let mut restored: TranscriptNormalizationState =
+            serde_json::from_str(&persisted).expect("restore turn B context");
+        let request_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [r#"{"type":"response_item","payload":{"type":"message","id":"request-b","role":"user","content":[{"type":"input_text","text":"Turn B request"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-b","content_item_kinds":["user.text"]}}}"#],
+            &mut restored,
+            false,
+            true,
+        )
+        .expect("bind retained context to turn B input");
+
+        assert_eq!(request_events.len(), 2);
+        assert_eq!(request_events[0].text.as_deref(), Some("Turn B context"));
+        assert_eq!(request_events[0].metadata["request_root_id"], "request-b");
+        assert_eq!(request_events[1].metadata["request_root_id"], "request-b");
+        assert!(!restored.has_pending_events());
+    }
+
+    #[test]
+    fn codex_repeated_same_turn_context_keeps_pending_binding_possible() {
+        let mut state = TranscriptNormalizationState::default();
+        let first_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [
+                r#"{"type":"turn_context","payload":{"turn_id":"turn-a"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"context-a","role":"user","content":[{"type":"input_text","text":"Turn A context"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-a","content_item_kinds":["agents_md.instructions"]}}}"#,
+            ],
+            &mut state,
+            false,
+            true,
+        )
+        .expect("normalize context before the request");
+        assert!(first_events.is_empty());
+
+        let events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [
+                r#"{"type":"turn_context","payload":{"turn_id":"turn-a"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","id":"request-a","role":"user","content":[{"type":"input_text","text":"Turn A request"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-a","content_item_kinds":["user.text"]}}}"#,
+            ],
+            &mut state,
+            false,
+            true,
+        )
+        .expect("same-turn context remains eligible for binding");
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].text.as_deref(), Some("Turn A context"));
+        assert_eq!(events[0].metadata["request_root_id"], "request-a");
+        assert_eq!(
+            events[0].metadata["causal_ref"],
+            "provider:message:context-a"
+        );
+        assert_eq!(events[1].text.as_deref(), Some("Turn A request"));
+        assert!(!state.has_pending_events());
+    }
+
+    #[test]
+    fn codex_startup_fixture_context_before_turn_context_binds_after_restart() {
+        let lines = include_str!("codex/tests/fixtures/startup-host-context.jsonl")
+            .lines()
+            .collect::<Vec<_>>();
+        let mut state = TranscriptNormalizationState::default();
+        let first_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            lines[..4].iter().copied(),
+            &mut state,
+            false,
+            true,
+        )
+        .expect("normalize startup context before its turn context");
+        assert!(first_events.is_empty());
+        assert!(state.has_pending_events());
+        assert_eq!(state.codex_provider_turn_id, None);
+
+        let persisted = serde_json::to_string(&state).expect("persist pending startup context");
+        let mut restored: TranscriptNormalizationState =
+            serde_json::from_str(&persisted).expect("restore pending startup context");
+        let request = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "startup-request",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Inspect the startup state."}],
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "auto-compact-1",
+                    "content_item_kinds": ["user.text"],
+                },
+            },
+        })
+        .to_string();
+        let second_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [lines[4], request.as_str()],
+            &mut restored,
+            false,
+            true,
+        )
+        .expect("match startup context with the later same-turn input");
+
+        assert_eq!(second_events.len(), 2);
+        assert_eq!(
+            second_events[0].text.as_deref(),
+            Some("# AGENTS.md instructions\nSanitized host instructions.")
+        );
+        assert_eq!(
+            second_events[0].metadata["provider_turn_id"],
+            "auto-compact-1"
+        );
+        assert_eq!(
+            second_events[0].metadata["request_root_id"],
+            "startup-request"
+        );
+        assert_eq!(
+            second_events[1].metadata["request_root_id"],
+            "startup-request"
+        );
+        assert!(!restored.has_pending_events());
+    }
+
+    #[test]
+    fn codex_input_turn_identity_filters_pending_context_with_same_turn_control() {
+        let context = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "context-a",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Turn A context"}],
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "turn-a",
+                    "content_item_kinds": ["agents_md.instructions"],
+                },
+            },
+        })
+        .to_string();
+        let turn_a_input = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "request-a",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Turn A request"}],
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "turn-a",
+                    "content_item_kinds": ["user.text"],
+                },
+            },
+        })
+        .to_string();
+        let turn_b_input = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "request-b",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Turn B request"}],
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "turn-b",
+                    "content_item_kinds": ["user.text"],
+                },
+            },
+        })
+        .to_string();
+
+        let mut distinct_state = TranscriptNormalizationState::default();
+        normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [
+                r#"{"type":"turn_context","payload":{"turn_id":"turn-a"}}"#,
+                context.as_str(),
+            ],
+            &mut distinct_state,
+            false,
+            true,
+        )
+        .expect("hold turn A context");
+        let distinct_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [turn_b_input.as_str()],
+            &mut distinct_state,
+            false,
+            true,
+        )
+        .expect("release incompatible context before turn B input");
+
+        assert_eq!(distinct_events.len(), 2);
+        assert_eq!(distinct_events[0].text.as_deref(), Some("Turn A context"));
+        assert_eq!(distinct_events[0].metadata["provider_turn_id"], "turn-a");
+        assert!(distinct_events[0].metadata.get("request_root_id").is_none());
+        assert_eq!(distinct_events[0].role, Some(AgentChatRole::System));
+        assert_eq!(distinct_events[1].metadata["request_root_id"], "request-b");
+        assert!(!distinct_state.has_pending_events());
+
+        let mut same_state = TranscriptNormalizationState::default();
+        normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [
+                r#"{"type":"turn_context","payload":{"turn_id":"turn-a"}}"#,
+                context.as_str(),
+            ],
+            &mut same_state,
+            false,
+            true,
+        )
+        .expect("hold same-turn context");
+        let same_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [turn_a_input.as_str()],
+            &mut same_state,
+            false,
+            true,
+        )
+        .expect("bind matching context to turn A input");
+        assert_eq!(same_events.len(), 2);
+        assert_eq!(same_events[0].metadata["request_root_id"], "request-a");
+        assert_eq!(same_events[1].metadata["request_root_id"], "request-a");
+        assert!(!same_state.has_pending_events());
+    }
+
+    #[test]
+    fn codex_missing_or_ambiguous_turn_id_releases_prior_pending_context() {
+        for boundary in [
+            r#"{"type":"turn_context","payload":{"root_turn_id":"turn-b"}}"#,
+            r#"{"type":"turn_context","turn_id":"turn-b","payload":{"turn_id":"turn-c"}}"#,
+        ] {
+            let mut state = TranscriptNormalizationState::default();
+            normalize_chat_lines_with_state(
+                "agent-1",
+                "codex",
+                [
+                    r#"{"type":"turn_context","payload":{"turn_id":"turn-a"}}"#,
+                    r#"{"type":"response_item","payload":{"type":"message","id":"context-a","role":"user","content":[{"type":"input_text","text":"Turn A context"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-a","content_item_kinds":["agents_md.instructions"]}}}"#,
+                ],
+                &mut state,
+                false,
+                true,
+            )
+            .expect("normalize initial pending context");
+
+            let events = normalize_chat_lines_with_state(
+                "agent-1",
+                "codex",
+                [
+                    boundary,
+                    r#"{"type":"event_msg","payload":{"type":"user_message","message":"Unbound next request"}}"#,
+                ],
+                &mut state,
+                false,
+                true,
+            )
+            .expect("ambiguous turn context is a boundary");
+
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0].text.as_deref(), Some("Turn A context"));
+            assert_eq!(events[0].metadata["provider_turn_id"], "turn-a");
+            assert!(events[0].metadata.get("request_root_id").is_none());
+            assert_eq!(events[1].text.as_deref(), Some("Unbound next request"));
+            assert_ne!(
+                events[0].metadata.get("request_root_id"),
+                events[1].metadata.get("request_root_id")
+            );
+            assert!(!state.has_pending_events());
+        }
     }
 
     #[test]
