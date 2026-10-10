@@ -54,7 +54,8 @@ import { writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 const original = cp.spawnSync;
 cp.spawnSync = (command, options) => {
-  if (!/^(cargo |npm run check:rust-deadcode$)/.test(command)) throw new Error('Unexpected instrumented command');
+  if (!/^(cargo |npm run check:rust-deadcode$)/.test(command)
+    && command !== 'node --test scripts/native-e2e-windows-supervisor.test.mjs') throw new Error('Unexpected instrumented command');
   writeFileSync(process.env.GUARD_TRACE, JSON.stringify({ command, cwd: options.cwd, shell: options.shell }));
   return original(process.execPath, ['-e', 'require("node:fs").writeFileSync(process.env.GUARD_MARKER, "harmless child launched")'], { env: process.env });
 };
@@ -80,6 +81,145 @@ function denied(f, command) {
   assert.equal(existsSync(f.marker), false, 'child was never launched');
   assert.equal(readFileSync(f.protectedFile, 'utf8'), 'immutable input');
 }
+
+const supervisorCommand = 'node --test scripts/native-e2e-windows-supervisor.test.mjs';
+
+function supervisorFixture(t) {
+  const f = fixture(t);
+  // Keep all modeled temporary roots disjoint from the protected target.
+  for (const key of Object.keys(f.env)) {
+    if (/^(?:TMPDIR|TMP|TEMP|NODE_OPTIONS|WARDIAN_SUPERVISOR_TEST_ROOT)$/i.test(key)) delete f.env[key];
+  }
+  const temporary = path.join(f.root, 'compiler-temp');
+  const fixtures = path.join(f.root, 'supervisor-fixtures');
+  mkdirSync(temporary);
+  mkdirSync(fixtures);
+  Object.assign(f.env, { TEMP: temporary, TMP: temporary, TMPDIR: temporary, WARDIAN_SUPERVISOR_TEST_ROOT: fixtures });
+  return f;
+}
+
+test('registered supervisor command reaches maintained verification dispatch with disjoint roots', (t) => {
+  const f = supervisorFixture(t);
+  const admission = assertCompilerAdmission({ program: 'node', args: ['--test', 'scripts/native-e2e-windows-supervisor.test.mjs'], cwd: f.cwd, env: f.env });
+  const canonical = (root) => process.platform === 'win32' ? realpathSync(root).toLowerCase() : realpathSync(root);
+  assert.deepEqual(admission.writable_roots, [canonical(f.env.WARDIAN_SUPERVISOR_TEST_ROOT), canonical(f.env.TEMP)]);
+  const result = f.run(supervisorCommand);
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(JSON.parse(readFileSync(f.trace)).command, supervisorCommand);
+  assert.match(readFileSync(f.marker, 'utf8'), /harmless child launched/);
+});
+
+test('supervisor default fixture root uses the child temporary environment', (t) => {
+  const f = supervisorFixture(t);
+  delete f.env.WARDIAN_SUPERVISOR_TEST_ROOT;
+  const result = f.run(supervisorCommand);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(existsSync(f.marker), true);
+});
+
+test('supervisor admission preserves safe explicit memory and warning tuning', (t) => {
+  const f = supervisorFixture(t);
+  const args = ['--test', 'scripts/native-e2e-windows-supervisor.test.mjs'];
+  const original = assertCompilerAdmission({ program: 'node', args, cwd: f.cwd, env: f.env });
+  f.env.NODE_OPTIONS = '--max-old-space-size=512 --disable-warning=DEP0040';
+  assert.deepEqual(assertCompilerAdmission({ program: 'node', args, cwd: f.cwd, env: f.env }), original);
+  // The memory option is supported by all maintained Node versions. Test the
+  // warning option's root classification directly without requiring newer Node.
+  f.env.NODE_OPTIONS = '--max-old-space-size=512';
+  const result = f.run(supervisorCommand);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(existsSync(f.marker), true);
+  assert.equal(f.env.NODE_OPTIONS, '--max-old-space-size=512');
+});
+
+test('supervisor admission refuses preload, debugger and output-redirection options', (t) => {
+  for (const options of ['--import=./unknown.mjs', '--require=./unknown.cjs', '--inspect', '--redirect-warnings=./warnings.log', '--max-old-space-size=512 --import=./unknown.mjs']) {
+    const f = supervisorFixture(t);
+    f.env.NODE_OPTIONS = options;
+    assert.throws(() => assertCompilerAdmission({ program: 'node', args: ['--test', 'scripts/native-e2e-windows-supervisor.test.mjs'], cwd: f.cwd, env: f.env }), /unsupported supervisor Node options/);
+    assert.equal(existsSync(f.trace), false);
+    assert.equal(existsSync(f.marker), false);
+  }
+});
+
+test('unknown Node scripts and extra supervisor options fail before dispatch', (t) => {
+  for (const command of [
+    'node --test scripts/unknown.test.mjs',
+    `${supervisorCommand} scripts/unknown.test.mjs`,
+    'node --inspect --test scripts/native-e2e-windows-supervisor.test.mjs',
+  ]) denied(supervisorFixture(t), command);
+});
+
+test('missing or relative supervisor fixture and compiler temporary roots fail before dispatch', (t) => {
+  for (const key of ['WARDIAN_SUPERVISOR_TEST_ROOT', 'TEMP', 'TMP', 'TMPDIR']) {
+    if (process.platform === 'win32' && key === 'TMPDIR') continue;
+    if (process.platform !== 'win32' && key !== 'WARDIAN_SUPERVISOR_TEST_ROOT' && key !== 'TMPDIR') continue;
+    for (const root of ['missing', 'relative']) {
+      const f = supervisorFixture(t);
+      f.env[key] = root === 'missing' ? path.join(f.root, 'not-created') : 'relative-temp';
+      denied(f, supervisorCommand);
+      assert.equal(existsSync(path.join(f.root, 'not-created')), false);
+    }
+  }
+});
+
+test('protected supervisor fixture and compiler temporary overlaps fail before dispatch', (t) => {
+  const keys = process.platform === 'win32' ? ['WARDIAN_SUPERVISOR_TEST_ROOT', 'TEMP', 'TMP'] : ['WARDIAN_SUPERVISOR_TEST_ROOT', 'TMPDIR'];
+  for (const key of keys) {
+    const f = supervisorFixture(t);
+    f.env[key] = f.target;
+    denied(f, supervisorCommand);
+  }
+});
+
+test('unqualified supervisor Node options fail before maintained dispatch', (t) => {
+  const f = supervisorFixture(t);
+  f.env.NODE_OPTIONS = '--no-warnings';
+  denied(f, supervisorCommand);
+});
+
+test('supervisor root aliases resolve before protected-input containment', (t) => {
+  const f = supervisorFixture(t);
+  const alias = path.join(f.root, 'fixture-alias');
+  symlinkSync(f.target, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  f.env.WARDIAN_SUPERVISOR_TEST_ROOT = alias;
+  denied(f, supervisorCommand);
+});
+
+test('shared admission refuses omitted Windows TEMP before a launcher can restore it', { skip: process.platform !== 'win32' }, (t) => {
+  for (const omitTmp of [false, true]) {
+    const f = supervisorFixture(t);
+    delete f.env.TEMP;
+    if (omitTmp) delete f.env.TMP;
+    // Windows child bootstrap can restore omitted TEMP from the parent, so
+    // test the supplied environment at the shared pre-spawn boundary itself.
+    assert.throws(() => assertCompilerAdmission({ program: 'node', args: ['--test', 'scripts/native-e2e-windows-supervisor.test.mjs'], cwd: f.cwd, env: f.env }), /supervisor temporary directory is not configured/);
+    assert.equal(existsSync(f.trace), false);
+    assert.equal(existsSync(f.marker), false);
+  }
+});
+
+test('Windows supervisor admission follows case-insensitive child environment names', { skip: process.platform !== 'win32' }, (t) => {
+  for (const key of ['TEMP', 'TMP', 'WARDIAN_SUPERVISOR_TEST_ROOT', 'NODE_OPTIONS']) {
+    const f = supervisorFixture(t);
+    delete f.env[key];
+    f.env[key.toLowerCase()] = key === 'NODE_OPTIONS' ? '--no-warnings' : f.target;
+    denied(f, supervisorCommand);
+  }
+});
+
+test('supervisor admission includes inherited Windows environment fields', { skip: process.platform !== 'win32' }, (t) => {
+  for (const key of ['TMP', 'NODE_OPTIONS']) {
+    const f = supervisorFixture(t);
+    delete f.env[key];
+    // Node deliberately includes enumerable prototype fields when spawning.
+    Object.setPrototypeOf(f.env, { [key]: key === 'TMP' ? f.target : '--import=./unknown.mjs' });
+    assert.throws(() => assertCompilerAdmission({ program: 'node', args: ['--test', 'scripts/native-e2e-windows-supervisor.test.mjs'], cwd: f.cwd, env: f.env }), /overlaps writable tree|unsupported supervisor Node options/);
+    assert.equal(existsSync(f.marker), false);
+    assert.equal(readFileSync(f.protectedFile, 'utf8'), 'immutable input');
+  }
+});
 
 // Match the setup record; it is deliberately not a production trust mechanism.
 // The executable really exists and is harmless; a correct self-hash must still

@@ -98,6 +98,7 @@ describe("CI workflow contract", () => {
       "cargo test --workspace --all-targets -- --test-threads=1",
       "cargo test --workspace --doc -- --test-threads=1",
       "cargo check --workspace",
+      "node --test scripts/native-e2e-windows-supervisor.test.mjs",
       "npm run check:rust-deadcode",
     ]);
     expect(backendCoverage).toContain(
