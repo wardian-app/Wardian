@@ -18,6 +18,8 @@ interface ProviderModelSelectorProps {
   idPrefix: string;
   compact?: boolean;
   disabled?: boolean;
+  /** Avoid provider discovery and refresh timers until the user activates the picker. */
+  deferDiscovery?: boolean;
 }
 
 export function ProviderModelSelector({
@@ -27,7 +29,10 @@ export function ProviderModelSelector({
   idPrefix,
   compact = false,
   disabled = false,
+  deferDiscovery = false,
 }: ProviderModelSelectorProps) {
+  const [activatedProvider, setActivatedProvider] = useState<string | null>(null);
+  const discoveryEnabled = !deferDiscovery || (!disabled && activatedProvider === provider);
   const [catalog, setCatalog] = useState<ProviderModelCatalog | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -71,12 +76,22 @@ export function ProviderModelSelector({
   );
 
   useEffect(() => {
+    if (!discoveryEnabled) {
+      loadEpochRef.current += 1;
+      setCatalog(null);
+      setLoading(false);
+      setError(null);
+      return;
+    }
     void loadCatalog(false);
     const timer = window.setInterval(() => {
       void loadCatalog(true);
     }, AUTO_REFRESH_MS);
-    return () => window.clearInterval(timer);
-  }, [loadCatalog]);
+    return () => {
+      loadEpochRef.current += 1;
+      window.clearInterval(timer);
+    };
+  }, [discoveryEnabled, loadCatalog]);
 
   const models = (catalog?.models ?? []).filter((model) => !HIDDEN_MODEL_IDS.has(model.id));
   const selectedModel = useMemo(() => {
@@ -95,6 +110,7 @@ export function ProviderModelSelector({
   const effortId = `${idPrefix}-effort`;
 
   const chooseModel = (nextModel: string) => {
+    if (disabled) return;
     const nextResolvedModel = nextModel
       ? models.find((model) => model.id === nextModel) ?? null
       : models.find((model) => model.is_default) ?? models[0] ?? null;
@@ -109,6 +125,20 @@ export function ProviderModelSelector({
       reasoning_effort: nextEffort,
     });
   };
+
+  if (!discoveryEnabled) {
+    return (
+      <button
+        aria-label="Choose model"
+        className="rounded border border-wardian-light px-2 py-1 text-[11px] text-muted-neutral hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
+        disabled={disabled || !provider?.trim()}
+        onClick={() => setActivatedProvider(provider ?? null)}
+        type="button"
+      >
+        {selection.model || "Provider default"}
+      </button>
+    );
+  }
 
   return (
     <div className={compact ? "flex min-w-0 items-center gap-1.5" : "rounded border border-wardian-light bg-[var(--color-wardian-card-bg-muted)] p-3"}>

@@ -58,8 +58,31 @@ describe("ConfigureAgentPanel", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     writeTextMock.mockReset();
-    vi.spyOn(window, "alert").mockImplementation(() => {});
+    vi.spyOn(window, "alert").mockReset().mockImplementation(() => {});
     mockConfigureInvokes();
+  });
+
+  it("keeps Off selection passive and discovers models only for an explicit configuration change", async () => {
+    const defaultInvoke = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "list_provider_model_catalog") return {
+        provider: "codex", refresh_error: null,
+        models: [{ id: "model-target", display_name: "Target model", effort_options: [], is_default: false }],
+      };
+      return defaultInvoke?.(command, args);
+    });
+    render(<ConfigureAgentPanel agentId="agent-1" agents={[baseAgent]} agentClasses={classes} telemetry={{}} onSaved={() => {}} />);
+    const picker = await screen.findByRole("button", { name: "Choose model" });
+    expect(invokeMock).not.toHaveBeenCalledWith("list_provider_model_catalog", expect.anything());
+    const user = userEvent.setup();
+    await user.click(picker);
+    await screen.findByRole("option", { name: "Target model" });
+    await user.selectOptions(screen.getByLabelText("Model"), "model-target");
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("update_agent_config", {
+      newConfig: expect.objectContaining({ model: "model-target", is_off: true }),
+    }));
+    expect(invokeMock).not.toHaveBeenCalledWith("resume_agent", expect.anything());
   });
 
   it("normalizes legacy flat provider fields before saving", async () => {

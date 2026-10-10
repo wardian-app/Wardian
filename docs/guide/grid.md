@@ -48,6 +48,10 @@ screen, including short histories that fit within one viewport. This history is
 bounded runtime state; restarting the provider does not restore a terminated
 terminal's screen.
 
+Chat keeps loaded messages visible if a history read fails. Use **Retry** to
+repeat the failed read; retrying older history keeps your current scroll position.
+If the first read takes longer, the waiting message stays visible until it settles.
+
 ## Related Links
 
 - [Agents](./agents-overview.md)

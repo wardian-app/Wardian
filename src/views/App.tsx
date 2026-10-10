@@ -75,7 +75,7 @@ import { findExistingSurface } from "../features/workbench/adjacentSurfaceTarget
 import { createWorkbenchNavigationService } from "../features/workbench/navigationService";
 import { useWatchlistAgentReveal } from "../features/workbench/useWatchlistAgentReveal";
 import { SurfaceRecoveryPlaceholder } from "../features/workbench/SurfaceRecoveryPlaceholder";
-import { AgentSessionSurface } from "../features/workbench/surfaces/AgentSessionSurface";
+import { WorkbenchAgentSessionSurface } from "../features/workbench/surfaces/WorkbenchAgentSessionSurface";
 import {
   AnalyticsSurface,
   DashboardSurface,
@@ -1494,10 +1494,13 @@ function AppBody() {
     if (surface.surface_type === "agent-session") {
       const resourceKey = surface.resource_key ?? "";
       return (
-        <AgentSessionSurface
+        <WorkbenchAgentSessionSurface
           surface_id={surface.surface_id}
           resource_key={resourceKey}
           agent={agents.find((agent) => agent.session_id === resourceKey)}
+          is_off={offAgentIds.has(resourceKey)}
+          navigation={workbenchNavigation}
+          on_agent_config_updated={agentResources.apply_agent_config}
           theme={theme}
           visibility={lifecycle?.visible === false ? "hidden" : "visible"}
           render_state={lifecycle?.visible === false ? "suspended" : "mounted"}
@@ -1505,12 +1508,6 @@ function AppBody() {
           on_title_change={handleTitleChange}
           on_refresh_agents={() => { void fetchAgents(); }}
           rebind_candidates={agents}
-          on_rebind_agent={(nextAgentId) => {
-            void workbenchNavigation.rebind_resource(surface.surface_id, {
-              surface_type: "agent-session",
-              resource_key: nextAgentId,
-            });
-          }}
           on_reset_surface={() => {
             workbenchPersistence.store.getState().apply_commands([{
               type: "update_surface_state",
@@ -1519,7 +1516,6 @@ function AppBody() {
               state: workbenchRegistry.default_state("agent-session"),
             }]);
           }}
-          on_close_surface={() => { void workbenchNavigation.close(surface.surface_id); }}
         />
       );
     }

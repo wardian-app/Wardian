@@ -206,7 +206,8 @@ pub(super) fn is_bound_native_delivery(
     record: &ConversationNarrativeRecord,
     event: &AgentChatEvent,
 ) -> bool {
-    event.metadata["provider_log"] == true
+    !event.metadata["chat_source_ref"].is_string()
+        && event.metadata["provider_log"] == true
         && event.kind == AgentChatEventKind::Message
         && event.role == Some(AgentChatRole::User)
         && record
@@ -505,6 +506,30 @@ pub(super) fn rebuild_derived_projections(
     records: &[ConversationNarrativeRecord],
     events: &[AgentChatEvent],
 ) -> io::Result<()> {
+    rebuild_derived_projections_inner(agent_id, directory, context, handle, records, events, true)
+}
+
+/// Receipt maintenance updates derived summaries without rewriting evidence.
+pub(super) fn rebuild_receipt_summaries(
+    agent_id: &str,
+    directory: &Path,
+    context: &ConversationArchiveContext,
+    handle: &ActiveConversationHandle,
+    records: &[ConversationNarrativeRecord],
+    events: &[AgentChatEvent],
+) -> io::Result<()> {
+    rebuild_derived_projections_inner(agent_id, directory, context, handle, records, events, false)
+}
+
+fn rebuild_derived_projections_inner(
+    agent_id: &str,
+    directory: &Path,
+    context: &ConversationArchiveContext,
+    handle: &ActiveConversationHandle,
+    records: &[ConversationNarrativeRecord],
+    events: &[AgentChatEvent],
+    reconcile: bool,
+) -> io::Result<()> {
     let Some(first_record) = records.first() else {
         return Ok(());
     };
@@ -512,7 +537,7 @@ pub(super) fn rebuild_derived_projections(
         return Ok(());
     };
     let mut all_events = events.to_vec();
-    if provenance::bind_delivered_inputs(&mut all_events, records)? {
+    if reconcile && provenance::bind_delivered_inputs(&mut all_events, records)? {
         write_jsonl_atomic(&directory.join("events.jsonl"), &all_events)?;
     }
     let sources: Vec<ConversationSourceRecord> =

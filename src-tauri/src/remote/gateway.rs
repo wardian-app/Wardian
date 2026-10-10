@@ -28,8 +28,6 @@ const REMOTE_STATUS_STREAM_NAME: &str = "agent_status";
 const WEBSOCKET_FIRST_TICKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const REMOTE_TERMINAL_DEFAULT_TAIL_BYTES: usize = 64 * 1024;
 const REMOTE_TERMINAL_MAX_TAIL_BYTES: usize = 128 * 1024;
-const REMOTE_CHAT_DEFAULT_PAGE_EVENTS: usize = 40;
-const REMOTE_CHAT_MAX_PAGE_EVENTS: usize = 100;
 
 pub fn validate_gateway_bind_config(config: &RemoteGatewayConfig) -> Result<(), String> {
     crate::remote::policy::CanonicalOrigin::parse(&config.canonical_origin)?;
@@ -834,8 +832,10 @@ fn parse_remote_automation_monitor_query(
 
 #[derive(Debug, serde::Deserialize)]
 struct RemoteChatQuery {
-    before: Option<usize>,
+    before: Option<String>,
     limit: Option<usize>,
+    revision: Option<String>,
+    detail: Option<String>,
 }
 
 async fn load_remote_agent_chat<R: Runtime>(
@@ -849,44 +849,22 @@ async fn load_remote_agent_chat<R: Runtime>(
         require_audited_remote_session(&ctx, &headers, &origin, "chat_read", "load_agent_chat")
             .await?;
     let state = ctx.app.state::<crate::state::AppState>();
-    let limit = query
-        .limit
-        .unwrap_or(REMOTE_CHAT_DEFAULT_PAGE_EVENTS)
-        .clamp(1, REMOTE_CHAT_MAX_PAGE_EVENTS);
-    let page =
-        crate::remote::operations::remote_agent_chat_page(&state, &session_id, query.before, limit)
-            .await
-            .map_err(|stage| {
-                RemoteGatewayError::bad_request(remote_agent_chat_failure_code(stage))
-            })?;
+    let _limit = query.limit;
+    let page = crate::remote::operations::remote_agent_chat_page(
+        &state,
+        &session_id,
+        query.before,
+        query.revision,
+        query.detail,
+    )
+    .await
+    .map_err(|_| RemoteGatewayError::bad_request("agent_chat_projection_unavailable"))?;
     audit_gateway_event(
         &session,
         &origin,
         GatewayAuditEvent::accepted("chat_read", "load_agent_chat").target("agent", &session_id),
     );
     Ok(Json(serde_json::json!(page)))
-}
-
-fn remote_agent_chat_failure_code(
-    stage: crate::commands::chat::ChatTranscriptFailureStage,
-) -> &'static str {
-    match stage {
-        crate::commands::chat::ChatTranscriptFailureStage::AgentSnapshot => {
-            "agent_chat_snapshot_failed"
-        }
-        crate::commands::chat::ChatTranscriptFailureStage::ProviderLogCapture => {
-            "agent_chat_provider_capture_failed"
-        }
-        crate::commands::chat::ChatTranscriptFailureStage::ArchiveWrite => {
-            "agent_chat_archive_write_failed"
-        }
-        crate::commands::chat::ChatTranscriptFailureStage::ProviderProjection => {
-            "agent_chat_projection_failed"
-        }
-        crate::commands::chat::ChatTranscriptFailureStage::Provenance => {
-            "agent_chat_provenance_failed"
-        }
-    }
 }
 
 async fn load_remote_agent_terminal(
@@ -951,25 +929,33 @@ async fn run_agent_action(
         );
         return Err(error);
     }
-    if let Err(error) =
-        crate::remote::operations::run_remote_agent_action(&ctx.app, request.clone()).await
-    {
-        let code = "agent_action_failed";
-        audit_gateway_event(
-            &session,
-            &origin,
-            GatewayAuditEvent::rejected("agent_action", &request.action, code)
-                .target("agent", &request.target),
-        );
-        return Err(RemoteGatewayError::bad_request_with_detail(code, error));
-    }
+    let receipt =
+        match crate::remote::operations::run_remote_agent_action(&ctx.app, request.clone()).await {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                let code = "agent_action_failed";
+                audit_gateway_event(
+                    &session,
+                    &origin,
+                    GatewayAuditEvent::rejected("agent_action", &request.action, code)
+                        .target("agent", &request.target),
+                );
+                return Err(RemoteGatewayError::bad_request_with_detail(code, error));
+            }
+        };
     audit_gateway_event(
         &session,
         &origin,
         GatewayAuditEvent::accepted("agent_action", &request.action)
             .target("agent", &request.target),
     );
-    Ok(Json(serde_json::json!({ "ok": true })))
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "chat_event_id": receipt.as_ref().map(|receipt| &receipt.chat_event_id),
+        "chat_agent_id": receipt.as_ref().map(|receipt| &receipt.chat_agent_id),
+        "chat_conversation_id": receipt.as_ref().map(|receipt| &receipt.chat_conversation_id),
+        "chat_source_epoch": receipt.as_ref().and_then(|receipt| receipt.chat_source_epoch.as_ref()),
+    })))
 }
 
 fn execute_remote_inbox_action(
@@ -1872,24 +1858,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_chat_failure_codes_identify_only_the_processing_stage() {
-        use crate::commands::chat::ChatTranscriptFailureStage as Stage;
-
-        for (stage, code) in [
-            (Stage::AgentSnapshot, "agent_chat_snapshot_failed"),
-            (
-                Stage::ProviderLogCapture,
-                "agent_chat_provider_capture_failed",
-            ),
-            (Stage::ArchiveWrite, "agent_chat_archive_write_failed"),
-            (Stage::ProviderProjection, "agent_chat_projection_failed"),
-            (Stage::Provenance, "agent_chat_provenance_failed"),
-        ] {
-            assert_eq!(remote_agent_chat_failure_code(stage), code);
-        }
-    }
-
-    #[test]
     fn gateway_unauthorized_errors_preserve_machine_code() {
         let error = RemoteGatewayError::unauthorized("missing_session_cookie");
 
@@ -2203,7 +2171,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_chat_snapshot_failure_returns_a_sanitized_stage_code() {
+    async fn remote_chat_snapshot_failure_returns_a_sanitized_projection_code() {
         let _guard = crate::utils::wardian_test_env_lock_async().await;
         let temp = tempfile::tempdir().expect("temp home");
         unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
@@ -2233,10 +2201,12 @@ mod tests {
             Query(RemoteChatQuery {
                 before: None,
                 limit: None,
+                revision: None,
+                detail: None,
             }),
         )
         .await
-        .expect_err("missing fixture agent should fail during capture");
+        .expect_err("missing fixture agent should fail before display read");
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -2244,7 +2214,7 @@ mod tests {
             .expect("response body");
         let body_text = String::from_utf8(body.to_vec()).expect("utf-8 response");
         let payload: serde_json::Value = serde_json::from_str(&body_text).expect("json response");
-        assert_eq!(payload["code"], "agent_chat_snapshot_failed");
+        assert_eq!(payload["code"], "agent_chat_projection_unavailable");
         assert!(payload.get("detail").is_none());
         assert!(!body_text.contains("sanitized-codex-agent"));
 
@@ -2297,8 +2267,15 @@ mod tests {
             ]
         };
         let first_lines = turn_lines("provider-turn-old", "native-message-old");
-        std::fs::write(&log_path, format!("{}\n", first_lines.join("\n")))
-            .expect("write first synthetic turn");
+        std::fs::write(
+            &log_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({"type":"session_meta","payload":{"id":"codex-session-one"}}),
+                first_lines.join("\n")
+            ),
+        )
+        .expect("write first synthetic turn");
 
         let app = tauri::test::mock_app();
         app.manage(AppState::new());
@@ -2419,16 +2396,23 @@ mod tests {
             app: app.handle().clone(),
             config: config(),
         };
-        let response = load_remote_agent_chat(
-            State(ctx),
-            action_headers(&session),
-            AxumPath("synthetic-codex-agent".to_string()),
-            Query(RemoteChatQuery {
-                before: None,
-                limit: Some(100),
-            }),
+        let _capture_guard = state.conversation_capture_policy_lock.lock().await;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            load_remote_agent_chat(
+                State(ctx),
+                action_headers(&session),
+                AxumPath("synthetic-codex-agent".to_string()),
+                Query(RemoteChatQuery {
+                    before: None,
+                    limit: Some(100),
+                    revision: None,
+                    detail: None,
+                }),
+            ),
         )
         .await
+        .expect("normal Chat read must not join the capture gate")
         .expect("authenticated gateway chat read")
         .into_response();
 
@@ -2443,15 +2427,26 @@ mod tests {
             .iter()
             .filter(|event| event["role"] == "user" && event["text"] == prompt)
             .collect::<Vec<_>>();
-        assert_eq!(repeated_users.len(), 2);
-        let provider_turn_ids = repeated_users
-            .iter()
-            .filter_map(|event| event["metadata"]["provider_turn_id"].as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            provider_turn_ids,
-            vec!["provider-turn-old", "provider-turn-new"]
+        assert!(
+            repeated_users.len() >= 2,
+            "both available identical turns remain visible"
         );
+        assert!(repeated_users
+            .iter()
+            .any(|event| event["metadata"]["chat_provisional"] == true));
+        let ids = repeated_users
+            .iter()
+            .filter_map(|event| event["id"].as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(ids.len(), repeated_users.len());
+        assert_eq!(
+            state
+                .conversation_archive
+                .provider_log_capture_state("synthetic-codex-agent", source_key)
+                .unwrap(),
+            Some(first.next)
+        );
+        assert!(payload["bytes_read"].as_u64().unwrap() <= 2 * 1024 * 1024);
         assert!(repeated_users
             .iter()
             .all(|event| event["id"].as_str().is_some()));

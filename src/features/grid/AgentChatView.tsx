@@ -5,7 +5,7 @@ import { readImage } from "@tauri-apps/plugin-clipboard-manager";
 import { FileText, Hand, Image as ImageIcon, Loader2, Plus, SendHorizontal, Square, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { DragEvent, KeyboardEvent } from "react";
-import type { AgentChatEvent, AgentConfig, AgentModelSelectionUpdateResult, AgentTelemetry } from "../../types";
+import type { AgentChatEvent, AgentChatPage, AgentConfig, AgentModelSelectionUpdateResult, AgentTelemetry } from "../../types";
 import { useSettingsStore } from "../../store/useSettingsStore";
 import { reasoningEffortForConfig } from "../agents/configUtils";
 import { ProviderModelSelector, type ModelSelection } from "../agents/ProviderModelSelector";
@@ -16,6 +16,10 @@ import {
   type ChatAttachment,
 } from "../../utils/terminalInput";
 import { ChatTranscriptRow } from "../chat/ChatTranscriptRows";
+import { useChatPages, type ChatPageLoader } from "../chat/useChatPages";
+import { chatReadProgress, submittedChatEvent } from "../chat/chatReadState";
+import { captureChatScrollAnchor, restoreChatScrollAnchor, type ChatScrollAnchor } from "../chat/chatScrollAnchor";
+import { useChatReadingPresentation } from "../chat/useChatReadingPresentation";
 import { matchingSlashCommands } from "../chat/slashCommands";
 import {
   isProcessingAgentStatus,
@@ -46,6 +50,10 @@ interface AgentChatViewBaseProps {
   className?: string;
   workspacePath?: string | null;
   refreshIntervalMs?: number;
+  /** Blocks chat mutations for explicitly read-only presentations; history still pages normally. */
+  readOnly?: boolean;
+  /** Discover provider models only after an explicit picker activation on history-first surfaces. */
+  deferModelDiscovery?: boolean;
   autoFocusComposer?: boolean;
   onComposerAutoFocused?: () => void;
   onAgentConfigUpdated?: (agent: AgentConfig) => void;
@@ -57,15 +65,15 @@ type AgentChatDraftControlProps =
 
 type AgentChatViewProps = AgentChatViewBaseProps & AgentChatDraftControlProps;
 
-type LoadState = "loading" | "ready" | "error";
+type LoadState = "loading" | "waiting" | "ready" | "error";
 const CHAT_REFRESH_INTERVAL_MS = 3000;
 
 
-type AwaitingResponseMarker = { id: string; response_count_after: number };
+type AwaitingResponseMarker = { id: string; response_ids: Set<string> };
 
-const CHAT_INITIAL_ROW_LIMIT = 80;
-const CHAT_ROW_PAGE_SIZE = 60;
 const CHAT_SCROLL_BOTTOM_THRESHOLD_PX = 48;
+const loadChatPage: ChatPageLoader = ({ sessionId, cursor, revision, detailRef }) =>
+  invoke<AgentChatPage>("load_agent_chat_page", { sessionId, cursor, revision, detailRef });
 
 export function AgentChatView({
   sessionId,
@@ -78,18 +86,22 @@ export function AgentChatView({
   className = "",
   workspacePath,
   refreshIntervalMs = CHAT_REFRESH_INTERVAL_MS,
+  readOnly = false,
+  deferModelDiscovery = false,
   autoFocusComposer = false,
   draft,
   onComposerAutoFocused,
   onAgentConfigUpdated,
   onDraftChange,
 }: AgentChatViewProps) {
-  const [events, setEvents] = useState<AgentChatEvent[]>([]);
-  const [pendingMessages, setPendingMessages] = useState<AgentChatEvent[]>([]);
   const [awaitingResponse, setAwaitingResponse] = useState<AwaitingResponseMarker | null>(null);
-  const [loadState, setLoadState] = useState<LoadState>("loading");
-  const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const chat = useChatPages(sessionId, loadChatPage, refreshIntervalMs, reloadKey);
+  const { events, page, loadingOlder, loadOlder, loadDetail, reset: resetChat, isCurrentScope: isCurrentChatScope } = chat;
+  const error = chat.error;
+  const loadState: LoadState = events.length === 0 && chat.waiting ? "waiting"
+    : chat.loading && events.length === 0 ? "loading" : error !== null && events.length === 0 ? "error" : "ready";
+  const progressText = page ? chatReadProgress(page.progress) : null;
   const [internalDraft, setInternalDraft] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isInterrupting, setIsInterrupting] = useState(false);
@@ -97,15 +109,17 @@ export function AgentChatView({
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [fileOpenError, setFileOpenError] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
-  const [visibleRowLimit, setVisibleRowLimit] = useState(CHAT_INITIAL_ROW_LIMIT);
+  const submissionSerial = useRef(0);
+  const pendingSubmissionScope = useRef<ReturnType<typeof chat.submissionScope> | null>(null);
   const workbenchNavigation = useAppShellWorkbenchNavigation();
   const externalEditor = useSettingsStore((state) => state.externalEditor);
   const externalEditorCustomExecutable = useSettingsStore((state) => state.externalEditorCustomExecutable);
   const fileOpenActions = useSettingsStore((state) => state.fileOpenActions);
   const transcriptScrollRef = useRef<HTMLDivElement>(null);
-  const transcriptRequestRef = useRef(0);
   const stickToLatestRef = useRef(true);
-  const prependScrollSnapshotRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  const prependScrollSnapshotRef = useRef<ChatScrollAnchor | null>(null);
+  const [settledPrependSnapshot, setSettledPrependSnapshot] = useState<ChatScrollAnchor | null>(null);
+  const scrollSessionRef = useRef(sessionId);
   const activeDraft = draft ?? internalDraft;
   const setActiveDraft = onDraftChange ?? setInternalDraft;
 
@@ -114,15 +128,12 @@ export function AgentChatView({
     let unlisten: (() => void) | null = null;
 
     listen<{ session_id?: string }>("agent-terminal-cleared", (event) => {
-      if (event.payload?.session_id !== sessionId) return;
-      transcriptRequestRef.current += 1;
+      if (disposed || event.payload?.session_id !== sessionId) return;
       stickToLatestRef.current = true;
       prependScrollSnapshotRef.current = null;
-      setEvents([]);
-      setPendingMessages([]);
+      resetChat();
+      submissionSerial.current += 1; pendingSubmissionScope.current = null; setIsSubmitting(false);
       setAwaitingResponse(null);
-      setLoadState("ready");
-      setError(null);
       setSubmitError(null);
       setAttachments([]);
     })
@@ -141,54 +152,21 @@ export function AgentChatView({
       disposed = true;
       unlisten?.();
     };
-  }, [sessionId]);
+  }, [sessionId, resetChat]);
 
   useEffect(() => {
-    let cancelled = false;
-    let intervalId: number | null = null;
+    if (pendingSubmissionScope.current && !isCurrentChatScope(pendingSubmissionScope.current)) {
+      submissionSerial.current += 1; pendingSubmissionScope.current = null; setIsSubmitting(false);
+    }
+  }, [page?.conversation_id, page?.source_epoch, isCurrentChatScope]);
 
-    const loadTranscript = (showLoading: boolean) => {
-      if (!showLoading && document.visibilityState === "hidden") return;
-      const requestId = ++transcriptRequestRef.current;
-      if (showLoading) {
-        setLoadState("loading");
-        setError(null);
-      }
+  useEffect(() => {
+    setAwaitingResponse((marker) => clearAwaitingResponseWhenAnswered(events, marker));
+  }, [events]);
 
-      invoke<AgentChatEvent[]>("load_agent_chat_transcript", { sessionId })
-        .then((transcript) => {
-          if (cancelled || requestId !== transcriptRequestRef.current) return;
-          const nextEvents = Array.isArray(transcript) ? transcript : [];
-          const scrollRegion = transcriptScrollRef.current;
-          if (scrollRegion && !prependScrollSnapshotRef.current) {
-            stickToLatestRef.current = stickToLatestRef.current || isNearTranscriptBottom(scrollRegion);
-          }
-          setEvents(nextEvents);
-          setPendingMessages((pending) => unconfirmedPendingMessages(nextEvents, pending));
-          setAwaitingResponse((marker) => clearAwaitingResponseWhenAnswered(nextEvents, marker));
-          setLoadState("ready");
-          setError(null);
-        })
-        .catch((reason: unknown) => {
-          if (cancelled || requestId !== transcriptRequestRef.current || !showLoading) return;
-          setEvents([]);
-          setError(errorMessage(reason));
-          setLoadState("error");
-        });
-    };
-
-    loadTranscript(true);
-    intervalId = window.setInterval(() => loadTranscript(false), refreshIntervalMs);
-
-    return () => {
-      cancelled = true;
-      if (intervalId !== null) window.clearInterval(intervalId);
-    };
-  }, [sessionId, reloadKey, refreshIntervalMs]);
-
-  const mergedEvents = useMemo(() => mergePendingMessages(events, pendingMessages), [events, pendingMessages]);
+  const mergedEvents = events;
   const activeStatus = status ?? telemetry?.current_status ?? null;
-  const showThinking = isProcessingAgentStatus(activeStatus) || awaitingResponse !== null || pendingMessages.length > 0;
+  const showThinking = isProcessingAgentStatus(activeStatus) || awaitingResponse !== null;
   const isExecutionActive = showThinking && !interruptRequested;
   const displayEvents = useMemo(
     () =>
@@ -200,16 +178,17 @@ export function AgentChatView({
       ),
     [agent?.provider, mergedEvents, provider, sessionId, showThinking],
   );
+  const presentationScope = JSON.stringify([sessionId, provider ?? agent?.provider, page?.conversation_id, page?.generation, page?.source_epoch]);
+  const readingPresentation = useChatReadingPresentation(presentationScope, displayEvents, page !== null);
   const chatRows = useMemo<ChatTranscriptRowModel[]>(
-    () => withTurnChangeSummaries(derivePresentedChatRows(sortTranscriptEvents(displayEvents).filter(shouldShowChatEvent))),
-    [displayEvents],
+    () => withTurnChangeSummaries(derivePresentedChatRows(displayEvents.filter(shouldShowChatEvent), readingPresentation.boundaries)),
+    [displayEvents, readingPresentation.boundaries],
   );
-  const hiddenOlderRowCount = Math.max(0, chatRows.length - visibleRowLimit);
-  const visibleChatRows = useMemo(() => chatRows.slice(hiddenOlderRowCount), [chatRows, hiddenOlderRowCount]);
+  const visibleChatRows = chatRows;
   const latestVisibleRowKey = visibleChatRows.length > 0 ? chatTranscriptRowKey(visibleChatRows[visibleChatRows.length - 1]) : "";
   const hasActionRequired = mergedEvents.some((event) => event.status === "action_required");
   const liveApprovalId = useMemo(() => liveApprovalEventId(sortTranscriptEvents(mergedEvents)), [mergedEvents]);
-  const disabledReason = inputDisabledReason(isSubmitting);
+  const disabledReason = readOnly ? "Read only" : inputDisabledReason(isSubmitting);
   const openChangedFile = useMemo(() => {
     const workspace = workspacePath?.trim();
     if (!workbenchNavigation || !workspace) return undefined;
@@ -254,21 +233,28 @@ export function AgentChatView({
 
   useEffect(() => {
     stickToLatestRef.current = true;
+    submissionSerial.current += 1; pendingSubmissionScope.current = null;
     prependScrollSnapshotRef.current = null;
-    setVisibleRowLimit(CHAT_INITIAL_ROW_LIMIT);
     setAwaitingResponse(null);
     setInterruptRequested(false);
     setIsInterrupting(false);
+    setIsSubmitting(false);
     setAttachments([]);
   }, [sessionId]);
 
   useLayoutEffect(() => {
+    if (scrollSessionRef.current !== presentationScope) {
+      scrollSessionRef.current = presentationScope;
+      prependScrollSnapshotRef.current = null;
+      stickToLatestRef.current = true;
+    }
     const scrollRegion = transcriptScrollRef.current;
     if (!scrollRegion || loadState !== "ready") return;
 
     const prependSnapshot = prependScrollSnapshotRef.current;
     if (prependSnapshot) {
-      scrollRegion.scrollTop = scrollRegion.scrollHeight - prependSnapshot.scrollHeight + prependSnapshot.scrollTop;
+      if (settledPrependSnapshot !== prependSnapshot) return;
+      restoreChatScrollAnchor(scrollRegion, prependSnapshot);
       prependScrollSnapshotRef.current = null;
       stickToLatestRef.current = isNearTranscriptBottom(scrollRegion);
       return;
@@ -278,7 +264,7 @@ export function AgentChatView({
       scrollRegion.scrollTop = scrollRegion.scrollHeight;
       stickToLatestRef.current = true;
     }
-  }, [hiddenOlderRowCount, latestVisibleRowKey, loadState, visibleChatRows.length]);
+  }, [latestVisibleRowKey, loadState, visibleChatRows.length, presentationScope, settledPrependSnapshot]);
 
   const submitPrompt = async (
     promptValue: string,
@@ -292,33 +278,31 @@ export function AgentChatView({
     const submittedPrompt = promptWithChatAttachments(prompt, selectedAttachments);
 
     stickToLatestRef.current = true;
+    readingPresentation.clear();
+    if (chat.browsingOlder) chat.jumpToLatest();
     setInterruptRequested(false);
     setIsSubmitting(true);
     setSubmitError(null);
+    const submissionScope = chat.submissionScope();
+    const request = ++submissionSerial.current;
+    pendingSubmissionScope.current = submissionScope;
     try {
       await stageChatImageAttachments(sessionId, providerName, selectedAttachments);
-      await submitInputToAgent(sessionId, submittedPrompt);
+      if (!chat.isCurrentScope(submissionScope)) return;
+      const acknowledgement = await submitInputToAgent(sessionId, submittedPrompt);
+      if (!chat.isCurrentScope(submissionScope)) return;
       if (clearDraft) setActiveDraft("");
       if (selectedAttachments.length > 0) setAttachments([]);
-      setPendingMessages((pending) => [
-        ...pending,
-        createPendingUserMessage(
-          sessionId,
-          providerName,
-          submittedPrompt,
-          maxSequence(events),
-          matchingUserMessageCount(events, submittedPrompt),
-        ),
-      ]);
+      chat.addSubmitted(submittedChatEvent(sessionId, providerName, submittedPrompt, acknowledgement));
       setAwaitingResponse({
         id: `awaiting-response-${sessionId}-${Date.now()}`,
-        response_count_after: responseEventCount(events),
+        response_ids: new Set(responseEvents(events).map((event) => event.id)),
       });
       setReloadKey((key) => key + 1);
     } catch (reason) {
-      setSubmitError(errorMessage(reason));
+      if (chat.isCurrentScope(submissionScope)) setSubmitError(errorMessage(reason));
     } finally {
-      setIsSubmitting(false);
+      if (request === submissionSerial.current) { pendingSubmissionScope.current = null; setIsSubmitting(false); }
     }
   };
 
@@ -331,14 +315,13 @@ export function AgentChatView({
   };
 
   const handleInterrupt = async () => {
-    if (isInterrupting || !showThinking) return;
+    if (readOnly || isInterrupting || !showThinking) return;
     setInterruptRequested(true);
     setIsInterrupting(true);
     setSubmitError(null);
     try {
       await invoke("send_input_to_agent", { sessionId, input: "\u0003" });
       setAwaitingResponse(null);
-      setPendingMessages([]);
       setReloadKey((key) => key + 1);
     } catch (reason) {
       setInterruptRequested(false);
@@ -352,18 +335,36 @@ export function AgentChatView({
     const scrollRegion = transcriptScrollRef.current;
     if (!scrollRegion || prependScrollSnapshotRef.current) return;
     stickToLatestRef.current = isNearTranscriptBottom(scrollRegion);
+    if (scrollRegion.scrollTop <= 160 && page?.next_before && !loadingOlder) {
+      void handleLoadOlderRows();
+      return;
+    }
+    if (stickToLatestRef.current) readingPresentation.clear();
+    else if (readingPresentation.active) {
+      const snapshot = captureChatScrollAnchor(scrollRegion);
+      if (readingPresentation.retainVisible(visibleChatRows, scrollRegion)) {
+        prependScrollSnapshotRef.current = snapshot;
+        setSettledPrependSnapshot(snapshot);
+      }
+    }
   };
 
-  const handleLoadOlderRows = () => {
+  const handleLoadOlderRows = async () => {
+    if (!page?.next_before || loadingOlder || prependScrollSnapshotRef.current) return;
     const scrollRegion = transcriptScrollRef.current;
-    if (scrollRegion) {
-      prependScrollSnapshotRef.current = {
-        scrollHeight: scrollRegion.scrollHeight,
-        scrollTop: scrollRegion.scrollTop,
-      };
+    const snapshot = scrollRegion ? captureChatScrollAnchor(scrollRegion) : null;
+    if (snapshot) {
+      readingPresentation.retainVisible(visibleChatRows, scrollRegion!);
+      prependScrollSnapshotRef.current = snapshot;
       stickToLatestRef.current = false;
     }
-    setVisibleRowLimit((limit) => limit + CHAT_ROW_PAGE_SIZE);
+    try {
+      await loadOlder();
+    } finally {
+      // Settle after the page updates so restoration sees the committed rows,
+      // including requests that return no rows or skip an active recent read.
+      if (snapshot && prependScrollSnapshotRef.current === snapshot) setSettledPrependSnapshot(snapshot);
+    }
   };
 
   return (
@@ -388,30 +389,48 @@ export function AgentChatView({
         ref={transcriptScrollRef}
       >
         {loadState === "loading" ? <LoadingState /> : null}
-        {loadState === "error" ? <ErrorState error={error} onRetry={() => setReloadKey((key) => key + 1)} /> : null}
-        {loadState === "ready" && chatRows.length === 0 ? <EmptyState /> : null}
+        {chat.waiting ? <WaitingState compact={events.length > 0} /> : null}
+        {error !== null ? <ErrorState error={error} onRetry={chat.errorDirection === "older" ? handleLoadOlderRows : chat.retry} compact={chatRows.length > 0} /> : null}
+        {progressText ? <p role="status" className="mb-2 text-xs text-muted-neutral">{progressText}</p> : null}
+        {loadState === "ready" && chatRows.length === 0 && !progressText ? <EmptyState /> : null}
         {loadState === "ready" && chatRows.length > 0 ? (
           <ol className="chat-transcript-list space-y-1.5" data-testid="agent-chat-transcript">
-            {hiddenOlderRowCount > 0 ? (
+            {chat.browsingOlder ? (
+              <li>
+                <button
+                  type="button"
+                  className="w-full rounded border border-wardian-light bg-[var(--color-wardian-card-bg-muted)] px-2.5 py-1.5 text-[11px] font-semibold leading-5 text-muted-neutral hover:text-primary"
+                  onClick={() => {
+                    prependScrollSnapshotRef.current = null;
+                    stickToLatestRef.current = true;
+                    readingPresentation.clear();
+                    chat.jumpToLatest();
+                  }}
+                >Jump to latest</button>
+              </li>
+            ) : null}
+            {page?.next_before ? (
               <li>
                 <button
                   type="button"
                   className="w-full rounded border border-wardian-light bg-[var(--color-wardian-card-bg-muted)] px-2.5 py-1.5 text-[11px] font-semibold leading-5 text-muted-neutral hover:text-primary"
                   onClick={handleLoadOlderRows}
+                  disabled={loadingOlder}
                 >
-                  Load {Math.min(CHAT_ROW_PAGE_SIZE, hiddenOlderRowCount)} earlier transcript rows
+                  {loadingOlder ? "Loading older transcript..." : "Load older transcript"}
                 </button>
               </li>
             ) : null}
             {visibleChatRows.map((row) => (
-              <li key={chatTranscriptRowKey(row)}>
+              <li key={`${sessionId}:${readingPresentation.rowEpoch}:${chatTranscriptRowKey(row)}`} data-chat-row-key={chatTranscriptRowKey(row)}>
                 <ChatTranscriptRow
                   agentIsWorking={showThinking}
-                  isSubmitting={isSubmitting}
+                  isSubmitting={isSubmitting || readOnly}
                   linkHandling={markdownLinkHandling}
                   onApprovalSubmit={handleApprovalSubmit}
                   liveApprovalId={liveApprovalId}
                   onOpenFile={openChangedFile}
+                  onLoadDetail={loadDetail}
                   row={row}
                 />
               </li>
@@ -428,6 +447,8 @@ export function AgentChatView({
         isExecuting={isExecutionActive}
         isInterrupting={isInterrupting}
         isSubmitting={isSubmitting}
+        readOnly={readOnly}
+        deferModelDiscovery={deferModelDiscovery}
         attachments={attachments}
         onAutoFocused={onComposerAutoFocused}
         onAgentConfigUpdated={onAgentConfigUpdated}
@@ -457,6 +478,8 @@ function ChatComposer({
   isExecuting,
   isInterrupting,
   isSubmitting,
+  readOnly,
+  deferModelDiscovery,
   onAutoFocused,
   onAgentConfigUpdated,
   onAttachmentsChange,
@@ -475,6 +498,8 @@ function ChatComposer({
   isExecuting: boolean;
   isInterrupting: boolean;
   isSubmitting: boolean;
+  readOnly: boolean;
+  deferModelDiscovery: boolean;
   onAutoFocused?: () => void;
   onAgentConfigUpdated?: (agent: AgentConfig) => void;
   onAttachmentsChange: (attachments: ChatAttachment[]) => void;
@@ -829,13 +854,15 @@ function ChatComposer({
         <div className="ml-auto flex min-w-0 items-center gap-1">
           <ChatModelSelection
             agent={agent}
+            readOnly={readOnly}
+            deferDiscovery={deferModelDiscovery}
             onAgentConfigUpdated={onAgentConfigUpdated}
             sessionId={sessionId}
           />
           <button
             aria-label={isInterrupting ? "Interrupting agent" : isSubmitting ? "Sending message" : isInterruptAction ? "Interrupt agent" : isExecuting ? "Queue message" : "Send message"}
             className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[var(--color-wardian-accent)] bg-[var(--color-wardian-accent)] text-[var(--color-wardian-accent-contrast)] transition-colors hover:opacity-85 disabled:cursor-not-allowed disabled:border-transparent disabled:bg-transparent disabled:text-[var(--color-wardian-text-muted-neutral)] disabled:opacity-50"
-            disabled={isInterrupting || isSubmitting || (!isExecuting && !canSubmit)}
+            disabled={Boolean(disabledReason) || isInterrupting || isSubmitting || (!isExecuting && !canSubmit)}
             onClick={isInterruptAction ? onInterrupt : undefined}
             title={isInterruptAction ? "Interrupt agent" : isSubmitting ? "Sending message" : isExecuting ? "Queue message" : "Send message"}
             type={isInterruptAction ? "button" : "submit"}
@@ -861,17 +888,22 @@ function ChatComposer({
 
 function ChatModelSelection({
   agent,
+  readOnly,
+  deferDiscovery,
   onAgentConfigUpdated,
   sessionId,
 }: {
   agent?: Pick<AgentConfig, "session_name" | "agent_class" | "provider" | "model" | "provider_config">;
+  readOnly: boolean;
+  deferDiscovery: boolean;
   onAgentConfigUpdated?: (agent: AgentConfig) => void;
   sessionId: string;
 }) {
   const provider = agent?.provider;
+  const configuredEffort = reasoningEffortForConfig(agent ?? {});
   const [selection, setSelection] = useState<ModelSelection>(() => ({
     model: agent?.model,
-    reasoning_effort: reasoningEffortForConfig(agent ?? {}),
+    reasoning_effort: configuredEffort,
   }));
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveNotice, setSaveNotice] = useState<string | null>(null);
@@ -884,17 +916,18 @@ function ChatModelSelection({
   useEffect(() => {
     const nextSelection = {
       model: agent?.model,
-      reasoning_effort: reasoningEffortForConfig(agent ?? {}),
+      reasoning_effort: configuredEffort,
     };
     selectionRef.current = nextSelection;
     setSelection(nextSelection);
     setSaveError(null);
     setSaveNotice(null);
-  }, [agent?.model, agent?.provider_config, sessionId]);
+  }, [agent?.model, configuredEffort, sessionId]);
 
   if (!provider?.trim()) return null;
 
   const saveSelection = async (nextSelection: ModelSelection) => {
+    if (readOnly) return;
     const previousSelection = selectionRef.current;
     selectionRef.current = nextSelection;
     let persisted = false;
@@ -943,7 +976,8 @@ function ChatModelSelection({
     <div className="min-w-0 shrink-0">
       <ProviderModelSelector
         compact
-        disabled={isSaving}
+        deferDiscovery={readOnly || deferDiscovery}
+        disabled={readOnly || isSaving}
         idPrefix={`chat-${sessionId}`}
         provider={provider}
         selection={selection}
@@ -969,6 +1003,19 @@ function LoadingState() {
   );
 }
 
+function WaitingState({ compact = false }: { compact?: boolean }) {
+  return (
+    <div role="status" className={`flex flex-col items-center justify-center gap-3 text-center ${compact ? "mb-2 px-3 py-2" : "h-full min-h-[160px]"}`}>
+      <div>
+        <div className="text-[13px] font-semibold text-primary">Waiting for transcript read</div>
+        <div className="mt-1 max-w-[42ch] text-[12px] leading-5 text-muted-neutral">
+          The transcript read is still running after 30 seconds. Waiting for it to settle.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function EmptyState() {
   return (
     <div className="flex h-full min-h-[160px] flex-col items-center justify-center gap-1 text-center">
@@ -980,9 +1027,9 @@ function EmptyState() {
   );
 }
 
-function ErrorState({ error, onRetry }: { error: string | null; onRetry: () => void }) {
+function ErrorState({ error, onRetry, compact = false }: { error: string | null; onRetry: () => void; compact?: boolean }) {
   return (
-    <div className="flex h-full min-h-[160px] flex-col items-center justify-center gap-3 text-center">
+    <div role="alert" className={`flex flex-col items-center justify-center gap-3 text-center ${compact ? "mb-2 rounded border border-wardian-error/40 px-3 py-2" : "h-full min-h-[160px]"}`}>
       <div>
         <div className="text-[13px] font-semibold text-[var(--color-wardian-error)]">Unable to load transcript</div>
         <div className="mt-1 max-w-[42ch] text-[12px] leading-5 text-muted-neutral">{error ?? "The transcript command failed."}</div>
@@ -996,12 +1043,6 @@ function ErrorState({ error, onRetry }: { error: string | null; onRetry: () => v
       </button>
     </div>
   );
-}
-
-function mergePendingMessages(events: AgentChatEvent[], pendingMessages: AgentChatEvent[]): AgentChatEvent[] {
-  if (pendingMessages.length === 0) return events;
-  const unconfirmed = unconfirmedPendingMessages(events, pendingMessages);
-  return [...events, ...unconfirmed.map((message, index) => ({ ...message, sequence: pendingSequence(events, index) }))];
 }
 
 function appendThinkingIndicator(
@@ -1043,85 +1084,11 @@ function clearAwaitingResponseWhenAnswered(
   marker: AwaitingResponseMarker | null,
 ): AwaitingResponseMarker | null {
   if (!marker) return null;
-  return responseEventCount(events) > marker.response_count_after ? null : marker;
-}
-
-function unconfirmedPendingMessages(events: AgentChatEvent[], pendingMessages: AgentChatEvent[]): AgentChatEvent[] {
-  const consumedEventIndexes = new Set<number>();
-  const consumedTranscriptMatchesByText = new Map<string, number>();
-
-  return pendingMessages.filter((message) => {
-    const pendingText = normalizePromptText(message.text ?? "");
-    if (!pendingText) return false;
-    const confirmAfterMatchingCount = pendingConfirmAfterMatchingUserCount(message);
-    if (confirmAfterMatchingCount !== null) {
-      const consumed = consumedTranscriptMatchesByText.get(pendingText) ?? 0;
-      const matchingCount = matchingUserMessageCount(events, pendingText);
-      if (matchingCount > confirmAfterMatchingCount + consumed) {
-        consumedTranscriptMatchesByText.set(pendingText, consumed + 1);
-        return false;
-      }
-      return true;
-    }
-
-    const confirmAfterSequence = pendingConfirmAfterSequence(message);
-    const matchingIndex = events.findIndex((event, index) => {
-      if (consumedEventIndexes.has(index)) return false;
-      if (event.kind !== "message" || event.role !== "user") return false;
-      const sequence = typeof event.sequence === "number" ? event.sequence : 0;
-      return sequence > confirmAfterSequence && normalizePromptText(event.text ?? "") === pendingText;
-    });
-    if (matchingIndex < 0) return true;
-    consumedEventIndexes.add(matchingIndex);
-    return false;
-  });
+  return responseEvents(events).some((event) => !marker.response_ids.has(event.id) && event.metadata.chat_older_header !== true) ? null : marker;
 }
 
 function pendingSequence(events: AgentChatEvent[], offset: number): number {
   return maxSequence(events) + offset + 1;
-}
-
-function pendingConfirmAfterSequence(pendingMessage: AgentChatEvent): number {
-  const value = pendingMessage.metadata?.confirm_after_sequence;
-  return typeof value === "number" ? value : 0;
-}
-
-function pendingConfirmAfterMatchingUserCount(pendingMessage: AgentChatEvent): number | null {
-  const value = pendingMessage.metadata?.confirm_after_matching_user_count;
-  return typeof value === "number" ? value : null;
-}
-
-function createPendingUserMessage(
-  sessionId: string,
-  provider: string,
-  text: string,
-  confirmAfterSequence: number,
-  confirmAfterMatchingUserCount: number,
-): AgentChatEvent {
-  const createdAt = new Date().toISOString();
-  return {
-    id: `pending-user-${sessionId}-${createdAt}`,
-    session_id: sessionId,
-    provider,
-    kind: "message",
-    role: "user",
-    text,
-    title: null,
-    status: "succeeded",
-    turn_id: null,
-    source: "chat_input",
-    command: null,
-    exit_code: null,
-    path: null,
-    language: null,
-    created_at: createdAt,
-    sequence: null,
-    metadata: {
-      optimistic: true,
-      confirm_after_sequence: confirmAfterSequence,
-      confirm_after_matching_user_count: confirmAfterMatchingUserCount,
-    },
-  };
 }
 
 function maxSequence(events: AgentChatEvent[]): number {
@@ -1132,22 +1099,11 @@ function providerFromEvents(events: AgentChatEvent[]): string {
   return events.find((event) => event.provider)?.provider ?? "unknown";
 }
 
-function normalizePromptText(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
-}
-
-function matchingUserMessageCount(events: AgentChatEvent[], text: string): number {
-  const normalized = normalizePromptText(text);
-  if (!normalized) return 0;
-  return events.filter((event) => event.kind === "message" && event.role === "user" && normalizePromptText(event.text ?? "") === normalized)
-    .length;
-}
-
-function responseEventCount(events: AgentChatEvent[]): number {
+function responseEvents(events: AgentChatEvent[]): AgentChatEvent[] {
   return events.filter((event) => {
     if (event.kind === "message") return event.role === "assistant" || event.role === "system" || event.role === "tool";
     return event.kind === "tool_call" || event.kind === "tool_result" || event.kind === "approval" || event.kind === "terminal_output" || event.kind === "error";
-  }).length;
+  });
 }
 
 function inputDisabledReason(isSubmitting: boolean): string | null {

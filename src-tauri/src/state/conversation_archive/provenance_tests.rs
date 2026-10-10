@@ -1,6 +1,73 @@
 use super::*;
 use wardian_core::models::chat::{AgentChatEvent, AgentChatEventKind, AgentChatRole};
 
+#[test]
+fn native_only_delivery_binding_preserves_repeated_text_and_unknown_references() {
+    let mut events = (0..128)
+        .map(|index| event(&format!("native-{index}"), "codex", None))
+        .collect::<Vec<_>>();
+    let records = events
+        .iter()
+        .enumerate()
+        .map(|(index, event)| {
+            let mut record = narrative_from_chat_event(event, index as u64 + 1).unwrap();
+            record.event_refs.push("unverified-legacy-reference".into());
+            record
+        })
+        .collect::<Vec<_>>();
+    let before = events.clone();
+    assert!(!provenance::bind_delivered_inputs(&mut events, &records).unwrap());
+    assert_eq!(events, before);
+}
+
+#[test]
+fn generated_reference_filter_keeps_duplicate_ids_eligible_for_binding() {
+    let mut generated = event("shared-id", "codex", None);
+    generated.metadata = serde_json::json!({"generated": true});
+    let native = event("shared-id", "codex", None);
+    let record = narrative_from_chat_event(&generated, 1).unwrap();
+    let mut events = vec![generated, native];
+    assert!(provenance::bind_delivered_inputs(&mut events, &[record]).unwrap());
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id, "shared-id");
+    assert_eq!(events[0].metadata["generated"], true);
+    assert_eq!(events[0].metadata["provider_log"], true);
+}
+
+#[test]
+fn generated_reference_filter_preserves_ambiguous_native_ownership() {
+    let mut generated = event("generated", "codex", None);
+    generated.metadata = serde_json::json!({"generated": true});
+    let mut record = narrative_from_chat_event(&generated, 1).unwrap();
+    record
+        .event_refs
+        .extend(["native-a".into(), "native-b".into()]);
+    let mut events = vec![
+        generated,
+        event("native-a", "codex", None),
+        event("native-b", "codex", None),
+    ];
+    let before = events.clone();
+    assert!(!provenance::bind_delivered_inputs(&mut events, &[record]).unwrap());
+    assert_eq!(events, before);
+}
+
+#[test]
+fn generated_reference_filter_does_not_bind_foreign_or_unreferenced_native_rows() {
+    let mut generated = event("generated", "codex", None);
+    generated.metadata = serde_json::json!({"generated": true});
+    let mut record = narrative_from_chat_event(&generated, 1).unwrap();
+    record.event_refs.push("foreign".into());
+    let mut events = vec![
+        generated,
+        event("foreign", "claude", None),
+        event("unreferenced", "codex", None),
+    ];
+    let before = events.clone();
+    assert!(!provenance::bind_delivered_inputs(&mut events, &[record]).unwrap());
+    assert_eq!(events, before);
+}
+
 fn event(id: &str, provider: &str, root: Option<&str>) -> AgentChatEvent {
     AgentChatEvent {
         id: id.into(), session_id: "agent-1".into(), provider: provider.into(),

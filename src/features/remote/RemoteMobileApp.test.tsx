@@ -12,7 +12,7 @@ import {
   saveStoredRemoteIdentity,
   signRemoteAuthChallenge,
 } from "./remoteIdentity";
-import { remoteClient } from "./remoteClient";
+import { type RemoteAgentChatPage, remoteClient } from "./remoteClient";
 import { RemoteBottomNav } from "./RemoteBottomNav";
 import { RemoteMobileApp } from "./RemoteMobileApp";
 import { RemoteWatchlistView } from "./RemoteWatchlistView";
@@ -30,6 +30,12 @@ vi.mock("./remoteIdentity", () => ({
 
 const fetchMock = vi.fn();
 globalThis.fetch = fetchMock;
+const chatPageFields: Omit<RemoteAgentChatPage, "events"> = {
+  session_id: "agent-1", conversation_id: "fixture-conversation", generation: "fixture-generation",
+  source_epoch: null, revision: "fixture-revision", unchanged: false, reset: false,
+  progress: "ready", aliases: [], removed_ids: [], detail: null,
+  bytes_read: 0, records_decoded: 0, next_before: null,
+};
 let scrollIntoViewMock: ReturnType<typeof vi.fn>;
 let clipboardWriteTextMock: ReturnType<typeof vi.fn>;
 
@@ -208,9 +214,9 @@ function mockRemoteAgentDetailFetch(
       return Promise.resolve(
         new Response(
           JSON.stringify({
+            ...chatPageFields,
             events: chatEvents.slice(start, end),
-            has_older: start > 0,
-            next_before: start > 0 ? start : null,
+            next_before: start > 0 ? String(start) : null,
           }),
           { status: 200 },
         ),
@@ -1259,11 +1265,12 @@ describe("RemoteMobileApp", () => {
           ),
         );
       }
-      if (url === "/remote/api/agents/agent-1/chat") {
+      if (new URL(url, "http://wardian.test").pathname === "/remote/api/agents/agent-1/chat") {
         chatCalls += 1;
         return Promise.resolve(
           new Response(
             JSON.stringify({
+              ...chatPageFields,
               events: [
                 {
                   id: "agent-1:1",
@@ -1454,8 +1461,8 @@ describe("RemoteMobileApp", () => {
       if (url === "/remote/api/automations") {
         return Promise.resolve(new Response(JSON.stringify({ automations: [] }), { status: 200 }));
       }
-      if (url === "/remote/api/agents/agent-1/chat") {
-        return Promise.resolve(new Response(JSON.stringify({ events: [] }), { status: 200 }));
+      if (new URL(url, "http://wardian.test").pathname === "/remote/api/agents/agent-1/chat") {
+        return Promise.resolve(new Response(JSON.stringify({ ...chatPageFields, events: [] }), { status: 200 }));
       }
       if (url === "/remote/api/agents/action" && init?.method === "POST") {
         return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
@@ -1824,10 +1831,10 @@ describe("RemoteMobileApp", () => {
       if (url === "/remote/api/automations") {
         return Promise.resolve(new Response(JSON.stringify({ automations: [] }), { status: 200 }));
       }
-      if (url === "/remote/api/agents/agent-1/chat") {
+      if (new URL(url, "http://wardian.test").pathname === "/remote/api/agents/agent-1/chat") {
         chatCalls += 1;
         if (chatCalls === 1) {
-          return Promise.resolve(new Response(JSON.stringify({ events: [] }), { status: 200 }));
+          return Promise.resolve(new Response(JSON.stringify({ ...chatPageFields, events: [] }), { status: 200 }));
         }
         return new Promise<Response>((resolve) => {
           resolveRefresh = resolve;
@@ -1852,6 +1859,7 @@ describe("RemoteMobileApp", () => {
       resolveRefresh?.(
         new Response(
           JSON.stringify({
+            ...chatPageFields,
             events: [
               {
                 id: "confirmed-user",
@@ -1885,6 +1893,7 @@ describe("RemoteMobileApp", () => {
   it("clears the active remote chat immediately after a clear action succeeds", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     let chatCalls = 0;
+    let settleAfterClear: ((response: Response) => void) | undefined;
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/remote/api/session") {
         return Promise.resolve(
@@ -1921,12 +1930,13 @@ describe("RemoteMobileApp", () => {
       if (url === "/remote/api/automations") {
         return Promise.resolve(new Response(JSON.stringify({ automations: [] }), { status: 200 }));
       }
-      if (url === "/remote/api/agents/agent-1/chat") {
+      if (new URL(url, "http://wardian.test").pathname === "/remote/api/agents/agent-1/chat") {
         chatCalls += 1;
         if (chatCalls === 1) {
           return Promise.resolve(
             new Response(
               JSON.stringify({
+                ...chatPageFields,
                 events: [
                   {
                     id: "message-before-clear",
@@ -1953,7 +1963,7 @@ describe("RemoteMobileApp", () => {
             ),
           );
         }
-        return new Promise<Response>(() => {});
+        return new Promise<Response>((resolve) => { settleAfterClear = resolve; });
       }
       if (url === "/remote/api/agents/action" && init?.method === "POST") {
         return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
@@ -1978,7 +1988,42 @@ describe("RemoteMobileApp", () => {
     });
 
     expect(screen.queryByText("Clear me from the PWA chat.")).not.toBeInTheDocument();
-    expect(screen.getByText("No chat transcript yet.")).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent("History is updating.");
+    expect(screen.queryByText("No chat transcript yet.")).not.toBeInTheDocument();
+    await act(async () => {
+      settleAfterClear?.(new Response(JSON.stringify({
+        ...chatPageFields, conversation_id: "after-clear-conversation", generation: "after-clear-generation",
+        reset: true, events: [],
+      }), { status: 200 }));
+    });
+    expect(await screen.findByText("No chat transcript yet.")).toBeVisible();
+  });
+
+  it("retains visible full tool output when an older mobile page crosses the work-group threshold", async () => {
+    const chatEvents: AgentChatEvent[] = Array.from({ length: 45 }, (_, i) => ({
+      id: `row-${i + 1}`, session_id: "agent-1", provider: "codex", kind: i >= 4 && i <= 6 ? "tool_result" : "message",
+      role: i >= 4 && i <= 6 ? "tool" : "assistant", text: i >= 4 && i <= 6 ? `Full output ${i + 1}\nVisible second line` : `Message ${i + 1}`,
+      title: null, status: "succeeded", turn_id: `turn-${i}`, source: "provider_log", command: null,
+      exit_code: 0, path: null, language: null, created_at: null, sequence: i + 1, metadata: {},
+    }));
+    mockRemoteAgentDetailFetch("codex", { chatEvents });
+    render(<RemoteMobileApp />);
+    await userEvent.click(await screen.findByRole("button", { name: /Open Coder details/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Chat" }));
+    await screen.findByText("Message 45");
+    const first = document.querySelector<HTMLElement>('[data-chat-row-key="row-6"]')!;
+    const second = document.querySelector<HTMLElement>('[data-chat-row-key="row-7"]')!;
+    const scroll = first.closest("section")!;
+    scroll.getBoundingClientRect = () => new DOMRect(0, 0, 390, 600);
+    first.getBoundingClientRect = () => new DOMRect(0, 20, 390, 294);
+    second.getBoundingClientRect = () => new DOMRect(0, 320, 390, 40);
+    const originalContent = first.textContent;
+    await userEvent.click(screen.getByRole("button", { name: "Load older transcript" }));
+    await screen.findByText("Message 1");
+    expect(document.querySelector('[data-chat-row-key="row-6"]')).toBe(first);
+    expect(first.textContent).toBe(originalContent);
+    expect(first.getBoundingClientRect().height).toBe(294);
+    expect(screen.queryByTestId("chat-work-group")).not.toBeInTheDocument();
   });
 
   it("loads older remote chat pages from the latest transcript window", async () => {
@@ -2148,10 +2193,11 @@ describe("RemoteMobileApp", () => {
           ),
         );
       }
-      if (url === "/remote/api/agents/agent-1/chat") {
+      if (new URL(url, "http://wardian.test").pathname === "/remote/api/agents/agent-1/chat") {
         return Promise.resolve(
           new Response(
             JSON.stringify({
+              ...chatPageFields,
               events: [
                 {
                   id: "shell-call-1",
@@ -2509,11 +2555,12 @@ describe("RemoteMobileApp", () => {
           ),
         );
       }
-      if (url === "/remote/api/agents/agent-1/chat") {
+      if (new URL(url, "http://wardian.test").pathname === "/remote/api/agents/agent-1/chat") {
         chatCalls += 1;
         return Promise.resolve(
           new Response(
             JSON.stringify({
+              ...chatPageFields,
               events: [
                 {
                   id: `agent-1:${chatCalls}`,
@@ -4484,7 +4531,7 @@ describe("RemoteMobileApp", () => {
 
   it("shows a Codex Chat HTTP 400 without replacing the connected desktop with a disconnect warning", async () => {
     fetchMock.mockImplementation((url: string) => {
-      if (url === "/remote/api/agents/agent-1/chat") {
+      if (new URL(url, "http://wardian.test").pathname === "/remote/api/agents/agent-1/chat") {
         return Promise.resolve(new Response(JSON.stringify({ ok: false, code: "agent_chat_failed" }), { status: 400 }));
       }
       return Promise.resolve(new Response("{}", { status: 404 }));
@@ -4562,8 +4609,8 @@ describe("RemoteMobileApp", () => {
           }),
         );
       }
-      if (url === "/remote/api/agents/agent-1/chat" || url === "/remote/api/agents/agent-2/chat") {
-        return Promise.resolve(new Response(JSON.stringify({ events: [] }), { status: 200 }));
+      if (["/remote/api/agents/agent-1/chat", "/remote/api/agents/agent-2/chat"].includes(new URL(url, "http://wardian.test").pathname)) {
+        return Promise.resolve(new Response(JSON.stringify({ ...chatPageFields, events: [] }), { status: 200 }));
       }
       return Promise.resolve(new Response("{}", { status: 404 }));
     });
@@ -4702,9 +4749,9 @@ describe("RemoteMobileApp", () => {
       if (url === "/remote/api/agents/action" && init?.method === "POST") {
         return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
       }
-      if (url === "/remote/api/agents/agent-1/chat") {
+      if (new URL(url, "http://wardian.test").pathname === "/remote/api/agents/agent-1/chat") {
         chatCalls += 1;
-        return Promise.resolve(new Response(JSON.stringify({ events: [] }), { status: 200 }));
+        return Promise.resolve(new Response(JSON.stringify({ ...chatPageFields, events: [] }), { status: 200 }));
       }
       return Promise.resolve(new Response("{}", { status: 404 }));
     });
