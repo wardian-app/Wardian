@@ -26,6 +26,23 @@ export interface RemoteAgentChatPage {
 const REMOTE_CSRF_HEADER_NAME = "x-wardian-csrf";
 const REMOTE_STATUS_STREAM_PATH = "/remote/api/status-stream";
 const REMOTE_REQUEST_TIMEOUT_MS = 15_000;
+const REMOTE_CHAT_READ_TIMEOUT_MS = 60_000;
+
+/** A Chat read deadline is independent of the desktop's connection status. */
+export class RemoteChatTimeoutError extends Error {
+  constructor() {
+    super("Chat history did not finish loading within 60 seconds. Retry to request it again; the desktop may still be loading it.");
+    this.name = "RemoteChatTimeoutError";
+  }
+}
+
+/** A received Chat response whose body failed does not establish desktop loss. */
+export class RemoteChatBodyError extends Error {
+  constructor() {
+    super("Chat could not be loaded. Retry when the desktop is available.");
+    this.name = "RemoteChatBodyError";
+  }
+}
 
 export class RemoteRequestError extends Error {
   constructor(
@@ -55,7 +72,7 @@ const normalizeHeaders = (headers?: HeadersInit): Record<string, string> => {
 const isReadOnlyRequest = (method: string) => method === "GET" || method === "HEAD";
 const isMutatingRequest = (method: string) => !isReadOnlyRequest(method);
 
-async function remoteJson<T>(path: string, init?: RequestInit): Promise<T> {
+async function remoteJson<T>(path: string, init?: RequestInit, chatRead = false): Promise<T> {
   const method = (init?.method ?? "GET").toUpperCase();
   const headers = {
     "Content-Type": "application/json",
@@ -63,8 +80,12 @@ async function remoteJson<T>(path: string, init?: RequestInit): Promise<T> {
     ...(csrfNonce && isMutatingRequest(method) ? { [REMOTE_CSRF_HEADER_NAME]: csrfNonce } : {}),
   };
   const controller = new AbortController();
+  let timedOut = false;
   const timeout = isReadOnlyRequest(method)
-    ? setTimeout(() => controller.abort(), REMOTE_REQUEST_TIMEOUT_MS)
+    ? setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, chatRead ? REMOTE_CHAT_READ_TIMEOUT_MS : REMOTE_REQUEST_TIMEOUT_MS)
     : undefined;
   const requestSignal = init?.signal;
   const abortRequest = () => controller.abort(requestSignal?.reason);
@@ -101,7 +122,18 @@ async function remoteJson<T>(path: string, init?: RequestInit): Promise<T> {
         detail,
       );
     }
-    return response.json() as Promise<T>;
+    try {
+      return await response.json() as T;
+    } catch (error) {
+      // Keep failures after successful headers local; other APIs may be healthy.
+      // Deadlines and caller cancellation retain their own classification.
+      if (chatRead && !timedOut && !requestSignal?.aborted) throw new RemoteChatBodyError();
+      throw error;
+    }
+  } catch (error) {
+    // Optional error-body parsing cannot erase an already received HTTP failure.
+    if (chatRead && timedOut && !(error instanceof RemoteRequestError)) throw new RemoteChatTimeoutError();
+    throw error;
   } finally {
     if (timeout !== undefined) clearTimeout(timeout);
     requestSignal?.removeEventListener("abort", abortRequest);
@@ -171,13 +203,17 @@ export const remoteClient = {
   async loadAgentChat(sessionId: string) {
     const result = await remoteJson<{ events: AgentChatEvent[] }>(
       `/remote/api/agents/${encodeURIComponent(sessionId)}/chat`,
+      undefined,
+      true,
     );
     return result.events;
   },
-  async loadAgentChatPage(sessionId: string, before?: number): Promise<RemoteAgentChatPage> {
+  async loadAgentChatPage(sessionId: string, before?: number, signal?: AbortSignal): Promise<RemoteAgentChatPage> {
     const search = typeof before === "number" ? `?before=${encodeURIComponent(before)}` : "";
     const result = await remoteJson<Partial<RemoteAgentChatPage>>(
       `/remote/api/agents/${encodeURIComponent(sessionId)}/chat${search}`,
+      { signal },
+      true,
     );
     return {
       events: result.events ?? [],

@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -106,6 +106,21 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("shows a Chat-local failure and retry without a misleading empty transcript", async () => {
+    const retry = vi.fn().mockResolvedValue(undefined);
+    const originalRefresh = useRemoteStore.getState().refreshActiveAgentChat;
+    useRemoteStore.setState({ activeAgentViewMode: "chat", chatError: "Chat history did not finish loading.", refreshActiveAgentChat: retry });
+    try {
+      render(<RemoteAgentDetailView agent={agent} />);
+      expect(screen.getByRole("alert")).toHaveTextContent("Chat history did not finish loading.");
+      expect(screen.queryByText("No chat transcript yet.")).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Retry Chat" }));
+      expect(retry).toHaveBeenCalledTimes(1);
+    } finally {
+      useRemoteStore.setState({ refreshActiveAgentChat: originalRefresh });
+    }
   });
 
   it("uses the desktop Antigravity terminal palette and contrast floor on mobile", async () => {
