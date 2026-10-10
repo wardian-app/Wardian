@@ -78,6 +78,12 @@ Each card can show either:
 Chat messages and activity rows share a centered, readable transcript column that
 expands fluidly on narrow surfaces.
 
+Chat waits for each transcript read to finish before scheduling another refresh.
+If the first read is still running after 30 seconds, the card says it is waiting;
+the transcript appears when that read completes. If a read fails, use **Retry**.
+When a later refresh fails, Chat keeps the last loaded transcript visible and
+shows the error while it retries automatically.
+
 Use the **Terminal** / **Chat** button in the card header for a temporary per-agent override. The default comes from **Settings > Agents > Agent card display**. Unsent Chat text stays with that agent when you switch modes.
 
 A compact **Subagents** badge appears in the card header only when Wardian has verified
