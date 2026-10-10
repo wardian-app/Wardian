@@ -271,6 +271,12 @@ mod tests {
 
     const DEFAULT: &str = "[build]\ntarget-dir = \"target\"\n";
 
+    const CARGO_OUTPUT_KEYS: [&str; 3] = [
+        "CARGO_TARGET_DIR",
+        "CARGO_BUILD_TARGET_DIR",
+        "CARGO_BUILD_BUILD_DIR",
+    ];
+
     struct Fixture {
         // Field order keeps cleanup and environment restoration inside the lock.
         _temp: tempfile::TempDir,
@@ -283,18 +289,24 @@ mod tests {
 
     struct FixtureCacheRoot {
         previous: Option<std::ffi::OsString>,
+        previous_outputs: [Option<std::ffi::OsString>; 3],
         before_restore: Option<Box<dyn FnOnce()>>,
     }
 
     impl FixtureCacheRoot {
         fn new(root: Option<&Path>, _env_lock: &tokio::sync::MutexGuard<'static, ()>) -> Self {
             let previous = std::env::var_os("WARDIAN_RUST_CACHE_ROOT");
+            let previous_outputs = CARGO_OUTPUT_KEYS.map(std::env::var_os);
+            for key in CARGO_OUTPUT_KEYS {
+                std::env::remove_var(key);
+            }
             match root {
                 Some(root) => std::env::set_var("WARDIAN_RUST_CACHE_ROOT", root),
                 None => std::env::remove_var("WARDIAN_RUST_CACHE_ROOT"),
             }
             Self {
                 previous,
+                previous_outputs,
                 before_restore: None,
             }
         }
@@ -304,6 +316,12 @@ mod tests {
         fn drop(&mut self) {
             if let Some(observe) = self.before_restore.take() {
                 observe();
+            }
+            for (key, previous) in CARGO_OUTPUT_KEYS.iter().zip(&mut self.previous_outputs) {
+                match previous.take() {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
             }
             match self.previous.take() {
                 Some(root) => std::env::set_var("WARDIAN_RUST_CACHE_ROOT", root),
@@ -447,6 +465,51 @@ mod tests {
         }
         // Both post-drop assertions must run before another test can change the variable.
         drop(temp);
+        drop(env_lock);
+    }
+
+    #[test]
+    fn fixture_cache_root_restores_cargo_outputs_after_drop_and_unwind() {
+        let env_lock = crate::utils::wardian_test_env_lock();
+        let original = CARGO_OUTPUT_KEYS.map(std::env::var_os);
+        // Preserve the runner's environment while seeding present and absent cases.
+        let runner_guard = FixtureCacheRoot::new(None, &env_lock);
+        for present in [true, false] {
+            let expected = CARGO_OUTPUT_KEYS
+                .map(|key| present.then(|| std::ffi::OsString::from(format!("inherited-{key}"))));
+            for (key, value) in CARGO_OUTPUT_KEYS.iter().zip(&expected) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+
+            let fixture_guard = FixtureCacheRoot::new(None, &env_lock);
+            for key in CARGO_OUTPUT_KEYS {
+                assert_eq!(std::env::var_os(key), None, "fixture must clear {key}");
+            }
+            drop(fixture_guard);
+            for (key, value) in CARGO_OUTPUT_KEYS.iter().zip(&expected) {
+                assert_eq!(&std::env::var_os(key), value, "drop must restore {key}");
+            }
+
+            let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _fixture_guard = FixtureCacheRoot::new(None, &env_lock);
+                for key in CARGO_OUTPUT_KEYS {
+                    assert_eq!(std::env::var_os(key), None, "fixture must clear {key}");
+                }
+                panic!("exercise Cargo output restoration during unwind");
+            }));
+            assert!(unwind.is_err());
+            for (key, value) in CARGO_OUTPUT_KEYS.iter().zip(&expected) {
+                assert_eq!(&std::env::var_os(key), value, "unwind must restore {key}");
+            }
+        }
+        drop(runner_guard);
+        for (key, value) in CARGO_OUTPUT_KEYS.iter().zip(&original) {
+            assert_eq!(&std::env::var_os(key), value, "runner must retain {key}");
+        }
+        // Restoration assertions stay inside the shared environment lock.
         drop(env_lock);
     }
 

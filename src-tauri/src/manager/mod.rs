@@ -3250,6 +3250,29 @@ mod tests {
 
     #[test]
     fn worktree_build_env_rejects_unregistered_worktree() {
+        let env_lock = crate::utils::wardian_test_env_lock();
+        struct CargoOutputs([(&'static str, Option<std::ffi::OsString>); 3]);
+        impl Drop for CargoOutputs {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let previous_outputs = [
+            "CARGO_TARGET_DIR",
+            "CARGO_BUILD_TARGET_DIR",
+            "CARGO_BUILD_BUILD_DIR",
+        ]
+        .map(|key| (key, std::env::var_os(key)));
+        let outputs_guard = CargoOutputs(previous_outputs.clone());
+        // Registration rejection applies only when explicit output policy is absent.
+        for (key, _) in &previous_outputs {
+            std::env::remove_var(key);
+        }
         let temp = tempfile::tempdir().expect("temp");
         let source = temp.path().join("Wardian");
         let worktree = temp.path().join("Wardian.wt").join("debugging");
@@ -3270,6 +3293,12 @@ mod tests {
         assert!(worktree_build_env(&config)
             .unwrap_err()
             .contains("not registered"));
+        drop(outputs_guard);
+        for (key, value) in &previous_outputs {
+            assert_eq!(&std::env::var_os(key), value, "must restore {key}");
+        }
+        drop(temp);
+        drop(env_lock);
     }
 
     #[test]
