@@ -375,11 +375,13 @@ export interface QueueItem {
     /** Full provider-authored final response for durable completion records. */
     response_text?: string;
     /**
-     * Where a completion's timestamp came from: the Claude Stop-hook outbox
-     * file, the provider log record, or the moment Wardian observed the
-     * provider's completion event.
+     * Where a completion's timestamp came from: Claude's settled-Stop-hooks
+     * telemetry event, the legacy Claude Stop-hook outbox file, the provider
+     * log record, or the moment Wardian observed the provider's completion
+     * event.
      */
     timestamp_source?:
+      | "claude_stop_hooks_settled_event"
       | "hook_outbox_mtime"
       | "processing_time_fallback"
       | "provider_log_timestamp"

@@ -5,13 +5,13 @@ This document captures the practical runtime differences between Wardian's suppo
 ## Shared Wardian Invariants
 
 Startup publishes the saved roster as `Restoring` placeholders and retains each
-agent's lifecycle claim until its provider or failure state is published. Pending
-Claude `Stop` records in
-`<wardian-home>/agents/<agent-id>/claude/turn-completions/` are replayed under
+agent's lifecycle claim until its provider or failure state is published.
+Verified but uncommitted Claude completions in
+`<wardian-home>/agents/<agent-id>/claude/turn-verdicts/` are replayed under
 those existing claims before providers launch, including for saved Off agents.
 Replay must not reacquire a claimed lifecycle gate: doing so blocks startup
 before any provider can launch. Inbox completion IDs make replay idempotent;
-records are acknowledged only after the corresponding Inbox item is persisted.
+a prompt is recorded as committed only after its Inbox item is persisted.
 
 - The Rust backend remains the source of truth for provider process lifecycle, session IDs, PTY ownership, and status telemetry.
 - Every provider receives Wardian's `system_include_directories`, which are resolved from `common`, `classes/<class>`, and `agents/<session_id>`.

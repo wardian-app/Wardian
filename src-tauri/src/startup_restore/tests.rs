@@ -5,8 +5,66 @@ use std::task::Poll;
 use tauri::Manager;
 use wardian_core::models::{AgentConfig, AgentSessionPersistenceOverride, ProviderConfig};
 
+/// Writes one launch whose single Stop round is verified by Claude's
+/// telemetry, plus a legacy unverified Stop outbox record.
+fn write_verified_launch(home: &std::path::Path, config: &AgentConfig) -> (String, String) {
+    use crate::manager::claude_verdict::{HookExecution, TelemetryEvent};
+    let claude_session = config.resume_session.clone().expect("resume session");
+    let prompt_id = uuid::Uuid::new_v4().to_string();
+    let answer = format!("verified answer for {}", config.session_name);
+    let claude_dir = home.join("agents").join(&config.session_id).join("claude");
+    let launch = claude_dir.join("turn-verdicts").join("0000000000001-launch");
+    std::fs::create_dir_all(&launch).unwrap();
+    let hook = |complete: bool| HookExecution {
+        hook_event: "Stop".into(),
+        num_hooks: Some(1),
+        num_success: complete.then_some(1),
+        num_blocking: complete.then_some(0),
+        num_non_blocking_error: complete.then_some(0),
+        num_cancelled: complete.then_some(0),
+        additional_context_chars: complete.then_some(0),
+    };
+    let ledger = [
+        (0, "user_prompt", None),
+        (1, "hook_execution_start", Some(hook(false))),
+        (2, "hook_execution_complete", Some(hook(true))),
+    ]
+    .into_iter()
+    .map(|(sequence, name, hook)| {
+        let event = TelemetryEvent {
+            sequence,
+            name: name.into(),
+            prompt_id: Some(prompt_id.clone()),
+            session_id: Some(claude_session.clone()),
+            timestamp: Some("2026-10-10T07:00:02.000Z".into()),
+            hook,
+        };
+        serde_json::to_string(&event).unwrap() + "\n"
+    })
+    .collect::<String>();
+    std::fs::write(launch.join("telemetry.jsonl"), ledger).unwrap();
+    let round = serde_json::json!({
+        "hook_event_name": "Stop",
+        "session_id": claude_session,
+        "prompt_id": prompt_id,
+        "last_assistant_message": answer,
+    });
+    std::fs::write(launch.join("stop-rounds.jsonl"), round.to_string() + "\n").unwrap();
+
+    let legacy = claude_dir.join("turn-completions");
+    std::fs::create_dir_all(&legacy).unwrap();
+    let unverified = serde_json::json!({
+        "hook_event_name": "Stop",
+        "session_id": config.resume_session,
+        "prompt_id": uuid::Uuid::new_v4().to_string(),
+        "last_assistant_message": "unverified Stop record",
+    });
+    std::fs::write(legacy.join("pending.json"), unverified.to_string()).unwrap();
+    (prompt_id, answer)
+}
+
 #[tokio::test(flavor = "current_thread")]
-async fn startup_replays_pending_claude_completions_while_restore_claims_remain_held() {
+async fn startup_replays_verified_claude_completions_while_restore_claims_remain_held() {
     let _environment = crate::utils::wardian_test_env_lock_async().await;
     let home = TestHome::new();
     let app = tauri::test::mock_app();
@@ -14,7 +72,7 @@ async fn startup_replays_pending_claude_completions_while_restore_claims_remain_
     let state = app.state::<AppState>();
     let mut configs = Vec::new();
     let mut publications = Vec::new();
-    let mut outboxes = Vec::new();
+    let mut expected = Vec::new();
     for is_off in [false, true] {
         let config = AgentConfig {
             session_id: uuid::Uuid::new_v4().to_string(),
@@ -39,22 +97,7 @@ async fn startup_replays_pending_claude_completions_while_restore_claims_remain_
                 ),
             )
             .await;
-        let directory = home
-            .directory
-            .path()
-            .join("agents")
-            .join(&config.session_id)
-            .join("claude/turn-completions");
-        std::fs::create_dir_all(&directory).unwrap();
-        let event = serde_json::json!({
-            "hook_event_name": "Stop",
-            "session_id": config.resume_session,
-            "prompt_id": uuid::Uuid::new_v4().to_string(),
-            "last_assistant_message": "completion survived an interrupted shutdown",
-        });
-        let path = directory.join("pending.json");
-        std::fs::write(&path, serde_json::to_vec(&event).unwrap()).unwrap();
-        outboxes.push((path, event));
+        expected.push(write_verified_launch(home.directory.path(), &config));
         configs.push(config);
         publications.push(publication);
     }
@@ -62,34 +105,33 @@ async fn startup_replays_pending_claude_completions_while_restore_claims_remain_
     // must not acquire a claim again before the provider-spawn pass can run.
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        crate::manager::replay_claude_completion_outboxes(
+        crate::manager::replay_verified_claude_completions(
             app.handle(),
             &publications.iter().collect::<Vec<_>>(),
         ),
     )
     .await
-    .expect("pending completion replay must not deadlock startup");
+    .expect("verified completion replay must not deadlock startup");
     let items = crate::utils::queue::load_items();
-    assert_eq!(items.len(), 2);
-    for (path, event) in &outboxes {
-        assert!(!path.exists(), "persisted completion must be acknowledged");
-        assert!(items
-            .iter()
-            .any(|item| item["evidence_id"] == event["prompt_id"]
-                && item["response_text"] == event["last_assistant_message"]));
-        // A repeated durable Stop event must not duplicate its Inbox item.
-        std::fs::write(path, serde_json::to_vec(event).unwrap()).unwrap();
+    assert_eq!(items.len(), 2, "only verified completions become cards");
+    for (prompt_id, answer) in &expected {
+        assert!(items.iter().any(|item| item["evidence_id"] == prompt_id.as_str()
+            && item["response_text"] == answer.as_str()
+            && item["timestamp_source"] == "claude_stop_hooks_settled_event"));
     }
+
+    // A committed completion is not recreated, even after the queue is cleared.
+    crate::utils::queue::save_items(&[]).unwrap();
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        crate::manager::replay_claude_completion_outboxes(
+        crate::manager::replay_verified_claude_completions(
             app.handle(),
             &publications.iter().collect::<Vec<_>>(),
         ),
     )
     .await
-    .expect("duplicate completion replay must finish");
-    assert_eq!(crate::utils::queue::load_items(), items);
+    .expect("repeated replay must finish");
+    assert!(crate::utils::queue::load_items().is_empty());
     for (publication, config) in publications.into_iter().zip(configs) {
         assert!(state
             .try_lock_agent_lifecycle(&config.session_id)
