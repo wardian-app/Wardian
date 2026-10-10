@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,6 +35,7 @@ const MAX_BODY_BYTES: usize = 32_768;
 const MAX_SESSION_FILE_BYTES: usize = 4096;
 const MAX_GENERATION: u64 = 9_007_199_254_740_991;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(35);
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(35);
 
 // These are embedded so installed bundles do not depend on a developer
@@ -259,7 +260,7 @@ impl PiBridgeLaunchPlan {
             token,
             command_tx,
             close_notify: Notify::new(),
-            process_id: AtomicU32::new(0),
+            registration: watch::channel(None).0,
             closed: AtomicBool::new(false),
             ready: AtomicBool::new(false),
             startup: watch::channel(PiBridgeStartup::Pending).0,
@@ -306,12 +307,18 @@ impl Drop for PiBridgeLaunchPlan {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PiBridgeRegistration {
+    process_id: u32,
+    deadline: tokio::time::Instant,
+}
+
 pub struct PiBridgeOwner {
     binding: PiBridgeBinding,
     token: String,
     command_tx: mpsc::Sender<BridgeCommand>,
     close_notify: Notify,
-    process_id: AtomicU32,
+    registration: watch::Sender<Option<PiBridgeRegistration>>,
     closed: AtomicBool,
     ready: AtomicBool,
     startup: watch::Sender<PiBridgeStartup>,
@@ -324,7 +331,7 @@ impl fmt::Debug for PiBridgeOwner {
             .field("target_agent_id", &self.binding.target_agent_id)
             .field("generation", &self.binding.generation)
             .field("session_id", &self.binding.session_id)
-            .field("process_id", &self.process_id.load(Ordering::Acquire))
+            .field("registration", &*self.registration.borrow())
             .field("ready", &self.ready.load(Ordering::Acquire))
             .finish()
     }
@@ -354,10 +361,22 @@ impl PiBridgeOwner {
         !self.closed.load(Ordering::Acquire) && self.ready.load(Ordering::Acquire)
     }
 
+    /// Arm startup once for the actual child. Repeated registration cannot
+    /// replace its identity or extend the deadline.
     pub fn register_process(&self, process_id: u32) {
-        if process_id != 0 {
-            self.process_id.store(process_id, Ordering::Release);
+        if process_id == 0 {
+            return;
         }
+        self.registration.send_if_modified(|registration| {
+            if registration.is_some() || self.closed.load(Ordering::Acquire) {
+                return false;
+            }
+            *registration = Some(PiBridgeRegistration {
+                process_id,
+                deadline: tokio::time::Instant::now() + STARTUP_TIMEOUT,
+            });
+            true
+        });
     }
 
     pub fn close(&self) {
@@ -449,12 +468,27 @@ async fn run_listener(
     owner: Arc<PiBridgeOwner>,
     mut commands: mpsc::Receiver<BridgeCommand>,
 ) {
-    if owner.closed.load(Ordering::Acquire) {
-        return;
-    }
+    // Subscribe before reading either state so registration and cancellation
+    // cannot disappear between a check and installing a waiter.
+    let mut registration = owner.registration.subscribe();
+    let mut startup = owner.startup();
+    let registered = loop {
+        if owner.closed.load(Ordering::Acquire)
+            || matches!(*startup.borrow(), PiBridgeStartup::Failed(_))
+        {
+            return;
+        }
+        if let Some(registered) = *registration.borrow_and_update() {
+            break registered;
+        }
+        tokio::select! {
+            _ = startup.changed() => {},
+            _ = registration.changed() => {},
+        }
+    };
     let accepted = tokio::select! {
-        _ = owner.close_notify.notified() => return,
-        accepted = tokio::time::timeout(HANDSHAKE_TIMEOUT, listener.accept()) => accepted,
+        _ = startup.wait_for(|state| matches!(state, PiBridgeStartup::Failed(_))) => return,
+        accepted = tokio::time::timeout_at(registered.deadline, listener.accept()) => accepted,
     };
     let Ok(Ok((mut stream, _peer))) = accepted else {
         owner.fail_startup("Pi bridge listener failed or timed out before connection".into());
@@ -465,8 +499,12 @@ async fn run_listener(
         return;
     }
     let authenticated = tokio::select! {
-        _ = owner.close_notify.notified() => return,
-        authenticated = authenticate(&owner, &mut stream) => authenticated,
+        _ = startup.wait_for(|state| matches!(state, PiBridgeStartup::Failed(_))) => return,
+        authenticated = tokio::time::timeout_at(
+            registered.deadline, authenticate(&owner, &mut stream, registered)
+        ) => authenticated.unwrap_or_else(|_| Err(PiBridgeError::authentication(
+            "startup", "timeout", "Pi TUI bridge startup deadline expired"
+        ))),
     };
     let mut session = match authenticated {
         Ok(session) => session,
@@ -481,9 +519,14 @@ async fn run_listener(
             return;
         }
     };
-    owner.ready.store(true, Ordering::Release);
+    if tokio::time::Instant::now() >= registered.deadline {
+        owner.fail_startup("Pi bridge startup deadline expired before readiness".into());
+        owner.close();
+        return;
+    }
     owner.startup.send_if_modified(|state| {
-        if matches!(state, PiBridgeStartup::Pending) {
+        if matches!(state, PiBridgeStartup::Pending) && !owner.closed.load(Ordering::Acquire) {
+            owner.ready.store(true, Ordering::Release);
             *state = PiBridgeStartup::Ready;
             true
         } else {
@@ -535,8 +578,9 @@ async fn run_listener(
 async fn authenticate(
     owner: &PiBridgeOwner,
     stream: &mut TcpStream,
+    registered: PiBridgeRegistration,
 ) -> Result<BridgeSession, PiBridgeError> {
-    let hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_frame(stream))
+    let hello = tokio::time::timeout_at(handshake_deadline(registered), read_frame(stream))
         .await
         .map_err(|_| {
             PiBridgeError::authentication("hello", "timeout", "Pi TUI bridge hello timed out")
@@ -596,7 +640,7 @@ async fn authenticate(
     let claimed_pid = hello["pid"]
         .as_u64()
         .and_then(|pid| u32::try_from(pid).ok());
-    let expected_pid = wait_for_process_id(owner).await;
+    let expected_pid = registered.process_id;
     if claimed_pid.is_none() || expected_pid == 0 || claimed_pid != Some(expected_pid) {
         return Err(PiBridgeError::authentication(
             "hello",
@@ -618,7 +662,7 @@ async fn authenticate(
         PiBridgeError::authentication("welcome", "write_failed", "Pi TUI bridge welcome failed")
     })?;
 
-    let ready = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_frame(stream))
+    let ready = tokio::time::timeout_at(handshake_deadline(registered), read_frame(stream))
         .await
         .map_err(|_| {
             PiBridgeError::authentication("ready", "timeout", "Pi TUI bridge ready timed out")
@@ -868,15 +912,10 @@ async fn peer_closed(stream: &TcpStream) -> bool {
     }
 }
 
-async fn wait_for_process_id(owner: &PiBridgeOwner) -> u32 {
-    for _ in 0..500 {
-        let process_id = owner.process_id.load(Ordering::Acquire);
-        if process_id != 0 {
-            return process_id;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    0
+fn handshake_deadline(registered: PiBridgeRegistration) -> tokio::time::Instant {
+    registered
+        .deadline
+        .min(tokio::time::Instant::now() + HANDSHAKE_TIMEOUT)
 }
 
 fn common_frame(
@@ -1095,3 +1134,7 @@ fn parse_strict_json(bytes: &[u8]) -> Result<Value, String> {
     deserializer.end().map_err(|error| error.to_string())?;
     Ok(value)
 }
+
+#[cfg(test)]
+#[path = "pi_bridge_startup_tests.rs"]
+mod startup_tests;

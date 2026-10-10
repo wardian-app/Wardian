@@ -162,6 +162,7 @@ async fn failure_case(case: Case) {
         )
         .await
         .unwrap();
+    plan.register_process(42);
     plan.attached();
     let launch: serde_json::Value = serde_json::from_str(plan.config()).unwrap();
     let signals = Arc::new(ChildState::default());

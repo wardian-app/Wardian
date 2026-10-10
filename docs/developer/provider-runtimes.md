@@ -674,7 +674,15 @@ workspace and model context. Loading, error, and stale historical frames cannot
 release queued input.
 
 For resumed TUI sessions with the Wardian messaging bridge, startup conversation
-exclusion also waits for the authenticated bridge handshake. A terminal bridge
+exclusion also waits for the authenticated bridge handshake. Its 35-second
+overall startup budget starts at the first registration of the actual child and
+ends at authenticated readiness. Preparing the listener does not arm this timer.
+HELLO and READY each retain a five-second maximum, capped by the remaining
+overall budget; connection, welcome writing, and other authentication awaits
+cannot extend that budget. Repeated registration cannot change the child or
+reset its deadline. Cancellation and failed spawn dispose an unregistered
+listener promptly. This allowance is a bounded startup policy, not a measured
+provider performance guarantee. A terminal bridge
 failure transfers the exact runtime into retained child cleanup. Successful
 termination requests and terminal EOF do not prove exit. Wardian publishes
 `Error` and releases the exact lease acquisition only after observing every
