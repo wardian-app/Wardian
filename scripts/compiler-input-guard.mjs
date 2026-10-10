@@ -203,13 +203,54 @@ export function compilerWritableRoots(args, cwd = process.cwd(), env = process.e
   return [...new Set([target, config['build.build-dir'] ?? target].map((root) => canonicalPath(root)))];
 }
 
+function supervisorWritableRoots(cwd, env) {
+  // Windows child-process environments deduplicate case-insensitive names in
+  // sorted order, including enumerable prototype fields. Resolve the same
+  // spelling the child receives.
+  const keys = [];
+  for (const key in env) keys.push(key);
+  keys.sort();
+  const value = (key) => {
+    if (process.platform !== 'win32') return env[key];
+    const name = keys.find((entry) => entry.toUpperCase() === key);
+    return name === undefined ? undefined : env[name];
+  };
+  const nodeOptions = value('NODE_OPTIONS');
+  // Preserve explicit memory/warning tuning. Preloads, debuggers and warning
+  // redirection can introduce code or writes outside the known fixture trees.
+  if (nodeOptions && (typeof nodeOptions !== 'string'
+    || nodeOptions.trim().split(/\s+/).some((option) => !/^(?:--max-old-space-size=[1-9]\d*|--disable-warning=[A-Z]+\d+)$/.test(option)))) {
+    unknown('unsupported supervisor Node options');
+  }
+  // Use the supplied child environment, not this process's os.tmpdir(). Require
+  // explicit Windows TEMP: a launcher can restore an omitted TEMP from its own
+  // environment. PowerShell's CodeDOM compiler can also use the supplied TMP.
+  const temporary = process.platform === 'win32'
+    ? value('TEMP')
+    : value('TMPDIR') || value('TMP') || value('TEMP') || '/tmp';
+  if (!temporary) unknown('supervisor temporary directory is not configured');
+  const roots = [value('WARDIAN_SUPERVISOR_TEST_ROOT') ?? temporary, temporary];
+  if (process.platform === 'win32') roots.push(...[value('TMP'), value('TEMP')].filter(Boolean));
+  return [...new Set(roots.map((root) => {
+    if (typeof root !== 'string' || !path.isAbsolute(root)) unknown('supervisor writable roots must be absolute');
+    const canonical = canonicalPath(root, cwd);
+    if (!stat(canonical)?.isDirectory()) unknown('supervisor writable root must be an existing directory');
+    return canonical;
+  }))];
+}
+
 /** Deny before spawn if any scheduler-protected file is within a writable tree. */
 export function assertCompilerAdmission({ program, args, cwd = process.cwd(), env = process.env }) {
   const protectedInputs = readProtectedInputs(env);
   if (protectedInputs === null) return { guarded: false, writable_roots: [] };
   const name = path.basename(program).toLowerCase().replace(/\.(?:exe|cmd)$/, '');
   let cargoArgs;
-  if (name === 'cargo') cargoArgs = args;
+  let roots;
+  if (name === 'node' && args.length === 2 && args[0] === '--test'
+    && args[1] === 'scripts/native-e2e-windows-supervisor.test.mjs') {
+    roots = supervisorWritableRoots(cwd, env);
+  }
+  else if (name === 'cargo') cargoArgs = args;
   else if (name === 'npm' && args.join(' ') === 'run check:rust-deadcode') {
     // The pinned script gets metadata from the original cwd, then explicitly
     // passes metadata.target_directory to check --target-dir. The source-copy
@@ -217,7 +258,7 @@ export function assertCompilerAdmission({ program, args, cwd = process.cwd(), en
     cargoArgs = ['metadata'];
   }
   else unknown('unsupported compiler launcher');
-  const roots = compilerWritableRoots(cargoArgs, cwd, env);
+  roots ??= compilerWritableRoots(cargoArgs, cwd, env);
   for (const root of roots) {
     for (const input of protectedInputs) {
       const relative = path.relative(root, input);

@@ -222,6 +222,6 @@ public static class WardianNativeE2eSupervisor
 "@
 
 $parsedArguments = ConvertFrom-Json -InputObject $ArgumentsJson
-$arguments = foreach ($argument in $parsedArguments) { [string] $argument }
+$arguments = @(foreach ($argument in $parsedArguments) { [string] $argument })
 [int] $exitCode = [WardianNativeE2eSupervisor]::Run($Executable, [string[]] $arguments)
 exit $exitCode
