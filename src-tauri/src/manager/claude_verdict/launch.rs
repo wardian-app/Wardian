@@ -281,9 +281,11 @@ impl VerdictTracker {
             .metadata()
             .is_ok_and(|metadata| metadata.len() < self.ledger_offset)
         {
-            // Committed lines never shrink; the stream is not trustworthy.
-            self.ledger.mark_conflicted();
-            return true;
+            // The receiver rolled back a batch this reader had partly
+            // consumed. Committed content is a prefix of what was read, so
+            // rebuild from it; the exporter's retry re-adds the batch.
+            self.ledger = TelemetryLedger::default();
+            self.ledger_offset = 0;
         }
         let mut appended = Vec::new();
         if file
@@ -341,9 +343,13 @@ pub(crate) fn record_committed(dir: &Path, prompt_id: &str) -> std::io::Result<(
 }
 
 /// The Inbox completion for a settled answer, timestamped by Claude's own
-/// settled-Stop event when it carries a parsable time. Only launches with
-/// evidence capture, which requires a supported turn verdict, produce one.
+/// settled-Stop event when it carries a parsable time.
+///
+/// Settlement alone is never a verdict, so this returns `None` while Claude
+/// supplies no supported turn verdict. Every publication path, including
+/// startup replay of retained launches, converts through here.
 pub(crate) fn inbox_completion(settled: &SettledCompletion) -> Option<TurnCompletion> {
+    interactive_turn_verdict().ok()?;
     let (timestamp, timestamp_source) = settled
         .completed_at
         .as_deref()
@@ -435,9 +441,10 @@ mod tests {
         assert_eq!(settled[0].response_text, "answer");
         assert!(tracker.poll().is_empty());
 
-        let completion = inbox_completion(&settled[0]).expect("completion");
-        assert_eq!(completion.timestamp_source, SETTLED_TIMESTAMP_SOURCE);
-        assert_eq!(completion.evidence_id, "p1");
+        assert!(
+            inbox_completion(&settled[0]).is_none(),
+            "settlement alone must not become a completion"
+        );
 
         record_committed(dir.path(), "p1").expect("commit");
         let mut replay = VerdictTracker::open(dir.path().to_path_buf(), accepted, None);
@@ -510,6 +517,37 @@ mod tests {
         )
         .expect("rewrite ledger");
         assert_eq!(tracker.poll().len(), 1);
+    }
+
+    #[test]
+    fn a_rolled_back_batch_rebuilds_the_ledger_instead_of_poisoning_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write(dir.path(), STOP_ROUNDS_FILE, &line(&round("p1")));
+        let events = turn("p1");
+        let committed = line(&events[0]);
+        // A reader polls while a multi-line append is half written.
+        write(
+            dir.path(),
+            TELEMETRY_FILE,
+            &(committed.clone() + &line(&events[1])),
+        );
+        let mut tracker =
+            VerdictTracker::open(dir.path().to_path_buf(), vec!["session".to_string()], None);
+        assert!(tracker.poll().is_empty());
+
+        // The append fails and rolls back, then the exporter retries.
+        std::fs::write(dir.path().join(TELEMETRY_FILE), &committed).expect("rollback");
+        assert!(tracker.poll().is_empty());
+        write(
+            dir.path(),
+            TELEMETRY_FILE,
+            &(line(&events[1]) + &line(&events[2])),
+        );
+        assert_eq!(
+            tracker.poll().len(),
+            1,
+            "the ledger stays usable after a rollback"
+        );
     }
 
     #[test]

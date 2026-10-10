@@ -67,8 +67,9 @@ Losing a prior round's completion together with the final round's Stop record
 cannot pair the earlier text with the final round: the lost completion is
 either a sequence gap or an unpaired round start.
 
-The tracker consumes complete ledger lines only. A missing prompt start or a
-gap leaves the prompt pending. A prompt that cannot settle is logged once per
+The tracker consumes complete ledger lines only. If a rollback shrinks the
+ledger below what it has read, it rebuilds from the committed prefix. A
+missing prompt start or a gap leaves the prompt pending. A prompt that cannot settle is logged once per
 reason and evaluated again when new evidence arrives, so a delayed batch can
 still complete it.
 
@@ -95,11 +96,14 @@ metrics, traces, and prompt, response, and tool content off.
   item stores the exact final response, a bounded summary, and the timestamp
   of the settled-Stop event (`timestamp_source:
   "claude_stop_hooks_settled_event"`).
-- Queue persistence is an idempotent upsert that retries while the runtime is
-  current. Its commit is then recorded in `committed.jsonl`. Startup replays
-  settled, uncommitted prompts from every retained launch before providers
-  launch, including saved-Off agents. A dismissal tombstone still consumes a
-  replay.
+- Every publication path, live or startup replay, converts through one
+  boundary that returns no completion while Claude supplies no supported turn
+  verdict. Retained settlement evidence therefore never becomes a card on its
+  own. Once a verdict exists, queue persistence is an idempotent upsert that
+  retries while the runtime is current, its commit is recorded in
+  `committed.jsonl`, and startup replays uncommitted prompts from every
+  retained launch before providers launch, including saved-Off agents. A
+  dismissal tombstone still consumes a replay.
 - Wardian keeps the newest eight launch directories per agent. A directory
   that still holds an uncommitted completion is kept beyond that count.
   Deletion is confined to direct children of the agent's `turn-verdicts`

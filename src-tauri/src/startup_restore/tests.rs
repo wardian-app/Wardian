@@ -66,7 +66,7 @@ fn write_settled_launch(home: &std::path::Path, config: &AgentConfig) -> (String
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn startup_replays_settled_claude_completions_while_restore_claims_remain_held() {
+async fn startup_replay_publishes_no_unverified_claude_completion_while_claims_remain_held() {
     let _environment = crate::utils::wardian_test_env_lock_async().await;
     let home = TestHome::new();
     let app = tauri::test::mock_app();
@@ -113,19 +113,23 @@ async fn startup_replays_settled_claude_completions_while_restore_claims_remain_
         ),
     )
     .await
-    .expect("settled completion replay must not deadlock startup");
-    let items = crate::utils::queue::load_items();
-    assert_eq!(items.len(), 2, "only settled completions become cards");
-    for (prompt_id, answer) in &expected {
-        assert!(items
-            .iter()
-            .any(|item| item["evidence_id"] == prompt_id.as_str()
-                && item["response_text"] == answer.as_str()
-                && item["timestamp_source"] == "claude_stop_hooks_settled_event"));
+    .expect("startup replay must not deadlock startup");
+    // Settled Stop hooks are not a turn verdict, and neither is a legacy
+    // unverified Stop record: neither becomes a card, and the retained
+    // evidence is neither committed nor discarded.
+    assert!(crate::utils::queue::load_items().is_empty());
+    for (config, (prompt_id, _)) in configs.iter().zip(&expected) {
+        let launch = home
+            .directory
+            .path()
+            .join("agents")
+            .join(&config.session_id)
+            .join("claude/turn-verdicts/0000000000001-launch");
+        assert!(!launch.join("committed.jsonl").exists());
+        let rounds = std::fs::read_to_string(launch.join("stop-rounds.jsonl")).unwrap();
+        assert!(rounds.contains(prompt_id.as_str()));
     }
 
-    // A committed completion is not recreated, even after the queue is cleared.
-    crate::utils::queue::save_items(&[]).unwrap();
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
         crate::manager::replay_settled_claude_completions(
