@@ -1285,6 +1285,13 @@ describe("AgentChatView", () => {
       expect(screen.getByRole("button", { name: "Loading older transcript..." })).toBeDisabled();
 
       await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+      expect(loadOlder).toHaveBeenCalledOnce();
+      expect(invokeMock).toHaveBeenLastCalledWith("load_agent_chat_page", expect.objectContaining({
+        sessionId: "agent-1", cursor: undefined, revision: "saved-revision",
+      }));
+      expect(screen.getByRole("button", { name: "Loading older transcript..." })).toBeDisabled();
+      expect(scroll.scrollTop).toBe(100);
+      await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
       expect(loadOlder).toHaveBeenCalledTimes(2);
       expect(loadOlder).toHaveBeenNthCalledWith(2, "saved-before");
       expect(scroll.scrollTop).toBe(100);
@@ -1346,7 +1353,14 @@ describe("AgentChatView", () => {
     await screen.findByText("agent-1 recent");
     fireEvent.scroll(screen.getByTestId("agent-chat-scroll-region"));
     rerender(<AgentChatView sessionId="agent-2" refreshIntervalMs={60000} />);
+    expect(screen.getByText("Loading transcript...")).toBeInTheDocument();
+    expect(loadOlder).toHaveBeenCalledOnce();
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+    await act(async () => firstOlder.resolve(olderReadPage({
+      events: [event({ id: "retired-older", text: "Retired older row", sequence: 1 })],
+    })));
     await screen.findByText("agent-2 recent");
+    expect(screen.queryByText("Retired older row")).not.toBeInTheDocument();
     const scroll = screen.getByTestId("agent-chat-scroll-region");
     const row = scroll.querySelector<HTMLElement>("[data-chat-row-key]")!;
     vi.spyOn(row, "getBoundingClientRect").mockImplementation(() => ({
@@ -1355,7 +1369,6 @@ describe("AgentChatView", () => {
     } as DOMRect));
     scroll.scrollTop = 100;
     fireEvent.scroll(scroll);
-    await act(async () => firstOlder.resolve(olderReadPage()));
     expect(scroll.scrollTop).toBe(100);
     fireEvent.scroll(scroll);
     expect(loadOlder).toHaveBeenCalledTimes(2);
@@ -2026,7 +2039,11 @@ describe("AgentChatView", () => {
     vi.useFakeTimers();
     const retired = deferred<AgentChatEvent[]>();
     const current = deferred<AgentChatEvent[]>();
-    invokeMock.mockReturnValueOnce(retired.promise).mockReturnValueOnce(current.promise);
+    invokeMock.mockImplementation((command, args) => {
+      if (command !== "load_agent_chat_page") return Promise.resolve(undefined);
+      const request = args as Record<string, unknown> | undefined;
+      return request?.sessionId === "agent-1" ? retired.promise : current.promise;
+    });
     try {
       const { rerender } = render(<AgentChatView sessionId="agent-1" refreshIntervalMs={60_000} />);
       await act(async () => { await vi.advanceTimersByTimeAsync(elapsed); });
@@ -2034,10 +2051,19 @@ describe("AgentChatView", () => {
       rerender(<AgentChatView sessionId="agent-2" refreshIntervalMs={60_000} />);
       expect(screen.queryByText("Waiting for transcript read")).not.toBeInTheDocument();
       expect(screen.getByText("Loading transcript...")).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(screen.queryByText("Waiting for transcript read")).not.toBeInTheDocument();
+      expect(invokeMock).toHaveBeenCalledTimes(1);
+      await act(async () => { retired.resolve([event({ text: "Retired transcript row" })]); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      const admittedAt = Date.now();
+      expect(invokeMock).toHaveBeenCalledTimes(2);
+      expect(screen.getByText("Loading transcript...")).toBeInTheDocument();
+      expect(screen.queryByText("Retired transcript row")).not.toBeInTheDocument();
       await act(async () => { await vi.advanceTimersByTimeAsync(29_999); });
       expect(screen.queryByText("Waiting for transcript read")).not.toBeInTheDocument();
       await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-      await act(async () => { retired.resolve([event({ text: "Retired transcript row" })]); });
+      expect(Date.now() - admittedAt).toBe(30_000);
       expect(screen.getByText("Waiting for transcript read")).toBeInTheDocument();
       expect(screen.queryByText("Retired transcript row")).not.toBeInTheDocument();
       expect(invokeMock).toHaveBeenCalledTimes(2);
@@ -2045,6 +2071,7 @@ describe("AgentChatView", () => {
       expect(screen.queryByText("Waiting for transcript read")).not.toBeInTheDocument();
       expect(screen.getByText("Current transcript row")).toBeInTheDocument();
     } finally {
+      await act(async () => { retired.resolve([]); current.resolve([]); });
       vi.useRealTimers();
     }
   });

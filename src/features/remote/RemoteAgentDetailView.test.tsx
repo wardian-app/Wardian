@@ -24,6 +24,17 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+// Deferred transport fixtures must settle when the store retires their real read scope.
+function withChatReadAbort(read: Promise<AgentChatPage>, signal?: AbortSignal): Promise<AgentChatPage> {
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(new DOMException("Chat read aborted", "AbortError"));
+    if (signal?.aborted) { abort(); return; }
+    signal?.addEventListener("abort", abort, { once: true });
+    read.then((page) => { signal?.removeEventListener("abort", abort); resolve(page); },
+      (error: unknown) => { signal?.removeEventListener("abort", abort); reject(error); });
+  });
+}
+
 function chatMessage(id: string, text: string, sequence: number, sessionId = "agent-1"): AgentChatEvent {
   return {
     id, session_id: sessionId, provider: "codex", kind: "message", role: "assistant", text,
@@ -93,6 +104,8 @@ function registered(options: { owner?: boolean; requiresResync?: boolean; state?
 
 describe("RemoteAgentDetailView terminal protocol v2", () => {
   beforeEach(() => {
+    useRemoteStore.getState().closeAgent({ syncHistory: false });
+    useRemoteStore.getState().disconnectStatusStream();
     Object.defineProperty(Element.prototype, "scrollIntoView", {
       configurable: true,
       value: vi.fn(),
@@ -134,7 +147,11 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
     });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await act(async () => {
+      useRemoteStore.getState().closeAgent({ syncHistory: false });
+      useRemoteStore.getState().disconnectStatusStream();
+    });
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -189,8 +206,23 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
     const firstOlder = deferred<AgentChatPage>();
     const secondOlder = deferred<AgentChatPage>();
     const recent = chatMessage("recent-row", "recent row", 2);
+    let olderReads = 0;
+    let activeReads = 0;
+    let maxActiveReads = 0;
     const load = vi.spyOn(remoteClient, "loadAgentChatPage")
-      .mockReturnValueOnce(firstOlder.promise).mockReturnValueOnce(secondOlder.promise);
+      .mockImplementation(async (_id, before, revision, _detail, signal) => {
+        activeReads += 1;
+        maxActiveReads = Math.max(maxActiveReads, activeReads);
+        try {
+          if (before === undefined) {
+            expect(revision).toBe("saved-revision");
+            return olderReadPage({ unchanged: true, progress: "ready" });
+          }
+          expect(before).toBe("saved-before");
+          const read = ++olderReads === 1 ? firstOlder : secondOlder;
+          return await withChatReadAbort(read.promise, signal);
+        } finally { activeReads -= 1; }
+      });
     useRemoteStore.setState({ status: "ready", activeAgentViewMode: "chat", chatEvents: [recent],
       chatPage: olderReadPage({ events: [recent] }), chatHasOlder: true, chatNextBefore: "saved-before" });
     render(<RemoteAgentDetailView agent={agent} />);
@@ -213,14 +245,22 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
     if (outcome === "empty indexing page") {
       expect(useRemoteStore.getState().chatLoadingOlder).toBe(true);
       await act(async () => { await vi.advanceTimersByTimeAsync(750); });
-    } else fireEvent.scroll(scroll);
-    expect(load).toHaveBeenCalledTimes(2);
-    expect(load.mock.calls[1]?.slice(0, 2)).toEqual(["agent-1", "saved-before"]);
+      expect(load).toHaveBeenCalledTimes(2);
+      expect(load.mock.calls[1]?.slice(0, 3)).toEqual(["agent-1", undefined, "saved-revision"]);
+      expect(olderReads).toBe(1);
+      expect(useRemoteStore.getState()).toMatchObject({ chatLoadingOlder: true, chatNextBefore: "saved-before" });
+      expect(scroll.scrollTop).toBe(100);
+      await act(async () => { await vi.advanceTimersByTimeAsync(750); });
+    } else await act(async () => { fireEvent.scroll(scroll); });
+    expect(load).toHaveBeenCalledTimes(outcome === "empty indexing page" ? 3 : 2);
+    expect(olderReads).toBe(2);
+    expect(load.mock.calls[load.mock.calls.length - 1]?.slice(0, 2)).toEqual(["agent-1", "saved-before"]);
     await act(async () => secondOlder.resolve(olderReadPage({
       events: [chatMessage("older-row", "older row", 1)], next_before: null, progress: "ready",
     })));
     expect(screen.getByText("older row")).toBeInTheDocument();
     expect(scroll.scrollTop).toBe(400);
+    expect(maxActiveReads).toBe(1);
     vi.useRealTimers();
   });
 
@@ -247,7 +287,10 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
     const firstOlder = deferred<AgentChatPage>();
     const secondOlder = deferred<AgentChatPage>();
     const load = vi.spyOn(remoteClient, "loadAgentChatPage")
-      .mockReturnValueOnce(firstOlder.promise).mockReturnValueOnce(secondOlder.promise);
+      .mockImplementation((id, before, _revision, _detail, signal) => {
+        expect(before).toBe("saved-before");
+        return withChatReadAbort(id === "agent-1" ? firstOlder.promise : secondOlder.promise, signal);
+      });
     const recent = chatMessage("recent-row", "recent row", 2);
     useRemoteStore.setState({ activeAgentViewMode: "chat", chatEvents: [recent],
       chatPage: olderReadPage({ events: [recent] }), chatHasOlder: true, chatNextBefore: "saved-before" });
@@ -264,8 +307,11 @@ describe("RemoteAgentDetailView terminal protocol v2", () => {
       bottom: screen.queryByText("next older") ? 370 : 70,
     } as DOMRect));
     scroll.scrollTop = 100;
-    fireEvent.scroll(scroll);
-    await act(async () => firstOlder.resolve(olderReadPage()));
+    expect(load).toHaveBeenCalledOnce();
+    await act(async () => firstOlder.resolve(olderReadPage({
+      events: [chatMessage("retired-older", "Retired older row", 1)],
+    })));
+    expect(screen.queryByText("Retired older row")).not.toBeInTheDocument();
     expect(scroll.scrollTop).toBe(100);
     fireEvent.scroll(scroll);
     expect(load).toHaveBeenCalledTimes(2);

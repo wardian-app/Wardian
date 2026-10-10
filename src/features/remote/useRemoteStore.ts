@@ -229,6 +229,8 @@ interface ChatReadFlight {
 }
 interface OlderChatReadFlight extends ChatReadFlight {
   physical: Promise<void> | null;
+  recentDue: boolean;
+  recentTurn: boolean;
   resume: () => Promise<void>;
   settle: () => void;
 }
@@ -239,6 +241,32 @@ let chatWindowRequestSerial = 0;
 let chatWindowRefreshQueued = false;
 let chatForceRecentRead = false;
 let queueRefreshRequestSerial = 0;
+
+/** Enrich verified loaded members without replacing the user's history window. */
+function patchLoadedRemoteChatMembers(current: AgentChatEvent[], next: AgentChatPage): AgentChatEvent[] {
+  const loaded = new Map(current.map((event) => [event.id, event]));
+  const aliases = next.aliases.filter((alias) => loaded.has(alias.observation_id));
+  const observations = new Map(aliases.map((alias) => [alias.canonical_id, alias.observation_id]));
+  const events = next.events.flatMap((event) => {
+    const old = loaded.get(event.id) ?? loaded.get(observations.get(event.id) ?? "");
+    if (!old || event.session_id !== next.session_id) return [];
+    const oldBinding = old.metadata.chat_body_binding;
+    const binding = event.metadata.chat_body_binding;
+    if (oldBinding !== undefined && binding !== undefined && oldBinding !== binding) return [];
+    const metadata = { ...old.metadata, ...event.metadata };
+    if (old.metadata.chat_body_pending === false) metadata.chat_body_pending = false;
+    if (old.metadata.chat_detail_ref && !event.metadata.chat_detail_ref) metadata.chat_detail_ref = old.metadata.chat_detail_ref;
+    const text = old.text && (!event.text || !event.text.startsWith(old.text)) ? old.text : event.text;
+    return [{ ...event, text, metadata }];
+  });
+  const result = applyChatPage(current, { ...next, reset: false, events, aliases, removed_ids: [] }, "recent", "older");
+  const retained = new Set(result.map((event) => event.id));
+  const canonical = new Map(aliases.map((alias) => [alias.observation_id, alias.canonical_id]));
+  if (current.some((event) => !retained.has(event.id) && !retained.has(canonical.get(event.id) ?? ""))) {
+    throw new Error("Loaded metadata patch exceeds the visible window. Retry without advancing history.");
+  }
+  return result;
+}
 
 const retireActiveChatReads = () => {
   chatReadInFlight?.controller.abort();
@@ -317,7 +345,18 @@ const runBackgroundActiveChatRefresh = async (set: RemoteSet, get: RemoteGet) =>
           scheduleBackgroundActiveChatRefresh(set, get);
           return;
         }
-        await chatOlderReadInFlight.resume();
+        const olderRead = chatOlderReadInFlight;
+        if (olderRead.recentDue && !olderRead.physical && !chatReadInFlight) {
+          // One existing interval serves recent metadata before the original older demand resumes.
+          olderRead.recentDue = false;
+          olderRead.recentTurn = true;
+          chatWindowRefreshQueued = false;
+          try { await get().refreshActiveAgentChat({ background: true }); }
+          finally {
+            olderRead.recentTurn = false;
+            if (chatOlderReadInFlight === olderRead && get().status === "ready") scheduleBackgroundActiveChatRefresh(set, get);
+          }
+        } else await olderRead.resume();
         if (!chatOlderReadInFlight && chatWindowRefreshQueued && get().status === "ready") {
           chatWindowRefreshQueued = false;
           await get().refreshActiveAgentChat({ background: true });
@@ -917,7 +956,9 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   async refreshActiveAgentChat(options) {
     const activeAgentId = get().activeAgentId;
     if (!activeAgentId) return;
-    if (get().chatLoadingOlder) {
+    const olderDemand = chatOlderReadInFlight;
+    const interleavedRecent = olderDemand?.recentTurn === true;
+    if (get().chatLoadingOlder && !interleavedRecent) {
       chatWindowRefreshQueued = true;
       return chatOlderReadInFlight?.promise;
     }
@@ -937,10 +978,23 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       const previous = get().chatPage;
       const page = await remoteClient.loadAgentChatPage(activeAgentId, undefined,
         !chatForceRecentRead && previous?.session_id === activeAgentId && get().chatEvents.length > 0 ? previous.revision : undefined, undefined, controller.signal);
+      if (page.reset && requestSerial === chatRefreshRequestSerial && requestedWindow === chatWindowRequestSerial
+        && get().activeAgentId === activeAgentId && page.session_id === activeAgentId
+        && (page.conversation_id !== get().chatPage?.conversation_id || page.generation !== get().chatPage?.generation
+          || page.source_epoch !== get().chatPage?.source_epoch)) olderDemand?.settle();
       set((state) => {
         if (requestSerial !== chatRefreshRequestSerial || requestedWindow !== chatWindowRequestSerial) return {};
         if (state.activeAgentId !== activeAgentId) return { chatLoading: false };
         if (page.session_id !== activeAgentId) return {};
+        const compatible = page.conversation_id === state.chatPage?.conversation_id
+          && page.generation === state.chatPage?.generation && page.source_epoch === state.chatPage?.source_epoch;
+        if (compatible && (interleavedRecent || (page.reset && state.chatBrowsingOlder))) {
+          if (page.reset && page.events.length > 80) throw new Error("Recent snapshot exceeds the metadata page limit");
+          const chatEvents = patchLoadedRemoteChatMembers(state.chatEvents, page);
+          return { chatEvents, chatLoading: false, chatError: "",
+            chatPage: state.chatPage ? { ...state.chatPage, revision: page.revision, progress: page.progress, next_before: state.chatNextBefore } : state.chatPage };
+        }
+        if (interleavedRecent && !page.reset) throw new Error("Conversation changed during recent read");
         if (!page.unchanged && (page.reset || !chatOlderCursor || chatOlderCursor.serial !== requestSerial || chatOlderCursor.generation !== page.generation)) chatOlderCursor = null;
         const nextBefore = chatOlderCursor ? chatOlderCursor.before : page.next_before;
         const nextPage = page.unchanged ? state.chatPage : { ...page, next_before: nextBefore };
@@ -1020,7 +1074,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     let settled = false;
     const read: OlderChatReadFlight = { agentId: activeAgentId, serial: requestSerial,
       window: requestedWindow, controller: new AbortController(),
-      promise: new Promise<void>((resolve) => { complete = resolve; }), physical: null,
+      promise: new Promise<void>((resolve) => { complete = resolve; }), physical: null, recentDue: false, recentTurn: false,
       resume: async () => {}, settle: () => {} };
     const ownsDemand = () => requestSerial === chatRefreshRequestSerial
       && requestedWindow === chatWindowRequestSerial && get().activeAgentId === activeAgentId
@@ -1037,6 +1091,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     set({ chatLoadingOlder: true, chatError: "" });
     read.resume = () => {
       if (read.physical) return read.physical;
+      if (chatReadInFlight?.serial === requestSerial && chatReadInFlight.agentId === activeAgentId) return chatReadInFlight.promise;
       if (settled || read.controller.signal.aborted || !ownsDemand()) {
         read.settle(); return Promise.resolve();
       }
@@ -1051,6 +1106,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
           if (!page.reset && !page.unchanged && page.events.length === 0
             && page.progress === "indexing" && page.next_before === chatNextBefore) {
             // Preserve the user's demand until the cold index has older rows, not just a successful response.
+            read.recentDue = true;
             set((state) => ({ chatLoadingOlder: true, chatError: "",
               chatPage: state.chatPage ? { ...state.chatPage, progress: page.progress } : state.chatPage }));
             return;
