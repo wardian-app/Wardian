@@ -14,6 +14,20 @@ pub struct UserTerminalSession {
 }
 
 impl UserTerminalSession {
+    /// A descendant can keep the PTY output pipe open after the root exits.
+    /// Inspect the retained child before treating that session as reusable.
+    pub(crate) fn has_exited(&mut self) -> Result<bool, String> {
+        if self.exited.lock().map(|value| *value).unwrap_or(true) {
+            return Ok(true);
+        }
+        self.child_process
+            .as_mut()
+            .ok_or("User terminal has no retained child handle")?
+            .try_wait()
+            .map(|status| status.is_some())
+            .map_err(|error| format!("Failed to check user terminal process: {error}"))
+    }
+
     /// Windows replacement requires verified exit of the original child and job
     /// members. Keep the session in its slot if stopping fails or is cancelled.
     pub(crate) async fn take_for_replacement(session: &mut Option<Self>) -> Result<(), String> {
@@ -150,6 +164,36 @@ mod tests {
             job_object: Some(job),
         };
         (Some(session), child)
+    }
+
+    #[test]
+    fn root_exit_is_detected_while_the_pty_output_pipe_is_still_open() {
+        let (mut session, child) = captured_session(WaitResult::Exited);
+        let terminal = session.as_mut().unwrap();
+        assert!(!*terminal.exited.lock().unwrap());
+        assert!(terminal.has_exited().unwrap());
+        assert_eq!(child.polls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn live_root_with_an_open_pty_remains_reusable() {
+        let (mut session, child) = captured_session(WaitResult::Uncertain);
+        assert!(!session.as_mut().unwrap().has_exited().unwrap());
+        assert!(session.as_ref().unwrap().child_process.is_some());
+        assert_eq!(child.polls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn root_wait_error_keeps_the_original_session_and_child_handle() {
+        let (mut session, child) = captured_session(WaitResult::Error);
+        let error = session.as_mut().unwrap().has_exited().unwrap_err();
+        assert!(error.contains("original child wait failed"));
+        let original = session.as_ref().unwrap();
+        assert_eq!(original.session_id, "original-terminal");
+        assert!(original.child_process.is_some());
+        assert!(original.job_object.is_some());
+        assert_eq!(child.polls.load(Ordering::SeqCst), 1);
+        assert_eq!(child.kills.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
