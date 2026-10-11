@@ -311,6 +311,13 @@ Wardian injects provider runtime configuration through a generated `OPENCODE_CON
 
 Wardian discovers OpenCode session IDs from JSON events emitted by `opencode run --format json`, then uses `--session <session_id>` for resumes and headless follow-up runs. Interactive terminal telemetry is supported, with provider-specific output cleanup for TUI rendering behavior.
 
+On Windows, Pause waits for verified exit of a prelaunch-contained native
+runtime before it succeeds. Unpublished candidate cancellation uses the same
+retained cleanup and replacement fence across providers. If shutdown cannot be verified, Wardian retains the
+stop state and blocks replacement startup. Retry Pause to retry shutdown of the
+same retained runtime; this does not resubmit any provider request. Legacy
+uncontained sessions keep their existing cleanup behavior.
+
 ### Debug First
 
 If OpenCode misses instructions or skills, inspect the generated `OPENCODE_CONFIG` file and `OPENCODE_CONFIG_DIR` skill projection. On Windows, also verify whether Wardian resolved a native executable or correctly wrapped a command shim through the host shell.

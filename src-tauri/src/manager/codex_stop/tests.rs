@@ -331,3 +331,280 @@ async fn every_captured_runtime_for_same_key_must_exit_and_other_homes_are_indep
     assert_eq!(first.drops.load(Ordering::SeqCst), 1);
     assert_eq!(second.drops.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn opencode_join_failure_keeps_exact_runtime_and_blocks_replacement() {
+    let home = tempfile::tempdir().unwrap();
+    let signals = Arc::new(Signals::default());
+    let candidate = agent("opencode-failed-join", &signals);
+    candidate.config.lock().unwrap().provider = "opencode".into();
+    let handle = prepare_runtime_stop(home.path(), "opencode-failed-join", "opencode")
+        .unwrap()
+        .capture(candidate)
+        .begin_stop();
+    assert!(handle.wait().await.is_err());
+    assert_eq!(handle.provider_label(), "OpenCode");
+    assert!(await_quiescent(home.path(), "opencode-failed-join")
+        .await
+        .is_err());
+    assert!(handle.0.runtime.lock().unwrap().is_some());
+    assert_eq!(signals.kills.load(Ordering::SeqCst), 0);
+    assert_eq!(signals.drops.load(Ordering::SeqCst), 0);
+    // This invalid no-process fixture has no Windows job to recover. Teardown
+    // releases only its own fake handle and registry entry.
+    signals.exited.store(true, Ordering::SeqCst);
+    drop(handle.0.runtime.lock().unwrap().take());
+    release(&handle.0);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn opencode_cancelled_pause_retains_and_joins_exact_job_before_replacement() {
+    use std::os::windows::io::AsRawHandle;
+    let home = tempfile::tempdir().unwrap();
+    let signals = Arc::new(Signals::default());
+    let (job, child, _pty, descendant) =
+        crate::utils::process::test_contained_pty_tree(home.path()).await;
+    let mut candidate = agent("opencode-cancelled-pause", &signals);
+    candidate.config.lock().unwrap().provider = "opencode".into();
+    candidate.child_process = Some(child);
+    candidate.job_object = Some(job);
+    let registration =
+        prepare_runtime_stop(home.path(), "opencode-cancelled-pause", "opencode").unwrap();
+    let (captured, ready) = tokio::sync::oneshot::channel();
+    let caller = tokio::spawn(async move {
+        let guard = registration.capture(candidate);
+        captured.send(()).unwrap();
+        std::future::pending::<()>().await;
+        drop(guard);
+    });
+    ready.await.unwrap();
+    fenced(home.path(), "opencode-cancelled-pause").await;
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        await_quiescent(home.path(), "opencode-cancelled-pause"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        unsafe { winapi::um::synchapi::WaitForSingleObject(descendant.as_raw_handle() as _, 0) },
+        winapi::um::winbase::WAIT_OBJECT_0
+    );
+    assert!(entries(&key(home.path(), "opencode-cancelled-pause").unwrap()).is_empty());
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct UncertainOpenCodeWait {
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    fail: Arc<AtomicBool>,
+}
+
+#[cfg(windows)]
+impl portable_pty::ChildKiller for UncertainOpenCodeWait {
+    fn kill(&mut self) -> std::io::Result<()> {
+        self.child.kill()
+    }
+    fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+        self.child.clone_killer()
+    }
+}
+
+#[cfg(windows)]
+impl portable_pty::Child for UncertainOpenCodeWait {
+    fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(std::io::Error::other("injected uncertain OpenCode wait"));
+        }
+        self.child.try_wait()
+    }
+    fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+        self.child.wait()
+    }
+    fn process_id(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+    fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+        self.child.as_raw_handle()
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn opencode_uncertain_job_join_retains_fence_until_explicit_same_handle_retry() {
+    let home = tempfile::tempdir().unwrap();
+    let signals = Arc::new(Signals::default());
+    let (job, child, _pty, _descendant) =
+        crate::utils::process::test_contained_pty_tree(home.path()).await;
+    let fail = Arc::new(AtomicBool::new(true));
+    let mut candidate = agent("opencode-uncertain-join", &signals);
+    candidate.config.lock().unwrap().provider = "opencode".into();
+    candidate.child_process = Some(Box::new(UncertainOpenCodeWait {
+        child,
+        fail: fail.clone(),
+    }));
+    candidate.job_object = Some(job);
+    let handle = prepare_runtime_stop(home.path(), "opencode-uncertain-join", "opencode")
+        .unwrap()
+        .capture(candidate)
+        .begin_stop();
+    assert!(handle
+        .wait()
+        .await
+        .unwrap_err()
+        .contains("injected uncertain OpenCode wait"));
+    assert!(await_quiescent(home.path(), "opencode-uncertain-join")
+        .await
+        .is_err());
+    {
+        let runtime = handle.0.runtime.lock().unwrap();
+        let retained = runtime.as_ref().unwrap();
+        assert!(retained.child_process.is_some());
+        assert!(retained.job_object.is_some());
+    }
+    fail.store(false, Ordering::SeqCst);
+    assert!(handle
+        .observe_exit()
+        .unwrap_err()
+        .contains("root-only exit"));
+    {
+        let runtime = handle.0.runtime.lock().unwrap();
+        let retained = runtime.as_ref().unwrap();
+        assert!(retained.child_process.is_some());
+        assert!(retained.job_object.is_some());
+        // A later roster provider edit must not rewrite the captured policy or
+        // identity, nor allow a different provider to bypass this session fence.
+        retained.config.lock().unwrap().provider = "claude".into();
+    }
+    assert!(await_quiescent(home.path(), "opencode-uncertain-join")
+        .await
+        .is_err());
+    retry_stop(home.path(), "opencode-uncertain-join").unwrap();
+    handle.wait().await.unwrap();
+    await_quiescent(home.path(), "opencode-uncertain-join")
+        .await
+        .unwrap();
+    assert!(entries(&key(home.path(), "opencode-uncertain-join").unwrap()).is_empty());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn contained_capture_missing_child_retains_policy_until_same_handle_retry() {
+    use std::os::windows::io::AsRawHandle;
+    let home = tempfile::tempdir().unwrap();
+    let signals = Arc::new(Signals::default());
+    let (job, child, _pty, descendant) =
+        crate::utils::process::test_contained_pty_tree(home.path()).await;
+    let id = "contained-missing-child";
+    let mut candidate = agent(id, &signals);
+    candidate.child_process = Some(child);
+    candidate.job_object = Some(job);
+    // The ordinary Codex registration must capture the same contained policy.
+    let guard = prepare_stop(home.path(), id).unwrap().capture(candidate);
+    let entry = entries(&key(home.path(), id).unwrap()).pop().unwrap();
+    let retained_child = entry
+        .runtime
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .child_process
+        .take();
+    let handle = guard.begin_stop();
+    assert!(handle.wait().await.unwrap_err().contains("retained child"));
+    assert!(handle
+        .observe_exit()
+        .unwrap_err()
+        .contains("root-only exit"));
+    assert!(await_quiescent(home.path(), id).await.is_err());
+    assert_eq!(
+        unsafe { winapi::um::synchapi::WaitForSingleObject(descendant.as_raw_handle() as _, 0) },
+        winapi::shared::winerror::WAIT_TIMEOUT
+    );
+    entry
+        .runtime
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .child_process = retained_child;
+    retry_stop(home.path(), id).unwrap();
+    handle.wait().await.unwrap();
+    await_quiescent(home.path(), id).await.unwrap();
+    assert_eq!(
+        unsafe { winapi::um::synchapi::WaitForSingleObject(descendant.as_raw_handle() as _, 0) },
+        winapi::um::winbase::WAIT_OBJECT_0
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn cancellation_before_terminal_setup_captures_exact_starting_job() {
+    use std::os::windows::io::AsRawHandle;
+    for provider in ["opencode", "codex"] {
+        let home = tempfile::tempdir().unwrap();
+        let config = AgentConfig {
+            session_id: "early-startup-cancel".into(),
+            provider: provider.into(),
+            ..Default::default()
+        };
+        let starting = StartingRuntime::prepare(
+            home.path(),
+            &config,
+            Arc::new(TerminalSessionBroker::default()),
+        )
+        .unwrap();
+        // This fixture has no terminal generation or published ActiveAgent.
+        let (job, child, pty, descendant) =
+            crate::utils::process::test_contained_pty_tree(home.path()).await;
+        let starting = starting.attach(child, Some(job));
+        let (ready, received) = tokio::sync::oneshot::channel();
+        let caller = tokio::spawn(async move {
+            let _starting = starting;
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        received.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            await_quiescent(home.path(), &config.session_id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            unsafe {
+                winapi::um::synchapi::WaitForSingleObject(descendant.as_raw_handle() as _, 0)
+            },
+            winapi::um::winbase::WAIT_OBJECT_0,
+            "{provider}"
+        );
+        let _rebound = std::net::TcpListener::bind(pty.listening_addr).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn never_launched_starting_guard_leaves_no_runtime_fence() {
+    let home = tempfile::tempdir().unwrap();
+    let config = AgentConfig {
+        session_id: "never-launched".into(),
+        provider: "codex".into(),
+        ..Default::default()
+    };
+    let starting = StartingRuntime::prepare(
+        home.path(),
+        &config,
+        Arc::new(TerminalSessionBroker::default()),
+    )
+    .unwrap();
+    drop(starting);
+    await_quiescent(home.path(), &config.session_id)
+        .await
+        .unwrap();
+    assert!(entries(&key(home.path(), &config.session_id).unwrap()).is_empty());
+}

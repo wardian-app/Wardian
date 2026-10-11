@@ -154,13 +154,6 @@ pub(crate) async fn test_contained_pty_tree(
 
 #[cfg(windows)]
 impl RuntimeProcessJob {
-    pub(crate) fn fallback(job: win32job::Job) -> Self {
-        Self {
-            job,
-            contained_from_launch: false,
-        }
-    }
-
     pub(crate) fn contained_from_launch(&self) -> bool {
         self.contained_from_launch
     }
@@ -509,11 +502,6 @@ pub fn init_app_process_supervisor() -> Result<(), String> {
 }
 
 #[cfg(windows)]
-pub fn app_process_supervisor_active() -> bool {
-    matches!(APP_PROCESS_SUPERVISOR.get(), Some(Ok(_)))
-}
-
-#[cfg(windows)]
 fn create_app_process_supervisor() -> Result<AppProcessSupervisor, String> {
     let job = create_app_process_supervisor_job()?;
     job.assign_current_process().map_err(|err| {
@@ -555,31 +543,6 @@ pub fn create_kill_on_close_job(context: &str) -> Result<win32job::Job, String> 
     job.set_extended_limit_info(&info)
         .map_err(|err| format!("failed to set {} kill-on-close limit: {}", context, err))?;
     Ok(job)
-}
-
-#[cfg(windows)]
-pub fn assign_pid_to_job(job: &win32job::Job, pid: u32, context: &str) -> Result<(), String> {
-    unsafe {
-        use winapi::um::processthreadsapi::OpenProcess;
-        use winapi::um::winnt::{PROCESS_SET_QUOTA, PROCESS_TERMINATE};
-
-        let handle = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
-        if handle.is_null() {
-            return Err(format!(
-                "failed to open process {} for {} job assignment",
-                pid, context
-            ));
-        }
-
-        let assign_result = job.assign_process(handle as isize).map_err(|err| {
-            format!(
-                "failed to assign process {} to {} job: {}",
-                pid, context, err
-            )
-        });
-        winapi::um::handleapi::CloseHandle(handle);
-        assign_result
-    }
 }
 
 #[cfg(windows)]
