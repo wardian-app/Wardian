@@ -2644,7 +2644,7 @@ async fn start_runtime(
         .map_err(db_error)?
         .filter(|binding| binding.provider == spec.provider);
     let (mut command, memory_capability) = native_command(spec, protocol, prior.as_ref())?;
-    let mut child = command.spawn().map_err(|err| {
+    let mut child = crate::utils::process::spawn_owned_command(&mut command).map_err(|err| {
         error(
             NativeDeliveryErrorCode::TransportUnavailable,
             format!("failed to start {} native transport: {err}", spec.provider),
@@ -3560,6 +3560,10 @@ fn error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[path = "process_lifetime_tests.rs"]
+    mod process_lifetime_tests;
 
     struct NativeTestScriptGuard;
 
