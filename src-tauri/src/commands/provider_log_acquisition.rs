@@ -6,6 +6,7 @@
 //! append-only; a small overlap cannot prove that an arbitrary older prefix was
 //! never rewritten in place.
 
+use std::collections::HashMap;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
@@ -14,7 +15,8 @@ use sha2::{Digest, Sha256};
 use wardian_core::models::chat::AgentChatEvent;
 
 use crate::providers::chat_transcript::{
-    normalize_chat_lines_with_state, TranscriptNormalizationState,
+    normalize_chat_line, normalize_chat_lines_with_state, TranscriptNormalizationState,
+    PROVIDER_LOG_ROW_OFFSET_METADATA_KEY, PROVIDER_RAW_LINE_METADATA_KEY,
 };
 
 /// Normal forward-acquisition work per pass. A record that starts in this
@@ -23,6 +25,8 @@ pub(crate) const PROVIDER_LOG_BATCH_BYTES: u64 = 256 * 1024;
 /// Maximum size of one newline-terminated JSONL record, including its newline.
 /// This is a record-framing bound, separate from the normal batch work budget.
 pub(crate) const PROVIDER_LOG_MAX_RECORD_BYTES: u64 = 16 * 1024 * 1024;
+/// Maximum source suffix scanned to upgrade a pre-row-offset pending event.
+const MAX_LEGACY_PENDING_ROW_RECOVERY_BYTES: u64 = 16 * 1024 * 1024;
 const PROVIDER_LOG_ANCHOR_BYTES: u64 = 4 * 1024;
 const MAX_PROVIDER_LOG_POLICY_SPANS: usize = 256;
 
@@ -74,6 +78,75 @@ pub(crate) struct ProviderLogBatch {
     pub(crate) next: ProviderLogCaptureState,
     pub(crate) consumed_bytes: u64,
     pub(crate) continue_immediately: bool,
+    source_proof: Option<ProviderLogSourceProof>,
+}
+
+/// An in-memory receipt produced only after native file identity, continuity
+/// and bounded row decoding succeed. Metadata cannot construct this receipt.
+#[derive(Debug)]
+pub(crate) struct ProviderLogSourceProof {
+    previous: String,
+    next: String,
+    rows: Vec<AgentChatEvent>,
+}
+
+fn capture_fingerprint(state: &ProviderLogCaptureState) -> io::Result<String> {
+    Ok(super::chat_recent_seed::hash(
+        &serde_json::to_vec(state).map_err(io::Error::other)?,
+    ))
+}
+
+impl ProviderLogBatch {
+    pub(crate) fn source_proof(&self) -> Option<&ProviderLogSourceProof> {
+        self.source_proof.as_ref()
+    }
+}
+
+impl ProviderLogSourceProof {
+    pub(crate) fn matches_capture(
+        &self,
+        previous: Option<&ProviderLogCaptureState>,
+        next: &ProviderLogCaptureState,
+    ) -> io::Result<bool> {
+        Ok(previous.is_some_and(|previous| {
+            capture_fingerprint(previous).is_ok_and(|fingerprint| fingerprint == self.previous)
+        }) && capture_fingerprint(next)? == self.next)
+    }
+
+    pub(crate) fn proves(&self, event: &AgentChatEvent) -> bool {
+        let matches = self
+            .rows
+            .iter()
+            .filter(|row| {
+                row.session_id == event.session_id
+                    && row.provider == event.provider
+                    && row.kind == event.kind
+                    && row.role == event.role
+                    && row.source == event.source
+                    && row.turn_id == event.turn_id
+                    && row.sequence == event.sequence
+                    && row.text == event.text
+                    && row.title == event.title
+                    && row.command == event.command
+                    && [
+                        "chat_source_ref",
+                        "chat_source_start",
+                        "chat_source_end",
+                        "chat_source_epoch",
+                        "provider_turn_id",
+                        "provider_event_id",
+                        "input_origin",
+                        "raw_type",
+                        "tool_name",
+                        "tool_input",
+                        "tool_input_text",
+                    ]
+                    .iter()
+                    .all(|key| row.metadata.get(*key) == event.metadata.get(*key))
+            })
+            .count();
+        matches == 1
+    }
 }
 
 pub(crate) fn acquire_provider_log_batch(
@@ -180,7 +253,48 @@ pub(crate) fn acquire_provider_log_batch_for_identity(
             next: state,
             consumed_bytes: skipped,
             continue_immediately: disabled_end < file_len,
+            source_proof: None,
         });
+    }
+
+    let recovered_pending_rows = match recover_legacy_pending_rows(
+        &mut file,
+        state.committed_offset,
+        state.normalizer.next_sequence(),
+        state.normalizer.pending_events(),
+        MAX_LEGACY_PENDING_ROW_RECOVERY_BYTES,
+    )? {
+        Some(offsets) => offsets,
+        None => {
+            return Ok(incomplete_batch(
+                previous,
+                state,
+                "provider_log_legacy_pending_row_offset_unavailable",
+            ));
+        }
+    };
+    for event in state.normalizer.pending_events_mut() {
+        if let Some(row) = event
+            .sequence
+            .and_then(|sequence| recovered_pending_rows.get(&sequence))
+        {
+            event.metadata[PROVIDER_LOG_ROW_OFFSET_METADATA_KEY] = serde_json::json!(row.offset);
+            // The bounded recovery proved the actual row and its single adapter
+            // output. Legacy continuation state has no physical source frame.
+            event.metadata["chat_source_ref"] =
+                serde_json::json!(super::chat_recent_seed::source_reference(
+                    session_id,
+                    &state.native_identity,
+                    row.offset,
+                    &row.raw,
+                    0,
+                ));
+            event.metadata["chat_source_start"] = serde_json::json!(row.offset);
+            event.metadata["chat_source_end"] = serde_json::json!(row.end);
+            event.metadata["chat_source_epoch"] = serde_json::json!(super::chat_recent_seed::hash(
+                &serde_json::to_vec(&state.native_identity).unwrap_or_default()
+            ));
+        }
     }
 
     if state.committed_offset == file_len {
@@ -200,6 +314,7 @@ pub(crate) fn acquire_provider_log_batch_for_identity(
             next: state,
             consumed_bytes: 0,
             continue_immediately: false,
+            source_proof: None,
         });
     }
 
@@ -229,6 +344,7 @@ pub(crate) fn acquire_provider_log_batch_for_identity(
                     next: state,
                     consumed_bytes: 0,
                     continue_immediately: false,
+                    source_proof: None,
                 });
             }
             if buffered_len >= remaining {
@@ -240,6 +356,7 @@ pub(crate) fn acquire_provider_log_batch_for_identity(
                     next: state,
                     consumed_bytes: 0,
                     continue_immediately: false,
+                    source_proof: None,
                 });
             }
 
@@ -259,6 +376,7 @@ pub(crate) fn acquire_provider_log_batch_for_identity(
                     next: state,
                     consumed_bytes: 0,
                     continue_immediately: false,
+                    source_proof: None,
                 });
             }
             if let Some(index) = bytes[previous_len..].iter().position(|byte| *byte == b'\n') {
@@ -281,6 +399,7 @@ pub(crate) fn acquire_provider_log_batch_for_identity(
                 next: state,
                 consumed_bytes: 0,
                 continue_immediately: false,
+                source_proof: None,
             });
         }
     };
@@ -305,9 +424,15 @@ pub(crate) fn acquire_provider_log_batch_for_identity(
             next: state,
             consumed_bytes: 0,
             continue_immediately: false,
+            source_proof: None,
         });
     }
 
+    let batch_start_offset = state.committed_offset;
+    let row_offsets = super::chat::archive_identity::provider_log_row_offsets(
+        complete.as_bytes(),
+        batch_start_offset,
+    );
     let mut next_normalizer = state.normalizer.clone();
     let first_sequence = next_normalizer.next_sequence();
     let mut events = match normalize_chat_lines_with_state(
@@ -328,6 +453,7 @@ pub(crate) fn acquire_provider_log_batch_for_identity(
                 next: state,
                 consumed_bytes: 0,
                 continue_immediately: false,
+                source_proof: None,
             });
         }
     };
@@ -352,6 +478,11 @@ pub(crate) fn acquire_provider_log_batch_for_identity(
         let Some((offset, raw, end)) = positions.get(&sequence) else {
             return;
         };
+        if provider == "pi" {
+            // The nested legacy turn ID is available only in this actual row.
+            // Preserve its bounded witness without retaining the raw transcript.
+            super::chat::archive_identity::capture_legacy_identity(event, path, Some(raw));
+        }
         let ordinal = ordinals.entry(sequence).or_default();
         event.metadata["chat_source_ref"] =
             serde_json::json!(super::chat_recent_seed::source_reference(
@@ -372,6 +503,12 @@ pub(crate) fn acquire_provider_log_batch_for_identity(
         annotate(event);
     }
     next_normalizer.visit_pending_events(&mut annotate);
+    next_normalizer.attach_pending_row_offsets(&row_offsets, first_sequence);
+    super::chat::archive_identity::attach_provider_log_row_offsets(
+        &mut events,
+        &row_offsets,
+        first_sequence,
+    );
     if let Err(error) = next_normalizer.validate_serialized_size() {
         state.status = "incomplete".into();
         state.reason = Some(format!("provider_log_normalization_state_limit: {error}"));
@@ -381,6 +518,7 @@ pub(crate) fn acquire_provider_log_batch_for_identity(
             next: state,
             consumed_bytes: 0,
             continue_immediately: false,
+            source_proof: None,
         });
     }
     let consumed_bytes = complete_len as u64;
@@ -412,12 +550,40 @@ pub(crate) fn acquire_provider_log_batch_for_identity(
 
     let policy_boundary_pending =
         next_disabled_start(&state, file_len).is_some_and(|start| start == state.committed_offset);
+    let source_proof = if provider == "codex" {
+        previous
+            .as_ref()
+            .map(|previous| {
+                let rows = events
+                    .iter()
+                    .filter(|event| {
+                        event.sequence.is_some_and(|sequence| {
+                            positions.contains_key(&sequence)
+                                || recovered_pending_rows.contains_key(&sequence)
+                        }) && event.metadata["chat_source_ref"].is_string()
+                            && super::chat::archive_identity::requires_provider_log_row_identity(
+                                event,
+                            )
+                    })
+                    .cloned()
+                    .collect();
+                Ok::<_, io::Error>(ProviderLogSourceProof {
+                    previous: capture_fingerprint(previous)?,
+                    next: capture_fingerprint(&state)?,
+                    rows,
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
     Ok(ProviderLogBatch {
         events,
         previous,
         next: state,
         consumed_bytes,
         continue_immediately: batch_limit_reached || policy_boundary_pending,
+        source_proof,
     })
 }
 
@@ -529,6 +695,7 @@ fn observe_provider_log_policy_for_identity(
         next: state,
         consumed_bytes: 0,
         continue_immediately: false,
+        source_proof: None,
     })
 }
 
@@ -641,6 +808,163 @@ fn next_disabled_start(state: &ProviderLogCaptureState, file_len: u64) -> Option
         .min()
 }
 
+struct RecoveredPendingProviderLogRow {
+    offset: u64,
+    end: u64,
+    raw: String,
+}
+
+fn recover_legacy_pending_rows(
+    file: &mut std::fs::File,
+    committed_offset: u64,
+    next_sequence: u64,
+    pending_events: &[AgentChatEvent],
+    max_scan_bytes: u64,
+) -> io::Result<Option<HashMap<u64, RecoveredPendingProviderLogRow>>> {
+    let mut pending_rows = HashMap::<u64, (AgentChatEvent, Option<String>)>::new();
+    for event in pending_events {
+        if !super::chat::archive_identity::requires_provider_log_row_identity(event)
+            || event.metadata[PROVIDER_LOG_ROW_OFFSET_METADATA_KEY]
+                .as_u64()
+                .is_some()
+        {
+            continue;
+        }
+        let Some(sequence) = event.sequence else {
+            return Ok(None);
+        };
+        if sequence == 0
+            || sequence >= next_sequence
+            || pending_rows
+                .insert(
+                    sequence,
+                    (
+                        event.clone(),
+                        event
+                            .metadata
+                            .get(PROVIDER_RAW_LINE_METADATA_KEY)
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned),
+                    ),
+                )
+                .is_some()
+        {
+            return Ok(None);
+        }
+    }
+    if pending_rows.is_empty() {
+        return Ok(Some(HashMap::new()));
+    }
+    if committed_offset == 0 || next_sequence == u64::MAX || max_scan_bytes == 0 {
+        return Ok(None);
+    }
+
+    let scan_len = committed_offset.min(max_scan_bytes);
+    let scan_start = committed_offset - scan_len;
+    let scan_len_usize = usize::try_from(scan_len).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "legacy provider-log recovery span exceeds address space",
+        )
+    })?;
+    let mut bytes = Vec::with_capacity(scan_len_usize);
+    let scan_start_is_boundary = if scan_start == 0 {
+        true
+    } else {
+        file.seek(SeekFrom::Start(scan_start - 1))?;
+        let mut preceding_byte = [0];
+        file.read_exact(&mut preceding_byte)?;
+        preceding_byte[0] == b'\n'
+    };
+    file.seek(SeekFrom::Start(scan_start))?;
+    Read::by_ref(file).take(scan_len).read_to_end(&mut bytes)?;
+    if bytes.len() != scan_len_usize {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "provider log ended during legacy pending-row recovery",
+        ));
+    }
+
+    let earliest_sequence = pending_rows
+        .keys()
+        .copied()
+        .min()
+        .expect("pending rows are non-empty");
+    let mut sequence = next_sequence - 1;
+    let mut cursor = bytes.len();
+    let mut recovered = HashMap::with_capacity(pending_rows.len());
+    loop {
+        if cursor == 0 || bytes[cursor - 1] != b'\n' {
+            return Ok(None);
+        }
+        let row_end = cursor - 1;
+        let mut row_start = row_end;
+        while row_start > 0 && bytes[row_start - 1] != b'\n' {
+            row_start -= 1;
+        }
+        let mut row = &bytes[row_start..row_end];
+        if row.last() == Some(&b'\r') {
+            row = &row[..row.len() - 1];
+        }
+        if let Some((expected_event, expected_raw_line)) = pending_rows.get(&sequence) {
+            if row_start == 0 && !scan_start_is_boundary {
+                return Ok(None);
+            }
+            let Ok(raw_line) = std::str::from_utf8(row) else {
+                return Ok(None);
+            };
+            if expected_raw_line
+                .as_deref()
+                .is_some_and(|expected| row != expected.as_bytes())
+                || !codex_pending_event_matches_row(expected_event, raw_line, sequence)
+            {
+                return Ok(None);
+            }
+            recovered.insert(
+                sequence,
+                RecoveredPendingProviderLogRow {
+                    offset: scan_start.saturating_add(row_start as u64),
+                    end: scan_start.saturating_add(cursor as u64),
+                    raw: raw_line.to_string(),
+                },
+            );
+        }
+        if sequence == earliest_sequence {
+            break;
+        }
+        sequence -= 1;
+        cursor = row_start;
+    }
+
+    Ok((recovered.len() == pending_rows.len()).then_some(recovered))
+}
+
+/// Reconstruct a legacy Codex row binding from the normalized event that was
+/// persisted in continuation state. Codex deliberately drops raw JSON lines
+/// from that state, so the source row must independently reproduce its stable
+/// narrative and provider identity fields at the saved sequence.
+fn codex_pending_event_matches_row(
+    expected: &AgentChatEvent,
+    raw_line: &str,
+    sequence: u64,
+) -> bool {
+    let Some(candidate) = normalize_chat_line(&expected.session_id, "codex", raw_line, sequence)
+    else {
+        return false;
+    };
+    candidate.provider == expected.provider
+        && candidate.session_id == expected.session_id
+        && candidate.sequence == expected.sequence
+        && candidate.source == expected.source
+        && candidate.kind == expected.kind
+        && candidate.role == expected.role
+        && candidate.text == expected.text
+        && candidate.turn_id == expected.turn_id
+        && ["input_origin", "provider_turn_id", "provider_event_id"]
+            .iter()
+            .all(|key| candidate.metadata.get(*key) == expected.metadata.get(*key))
+}
+
 fn incomplete_batch(
     previous: Option<ProviderLogCaptureState>,
     mut state: ProviderLogCaptureState,
@@ -654,6 +978,7 @@ fn incomplete_batch(
         next: state,
         consumed_bytes: 0,
         continue_immediately: false,
+        source_proof: None,
     }
 }
 
@@ -925,6 +1250,133 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["Visible after disabled"]
         );
+    }
+
+    #[test]
+    fn pending_codex_context_keeps_its_source_offset_across_batches() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.jsonl");
+        let context = r#"{"type":"response_item","payload":{"type":"message","id":"context-1","role":"user","content":[{"type":"input_text","text":"Host context."}],"internal_chat_message_metadata_passthrough":{"turn_id":"codex-turn-1"}}}"#;
+        std::fs::write(&path, format!("{context}\n")).expect("write pending context");
+
+        let first =
+            acquire_provider_log_batch("agent-1", "codex", &path, "codex:session:one", None, true)
+                .expect("acquire pending context");
+        assert!(first.events.is_empty());
+        assert!(first.next.normalizer.has_pending_events());
+
+        let request = r#"{"type":"event_msg","payload":{"type":"user_message","message":"Inspect the archive."}}"#;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| {
+                use std::io::Write as _;
+                writeln!(file, "{request}")
+            })
+            .expect("append request that roots the pending context");
+        let second = acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            "codex:session:one",
+            Some(first.next),
+            true,
+        )
+        .expect("acquire request and release context");
+        let context_event = second
+            .events
+            .iter()
+            .find(|event| event.metadata["input_origin"] == "context_injection")
+            .expect("released context event");
+        assert_eq!(context_event.sequence, Some(1));
+        assert_eq!(
+            context_event.metadata["provider_log_row_offset"].as_u64(),
+            Some(0)
+        );
+        let request_event = second
+            .events
+            .iter()
+            .find(|event| event.metadata["input_origin"] == "human_input")
+            .expect("request event");
+        assert_eq!(request_event.sequence, Some(2));
+        assert_eq!(
+            request_event.metadata["provider_log_row_offset"].as_u64(),
+            Some(context.len() as u64 + 1)
+        );
+    }
+
+    #[test]
+    fn legacy_pending_row_recovery_fails_when_sequence_is_outside_scan_limit() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.jsonl");
+        let context = r#"{"type":"response_item","payload":{"type":"message","id":"context-1","role":"user","content":[{"type":"input_text","text":"Host context."}],"internal_chat_message_metadata_passthrough":{"turn_id":"codex-turn-1"}}}"#;
+        let content = format!("{context}\n{{\"type\":\"ignored\"}}\n{{\"type\":\"ignored\"}}\n");
+        std::fs::write(&path, &content).expect("write source rows");
+
+        let mut event =
+            crate::providers::chat_transcript::normalize_chat_line("agent-1", "codex", context, 1)
+                .expect("normalize pending Codex context");
+        event.metadata[PROVIDER_RAW_LINE_METADATA_KEY] = serde_json::json!(context);
+        let mut file = std::fs::File::open(&path).expect("open source rows");
+
+        let recovered =
+            recover_legacy_pending_rows(&mut file, content.len() as u64, 4, &[event], 8)
+                .expect("bounded recovery scan");
+
+        assert!(recovered.is_none());
+    }
+
+    #[test]
+    fn legacy_pending_row_recovery_rejects_a_mid_record_scan_boundary() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.jsonl");
+        let context = r#"{"type":"response_item","payload":{"type":"message","id":"context-1","role":"user","content":[{"type":"input_text","text":"Host context."}],"internal_chat_message_metadata_passthrough":{"turn_id":"codex-turn-1"}}}"#;
+        let source_row = format!("    {context}\n");
+        std::fs::write(&path, &source_row).expect("write source row with JSON whitespace prefix");
+
+        let mut event =
+            crate::providers::chat_transcript::normalize_chat_line("agent-1", "codex", context, 1)
+                .expect("normalize pending Codex context");
+        // Simulate a stored row string that matches the scan suffix but does
+        // not establish that the suffix begins at the physical row boundary.
+        event.metadata[PROVIDER_RAW_LINE_METADATA_KEY] = serde_json::json!(context);
+        let mut file = std::fs::File::open(&path).expect("open source row");
+
+        let recovered = recover_legacy_pending_rows(
+            &mut file,
+            source_row.len() as u64,
+            2,
+            &[event],
+            source_row.len() as u64 - 4,
+        )
+        .expect("bounded recovery scan");
+
+        assert!(recovered.is_none());
+    }
+
+    #[test]
+    fn legacy_pending_row_recovery_rejects_duplicate_sequence_mapping() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.jsonl");
+        let context = r#"{"type":"response_item","payload":{"type":"message","id":"context-1","role":"user","content":[{"type":"input_text","text":"Host context."}],"internal_chat_message_metadata_passthrough":{"turn_id":"codex-turn-1"}}}"#;
+        let content = format!("{context}\n");
+        std::fs::write(&path, &content).expect("write source row");
+        let event =
+            crate::providers::chat_transcript::normalize_chat_line("agent-1", "codex", context, 1)
+                .expect("normalize pending Codex context");
+        assert!(event.metadata.get(PROVIDER_RAW_LINE_METADATA_KEY).is_none());
+        let mut file = std::fs::File::open(&path).expect("open source row");
+
+        let recovered = recover_legacy_pending_rows(
+            &mut file,
+            content.len() as u64,
+            2,
+            &[event.clone(), event],
+            content.len() as u64,
+        )
+        .expect("bounded recovery scan");
+
+        assert!(recovered.is_none());
     }
 
     #[test]
@@ -1900,6 +2352,74 @@ mod tests {
             context_event.metadata["causal_ref"],
             "provider:message:context-after"
         );
+        assert!(!second.next.normalizer_has_pending_events());
+    }
+
+    #[test]
+    fn codex_distinct_turn_boundary_flushes_persisted_context_and_retries_stably() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.jsonl");
+        let first_lines = concat!(
+            r#"{"type":"turn_context","payload":{"turn_id":"turn-a"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"message","id":"context-a","role":"user","content":[{"type":"input_text","text":"Turn A context"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-a","content_item_kinds":["agents_md.instructions"]}}}"#,
+            "\n"
+        );
+        std::fs::write(&path, first_lines).expect("write first Codex batch");
+        let first =
+            acquire_provider_log_batch("agent-1", "codex", &path, "codex:session:one", None, true)
+                .expect("acquire first Codex batch");
+        assert!(first.events.is_empty());
+        assert!(first.next.normalizer_has_pending_events());
+
+        let persisted = serde_json::to_string(&first.next).expect("persist first capture state");
+        let restored: ProviderLogCaptureState =
+            serde_json::from_str(&persisted).expect("restore first capture state");
+        let second_lines = concat!(
+            r#"{"type":"turn_context","payload":{"turn_id":"turn-b"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"message","id":"request-b","role":"user","content":[{"type":"input_text","text":"Turn B request"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-b","content_item_kinds":["user.text"]}}}"#,
+            "\n"
+        );
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| {
+                use std::io::Write as _;
+                file.write_all(second_lines.as_bytes())
+            })
+            .expect("append next Codex batch");
+
+        let second = acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            "codex:session:one",
+            Some(restored.clone()),
+            true,
+        )
+        .expect("acquire second Codex batch");
+        let retry = acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            "codex:session:one",
+            Some(restored),
+            true,
+        )
+        .expect("retry second Codex batch from the same persisted state");
+
+        assert_eq!(second.previous.as_ref(), Some(&first.next));
+        assert!(second.next.committed_offset > first.next.committed_offset);
+        assert_eq!(retry.events, second.events);
+        assert_eq!(retry.next, second.next);
+        assert_eq!(second.events.len(), 2);
+        assert_eq!(second.events[0].text.as_deref(), Some("Turn A context"));
+        assert_eq!(second.events[0].role, Some(AgentChatRole::System));
+        assert_eq!(second.events[0].metadata["provider_turn_id"], "turn-a");
+        assert!(second.events[0].metadata.get("request_root_id").is_none());
+        assert_eq!(second.events[1].text.as_deref(), Some("Turn B request"));
+        assert_eq!(second.events[1].metadata["request_root_id"], "request-b");
         assert!(!second.next.normalizer_has_pending_events());
     }
 

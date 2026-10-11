@@ -69,6 +69,27 @@ restarts. Count limits and a 1 MiB serialized-state limit prevent unbounded
 private state. Exceeding a limit is an explicit incomplete state, not silent
 loss or cursor advancement.
 
+Fallback event identity is bound to the absolute byte offset of its JSONL row,
+alongside provider, Wardian session, and canonical source path. Turn and
+request IDs do not exempt a row because one turn can contain several events.
+Provider event IDs are retained only where the adapter identifies a native
+per-record identifier. The row offset is mapped from the normalizer's persisted
+sequence so events released from pending continuation state keep their
+original location across batches and restarts. Repeated equal rows at
+different offsets remain separate; retrying the same row retains its ID. The
+established Codex user-mirror identity remains turn- or sequence-bound. A
+fallback event does not claim its old field-derived hash as a legacy alias
+because that hash cannot identify one source occurrence. Previously archived
+IDs and narrative references remain unchanged.
+
+For pending events serialized before row offsets were added, acquisition
+recovers the byte start by reverse-counting source rows from the committed
+cursor using the pending event sequence and the normalizer's next sequence. It
+validates the recovered physical row boundary and its persisted raw line within
+a 16 MiB scan window. If that proof is unavailable, capture becomes incomplete
+with no events or cursor advancement; it does not guess from normalized text or
+timestamps.
+
 The archive's per-agent operation checks the expected prior cursor, performs
 the ordinary archive append, and writes the next cursor only after append
 success. Stale workers fail the compare-and-set. An append failure leaves the

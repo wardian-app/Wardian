@@ -1320,6 +1320,271 @@ fn finish_projection(archive: &ConversationArchiveState) {
 }
 
 #[test]
+fn saved_codex_unqualified_saved_ordinal_retry_retains_old_and_native_rows() {
+    saved_codex_ambiguous_retry_page(false, false);
+}
+
+#[test]
+fn saved_codex_unknown_prefix_retry_retains_old_and_both_native_rows() {
+    saved_codex_ambiguous_retry_page(true, false);
+}
+
+#[test]
+fn saved_codex_tail_relative_cursor_collision_never_claims_an_earlier_native_row() {
+    saved_codex_ambiguous_retry_page(false, true);
+}
+
+/// Retain historical and physical observations when old ordinal origin is unproved.
+/// Retry and cold admission must not guess a legacy alias from its numeric cursor.
+fn saved_codex_ambiguous_retry_page(oversized: bool, tail_collision: bool) {
+    use std::io::Write;
+    let (_guard, temp) = isolated_home();
+    let path = temp.path().join("saved-codex.jsonl");
+    let mut prefix = format!(
+        "{}\n",
+        json!({"type":"session_meta","payload":{"id":"one"}})
+    );
+    if oversized {
+        let filler = format!("{}\n", json!({"type":"ignored","padding":"x".repeat(4096)}));
+        for _ in 0..600 {
+            prefix.push_str(&filler);
+        }
+        assert!(prefix.len() > 2 * 1024 * 1024);
+    }
+    fs::write(&path, &prefix).unwrap();
+    let mut snap = snapshot(&context());
+    snap.provider = "codex".into();
+    snap.resume_session = Some("one".into());
+    snap.log_path = Some(path.clone());
+    let ctx = crate::commands::chat::conversation_archive_context_from_snapshot(&snap);
+    let source_key = ctx.provider_source_key.as_deref().unwrap();
+    let archive = ConversationArchiveState::default();
+    let initial = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        "agent-1", "codex", &path, source_key, None, !oversized,
+    )
+    .unwrap();
+    assert!(initial.events.is_empty());
+    assert_eq!(initial.next.unknown_before_offset.is_some(), oversized);
+    archive
+        .append_provider_log_batch_with_context(ctx.clone(), &initial.events, None, &initial.next)
+        .unwrap();
+    let raw = json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Original saved reply"}]}}).to_string();
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(file, "{raw}").unwrap();
+    let ignored = json!({"type":"ignored_control"}).to_string();
+    if tail_collision {
+        writeln!(file, "{ignored}").unwrap();
+    }
+    let two_native = oversized || tail_collision;
+    if two_native {
+        writeln!(file, "{raw}").unwrap();
+    }
+    file.sync_all().unwrap();
+    drop(file);
+    let mut batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        "agent-1",
+        "codex",
+        &path,
+        source_key,
+        Some(initial.next.clone()),
+        true,
+    )
+    .unwrap();
+    crate::commands::chat::decorate_forward_provider_log_events(&mut batch.events, "codex", &path);
+    assert_eq!(batch.events.len(), if two_native { 2 } else { 1 });
+    let native_ids: Vec<_> = batch.events.iter().map(|event| event.id.clone()).collect();
+    if two_native {
+        assert_ne!(native_ids[0], native_ids[1]);
+        assert_eq!(
+            batch.events[0].metadata["chat_compatibility_legacy_id"],
+            batch.events[1].metadata["chat_compatibility_legacy_id"]
+        );
+    }
+    let legacy_id = batch.events[0].metadata["chat_compatibility_legacy_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut legacy = batch.events[if tail_collision { 1 } else { 0 }].clone();
+    if tail_collision {
+        // This actual tail normalizer starts on the ignored row immediately
+        // before the later answer. Its ordinal collides with the earlier answer.
+        let tail = format!("{ignored}\n{raw}\n");
+        let tail_event = crate::providers::chat_transcript::normalize_chat_lines(
+            "agent-1",
+            "codex",
+            tail.lines(),
+        )
+        .into_iter()
+        .find(|event| event.kind == AgentChatEventKind::Message)
+        .unwrap();
+        assert_eq!(tail_event.sequence, batch.events[0].sequence);
+        assert_ne!(tail_event.sequence, batch.events[1].sequence);
+        legacy.sequence = tail_event.sequence;
+    }
+    legacy.id = legacy_id.clone();
+    legacy.metadata.as_object_mut().unwrap().retain(|key, _| {
+        !key.starts_with("chat_source_")
+            && !key.starts_with("chat_compatibility_")
+            && key != "chat_legacy_source_sequence"
+            && key != "legacy_event_ids"
+            && key != "provider_log_row_offset"
+    });
+    assert!(legacy.sequence.is_some());
+    assert!(legacy.metadata.get("chat_legacy_source_sequence").is_none());
+    assert!(legacy.metadata.get("chat_source_ref").is_none());
+    assert!(legacy.metadata.get("cursor").is_none());
+    let expected_legacy_cursor = legacy.sequence.unwrap().to_string();
+    archive
+        .append_chat_events_with_context(ctx.clone(), &[legacy])
+        .unwrap();
+    let saved = archive.chat_events_for_agent("agent-1").unwrap();
+    assert!(saved
+        .iter()
+        .find(|event| event.id == legacy_id)
+        .unwrap()
+        .metadata
+        .get("chat_legacy_source_sequence")
+        .is_none());
+    let conversation = archive.active_conversation_id("agent-1").unwrap().unwrap();
+    let directory = wardian_core::paths::agent_conversation_dir("agent-1", &conversation).unwrap();
+    let records: Vec<wardian_core::conversations::ConversationNarrativeRecord> =
+        wardian_core::conversations::read_jsonl_records(&directory.join("conversation.jsonl"))
+            .unwrap();
+    let old_record = records
+        .iter()
+        .find(|record| record.event_refs.contains(&legacy_id))
+        .unwrap();
+    let sources: Vec<wardian_core::conversations::ConversationSourceRecord> =
+        wardian_core::conversations::read_jsonl_records(&directory.join("sources.jsonl")).unwrap();
+    let old_source = sources
+        .iter()
+        .find(|source| {
+            source.source_id.starts_with("src_")
+                && old_record.source_refs.contains(&source.source_id)
+        })
+        .unwrap();
+    assert_eq!(
+        old_source.cursor.as_deref(),
+        Some(expected_legacy_cursor.as_str())
+    );
+    assert!(old_source.offset.is_none());
+    archive
+        .fail_next_chat_cursor_commit
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let failure = archive
+        .append_provider_log_batch_with_context(
+            ctx.clone(),
+            &batch.events,
+            batch.previous.as_ref(),
+            &batch.next,
+        )
+        .unwrap_err();
+    assert!(failure
+        .to_string()
+        .contains("injected chat cursor commit failure"));
+    assert_eq!(
+        archive
+            .provider_log_capture_state("agent-1", source_key)
+            .unwrap(),
+        Some(initial.next.clone())
+    );
+    drop(archive);
+    let reopened = ConversationArchiveState::default();
+    let mut replay = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        "agent-1",
+        "codex",
+        &path,
+        source_key,
+        Some(initial.next),
+        true,
+    )
+    .unwrap();
+    crate::commands::chat::decorate_forward_provider_log_events(&mut replay.events, "codex", &path);
+    assert_eq!(
+        replay
+            .events
+            .iter()
+            .map(|event| &event.id)
+            .collect::<Vec<_>>(),
+        native_ids.iter().collect::<Vec<_>>()
+    );
+    reopened
+        .append_provider_log_batch_with_context(
+            ctx.clone(),
+            &replay.events,
+            replay.previous.as_ref(),
+            &replay.next,
+        )
+        .unwrap();
+    assert_eq!(
+        reopened
+            .provider_log_capture_state("agent-1", source_key)
+            .unwrap(),
+        Some(replay.next.clone())
+    );
+    drop(reopened);
+    // Exercise actual saved-row bootstrap, not a warm candidate or live-tail loader.
+    cold_saved_remove_projection(temp.path());
+    let mut ready = false;
+    for _ in 0..128 {
+        if !ConversationArchiveState::default()
+            .bootstrap_saved_chat(&ctx)
+            .unwrap()
+        {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready, "cold saved archive admission did not settle");
+    let mut foreign = ctx.clone();
+    foreign.provider_session_ids = vec!["foreign-session".into()];
+    assert!(super::super::chat_logical_index::source_proof(&foreign)
+        .unwrap()
+        .is_none());
+    let page = read(&ctx, &snap, None, None, None).unwrap();
+    let rows: Vec<_> = page
+        .events
+        .iter()
+        .filter(|event| event.text.as_deref() == Some("Original saved reply"))
+        .collect();
+    assert_eq!(
+        rows.len(),
+        if two_native { 3 } else { 2 },
+        "ambiguous old origin must preserve history and every native occurrence"
+    );
+    assert!(rows.iter().any(|event| event.id == legacy_id));
+    for native_id in &native_ids {
+        assert!(rows.iter().any(|event| &event.id == native_id));
+        assert!(
+            !page
+                .aliases
+                .iter()
+                .any(|alias| &alias.observation_id == native_id && alias.canonical_id == legacy_id),
+            "an untagged old cursor cannot transfer physical ownership"
+        );
+    }
+    assert_eq!(
+        ConversationArchiveState::default()
+            .provider_log_capture_state("agent-1", source_key)
+            .unwrap(),
+        Some(replay.next)
+    );
+    assert!(page.records_decoded < 512 && page.bytes_read < 2 * 1024 * 1024);
+    let restarted = read(&ctx, &snap, None, None, None).unwrap();
+    assert_eq!(
+        restarted
+            .events
+            .iter()
+            .map(|event| &event.id)
+            .collect::<Vec<_>>(),
+        page.events
+            .iter()
+            .map(|event| &event.id)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn codex_original_sequence_bridge_and_user_mirror_share_normal_paged_relation() {
     let (_guard, temp) = isolated_home();
     let path = temp.path().join("codex-legacy.jsonl");
@@ -1339,7 +1604,7 @@ fn codex_original_sequence_bridge_and_user_mirror_share_normal_paged_relation() 
     .find(|event| event.source.as_deref() == Some("response_item"))
     .unwrap();
     legacy.id =
-        crate::commands::chat::archive_identity::stable_provider_log_event_id(&legacy, &path);
+        crate::commands::chat::archive_identity::legacy_provider_log_event_id(&legacy, &path);
     legacy.metadata["provider_log"] = json!(true);
     legacy.metadata["log_path"] = json!(path.to_string_lossy());
     legacy.metadata["chat_legacy_source_sequence"] = json!(legacy.sequence.unwrap());
@@ -1367,7 +1632,31 @@ fn codex_original_sequence_bridge_and_user_mirror_share_normal_paged_relation() 
         .iter()
         .filter(|event| event.role == Some(AgentChatRole::User))
         .collect();
-    assert_eq!(rows.len(), 1);
+    let request = batch
+        .events
+        .iter()
+        .find(|event| event.source.as_deref() == Some("response_item"))
+        .unwrap();
+    assert_eq!(
+        request.metadata["chat_compatibility_legacy_id"],
+        json!(legacy.id)
+    );
+    assert_eq!(
+        request.metadata["chat_compatibility_source_sequence"],
+        legacy.metadata["chat_legacy_source_sequence"]
+    );
+    let proof = super::super::chat_logical_index::source_proof(&ctx)
+        .unwrap()
+        .expect("normal capture must qualify the original source");
+    assert!(proof.sequence_trusted && proof.narrative_complete);
+    assert_eq!(
+        rows.len(),
+        1,
+        "qualified row identities and members: {:?}",
+        rows.iter()
+            .map(|event| (&event.id, event.metadata["chat_display_member_ids"].clone()))
+            .collect::<Vec<_>>()
+    );
     assert_eq!(
         rows[0].metadata["chat_display_member_ids"]
             .as_array()
@@ -1534,8 +1823,13 @@ fn pi_legacy_from_original_algorithm(contents: &str, path: &Path) -> AgentChatEv
     // The published original projection used the nested message ID. This
     // fixture has none; today's adapter correctly retains the envelope ID.
     legacy.turn_id = None;
+    legacy
+        .metadata
+        .as_object_mut()
+        .unwrap()
+        .remove(crate::providers::chat_transcript::PROVIDER_EVENT_ID_METADATA_KEY);
     legacy.id =
-        crate::commands::chat::archive_identity::stable_provider_log_event_id(&legacy, path);
+        crate::commands::chat::archive_identity::legacy_provider_log_event_id(&legacy, path);
     legacy.metadata["provider_log"] = json!(true);
     legacy.metadata["log_path"] = json!(path.to_string_lossy());
     legacy.metadata["chat_legacy_source_sequence"] = json!(legacy.sequence.unwrap());

@@ -18,6 +18,7 @@ const PROVENANCE_KEYS: &[&str] = &[
     "causal_ref",
     "context_observation",
     "provider_turn_id",
+    "codex_user_text_sha256",
     "provider_step_source",
 ];
 
@@ -81,20 +82,21 @@ pub(crate) fn same_observation(old: &AgentChatEvent, current: &AgentChatEvent) -
     if !shares_identity {
         return false;
     }
-    if old.id != current.id
-        && is_codex_user_message_mirror(old)
-        && is_codex_user_message_mirror(current)
-    {
-        match (
-            string(old, "provider_turn_id"),
-            string(current, "provider_turn_id"),
-        ) {
-            (Some(old_turn), Some(current_turn)) => old_turn == current_turn,
-            _ => old.sequence.is_some() && old.sequence == current.sequence,
+    if old.id != current.id {
+        if is_codex_user_message_mirror(old) && is_codex_user_message_mirror(current) {
+            return match (
+                string(old, "provider_turn_id"),
+                string(current, "provider_turn_id"),
+            ) {
+                (Some(old_turn), Some(current_turn)) => old_turn == current_turn,
+                _ => old.sequence.is_some() && old.sequence == current.sequence,
+            };
         }
-    } else {
-        true
+        if is_codex_user_message_mirror(old) || is_codex_user_message_mirror(current) {
+            return crate::providers::chat_transcript::codex_user_mirror_pair(old, current);
+        }
     }
+    true
 }
 
 pub(super) fn is_codex_user_message_mirror(event: &AgentChatEvent) -> bool {
@@ -530,43 +532,28 @@ fn is_claude_stream_watch_pair(mirror: &AgentChatEvent, native: &AgentChatEvent)
 /// Older rows without these bindings remain untouched.
 fn collapse_codex_stream_completion_pairs(events: &mut Vec<AgentChatEvent>) {
     let mut removed = BTreeSet::new();
+    let completions = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| is_codex_final_completion(event).then_some(index))
+        .collect::<Vec<_>>();
 
-    for mirror_index in 0..events.len() {
-        if removed.contains(&mirror_index) || !is_codex_assistant_mirror(&events[mirror_index]) {
+    for completion_index in completions {
+        let Some(members) = codex_completion_group_members(events, completion_index) else {
+            continue;
+        };
+        if members.iter().any(|index| removed.contains(index)) {
             continue;
         }
-        let completions: Vec<usize> = (0..events.len())
-            .filter(|&completion_index| {
-                completion_index != mirror_index
-                    && !removed.contains(&completion_index)
-                    && is_codex_stream_completion_pair(
-                        &events[mirror_index],
-                        &events[completion_index],
-                    )
-            })
-            .collect();
-        if completions.len() != 1 {
-            continue;
-        }
-        let completion_index = completions[0];
-        let mirrors: Vec<usize> = (0..events.len())
-            .filter(|&candidate_index| {
-                candidate_index != completion_index
-                    && !removed.contains(&candidate_index)
-                    && is_codex_stream_completion_pair(
-                        &events[candidate_index],
-                        &events[completion_index],
-                    )
-            })
-            .collect();
-        if mirrors.len() != 1 {
-            continue;
-        }
-
         let mut canonical = events[completion_index].clone();
-        retain_provider_observation_ids(&mut canonical, &events[mirror_index]);
+        for mirror_index in members
+            .into_iter()
+            .filter(|index| *index != completion_index)
+        {
+            retain_provider_observation_ids(&mut canonical, &events[mirror_index]);
+            removed.insert(mirror_index);
+        }
         events[completion_index] = canonical;
-        removed.insert(mirror_index);
     }
 
     if !removed.is_empty() {
@@ -584,19 +571,145 @@ fn is_codex_assistant_mirror(event: &AgentChatEvent) -> bool {
         && event.role == Some(AgentChatRole::Assistant)
         && event.source.as_deref() == Some("event_msg")
         && event.turn_id.is_none()
+        && event.metadata["provider_log"] == true
+        && event.metadata["provider_source"] != "event"
+}
+
+fn is_codex_live_watch_observation(event: &AgentChatEvent) -> bool {
+    event.provider == "codex"
+        && event.kind == AgentChatEventKind::Message
+        && event.role == Some(AgentChatRole::Assistant)
+        && matches!(event.source.as_deref(), Some("event_msg" | "response_item"))
+        && event.metadata["provider_log"] == true
+        && event.metadata["provider_source"] == "event"
+        && string(event, "provider_session_id").is_some()
+        && string(event, "log_path").is_some()
+        && string(event, "provider_turn_id").is_some()
+        && string(event, "provider_phase") != Some("final_answer")
+}
+
+fn is_codex_final_completion(event: &AgentChatEvent) -> bool {
+    event.provider == "codex"
+        && event.kind == AgentChatEventKind::Message
+        && event.role == Some(AgentChatRole::Assistant)
+        && event.source.as_deref() == Some("response_item")
+        && event
+            .turn_id
+            .as_deref()
+            .is_some_and(|turn_id| !turn_id.is_empty())
+        && event.metadata["provider_log"] == true
+        && string(event, "provider_phase") == Some("final_answer")
+}
+
+fn same_codex_assistant_text(first: &AgentChatEvent, second: &AgentChatEvent) -> bool {
+    match (first.text.as_deref(), second.text.as_deref()) {
+        (Some(first_text), Some(second_text)) => {
+            !first_text.is_empty() && first_text == second_text
+        }
+        (None, None) => string(first, "codex_assistant_text_sha256")
+            .zip(string(second, "codex_assistant_text_sha256"))
+            .is_some_and(|(first_hash, second_hash)| first_hash == second_hash),
+        _ => false,
+    }
+}
+
+pub(crate) fn codex_live_watch_observation_pair(
+    first: &AgentChatEvent,
+    second: &AgentChatEvent,
+) -> bool {
+    let sources_pair = matches!(
+        (first.source.as_deref(), second.source.as_deref()),
+        (Some("event_msg"), Some("response_item")) | (Some("response_item"), Some("event_msg"))
+    );
+    sources_pair
+        && is_codex_live_watch_observation(first)
+        && is_codex_live_watch_observation(second)
+        && first.session_id == second.session_id
+        && string(first, "provider_session_id") == string(second, "provider_session_id")
+        && string(first, "log_path") == string(second, "log_path")
+        && string(first, "provider_turn_id") == string(second, "provider_turn_id")
+        && same_codex_assistant_text(first, second)
+}
+
+/// Return the uniquely bound native mirror and optional live watch pair for a
+/// final Codex answer. Every candidate must map to this one completion.
+pub(crate) fn codex_completion_group_members(
+    events: &[AgentChatEvent],
+    completion_index: usize,
+) -> Option<Vec<usize>> {
+    let completion = events.get(completion_index)?;
+    if !is_codex_final_completion(completion) {
+        return None;
+    }
+    let mirrors = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            (index != completion_index && is_codex_stream_completion_pair(event, completion))
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    for mirror_index in &mirrors {
+        let completion_count = events
+            .iter()
+            .enumerate()
+            .filter(|(index, candidate)| {
+                *index != *mirror_index
+                    && is_codex_final_completion(candidate)
+                    && is_codex_stream_completion_pair(&events[*mirror_index], candidate)
+            })
+            .count();
+        if completion_count != 1 {
+            return None;
+        }
+    }
+
+    let native_mirrors = mirrors
+        .iter()
+        .copied()
+        .filter(|index| is_codex_assistant_mirror(&events[*index]))
+        .collect::<Vec<_>>();
+    if native_mirrors.len() != 1 {
+        return None;
+    }
+
+    let watch_mirrors = mirrors
+        .iter()
+        .copied()
+        .filter(|index| is_codex_live_watch_observation(&events[*index]))
+        .collect::<Vec<_>>();
+    if !watch_mirrors.is_empty() {
+        let watch_messages = watch_mirrors
+            .iter()
+            .filter(|index| events[**index].source.as_deref() == Some("event_msg"))
+            .copied()
+            .collect::<Vec<_>>();
+        let watch_responses = watch_mirrors
+            .iter()
+            .filter(|index| events[**index].source.as_deref() == Some("response_item"))
+            .copied()
+            .collect::<Vec<_>>();
+        if watch_messages.len() != 1
+            || watch_responses.len() != 1
+            || !codex_live_watch_observation_pair(
+                &events[watch_messages[0]],
+                &events[watch_responses[0]],
+            )
+        {
+            return None;
+        }
+    }
+
+    let mut members = mirrors;
+    members.push(completion_index);
+    Some(members)
 }
 
 fn is_codex_stream_completion_pair(mirror: &AgentChatEvent, completion: &AgentChatEvent) -> bool {
-    if !is_codex_assistant_mirror(mirror)
-        || completion.provider != "codex"
-        || completion.kind != AgentChatEventKind::Message
-        || completion.role != Some(AgentChatRole::Assistant)
-        || completion.source.as_deref() != Some("response_item")
-        || completion.turn_id.as_deref().is_none_or(str::is_empty)
+    if !(is_codex_assistant_mirror(mirror) || is_codex_live_watch_observation(mirror))
+        || !is_codex_final_completion(completion)
         || mirror.session_id != completion.session_id
-        || mirror.metadata["provider_log"] != true
-        || completion.metadata["provider_log"] != true
-        || mirror.text.as_deref() != completion.text.as_deref()
+        || !same_codex_assistant_text(mirror, completion)
     {
         return false;
     }
@@ -606,9 +719,41 @@ fn is_codex_stream_completion_pair(mirror: &AgentChatEvent, completion: &AgentCh
     let same_provider_turn = string(mirror, "provider_turn_id")
         .zip(string(completion, "provider_turn_id"))
         .is_some_and(|(mirror_turn, completion_turn)| mirror_turn == completion_turn);
-    same_log_path
-        && same_provider_turn
-        && string(completion, "provider_phase") == Some("final_answer")
+    let provider_sessions_are_compatible = match (
+        string(mirror, "provider_session_id"),
+        string(completion, "provider_session_id"),
+    ) {
+        (Some(mirror_session), Some(completion_session)) => mirror_session == completion_session,
+        _ => true,
+    };
+    same_log_path && same_provider_turn && provider_sessions_are_compatible
+}
+
+/// A mirror cannot establish ownership when distinct identified completions
+/// match it. Check all known observations, including the pending batch, before
+/// assigning a durable narrative so iteration order cannot choose an owner.
+pub(super) fn codex_unique_stream_completion_pair<'a>(
+    first: &AgentChatEvent,
+    second: &AgentChatEvent,
+    candidates: impl IntoIterator<Item = &'a AgentChatEvent>,
+) -> bool {
+    let mirror = if is_codex_stream_completion_pair(first, second) {
+        first
+    } else if is_codex_stream_completion_pair(second, first) {
+        second
+    } else {
+        return false;
+    };
+    let mut completion_id = None;
+    for candidate in candidates {
+        if is_codex_stream_completion_pair(mirror, candidate) {
+            if completion_id.is_some_and(|id| id != candidate.id.as_str()) {
+                return false;
+            }
+            completion_id = Some(candidate.id.as_str());
+        }
+    }
+    completion_id.is_some()
 }
 
 /// Collapse Pi's uniquely bound session JSONL watcher mirror while retaining
@@ -699,6 +844,32 @@ fn retain_provider_observation_ids(canonical: &mut AgentChatEvent, duplicate: &A
         }
     }
     canonical.metadata["provider_observation_ids"] = serde_json::json!(ids);
+
+    if canonical.source.as_deref() == Some("response_item")
+        && duplicate.source.as_deref() == Some("event_msg")
+    {
+        let mut roots = canonical.metadata["provider_mirror_request_root_ids"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let mirror_roots = duplicate.metadata["provider_mirror_request_root_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .chain(string(duplicate, "request_root_id"));
+        for root in mirror_roots {
+            if string(canonical, "request_root_id") != Some(root)
+                && !roots.iter().any(|value| value.as_str() == Some(root))
+            {
+                roots.push(serde_json::json!(root));
+            }
+        }
+        if !roots.is_empty() {
+            canonical.metadata["provider_mirror_request_root_ids"] =
+                serde_json::Value::Array(roots);
+        }
+    }
 }
 
 fn provider_observation_ids(event: &AgentChatEvent) -> Vec<String> {
@@ -968,4 +1139,20 @@ pub(super) fn bind_delivered_inputs(
         events.remove(*native);
     }
     Ok(*events != before)
+}
+
+#[cfg(test)]
+pub(crate) use test_support::codex_stream_completion_pair;
+
+#[cfg(test)]
+mod test_support {
+    use super::{is_codex_stream_completion_pair, AgentChatEvent};
+
+    pub(crate) fn codex_stream_completion_pair(
+        first: &AgentChatEvent,
+        second: &AgentChatEvent,
+    ) -> bool {
+        is_codex_stream_completion_pair(first, second)
+            || is_codex_stream_completion_pair(second, first)
+    }
 }

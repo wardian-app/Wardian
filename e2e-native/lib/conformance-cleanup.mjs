@@ -99,6 +99,7 @@ export async function cleanupConformanceSession({
     shutdown_confirmed: shutdownConfirmed,
     home_lock_released: homeLockReleased,
     home_lock_release_deferred: homeLockReleaseDeferred,
+    ...(errors.length ? { cleanup_error_categories: cleanupErrorCategories(errors) } : {}),
   };
   // Save last, so even a rejected write cannot bypass any shutdown operation.
   try { await save(cleanup); }
@@ -126,4 +127,20 @@ export async function pauseConformanceAgents(invoke) {
     invoke("pause_agent", { sessionId: agent.session_id })));
   const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason);
   if (errors.length) throw new AggregateError(errors, "Owned agents did not all confirm pause");
+}
+
+function cleanupErrorCategories(errors) {
+  const categories = new Set();
+  const collect = (error) => {
+    if (error instanceof AggregateError && error.errors.length) {
+      for (const nested of error.errors) collect(nested);
+      return;
+    }
+    const code = error && typeof error.code === "string" ? error.code : "";
+    categories.add(/^[a-z][a-z0-9_]{0,63}$/i.test(code)
+      ? code
+      : error instanceof Error ? "error" : "unknown");
+  };
+  for (const error of errors) collect(error);
+  return [...categories].sort();
 }
