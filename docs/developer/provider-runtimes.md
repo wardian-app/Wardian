@@ -259,6 +259,23 @@ preparation, periodic publication, and rollout lookup paths described above.
 
 The critical rule is: **trust should bind to the real workspace, not to the bootstrap directory or habitat path**.
 
+### Peer task recovery after compaction
+
+The qualified managed Codex 0.160.0 profile uses one private, synchronous
+`SessionStart` compact hook and the read-only `read_task_context` MCP tool.
+Wardian registers trust only for its exact owned static handler. User hook-file
+collisions, edits, removal, disable/trust decisions and lower output limits
+disable recovery without blocking normal startup. The applied launch's explicit
+tool budget, configuration origin/version and provider-reported trusted hook
+are qualified for that owner generation. Observable MCP reload retires it.
+Model/effort changes preserve the explicit budget. Arbitrary external runtime
+configuration changes are outside this profile.
+
+See [Agent messaging tools](./agent-messaging-tools.md#codex-task-recovery-after-compaction)
+for exact native call correlation, response bounds and separate protocol/model
+acceptance requirements. The hook carries a stable pointer; canonical task
+bodies remain in Wardian's interaction records.
+
 ### Skill discovery model
 
 Codex does not treat `--add-dir` as a skill-discovery mechanism. Wardian therefore projects assigned skills into the agent-specific `CODEX_HOME/skills` tree.

@@ -1464,7 +1464,9 @@ pub(crate) fn worktree_build_env(config: &AgentConfig) -> Result<Vec<(String, St
     worktree_build_env_with_policy(config, explicit_outputs)
 }
 
-fn worktree_build_env_with_policy(
+/// Resolve managed-worktree defaults for the caller's selected output policy.
+/// Explicit output settings bypass managed routing and source validation.
+pub(crate) fn worktree_build_env_with_policy(
     config: &AgentConfig,
     explicit_outputs: bool,
 ) -> Result<Vec<(String, String)>, String> {
@@ -3152,7 +3154,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(worktree_build_env(&config)
+        assert!(worktree_build_env_with_policy(&config, false)
             .unwrap_err()
             .contains("not registered"));
         drop(outputs_guard);
@@ -3175,7 +3177,9 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(worktree_build_env(&config).unwrap().is_empty());
+        assert!(worktree_build_env_with_policy(&config, false)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -3185,7 +3189,9 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(worktree_build_env(&config).unwrap().is_empty());
+        assert!(worktree_build_env_with_policy(&config, false)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

@@ -1,10 +1,9 @@
-//! Exact-turn fallback for canonical Codex tasks, separate from human input.
+//! Exact-turn terminal observations and attributed task results.
 
 use super::*;
 use crate::delivery::codex_shared::{CodexSharedClient, CodexSharedReceipt};
 use crate::state::InteractionState;
 use std::sync::Arc;
-use wardian_core::control::ReplyStatus;
 
 pub(super) async fn bind_codex_task(
     state: &AppState,
@@ -51,28 +50,9 @@ pub(super) async fn bind_codex_task(
     binding
 }
 
-/// Provider terminal evidence determines status; text never determines routing.
-fn terminal_reply(status: &str, answer: &str) -> Option<(ReplyStatus, String)> {
-    match status {
-        "completed" if answer.trim().is_empty() => Some((
-            ReplyStatus::Blocked,
-            "Wardian: the task's bound turn completed without usable final answer text. Use an explicit reply to supply a result before turn completion when needed.".into(),
-        )),
-        "completed" if answer.len() > wardian_core::agent_messaging::MAX_MESSAGE_BYTES => Some((
-            ReplyStatus::Blocked,
-            "Wardian: the task's bound turn completed, but its final answer exceeds the 64 KiB reply limit. Automatic publication cannot supply that result.".into(),
-        )),
-        "completed" => Some((ReplyStatus::Done, answer.to_owned())),
-        "interrupted" => Some((
-            ReplyStatus::Blocked,
-            "Wardian: the provider interrupted the task's bound turn before completion.".into(),
-        )),
-        "failed" => Some((
-            ReplyStatus::Failed,
-            "Wardian: the provider reported failure for the task's bound turn.".into(),
-        )),
-        _ => None,
-    }
+pub(super) struct TaskFinalDelivery {
+    pub replies: Vec<store::Replied>,
+    pub information: Vec<store::Admitted>,
 }
 
 pub(super) async fn observe_codex_task(
@@ -80,7 +60,7 @@ pub(super) async fn observe_codex_task(
     client: &CodexSharedClient,
     binding: &store::TaskTurnBinding,
     timeout: Duration,
-) -> Result<(Option<store::Replied>, String), ControlError> {
+) -> Result<(TaskFinalDelivery, String), ControlError> {
     let result = client
         .wait_for_final_result(&binding.provider_turn_id, timeout)
         .await;
@@ -94,7 +74,7 @@ pub(super) async fn observe_codex_task(
             return Err(ControlError::coded("submitted_unconfirmed", error.message));
         }
     };
-    let Some((status, body)) = terminal_reply(&status, &answer) else {
+    if !matches!(status.as_str(), "completed" | "interrupted" | "failed") {
         interactions
             .mark_agent_task_turn_uncertain(binding)
             .await
@@ -103,12 +83,18 @@ pub(super) async fn observe_codex_task(
             "submitted_unconfirmed",
             "Codex did not report a recognized terminal task outcome.",
         ));
-    };
-    let reply = interactions
-        .complete_agent_task_turn(binding, status, &body)
+    }
+    let (replies, information) = interactions
+        .complete_agent_task_turn(binding, &status, &answer)
         .await
         .map_err(control_error)?;
-    Ok((reply, answer))
+    Ok((
+        TaskFinalDelivery {
+            replies,
+            information,
+        },
+        answer,
+    ))
 }
 
 pub(super) fn publish_completion(app: Option<&AppHandle>, replied: &store::Replied) {
@@ -128,42 +114,21 @@ pub(super) fn spawn_codex_task_completion(
 ) {
     tokio::spawn(async move {
         match observe_codex_task(&interactions, &client, &binding, Duration::from_secs(900)).await {
-            Ok((Some(reply), _)) => publish_completion(app.as_ref(), &reply),
-            Ok((None, _)) => {}
+            Ok((delivery, _)) => {
+                for reply in &delivery.replies {
+                    publish_completion(app.as_ref(), reply);
+                }
+                if let Some(app) = app.as_ref() {
+                    for information in delivery.information {
+                        for recipient in information.record.target_session_ids {
+                            spawn_information(app, &recipient);
+                        }
+                    }
+                }
+            }
             Err(error) => manager::log_debug(&format!("[WARDIAN] task completion: {error}")),
         }
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn terminal_evidence_preserves_final_text_and_bounds_fallback() {
-        let body = "\r\n final café 日本語 \r\n";
-        assert_eq!(
-            terminal_reply("completed", body),
-            Some((ReplyStatus::Done, body.into()))
-        );
-        assert_eq!(
-            terminal_reply("completed", "  \n").unwrap().0,
-            ReplyStatus::Blocked
-        );
-        assert_eq!(
-            terminal_reply("completed", &"x".repeat(65_537)).unwrap().0,
-            ReplyStatus::Blocked
-        );
-        assert_eq!(
-            terminal_reply("interrupted", "partial").unwrap().0,
-            ReplyStatus::Blocked
-        );
-        assert_eq!(
-            terminal_reply("failed", "partial").unwrap().0,
-            ReplyStatus::Failed
-        );
-        assert!(terminal_reply("unknown", "plausible answer").is_none());
-    }
 }
 
 #[cfg(test)]

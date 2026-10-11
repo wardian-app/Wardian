@@ -23,6 +23,7 @@ The tool surface follows Codex v2's distinction between information and work:
 | --- | --- |
 | wait_agent | Wait for mailbox activity without reading, claiming, or acknowledging records. |
 | `send_message` | Send information without starting or interrupting a turn. |
+| `read_task_context` | Recover unresolved peer tasks for the exact active native Codex call and turn after compaction. Read-only; no model arguments. |
 | `followup_task` | Assign work and return a request receipt without waiting for its reply. |
 | `receive_messages` | Read a bounded batch of information, tasks, and replies addressed to the caller. |
 | `reply` | Complete the specified request as its authorized recipient. |
@@ -49,9 +50,33 @@ acknowledge its consumption. The timeout flag remains false.
 Reply takes `request_id`, `status` (`done`, `blocked`, or `failed`), and
 `message`. The request determines the destination. A committed explicit reply
 suppresses automatic final-result publication. Canonical tasks dispatched to
-an exact native Codex turn return that turn's final result to their requester
-automatically. Manual receive, composer delivery, and providers without an
+an exact native Codex turn automatically return only an explicitly attributed
+per-request result from its final task-outcome appendix. Ordinary final prose
+does not complete a task. A finished turn without attribution remains awaiting
+reply and sends its requester one informational notification. It is not replayed
+or changed into a synthetic failed/blocked result. Manual receive, composer delivery, and providers without an
 exact native completion boundary still require explicit `reply`.
+
+The host supplies the same appendix protocol on native start, active steering,
+and compaction recovery. Preserve ordinary final prose and append one unquoted,
+unfenced block after a blank line:
+
+```text
+<wardian_task_outcomes>
+{"schema_version":1,"outcomes":[{"request_id":"<exact-request-id>","status":"done","result":"Task-specific result"}]}
+</wardian_task_outcomes>
+```
+
+Use `done`, `failed`, or `blocked` for each supplied disposition. The complete
+packet must validate before any positive outcome is recorded: at most 16 unique
+IDs, nonempty results within 64 KiB each, and exact accepted bindings to the
+observed worker, generation, provider session and original turn. Foreign,
+unknown, stale or duplicated IDs reject the whole packet. Omitted tasks retain
+their obligations. Explicit replies take precedence. When a human-required
+output format cannot contain the appendix, use `reply` separately.
+
+See [the attribution decision](https://github.com/wardian-app/Wardian/blob/main/docs/specs/codex-task-outcome-attribution.md) for
+finished-turn evidence, atomic publication and restart behavior.
 
 Only an assigned task with an explicit `request_id` may use MCP `reply`.
 An ordinary human chat message completes through the agent's assistant
@@ -68,6 +93,40 @@ records. The tool does not accept an arbitrary sender argument. Informational
 records never enter the runnable prompt queue. Follow-up work uses the
 receiver's supported delivery boundary. Interruption is separate from sending
 a correction, pausing the agent, or destroying its provider process.
+
+## Codex task recovery after compaction
+
+In the qualified managed Codex 0.160.0 profile, the agent-local synchronous
+`SessionStart` hook matching `compact` emits a stable recovery pointer. Its CLI
+entry point, `wardian mcp recovery-pointer`, reads bounded hook input and emits
+static context. It never reads a task body or chooses a native turn.
+
+The agent calls `read_task_context` with `{}`. Provider transport metadata is
+kept outside model arguments and verified against the current native owner,
+generation, thread, active turn and exact MCP call. Runtime `sessionId` and
+optional Code Mode origin `itemId` are labels; neither substitutes for the
+stable thread or actual `callId`. A two-second event wait handles transport
+ordering without resending a provider call.
+
+The response contains source labels, observation time and canonical unresolved
+tasks with their exact request IDs. Human instructions always prevail over
+literal, untrusted peer text. Sequence/timestamps describe inbox/request
+chronology only. The read does not claim, acknowledge, reply, replay or start
+work. Replied, cancelled, uncertain, completed or stale bindings are excluded.
+
+The complete MCP result has a 4 KiB UTF-8 bound, including duplicated content
+and JSON escaping. Overflow returns `task_context_overflow` without a partial
+list. Unknown/lower output policy, unsupported provider versions or unavailable
+native evidence return explicit errors. Preserve the user's configuration and
+continue the current human instructions; never select another turn as a fallback.
+
+Hook trust/disable policy and custom configuration remain authoritative.
+Recovery qualification belongs to the applied managed launch and owner
+generation. Ordinary model/effort changes preserve the explicit tool budget;
+configuration/reload changes may retire recovery. This path does not promise
+recovery for arbitrary external mutations or guarantee that the model obeys the
+pointer. Provider acceptance requires an unmodified-provider protocol check and
+separate real-model retrieval evidence.
 
 Native delivery must reach the same running provider conversation. Provider
 adapters may retain composer delivery for specific configurations where native
@@ -95,14 +154,15 @@ versions retain idle and information delivery. No terminal paste or Return key
 is involved. Acceptance persists an exact request/claim/generation/thread/turn
 binding before a completion observer can publish a result.
 
-An exact completed turn returns its final assistant item as `done`. Commentary
-is excluded. When a model omits message phases, the last completed assistant
-item with an unknown phase supplies the compatibility result. An interrupted
-turn returns an attributed Wardian `blocked` notice; a failed turn returns
-`failed`. Missing final text or output exceeding the 64 KiB reply limit returns
-an attributed `blocked` notice. Unknown outcomes and lost observations remain
-uncertain and are never replayed. Several tasks accepted into the same active
-turn each return its shared final result to their own requester.
+A completed turn's final assistant item supplies terminal evidence for the
+task-outcome parser. Commentary is excluded. When a model omits message phases,
+the last completed assistant item with an unknown phase supplies the
+compatibility evidence. Only validated per-request dispositions become canonical
+replies. Interruption, failure, missing text, oversized prose and generic finals
+retain known finished-turn evidence with unresolved task ownership; they do not
+invent terminal task replies. Unknown outcomes and lost observations remain
+uncertain and are never replayed. Several tasks accepted into one active turn
+require separate results and return each result to its own requester.
 
 A recognized stale-turn rejection or a writer-fence activity change confirms
 that no task was admitted. Its claim is released before current activity is

@@ -47,14 +47,15 @@ impl InteractionState {
         Ok(())
     }
 
-    /// Persist verified terminal evidence before attempting the atomic reply.
-    /// A failed reply write leaves a recoverable outcome, never runnable work.
+    /// Capture an exact finished turn and publish only positively attributed
+    /// per-request outcomes. Unattributed evidence keeps ownership and wakes
+    /// requesters through informational availability without runnable work.
     pub async fn complete_agent_task_turn(
         &self,
         binding: &store::TaskTurnBinding,
-        status: ReplyStatus,
-        body: &str,
-    ) -> Result<Option<store::Replied>, AgentMessagingError> {
+        provider_status: &str,
+        answer: &str,
+    ) -> Result<(Vec<store::Replied>, Vec<store::Admitted>), AgentMessagingError> {
         let _mutation = self.mutation_lock.lock().await;
         if let Err(error) = self
             .validate_task_turn_generation(&binding.recipient, binding.generation)
@@ -63,12 +64,30 @@ impl InteractionState {
             let _ = store::with_db(|conn| store::mark_task_turn_uncertain(conn, binding));
             return Err(error);
         }
-        store::with_db(|conn| store::record_task_turn_outcome(conn, binding, status, body))?;
-        let replied = store::with_db(|conn| store::publish_task_turn_outcome(conn, binding))?;
-        if let Some(replied) = &replied {
-            self.cache_agent_reply(replied).await;
+        let recorded = store::with_db(|conn| {
+            store::record_task_turn_final(conn, binding, provider_status, answer)
+        })?;
+        for information in &recorded.information {
+            self.records
+                .lock()
+                .await
+                .insert(information.record.id.clone(), information.record.clone());
+            if !information.duplicate {
+                for recipient in &information.record.target_session_ids {
+                    self.notify_agent_mailbox(recipient, false).await;
+                }
+            }
         }
-        Ok(replied)
+        let mut replies = Vec::new();
+        for binding in recorded.outcomes {
+            if let Some(replied) =
+                store::with_db(|conn| store::publish_task_turn_outcome(conn, &binding))?
+            {
+                self.cache_agent_reply(&replied).await;
+                replies.push(replied);
+            }
+        }
+        Ok((replies, recorded.information))
     }
 
     /// Observation loss cannot produce a terminal reply or authorize replay.

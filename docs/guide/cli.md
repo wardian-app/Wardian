@@ -499,10 +499,14 @@ settles a request by its exact request ID, and `message interrupt` requests
 interruption only where the provider bridge supports it.
 
 For tasks dispatched through Wardian's native Codex owner, the bound provider
-turn's final answer automatically completes the request and returns to its
-requester. An explicit `message reply` that completed the request takes
-precedence. Multiple tasks admitted into the same turn receive that turn's
-shared final answer. Manual inbox delivery, composer delivery, and other
+turn automatically returns only an explicitly attributed per-request result
+from its final task-outcome appendix. An explicit `message reply` takes
+precedence. Multiple tasks admitted into the same turn require separate results.
+Generic final text leaves tasks awaiting reply and generates one informational
+finished-turn notice; it does not restart the requester or replay the task.
+The host supplies appendix instructions on start, steer and compaction recovery.
+Use explicit reply if the human-required output format excludes the appendix.
+Manual inbox delivery, composer delivery, and other
 providers still require an explicit reply.
 
 `message wait --timeout-ms 60000` waits for mailbox activity, including

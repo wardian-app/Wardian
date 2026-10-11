@@ -12,6 +12,7 @@ use wardian_core::agent_messaging::{
 };
 use wardian_core::db::agent_messaging as store;
 mod native;
+mod task_context;
 
 pub(super) async fn push_native_information(
     state: &AppState,
@@ -107,6 +108,9 @@ async fn handle_in_state(
     let MessageOrigin::WardianAgent { session_id: sender } = origin;
     authenticate(state, &sender).await?;
     match request {
+        Request::ReadTaskContext { provider_call } => {
+            task_context::read(state, &sender, provider_call).await
+        }
         Request::ListAgents => {
             let sources = {
                 let agents = state.agents.lock().await;

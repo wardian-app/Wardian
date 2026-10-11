@@ -2,7 +2,9 @@ use crate::live;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io;
-use wardian_core::agent_messaging::{AgentMessagingRequest, AgentMessagingResponse};
+use wardian_core::agent_messaging::{
+    task_context_mcp_result, AgentMessagingRequest, AgentMessagingResponse, TaskContextCall,
+};
 
 pub(super) trait Backend {
     fn require_sender(&self) -> io::Result<()>;
@@ -68,13 +70,15 @@ fn default_wait_timeout() -> u64 {
     wardian_core::agent_messaging::MAX_WAIT_AGENT_TIMEOUT_MS
 }
 
-pub(super) fn call(
+/// Metadata stays outside model arguments and is verified by the native owner.
+pub(super) fn call_with_metadata(
     name: &str,
     arguments: Value,
+    provider_meta: Option<&Value>,
     idempotency_key: &str,
     backend: &mut impl Backend,
 ) -> Value {
-    let request = match parse(name, arguments, idempotency_key) {
+    let request = match parse(name, arguments, provider_meta, idempotency_key) {
         Ok(request) => request,
         Err(error) => return failure("invalid_arguments", &error),
     };
@@ -88,14 +92,30 @@ pub(super) fn call(
         AgentMessagingRequest::Reply { request_id, .. } => Some(request_id.clone()),
         _ => None,
     };
+    let recovery_call = match &request {
+        AgentMessagingRequest::ReadTaskContext { provider_call } => Some(provider_call.clone()),
+        _ => None,
+    };
     match backend.invoke(request) {
         Ok(value) if value.is_object() => {
             let failed = value.get("error").is_some() || value.get("ok") == Some(&Value::Bool(false));
             if !failed && (value["operation"] != name
                 || serde_json::from_value::<AgentMessagingResponse>(value.clone()).is_err()
                 || ["interaction_id", "request_id"].iter().any(|key| value.get(key).is_some_and(|id| id.as_str().is_none_or(|id| id.trim().is_empty())))
-                || reply_request_id.as_ref().is_some_and(|id| value["request_id"] != *id)) {
+                || reply_request_id.as_ref().is_some_and(|id| value["request_id"] != *id)
+                || recovery_call.as_ref().is_some_and(|call| {
+                    value["provider_call"] != serde_json::to_value(call).expect("metadata serialization")
+                    || value["thread_id"] != call.thread_id
+                    || value["agent_id"].as_str().is_none_or(|id| id.is_empty())
+                    || value["turn_id"].as_str().is_none_or(|id| id.is_empty())
+                    || value["generation"].as_u64().is_none_or(|generation| generation == 0)
+                    || value["tasks"].as_array().is_none_or(Vec::is_empty)
+                })) {
                 return failure("invalid_receipt", "Runtime receipt did not match the operation. Delivery may be uncertain; do not replay automatically.");
+            }
+            if name == "read_task_context" {
+                return task_context_mcp_result(value, failed)
+                    .unwrap_or_else(|error| failure(&error.code, &error.message));
             }
             tool_result(value, failed)
         }
@@ -133,7 +153,12 @@ fn nonempty(value: &str) -> Result<(), String> {
     }
 }
 
-fn parse(name: &str, arguments: Value, key: &str) -> Result<AgentMessagingRequest, String> {
+fn parse(
+    name: &str,
+    arguments: Value,
+    provider_meta: Option<&Value>,
+    key: &str,
+) -> Result<AgentMessagingRequest, String> {
     // These are the model-facing arguments. Admission keys and authenticated
     // origin are supplied by the adapter, never accepted from the model.
     if arguments
@@ -145,6 +170,15 @@ fn parse(name: &str, arguments: Value, key: &str) -> Result<AgentMessagingReques
         );
     }
     let request = match name {
+        "read_task_context" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Empty {}
+            let _: Empty = decode(arguments)?;
+            AgentMessagingRequest::ReadTaskContext {
+                provider_call: task_context_call(provider_meta)?,
+            }
+        }
         "send_message" | "followup_task" => {
             let args: MessageArgs = decode(arguments)?;
             valid_target(&args.target)?;
@@ -214,6 +248,33 @@ fn parse(name: &str, arguments: Value, key: &str) -> Result<AgentMessagingReques
         _ => return Err("Unknown tool.".into()),
     };
     Ok(request)
+}
+
+fn task_context_call(meta: Option<&Value>) -> Result<TaskContextCall, String> {
+    let meta = meta
+        .and_then(Value::as_object)
+        .ok_or("Native Codex call metadata is required.")?;
+    let field = |name: &str, required: bool| -> Result<Option<String>, String> {
+        let Some(value) = meta.get(name) else {
+            return if required {
+                Err(format!("Native Codex {name} is required."))
+            } else {
+                Ok(None)
+            };
+        };
+        let value = value
+            .as_str()
+            .filter(|value| !value.is_empty() && value.len() <= 256 && value.trim() == *value)
+            .ok_or_else(|| format!("Native Codex {name} must be a bounded nonempty string."))?;
+        Ok(Some(value.to_owned()))
+    };
+    Ok(TaskContextCall {
+        call_id: field("callId", true)?.expect("required callId"),
+        thread_id: field("threadId", true)?.expect("required threadId"),
+        reported_session_id: field("sessionId", true)?.expect("required sessionId"),
+        originating_item_id: field("itemId", false)?,
+        window_id: field("windowId", false)?,
+    })
 }
 
 fn transport_error(error: io::Error) -> Value {

@@ -369,6 +369,91 @@ fn owner_prepares_a_new_home_without_config_or_journal() {
 }
 
 #[test]
+fn task_context_fresh_owner_installs_owned_recovery_without_generic_preparation() {
+    let _lock = crate::utils::wardian_test_env_lock();
+    let fixture = Fixture::new();
+    assert!(!fixture._temp.path().join("wardian/agents").exists());
+    let (_, home) = prepare_owner_habitat(
+        &fixture.workspace,
+        "",
+        "agent",
+        &mut OwnerStartTimings::default(),
+    )
+    .unwrap();
+    let record = crate::utils::codex_messaging::recovery_registration(&home, "agent").unwrap();
+    let config = Fixture::config(&home);
+    assert_eq!(record.agent_id, "agent");
+    assert_eq!(
+        config["mcp_servers"]["wardian"]["tools"]["read_task_context"]["output_token_limit"]
+            .as_integer(),
+        Some(wardian_core::agent_messaging::TASK_CONTEXT_OUTPUT_TOKENS as i64)
+    );
+    assert_eq!(
+        config["hooks"]["state"][&record.hook_key]["trusted_hash"].as_str(),
+        Some(record.hook_hash.as_str())
+    );
+    let hooks: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.join("hooks.json")).unwrap()).unwrap();
+    let entries = hooks["hooks"]["SessionStart"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["matcher"], "compact");
+    let handlers = entries[0]["hooks"].as_array().unwrap();
+    assert_eq!(handlers.len(), 1);
+    assert_eq!(handlers[0]["type"], "command");
+    assert_eq!(handlers[0]["command"], record.hook_command);
+    assert_eq!(handlers[0]["async"], false);
+}
+
+#[test]
+fn task_context_owner_recovery_failure_preserves_ordinary_preparation() {
+    let _lock = crate::utils::wardian_test_env_lock();
+    let fixture = Fixture::new();
+    let initial = habitat_codex_home(&fixture.neutral());
+    std::fs::create_dir_all(&initial).unwrap();
+    let invalid_record = b"malformed recovery ownership";
+    std::fs::write(initial.join(".wardian-task-recovery.json"), invalid_record).unwrap();
+    let (_, home) = prepare_owner_habitat(
+        &fixture.workspace,
+        "",
+        "agent",
+        &mut OwnerStartTimings::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read(home.join(".wardian-task-recovery.json")).unwrap(),
+        invalid_record
+    );
+    assert!(home.join(".wardian-messaging.json").is_file());
+    assert!(!home.join("hooks.json").exists());
+    assert_eq!(
+        Fixture::config(&home)["model"].as_str(),
+        Some("current-global")
+    );
+}
+
+#[test]
+fn task_context_owner_preserves_user_hooks_and_ordinary_preparation() {
+    let _lock = crate::utils::wardian_test_env_lock();
+    let fixture = Fixture::new();
+    let initial = habitat_codex_home(&fixture.neutral());
+    std::fs::create_dir_all(&initial).unwrap();
+    let user_hooks =
+        br#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"user-owned"}]}]}}"#;
+    std::fs::write(initial.join("hooks.json"), user_hooks).unwrap();
+    let (_, home) = prepare_owner_habitat(
+        &fixture.workspace,
+        "",
+        "agent",
+        &mut OwnerStartTimings::default(),
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(home.join("hooks.json")).unwrap(), user_hooks);
+    assert!(!home.join(".wardian-task-recovery.json").exists());
+    assert!(home.join(".wardian-messaging.json").is_file());
+    assert!(Fixture::config(&home).get("hooks").is_none());
+}
+
+#[test]
 fn issue1214_normal_owner_preparation_preserves_private_state_without_shared_cache() {
     let _lock = crate::utils::wardian_test_env_lock();
     for retained in [false, true] {

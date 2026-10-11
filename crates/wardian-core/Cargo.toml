@@ -15,6 +15,7 @@ fs2 = { workspace = true }
 glob = "0.3"
 hmac = { workspace = true }
 once_cell = { workspace = true }
+pulldown-cmark = { version = "0.13.4", default-features = false }
 rand = { workspace = true }
 regex = "1"
 rusqlite = { workspace = true }

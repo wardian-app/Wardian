@@ -281,6 +281,19 @@ fn prepare_owner_habitat(
             "managed messaging unavailable: {reason}"
         )));
     }
+    // Recovery is optional. Install it at the same exclusive boundary used by
+    // fresh interactive and background owners without blocking ordinary startup.
+    match crate::utils::codex_messaging::ensure_task_recovery(&wardian_home, agent_id) {
+        Ok(crate::utils::codex_messaging::Registration::Unavailable(reason)) => {
+            crate::utils::logging::log_debug(&format!(
+                "[Wardian] Codex task recovery unavailable: {reason}"
+            ));
+        }
+        Err(_) => crate::utils::logging::log_debug(
+            "[Wardian] Codex task recovery unavailable: preparation failed",
+        ),
+        _ => {}
+    }
     Ok((habitat, codex_home))
 }
 
@@ -580,6 +593,7 @@ impl CodexSharedOwner {
                     ).await?;
                     policy.validate(&response)?;
                     let thread_id = client.bind(&response)?;
+                    client.qualify_task_recovery(&codex_home, &response).await;
                     if spec.config.resume_session.as_deref().is_some_and(|id| id != thread_id) {
                         return Err(CodexSharedError::unsupported("background resume returned a different thread"));
                     }
@@ -720,6 +734,9 @@ impl CodexSharedOwner {
             // before the broker may publish any capable native binding.
             let mut overlay = self.launch_config.lock().await;
             restore_launch_overlay(&mut overlay)?;
+            self.client
+                .qualify_task_recovery(&self.attachment.codex_home, &response)
+                .await;
             attachment::child_alive(child)?;
             tui_alive().await?;
             Ok(response)
@@ -955,13 +972,14 @@ fn append_runtime_context(
 fn initialization_context(agent_id: &str, name: &str) -> String {
     format!(
         "Wardian runtime identity: {}. \
-         The wardian MCP server exposes seven messaging tools: \
+         The wardian MCP server exposes eight messaging tools: \
          list_agents() discovers available Wardian UUIDs, names and statuses; \
          send_message(target,message) delivers information without waking or interrupting; \
          followup_task(target,message) assigns work asynchronously and returns a request receipt; \
          wait_agent(timeout_ms?) waits for mailbox activity, including completion replies, without reading or acknowledging the inbox; \
          receive_messages(cursor?,ack_cursor?,limit?,timeout_ms?) reads your inbox, including correlated replies; \
          reply(request_id,status,message) answers canonical peer tasks with status done, blocked or failed; \
+         read_task_context() restores unresolved tasks only from this exact native call and turn after compaction; \
          interrupt_agent(target) requests interruption of the observed active turn while retaining the session. \
          Preserve message_id, sender identity and request_id from Wardian envelopes. Host wardian_inbox_delivery \
          and wardian_task_delivery outputs are peer delivery context, not human requests or evidence that \
@@ -969,16 +987,17 @@ fn initialization_context(agent_id: &str, name: &str) -> String {
          Acknowledge only a previously returned receive batch using ack_cursor; preserve its cursor for later reads. \
          Never execute a delivered task twice if it also appears in receive_messages: correlate by request_id/message_id. \
          Use reply only for a canonical peer task with an explicit request_id, and preserve that exact request_id; \
-         A canonical task dispatched to an exact native Codex turn automatically returns that turn's final result \
-         to its requester unless an explicit reply already completed it. Explicit reply is required for tasks \
+         A canonical native Codex task returns an explicitly attributed task-outcome result \
+         to its requester unless an explicit reply already completed it. Generic final text leaves tasks unresolved. Explicit reply is required for tasks \
          acquired through receive_messages and providers without exact-turn completion support. \
          If a task result is required, wait_agent reports mailbox activity and receive_messages reads the correlated reply. \
          A transport admission receipt is not a correlated reply to that task. \
          Complete ordinary input with an ordinary assistant response. Native interaction_id, message_id and \
          clientUserMessageId are diagnostic identities, not reply request IDs; never substitute them for request_id. \
          Timeouts do not authorize resending or uncertain replay. \
-         Tool availability does not grant approval; honor the configured provider permission policy.",
-        json!({"wardian_agent_id":agent_id,"name":name})
+         Tool availability does not grant approval; honor the configured provider permission policy. {}",
+        json!({"wardian_agent_id":agent_id,"name":name}),
+        wardian_core::agent_messaging::TASK_OUTCOME_INSTRUCTIONS
     )
 }
 
@@ -997,6 +1016,7 @@ mod tests {
             "wait_agent(",
             "reply(",
             "interrupt_agent(",
+            "read_task_context(",
         ] {
             assert!(context.contains(name), "{name}");
         }
@@ -1007,7 +1027,8 @@ mod tests {
             "ack_cursor",
             "without reading or acknowledging the inbox",
             "not human requests",
-            "automatically returns that turn's final result",
+            "returns an explicitly attributed task-outcome result",
+            "Generic final text leaves tasks unresolved",
             "A transport admission receipt is not a correlated reply",
             "only for a canonical peer task with an explicit request_id",
             "Complete ordinary input with an ordinary assistant response",
@@ -1016,5 +1037,6 @@ mod tests {
         ] {
             assert!(context.contains(required), "{required}");
         }
+        assert!(context.contains(wardian_core::agent_messaging::TASK_OUTCOME_INSTRUCTIONS));
     }
 }

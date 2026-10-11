@@ -13,7 +13,9 @@ use std::task::Poll;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 use wardian_core::agent_messaging::{AgentMessagePage, TaskDeliveryOwner};
-use wardian_core::control::{InteractionKind, InteractionStatus, ProviderInputReadiness};
+use wardian_core::control::{
+    InteractionKind, InteractionStatus, ProviderInputReadiness, ReplyStatus,
+};
 
 const REQUESTER: &str = "completion-requester";
 const RECIPIENT: &str = "completion-recipient";
@@ -21,6 +23,106 @@ const THREAD: &str = "owned-thread";
 const FINAL: &str = "\r\n final café 日本語 'quoted' `$() \\ \r\n";
 const WAIT: Duration = Duration::from_secs(60);
 const DEADLINE: Duration = Duration::from_secs(10);
+
+fn attributed_final(request: &str) -> String {
+    use wardian_core::agent_messaging::{TASK_OUTCOME_CLOSE, TASK_OUTCOME_OPEN};
+    format!(
+        "{FINAL}\n{TASK_OUTCOME_OPEN}\n{}\n{TASK_OUTCOME_CLOSE}",
+        json!({
+            "schema_version":1,"outcomes":[{"request_id":request,"status":"done","result":FINAL}]
+        })
+    )
+}
+
+#[tokio::test]
+async fn wrong_scope_final_wakes_mailbox_without_settling_or_starting_requester() {
+    scenario(|fixture| {
+        Box::pin(async move {
+            let binding = fixture.task("wrong-scope", false).await;
+            let answer = "Finished the old CRM task. The new software audit is still unfinished.";
+            let (observed, page, timed_out) = {
+                // Completed pinned futures retain their input borrows until dropped.
+                let observer = observe_codex_task(
+                    &fixture.state.interactions,
+                    &fixture.client,
+                    &binding,
+                    WAIT,
+                );
+                let receive_wait = receive(&fixture.state, REQUESTER, 60_000, None, None);
+                let activity_wait = wait_agent(&fixture.state, REQUESTER, 60_000);
+                tokio::pin!(observer, receive_wait, activity_wait);
+                assert_pending(observer.as_mut()).await;
+                assert_pending(receive_wait.as_mut()).await;
+                assert_pending(activity_wait.as_mut()).await;
+                fixture.peer.complete(THREAD, "wrong-scope", answer).await;
+                tokio::join!(observer, receive_wait, activity_wait)
+            };
+            let (delivery, final_text) = observed.unwrap();
+            assert_eq!(final_text, answer);
+            assert!(delivery.replies.is_empty());
+            assert_eq!(delivery.information.len(), 1);
+            assert!(!timed_out.unwrap());
+            let page = page.unwrap();
+            assert_eq!(page.messages.len(), 1);
+            let message = &page.messages[0];
+            assert_eq!(message.kind, InteractionKind::Message);
+            assert_eq!(message.reply_status, None);
+            assert_eq!(
+                message.parent_interaction_id.as_deref(),
+                Some(binding.request_id.as_str())
+            );
+            assert_eq!(
+                store::with_db(|conn| store::load(conn, &binding.request_id))
+                    .unwrap()
+                    .status,
+                InteractionStatus::AwaitingReply
+            );
+            assert!(store::with_db(store::pending_task_turn_bindings)
+                .unwrap()
+                .is_empty());
+            store::with_db(store::abandon_task_turn_observations).unwrap();
+            assert!(fixture
+                .state
+                .interactions
+                .recover_agent_task_results()
+                .await
+                .unwrap()
+                .is_empty());
+            let (duplicate, _) =
+                observe_codex_task(&fixture.state.interactions, &fixture.client, &binding, WAIT)
+                    .await
+                    .unwrap();
+            assert!(duplicate.replies.is_empty());
+            assert!(duplicate.information.is_empty());
+            receive(&fixture.state, REQUESTER, 0, None, Some(page.ack_cursor))
+                .await
+                .unwrap();
+            handle_in_state(
+                None,
+                &fixture.state,
+                Request::Reply {
+                    request_id: binding.request_id.clone(),
+                    status: ReplyStatus::Done,
+                    message: "The actual software audit result".into(),
+                },
+                origin(RECIPIENT),
+            )
+            .await
+            .unwrap();
+            let genuine = receive(&fixture.state, REQUESTER, 0, None, None)
+                .await
+                .unwrap();
+            assert_reply(
+                &genuine,
+                &binding.request_id,
+                ReplyStatus::Done,
+                "The actual software audit result",
+            );
+            fixture.assert_no_process_start(1).await;
+        })
+    })
+    .await;
+}
 
 struct Peer {
     socket: WebSocketStream<TcpStream>,
@@ -208,7 +310,9 @@ impl Fixture {
             assert_eq!(written["request_id"], request_id);
             if early {
                 // Both events precede the RPC response in the reader's stream.
-                self.peer.complete(THREAD, turn, FINAL).await;
+                self.peer
+                    .complete(THREAD, turn, &attributed_final(&request_id))
+                    .await;
             } else {
                 self.peer
                     .send(json!({"method":"turn/started","params":{
@@ -436,10 +540,13 @@ async fn automatic_final_wakes_concurrent_waiters_without_ack_or_timeout_settlem
                     .structured_reply(&binding.request_id)
                     .await
                     .is_none());
-                fixture.peer.complete(THREAD, "bound", FINAL).await;
+                fixture
+                    .peer
+                    .complete(THREAD, "bound", &attributed_final(&binding.request_id))
+                    .await;
                 let (observed, first, second, timed_out) =
                     tokio::join!(observer, first, second, waiter);
-                assert_eq!(observed.unwrap().1, FINAL);
+                assert_eq!(observed.unwrap().1, attributed_final(&binding.request_id));
                 assert!(!timed_out.unwrap(), "completion releases wait_agent");
                 let first = first.unwrap();
                 let second = second.unwrap();
@@ -467,7 +574,7 @@ async fn automatic_final_wakes_concurrent_waiters_without_ack_or_timeout_settlem
                 observe_codex_task(&fixture.state.interactions, &fixture.client, &binding, WAIT)
                     .await
                     .unwrap();
-            assert!(duplicate.0.is_none());
+            assert!(duplicate.0.replies.is_empty());
             assert_eq!(
                 store::with_db(|conn| store::load(conn, &binding.request_id))
                     .unwrap()
@@ -506,7 +613,7 @@ async fn exact_completion_before_ack_is_available_to_late_coordinator_observer()
                     WAIT,
                 );
                 let (observed, page) = tokio::join!(observed, wait);
-                assert_eq!(observed.unwrap().1, FINAL);
+                assert_eq!(observed.unwrap().1, attributed_final(&binding.request_id));
                 assert_reply(
                     &page.unwrap(),
                     &binding.request_id,
@@ -573,7 +680,7 @@ async fn explicit_done_failed_and_blocked_win_over_later_automatic_final() {
                     fixture.peer.complete(THREAD, &turn, FINAL).await;
                     let observed = observer.await.unwrap();
                     assert!(
-                        observed.0.is_none(),
+                        observed.0.replies.is_empty(),
                         "explicit terminal reply must suppress automatic publication"
                     );
                     assert_eq!(observed.1, FINAL);
@@ -907,11 +1014,12 @@ async fn codex_deferral_rechecks_idle_after_release_when_normal_dispatch_was_con
                 tokio::pin!(observer);
                 assert_pending(observer.as_mut()).await;
                 assert_pending(wait.as_mut()).await;
-                fixture.peer.complete(THREAD, "T-retry", FINAL).await;
+                fixture.peer.complete(THREAD, "T-retry", &attributed_final(&binding.request_id)).await;
                 let (observed, page) = tokio::join!(observer, wait);
                 let (published, answer) = observed.unwrap();
-                assert_eq!(answer, FINAL);
-                let published = published.expect("released T publishes one automatic result");
+                assert_eq!(answer, attributed_final(&binding.request_id));
+                assert_eq!(published.replies.len(), 1);
+                let published = published.replies.into_iter().next().unwrap();
                 let page = page.unwrap();
                 assert_reply(&page, &task.record.id, ReplyStatus::Done, FINAL);
                 assert_eq!(page.messages[0].interaction_id, published.record.id);
@@ -922,7 +1030,7 @@ async fn codex_deferral_rechecks_idle_after_release_when_normal_dispatch_was_con
                     .await.unwrap().is_none());
                 let duplicate = observe_codex_task(&fixture.state.interactions, &fixture.client, &binding, WAIT)
                     .await.unwrap();
-                assert!(duplicate.0.is_none(), "the admission produces only one canonical result");
+                assert!(duplicate.0.replies.is_empty(), "the admission produces only one canonical result");
                 assert_eq!(receive(&fixture.state, REQUESTER, 0, None, None).await.unwrap().messages,
                     page.messages);
             }

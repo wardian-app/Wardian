@@ -136,7 +136,24 @@ fn stdio_discovery_and_rejections_do_not_create_home_or_need_app() {
     ]);
     let responses = run(&test_home, requests);
     assert_eq!(responses.len(), 4);
-    assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 7);
+    let tools = responses[1]["result"]["tools"].as_array().unwrap();
+    let names: Vec<_> = tools
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "send_message",
+            "followup_task",
+            "receive_messages",
+            "wait_agent",
+            "reply",
+            "interrupt_agent",
+            "list_agents",
+            "read_task_context",
+        ]
+    );
     let error: Value = serde_json::from_str(
         responses[2]["result"]["content"][0]["text"]
             .as_str()

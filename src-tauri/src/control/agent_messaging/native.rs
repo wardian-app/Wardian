@@ -717,7 +717,7 @@ pub(super) async fn dispatch_background(
                     message: error.to_string(),
                     provider_boundary_crossed: true,
                 })?;
-            let (reply, answer) = observe_codex_task(
+            let (delivery, answer) = observe_codex_task(
                 &state.interactions,
                 &client,
                 &binding,
@@ -729,8 +729,15 @@ pub(super) async fn dispatch_background(
                 message: error.to_string(),
                 provider_boundary_crossed: true,
             })?;
-            if let Some(reply) = &reply {
+            for reply in &delivery.replies {
                 publish_completion(app, reply);
+            }
+            if let Some(app) = app {
+                for information in delivery.information {
+                    for recipient in information.record.target_session_ids {
+                        spawn_information(app, &recipient);
+                    }
+                }
             }
             receipt.delivery_state = "provider_completed".into();
             Ok((receipt, answer))

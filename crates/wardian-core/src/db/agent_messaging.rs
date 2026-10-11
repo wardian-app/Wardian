@@ -18,9 +18,10 @@ pub use provider_claims::{
     pending_information, release_before_write,
 };
 pub use task_turns::{
-    abandon_task_turn_observations, bind_task_turn, mark_task_turn_uncertain,
-    pending_task_turn_bindings, publish_task_turn_outcome, record_task_turn_outcome,
-    recover_task_turn_outcomes, TaskTurnBinding,
+    abandon_task_turn_observations, bind_task_turn, compacted_task_contexts,
+    mark_task_turn_uncertain, pending_task_turn_bindings, publish_task_turn_outcome,
+    record_task_turn_final, recover_task_turn_outcomes, CompactedTaskContext, RecordedTaskFinal,
+    TaskTurnBinding, MAX_COMPACTED_TASK_CONTEXTS,
 };
 
 /// Availability is append-only and never backfilled from legacy interactions.
@@ -237,6 +238,19 @@ fn admit_with_host(
     request: Admission<'_>,
     host: Option<(&str, &str)>,
 ) -> Result<Admitted> {
+    let tx = conn.unchecked_transaction()?;
+    let admitted = admit_in_transaction(&tx, request, host)?;
+    tx.commit()?;
+    Ok(admitted)
+}
+
+/// Reuse admission inside a caller-owned transaction so availability and its
+/// finished-turn observation cannot commit independently.
+fn admit_in_transaction(
+    tx: &Connection,
+    request: Admission<'_>,
+    host: Option<(&str, &str)>,
+) -> Result<Admitted> {
     validate_message(request.message)?;
     if request
         .idempotency_key
@@ -256,7 +270,6 @@ fn admit_with_host(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&(request.recipient, request.message)).unwrap())
     );
-    let tx = conn.unchecked_transaction()?;
     if let Some(key) = request.idempotency_key {
         let existing: Option<(String, String, String)> = tx.query_row(
             "SELECT interaction_id, fingerprint, owner FROM agent_message_delivery WHERE sender=?1 AND operation=?2 AND idempotency_key=?3",
@@ -269,9 +282,9 @@ fn admit_with_host(
                 ));
             }
             if let Some(origin) = host {
-                verify_host_provenance(&tx, &id, origin)?;
+                verify_host_provenance(tx, &id, origin)?;
             }
-            let record = load(&tx, &id)?;
+            let record = load(tx, &id)?;
             return Ok(Admitted {
                 record,
                 owner: delivery_owner(&owner),
@@ -309,7 +322,7 @@ fn admit_with_host(
         updated_at: now,
         completed_at: None,
     };
-    super::upsert_interaction_record_with_conn(&tx, &record)?;
+    super::upsert_interaction_record_with_conn(tx, &record)?;
     tx.execute("INSERT INTO agent_message_delivery(interaction_id,sender,recipient,operation,idempotency_key,fingerprint,owner,generation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
         params![record.id,request.sender,request.recipient,operation,request.idempotency_key,fingerprint,owner,request.generation])?;
     if let Some((run_id, node)) = host {
@@ -318,8 +331,7 @@ fn admit_with_host(
             params![record.id, run_id, node],
         )?;
     }
-    make_available(&tx, request.recipient, &record.id)?;
-    tx.commit()?;
+    make_available(tx, request.recipient, &record.id)?;
     Ok(Admitted {
         record,
         owner: delivery_owner(owner),
@@ -529,12 +541,23 @@ pub(super) fn delete_references(
     interaction_ids: &[String],
 ) -> rusqlite::Result<()> {
     // Delete by identities before delivery metadata disappears, including host tasks.
+    // Do not rely on foreign-key enforcement in older database connections.
+    conn.execute(
+        "DELETE FROM agent_message_task_turn_observations WHERE request_id IN (
+            SELECT request_id FROM agent_message_task_turns WHERE recipient=?1 OR request_id IN (
+                SELECT interaction_id FROM agent_message_delivery WHERE sender=?1 OR recipient=?1))",
+        [recipient],
+    )?;
     conn.execute(
         "DELETE FROM agent_message_task_turns WHERE recipient=?1 OR request_id IN (
             SELECT interaction_id FROM agent_message_delivery WHERE sender=?1 OR recipient=?1)",
         [recipient],
     )?;
     for id in interaction_ids {
+        conn.execute(
+            "DELETE FROM agent_message_task_turn_observations WHERE request_id=?1",
+            [id],
+        )?;
         conn.execute(
             "DELETE FROM agent_message_task_turns WHERE request_id=?1",
             [id],

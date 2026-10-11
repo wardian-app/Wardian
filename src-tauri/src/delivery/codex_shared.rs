@@ -30,7 +30,10 @@ mod proxy;
 #[cfg(test)]
 mod startup_tests;
 mod stderr_capture;
+mod task_context;
+mod task_context_policy;
 mod task_delivery;
+pub(crate) use task_context::TaskContextBinding;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod version;
@@ -193,6 +196,9 @@ pub(crate) struct Observation {
     idle_reconciled_turn: Option<String>,
     completed_turn: Option<(String, String)>,
     turn_answers: HashMap<String, final_items::CompletedMessages>,
+    task_context_calls: task_context::TaskContextCalls,
+    task_context_policy: Option<task_context_policy::TaskContextPolicy>,
+    task_context_policy_revision: u64,
     closed: bool,
     stopped: bool,
     completions: completion::TurnCompletions,
@@ -299,9 +305,18 @@ impl Observation {
     /// Only the bound native thread can change interrupt or completion evidence.
     fn observe(&mut self, value: &Value) {
         let params = &value["params"];
+        if value["method"] == "mcpServer/startupStatus/updated"
+            && params["name"] == "wardian"
+            && params["status"] != "ready"
+        {
+            self.task_context_policy = None;
+            self.task_context_policy_revision = self.task_context_policy_revision.wrapping_add(1);
+        }
         if params["threadId"].as_str() != self.thread_id.as_deref() || self.thread_id.is_none() {
             return;
         }
+        self.task_context_calls
+            .observe(value, self.active_turn.as_deref());
         if value["method"] == "thread/status/changed" {
             if let Some(status) = thread_runtime_status(&params["status"]) {
                 self.set_thread_runtime_status(status);
@@ -327,6 +342,9 @@ impl Observation {
             Some("turn/started") => {
                 if self.has_terminal_evidence(turn_id) {
                     return;
+                }
+                if self.active_turn.as_deref() != Some(turn_id) {
+                    self.task_context_calls = Default::default();
                 }
                 self.completions.start(turn_id);
                 self.completed_turn = None;
@@ -843,6 +861,16 @@ impl CodexSharedClient {
         expected_activity: Option<&CodexTurnActivity>,
         initial_activity: Option<u64>,
     ) -> Result<Value, CodexSharedError> {
+        if matches!(
+            method,
+            "config/value/write" | "config/batchWrite" | "config/mcpServer/reload"
+        ) {
+            self.observation.send_modify(|state| {
+                state.task_context_policy = None;
+                state.task_context_policy_revision =
+                    state.task_context_policy_revision.wrapping_add(1);
+            });
+        }
         if self.observation.borrow().closed {
             return Err(CodexSharedError::unsupported(
                 "provider connection is closed",
@@ -851,7 +879,9 @@ impl CodexSharedClient {
         let id = format!("wardian:{}", uuid::Uuid::new_v4());
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id.clone(), tx);
-        let payload = json!({"id":id,"method":method,"params":params});
+        let diagnostic_payload = json!({
+            "id":id.clone(),"method":method,"params":params.clone()
+        });
         let deadline = tokio::time::Instant::now() + timeout.unwrap_or(STARTUP_TIMEOUT);
         let written = tokio::time::timeout_at(deadline, async {
             let mut writer = self.writer.lock().await;
@@ -873,6 +903,7 @@ impl CodexSharedClient {
                     provider_boundary_crossed: false,
                 });
             }
+            let payload = json!({"id":id.clone(),"method":method,"params":params});
             writer
                 .send(Message::Text(payload.to_string().into()))
                 .await
@@ -900,7 +931,7 @@ impl CodexSharedClient {
             result?.map_err(|_| CodexSharedError::uncertain("provider reply channel ended"))??;
         if let Some(error) = value.get("error") {
             if value.get("result").is_none()
-                && diagnostics::stale_steer_rejection(method, &payload["params"], error)
+                && diagnostics::stale_steer_rejection(method, &diagnostic_payload["params"], error)
             {
                 return Err(CodexSharedError {
                     code: "stale_turn_rejected".into(),
