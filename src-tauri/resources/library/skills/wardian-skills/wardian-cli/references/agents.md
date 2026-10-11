@@ -144,6 +144,7 @@ through the official commands:
 
 ```bash
 wardian agent worktree list
+wardian agent worktree prepare --source <absolute-repository-path> --name review-fixes --ref <commit-or-revision>
 wardian agent worktree enable reviewer-a1 --name review-fixes
 wardian agent worktree join reviewer-a1 --worktree <absolute-worktree-path-or-id>
 wardian agent worktree disable reviewer-a1
@@ -158,3 +159,13 @@ replacement transaction. The explicit move temporarily uses Resume while retaini
 configured persistence policy. An unconfirmed candidate leaves a durable
 `<wardian-home>/runtime/workspace-handovers/` reservation that blocks target deletion
 until candidate exit and the reservation have been inspected.
+
+`agent worktree prepare` uses the live desktop endpoint but requires no managed
+caller or target agent. It creates a new unassigned Git worktree at the explicit
+commit under the primary checkout's sibling `<project>.wt/<name>` and runs the
+existing build-cache setup. Git owns registration; there is no additional
+registry. Names use lowercase letters, digits and hyphens; branch
+`wardian/<name>` and the target path must both be unused. Preparation leaves
+agent assignments and provider sessions intact. A later `join` uses the
+session-preserving assignment described above. If cache setup fails after creation, the
+checkout is retained and the error explains that state; no cleanup runs.

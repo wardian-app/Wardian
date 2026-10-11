@@ -380,6 +380,7 @@ wardian agent update <name-or-uuid> --description= # clear the memo
 wardian agent update <name-or-uuid> --model <model-id> --reasoning-effort <effort>
 wardian agent clone <name-or-uuid> --name coder-a2
 wardian agent worktree list
+wardian agent worktree prepare --source <absolute-repository-path> --name review-fixes --ref <commit-or-revision>
 wardian agent worktree enable <name-or-uuid> --name review-fixes
 wardian agent worktree join <name-or-uuid> --worktree <absolute-worktree-path-or-id>
 wardian agent worktree disable <name-or-uuid>
@@ -757,6 +758,17 @@ uncontained active runtimes, including POSIX PTYs without such a receipt, are re
 assignment remains supported across platforms. If shutdown or replacement is unconfirmed, a retained `<wardian-home>/runtime/workspace-handovers/` record blocks deletion of the target
 until the provider candidate and reservation have been inspected. Do not remove that record while candidate exit
 is unconfirmed.
+
+`agent worktree prepare` uses the live desktop endpoint but requires no managed
+caller or target agent. It creates a new unassigned Git worktree at the explicit
+commit under the primary checkout's sibling `<project>.wt/<name>` and runs the
+existing build-cache setup. Git owns registration; there is no additional
+registry. Names use lowercase letters, digits and hyphens; branch
+`wardian/<name>` and the target path must both be unused. Preparation leaves
+agent assignments and provider sessions intact. A later `join` uses the
+session-preserving assignment described above. If cache setup fails after creation, the
+checkout is retained and the error explains that state; no cleanup runs.
+
 
 `team` and `watchlist` read and write `<wardian-home>/watchlists/index.json`. Read commands accept the current v2 shape with global teams and legacy flat watchlist arrays, then return `schema: 1` JSON for automation. Mutation commands write canonical v2 JSON with camelCase storage keys, resolve agent names or UUIDs through the same roster state as `agent list`, and update `topology.json` when team creation, add, or split operations seed new team clique edges. If the desktop app is running for the same `WARDIAN_HOME`, the CLI sends a best-effort reload notification so the roster picks up the change. `message send team:<name> <message>` is still not implemented.
 

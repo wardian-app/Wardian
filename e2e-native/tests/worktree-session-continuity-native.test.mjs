@@ -157,8 +157,11 @@ setInterval(() => {
   assert.equal(launches[1].id, thread);
   assert.equal(normalized(launches[1].cwd), normalized(enabled.worktree.worktree_folder));
   await waitPublishedProvider(harness, owner.session_id);
-  const second = path.join(`${source}.wt`, `second-${runId}`);
-  git(source, ['worktree','add','-b', `wardian/second-${runId}`, second, 'HEAD']);
+  const beforePreparation = await snapshot();
+  const prepared = cli(binary, harness, ['agent','worktree','prepare','--source',source,'--name',`second-${runId}`,'--ref','HEAD']);
+  assert.deepEqual(await snapshot(), beforePreparation, 'Preparation must not alter the live conversation or assignment');
+  assert.equal(prepared.cleared_session, false);
+  const second = prepared.worktree_folder;
   const joined = cli(binary, harness, ['agent','worktree','join', name, '--worktree', second]);
   assert.equal(joined.cleared_session, false);
   await check(second);

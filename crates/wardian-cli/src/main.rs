@@ -19,11 +19,11 @@ mod output;
 mod schema;
 mod telemetry;
 mod watchlist;
+mod worktree;
 use args::{
-    AgentArgs, AgentCommand, AgentWorktreeCommand, AutomationArgs, AutomationCommand,
-    AutomationScheduleCommand, AutomationSessionCloseCommand, Cli, Command, ConversationArgs,
-    ConversationCommand, DeliveryArgs, DeliveryCommand, NotifyArgs, NotifyCommand,
-    ScheduleDefinitionArgs,
+    AgentArgs, AgentCommand, AutomationArgs, AutomationCommand, AutomationScheduleCommand,
+    AutomationSessionCloseCommand, Cli, Command, ConversationArgs, ConversationCommand,
+    DeliveryArgs, DeliveryCommand, NotifyArgs, NotifyCommand, ScheduleDefinitionArgs,
 };
 use clap::Parser;
 use errors::{handle_parse_error, parse_error, CliError, ExitCode};
@@ -42,6 +42,7 @@ use wardian_core::identity::{self, ListFilters, Scope};
 use wardian_core::models::{
     AutomationAssignments, LibraryEntry, LibraryIndexNode, ScheduleDefinition,
 };
+use worktree::handle_agent_worktree;
 
 fn main() {
     std::process::exit(run());
@@ -457,47 +458,6 @@ fn handle_agent_clone(
 ) -> Result<String, CliError> {
     let agent = live::agent_clone(target, name).map_err(control_error)?;
     render_show(&agent, &render_options(args))
-}
-
-fn handle_agent_worktree(command: &AgentWorktreeCommand) -> Result<String, CliError> {
-    match command {
-        AgentWorktreeCommand::List => {
-            let worktrees = live::agent_worktree_list().map_err(control_error)?;
-            render_worktree_list(&worktrees)
-        }
-        AgentWorktreeCommand::Enable { target, name } => {
-            let response =
-                live::agent_worktree_enable(target, name.as_deref()).map_err(control_error)?;
-            render_worktree_mutation_response(&response)
-        }
-        AgentWorktreeCommand::Join { target, worktree } => {
-            let response = live::agent_worktree_join(target, worktree).map_err(control_error)?;
-            render_worktree_mutation_response(&response)
-        }
-        AgentWorktreeCommand::Disable { target } => {
-            let response = live::agent_worktree_disable(target).map_err(control_error)?;
-            render_worktree_mutation_response(&response)
-        }
-    }
-}
-
-fn render_worktree_list(
-    worktrees: &[wardian_core::control::AgentWorktreeSummary],
-) -> Result<String, CliError> {
-    serde_json::to_string(&serde_json::json!({
-        "schema": 1,
-        "worktrees": worktrees,
-    }))
-    .map(|json| format!("{json}\n"))
-    .map_err(|e| CliError::generic(e.to_string()))
-}
-
-fn render_worktree_mutation_response(
-    response: &wardian_core::control::AgentWorktreeMutationResponse,
-) -> Result<String, CliError> {
-    serde_json::to_string(response)
-        .map(|json| format!("{json}\n"))
-        .map_err(|e| CliError::generic(e.to_string()))
 }
 
 fn handle_agent_wait(
@@ -2021,6 +1981,7 @@ fn identity_error(error: identity::IdentityError) -> CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::worktree::{render_worktree_list, render_worktree_mutation_response};
     include!("tests/automation_snapshot_tests.rs");
 
     struct TestWardianHome {

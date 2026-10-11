@@ -56,6 +56,8 @@ function seedGitRepo(harness) {
     "user.name=Wardian E2E",
     "-c",
     "user.email=wardian-e2e@example.invalid",
+    "-c",
+    "commit.gpgsign=false",
     "commit",
     "-m",
     "Initial commit",
@@ -141,6 +143,19 @@ test("CLI worktree mode enables, lists, and disables without deleting the physic
   }
 
   const cliPath = buildCli(harness);
+  const activeRecords = path.join(harness.isolatedHome, "preparation-active-provider.jsonl");
+  const activeScript = path.join(harness.isolatedHome, "preparation-provider.cjs");
+  fs.writeFileSync(activeScript, `
+const fs = require('node:fs');
+const id = process.env.WARDIAN_MOCK_SESSION_ID;
+fs.appendFileSync(${JSON.stringify(activeRecords)}, JSON.stringify({pid:process.pid, id, cwd:process.cwd()}) + '\\n');
+const event = JSON.stringify({type:'init', session_id:id, timestamp:new Date().toISOString()}) + '\\n';
+process.stdout.write(event); fs.appendFileSync(process.env.WARDIAN_MOCK_LOG, event);
+const ready = JSON.stringify({type:'result', status:'success'}) + '\\n';
+process.stdout.write(ready); fs.appendFileSync(process.env.WARDIAN_MOCK_LOG, ready);
+process.stdin.resume(); setInterval(() => {}, 1000);
+`);
+  process.env.WARDIAN_MOCK_SCRIPT = activeScript;
 
   let session;
   try {
@@ -159,6 +174,47 @@ test("CLI worktree mode enables, lists, and disables without deleting the physic
   const sessionId = spawnedAgent.session_id;
   assert.notEqual(sessionId, PROVIDER_SESSION_ID);
 
+  const activeAgent = await session.driver.executeAsyncScript((folder, name, thread, done) => {
+    window.__TAURI_INTERNALS__.invoke("spawn_agent", { req: {
+      sessionName:name, agentClass:"Coder", folder, resumeSession:thread, isOff:false,
+      configOverride:{provider:"mock", session_persistence:"resume"},
+    }}).then(value => done({ok:true,value}), error => done({ok:false,error:String(error)}));
+  }, repoPath, `Active-Preparation-${RUN_ID}`, `active-preparation-${RUN_ID}`);
+  assert.equal(activeAgent.ok, true, activeAgent.error);
+  await session.driver.wait(() => { try { return JSON.parse(fs.readFileSync(activeRecords, "utf8").trim()); } catch { return false; } }, 20000, "Active provider did not start");
+  const providerRecordBytes = fs.readFileSync(activeRecords);
+  const providerRecord = JSON.parse(providerRecordBytes.toString('utf8').trim());
+  assert.equal(providerRecord.id, `active-preparation-${RUN_ID}`);
+  process.kill(providerRecord.pid, 0); // Read-only liveness of this test-owned child.
+
+  // Creation is independent of assignment and never clears even the recorded
+  // provider identity. This crosses the real CLI and desktop dispatch path.
+  const beforePreparation = await session.driver.executeAsyncScript((done) => {
+    window.__TAURI_INTERNALS__.invoke("list_agents").then(done);
+  });
+  const sourceHead = runGit(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+  const sourceIndex = fs.readFileSync(path.join(repoPath, ".git", "index"));
+  const prepared = runCli(cliPath, harness, [
+    "agent", "worktree", "prepare", "--source", repoPath,
+    "--name", `prepared-${RUN_ID}`, "--ref", sourceHead,
+  ]);
+  assert.equal(prepared.ok, true);
+  assert.equal(prepared.cleared_session, false);
+  assert.equal(prepared.commit, sourceHead);
+  assert.equal(runGit(prepared.worktree_folder, ["rev-parse", "HEAD"]).stdout.trim(), sourceHead);
+  assert.deepEqual(fs.readFileSync(path.join(repoPath, ".git", "index")), sourceIndex);
+  const afterPreparation = await session.driver.executeAsyncScript((done) => {
+    window.__TAURI_INTERNALS__.invoke("list_agents").then(done);
+  });
+  assert.deepEqual(afterPreparation, beforePreparation);
+  assert.deepEqual(fs.readFileSync(activeRecords), providerRecordBytes, "Preparation must not restart the active provider");
+  process.kill(providerRecord.pid, 0);
+  const preparedList = runCli(cliPath, harness, ["agent", "worktree", "list"]);
+  const unassigned = preparedList.worktrees.find((entry) =>
+    entry.worktree_folder === normalizeForWardianRecords(prepared.worktree_folder));
+  assert.ok(unassigned, "prepared checkout must be discovered through Git registration");
+  assert.deepEqual(unassigned.member_agent_ids, []);
+
   const enabled = runCli(cliPath, harness, [
     "agent",
     "worktree",
@@ -168,6 +224,7 @@ test("CLI worktree mode enables, lists, and disables without deleting the physic
     WORKTREE_NAME,
   ]);
   assert.equal(enabled.ok, true);
+  assert.equal(enabled.cleared_session, false);
   assert.equal(enabled.agent?.uuid, sessionId);
   assert.equal(enabled.agent?.name, SESSION_NAME);
   assert.ok(enabled.worktree?.worktree_folder, `missing worktree in response: ${JSON.stringify(enabled)}`);
@@ -182,8 +239,19 @@ test("CLI worktree mode enables, lists, and disables without deleting the physic
   assert.ok(listedWorktree, `enabled worktree missing from CLI list: ${JSON.stringify(listed)}`);
   assert.equal(listedWorktree.worktree_folder, normalizeForWardianRecords(worktreeFolder));
 
+  // Composed Off assignment preserves its identity without launching a provider.
+  const enabledAgents = await session.driver.executeAsyncScript((done) => {
+    window.__TAURI_INTERNALS__.invoke("list_agents").then(done);
+  });
+  const enabledConfig = enabledAgents.find(agent => agent.session_id === sessionId);
+  assert.equal(enabledConfig.is_off, true);
+  assert.equal(enabledConfig.resume_session, spawnedAgent.resume_session);
+  assert.deepEqual(fs.readFileSync(activeRecords), providerRecordBytes);
+  process.kill(providerRecord.pid, 0);
+
   const disabled = runCli(cliPath, harness, ["agent", "worktree", "disable", SESSION_NAME]);
   assert.equal(disabled.ok, true);
+  assert.equal(disabled.cleared_session, false);
   assert.equal(disabled.agent?.uuid, sessionId);
   assert.equal(disabled.agent?.name, SESSION_NAME);
   assert.equal(disabled.worktree ?? null, null);

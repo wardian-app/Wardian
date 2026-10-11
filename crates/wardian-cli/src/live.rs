@@ -55,6 +55,7 @@ enum ControlOperation {
     AgentClone,
     AgentWorktreeList,
     AgentWorktreeEnable,
+    AgentWorktreePrepare,
     AgentWorktreeJoin,
     AgentWorktreeDisable,
     ConversationList,
@@ -473,6 +474,25 @@ pub fn agent_worktree_list() -> io::Result<Vec<AgentWorktreeSummary>> {
     Ok(resp.worktrees)
 }
 
+/// Prepare a checkout through live control; no managed sender or target is needed.
+pub fn agent_worktree_prepare(
+    source: &str,
+    name: &str,
+    reference: &str,
+) -> io::Result<wardian_core::control::AgentWorktreePrepareResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::AgentWorktreePrepare,
+        send_request(ControlRequest::AgentWorktreePrepare {
+            source: source.to_string(),
+            name: name.to_string(),
+            reference: reference.to_string(),
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|error| io::Error::other(error.to_string()))
+}
+
 pub fn agent_worktree_enable(
     target: &str,
     name: Option<&str>,
@@ -888,6 +908,7 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::AgentUpdate
         | ControlOperation::AgentClone
         | ControlOperation::AgentWorktreeEnable
+        | ControlOperation::AgentWorktreePrepare
         | ControlOperation::AgentWorktreeJoin
         | ControlOperation::AgentWorktreeDisable
         | ControlOperation::AutomationRun
@@ -1468,6 +1489,10 @@ mod tests {
 
     #[test]
     fn worktree_mutations_use_longer_control_timeout() {
+        assert_eq!(
+            operation_timeout(&ControlOperation::AgentWorktreePrepare),
+            CONTROL_MUTATION_TIMEOUT
+        );
         assert_eq!(
             operation_timeout(&ControlOperation::AgentWorktreeEnable),
             CONTROL_MUTATION_TIMEOUT

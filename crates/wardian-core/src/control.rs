@@ -89,6 +89,12 @@ pub enum ControlRequest {
         name: Option<String>,
     },
     AgentWorktreeList,
+    /// Create Git-owned source isolation without an agent lifecycle transition.
+    AgentWorktreePrepare {
+        source: String,
+        name: String,
+        reference: String,
+    },
     AgentWorktreeEnable {
         target: String,
         name: Option<String>,
@@ -981,6 +987,18 @@ impl AgentWorktreeListResponse {
     }
 }
 
+/// Preparation has no target agent or assignment; Git owns registration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentWorktreePrepareResponse {
+    pub schema: u8,
+    pub ok: bool,
+    pub source_folder: String,
+    pub worktree_folder: String,
+    pub branch_name: String,
+    pub commit: String,
+    pub cleared_session: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentWorktreeMutationResponse {
     pub schema: u8,
@@ -1023,6 +1041,23 @@ pub fn socket_path() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worktree_prepare_contract_has_no_target_or_sender() {
+        let request = ControlRequest::AgentWorktreePrepare {
+            source: "/repo".into(),
+            name: "review".into(),
+            reference: "HEAD~1".into(),
+        };
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["command"], "agent_worktree_prepare");
+        assert!(value.get("target").is_none());
+        assert!(value.get("origin").is_none());
+        assert!(
+            matches!(serde_json::from_value::<ControlRequest>(value).unwrap(),
+            ControlRequest::AgentWorktreePrepare { reference, .. } if reference == "HEAD~1")
+        );
+    }
 
     #[test]
     fn artifact_present_request_serializes_origin_and_repeated_addresses() {

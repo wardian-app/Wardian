@@ -6,7 +6,11 @@ owned by Wardian's workspace records. Use `wardian agent worktree enable` and
 the primary checkout under `<source-checkout>.wt/`. These commands preserve the
 target provider conversation through a workspace handover. A harness subagent uses its coordinator's prepared
 checkout with an explicit working directory; creating a worktree does not
-require creating another permanent agent.
+require creating another permanent agent. Prepare an unassigned checkout with
+`wardian agent worktree prepare --source <absolute-repository-path> --name <name> --ref <commit-or-revision>`.
+This requires the matching live desktop endpoint but no managed sender or target;
+creation does not assign a workspace or reset any provider session. Existing
+paths and branches are refused. Git remains the sole worktree registry.
 
 Ephemeral baseline source exports can live in private temporary directories.
 They are unassigned measurement inputs, with no implementation branch,
