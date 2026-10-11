@@ -192,20 +192,14 @@ where
 
     let result = dispatch_request(&line, &app).await;
 
+    let payload = match result {
+        Ok(json) => json,
+        Err(error) => error_payload(&error)?,
+    };
     let stream = reader.get_mut();
-    match result {
-        Ok(json) => {
-            stream.write_all(json.as_bytes()).await?;
-            stream.write_all(b"\n").await?;
-            stream.flush().await?;
-        }
-        Err(error) => {
-            let payload = error_payload(&error)?;
-            stream.write_all(payload.as_bytes()).await?;
-            stream.write_all(b"\n").await?;
-            stream.flush().await?;
-        }
-    }
+    stream.write_all(payload.as_bytes()).await?;
+    stream.write_all(b"\n").await?;
+    stream.flush().await?;
 
     Ok(())
 }
@@ -215,6 +209,11 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
         .map_err(|e| ControlError::bad_request(format!("malformed control request JSON: {e}")))?;
 
     match req {
+        ControlRequest::ControllerMessaging {
+            request,
+            token,
+            resource,
+        } => agent_messaging::handle_controller(app, request, token, resource).await,
         ControlRequest::AgentMessaging { request, origin } => {
             agent_messaging::handle(app, request, origin).await
         }

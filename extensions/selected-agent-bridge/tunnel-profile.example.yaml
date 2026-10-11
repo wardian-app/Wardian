@@ -1,0 +1,24 @@
+# Dormant template for OpenAI tunnel-client v0.0.16. Copy outside the repository.
+# Replace every placeholder; this file does not create a tunnel or credentials.
+config_version: 1
+control_plane:
+  base_url: https://api.openai.com
+  tunnel_id: <approved-private-tunnel-id>
+  # Keep the Platform runtime API key in a private file, not child-inherited env.
+  api_key: file:<absolute-private-runtime-key-file>
+health:
+  listen_addr: 127.0.0.1:8080
+admin_ui:
+  open_browser: false
+log:
+  level: info
+  format: json
+mcp:
+  max_concurrent_requests: 1
+  stdio_send_initialized_notification: true
+  commands:
+    - channel: main
+      # The tunnel parser preserves backslashes inside these inner single quotes.
+      # Use absolute paths for Node, the relay, and its private JSON configuration.
+      command: >-
+        '<absolute-node-executable>' '<absolute-extension-path>/tunnel-stdio.mjs' --config '<absolute-private-relay-config>' --stdio

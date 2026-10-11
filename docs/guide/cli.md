@@ -892,3 +892,9 @@ blueprints still return `ok: true` on stdout and exit 0.
 - [Command Panel](./command-panel.md)
 - [Automations](../automations/index.md)
 - [Native E2E Harness](../developer/native-e2e.md)
+
+## External controller grants
+
+External assistants can use a distinct named controller identity with selected agent UUIDs and explicit scopes. Owner commands are `wardian controller create`, `list` and `revoke`; token verification is `controller verify --resource <https-resource>`. Controller stdio mode is `mcp serve --controller`, with environment-only credentials and resource binding. Grant management runs outside managed agent sessions.
+
+See the [optional controller bridge setup](https://github.com/wardian-app/Wardian/blob/main/extensions/selected-agent-bridge/CONTROLLERS.md) for exact capability names, credential handling and remote HTTP integration. A cloud client needs an approved HTTPS route; localhost and stdio alone provide no cloud connectivity.
