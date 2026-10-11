@@ -1502,8 +1502,6 @@ fn codex_cleared_provider_sessions(config: &AgentConfig) -> Vec<String> {
 
 #[cfg(target_os = "macos")]
 use super::macos_extended_path;
-#[cfg(windows)]
-use super::{app_process_supervisor_active, assign_pid_to_job, create_kill_on_close_job};
 
 pub(super) fn capture_init_timestamp(
     event: &AgentEvent,
@@ -2137,10 +2135,10 @@ async fn spawn_agent_inner(
     )?;
     let provider = ProviderFactory::resolve(&config.provider)?;
     crate::providers::readiness::ensure_provider_available_for_launch(&config.provider)?;
-    if matches!(config.provider.as_str(), "pi" | "opencode") {
-        let home = crate::utils::fs::get_wardian_home().ok_or("Could not locate Wardian home")?;
-        super::codex_stop::await_quiescent(&home, &config.session_id).await?;
-    }
+    // Replacement admission belongs to the retained incarnation, not the
+    // newly selected provider. Never bypass an old stop fence after config edits.
+    let home = crate::utils::fs::get_wardian_home().ok_or("Could not locate Wardian home")?;
+    super::codex_stop::await_quiescent(&home, &config.session_id).await?;
 
     let cwd = crate::utils::fs::resolve_cwd(&config.folder, &config.session_id);
     let antigravity_database_baseline = if config.provider == "antigravity"
@@ -2729,6 +2727,11 @@ async fn spawn_agent_inner(
 
     // The transition lease acquired before native owner preparation remains
     // held through PTY creation and publication.
+    let starting_runtime = super::codex_stop::StartingRuntime::prepare(
+        &home,
+        &config,
+        app_state.terminal_sessions.clone(),
+    )?;
     #[cfg(windows)]
     let contained_job = Some(crate::utils::process::RuntimeProcessJob::prepare(&mut cmd)?);
     // Provider records written after this instant belong to this runtime.
@@ -2760,7 +2763,11 @@ async fn spawn_agent_inner(
         child
     };
     let mut child = super::codex_shared::StartingCodexTui::new(
-        child,
+        starting_runtime.attach(
+            child,
+            #[cfg(windows)]
+            contained_job,
+        ),
         codex_attachment.as_ref().map(|attachment| {
             (
                 app_state.native_delivery.clone(),
@@ -2811,26 +2818,6 @@ async fn spawn_agent_inner(
         process_id,
     );
 
-    #[cfg(windows)]
-    let job_object = {
-        if contained_job.is_some() {
-            contained_job
-        } else if app_process_supervisor_active() {
-            None
-        } else if let Ok(job) = create_kill_on_close_job("agent fallback") {
-            if let Some(pid) = process_id {
-                if let Err(err) = assign_pid_to_job(&job, pid, "agent fallback") {
-                    log_debug(&format!(
-                        "[Wardian] Failed to assign session {} PID {} to fallback job: {}",
-                        config.session_id, pid, err
-                    ));
-                }
-            }
-            Some(crate::utils::process::RuntimeProcessJob::fallback(job))
-        } else {
-            None
-        }
-    };
     let mut reader = pair
         .master
         .try_clone_reader()
@@ -4863,9 +4850,10 @@ async fn spawn_agent_inner(
             guard.attached();
         }
     }
+    let started = child.attached();
     let active = ActiveAgent {
         config: config_lock.clone(),
-        child_process: Some(child.attached()),
+        child_process: Some(started.child),
         background_processes,
         memory_capability,
         runtime_generation: Some(runtime_generation),
@@ -4881,7 +4869,7 @@ async fn spawn_agent_inner(
         log_path,
         log_last_modified: std::sync::Arc::new(std::sync::Mutex::new(None)),
         #[cfg(windows)]
-        job_object,
+        job_object: started.job,
     };
     if publication == SpawnPublication::Provisional {
         codex_attachment_completion = codex_attachment.as_ref().map(|attachment| {

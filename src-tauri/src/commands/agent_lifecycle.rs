@@ -278,13 +278,13 @@ where
         .dispose_agent(session_id)
         .await
         .map_err(|error| error.to_string())?;
-    stop_codex_runtime(state, session_id, remove_terminal, before_capture).await
+    stop_retained_runtime(state, session_id, remove_terminal, before_capture).await
 }
 
 /// Explicit lifecycle operations may retry the same retained children. Native
 /// startup only awaits quiescence; it must never retry a failed stop itself.
 /// Finish this before clear/resume bootstrap, even when the roster looks Off.
-async fn stop_codex_runtime<F>(
+async fn stop_retained_runtime<F>(
     state: &AppState,
     session_id: &str,
     remove_terminal: bool,
@@ -306,7 +306,12 @@ where
         .map_err(|_| "Agent configuration lock poisoned")?
         .provider
         .clone();
-    let contained_opencode = if provider == "opencode" {
+    // A captured old incarnation fences this home/session even after the roster
+    // provider changes or its handles have moved to retained cleanup.
+    let home = crate::utils::fs::get_wardian_home().ok_or("Could not locate Wardian home")?;
+    crate::manager::codex_stop::retry_stop(&home, session_id)?;
+    crate::manager::codex_stop::await_quiescent(&home, session_id).await?;
+    let contained = {
         #[cfg(windows)]
         {
             let agents = state.agents.lock().await;
@@ -321,30 +326,12 @@ where
         {
             false
         }
-    } else {
-        false
     };
-    if provider != "codex" && !contained_opencode {
-        // An earlier failed/cancelled OpenCode stop must still fence replacement,
-        // even though its captured handles have left the roster.
-        if provider == "opencode" {
-            let home =
-                crate::utils::fs::get_wardian_home().ok_or("Could not locate Wardian home")?;
-            crate::manager::codex_stop::retry_stop(&home, session_id)?;
-            crate::manager::codex_stop::await_quiescent(&home, session_id).await?;
-        }
+    if provider != "codex" && !contained {
         return Ok(());
     }
-    let home = crate::utils::fs::get_wardian_home().ok_or("Could not locate Wardian home")?;
-    crate::manager::codex_stop::retry_stop(&home, session_id)?;
-    crate::manager::codex_stop::await_quiescent(&home, session_id).await?;
-    // Validate while the roster still owns the runtime. Lifecycle exclusion
-    // covers the interval until capture; this token does not fence owner startup.
-    let registration = if contained_opencode {
-        crate::manager::codex_stop::prepare_opencode_stop(&home, session_id)?
-    } else {
-        crate::manager::codex_stop::prepare_stop(&home, session_id)?
-    };
+    let registration =
+        crate::manager::codex_stop::prepare_runtime_stop(&home, session_id, &provider)?;
     let (guard, generation) = {
         let mut agents = state.agents.lock().await;
         let agent = agents
@@ -382,7 +369,7 @@ where
     guard.begin_stop().wait().await
 }
 
-/// Finite launch/registration guard: uncommitted Codex and Pi runtimes transfer their
+/// Finite launch/registration guard: uncommitted native runtimes transfer their
 /// child handles and exact terminal generation into retained cancellation cleanup.
 /// Installed ActiveAgent Drop is unchanged.
 pub(super) struct PendingRuntime {
@@ -396,14 +383,14 @@ impl PendingRuntime {
         config: &wardian_core::models::AgentConfig,
         terminal_sessions: &std::sync::Arc<crate::state::terminal_session::TerminalSessionBroker>,
     ) -> Result<Self, String> {
-        let registration = if matches!(config.provider.as_str(), "codex" | "pi") {
+        let registration = if cfg!(windows) || matches!(config.provider.as_str(), "codex" | "pi") {
             let home =
                 crate::utils::fs::get_wardian_home().ok_or("Could not locate Wardian home")?;
-            let registration = if config.provider == "pi" {
-                crate::manager::codex_stop::prepare_pi_stop(&home, &config.session_id)?
-            } else {
-                crate::manager::codex_stop::prepare_stop(&home, &config.session_id)?
-            };
+            let registration = crate::manager::codex_stop::prepare_runtime_stop(
+                &home,
+                &config.session_id,
+                &config.provider,
+            )?;
             Some(registration.with_terminal_cleanup(terminal_sessions.clone())?)
         } else {
             None
@@ -474,7 +461,7 @@ impl Drop for PendingRuntime {
                 // No await or fallible operation between take and registry capture.
                 drop(registration.capture(self.runtime.take().expect("checked runtime")));
             }
-            // Other providers retain ActiveAgent's existing Drop behavior.
+            // Providers outside retained native ownership keep their existing Drop behavior.
         }
     }
 }

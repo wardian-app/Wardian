@@ -298,13 +298,22 @@ Some TUIs repaint by moving the cursor home and rewriting the current viewport i
 The frontend drain path batches PTY output before writing into xterm instead of issuing one write per small chunk. This reduces render pressure during bursty output and improves scrolling behavior for TUI-heavy providers such as OpenCode.
 
 
-### Contained OpenCode Pause acknowledgement
+### Contained native-runtime stop acknowledgement
 
-On Windows, normal lifecycle stop of a prelaunch-contained OpenCode runtime
+On Windows, normal lifecycle stop of a prelaunch-contained native runtime
 captures the exact job and PTY child into retained stop ownership before any
 terminal shutdown await. Pause acknowledges only after the retained child,
 captured job members, and job emptiness prove tree exit. The stop worker
 survives cancellation of the IPC waiter. A join failure retains both ownership
 and a stop fence; resume and other replacement launch paths await that fence.
+Unpublished Windows candidates reserve the same retained cleanup before launch.
+A startup guard receives the exact child and job immediately after spawn, before
+fallible reader setup or terminal registration, and retains them until the
+unpublished runtime takes ownership.
+Cancellation synchronously captures their exact runtime and terminal generation;
+replacement admission checks the old home/session fence even if the selected
+provider changes. Cleanup snapshots identity and containment at capture rather
+than consulting later mutable configuration. A root-only observation cannot
+release a failed contained-job fence; explicit retry must obtain the job receipt.
 No provider request is replayed by stop or explicit stop retry. Legacy
 uncontained runtimes retain their existing best-effort cleanup policy.

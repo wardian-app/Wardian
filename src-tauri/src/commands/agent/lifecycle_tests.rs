@@ -1,4 +1,4 @@
-//! Retained lifecycle cleanup with fake children; no provider processes run.
+//! Retained lifecycle cleanup with fake children and isolated contained process fixtures.
 use super::super::tests::make_test_agent;
 use super::super::tests::use_isolated_resume_setting;
 use super::super::{
@@ -421,7 +421,7 @@ async fn failed_candidate_keeps_original_error_and_retained_cleanup_failure() {
 }
 
 #[tokio::test]
-async fn installed_candidate_and_non_codex_runtime_do_not_create_stop_fences() {
+async fn installed_candidates_do_not_create_stop_fences() {
     let _environment = crate::utils::wardian_test_env_lock_async().await;
     let fixture = Fixture::new();
     for provider in ["codex", "claude"] {
@@ -591,4 +591,58 @@ fn confirmed_and_legacy_pi_resume_remain_strict() {
     assert!(prepare_resume_config(&mut config).is_err());
     assert_eq!(config.fresh_provider_session_id, None);
     std::env::remove_var("WARDIAN_HOME");
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn cancelled_contained_candidates_join_tree_and_terminal_for_each_provider() {
+    use std::os::windows::io::AsRawHandle;
+    let _environment = crate::utils::wardian_test_env_lock_async().await;
+    let fixture = Fixture::new();
+    for provider in ["opencode", "claude", "codex", "pi"] {
+        let id = format!("cancelled-contained-{provider}");
+        let directory = fixture.home.join(&id);
+        std::fs::create_dir(&directory).unwrap();
+        let (job, child, pty, descendant) =
+            crate::utils::process::test_contained_pty_tree(&directory).await;
+        let root_pid = child.process_id();
+        let signals = Arc::new(ChildState::default());
+        let mut runtime = fixture.runtime(&id, &signals);
+        runtime.config.lock().unwrap().provider = provider.into();
+        runtime.child_process = Some(child);
+        runtime.job_object = Some(job);
+        runtime.process_id = root_pid;
+        let terminal = Arc::new(TerminalSessionBroker::default());
+        let (generation, mut input) = attached_terminal(&terminal, &id).await;
+        runtime.runtime_generation = Some(generation);
+        let config = runtime.config.lock().unwrap().clone();
+        let pending = PendingRuntime::prepare(&config, &terminal)
+            .unwrap()
+            .attach(runtime);
+        let (ready, received) = tokio::sync::oneshot::channel();
+        let caller = tokio::spawn(async move {
+            let _pending = pending;
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        received.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            await_quiescent(&fixture.home, &id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            unsafe {
+                winapi::um::synchapi::WaitForSingleObject(descendant.as_raw_handle() as _, 0)
+            },
+            winapi::um::winbase::WAIT_OBJECT_0,
+            "{provider}"
+        );
+        assert_terminal_closed(&terminal, &id, &mut input).await;
+        let _rebound = std::net::TcpListener::bind(pty.listening_addr).unwrap();
+    }
 }
