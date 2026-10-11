@@ -686,26 +686,8 @@ fn parse_pi_log_metrics(content: &str) -> Option<PiLogMetrics> {
     (saw_record && (metrics.init_timestamp.is_some() || metrics.query_count > 0)).then_some(metrics)
 }
 
-struct AgentSnapshot {
-    session_id: String,
-    provider: String,
-    folder: String,
-    is_off: bool,
-    resume_session: Option<String>,
-    conversation_logging: wardian_core::conversations::AgentConversationLoggingSetting,
-    capture_conversation: Option<String>,
-    provider_generation: u64,
-    process_id: Option<u32>,
-    query_count: Arc<Mutex<usize>>,
-    init_timestamp: Arc<Mutex<Option<String>>>,
-    last_query_timestamp: Arc<Mutex<Option<String>>>,
-    current_status: Arc<Mutex<String>>,
-    status_observation: Mutex<TelemetryStatusDraft>,
-    watch_state: Arc<Mutex<crate::state::AgentWatchState>>,
-    last_output_at: Arc<Mutex<Option<std::time::SystemTime>>>,
-    log_path: Arc<Mutex<Option<std::path::PathBuf>>>,
-    log_last_modified: Arc<Mutex<Option<std::time::SystemTime>>>,
-}
+mod snapshot;
+use snapshot::AgentSnapshot;
 
 #[derive(Default)]
 struct TelemetryStatusDraft {

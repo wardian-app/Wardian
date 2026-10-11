@@ -1,4 +1,8 @@
-use wardian_core::models::provider::{AgentEvent, AgentProvider};
+pub(crate) mod history;
+use wardian_core::models::provider::{
+    AgentEvent, AgentProvider, ConfirmedResumeRecord, ExactResumeSourceBinding,
+    MaterializedStoreBinding, ResumeWorkspaceContext,
+};
 use wardian_core::models::AgentConfig;
 
 /// Provider adapter for the OpenCode CLI.
@@ -19,6 +23,71 @@ impl Default for OpenCodeProvider {
 impl OpenCodeProvider {
     pub fn new() -> Self {
         OpenCodeProvider
+    }
+
+    fn decode_resume_binding(
+        binding: &MaterializedStoreBinding,
+    ) -> Result<history::OpenCodeResumeBinding, String> {
+        if binding.confirmed_records.len() > 10_000
+            || binding
+                .confirmed_records
+                .iter()
+                .map(|record| record.key.len().saturating_add(record.sha256.len()))
+                .sum::<usize>()
+                > 1024 * 1024
+            || binding.confirmed_records.iter().any(|record| {
+                record.sha256.len() != 64
+                    || !record.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        {
+            return Err(
+                "OpenCode retained history receipt is invalid or exceeds its budget".into(),
+            );
+        }
+        let identity = (
+            binding
+                .native_identity
+                .0
+                .parse::<u64>()
+                .map_err(|_| "OpenCode retained source volume identity is invalid")?,
+            binding
+                .native_identity
+                .1
+                .parse::<u64>()
+                .map_err(|_| "OpenCode retained source file identity is invalid")?,
+        );
+        Ok(history::OpenCodeResumeBinding {
+            source_path: binding.source_path.clone(),
+            session_id: binding.session_id.clone(),
+            native_identity: identity,
+            confirmed_records: binding
+                .confirmed_records
+                .iter()
+                .map(|record| history::OpenCodeConfirmedRecord {
+                    key: record.key.clone(),
+                    sha256: record.sha256.clone(),
+                })
+                .collect(),
+        })
+    }
+
+    fn encode_resume_binding(binding: history::OpenCodeResumeBinding) -> ExactResumeSourceBinding {
+        ExactResumeSourceBinding::MaterializedStore(MaterializedStoreBinding {
+            source_path: binding.source_path,
+            session_id: binding.session_id,
+            native_identity: (
+                binding.native_identity.0.to_string(),
+                binding.native_identity.1.to_string(),
+            ),
+            confirmed_records: binding
+                .confirmed_records
+                .into_iter()
+                .map(|record| ConfirmedResumeRecord {
+                    key: record.key,
+                    sha256: record.sha256,
+                })
+                .collect(),
+        })
     }
 
     /// Resolve the native launcher referenced by an npm-generated Windows
@@ -130,6 +199,83 @@ impl OpenCodeProvider {
 }
 
 impl AgentProvider for OpenCodeProvider {
+    fn prepare_exact_resume(
+        &self,
+        config: &mut AgentConfig,
+        _context: &ResumeWorkspaceContext,
+    ) -> Result<(), String> {
+        config.validate_exact_resume_identity()?;
+        let source = config
+            .exact_resume
+            .as_ref()
+            .ok_or("OpenCode exact preparation requires retained conversation identity")?
+            .source
+            .as_ref();
+        let binding = match source {
+            None => history::prepare_exact_continuation(config)?,
+            Some(ExactResumeSourceBinding::MaterializedStore(previous)) => {
+                history::revalidate_exact_continuation(
+                    config,
+                    &Self::decode_resume_binding(previous)?,
+                )?
+            }
+            Some(_) => {
+                return Err(
+                    "OpenCode exact resume requires a materialized-store source receipt".into(),
+                )
+            }
+        };
+        config
+            .exact_resume
+            .as_mut()
+            .ok_or("OpenCode exact conversation identity is unavailable")?
+            .source = Some(Self::encode_resume_binding(binding));
+        Ok(())
+    }
+
+    fn revalidate_exact_resume(
+        &self,
+        config: &mut AgentConfig,
+        _context: &ResumeWorkspaceContext,
+    ) -> Result<(), String> {
+        config.validate_exact_resume_identity()?;
+        let previous = match config
+            .exact_resume
+            .as_ref()
+            .and_then(|identity| identity.source.as_ref())
+        {
+            Some(ExactResumeSourceBinding::MaterializedStore(previous)) => {
+                Self::decode_resume_binding(previous)?
+            }
+            Some(_) => {
+                return Err(
+                    "OpenCode exact resume requires a materialized-store source receipt".into(),
+                )
+            }
+            None => {
+                return Err("OpenCode exact resume source receipt is missing before launch".into())
+            }
+        };
+        let binding = history::revalidate_exact_continuation(config, &previous)?;
+        config
+            .exact_resume
+            .as_mut()
+            .ok_or("OpenCode exact conversation identity is unavailable")?
+            .source = Some(Self::encode_resume_binding(binding));
+        Ok(())
+    }
+
+    fn validate_exact_resume(&self, config: &AgentConfig) -> Result<(), String> {
+        history::validate(config)
+    }
+
+    fn validate_resume_launch(&self, config: &AgentConfig) -> Result<(), String> {
+        if config.resume_session.is_some() || config.exact_resume.is_some() {
+            history::validate(config)?;
+        }
+        Ok(())
+    }
+
     fn name(&self) -> &str {
         "OpenCode"
     }

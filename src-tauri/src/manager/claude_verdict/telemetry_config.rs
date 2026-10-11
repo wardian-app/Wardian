@@ -69,21 +69,13 @@ pub(crate) fn existing_telemetry(project_dir: &Path) -> Option<ExistingTelemetry
 
 fn settings_files(project_dir: &Path) -> Vec<PathBuf> {
     let mut files = managed_settings_files();
-    if let Some(config_dir) = claude_config_dir() {
+    if let Ok(config_dir) = crate::providers::claude::history::config_root(project_dir) {
         files.push(config_dir.join("settings.json"));
     }
     let project = project_dir.join(".claude");
     files.push(project.join("settings.json"));
     files.push(project.join("settings.local.json"));
     files
-}
-
-/// Claude's user configuration directory, honouring `CLAUDE_CONFIG_DIR`.
-fn claude_config_dir() -> Option<PathBuf> {
-    std::env::var_os("CLAUDE_CONFIG_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
 }
 
 fn managed_settings_root() -> PathBuf {

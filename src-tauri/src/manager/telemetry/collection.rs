@@ -20,9 +20,22 @@ pub(super) async fn collect_agent_metrics_with_sampler(
             .map(|(sid, agent)| {
                 let config = agent.config.lock().unwrap();
                 AgentSnapshot {
+                    claude_source: crate::providers::claude::continuation_path(&config),
+                    claude_root: crate::manager::continuation_workspace_context(
+                        &config, false, None,
+                    )
+                    .ok()
+                    .and_then(|context| {
+                        crate::providers::claude::continuation_root(&config, &context.launch_cwd)
+                            .ok()
+                    }),
+                    claude_launch_cwd: crate::manager::continuation_workspace_context(
+                        &config, false, None,
+                    )
+                    .ok()
+                    .map(|context| context.launch_cwd),
                     session_id: sid.clone(),
                     provider: config.provider.clone(),
-                    folder: config.folder.clone(),
                     is_off: config.is_off,
                     resume_session: opencode_telemetry_session_id(&config),
                     conversation_logging: config.conversation_logging,
@@ -237,11 +250,12 @@ pub(super) async fn collect_agent_metrics_with_sampler(
                     } else if snap.provider == "claude" && snap.resume_session.is_some() {
                         // For Claude, if we have a resume_session (Conversation ID), always re-verify
                         // the path so it updates immediately after a Clear rotation.
-                        if let Some(home) = dirs::home_dir() {
-                            let project_dir = claude_project_dir_name(&snap.folder);
+                        if let Some(path) = snap.claude_source.as_ref() {
+                            *log_path_lock = Some(path.clone());
+                        } else if let (Some(home), Some(cwd)) = (&snap.claude_root, &snap.claude_launch_cwd) {
+                            let project_dir = claude_project_dir_name(&cwd.to_string_lossy());
                             let session_id_to_find = snap.resume_session.as_deref().unwrap();
                             let candidate = home
-                                .join(".claude")
                                 .join("projects")
                                 .join(&project_dir)
                                 .join(format!("{}.jsonl", session_id_to_find));

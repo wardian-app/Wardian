@@ -1,7 +1,10 @@
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
-use wardian_core::models::provider::{AgentEvent, AgentProvider};
+use wardian_core::models::provider::{
+    AgentEvent, AgentProvider, AppendOnlyTranscriptBinding, ExactResumeSourceBinding,
+    ResumeWorkspaceContext,
+};
 use wardian_core::models::AgentConfig;
 
 pub(crate) mod exact_resume;
@@ -202,7 +205,110 @@ impl PiProvider {
     }
 }
 
+fn retained_continuation_binding(
+    config: &AgentConfig,
+) -> Result<Option<exact_resume::PiContinuationBinding>, String> {
+    let source = config
+        .exact_resume
+        .as_ref()
+        .and_then(|identity| identity.source.as_ref());
+    match source {
+        None => Ok(None),
+        Some(ExactResumeSourceBinding::AppendOnlyTranscript(binding))
+            if binding.root_selector.is_none() =>
+        {
+            Ok(Some(exact_resume::PiContinuationBinding {
+                config_root: binding.config_root.clone(),
+                canonical_path: binding.canonical_path.clone(),
+                session_id: binding.session_id.clone(),
+                native_identity: (
+                    binding
+                        .native_identity
+                        .0
+                        .parse::<u64>()
+                        .map_err(|_| "Pi exact continuation volume identity is invalid")?,
+                    binding
+                        .native_identity
+                        .1
+                        .parse::<u64>()
+                        .map_err(|_| "Pi exact continuation file identity is invalid")?,
+                ),
+                confirmed_bytes: binding.confirmed_bytes,
+                prefix_sha256: binding.prefix_sha256.clone(),
+            }))
+        }
+        Some(_) => Err("Pi exact continuation has incompatible source evidence".into()),
+    }
+}
+
+fn persist_continuation_binding(
+    config: &mut AgentConfig,
+    binding: exact_resume::PiContinuationBinding,
+) -> Result<(), String> {
+    let identity = config
+        .exact_resume
+        .as_mut()
+        .ok_or("Pi exact continuation requires durable exact intent")?;
+    identity.source = Some(ExactResumeSourceBinding::AppendOnlyTranscript(
+        AppendOnlyTranscriptBinding {
+            config_root: binding.config_root,
+            root_selector: None,
+            canonical_path: binding.canonical_path,
+            session_id: binding.session_id,
+            native_identity: (
+                binding.native_identity.0.to_string(),
+                binding.native_identity.1.to_string(),
+            ),
+            confirmed_bytes: binding.confirmed_bytes,
+            prefix_sha256: binding.prefix_sha256,
+        },
+    ));
+    Ok(())
+}
+
+/// Reuse saved pre-stop authority in the generation plan; ordinary unmarked
+/// materialized Resume retains the provider's existing preparation route.
+pub(crate) fn bound_exact_resume_plan(
+    config: &AgentConfig,
+) -> Result<exact_resume::PiExactResumePlan, String> {
+    match retained_continuation_binding(config)? {
+        Some(binding) => exact_resume::PiExactResumePlan::prepare_bound(config, &binding),
+        None => exact_resume::PiExactResumePlan::prepare(config),
+    }
+}
+
 impl AgentProvider for PiProvider {
+    fn prepare_exact_resume(
+        &self,
+        config: &mut AgentConfig,
+        _context: &ResumeWorkspaceContext,
+    ) -> Result<(), String> {
+        config.validate_exact_resume_identity()?;
+        if config.exact_resume.is_none() {
+            return Err("Pi exact continuation requires durable exact intent".into());
+        }
+        let binding = match retained_continuation_binding(config)? {
+            Some(binding) => exact_resume::revalidate_continuation_binding(config, &binding)?,
+            None => exact_resume::prepare_continuation_binding(config)?,
+        };
+        // Validate installation/options before publishing staged evidence.
+        exact_resume::PiExactResumePlan::prepare_bound(config, &binding)?;
+        persist_continuation_binding(config, binding)
+    }
+
+    fn revalidate_exact_resume(
+        &self,
+        config: &mut AgentConfig,
+        _context: &ResumeWorkspaceContext,
+    ) -> Result<(), String> {
+        config.validate_exact_resume_identity()?;
+        let binding = retained_continuation_binding(config)?
+            .ok_or("Pi exact continuation is missing retained source evidence")?;
+        let updated = exact_resume::revalidate_continuation_binding(config, &binding)?;
+        exact_resume::PiExactResumePlan::prepare_bound(config, &updated)?;
+        persist_continuation_binding(config, updated)
+    }
+
     fn validate_native_exact_resume(&self, config: &AgentConfig) -> Result<(), String> {
         config.validate_exact_resume_identity()?;
         Err("Pi exact continuation requires the SDK interactive bridge; native RPC destination resume is not qualified".into())
@@ -211,14 +317,14 @@ impl AgentProvider for PiProvider {
     fn validate_resume_launch(&self, config: &AgentConfig) -> Result<(), String> {
         config.validate_exact_resume_identity()?;
         if config.resume_session.is_some() || config.exact_resume.is_some() {
-            exact_resume::PiExactResumePlan::prepare(config)?;
+            bound_exact_resume_plan(config)?;
         }
         Ok(())
     }
 
     fn validate_exact_resume(&self, config: &AgentConfig) -> Result<(), String> {
         config.validate_exact_resume_identity()?;
-        exact_resume::PiExactResumePlan::prepare(config).map(|_| ())
+        bound_exact_resume_plan(config).map(|_| ())
     }
 
     fn name(&self) -> &str {

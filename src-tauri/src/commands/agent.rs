@@ -2280,7 +2280,12 @@ pub(crate) fn prepare_restored_config_for_spawn(config: &mut AgentConfig) -> Res
 
     let mut prepared = config.clone();
     prepare_resume_config(&mut prepared)?;
-    ProviderFactory::resolve(&prepared.provider)?.validate_resume_launch(&prepared)?;
+    let provider = ProviderFactory::resolve(&prepared.provider)?;
+    provider.validate_resume_launch(&prepared)?;
+    if prepared.exact_resume.is_some() {
+        let context = manager::continuation_workspace_context(&prepared, false, None)?;
+        provider.prepare_exact_resume(&mut prepared, &context)?;
+    }
     *config = prepared;
     Ok(())
 }

@@ -759,7 +759,17 @@ until the provider candidate and reservation have been inspected. Do not remove 
 is unconfirmed.
 
 A workspace assignment records an exact continuation requirement for later
-Resume and native dispatch. Interactive handover qualification does not imply
+Resume and native dispatch. For providers with materialized history, assignment
+also retains source evidence before disposal and revalidates it after archive
+drain and before launch. Missing, replaced, ambiguous, or changed history refuses
+the move without selecting a different conversation. Claude pins its captured
+configuration root and canonical transcript; a changed configuration selector
+requires an explicit conversation boundary. Antigravity accepts only the owned
+stable projection already recorded in its native history, rather than importing
+a conversation created against another literal path. OpenCode requires its
+verified persistent store. Pi retains its owned transcript and complete confirmed
+prefix. These checks also apply to Off assignments and subsequent Resume.
+ Interactive handover qualification does not imply
 native RPC support. Pi's SDK interactive bridge accepts the assigned destination;
 exact continuation through its stock CLI RPC route is refused before startup
 because that route retains the saved directory. Ordinary unmarked RPC recovery

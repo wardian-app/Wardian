@@ -209,7 +209,24 @@ export interface AgentConfig {
     folder: string;
     resume_session?: string;
     /** Identity-bound continuation requirement retained across restore and delayed dispatch. */
-    exact_resume?: { provider: string; session_id: string };
+    exact_resume?: {
+        provider: string;
+        session_id: string;
+        source?:
+            | { kind: 'append_only_transcript'; binding: {
+                root_selector?: string; config_root: string; canonical_path: string;
+                session_id: string; native_identity: [string, string];
+                confirmed_bytes: number; prefix_sha256: string;
+            } }
+            | { kind: 'stable_projection'; binding: {
+                source_path: string; projection_path: string; session_id: string;
+                native_identity: [string, string];
+            } }
+            | { kind: 'materialized_store'; binding: {
+                source_path: string; session_id: string; native_identity: [string, string];
+                confirmed_records: { key: string; sha256: string }[];
+            } };
+    };
     is_off: boolean;
     provider?: ProviderName | string;
     debug?: boolean;

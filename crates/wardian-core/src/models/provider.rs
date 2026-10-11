@@ -47,6 +47,61 @@ pub enum WorkspaceHandoverQualification {
 pub struct ExactResumeIdentity {
     pub provider: String,
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ExactResumeSourceBinding>,
+}
+
+/// Inspectable continuation evidence. Adapters own interpretation and verification;
+/// the lifecycle only carries the typed receipt across shutdown and publication.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "binding", rename_all = "snake_case")]
+pub enum ExactResumeSourceBinding {
+    AppendOnlyTranscript(AppendOnlyTranscriptBinding),
+    StableProjection(StableProjectionBinding),
+    MaterializedStore(MaterializedStoreBinding),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AppendOnlyTranscriptBinding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_selector: Option<std::path::PathBuf>,
+    pub config_root: std::path::PathBuf,
+    pub canonical_path: std::path::PathBuf,
+    pub session_id: String,
+    pub native_identity: (String, String),
+    pub confirmed_bytes: u64,
+    pub prefix_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StableProjectionBinding {
+    pub source_path: std::path::PathBuf,
+    pub projection_path: std::path::PathBuf,
+    pub session_id: String,
+    pub native_identity: (String, String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConfirmedResumeRecord {
+    pub key: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MaterializedStoreBinding {
+    pub source_path: std::path::PathBuf,
+    pub session_id: String,
+    pub native_identity: (String, String),
+    pub confirmed_records: Vec<ConfirmedResumeRecord>,
+}
+
+/// Read-only launch context selected by the shared owner, never by custom args
+/// or a receipt itself. Projection ownership must be checked by the caller.
+#[derive(Debug, Clone)]
+pub struct ResumeWorkspaceContext {
+    pub launch_cwd: std::path::PathBuf,
+    pub owned_projection: Option<std::path::PathBuf>,
+    pub workspace_changed: bool,
 }
 
 /// Abstraction over a specific agent CLI harness (Gemini, Claude, Codex, etc.).
@@ -78,6 +133,26 @@ pub trait AgentProvider: Send + Sync {
                 config.provider
             )),
         }
+    }
+
+    /// Prepare or revalidate adapter-owned source evidence before stopping a writer.
+    /// The staged config carries this receipt through drain, restore and dispatch.
+    fn prepare_exact_resume(
+        &self,
+        config: &mut AgentConfig,
+        _context: &ResumeWorkspaceContext,
+    ) -> Result<(), String> {
+        self.validate_exact_resume(config)
+    }
+
+    /// Verify the retained receipt after drain and immediately before child launch.
+    /// Implementations must not replace a prior receipt with newly discovered authority.
+    fn revalidate_exact_resume(
+        &self,
+        config: &mut AgentConfig,
+        _context: &ResumeWorkspaceContext,
+    ) -> Result<(), String> {
+        self.validate_exact_resume(config)
     }
 
     /// Validate exact continuation through the native broker's own transport.

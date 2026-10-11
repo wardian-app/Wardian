@@ -48,3 +48,29 @@ qualification cannot imply RPC parity. Pi's stock RPC launch retains the saved
 header cwd, so exact-required RPC fails before provider startup until a supported
 destination override exists. Ordinary unmarked RPC recovery retains its existing
 behavior; the SDK interactive bridge consumes the assigned destination.
+
+## Retained source evidence
+
+The shared lifecycle stages a typed source receipt before stopping the previous
+writer. It carries that receipt through archive drain, roster persistence,
+replacement publication, delayed Resume, and native dispatch. Each adapter
+revalidates the retained receipt after drain and immediately before launch;
+failure cannot substitute a newly discovered source for an existing receipt.
+
+Claude and Pi retain append-only transcript identity and a confirmed byte-prefix
+digest. Claude also records its configuration selector and pins the child to the
+canonical captured root, so rotating a workspace projection cannot silently
+select another transcript. Watchers and telemetry consume the same source.
+Antigravity requires independently owned, stable projection paths matching all
+persisted provider workspace fields. A receipt cannot grant projection ownership.
+OpenCode records its actual materialized store and immutable completed history
+rows; unfinished provider work can append without changing confirmed records.
+
+Physical file identities are serialized as decimal strings to preserve their
+full width across Rust and TypeScript. Legacy identity-only records can acquire
+source evidence during preparation, but launch revalidation requires retained
+evidence once captured. Explicit New Session removes the old continuation intent.
+Adapter support and focused tests do not imply native provider qualification.
+Only observed same-identity, retained-context, actual destination-tool execution
+can open an active handover capability. Unsupported native transports fail before
+launch; Pi stock RPC remains separate from the interactive SDK route.

@@ -32,7 +32,8 @@ pub(super) fn prepare_workspace_resume_config(
             return Err(format!("Active worktree handover is not qualified for provider {}: {reason}; turn the agent Off before assigning a different workspace", prepared.provider));
         }
     }
-    ProviderFactory::resolve(&prepared.provider)?.validate_exact_resume(&prepared)?;
+    let context = manager::continuation_workspace_context(&prepared, true, None)?;
+    ProviderFactory::resolve(&prepared.provider)?.prepare_exact_resume(&mut prepared, &context)?;
     prepared.session_persistence = persistence;
     Ok(prepared)
 }
@@ -89,17 +90,32 @@ pub(super) async fn finish_worktree_mutation(
         .get_mut(&session_id)
         .ok_or_else(|| format!("Agent {session_id} not found"))?;
     context.heartbeat.ensure_active("worktree assignment")?;
-    mutation.apply(&mut agent.config.lock().unwrap())?;
+    let mut prepared = agent.config.lock().unwrap().clone();
+    mutation.apply(&mut prepared)?;
+    if prepared.exact_resume.is_some() {
+        let launch_context = manager::continuation_workspace_context(&prepared, true, None)?;
+        ProviderFactory::resolve(&prepared.provider)?
+            .prepare_exact_resume(&mut prepared, &launch_context)?;
+    }
+    *agent.config.lock().unwrap() = prepared;
     let _context = roster.save(context).await?;
     let _ = app.emit("agents-updated", ());
     Ok(())
 }
 
 /// Read-only preparation preserves the published config and owner on failure.
-pub(super) fn validate_resume_launch_before_stop(config: &AgentConfig) -> Result<(), String> {
+pub(super) fn prepare_resume_launch_before_stop(
+    config: &AgentConfig,
+) -> Result<AgentConfig, String> {
     let mut prepared = config.clone();
     prepare_resume_config_for_runtime(&mut prepared, 0)?;
-    ProviderFactory::resolve(&prepared.provider)?.validate_resume_launch(&prepared)
+    let provider = ProviderFactory::resolve(&prepared.provider)?;
+    provider.validate_resume_launch(&prepared)?;
+    if prepared.exact_resume.is_some() {
+        let context = manager::continuation_workspace_context(&prepared, false, None)?;
+        provider.prepare_exact_resume(&mut prepared, &context)?;
+    }
+    Ok(prepared)
 }
 
 pub(super) async fn resume_agent_inner(
@@ -136,12 +152,17 @@ pub(super) async fn resume_agent_inner(
     let initial_config = lifecycle_config_for_session(&state, &session_id).await?;
     let starts_fresh = workspace_change.is_none()
         && resolved_session_persistence(&initial_config) == AgentSessionPersistence::Fresh;
-    if !starts_fresh || initial_config.pending_pi_session_id().is_some() {
-        validate_resume_launch_before_stop(&initial_config)?;
-    }
+    let prepared_resume = if !starts_fresh || initial_config.pending_pi_session_id().is_some() {
+        Some(prepare_resume_launch_before_stop(&initial_config)?)
+    } else {
+        None
+    };
     let workspace_handover = workspace_change.is_some();
-    let mut workspace_reservation = if let Some(mutation) = workspace_change.as_ref() {
-        let prepared = prepare_workspace_resume_config(&initial_config, mutation)?;
+    let prepared_workspace = workspace_change
+        .as_ref()
+        .map(|mutation| prepare_workspace_resume_config(&initial_config, mutation))
+        .transpose()?;
+    let mut workspace_reservation = if let Some(prepared) = prepared_workspace.as_ref() {
         {
             let agents = state.agents.lock().await;
             let agent = agents
@@ -217,12 +238,14 @@ pub(super) async fn resume_agent_inner(
     manager::publish_agent_status(&app, &session_id, &staged_status_arc);
 
     let status_before_resume = snapshot.current_status.clone();
-    let mut config = snapshot.config.clone();
+    let mut config = prepared_workspace.unwrap_or_else(|| snapshot.config.clone());
+    if let Some(prepared) = prepared_resume.as_ref() {
+        if !workspace_handover {
+            config.exact_resume = prepared.exact_resume.clone();
+        }
+    }
     if starts_fresh {
         config.exact_resume = None;
-    }
-    if let Some(mutation) = workspace_change {
-        mutation.apply(&mut config)?;
     }
     let fresh_pending_boundary =
         if starts_fresh {
@@ -374,6 +397,29 @@ pub(super) async fn resume_agent_inner(
                 .await;
             return Err(format!("Failed to retain the closing worktree conversation: {error}; fence cleanup: {release_error:?}"));
         }
+    }
+    let revalidation = if config.exact_resume.is_some() {
+        manager::continuation_workspace_context(&config, workspace_handover, None).and_then(
+            |context| {
+                ProviderFactory::resolve(&config.provider)?
+                    .revalidate_exact_resume(&mut config, &context)
+            },
+        )
+    } else {
+        Ok(())
+    };
+    if let Err(error) = revalidation {
+        lifecycle_heartbeat.stop().await;
+        let release_error = lifecycle_lease.release().err();
+        if release_error.is_none() {
+            if let Some(reservation) = workspace_reservation.as_mut() {
+                reservation.disarm_after_confirmed_stop();
+            }
+        }
+        restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error").await;
+        return Err(format!(
+            "Continuation source changed after drain: {error}; fence cleanup: {release_error:?}"
+        ));
     }
     let mut publication_disposition = manager::SpawnPublicationDisposition::new();
     let unpublished_failure = publication_disposition.failure_signal();

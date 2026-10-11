@@ -323,7 +323,7 @@ fn unreadable_transcript_fails_before_any_config_mutation() {
 }
 
 #[test]
-fn public_preparation_and_revalidation_use_the_inherited_root_and_exact_identity() {
+fn preparation_captures_inherited_root_and_revalidation_uses_captured_root() {
     let _lock = crate::utils::wardian_test_env_lock();
     struct RestoreRoot(Option<OsString>);
     impl Drop for RestoreRoot {
@@ -352,7 +352,8 @@ fn public_preparation_and_revalidation_use_the_inherited_root_and_exact_identity
         .unwrap()
         .write_all(&record(ID, "closing turn"))
         .unwrap();
-    let revalidated = revalidate_exact_continuation(&owner, root.path(), &prepared).unwrap();
+    let revalidated =
+        revalidate_exact_continuation_at_root(&owner, &prepared.config_root, &prepared).unwrap();
     assert!(revalidated.confirmed_bytes > prepared.confirmed_bytes);
     assert_eq!(serde_json::to_value(&owner).unwrap(), before);
     let changed = AgentConfig {
@@ -360,7 +361,7 @@ fn public_preparation_and_revalidation_use_the_inherited_root_and_exact_identity
         ..owner.clone()
     };
     assert!(
-        revalidate_exact_continuation(&changed, root.path(), &prepared)
+        revalidate_exact_continuation_at_root(&changed, &prepared.config_root, &prepared)
             .unwrap_err()
             .contains("identity changed")
     );
@@ -443,4 +444,109 @@ fn conversation_message_and_role_are_required_even_after_valid_history() {
         bytes.extend_from_slice(format!("{malformed}\n").as_bytes());
         assert!(validate_records(&bytes, ID).is_err());
     }
+}
+#[test]
+fn explicit_root_receipt_survives_restore_and_accepts_only_append() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("claude-source");
+    let other = root.path().join("claude-other");
+    let path = seed(&source, "old-project", &record(ID, "retained"));
+    seed(&other, "other-project", &record(ID, "retained"));
+    let owner = config();
+    let binding = prepare_exact_continuation_at_root(&owner, &source).unwrap();
+    let restored: ClaudeTranscriptBinding =
+        serde_json::from_value(serde_json::to_value(&binding).unwrap()).unwrap();
+    File::options()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(&record(ID, "closing append"))
+        .unwrap();
+    let final_binding = revalidate_exact_continuation_at_root(&owner, &source, &restored).unwrap();
+    assert_eq!(final_binding.canonical_path, restored.canonical_path);
+    assert_eq!(final_binding.native_identity, restored.native_identity);
+    assert!(final_binding.confirmed_bytes > restored.confirmed_bytes);
+    assert!(
+        revalidate_exact_continuation_at_root(&owner, &other, &restored)
+            .unwrap_err()
+            .contains("configuration root changed")
+    );
+    std::fs::write(&path, record(ID, "changed!")).unwrap();
+    assert!(revalidate_exact_continuation_at_root(&owner, &source, &final_binding).is_err());
+}
+
+#[test]
+fn malformed_persisted_receipts_fail_before_prefix_slicing() {
+    let root = tempfile::tempdir().unwrap();
+    seed(root.path(), "source", &record(ID, "retained"));
+    let owner = config();
+    let binding = prepare_exact_continuation_at_root(&owner, root.path()).unwrap();
+    let mut malformed = Vec::new();
+    for length in [0, MAX_TRANSCRIPT_BYTES + 1, u64::MAX] {
+        let mut candidate = binding.clone();
+        candidate.confirmed_bytes = length;
+        malformed.push(candidate);
+    }
+    for digest in ["", "no-digest", &"z".repeat(64)] {
+        let mut candidate = binding.clone();
+        candidate.prefix_sha256 = digest.into();
+        malformed.push(candidate);
+    }
+    let mut candidate = binding.clone();
+    candidate.canonical_path = PathBuf::from("relative-transcript");
+    malformed.push(candidate);
+    let mut candidate = binding.clone();
+    candidate.config_root = PathBuf::from("relative-root");
+    malformed.push(candidate);
+    let mut candidate = binding.clone();
+    candidate.session_id = "../another-session".into();
+    malformed.push(candidate);
+    for candidate in malformed {
+        assert!(
+            revalidate_exact_continuation_at_root(&owner, root.path(), &candidate)
+                .unwrap_err()
+                .contains("receipt is malformed")
+        );
+    }
+}
+
+#[test]
+fn explicit_root_rejects_relative_root_instead_of_reading_global_environment() {
+    let owner = config();
+    assert!(
+        prepare_exact_continuation_at_root(&owner, Path::new("relative-root"))
+            .unwrap_err()
+            .contains("absolute effective configuration root")
+    );
+}
+
+#[test]
+fn workspace_handover_refuses_relative_override_before_projection_rotation() {
+    assert!(
+        validate_workspace_handover_root_with_environment(Some(OsString::from("relative-claude")))
+            .unwrap_err()
+            .contains("could rebind its source history")
+    );
+    assert!(validate_workspace_handover_root_with_environment(None).is_ok());
+    assert!(validate_workspace_handover_root_with_environment(Some(OsString::new())).is_ok());
+    let root = tempfile::tempdir().unwrap();
+    assert!(validate_workspace_handover_root_with_environment(Some(
+        root.path().as_os_str().into()
+    ))
+    .is_ok());
+}
+
+#[test]
+fn explicit_root_validation_does_not_accept_substituted_durable_identity() {
+    let root = tempfile::tempdir().unwrap();
+    seed(root.path(), "source", &record(ID, "retained"));
+    let mut owner = config();
+    owner.require_exact_resume();
+    owner.resume_session = Some(OTHER_ID.into());
+    assert!(prepare_exact_continuation_at_root(&owner, root.path()).is_err());
+    let mut owner = config();
+    owner.provider = "codex".into();
+    assert!(prepare_exact_continuation_at_root(&owner, root.path())
+        .unwrap_err()
+        .contains("another provider identity"));
 }

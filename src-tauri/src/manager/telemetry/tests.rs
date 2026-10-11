@@ -7,9 +7,11 @@ use std::sync::{Arc, Mutex};
 
 fn test_snapshot(status: &str) -> AgentSnapshot {
     AgentSnapshot {
+        claude_source: None,
+        claude_root: None,
+        claude_launch_cwd: None,
         session_id: "agent-1".to_string(),
         provider: "opencode".to_string(),
-        folder: "D:/work".to_string(),
         is_off: false,
         resume_session: None,
         conversation_logging: wardian_core::conversations::AgentConversationLoggingSetting::Default,
@@ -81,9 +83,11 @@ fn test_snapshot_from_agent(
 ) -> AgentSnapshot {
     let config = agent.config.lock().unwrap();
     let snapshot = AgentSnapshot {
+        claude_source: None,
+        claude_root: None,
+        claude_launch_cwd: None,
         session_id: config.session_id.clone(),
         provider: config.provider.clone(),
-        folder: config.folder.clone(),
         is_off: config.is_off,
         resume_session: super::opencode_telemetry_session_id(&config),
         conversation_logging: config.conversation_logging,

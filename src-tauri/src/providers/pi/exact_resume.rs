@@ -7,6 +7,38 @@ const SDK_VERSION: &str = "0.84.2";
 const LAUNCHER: &str = include_str!("sdk-resume.mjs");
 const MAX_GENERATION: u64 = 9_007_199_254_740_991;
 
+pub(crate) use super::history::PiContinuationBinding;
+
+/// Read-only durable history binding, independent of destination changes.
+pub(crate) fn prepare_continuation_binding(
+    config: &AgentConfig,
+) -> Result<PiContinuationBinding, String> {
+    let (directory, native_id) = continuation_context(config)?;
+    super::history::prepare_continuation_binding(&directory, native_id)
+}
+
+/// Preserve the pre-stop physical source while admitting valid appended records.
+pub(crate) fn revalidate_continuation_binding(
+    config: &AgentConfig,
+    binding: &PiContinuationBinding,
+) -> Result<PiContinuationBinding, String> {
+    let (directory, native_id) = continuation_context(config)?;
+    super::history::revalidate_continuation_binding(&directory, native_id, binding)
+}
+
+fn continuation_context(config: &AgentConfig) -> Result<(PathBuf, &str), String> {
+    config.validate_exact_resume_identity()?;
+    let native_id = config
+        .resume_session
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or("Pi exact continuation requires a materialized resume identity")?;
+    let directory = PiProvider::session_dir(&config.session_id)
+        .ok_or("Pi owned session directory is unavailable")?;
+    Ok((directory, native_id))
+}
+
 /// Preparation never creates files, invokes Pi, loads extensions, or opens its
 /// SDK session API. Publication/stop/bridge authority stays with the manager.
 pub(crate) struct PiExactResumePlan {
@@ -17,6 +49,7 @@ pub(crate) struct PiExactResumePlan {
     native_id: String,
     destination: PathBuf,
     history: SessionFileBinding,
+    durable_binding: Option<PiContinuationBinding>,
 }
 
 impl PiExactResumePlan {
@@ -51,6 +84,23 @@ impl PiExactResumePlan {
         )
     }
 
+    /// Carry a pre-stop durable receipt into the actual generation launch plan.
+    pub(crate) fn prepare_bound(
+        config: &AgentConfig,
+        binding: &PiContinuationBinding,
+    ) -> Result<Self, String> {
+        let updated = revalidate_continuation_binding(config, binding)?;
+        let mut plan = Self::prepare(config)?;
+        if std::fs::canonicalize(&plan.history.path).map_err(|error| error.to_string())?
+            != updated.canonical_path
+        {
+            return Err("Pi exact SDK resume source differs from durable receipt".into());
+        }
+        plan.durable_binding = Some(updated);
+        plan.revalidate()?;
+        Ok(plan)
+    }
+
     fn prepare_from(
         executable: &str,
         cli_prefix: Vec<String>,
@@ -83,6 +133,7 @@ impl PiExactResumePlan {
             native_id: native_id.into(),
             destination: destination.into(),
             history,
+            durable_binding: None,
         })
     }
 
@@ -95,6 +146,13 @@ impl PiExactResumePlan {
 
     /// Reuse adapter history inspection and its physical-file/prefix fence.
     pub(crate) fn revalidate(&self) -> Result<(), String> {
+        if let Some(binding) = &self.durable_binding {
+            super::history::revalidate_continuation_binding(
+                &self.directory,
+                &self.native_id,
+                binding,
+            )?;
+        }
         validate_installation(&self.package_root)?;
         let current = super::history::inspect_owned_history(&self.directory, &self.native_id)?
             .complete
@@ -122,6 +180,10 @@ impl PiExactResumePlan {
         validate_args(args, &self.history.path, &self.directory)?;
         self.revalidate()?;
         let mut manifest = self.history.sdk_open_receipt(&self.native_id)?;
+        if let Some(binding) = &self.durable_binding {
+            manifest["prefixBytes"] = binding.confirmed_bytes.into();
+            manifest["prefixSha256"] = binding.prefix_sha256.clone().into();
+        }
         manifest["packageRoot"] = path_text(&self.package_root)?.into();
         manifest["sessionFile"] = path_text(&self.history.path)?.into();
         manifest["sessionDir"] = path_text(&self.directory)?.into();
@@ -403,6 +465,57 @@ mod tests {
         ];
         let executable = path_text(&package.join("dist/cli.js")).unwrap();
         (root, config, executable, args, directory)
+    }
+
+    #[test]
+    fn launch_plan_retains_durable_tail_prefix_across_materialization() {
+        let (_root, config, cli, args, directory) = fixture(3, true);
+        let path = directory.join("exact.jsonl");
+        use std::io::Write;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap(),
+            "{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"text\":\"before\"}}}}"
+        )
+        .unwrap();
+        let receipt =
+            super::super::history::prepare_continuation_binding(&directory, "exact").unwrap();
+        let mut plan = PiExactResumePlan::prepare_from(
+            "node",
+            vec![cli.clone()],
+            directory.clone(),
+            "exact",
+            Path::new(&config.folder),
+            args,
+        )
+        .unwrap();
+        plan.durable_binding = Some(receipt.clone());
+        plan.revalidate().unwrap();
+        let provider_args = vec![
+            cli,
+            "--session".into(),
+            path_text(&path).unwrap(),
+            "--session-dir".into(),
+            path_text(&directory).unwrap(),
+        ];
+        let (_, launch) = plan.materialize(&provider_args, 8).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&launch[1]).unwrap()).unwrap();
+        assert_eq!(manifest["prefixBytes"], receipt.confirmed_bytes);
+        assert_eq!(manifest["prefixSha256"], receipt.prefix_sha256);
+        let content = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, content.replace("before", "edited")).unwrap();
+        // The old first-assistant-only fence would accept this later-record edit.
+        plan.history.revalidate().unwrap();
+        assert!(plan.revalidate().unwrap_err().contains("prefix changed"));
+        let result = std::process::Command::new(&plan.executable)
+            .args(["--input-type=module", "-e", "import fs from 'node:fs'; import { pathToFileURL } from 'node:url'; const {validateHistory}=await import(pathToFileURL(process.argv[2])); validateHistory(JSON.parse(fs.readFileSync(process.argv[3],'utf8')),3);", "inert-validator", &launch[0], &launch[1]])
+            .output().unwrap();
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr)
+            .contains("Pi history confirmation changed before SDK open"));
     }
 
     #[test]

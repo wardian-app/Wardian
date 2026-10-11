@@ -379,9 +379,13 @@ impl AgentConfig {
             .map(str::trim)
             .filter(|id| !id.is_empty())
         {
+            if self.exact_resume.is_some() {
+                return;
+            }
             self.exact_resume = Some(super::provider::ExactResumeIdentity {
                 provider: self.provider.clone(),
                 session_id: session_id.to_owned(),
+                source: None,
             });
         }
     }
@@ -1649,6 +1653,126 @@ mod exact_resume_tests {
             changed.provider = provider.into();
             changed.resume_session = session.map(str::to_owned);
             assert!(changed.validate_exact_resume_identity().is_err());
+        }
+    }
+
+    fn durable_test_sources() -> Vec<super::super::provider::ExactResumeSourceBinding> {
+        use super::super::provider::{
+            AppendOnlyTranscriptBinding, ConfirmedResumeRecord, ExactResumeSourceBinding,
+            MaterializedStoreBinding, StableProjectionBinding,
+        };
+        let native_identity = (u64::MAX.to_string(), (u64::MAX - 1).to_string());
+        vec![
+            ExactResumeSourceBinding::AppendOnlyTranscript(AppendOnlyTranscriptBinding {
+                root_selector: Some("relative-provider-root".into()),
+                config_root: "owned-root".into(),
+                canonical_path: "owned-root/history.jsonl".into(),
+                session_id: "123e4567-e89b-12d3-a456-426614174000".into(),
+                native_identity: native_identity.clone(),
+                confirmed_bytes: 4096,
+                prefix_sha256: "a".repeat(64),
+            }),
+            ExactResumeSourceBinding::StableProjection(StableProjectionBinding {
+                source_path: "owned-source".into(),
+                projection_path: "owned-projection".into(),
+                session_id: "123e4567-e89b-12d3-a456-426614174000".into(),
+                native_identity: native_identity.clone(),
+            }),
+            ExactResumeSourceBinding::MaterializedStore(MaterializedStoreBinding {
+                source_path: "owned-store".into(),
+                session_id: "123e4567-e89b-12d3-a456-426614174000".into(),
+                native_identity,
+                confirmed_records: vec![ConfirmedResumeRecord {
+                    key: "retained-turn".into(),
+                    sha256: "b".repeat(64),
+                }],
+            }),
+        ]
+    }
+
+    #[test]
+    fn typed_continuation_sources_roundtrip_without_native_identity_precision_loss() {
+        use super::super::provider::ExactResumeIdentity;
+        for encoding in [
+            ProviderConfigEncoding::LegacyFlat,
+            ProviderConfigEncoding::Nested,
+        ] {
+            for source in durable_test_sources() {
+                let config = AgentConfig {
+                    provider: "pi".into(),
+                    resume_session: Some("123e4567-e89b-12d3-a456-426614174000".into()),
+                    exact_resume: Some(ExactResumeIdentity {
+                        provider: "pi".into(),
+                        session_id: "123e4567-e89b-12d3-a456-426614174000".into(),
+                        source: Some(source),
+                    }),
+                    provider_config_encoding: encoding,
+                    ..Default::default()
+                };
+                let value = serde_json::to_value(&config).unwrap();
+                let identity = &value["exact_resume"]["source"]["binding"]["native_identity"];
+                assert_eq!(identity[0].as_str(), Some("18446744073709551615"));
+                assert_eq!(identity[1].as_str(), Some("18446744073709551614"));
+                let restored: AgentConfig = serde_json::from_value(value).unwrap();
+                assert_eq!(restored.exact_resume, config.exact_resume);
+                restored.validate_exact_resume_identity().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_exact_identity_without_source_and_optional_root_remain_compatible() {
+        use super::super::provider::ExactResumeSourceBinding;
+        let restored: AgentConfig = serde_json::from_value(serde_json::json!({
+            "provider": "pi", "resume_session": "legacy-id",
+            "exact_resume": { "provider": "pi", "session_id": "legacy-id" }
+        }))
+        .unwrap();
+        assert!(restored.exact_resume.as_ref().unwrap().source.is_none());
+        restored.validate_exact_resume_identity().unwrap();
+        let value = serde_json::to_value(&restored).unwrap();
+        assert!(value["exact_resume"].get("source").is_none());
+        let mut value = serde_json::to_value(&durable_test_sources()[0]).unwrap();
+        value["binding"]
+            .as_object_mut()
+            .unwrap()
+            .remove("root_selector");
+        let source: ExactResumeSourceBinding = serde_json::from_value(value).unwrap();
+        let ExactResumeSourceBinding::AppendOnlyTranscript(binding) = source else {
+            panic!("wrong source variant")
+        };
+        assert!(binding.root_selector.is_none());
+    }
+
+    #[test]
+    fn require_exact_resume_preserves_receipt_instead_of_rebinding_changed_identity() {
+        use super::super::provider::ExactResumeIdentity;
+        for source in durable_test_sources() {
+            let mut config = AgentConfig {
+                provider: "pi".into(),
+                resume_session: Some("123e4567-e89b-12d3-a456-426614174000".into()),
+                exact_resume: Some(ExactResumeIdentity {
+                    provider: "pi".into(),
+                    session_id: "123e4567-e89b-12d3-a456-426614174000".into(),
+                    source: Some(source),
+                }),
+                ..Default::default()
+            };
+            let expected = config.exact_resume.clone();
+            config.require_exact_resume();
+            assert_eq!(config.exact_resume, expected);
+            config.validate_exact_resume_identity().unwrap();
+            for (provider, session) in [
+                ("claude", "123e4567-e89b-12d3-a456-426614174000"),
+                ("pi", "123e4567-e89b-12d3-a456-426614174001"),
+            ] {
+                let mut changed = config.clone();
+                changed.provider = provider.into();
+                changed.resume_session = Some(session.into());
+                changed.require_exact_resume();
+                assert_eq!(changed.exact_resume, expected);
+                assert!(changed.validate_exact_resume_identity().is_err());
+            }
         }
     }
 }

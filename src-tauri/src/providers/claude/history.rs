@@ -60,27 +60,89 @@ pub fn prepare_exact_continuation(
     config: &AgentConfig,
     launch_cwd: &Path,
 ) -> Result<ClaudeTranscriptBinding, String> {
-    validate_selectors(config)?;
-    let id = exact_id(config)?;
-    prepare_in(&config_root(launch_cwd)?, id, None)
+    prepare_exact_continuation_at_root(config, &config_root(launch_cwd)?)
 }
 
-/// After writer shutdown, reject replacement, truncation or confirmed-prefix
-/// changes. Appends are inspected and extend the returned binding's prefix.
-pub fn revalidate_exact_continuation(
+/// Validate a source using the root captured for this provider generation. The
+/// caller must use this same root in the child environment and its watchers;
+/// this API deliberately does not read or modify global environment variables.
+pub fn prepare_exact_continuation_at_root(
     config: &AgentConfig,
-    launch_cwd: &Path,
+    effective_root: &Path,
+) -> Result<ClaudeTranscriptBinding, String> {
+    validate_selectors(config)?;
+    let id = exact_id(config)?;
+    require_absolute_root(effective_root)?;
+    prepare_in(effective_root, id, None)
+}
+
+/// Revalidate a persisted receipt against an explicitly selected generation
+/// root. Root changes, replacement and prefix mutation cannot create authority.
+pub fn revalidate_exact_continuation_at_root(
+    config: &AgentConfig,
+    effective_root: &Path,
     binding: &ClaudeTranscriptBinding,
 ) -> Result<ClaudeTranscriptBinding, String> {
     validate_selectors(config)?;
     let id = exact_id(config)?;
+    require_absolute_root(effective_root)?;
+    validate_binding_shape(binding)?;
     if id != binding.session_id {
         return Err("Claude exact Resume identity changed after preparation".into());
     }
-    prepare_in(&config_root(launch_cwd)?, id, Some(binding))
+    prepare_in(effective_root, id, Some(binding))
+}
+
+/// Workspace rotation cannot preserve an inherited relative configuration root
+/// without explicitly pinning it in the child environment. Shared preflight
+/// calls this before stopping the source owner. Normal Resume may still use a
+/// relative root because it does not rotate the workspace projection.
+pub fn validate_workspace_handover_root() -> Result<(), String> {
+    validate_workspace_handover_root_with_environment(std::env::var_os("CLAUDE_CONFIG_DIR"))
+}
+
+fn validate_workspace_handover_root_with_environment(
+    configured: Option<OsString>,
+) -> Result<(), String> {
+    if configured
+        .filter(|value| !value.is_empty())
+        .is_some_and(|value| !Path::new(&value).is_absolute())
+    {
+        return Err("Claude workspace handover requires an absolute configuration root; relative CLAUDE_CONFIG_DIR could rebind its source history".into());
+    }
+    Ok(())
+}
+
+fn require_absolute_root(root: &Path) -> Result<(), String> {
+    if !root.is_absolute() {
+        return Err("Claude exact Resume requires an absolute effective configuration root".into());
+    }
+    Ok(())
+}
+
+fn validate_binding_shape(binding: &ClaudeTranscriptBinding) -> Result<(), String> {
+    if !binding.config_root.is_absolute()
+        || !binding.canonical_path.is_absolute()
+        || binding.session_id.trim() != binding.session_id
+        || uuid::Uuid::parse_str(&binding.session_id).is_err()
+        || binding.confirmed_bytes == 0
+        || binding.confirmed_bytes > MAX_TRANSCRIPT_BYTES
+        || binding.prefix_sha256.len() != 64
+        || !binding
+            .prefix_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("Claude exact Resume transcript receipt is malformed".into());
+    }
+    Ok(())
 }
 
 fn exact_id(config: &AgentConfig) -> Result<&str, String> {
+    config.validate_exact_resume_identity()?;
+    if config.provider != "claude" {
+        return Err("Claude exact Resume received another provider identity".into());
+    }
     let id = config
         .resume_session
         .as_deref()

@@ -1,9 +1,13 @@
-use wardian_core::models::provider::{AgentEvent, AgentProvider, WorkspaceHandoverQualification};
+use wardian_core::models::provider::{
+    AgentEvent, AgentProvider, ResumeWorkspaceContext, WorkspaceHandoverQualification,
+};
 use wardian_core::models::AgentConfig;
 
 use crate::utils::strip_ansi_controls;
 
+mod continuation;
 pub mod history;
+pub(crate) use continuation::{continuation_path, continuation_root};
 
 /// The concrete `AgentProvider` implementation for Claude Code CLI.
 pub struct ClaudeProvider;
@@ -205,6 +209,26 @@ impl ClaudeProvider {
 }
 
 impl AgentProvider for ClaudeProvider {
+    fn validate_exact_resume(&self, config: &AgentConfig) -> Result<(), String> {
+        continuation::validate(config)
+    }
+
+    fn prepare_exact_resume(
+        &self,
+        config: &mut AgentConfig,
+        context: &ResumeWorkspaceContext,
+    ) -> Result<(), String> {
+        continuation::prepare(config, context)
+    }
+
+    fn revalidate_exact_resume(
+        &self,
+        config: &mut AgentConfig,
+        context: &ResumeWorkspaceContext,
+    ) -> Result<(), String> {
+        continuation::revalidate(config, context)
+    }
+
     fn workspace_handover_qualification(&self) -> WorkspaceHandoverQualification {
         // Native missing-transcript recovery may use the same UUID for a fresh
         // session. That is ordinary startup recovery, not retained conversation

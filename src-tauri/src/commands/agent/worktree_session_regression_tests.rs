@@ -233,12 +233,12 @@ fn off_assignment_retains_exact_requirement_for_later_resume() {
         serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
     assert_eq!(restored.exact_resume, config.exact_resume);
     let before = serde_json::to_value(&restored).unwrap();
-    // No adapter is enabled by assignment. The later shared preflight fails closed.
+    // An identity-only assignment cannot bypass the adapter source preflight.
     let failure = ProviderFactory::resolve("claude")
         .unwrap()
         .validate_exact_resume(&restored)
         .unwrap_err();
-    assert!(failure.contains("not qualified"));
+    assert!(failure.contains("requires a provider UUID"), "{failure}");
     assert_eq!(serde_json::to_value(restored).unwrap(), before);
 }
 
@@ -307,7 +307,7 @@ fn unmarked_pi_resume_rejects_sdk_options_before_owner_disposal() {
         }
         assert!(config.exact_resume.is_none());
         let before = serde_json::to_value(&config).unwrap();
-        let error = workspace_resume::validate_resume_launch_before_stop(&config).unwrap_err();
+        let error = workspace_resume::prepare_resume_launch_before_stop(&config).unwrap_err();
         assert!(
             error.contains("Pi exact resume custom arguments have invalid quoting"),
             "{error}"

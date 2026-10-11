@@ -8,12 +8,14 @@ pub(crate) mod codex_stop;
 mod codex_terminal_theme;
 #[cfg(any(windows, test))]
 mod conpty_startup;
+mod continuation;
 pub(crate) mod headless;
 pub(crate) mod opencode;
 pub(crate) mod pi_receipt;
 pub(crate) mod roster_io;
 pub(crate) mod session_identity;
 pub(crate) mod spawn;
+pub(crate) use continuation::continuation_workspace_context;
 #[cfg(test)]
 mod spawn_tests;
 pub(crate) mod telemetry;

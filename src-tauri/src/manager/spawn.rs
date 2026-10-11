@@ -7,7 +7,6 @@ use crate::providers::claude::{
     effective_claude_permission_mode, ClaudeUserEventKind,
 };
 use crate::providers::codex::CodexProvider;
-use crate::providers::pi::exact_resume::PiExactResumePlan;
 use crate::providers::transcript::{
     bind_pi_watch_message, extract_transcript_message, CodexWatchBindingState,
 };
@@ -2226,6 +2225,11 @@ async fn spawn_agent_inner(
         }));
     }
 
+    if config.exact_resume.is_some() {
+        let context = super::continuation_workspace_context(&config, false, None)?;
+        ProviderFactory::resolve(&config.provider)?
+            .revalidate_exact_resume(&mut config, &context)?;
+    }
     let mut pi_launch_plan = (config.provider == "pi")
         .then(|| pi_history::PiLaunchPlan::prepare(&config))
         .transpose()?;
@@ -2235,7 +2239,7 @@ async fn spawn_agent_inner(
         .as_ref()
         .and_then(|plan| plan.resume_path())
         .is_some()
-        .then(|| PiExactResumePlan::prepare(&config))
+        .then(|| crate::providers::pi::bound_exact_resume_plan(&config))
         .transpose()?;
     let provider_generation = app_state
         .interactions
@@ -2424,13 +2428,13 @@ async fn spawn_agent_inner(
     };
     let fresh_claude_log_paths =
         if config.provider == "claude" && config.fresh_provider_session_id.is_some() {
-            dirs::home_dir()
+            crate::providers::claude::history::config_root(&launch_cwd)
+                .ok()
                 .map(|home| {
                     claude_log_paths(
                         &home
-                            .join(".claude")
                             .join("projects")
-                            .join(claude_project_dir_name(&expected_folder)),
+                            .join(claude_project_dir_name(&launch_cwd.to_string_lossy())),
                     )
                 })
                 .unwrap_or_default()
@@ -2648,11 +2652,22 @@ async fn spawn_agent_inner(
         attachment_ms,
         spawn_started_at.elapsed().as_millis(),
     ));
+    let claude_launch_root = if config.provider == "claude" {
+        Some(crate::providers::claude::continuation_root(
+            &config,
+            &launch_cwd,
+        )?)
+    } else {
+        None
+    };
     let mut cmd = CommandBuilder::new(&launch_spec.executable);
     for arg in &launch_spec.args {
         cmd.arg(arg);
     }
     cmd.cwd(&launch_cwd);
+    if let Some(root) = claude_launch_root.as_ref() {
+        cmd.env("CLAUDE_CONFIG_DIR", root);
+    }
     apply_terminal_identity_env(&mut cmd);
     super::apply_managed_cli_path_to_pty(&mut cmd);
     super::apply_interactive_provider_runtime_env(&config.provider, &mut cmd)?;
@@ -2740,6 +2755,13 @@ async fn spawn_agent_inner(
         is_restored
     ));
 
+    if config.exact_resume.is_some() {
+        let context = super::continuation_workspace_context(&config, false, Some(&launch_cwd))?;
+        provider.revalidate_exact_resume(&mut config, &context)?;
+        *config_lock
+            .lock()
+            .map_err(|_| "Continuation config lock unavailable")? = config.clone();
+    }
     // A restored Pi process can append its first turn immediately after spawn.
     // Capture the existing transcript boundary while the provider is still
     // unable to write, then start the watcher from that exact byte offset.
@@ -2989,9 +3011,11 @@ async fn spawn_agent_inner(
     let terminal_title_clone = terminal_title.clone();
     let last_output_at = std::sync::Arc::new(std::sync::Mutex::new(None));
     let last_output_at_clone = last_output_at.clone();
-    let initial_log_path = pi_log_baseline
-        .as_ref()
-        .map(|baseline| baseline.path.clone());
+    let initial_log_path = crate::providers::claude::continuation_path(&config).or_else(|| {
+        pi_log_baseline
+            .as_ref()
+            .map(|baseline| baseline.path.clone())
+    });
     let log_path = std::sync::Arc::new(std::sync::Mutex::new(initial_log_path));
     // The mock provider writes its event stream to a file it owns, so its log
     // path is known up front and needs no discovery watcher. Without this the
@@ -4224,7 +4248,10 @@ async fn spawn_agent_inner(
         let watcher_init_timestamp = init_timestamp.clone();
         let watcher_current_status = current_status.clone();
         let watcher_log_path = log_path.clone();
-        let watcher_folder = expected_folder.clone();
+        let watcher_folder = launch_cwd.to_string_lossy().to_string();
+        let watcher_claude_root = claude_launch_root
+            .clone()
+            .expect("Claude launch root prepared before child creation");
         let watcher_fresh_claude_log_paths = fresh_claude_log_paths;
         let watcher_watch_state = watch_state.clone();
         let watcher_skip_existing_log = is_restored;
@@ -4252,9 +4279,8 @@ async fn spawn_agent_inner(
                     let mut lock = watcher_log_path.lock().unwrap_or_else(|e| e.into_inner());
                     let mut captured_identity = false;
                     if lock.is_none() {
-                        if let Some(home) = dirs::home_dir() {
-                            let project_dir = home
-                                .join(".claude")
+                        {
+                            let project_dir = watcher_claude_root
                                 .join("projects")
                                 .join(claude_project_dir_name(&watcher_folder));
                             let candidate =

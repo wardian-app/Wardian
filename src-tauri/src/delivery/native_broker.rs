@@ -2921,6 +2921,7 @@ fn native_command(
     if let Some(session_id) = prior.and_then(|binding| binding.provider_session_id.clone()) {
         exact_config.resume_session = Some(session_id);
     }
+    let mut exact_launch_cwd = None;
     if exact_config.exact_resume.is_some() {
         if exact_config.provider != spec.provider {
             return Err(error(
@@ -2941,6 +2942,39 @@ fn native_command(
                     false,
                 )
             })?;
+        let context = crate::manager::continuation_workspace_context(&exact_config, false, None)
+            .map_err(|message| {
+                error(
+                    NativeDeliveryErrorCode::CapabilityUnavailable,
+                    message,
+                    false,
+                )
+            })?;
+        if exact_config
+            .exact_resume
+            .as_ref()
+            .is_some_and(|identity| identity.source.is_none())
+        {
+            provider
+                .prepare_exact_resume(&mut exact_config, &context)
+                .map_err(|message| {
+                    error(
+                        NativeDeliveryErrorCode::CapabilityUnavailable,
+                        message,
+                        false,
+                    )
+                })?;
+        }
+        provider
+            .revalidate_exact_resume(&mut exact_config, &context)
+            .map_err(|message| {
+                error(
+                    NativeDeliveryErrorCode::CapabilityUnavailable,
+                    message,
+                    false,
+                )
+            })?;
+        exact_launch_cwd = Some(context.launch_cwd);
     }
     #[cfg(test)]
     if let Some(script) = std::env::var_os("WARDIAN_NATIVE_TEST_SCRIPT") {
@@ -2964,20 +2998,18 @@ fn native_command(
     let provider = ProviderFactory::resolve(&spec.provider)
         .map_err(|message| error(NativeDeliveryErrorCode::UnsupportedProvider, message, false))?;
     let (program, mut args) = provider.get_executable();
-    let mut config = spec.config.clone();
-    if let Some(session_id) = prior.and_then(|binding| binding.provider_session_id.clone()) {
-        config.resume_session = Some(session_id);
-    }
+    let mut config = exact_config;
     if protocol == NativeProviderProtocol::ClaudeStreamJson {
-        reconcile_claude_native_session(&mut config, claude_session_file_exists).map_err(
-            |message| {
-                error(
-                    NativeDeliveryErrorCode::CapabilityUnavailable,
-                    message,
-                    false,
-                )
-            },
-        )?;
+        reconcile_claude_native_session(&mut config, |id| {
+            claude_session_file_exists(id, exact_launch_cwd.as_deref().unwrap_or(&spec.workspace))
+        })
+        .map_err(|message| {
+            error(
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+                message,
+                false,
+            )
+        })?;
     }
     if protocol == NativeProviderProtocol::PiRpc {
         let session_dir = PiProvider::session_dir(&config.session_id);
@@ -3032,11 +3064,25 @@ fn native_command(
     let mut command = Command::new(program);
     command
         .args(args)
-        .current_dir(&spec.workspace)
+        .current_dir(exact_launch_cwd.as_deref().unwrap_or(&spec.workspace))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if config.provider == "claude" {
+        let root = crate::providers::claude::continuation_root(
+            &config,
+            exact_launch_cwd.as_deref().unwrap_or(&spec.workspace),
+        )
+        .map_err(|message| {
+            error(
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+                message,
+                false,
+            )
+        })?;
+        command.env("CLAUDE_CONFIG_DIR", root);
+    }
     crate::manager::apply_managed_cli_path_to_process(&mut command);
     crate::manager::apply_process_provider_runtime_env(&spec.provider, &mut command).map_err(
         |message| {
@@ -3151,7 +3197,7 @@ fn reconcile_pi_native_session(
     Ok(())
 }
 
-fn claude_session_file_exists(session_id: &str) -> bool {
+fn claude_session_file_exists(session_id: &str, launch_cwd: &std::path::Path) -> bool {
     if session_id.is_empty()
         || session_id.contains('/')
         || session_id.contains('\\')
@@ -3159,14 +3205,10 @@ fn claude_session_file_exists(session_id: &str) -> bool {
     {
         return false;
     }
-    let Some(projects_root) = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
-        .map(|root| root.join("projects"))
-    else {
+    let Ok(root) = crate::providers::claude::history::config_root(launch_cwd) else {
         return false;
     };
+    let projects_root = root.join("projects");
     let Ok(projects) = std::fs::read_dir(projects_root) else {
         return false;
     };
@@ -3895,9 +3937,10 @@ mod tests {
     }
 
     #[test]
-    fn exact_resume_survives_restore_and_rejects_later_native_dispatch() {
+    fn exact_resume_survives_restore_and_rejects_malformed_native_identity() {
         let mut config = AgentConfig {
             provider: "claude".into(),
+            session_id: "roster-id".into(),
             resume_session: Some("source-id".into()),
             ..AgentConfig::default()
         };
@@ -3915,7 +3958,11 @@ mod tests {
             .expect("exact launch rejected before command construction");
         assert_eq!(failure.code, NativeDeliveryErrorCode::CapabilityUnavailable);
         assert!(!failure.provider_boundary_crossed);
-        assert!(failure.message.contains("not qualified"));
+        assert!(
+            failure.message.contains("requires a provider UUID"),
+            "{}",
+            failure.message
+        );
         assert_eq!(spec.config.resume_session.as_deref(), Some("source-id"));
     }
 

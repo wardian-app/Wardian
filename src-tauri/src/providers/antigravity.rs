@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use wardian_core::models::chat::AgentChatRole;
-use wardian_core::models::provider::{AgentEvent, AgentProvider};
+use wardian_core::models::provider::{
+    AgentEvent, AgentProvider, ExactResumeSourceBinding, ResumeWorkspaceContext,
+    StableProjectionBinding,
+};
 use wardian_core::models::AgentConfig;
 
 pub(crate) mod chat_tools;
@@ -16,6 +19,17 @@ pub struct AntigravityTranscriptSummary {
 }
 
 pub struct AntigravityProvider;
+
+/// Exact native identity and immutable lexical workspace used by Antigravity tools.
+/// The caller must establish that `projection_path` is an agent-owned projection;
+/// this receipt is evidence, never authority to select an arbitrary projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AntigravityContinuationBinding {
+    pub session_id: String,
+    pub source_path: PathBuf,
+    pub projection_path: PathBuf,
+    pub native_identity: (u64, u64),
+}
 
 fn database_contains_user_message(path: &Path) -> bool {
     let Ok(connection) = Connection::open_with_flags(
@@ -80,6 +94,173 @@ fn workspace_file_uri(workspace: &Path) -> String {
     }
 }
 
+fn current_source_identity(path: &Path) -> Result<(u64, u64), String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("Antigravity resume source is unavailable: {error}"))?;
+    if !metadata.file_type().is_file() {
+        return Err("Antigravity resume source must remain a regular file".to_string());
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("Cannot reopen Antigravity resume source: {error}"))?;
+    source_file_identity(&file)
+        .map_err(|error| format!("Cannot identify Antigravity resume source: {error}"))
+}
+
+#[cfg(unix)]
+fn source_file_identity(file: &std::fs::File) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata()?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+#[cfg(windows)]
+fn source_file_identity(file: &std::fs::File) -> std::io::Result<(u64, u64)> {
+    use std::os::windows::io::AsRawHandle;
+    use winapi::um::fileapi::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
+    let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    // SAFETY: live owned file handle and the Windows ABI structure.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), info.as_mut_ptr()) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: successful call initialized the complete structure.
+    let info = unsafe { info.assume_init() };
+    Ok((
+        u64::from(info.dwVolumeSerialNumber),
+        (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    ))
+}
+#[cfg(not(any(unix, windows)))]
+fn source_file_identity(_file: &std::fs::File) -> std::io::Result<(u64, u64)> {
+    Err(std::io::Error::other(
+        "Antigravity source identity is unsupported on this platform",
+    ))
+}
+
+/// Lexical identity deliberately does not resolve the workspace link: its
+/// physical target changes during handover, while the provider's path must not.
+fn lexical_projection_key(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        let value = value.replace('\\', "/");
+        let value = value
+            .strip_prefix("//?/UNC/")
+            .map(|rest| format!("//{rest}"))
+            .unwrap_or(value);
+        value
+            .strip_prefix("//?/")
+            .unwrap_or(&value)
+            .trim_end_matches('/')
+            .to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        value.trim_end_matches('/').to_string()
+    }
+}
+
+fn metadata_launch_matches_projection(data: &[u8], projection: &Path) -> bool {
+    if data.len() > 1024 * 1024 {
+        return false;
+    }
+    let expected = lexical_projection_key(projection);
+    // Native metadata records workspace URI/root URI in field 1, and the
+    // original tool launch URI in field 7. Require all three, exactly once.
+    [[1_u32, 1].as_slice(), [1, 2].as_slice(), [7].as_slice()]
+        .iter()
+        .all(|fields| {
+            let Some(uri) = unique_protobuf_string_at_path(data, fields) else {
+                return false;
+            };
+            let Some(path) = projection_file_uri_path(&uri) else {
+                return false;
+            };
+            lexical_projection_key(&path) == expected
+        })
+}
+
+fn projection_file_uri_path(uri: &str) -> Option<PathBuf> {
+    let raw = uri.strip_prefix("file://")?;
+    if raw.contains(['?', '#']) {
+        return None;
+    }
+    let mut decoded = Vec::with_capacity(raw.len());
+    let mut bytes = raw.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let high = char::from(bytes.next()?).to_digit(16)?;
+            let low = char::from(bytes.next()?).to_digit(16)?;
+            decoded.push(u8::try_from((high << 4) | low).ok()?);
+        } else {
+            decoded.push(byte);
+        }
+    }
+    let path = String::from_utf8(decoded).ok()?;
+    if path.contains('\0') {
+        return None;
+    }
+    let path = if !path.starts_with('/') {
+        format!("//{path}")
+    } else if path.len() >= 3 && path.as_bytes()[2] == b':' {
+        path[1..].to_string()
+    } else {
+        path
+    };
+    let path = PathBuf::from(path);
+    if path
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    Some(path)
+}
+
+fn unique_protobuf_string_at_path(bytes: &[u8], fields: &[u32]) -> Option<String> {
+    let value = fields.iter().try_fold(bytes, |current, wanted| {
+        let mut offset = 0;
+        let mut found = None;
+        while offset < current.len() {
+            let key = protobuf_varint(current, &mut offset)?;
+            if key >> 3 == 0 {
+                return None;
+            }
+            let field = u32::try_from(key >> 3).ok()?;
+            let wire = key & 7;
+            match wire {
+                0 => {
+                    protobuf_varint(current, &mut offset)?;
+                }
+                1 => {
+                    current.get(offset..offset.checked_add(8)?)?;
+                    offset += 8;
+                }
+                2 => {
+                    let length = usize::try_from(protobuf_varint(current, &mut offset)?).ok()?;
+                    let end = offset.checked_add(length)?;
+                    let value = current.get(offset..end)?;
+                    offset = end;
+                    if field == *wanted {
+                        if found.is_some() {
+                            return None;
+                        }
+                        found = Some(value);
+                    }
+                }
+                5 => {
+                    current.get(offset..offset.checked_add(4)?)?;
+                    offset += 4;
+                }
+                _ => return None,
+            }
+            if field == *wanted && wire != 2 {
+                return None;
+            }
+        }
+        found
+    })?;
+    String::from_utf8(value.to_vec()).ok()
+}
+
 fn update_latest_timestamp(latest: &mut Option<String>, candidate: Option<String>) {
     let Some(candidate) = candidate else {
         return;
@@ -133,6 +314,62 @@ impl Default for AntigravityProvider {
 }
 
 impl AntigravityProvider {
+    fn revalidate_exact_resume_in(
+        config: &mut AgentConfig,
+        context: &ResumeWorkspaceContext,
+        home: &Path,
+    ) -> Result<(), String> {
+        Self::validate_exact_resume_options(config)?;
+        let projection = context.owned_projection.as_deref().ok_or(
+            "Antigravity exact continuation requires an independently owned stable projection",
+        )?;
+        let intent = config
+            .exact_resume
+            .as_ref()
+            .ok_or("Antigravity exact continuation requires durable exact intent")?;
+        let source = intent
+            .source
+            .as_ref()
+            .ok_or("Antigravity exact continuation has no prepared source receipt")?;
+        let retained = antigravity_retained_binding(source, &intent.session_id)?;
+        let binding =
+            Self::revalidate_exact_continuation(home, &retained, projection, &context.launch_cwd)?;
+        store_antigravity_binding(config, binding)
+    }
+
+    fn prepare_exact_resume_in(
+        config: &mut AgentConfig,
+        context: &ResumeWorkspaceContext,
+        home: &Path,
+    ) -> Result<(), String> {
+        Self::validate_exact_resume_options(config)?;
+        let projection = context.owned_projection.as_deref().ok_or(
+            "Antigravity exact continuation requires an independently owned stable projection",
+        )?;
+        let intent = config
+            .exact_resume
+            .as_ref()
+            .ok_or("Antigravity exact continuation requires durable exact intent")?;
+        let binding = match intent.source.as_ref() {
+            None => Self::prepare_exact_continuation(
+                home,
+                &intent.session_id,
+                projection,
+                &context.launch_cwd,
+            )?,
+            Some(source) => {
+                let retained = antigravity_retained_binding(source, &intent.session_id)?;
+                Self::revalidate_exact_continuation(
+                    home,
+                    &retained,
+                    projection,
+                    &context.launch_cwd,
+                )?
+            }
+        };
+        store_antigravity_binding(config, binding)
+    }
+
     pub fn new() -> Self {
         AntigravityProvider
     }
@@ -154,6 +391,219 @@ impl AntigravityProvider {
             .join(format!("{conversation_id}.db"))
     }
 
+    /// Validates the exact current-format conversation before a resume can
+    /// mutate Wardian state. The CLI silently creates a fresh conversation for
+    /// a missing ID, so a filename or workspace-cache binding is insufficient.
+    /// Empty materialized conversations are valid; legacy transcripts alone
+    /// cannot establish that the current CLI can resume the source.
+    ///
+    /// Query a private DB/WAL snapshot: SQLite read-only opens can create SHM
+    /// sidecars. This guard never opens the authoritative source with SQLite.
+    /// Call again after draining the old process before launching its successor.
+    pub fn validate_authoritative_resume_source(
+        home: &Path,
+        conversation_id: &str,
+    ) -> Result<PathBuf, String> {
+        Self::validate_resume_source(home, conversation_id, None).map(|source| source.0)
+    }
+
+    /// Rejects custom selectors that would override the exact native identity
+    /// or remembered project/tool directory after the shared guard succeeds.
+    pub fn validate_exact_resume_options(config: &AgentConfig) -> Result<(), String> {
+        config.validate_exact_resume_identity()?;
+        let arguments = shlex::split(config.custom_args.as_deref().unwrap_or_default())
+            .ok_or("Antigravity exact continuation custom arguments have invalid quoting")?;
+        for argument in arguments {
+            let selector = argument.split('=').next().unwrap_or_default();
+            if matches!(
+                selector,
+                "--conversation"
+                    | "--conversation-id"
+                    | "--resume"
+                    | "--continue"
+                    | "--project"
+                    | "--new-project"
+                    | "--cwd"
+                    | "--workspace"
+                    | "--"
+            ) || (argument.starts_with("-c") && !argument.starts_with("--"))
+            {
+                return Err("Antigravity exact continuation custom arguments conflict with native identity or stable projection".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    /// Prepares exact continuation only for a source originally launched through
+    /// the same agent-owned lexical projection that its successor will use.
+    /// Literal/imported launch paths cannot retarget Antigravity's relative tools.
+    /// `owned_projection` must come from trusted habitat ownership validation,
+    /// never from provider metadata or a saved continuation receipt alone.
+    pub fn prepare_exact_continuation(
+        home: &Path,
+        conversation_id: &str,
+        owned_projection: &Path,
+        successor_launch_cwd: &Path,
+    ) -> Result<AntigravityContinuationBinding, String> {
+        if !owned_projection.is_absolute()
+            || lexical_projection_key(owned_projection)
+                != lexical_projection_key(successor_launch_cwd)
+            || owned_projection
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(
+                "Antigravity exact continuation requires the same owned stable launch projection"
+                    .to_string(),
+            );
+        }
+        let (source_path, native_identity) =
+            Self::validate_resume_source(home, conversation_id, Some(owned_projection))?;
+        Ok(AntigravityContinuationBinding {
+            session_id: conversation_id.to_string(),
+            source_path,
+            projection_path: owned_projection.to_path_buf(),
+            native_identity,
+        })
+    }
+
+    /// Rechecks the prepared source and recorded launch URI after the old writer
+    /// drains. Appended native steps are allowed; rebinding to another lexical
+    /// launch path or losing the authoritative native identity is rejected.
+    pub fn revalidate_exact_continuation(
+        home: &Path,
+        binding: &AntigravityContinuationBinding,
+        owned_projection: &Path,
+        successor_launch_cwd: &Path,
+    ) -> Result<AntigravityContinuationBinding, String> {
+        if lexical_projection_key(&binding.projection_path)
+            != lexical_projection_key(owned_projection)
+        {
+            return Err(
+                "Antigravity exact continuation projection changed after preparation".to_string(),
+            );
+        }
+        let updated = Self::prepare_exact_continuation(
+            home,
+            &binding.session_id,
+            owned_projection,
+            successor_launch_cwd,
+        )?;
+        if updated.source_path != binding.source_path
+            || updated.native_identity != binding.native_identity
+        {
+            return Err(
+                "Antigravity exact continuation source changed after preparation".to_string(),
+            );
+        }
+        Ok(updated)
+    }
+
+    fn validate_resume_source(
+        home: &Path,
+        conversation_id: &str,
+        projection: Option<&Path>,
+    ) -> Result<(PathBuf, (u64, u64)), String> {
+        if conversation_id.is_empty()
+            || !conversation_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err("Antigravity resume requires a safe exact conversation ID".to_string());
+        }
+        let database = Self::conversation_database_path(home, conversation_id);
+        let snapshot = tempfile::tempdir()
+            .map_err(|error| format!("Cannot snapshot Antigravity resume source: {error}"))?;
+        let snapshot_database = snapshot.path().join("source.db");
+        let copy_file = |source: &Path, destination: &Path| -> Result<(u64, u64), String> {
+            let metadata = std::fs::symlink_metadata(source)
+                .map_err(|error| format!("Antigravity resume source is unavailable: {error}"))?;
+            if !metadata.file_type().is_file() {
+                return Err("Antigravity resume source must be a regular file".to_string());
+            }
+            let mut source_file = std::fs::File::open(source)
+                .map_err(|error| format!("Cannot open Antigravity resume source: {error}"))?;
+            let identity = source_file_identity(&source_file)
+                .map_err(|error| format!("Cannot identify Antigravity resume source: {error}"))?;
+            let mut destination_file = std::fs::File::create(destination)
+                .map_err(|error| format!("Cannot create Antigravity source snapshot: {error}"))?;
+            std::io::copy(&mut source_file, &mut destination_file)
+                .map_err(|error| format!("Cannot snapshot Antigravity resume source: {error}"))?;
+            if current_source_identity(source)? != identity {
+                return Err("Antigravity resume source changed during inspection".to_string());
+            }
+            Ok(identity)
+        };
+        let native_identity = copy_file(&database, &snapshot_database)?;
+        let mut wal_name = database.as_os_str().to_os_string();
+        wal_name.push("-wal");
+        let wal = PathBuf::from(wal_name);
+        match std::fs::symlink_metadata(&wal) {
+            Ok(_) => {
+                copy_file(&wal, &snapshot.path().join("source.db-wal"))?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Cannot inspect Antigravity resume WAL: {error}")),
+        }
+        // A rollback journal requires recovery against the source. Do not
+        // mistake an uncommitted/recovering store for an authoritative snapshot.
+        let mut journal_name = database.as_os_str().to_os_string();
+        journal_name.push("-journal");
+        if Path::new(&journal_name)
+            .try_exists()
+            .map_err(|error| format!("Cannot inspect Antigravity resume journal: {error}"))?
+        {
+            return Err("Antigravity resume source has an unresolved rollback journal".to_string());
+        }
+        let validate = || -> rusqlite::Result<bool> {
+            let connection = Connection::open_with_flags(
+                &snapshot_database,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            let integrity: String =
+                connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+            if integrity != "ok" {
+                return Ok(false);
+            }
+            connection.prepare("SELECT idx, step_type, step_payload FROM steps LIMIT 0")?;
+            let mut statement =
+                connection.prepare("SELECT cascade_id FROM trajectory_meta LIMIT 2")?;
+            let identities = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if identities.len() != 1 || identities[0] != conversation_id {
+                return Ok(false);
+            }
+            if let Some(projection) = projection {
+                let mut metadata_statement = connection.prepare(
+                    "SELECT data FROM trajectory_metadata_blob WHERE id = 'main' LIMIT 2",
+                )?;
+                let metadata = metadata_statement
+                    .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                if metadata.len() != 1
+                    || !metadata_launch_matches_projection(&metadata[0], projection)
+                {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        };
+        match validate() {
+            Ok(true) => {
+                if current_source_identity(&database)? != native_identity {
+                    return Err("Antigravity resume source changed during inspection".to_string());
+                }
+                Ok((database, native_identity))
+            }
+            Ok(false) => {
+                Err("Antigravity resume source identity or integrity does not match".to_string())
+            }
+            Err(error) => Err(format!(
+                "Antigravity resume source is not a valid authoritative conversation: {error}"
+            )),
+        }
+    }
     pub fn conversation_database_ids(home: &Path) -> HashSet<String> {
         std::fs::read_dir(home.join("conversations"))
             .into_iter()
@@ -188,7 +638,7 @@ impl AntigravityProvider {
             })
             .filter(|conversation_id| {
                 let database = Self::conversation_database_path(home, conversation_id);
-                database_contains_steps_table(&database)
+                Self::validate_authoritative_resume_source(home, conversation_id).is_ok()
                     && database_metadata_matches_workspace(&database, workspace)
             });
         let conversation_id = matches.next()?;
@@ -601,7 +1051,85 @@ fn protobuf_varint(bytes: &[u8], offset: &mut usize) -> Option<u64> {
     None
 }
 
+fn antigravity_retained_binding(
+    source: &ExactResumeSourceBinding,
+    expected_session: &str,
+) -> Result<AntigravityContinuationBinding, String> {
+    let ExactResumeSourceBinding::StableProjection(binding) = source else {
+        return Err("Antigravity exact continuation source receipt has the wrong kind".to_string());
+    };
+    if binding.session_id != expected_session {
+        return Err(
+            "Antigravity exact continuation source receipt has another native identity".to_string(),
+        );
+    }
+    let parse_identity = |value: &str| {
+        value.parse::<u64>().map_err(|_| {
+            "Antigravity exact continuation source receipt has an invalid file identity".to_string()
+        })
+    };
+    Ok(AntigravityContinuationBinding {
+        session_id: binding.session_id.clone(),
+        source_path: binding.source_path.clone(),
+        projection_path: binding.projection_path.clone(),
+        native_identity: (
+            parse_identity(&binding.native_identity.0)?,
+            parse_identity(&binding.native_identity.1)?,
+        ),
+    })
+}
+
+fn store_antigravity_binding(
+    config: &mut AgentConfig,
+    binding: AntigravityContinuationBinding,
+) -> Result<(), String> {
+    let intent = config
+        .exact_resume
+        .as_mut()
+        .ok_or("Antigravity exact continuation requires durable exact intent")?;
+    intent.source = Some(ExactResumeSourceBinding::StableProjection(
+        StableProjectionBinding {
+            session_id: binding.session_id,
+            source_path: binding.source_path,
+            projection_path: binding.projection_path,
+            native_identity: (
+                binding.native_identity.0.to_string(),
+                binding.native_identity.1.to_string(),
+            ),
+        },
+    ));
+    Ok(())
+}
+
 impl AgentProvider for AntigravityProvider {
+    fn validate_exact_resume(&self, config: &AgentConfig) -> Result<(), String> {
+        Self::validate_exact_resume_options(config)?;
+        let id = config
+            .resume_session
+            .as_deref()
+            .ok_or("Antigravity exact continuation requires a materialized native identity")?;
+        let home = Self::antigravity_home().ok_or("Antigravity provider home is unavailable")?;
+        Self::validate_authoritative_resume_source(&home, id).map(|_| ())
+    }
+
+    fn prepare_exact_resume(
+        &self,
+        config: &mut AgentConfig,
+        context: &ResumeWorkspaceContext,
+    ) -> Result<(), String> {
+        let home = Self::antigravity_home().ok_or("Antigravity provider home is unavailable")?;
+        Self::prepare_exact_resume_in(config, context, &home)
+    }
+
+    fn revalidate_exact_resume(
+        &self,
+        config: &mut AgentConfig,
+        context: &ResumeWorkspaceContext,
+    ) -> Result<(), String> {
+        let home = Self::antigravity_home().ok_or("Antigravity provider home is unavailable")?;
+        Self::revalidate_exact_resume_in(config, context, &home)
+    }
+
     fn name(&self) -> &str {
         "antigravity"
     }
@@ -808,6 +1336,550 @@ mod tests {
     use super::*;
     use rusqlite::params;
 
+    fn create_resume_source(home: &Path, id: &str) -> Connection {
+        std::fs::create_dir_all(home.join("conversations")).expect("source directory");
+        let connection =
+            Connection::open(AntigravityProvider::conversation_database_path(home, id))
+                .expect("create source");
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+            CREATE TABLE steps (idx INTEGER, step_type INTEGER, step_payload BLOB);
+            CREATE TABLE trajectory_meta (trajectory_id TEXT, cascade_id TEXT);",
+            )
+            .expect("native schema");
+        connection
+            .execute(
+                "INSERT INTO trajectory_meta VALUES ('different-trajectory', ?1)",
+                [id],
+            )
+            .expect("native identity");
+        connection
+    }
+
+    fn source_store_bytes(home: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut entries = std::fs::read_dir(home.join("conversations"))
+            .expect("source directory")
+            .map(|entry| {
+                let path = entry.expect("source entry").path();
+                let bytes = std::fs::read(&path).expect("source bytes");
+                (path, bytes)
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        entries
+    }
+
+    #[test]
+    fn projected_resume_does_not_confuse_encoded_space_with_literal_percent_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let projection = temp.path().join("owned space/workspace");
+        let literal_percent = temp.path().join("owned%20space/workspace");
+        let metadata = projection_metadata(&projection);
+        // Protobuf length changes when URI text is escaped; construct its three
+        // length-delimited fields afresh instead of replacing serialized bytes.
+        let key = lexical_projection_key(&projection).replace(' ', "%20");
+        let uri = if key.starts_with('/') {
+            format!("file://{key}")
+        } else {
+            format!("file:///{key}")
+        };
+        let mut workspace = protobuf_string_field(1, &uri);
+        workspace.extend(protobuf_string_field(2, &uri));
+        let mut encoded = protobuf_message_field(1, workspace);
+        encoded.extend(protobuf_string_field(7, &uri));
+        assert!(metadata_launch_matches_projection(&encoded, &projection));
+        assert!(!metadata_launch_matches_projection(
+            &encoded,
+            &literal_percent
+        ));
+        assert!(metadata_launch_matches_projection(&metadata, &projection));
+    }
+
+    #[test]
+    fn projected_resume_rejects_custom_identity_and_workspace_overrides() {
+        let mut config = AgentConfig::default();
+        for custom in [
+            "--conversation other",
+            "--conversation=other",
+            "--project other",
+            "--new-project",
+            "-cother",
+            "'unclosed",
+        ] {
+            config.custom_args = Some(custom.to_string());
+            assert!(
+                AntigravityProvider::validate_exact_resume_options(&config).is_err(),
+                "{custom}"
+            );
+        }
+        config.custom_args = Some("--model test-model --effort high".to_string());
+        assert!(AntigravityProvider::validate_exact_resume_options(&config).is_ok());
+    }
+
+    #[test]
+    fn projection_uri_decodes_unicode_spaces_percent_and_preserves_authority() {
+        assert_eq!(
+            projection_file_uri_path("file:///tmp/owned%20%E6%B5%8B%E8%AF%95%25/workspace"),
+            Some(PathBuf::from("/tmp/owned \u{6d4b}\u{8bd5}%/workspace"))
+        );
+        assert_eq!(
+            projection_file_uri_path("file://server/share/workspace"),
+            Some(PathBuf::from("//server/share/workspace"))
+        );
+        for uri in [
+            "file:///tmp/%GG",
+            "file:///tmp/%",
+            "file:///tmp/%00",
+            "file:///tmp/%FF",
+            "https:///tmp/workspace",
+            "file:///tmp/../workspace",
+        ] {
+            assert!(projection_file_uri_path(uri).is_none(), "{uri}");
+        }
+    }
+
+    #[test]
+    fn typed_projection_callbacks_retain_receipt_and_refuse_replacement_or_recapture() {
+        let temp = tempfile::tempdir().unwrap();
+        let projection = temp.path().join("owned-habitat/workspace");
+        let writer = create_resume_source(temp.path(), "projected-session");
+        add_projection_metadata(&writer, &projection);
+        let mut config = AgentConfig {
+            provider: "antigravity".into(),
+            resume_session: Some("projected-session".into()),
+            ..Default::default()
+        };
+        config.require_exact_resume();
+        let context = ResumeWorkspaceContext {
+            launch_cwd: projection.clone(),
+            owned_projection: Some(projection.clone()),
+            workspace_changed: true,
+        };
+        assert!(AntigravityProvider::revalidate_exact_resume_in(
+            &mut config,
+            &context,
+            temp.path()
+        )
+        .is_err());
+        AntigravityProvider::prepare_exact_resume_in(&mut config, &context, temp.path()).unwrap();
+        let receipt = config.exact_resume.clone();
+        writer
+            .execute("INSERT INTO steps VALUES (0, 14, X'0001')", [])
+            .unwrap();
+        AntigravityProvider::revalidate_exact_resume_in(&mut config, &context, temp.path())
+            .unwrap();
+        assert_eq!(config.exact_resume, receipt);
+        drop(writer);
+        let path =
+            AntigravityProvider::conversation_database_path(temp.path(), "projected-session");
+        std::fs::rename(path, temp.path().join("retained-original.db")).unwrap();
+        let replacement = create_resume_source(temp.path(), "projected-session");
+        add_projection_metadata(&replacement, &projection);
+        assert!(
+            AntigravityProvider::prepare_exact_resume_in(&mut config, &context, temp.path())
+                .is_err()
+        );
+        assert_eq!(config.exact_resume, receipt);
+    }
+
+    #[test]
+    fn typed_projection_callbacks_reject_untrusted_projection_and_invalid_receipts_without_mutation(
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let projection = temp.path().join("owned-habitat/workspace");
+        let mut config = AgentConfig {
+            provider: "antigravity".into(),
+            resume_session: Some("projected-session".into()),
+            ..Default::default()
+        };
+        config.require_exact_resume();
+        let context = ResumeWorkspaceContext {
+            launch_cwd: projection.clone(),
+            owned_projection: None,
+            workspace_changed: true,
+        };
+        let before = config.exact_resume.clone();
+        assert!(
+            AntigravityProvider::prepare_exact_resume_in(&mut config, &context, temp.path())
+                .is_err()
+        );
+        assert_eq!(config.exact_resume, before);
+        let mut receipt = StableProjectionBinding {
+            session_id: "projected-session".into(),
+            source_path: temp.path().join("source.db"),
+            projection_path: projection,
+            native_identity: ("invalid".into(), "0".into()),
+        };
+        assert!(antigravity_retained_binding(
+            &ExactResumeSourceBinding::StableProjection(receipt.clone()),
+            "projected-session"
+        )
+        .is_err());
+        receipt.native_identity = ("1".into(), "2".into());
+        assert!(antigravity_retained_binding(
+            &ExactResumeSourceBinding::StableProjection(receipt),
+            "another-session"
+        )
+        .is_err());
+    }
+
+    fn projection_metadata(projection: &Path) -> Vec<u8> {
+        let key = lexical_projection_key(projection);
+        let uri = if key.starts_with("//") {
+            format!("file:{key}")
+        } else if key.starts_with('/') {
+            format!("file://{key}")
+        } else {
+            format!("file:///{key}")
+        };
+        let mut workspace = protobuf_string_field(1, &uri);
+        workspace.extend(protobuf_string_field(2, &uri));
+        let mut metadata = protobuf_message_field(1, workspace);
+        metadata.extend(protobuf_string_field(7, &uri));
+        metadata
+    }
+
+    fn add_projection_metadata(connection: &Connection, projection: &Path) {
+        connection
+            .execute_batch("CREATE TABLE trajectory_metadata_blob (id TEXT, data BLOB)")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO trajectory_metadata_blob VALUES ('main', ?1)",
+                [projection_metadata(projection)],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn projected_resume_revalidates_wal_identity_and_allows_appended_steps_without_source_mutation()
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let projection = temp.path().join("owned-habitat/workspace");
+        let writer = create_resume_source(temp.path(), "projected-session");
+        add_projection_metadata(&writer, &projection);
+        let before = source_store_bytes(temp.path());
+        let binding = AntigravityProvider::prepare_exact_continuation(
+            temp.path(),
+            "projected-session",
+            &projection,
+            &projection,
+        )
+        .unwrap();
+        assert_eq!(source_store_bytes(temp.path()), before);
+        writer
+            .execute("INSERT INTO steps VALUES (0, 14, X'0001')", [])
+            .unwrap();
+        let appended = source_store_bytes(temp.path());
+        assert_eq!(
+            AntigravityProvider::revalidate_exact_continuation(
+                temp.path(),
+                &binding,
+                &projection,
+                &projection
+            )
+            .unwrap(),
+            binding
+        );
+        assert_eq!(source_store_bytes(temp.path()), appended);
+    }
+
+    #[test]
+    fn projected_resume_rejects_literal_imported_and_prefix_launches_before_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let projection = temp.path().join("owned-habitat/workspace");
+        for (id, recorded) in [
+            ("literal", temp.path().join("old-literal")),
+            ("prefix", projection.with_file_name("workspace-other")),
+        ] {
+            let writer = create_resume_source(temp.path(), id);
+            add_projection_metadata(&writer, &recorded);
+            let before = source_store_bytes(temp.path());
+            assert!(AntigravityProvider::prepare_exact_continuation(
+                temp.path(),
+                id,
+                &projection,
+                &projection
+            )
+            .is_err());
+            assert_eq!(source_store_bytes(temp.path()), before);
+        }
+    }
+
+    #[test]
+    fn projected_resume_rejects_different_successor_and_receipt_projection() {
+        let temp = tempfile::tempdir().unwrap();
+        let projection = temp.path().join("owned-habitat/workspace");
+        let other = temp.path().join("another/workspace");
+        let writer = create_resume_source(temp.path(), "projected-session");
+        add_projection_metadata(&writer, &projection);
+        assert!(AntigravityProvider::prepare_exact_continuation(
+            temp.path(),
+            "projected-session",
+            &projection,
+            &other
+        )
+        .is_err());
+        let binding = AntigravityProvider::prepare_exact_continuation(
+            temp.path(),
+            "projected-session",
+            &projection,
+            &projection,
+        )
+        .unwrap();
+        assert!(AntigravityProvider::revalidate_exact_continuation(
+            temp.path(),
+            &binding,
+            &other,
+            &other
+        )
+        .is_err());
+        assert!(AntigravityProvider::prepare_exact_continuation(
+            temp.path(),
+            "projected-session",
+            Path::new("relative/workspace"),
+            Path::new("relative/workspace")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn projected_resume_rejects_missing_ambiguous_changed_or_malformed_native_launch_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let projection = temp.path().join("owned-habitat/workspace");
+        let writer = create_resume_source(temp.path(), "projected-session");
+        assert!(AntigravityProvider::prepare_exact_continuation(
+            temp.path(),
+            "projected-session",
+            &projection,
+            &projection
+        )
+        .is_err());
+        add_projection_metadata(&writer, &projection);
+        let binding = AntigravityProvider::prepare_exact_continuation(
+            temp.path(),
+            "projected-session",
+            &projection,
+            &projection,
+        )
+        .unwrap();
+        writer
+            .execute(
+                "UPDATE trajectory_metadata_blob SET data = ?1",
+                [projection_metadata(&temp.path().join("literal"))],
+            )
+            .unwrap();
+        assert!(AntigravityProvider::revalidate_exact_continuation(
+            temp.path(),
+            &binding,
+            &projection,
+            &projection
+        )
+        .is_err());
+        let mut duplicate = projection_metadata(&projection);
+        duplicate.extend(protobuf_string_field(7, "file:///other"));
+        for metadata in [
+            duplicate,
+            vec![10, 255],
+            protobuf_string_field(7, "file:///other"),
+        ] {
+            writer
+                .execute("UPDATE trajectory_metadata_blob SET data = ?1", [metadata])
+                .unwrap();
+            assert!(AntigravityProvider::prepare_exact_continuation(
+                temp.path(),
+                "projected-session",
+                &projection,
+                &projection
+            )
+            .is_err());
+        }
+        writer
+            .execute(
+                "UPDATE trajectory_metadata_blob SET data = ?1",
+                [projection_metadata(&projection)],
+            )
+            .unwrap();
+        writer
+            .execute(
+                "INSERT INTO trajectory_metadata_blob VALUES ('main', ?1)",
+                [projection_metadata(&projection)],
+            )
+            .unwrap();
+        assert!(AntigravityProvider::prepare_exact_continuation(
+            temp.path(),
+            "projected-session",
+            &projection,
+            &projection
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn projected_resume_rejects_replaced_same_id_database_after_preparation() {
+        let temp = tempfile::tempdir().unwrap();
+        let projection = temp.path().join("owned-habitat/workspace");
+        let writer = create_resume_source(temp.path(), "projected-session");
+        add_projection_metadata(&writer, &projection);
+        drop(writer);
+        let binding = AntigravityProvider::prepare_exact_continuation(
+            temp.path(),
+            "projected-session",
+            &projection,
+            &projection,
+        )
+        .unwrap();
+        std::fs::rename(
+            &binding.source_path,
+            temp.path().join("retained-original.db"),
+        )
+        .unwrap();
+        let replacement = create_resume_source(temp.path(), "projected-session");
+        add_projection_metadata(&replacement, &projection);
+        assert!(AntigravityProvider::revalidate_exact_continuation(
+            temp.path(),
+            &binding,
+            &projection,
+            &projection
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn authoritative_resume_accepts_empty_native_identity_from_wal_without_source_mutation() {
+        let temp = tempfile::tempdir().expect("temporary provider home");
+        let home = temp.path();
+        // Keep the writer open so schema/identity remain in the WAL rather than
+        // the base database. No user row is needed for a materialized session.
+        let _writer = create_resume_source(home, "source-session");
+        let before = source_store_bytes(home);
+        assert_eq!(
+            AntigravityProvider::validate_authoritative_resume_source(home, "source-session")
+                .expect("exact empty source"),
+            AntigravityProvider::conversation_database_path(home, "source-session")
+        );
+        assert_eq!(source_store_bytes(home), before);
+    }
+
+    #[test]
+    fn authoritative_resume_preserves_history_and_ignores_destination_cache() {
+        let temp = tempfile::tempdir().expect("temporary provider home");
+        let home = temp.path();
+        let writer = create_resume_source(home, "source-session");
+        writer
+            .execute(
+                "INSERT INTO steps VALUES (0, 14, ?1)",
+                params![protobuf_message_field(
+                    19,
+                    protobuf_string_field(2, "retained-context")
+                )],
+            )
+            .expect("source history");
+        drop(writer);
+        let _other = create_resume_source(home, "destination-session");
+        std::fs::create_dir_all(home.join("cache")).expect("cache directory");
+        let cache = home.join("cache/last_conversations.json");
+        std::fs::write(&cache, r#"{"/destination":"destination-session"}"#)
+            .expect("destination cache");
+        let before = source_store_bytes(home);
+        let cache_before = std::fs::read(&cache).expect("cache bytes");
+        let exact =
+            AntigravityProvider::validate_authoritative_resume_source(home, "source-session")
+                .expect("source identity");
+        let history_copy = temp.path().join("history-proof.db");
+        std::fs::copy(&exact, &history_copy).expect("private history proof");
+        assert_eq!(
+            AntigravityProvider::conversation_messages_from_database(&history_copy)
+                .expect("source messages")[0]
+                .text,
+            "retained-context"
+        );
+        assert_eq!(source_store_bytes(home), before);
+        assert_eq!(std::fs::read(cache).expect("cache after"), cache_before);
+    }
+
+    #[test]
+    fn authoritative_resume_rejects_missing_corrupt_legacy_and_mismatched_sources() {
+        let temp = tempfile::tempdir().expect("temporary provider home");
+        let home = temp.path();
+        let writer = create_resume_source(home, "wrong-identity");
+        writer
+            .execute(
+                "UPDATE trajectory_meta SET cascade_id = 'other-session'",
+                [],
+            )
+            .expect("mismatched native identity");
+        drop(writer);
+        std::fs::write(
+            AntigravityProvider::conversation_database_path(home, "corrupt"),
+            b"not sqlite",
+        )
+        .expect("corrupt source");
+        let transcript = AntigravityProvider::transcript_path(home, "legacy-only");
+        std::fs::create_dir_all(transcript.parent().expect("transcript parent"))
+            .expect("legacy directory");
+        std::fs::write(&transcript, b"{}").expect("legacy transcript");
+        let before = source_store_bytes(home);
+        for id in [
+            "missing",
+            "corrupt",
+            "wrong-identity",
+            "legacy-only",
+            "../escape",
+            "",
+            "source/session",
+            " source",
+        ] {
+            assert!(
+                AntigravityProvider::validate_authoritative_resume_source(home, id).is_err(),
+                "must reject {id:?}"
+            );
+        }
+        assert_eq!(source_store_bytes(home), before);
+        assert_eq!(std::fs::read(transcript).expect("legacy after"), b"{}");
+    }
+
+    #[test]
+    fn authoritative_resume_rejects_missing_or_ambiguous_metadata_and_recovery_journal() {
+        let temp = tempfile::tempdir().expect("temporary provider home");
+        let home = temp.path();
+        let writer = create_resume_source(home, "source-session");
+        writer
+            .execute(
+                "INSERT INTO trajectory_meta VALUES ('another-trajectory', 'source-session')",
+                [],
+            )
+            .expect("ambiguous identity");
+        assert!(
+            AntigravityProvider::validate_authoritative_resume_source(home, "source-session")
+                .is_err()
+        );
+        writer
+            .execute("DELETE FROM trajectory_meta", [])
+            .expect("missing identity");
+        assert!(
+            AntigravityProvider::validate_authoritative_resume_source(home, "source-session")
+                .is_err()
+        );
+        writer
+            .execute(
+                "INSERT INTO trajectory_meta VALUES ('trajectory', 'source-session')",
+                [],
+            )
+            .expect("restore identity");
+        drop(writer);
+        let database = AntigravityProvider::conversation_database_path(home, "source-session");
+        let mut journal = database.as_os_str().to_os_string();
+        journal.push("-journal");
+        std::fs::write(PathBuf::from(journal), b"unresolved").expect("recovery journal");
+        let before = source_store_bytes(home);
+        assert!(
+            AntigravityProvider::validate_authoritative_resume_source(home, "source-session")
+                .is_err()
+        );
+        assert_eq!(source_store_bytes(home), before);
+    }
     #[test]
     fn bootstrap_requires_a_changed_workspace_mapping() {
         assert_eq!(
@@ -1323,9 +2395,13 @@ SET dp0=%~dp0
             connection
                 .execute_batch(
                     "CREATE TABLE steps (idx INTEGER, step_type INTEGER, step_payload BLOB);\
-                     CREATE TABLE trajectory_metadata_blob (id TEXT PRIMARY KEY, data BLOB);",
+                     CREATE TABLE trajectory_metadata_blob (id TEXT PRIMARY KEY, data BLOB);\
+                     CREATE TABLE trajectory_meta (cascade_id TEXT);",
                 )
                 .expect("create schema");
+            connection
+                .execute("INSERT INTO trajectory_meta VALUES (?1)", [conversation_id])
+                .expect("native conversation identity");
             let uri = workspace_file_uri(metadata_workspace);
             connection
                 .execute(
