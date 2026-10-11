@@ -637,6 +637,7 @@ fn clone_sanitize_config(
             clone_custom_args_without_provider_memory(config.custom_args.as_deref());
     }
     config.resume_session = None;
+    config.exact_resume = None;
     config.fresh_provider_session_id = None;
     clear_codex_cleared_provider_sessions(&mut config);
     config.system_include_directories = None;
@@ -2223,6 +2224,11 @@ fn add_antigravity_cleared_conversation(conversations: &mut Vec<String>, convers
 
 fn prepare_resume_config(config: &mut AgentConfig) -> Result<(), String> {
     let mut prepared = config.clone();
+    if prepared.pending_pi_session_id().is_none()
+        && resolved_session_persistence(&prepared) == AgentSessionPersistence::Fresh
+    {
+        prepared.exact_resume = None;
+    }
     agent_lifecycle::prepare_resume_config_in_place(&mut prepared)?;
     *config = prepared;
     Ok(())
@@ -2272,7 +2278,14 @@ pub(crate) fn prepare_restored_config_for_spawn(config: &mut AgentConfig) -> Res
         return Ok(());
     }
 
-    prepare_resume_config(config)
+    let mut prepared = config.clone();
+    prepare_resume_config(&mut prepared)?;
+    if prepared.exact_resume.is_some() {
+        prepared.validate_exact_resume_identity()?;
+        ProviderFactory::resolve(&prepared.provider)?.validate_exact_resume(&prepared)?;
+    }
+    *config = prepared;
+    Ok(())
 }
 
 fn prepare_resume_config_for_runtime(
@@ -2308,6 +2321,7 @@ pub(crate) async fn prepare_provider_owned_fresh_identity(
 fn prepare_clear_config(config: &mut AgentConfig) -> Result<(), String> {
     config.is_off = false;
     config.resume_session = None;
+    config.exact_resume = None;
     config.fresh_provider_session_id = None;
     clear_codex_cleared_provider_sessions(config);
     if provider_uses_manual_session_id(&config.provider) {
@@ -2382,6 +2396,7 @@ pub async fn spawn_agent(
     config.agent_class = agent_class.clone();
     config.folder = folder;
     config.resume_session = None;
+    config.exact_resume = None;
     config.fresh_provider_session_id = None;
     config.is_off = is_off.unwrap_or(false);
     config.normalize_provider_config_for_provider();
@@ -2522,6 +2537,7 @@ pub async fn clone_agent(
     let session_id = identity.wardian_session_id;
     config.session_id = session_id.clone();
     config.resume_session = None;
+    config.exact_resume = None;
     config.fresh_provider_session_id = identity.fresh_provider_session_id.clone();
 
     if !is_session_id_available(&state, &session_id).await {

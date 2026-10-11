@@ -326,6 +326,8 @@ pub struct AgentConfig {
     pub git_worktree_source: Option<String>,
     pub git_worktree_folder: Option<String>,
     pub resume_session: Option<String>,
+    /// Persisted continuation requirement; never permits fresh recovery of this identity.
+    pub exact_resume: Option<super::provider::ExactResumeIdentity>,
     pub is_off: bool,
     pub provider: String,
     pub debug: Option<bool>,
@@ -368,6 +370,39 @@ pub struct AgentConfig {
     pub opencode_port: Option<u16>,
 }
 
+impl AgentConfig {
+    /// Bind a workspace reassignment to its current provider conversation.
+    pub fn require_exact_resume(&mut self) {
+        if let Some(session_id) = self
+            .resume_session
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            self.exact_resume = Some(super::provider::ExactResumeIdentity {
+                provider: self.provider.clone(),
+                session_id: session_id.to_owned(),
+            });
+        }
+    }
+
+    /// Detect identity substitution before a provider command can be constructed.
+    pub fn validate_exact_resume_identity(&self) -> Result<(), String> {
+        let Some(expected) = &self.exact_resume else {
+            return Ok(());
+        };
+        if expected.provider != self.provider
+            || expected.session_id.trim().is_empty()
+            || self.resume_session.as_deref().map(str::trim) != Some(expected.session_id.as_str())
+        {
+            return Err(
+                "Exact continuation lost its required provider conversation identity".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
@@ -380,6 +415,7 @@ impl Default for AgentConfig {
             git_worktree_source: None,
             git_worktree_folder: None,
             resume_session: None,
+            exact_resume: None,
             is_off: false,
             provider: default_provider(),
             debug: None,
@@ -433,6 +469,8 @@ struct AgentConfigCompat {
     pub git_worktree_source: Option<String>,
     pub git_worktree_folder: Option<String>,
     pub resume_session: Option<String>,
+    /// Persisted continuation requirement; never permits fresh recovery of this identity.
+    pub exact_resume: Option<super::provider::ExactResumeIdentity>,
     pub is_off: bool,
     #[serde(default = "default_provider")]
     pub provider: String,
@@ -485,6 +523,7 @@ impl Default for AgentConfigCompat {
             git_worktree_source: default.git_worktree_source,
             git_worktree_folder: default.git_worktree_folder,
             resume_session: default.resume_session,
+            exact_resume: default.exact_resume,
             is_off: default.is_off,
             provider: default.provider,
             debug: default.debug,
@@ -620,6 +659,7 @@ impl From<AgentConfigCompat> for AgentConfig {
             git_worktree_source: compat.git_worktree_source,
             git_worktree_folder: compat.git_worktree_folder,
             resume_session: compat.resume_session,
+            exact_resume: compat.exact_resume,
             is_off: compat.is_off,
             provider: compat.provider,
             debug: compat.debug,
@@ -876,6 +916,9 @@ impl AgentConfig {
         map.serialize_entry("git_worktree_source", &self.git_worktree_source)?;
         map.serialize_entry("git_worktree_folder", &self.git_worktree_folder)?;
         map.serialize_entry("resume_session", &self.resume_session)?;
+        if let Some(identity) = &self.exact_resume {
+            map.serialize_entry("exact_resume", identity)?;
+        }
         map.serialize_entry("is_off", &self.is_off)?;
         map.serialize_entry("provider", &self.provider)?;
         map.serialize_entry("debug", &self.debug)?;
@@ -1549,5 +1592,63 @@ mod tests {
         assert_eq!(cls.is_default, deserialized.is_default);
         assert_eq!(cls.instruction_content, deserialized.instruction_content);
         assert_eq!(cls.assigned_skills, deserialized.assigned_skills);
+    }
+}
+
+#[cfg(test)]
+mod exact_resume_tests {
+    use super::*;
+
+    #[test]
+    fn exact_resume_requirement_round_trips_both_config_encodings() {
+        for encoding in [
+            ProviderConfigEncoding::Nested,
+            ProviderConfigEncoding::LegacyFlat,
+        ] {
+            let mut config = AgentConfig {
+                provider: "claude".into(),
+                resume_session: Some("source-id".into()),
+                provider_config_encoding: encoding,
+                ..AgentConfig::default()
+            };
+            config.require_exact_resume();
+            let restored: AgentConfig =
+                serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+            assert_eq!(restored.exact_resume, config.exact_resume);
+            restored.validate_exact_resume_identity().unwrap();
+        }
+    }
+
+    #[test]
+    fn ordinary_configuration_stays_compatible_without_exact_requirement() {
+        let config: AgentConfig = serde_json::from_value(
+            serde_json::json!({"provider":"claude", "resume_session":"source-id"}),
+        )
+        .unwrap();
+        assert!(config.exact_resume.is_none());
+        assert!(serde_json::to_value(config)
+            .unwrap()
+            .get("exact_resume")
+            .is_none());
+    }
+
+    #[test]
+    fn exact_requirement_rejects_lost_or_changed_identity() {
+        let mut config = AgentConfig {
+            provider: "claude".into(),
+            resume_session: Some("source-id".into()),
+            ..AgentConfig::default()
+        };
+        config.require_exact_resume();
+        for (provider, session) in [
+            ("pi", Some("source-id")),
+            ("claude", Some("other-id")),
+            ("claude", None),
+        ] {
+            let mut changed = config.clone();
+            changed.provider = provider.into();
+            changed.resume_session = session.map(str::to_owned);
+            assert!(changed.validate_exact_resume_identity().is_err());
+        }
     }
 }

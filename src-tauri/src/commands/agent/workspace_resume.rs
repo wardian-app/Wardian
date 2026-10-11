@@ -32,6 +32,7 @@ pub(super) fn prepare_workspace_resume_config(
             return Err(format!("Active worktree handover is not qualified for provider {}: {reason}; turn the agent Off before assigning a different workspace", prepared.provider));
         }
     }
+    ProviderFactory::resolve(&prepared.provider)?.validate_exact_resume(&prepared)?;
     prepared.session_persistence = persistence;
     Ok(prepared)
 }
@@ -50,14 +51,17 @@ pub(super) enum WorkspaceMutation {
 
 impl WorkspaceMutation {
     pub(super) fn apply(&self, config: &mut AgentConfig) -> Result<(), String> {
-        match self {
+        let result = match self {
             Self::Enable(path) => {
                 enable_worktree_config(config, path);
                 Ok(())
             }
             Self::Join(folder) => assign_worktree_config(config, folder),
             Self::Disable => disable_worktree_config(config),
-        }
+        };
+        result?;
+        config.require_exact_resume();
+        Ok(())
     }
 }
 
@@ -123,6 +127,13 @@ pub(super) async fn resume_agent_inner(
         };
     lifecycle_heartbeat.ensure_active("resume")?;
     let initial_config = lifecycle_config_for_session(&state, &session_id).await?;
+    let starts_fresh = workspace_change.is_none()
+        && resolved_session_persistence(&initial_config) == AgentSessionPersistence::Fresh;
+    if !starts_fresh && initial_config.exact_resume.is_some() {
+        initial_config.validate_exact_resume_identity()?;
+        ProviderFactory::resolve(&initial_config.provider)?
+            .validate_exact_resume(&initial_config)?;
+    }
     let workspace_handover = workspace_change.is_some();
     let mut workspace_reservation = if let Some(mutation) = workspace_change.as_ref() {
         let prepared = prepare_workspace_resume_config(&initial_config, mutation)?;
@@ -161,8 +172,6 @@ pub(super) async fn resume_agent_inner(
             reservation.arm();
         }
     }
-    let starts_fresh = workspace_change.is_none()
-        && resolved_session_persistence(&initial_config) == AgentSessionPersistence::Fresh;
     let codex_stops_before_preflight = starts_fresh && initial_config.provider == "codex";
     if workspace_handover {
         // Dispose the native owner, but keep the TUI and its retained job in
@@ -204,6 +213,9 @@ pub(super) async fn resume_agent_inner(
 
     let status_before_resume = snapshot.current_status.clone();
     let mut config = snapshot.config.clone();
+    if starts_fresh {
+        config.exact_resume = None;
+    }
     if let Some(mutation) = workspace_change {
         mutation.apply(&mut config)?;
     }

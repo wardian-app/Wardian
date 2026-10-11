@@ -131,6 +131,8 @@ fn worktree_preflight_preserves_identity_and_policy_without_publishing_folder() 
     )
     .unwrap();
     assert_eq!(prepared.resume_session, before.resume_session);
+    assert!(prepared.exact_resume.is_some());
+    prepared.validate_exact_resume_identity().unwrap();
     assert_eq!(prepared.session_id, before.session_id);
     assert_eq!(
         prepared.session_persistence,
@@ -216,4 +218,66 @@ fn pending_handover_excludes_worktree_deletion_until_guard_release() {
         Some(value) => std::env::set_var("WARDIAN_HOME", value),
         None => std::env::remove_var("WARDIAN_HOME"),
     }
+}
+
+#[test]
+fn off_assignment_retains_exact_requirement_for_later_resume() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = configuration("claude", &root.path().join("repo"));
+    config.is_off = true;
+    WorkspaceMutation::Enable(root.path().join("repo.wt/destination"))
+        .apply(&mut config)
+        .unwrap();
+    assert!(config.is_off);
+    let restored: AgentConfig =
+        serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+    assert_eq!(restored.exact_resume, config.exact_resume);
+    let before = serde_json::to_value(&restored).unwrap();
+    // No adapter is enabled by assignment. The later shared preflight fails closed.
+    let failure = ProviderFactory::resolve("claude")
+        .unwrap()
+        .validate_exact_resume(&restored)
+        .unwrap_err();
+    assert!(failure.contains("not qualified"));
+    assert_eq!(serde_json::to_value(restored).unwrap(), before);
+}
+
+#[test]
+fn fresh_restore_clears_the_previous_exact_requirement() {
+    let _lock = crate::utils::wardian_test_env_lock();
+    let root = tempfile::tempdir().unwrap();
+    let mut config = configuration("mock", root.path());
+    config.is_off = false;
+    config.session_persistence = AgentSessionPersistenceOverride::Fresh;
+    config.require_exact_resume();
+    prepare_restored_config_for_spawn(&mut config).unwrap();
+    assert!(config.exact_resume.is_none());
+    assert!(config.resume_session.is_none());
+}
+
+#[test]
+fn restored_exact_resume_preflight_does_not_publish_identity_substitution() {
+    let _lock = crate::utils::wardian_test_env_lock();
+    let root = tempfile::tempdir().unwrap();
+    let mut config = configuration("mock", root.path());
+    config.is_off = false;
+    config.session_persistence = AgentSessionPersistenceOverride::Resume;
+    config.require_exact_resume();
+    config.resume_session = Some("substituted-provider-id".into());
+    let before = serde_json::to_value(&config).unwrap();
+    let error = prepare_restored_config_for_spawn(&mut config).unwrap_err();
+    assert!(error.contains("identity"), "{error}");
+    assert_eq!(serde_json::to_value(config).unwrap(), before);
+}
+
+#[test]
+fn clone_and_new_session_do_not_inherit_exact_source_requirement() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = configuration("mock", root.path());
+    config.require_exact_resume();
+    let cloned = clone_sanitize_config(&config, "clone".into(), None, None, None, false);
+    assert!(cloned.exact_resume.is_none());
+    assert!(cloned.resume_session.is_none());
+    prepare_clear_config(&mut config).unwrap();
+    assert!(config.exact_resume.is_none());
 }

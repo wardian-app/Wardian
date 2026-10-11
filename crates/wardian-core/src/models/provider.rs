@@ -41,6 +41,14 @@ pub enum WorkspaceHandoverQualification {
     Unqualified { reason: &'static str },
 }
 
+/// Durable identity that must resume with history rather than same-ID fresh recovery.
+/// The roster carries this requirement into delayed provider dispatch and restore.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExactResumeIdentity {
+    pub provider: String,
+    pub session_id: String,
+}
+
 /// Abstraction over a specific agent CLI harness (Gemini, Claude, Codex, etc.).
 ///
 /// Implementations encapsulate the provider-specific binary resolution,
@@ -55,6 +63,20 @@ pub trait AgentProvider: Send + Sync {
     fn workspace_handover_qualification(&self) -> WorkspaceHandoverQualification {
         WorkspaceHandoverQualification::Unqualified {
             reason: "exact conversation identity, destination cwd and retained history have not been qualified",
+        }
+    }
+
+    /// Read-only validation before an exact continuation can stop its old writer.
+    /// Adapters override this to prove supported options and materialized history.
+    /// Launch must repeat validation immediately before crossing the provider boundary.
+    fn validate_exact_resume(&self, config: &AgentConfig) -> Result<(), String> {
+        config.validate_exact_resume_identity()?;
+        match self.workspace_handover_qualification() {
+            WorkspaceHandoverQualification::ExactConversationAtDestination => Ok(()),
+            WorkspaceHandoverQualification::Unqualified { reason } => Err(format!(
+                "Exact continuation is not qualified for provider {}: {reason}",
+                config.provider
+            )),
         }
     }
 

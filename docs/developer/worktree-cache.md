@@ -135,3 +135,10 @@ handover to supported Windows runtimes. New adapter qualification must preserve
 these shared transaction rules and prove actual relative tool execution at the
 destination, prior context and durable/rendered history with the same native
 conversation identity. Missing-history fresh-session fallback is not continuity.
+
+Workspace assignment also records an identity-bound `exact_resume` requirement
+in the saved agent configuration. Read-only adapter preflight checks it before
+shutdown, and native launch checks it again after restore or delayed dispatch.
+Missing history cannot become a same-ID fresh conversation. Explicit New Session
+or an ordinary Fresh resume clears the prior requirement at its intentional
+conversation boundary. The roster owns this agent-scoped contract; runtime launch plans consume it.

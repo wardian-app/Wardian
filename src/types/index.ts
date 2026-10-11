@@ -208,6 +208,8 @@ export interface AgentConfig {
     agent_class: string;
     folder: string;
     resume_session?: string;
+    /** Identity-bound continuation requirement retained across restore and delayed dispatch. */
+    exact_resume?: { provider: string; session_id: string };
     is_off: boolean;
     provider?: ProviderName | string;
     debug?: boolean;

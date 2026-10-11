@@ -2917,6 +2917,31 @@ fn native_command(
     protocol: NativeProviderProtocol,
     prior: Option<&NativeSessionBinding>,
 ) -> Result<(Command, Option<wardian_core::memory::MemoryCapabilityLease>), NativeBrokerError> {
+    let mut exact_config = spec.config.clone();
+    if let Some(session_id) = prior.and_then(|binding| binding.provider_session_id.clone()) {
+        exact_config.resume_session = Some(session_id);
+    }
+    if exact_config.exact_resume.is_some() {
+        if exact_config.provider != spec.provider {
+            return Err(error(
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+                "Exact continuation provider does not match its native launch",
+                false,
+            ));
+        }
+        let provider = ProviderFactory::resolve(&spec.provider).map_err(|message| {
+            error(NativeDeliveryErrorCode::UnsupportedProvider, message, false)
+        })?;
+        provider
+            .validate_exact_resume(&exact_config)
+            .map_err(|message| {
+                error(
+                    NativeDeliveryErrorCode::CapabilityUnavailable,
+                    message,
+                    false,
+                )
+            })?;
+    }
     #[cfg(test)]
     if let Some(script) = std::env::var_os("WARDIAN_NATIVE_TEST_SCRIPT") {
         let mut command = Command::new("node");
@@ -2944,7 +2969,15 @@ fn native_command(
         config.resume_session = Some(session_id);
     }
     if protocol == NativeProviderProtocol::ClaudeStreamJson {
-        reconcile_claude_native_session(&mut config, claude_session_file_exists);
+        reconcile_claude_native_session(&mut config, claude_session_file_exists).map_err(
+            |message| {
+                error(
+                    NativeDeliveryErrorCode::CapabilityUnavailable,
+                    message,
+                    false,
+                )
+            },
+        )?;
     }
     if protocol == NativeProviderProtocol::PiRpc {
         let session_dir = PiProvider::session_dir(&config.session_id);
@@ -2953,7 +2986,14 @@ fn native_command(
                 .as_deref()
                 .and_then(|dir| PiProvider::session_file(dir, session_id))
                 .is_some()
-        });
+        })
+        .map_err(|message| {
+            error(
+                NativeDeliveryErrorCode::CapabilityUnavailable,
+                message,
+                false,
+            )
+        })?;
     }
     let is_resume = config
         .resume_session
@@ -3046,7 +3086,8 @@ fn native_command(
 fn reconcile_claude_native_session(
     config: &mut AgentConfig,
     session_exists: impl FnOnce(&str) -> bool,
-) {
+) -> Result<(), String> {
+    config.validate_exact_resume_identity()?;
     let Some(resume_session) = config
         .resume_session
         .as_deref()
@@ -3054,10 +3095,17 @@ fn reconcile_claude_native_session(
         .filter(|session_id| !session_id.is_empty())
         .map(str::to_string)
     else {
-        return;
+        return Ok(());
     };
     if session_exists(&resume_session) {
-        return;
+        return Ok(());
+    }
+
+    if config.exact_resume.is_some() {
+        return Err(
+            "Exact continuation requires materialized history; same-ID fresh recovery is forbidden"
+                .into(),
+        );
     }
 
     // Claude emits its init event before the first transcript is durable. If
@@ -3066,12 +3114,14 @@ fn reconcile_claude_native_session(
     // Preserve the provider UUID and start it with `--session-id` instead.
     config.resume_session = None;
     config.fresh_provider_session_id = Some(resume_session);
+    Ok(())
 }
 
 fn reconcile_pi_native_session(
     config: &mut AgentConfig,
     session_exists: impl FnOnce(&str) -> bool,
-) {
+) -> Result<(), String> {
+    config.validate_exact_resume_identity()?;
     let Some(resume_session) = config
         .resume_session
         .as_deref()
@@ -3079,10 +3129,17 @@ fn reconcile_pi_native_session(
         .filter(|session_id| !session_id.is_empty())
         .map(str::to_string)
     else {
-        return;
+        return Ok(());
     };
     if session_exists(&resume_session) {
-        return;
+        return Ok(());
+    }
+
+    if config.exact_resume.is_some() {
+        return Err(
+            "Exact continuation requires materialized history; same-ID fresh recovery is forbidden"
+                .into(),
+        );
     }
 
     // Pi's `--session` only resumes an existing transcript, while
@@ -3091,6 +3148,7 @@ fn reconcile_pi_native_session(
     // first transcript, so retain the identity and switch launch mode.
     config.resume_session = None;
     config.fresh_provider_session_id = Some(resume_session);
+    Ok(())
 }
 
 fn claude_session_file_exists(session_id: &str) -> bool {
@@ -3101,7 +3159,11 @@ fn claude_session_file_exists(session_id: &str) -> bool {
     {
         return false;
     }
-    let Some(projects_root) = dirs::home_dir().map(|home| home.join(".claude").join("projects"))
+    let Some(projects_root) = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
+        .map(|root| root.join("projects"))
     else {
         return false;
     };
@@ -3811,6 +3873,67 @@ mod tests {
     }
 
     #[test]
+    fn exact_resume_rejects_same_id_fresh_recovery_without_mutating_configuration() {
+        for provider in ["claude", "pi"] {
+            let mut config = AgentConfig {
+                provider: provider.into(),
+                resume_session: Some("source-id".into()),
+                ..AgentConfig::default()
+            };
+            config.require_exact_resume();
+            let before = serde_json::to_value(&config).unwrap();
+            let failure = if provider == "claude" {
+                reconcile_claude_native_session(&mut config, |_| false)
+            } else {
+                reconcile_pi_native_session(&mut config, |_| false)
+            }
+            .unwrap_err();
+            assert!(failure.contains("fresh recovery is forbidden"), "{failure}");
+            assert_eq!(serde_json::to_value(&config).unwrap(), before);
+            assert!(config.fresh_provider_session_id.is_none());
+        }
+    }
+
+    #[test]
+    fn exact_resume_survives_restore_and_rejects_later_native_dispatch() {
+        let mut config = AgentConfig {
+            provider: "claude".into(),
+            resume_session: Some("source-id".into()),
+            ..AgentConfig::default()
+        };
+        config.require_exact_resume();
+        let restored = serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        let spec = NativeSessionSpec {
+            target_agent_id: "roster-id".into(),
+            provider: "claude".into(),
+            generation: 2,
+            workspace: PathBuf::from("."),
+            config: restored,
+        };
+        let failure = native_command(&spec, NativeProviderProtocol::ClaudeStreamJson, None)
+            .err()
+            .expect("exact launch rejected before command construction");
+        assert_eq!(failure.code, NativeDeliveryErrorCode::CapabilityUnavailable);
+        assert!(!failure.provider_boundary_crossed);
+        assert!(failure.message.contains("not qualified"));
+        assert_eq!(spec.config.resume_session.as_deref(), Some("source-id"));
+    }
+
+    #[test]
+    fn exact_resume_rejects_identity_substitution_even_with_existing_history() {
+        let mut config = AgentConfig {
+            provider: "claude".into(),
+            resume_session: Some("source-id".into()),
+            ..AgentConfig::default()
+        };
+        config.require_exact_resume();
+        config.resume_session = Some("substituted-id".into());
+        let failure = reconcile_claude_native_session(&mut config, |_| true).unwrap_err();
+        assert!(failure.contains("identity"));
+        assert!(config.fresh_provider_session_id.is_none());
+    }
+
+    #[test]
     fn claude_missing_resume_transcript_reuses_the_id_as_a_fresh_session() {
         let mut config = AgentConfig {
             provider: "claude".to_string(),
@@ -3818,7 +3941,7 @@ mod tests {
             ..AgentConfig::default()
         };
 
-        reconcile_claude_native_session(&mut config, |_| false);
+        reconcile_claude_native_session(&mut config, |_| false).unwrap();
 
         assert_eq!(config.resume_session, None);
         assert_eq!(
@@ -3835,7 +3958,7 @@ mod tests {
             ..AgentConfig::default()
         };
 
-        reconcile_claude_native_session(&mut config, |_| true);
+        reconcile_claude_native_session(&mut config, |_| true).unwrap();
 
         assert_eq!(config.resume_session.as_deref(), Some("claude-session-1"));
         assert_eq!(config.fresh_provider_session_id, None);
@@ -3849,7 +3972,7 @@ mod tests {
             ..AgentConfig::default()
         };
 
-        reconcile_pi_native_session(&mut config, |_| false);
+        reconcile_pi_native_session(&mut config, |_| false).unwrap();
 
         assert_eq!(config.resume_session, None);
         assert_eq!(
@@ -3866,7 +3989,7 @@ mod tests {
             ..AgentConfig::default()
         };
 
-        reconcile_pi_native_session(&mut config, |_| true);
+        reconcile_pi_native_session(&mut config, |_| true).unwrap();
 
         assert_eq!(config.resume_session.as_deref(), Some("pi-session-1"));
         assert_eq!(config.fresh_provider_session_id, None);
