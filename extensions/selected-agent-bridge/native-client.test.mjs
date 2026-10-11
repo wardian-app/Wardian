@@ -17,7 +17,7 @@ function fixture(behavior = 'normal', timeout_ms = 2000) {
   writeFileSync(script, `const fs=require('node:fs'); const readline=require('node:readline');
 const [log,behavior,...args]=process.argv.slice(2);
 const record=value=>fs.appendFileSync(log,JSON.stringify(value)+'\\n');
-record({args,token:process.env.WARDIAN_CONTROLLER_TOKEN,resource:process.env.WARDIAN_CONTROLLER_RESOURCE,home:process.env.WARDIAN_HOME,key:process.env.WARDIAN_CONTROLLER_REQUEST_KEY,sender:process.env.WARDIAN_SESSION_ID,pid:process.pid});
+record({args,token:process.env.WARDIAN_CONTROLLER_TOKEN,resource:process.env.WARDIAN_CONTROLLER_RESOURCE,home:process.env.WARDIAN_HOME,key:process.env.WARDIAN_CONTROLLER_REQUEST_KEY,sender:process.env.WARDIAN_SESSION_ID,platformKey:process.env.CONTROL_PLANE_API_KEY,openaiKey:process.env.OPENAI_API_KEY,pid:process.pid});
 process.stderr.write('private-token private-path');
 if(behavior==='hang'){process.stdin.resume();setInterval(()=>{},1000);}
 else if(behavior==='oversized'){process.stdout.write('x'.repeat(1024*1024+1));}
@@ -49,6 +49,8 @@ test('principal projection keeps native attribution and expiry/revocation semant
 
 test('verify subprocess uses fixed args, redacted native principal and private env token', async () => {
   const f = fixture();
+  const inherited = {CONTROL_PLANE_API_KEY:process.env.CONTROL_PLANE_API_KEY, OPENAI_API_KEY:process.env.OPENAI_API_KEY};
+  process.env.CONTROL_PLANE_API_KEY = 'fake-platform-key'; process.env.OPENAI_API_KEY = 'fake-openai-key';
   try {
     const grant = await f.client.verify_access_token('fixture-secret', { resource });
     assert.equal(grant.controller_id, id);
@@ -57,8 +59,14 @@ test('verify subprocess uses fixed args, redacted native principal and private e
     assert.equal(record.resource, resource);
     assert.equal(record.token, 'fixture-secret'); assert.equal(record.home, f.directory);
     assert.equal(record.key, undefined); assert.equal(record.sender, undefined);
+    assert.equal(record.platformKey, undefined); assert.equal(record.openaiKey, undefined);
     assert.equal(JSON.stringify(grant).includes('fixture-secret'), false);
-  } finally { f.close(); }
+  } finally {
+    for (const [name,value] of Object.entries(inherited)) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+    f.close();
+  }
 });
 
 test('MCP subprocess handshakes, forwards literal call/key/token and ignores supplied principal', async () => {

@@ -2,7 +2,9 @@
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
 import { once } from 'node:events';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { createGateway } from './server.mjs';
 
 const resource = process.env.WARDIAN_BRIDGE_E2E_RESOURCE;
@@ -53,5 +55,60 @@ try {
   assert.ok(audit.includes('receipt_returned'));
   assert.equal(audit.includes(token), false);
   assert.equal(audit.includes('external-controller-work'), false);
+  // The released private tunnel keeps one child across logical reconnects.
+  const relayConfig = process.env.WARDIAN_HOME + '/test-tunnel.json';
+  await writeFile(relayConfig, JSON.stringify({ cli_path: process.env.WARDIAN_BRIDGE_E2E_CLI,
+    wardian_home: process.env.WARDIAN_HOME, resource, allowed_origins: [], port: 47691,
+    audit_path: process.env.WARDIAN_HOME + '/test-tunnel-audit.jsonl' }));
+  const relay = spawn(process.execPath, [fileURLToPath(new URL('./tunnel-stdio.mjs', import.meta.url)),
+    '--config', relayConfig, '--stdio'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+    env: {...process.env, WARDIAN_CONTROLLER_TOKEN: token} });
+  relay.stderr.resume();
+  let buffered = '';
+  const responses = [];
+  let waiter;
+  relay.stdout.on('data', chunk => {
+    buffered += chunk.toString();
+    while (buffered.includes('\n')) {
+      const at = buffered.indexOf('\n');
+      responses.push(JSON.parse(buffered.slice(0, at))); buffered = buffered.slice(at + 1);
+    }
+    if (waiter && responses.length) { const accept = waiter; waiter = undefined; accept(responses.shift()); }
+  });
+  async function relayCall(method, params, id = 1) {
+    relay.stdin.write(JSON.stringify({jsonrpc:'2.0', id, method, params}) + '\n');
+    let timer;
+    try {
+      return await Promise.race([responses.length ? Promise.resolve(responses.shift()) : new Promise(accept => { waiter = accept; }),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('relay deadline')), 75000); })]);
+    } finally { clearTimeout(timer); }
+  }
+  try {
+    const init = { protocolVersion:'2025-11-25', capabilities:{}, clientInfo:{name:'fixture',version:'1'} };
+    assert.ok((await relayCall('initialize', init)).result);
+    assert.ok((await relayCall('initialize', init)).result); // reused ID, fresh logical session
+    const meta = {'io.modelcontextprotocol/protocolVersion':'2026-07-28', 'io.modelcontextprotocol/clientCapabilities':{}};
+    const discovery = await relayCall('server/discover', {_meta:meta});
+    assert.equal(discovery.result.resultType, 'complete');
+    assert.ok(discovery.result.supportedVersions.includes('2026-07-28'));
+    const tools = await relayCall('tools/list', {_meta:meta});
+    assert.ok(tools.result.tools.every(tool => tool.name !== 'reply'));
+    const taskTool = tools.result.tools.find(tool => tool.name === 'followup_task');
+    assert.deepEqual(taskTool.inputSchema.properties.target.enum, [worker]);
+    const replayed = await relayCall('tools/call', {name:'followup_task', arguments:{target:worker,message:'external-controller-work'},
+      _meta:{...meta,'wardian/request_key':'native-e2e-task'}});
+    assert.equal(replayed.result.structuredContent.request_id, task.request_id);
+    const denied = await relayCall('tools/call', {name:'send_message', arguments:{target:'ffffffff-ffff-4fff-8fff-ffffffffffff',message:'denied'},_meta:meta});
+    assert.ok(denied.error); assert.equal(denied.result, undefined);
+    const empty = await relayCall('tools/call', {name:'receive_messages',arguments:{timeout_ms:0},_meta:meta});
+    assert.deepEqual(empty.result.structuredContent.messages, []);
+    // Owner revocation must also close a persistent relay's next logical session.
+    const revokeEnv = {...process.env}; delete revokeEnv.WARDIAN_SESSION_ID;
+    const revoke = spawn(process.env.WARDIAN_BRIDGE_E2E_CLI, ['controller','revoke',token.split('.')[1]],
+      {windowsHide:true,stdio:['ignore','ignore','ignore'],env:revokeEnv});
+    const [revokeCode] = await once(revoke, 'exit'); assert.equal(revokeCode, 0);
+    const revoked = await relayCall('initialize', init);
+    assert.ok(revoked.error); assert.equal(revoked.result, undefined);
+  } finally { relay.kill(); }
   process.stdout.write('native_controller_http_roundtrip_passed\n');
 } finally { server.closeAllConnections(); await new Promise(accept => server.close(accept)); }

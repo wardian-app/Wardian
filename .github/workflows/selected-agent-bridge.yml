@@ -45,7 +45,7 @@ jobs:
         with:
           workspaces: .
       - run: cargo build -p wardian-cli
-      - name: Real CLI and canonical mailbox through transient HTTP
+      - name: Real CLI and canonical mailbox through HTTP and private-tunnel stdio
         shell: pwsh
         run: |
           $env:WARDIAN_BRIDGE_E2E_CLI = Join-Path $env:GITHUB_WORKSPACE 'target/debug/wardian-cli.exe'

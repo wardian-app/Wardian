@@ -34,6 +34,8 @@ node server.mjs --config /absolute/path/controller.json --listen
 
 The process binds only `127.0.0.1` and the configured port. An operator-managed HTTPS reverse proxy must route that resource to this loopback port and preserve its original Host header. The extension does not provision TLS, a tunnel, a public bind, background service, or firewall rules. A remote/cloud client cannot reach localhost by itself. Configure its endpoint and `Authorization: Bearer <token>` only after the owner approves the chosen network boundary. Never put the token in a URL. A custom MCP client supporting manually configured bearer headers can use this transport. This release does not implement OAuth login, dynamic registration, or automatic ChatGPT/Codex connector installation; clients requiring OAuth need a separate authorization integration.
 
+For the optional owner-private ChatGPT Secure MCP Tunnel route, use the dedicated [stdio relay and setup guide](SECURE-TUNNEL.md). The manual bearer HTTP route above does not supply ChatGPT OAuth login.
+
 ## Tools and boundaries
 
 | Tool | Required capabilities | Behavior |
@@ -63,4 +65,4 @@ For the optional real CLI acceptance scenario, first build `wardian-cli`, set `W
 cargo test -p Wardian --lib controller_task_worker_reply_and_ack_use_canonical_mailbox_without_agent -- --test-threads=1 --nocapture
 ```
 
-The command works in PowerShell after setting the two variables with `$env:WARDIAN_BRIDGE_E2E_CLI` and `$env:WARDIAN_BRIDGE_E2E_DRIVER`. With the driver configured, the test must print `native_controller_http_roundtrip_passed`; without it the baseline test covers native mailbox behavior only. The bridge CI job configures the driver automatically. This scenario uses the actual built CLI and production handler, an isolated control endpoint, a transient loopback HTTP server, and a mock worker. It does not verify a real provider, public HTTPS routing, or a cloud client's connector installation.
+The command works in PowerShell after setting the two variables with `$env:WARDIAN_BRIDGE_E2E_CLI` and `$env:WARDIAN_BRIDGE_E2E_DRIVER`. With the driver configured, the test must print `native_controller_http_roundtrip_passed`; without it the baseline test covers native mailbox behavior only. The bridge CI job configures the driver automatically. This scenario uses the actual built CLI and production handler, an isolated control endpoint, a transient loopback HTTP server, and a mock worker. It also exercises the private-tunnel stdio relay in a real subprocess, repeated initialization and reused IDs, modern discovery, selected tool schemas, a durable task replay, out-of-scope rejection, and the acknowledged mailbox. It does not verify a real provider, public HTTPS routing, or a cloud client's connector installation.

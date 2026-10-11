@@ -43,6 +43,9 @@ export function createNativeControllerClient({ cli_path, wardian_home, resource,
       delete env.WARDIAN_CONTROLLER_REQUEST_KEY;
       // Controller mode must never inherit managed-agent attribution as a fallback.
       delete env.WARDIAN_SESSION_ID;
+      // Platform tunnel credentials are not Wardian native credentials.
+      delete env.CONTROL_PLANE_API_KEY;
+      delete env.OPENAI_API_KEY;
       if (key !== undefined) env.WARDIAN_CONTROLLER_REQUEST_KEY = key;
       let child;
       try { child = spawn(cli_path, [...prefix, ...args], { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env }); }

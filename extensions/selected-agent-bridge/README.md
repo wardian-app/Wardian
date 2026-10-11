@@ -1,3 +1,5 @@
+For distinct external controller identity, see [CONTROLLERS.md](CONTROLLERS.md). For an optional private ChatGPT tunnel route, see [SECURE-TUNNEL.md](SECURE-TUNNEL.md). The managed-agent adapter described below is a separate mode.
+
 # Selected-agent MCP bridge
 
 For an external assistant without a managed Wardian identity, use the separate
