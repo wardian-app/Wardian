@@ -45,6 +45,20 @@ test('dormant factory requires an explicit authenticated native port', () => {
   assert.throws(() => createControllerHandler({ resource: 'http://unsafe.test/mcp' }));
   assert.throws(() => createControllerHandler({ resource }));
 });
+test('in-flight request cap fences authentication subprocesses and releases slots', async () => {
+  let release, ready, grant, count = 0;
+  const blocked = new Promise(resolve => { release = resolve; });
+  const started = new Promise(resolve => { ready = resolve; });
+  await fixture(async ({request,state}) => {
+    grant = state.grant;
+    const pending = Array.from({length:8}, (_,id) => request(rpc('list_agents',{},id)));
+    await started;
+    try { assert.equal((await request(rpc('list_agents',{},9))).status,503); assert.equal(count,8); }
+    finally { release(); }
+    assert.ok((await Promise.all(pending)).every(response => response.status === 200));
+    assert.equal((await request(rpc('list_agents',{},10))).status,200);
+  }, {verify_access_token:async()=>{count++; if(count===8) ready(); await blocked; return grant;},exchange_timeout_ms:3000});
+});
 test('resource discovery, stateless initialization and JSON-only transport', async () => fixture(async ({ request, state }) => {
   const metadata = await request(undefined, { method: 'GET', path: '/.well-known/oauth-protected-resource/mcp', headers: { Authorization: '' } });
   assert.equal(metadata.status, 200);
@@ -126,14 +140,23 @@ test('audit failure prevents dispatch; lost receipts do not retry; backend deadl
   await fixture(async ({request})=>{const response=await request(rpc('followup_task',{target:agent,message:'work'}));assert.equal(response.body.result.isError,true);assert.equal(calls,1);}, {invoke:async()=>{calls++;throw new Error('lost receipt');}});
   await fixture(async ({request})=>{const response=await request(rpc('wait_agent'));assert.equal(response.body.result.isError,true);}, {invoke:async()=>new Promise(()=>{}),exchange_timeout_ms:30});
 });
-test('admission keys are principal-bound and stable across grant rotation; typed IDs remain distinct', async () => fixture(async ({request,state})=>{
+test('SDK counters can restart; explicit request keys are principal-bound and stable', async () => fixture(async ({request,state})=>{
   await request(rpc('send_message',{target:agent,message:'x'},1));
-  const first=state.calls.at(-1).idempotency_key;
+  const ordinary=state.calls.at(-1).idempotency_key;
+  await request(rpc('send_message',{target:agent,message:'new task'},1));
+  assert.notEqual(state.calls.at(-1).idempotency_key,ordinary);
+  const keyed = id => { const value = rpc('send_message',{target:agent,message:'x'},id); value.params._meta={'wardian/request_key':'logical-request'}; return value; };
+  await request(keyed(1));
+  const first = state.calls.at(-1).idempotency_key;
   state.grant={...state.grant,grant_id:'rotated-fake-grant'};
-  await request(rpc('send_message',{target:agent,message:'x'},1));
+  await request(keyed(2));
   assert.equal(state.calls.at(-1).idempotency_key,first);
-  await request(rpc('send_message',{target:agent,message:'x'},'1'));
+  state.grant={...state.grant,controller_id:other};
+  await request(keyed(1));
   assert.notEqual(state.calls.at(-1).idempotency_key,first);
+  const before=state.calls.length;
+  for(const key of [null,42,'',' ', 'é'.repeat(101)]) { const value=keyed(3); value.params._meta['wardian/request_key']=key; assert.equal((await request(value)).status,403); }
+  assert.equal(state.calls.length,before);
 }));
 test('roster filtering replaces both representations and omits private fields', async()=> fixture(async({request})=>{
   const response=await request(rpc('list_agents'));

@@ -97,8 +97,7 @@ fn run() -> i32 {
         return error.code_i32();
     }
     let result = match cli.command {
-        Command::Mcp { .. } => unreachable!("MCP runs before home migration"),
-        Command::Controller(_) => unreachable!("controller management runs without migrations"),
+        Command::Mcp { .. } | Command::Controller(_) => unreachable!("early CLI command"),
         Command::Schema { path } => schema::render(&path),
         Command::Agent(args) => handle_agent(args),
         Command::Artifact(args) => artifact::handle_artifact(args),

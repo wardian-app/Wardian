@@ -77,6 +77,30 @@ fn validate_receipt(request: &AgentMessagingRequest, value: &serde_json::Value) 
     }
 }
 
+/// Explicit external controller exchange on the existing authenticated local pipe.
+pub(crate) fn controller_request(
+    request: AgentMessagingRequest,
+    token: wardian_core::control::ControllerSecret,
+    resource: String,
+) -> io::Result<serde_json::Value> {
+    let expected = request.clone();
+    let runtime = build_runtime()?;
+    let value = runtime.block_on(async {
+        tokio::time::timeout(
+            Duration::from_secs(61),
+            send_request(ControlRequest::ControllerMessaging {
+                request,
+                token,
+                resource,
+            }),
+        )
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Controller response timed out"))?
+    })?;
+    validate_receipt(&expected, &value)?;
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,28 +129,4 @@ mod tests {
         assert!(validate_receipt(&request, &json!({"schema":1,"ok":true,"delivery":[]})).is_err());
         assert!(validate_receipt(&request, &json!({"operation":"send_message","interaction_id":"id","delivery_state":"pending","duplicate":false})).is_err());
     }
-}
-
-/// Explicit external controller exchange on the existing authenticated local pipe.
-pub(crate) fn controller_request(
-    request: AgentMessagingRequest,
-    token: wardian_core::control::ControllerSecret,
-    resource: String,
-) -> io::Result<serde_json::Value> {
-    let expected = request.clone();
-    let runtime = build_runtime()?;
-    let value = runtime.block_on(async {
-        tokio::time::timeout(
-            Duration::from_secs(61),
-            send_request(ControlRequest::ControllerMessaging {
-                request,
-                token,
-                resource,
-            }),
-        )
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Controller response timed out"))?
-    })?;
-    validate_receipt(&expected, &value)?;
-    Ok(value)
 }

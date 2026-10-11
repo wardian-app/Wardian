@@ -1,5 +1,5 @@
 /** Dormant MCP resource handler: no listener, credentials, grants, CLI, or provider startup. */
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 const VERSION = '2025-11-25';
 const MAX_BYTES = 1024 * 1024;
@@ -107,7 +107,7 @@ function respond(response, status, body, headers = {}) {
 
 /**
  * Construct a stateless JSON-response Streamable HTTP handler; never binds a socket.
- * verify_access_token must validate issuer/signature/audience and return a fresh authoritative
+ * verify_access_token must validate the credential, resource audience and return a fresh authoritative
  * grant on EACH request. It must not cache revocation or accept caller-supplied attribution.
  * invoke must implement the distinct controller mailbox/admission port, never agent impersonation.
  * The optional native client authenticates owner-issued bearer grants. OAuth authorization
@@ -122,8 +122,12 @@ export function createControllerHandler({ resource, authorization_servers, allow
       ![verify_access_token, invoke, audit, now].every(value => typeof value === 'function') || !Number.isInteger(exchange_timeout_ms) || exchange_timeout_ms < 1 || exchange_timeout_ms > 75000) throw new Error('Explicit authority, origins, verifier, broker and audit required');
   const metadataPath = '/.well-known/oauth-protected-resource' + parsed.pathname;
   const challenge = { 'WWW-Authenticate': `Bearer resource_metadata="${parsed.origin}${metadataPath}"` };
+  let activeRequests = 0;
 
   return async (request, response) => {
+    // TCP connection limits alone do not bound pipelined authentication subprocesses.
+    if (activeRequests >= 8) return respond(response, 503, { error: 'controller_busy' }, { Connection: 'close' });
+    activeRequests++;
     let grant;
     let dispatched = false;
     try {
@@ -157,7 +161,7 @@ export function createControllerHandler({ resource, authorization_servers, allow
       let result;
       if (input.method === 'initialize') {
         if (params.protocolVersion !== VERSION || !object(params.capabilities) || !nonempty(params.clientInfo?.name) || !nonempty(params.clientInfo?.version)) return respond(response, 400, rpcError(id, -32602, 'Unsupported initialization'));
-        result = { protocolVersion: VERSION, capabilities: { tools: {} }, serverInfo: { name: 'wardian-external-controller-prototype', version: '0.1.0' } };
+        result = { protocolVersion: VERSION, capabilities: { tools: {} }, serverInfo: { name: 'wardian-external-controller', version: '0.1.0' } };
       } else if (input.method === 'ping') result = {};
       else if (input.method === 'tools/list') {
         if (!only(params, ['_meta'])) return respond(response, 400, rpcError(id, -32602, 'No pagination'));
@@ -165,8 +169,11 @@ export function createControllerHandler({ resource, authorization_servers, allow
       } else if (input.method === 'tools/call') {
         const name = params.name;
         const args = params.arguments === undefined ? {} : params.arguments;
+        const requestKey = params._meta?.['wardian/request_key'];
+        const validMeta = params._meta === undefined || (object(params._meta) &&
+          (requestKey === undefined || (nonempty(requestKey) && Buffer.byteLength(requestKey) <= 200)));
         const scopes = Object.hasOwn(SCOPES, name) ? SCOPES[name] : null;
-        const permitted = only(params, ['name', 'arguments', '_meta']) && scopes && scopes.every(scope => grant.scopes.includes(scope)) &&
+        const permitted = only(params, ['name', 'arguments', '_meta']) && validMeta && scopes && scopes.every(scope => grant.scopes.includes(scope)) &&
           validateArguments(name, args, grant) && (args.ack_cursor === undefined || grant.scopes.includes('controller:ack'));
         const event = { controller_id: grant.controller_id, controller_name: grant.controller_name, grant_id: grant.grant_id,
           operation: scopes ? name : 'unknown', target_uuid: permitted && args.target ? args.target : null, request_id: id };
@@ -178,7 +185,9 @@ export function createControllerHandler({ resource, authorization_servers, allow
         if (!validGrant(fresh, resource, now()) || grantKey(fresh) !== grantKey(grant)) return respond(response, 401, { error: 'invalid_token' }, challenge);
         const principal = Object.freeze({ kind: 'external_controller', controller_id: grant.controller_id, controller_name: grant.controller_name,
           grant_id: grant.grant_id, audience: resource, mailbox_owner: `controller:${grant.controller_id}` });
-        const idempotency_key = `controller:${grant.controller_id}:${createHash('sha256').update(JSON.stringify(id)).digest('hex')}`;
+        // JSON-RPC IDs correlate responses and may restart with a new SDK instance.
+        // Durable replay is an explicit caller choice; new calls otherwise get fresh keys.
+        const idempotency_key = `controller:${grant.controller_id}:${createHash('sha256').update(requestKey ?? randomUUID()).digest('hex')}`;
         dispatched = true;
         try { result = await bounded(() => invoke({ principal, operation: name, arguments: structuredClone(args), idempotency_key, access_token: authorization.slice(7) }), exchange_timeout_ms); }
         catch { result = failure('controller_backend_unavailable', 'Controller receipt unavailable; delivery may be uncertain. Do not replay automatically.'); }
@@ -198,7 +207,8 @@ export function createControllerHandler({ resource, authorization_servers, allow
       return respond(response, 200, { jsonrpc: '2.0', id, result });
     } catch {
       if (!response.headersSent && !response.destroyed) respond(response, 503, { error: 'controller_boundary_unavailable', delivery_uncertain: dispatched });
+    } finally {
+      activeRequests--;
     }
   };
 }
-
