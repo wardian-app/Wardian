@@ -1,4 +1,4 @@
-use wardian_core::models::provider::{AgentEvent, AgentProvider};
+use wardian_core::models::provider::{AgentEvent, AgentProvider, WorkspaceHandoverQualification};
 use wardian_core::models::AgentConfig;
 
 use crate::utils::strip_ansi_controls;
@@ -203,6 +203,15 @@ impl ClaudeProvider {
 }
 
 impl AgentProvider for ClaudeProvider {
+    fn workspace_handover_qualification(&self) -> WorkspaceHandoverQualification {
+        // Native missing-transcript recovery may use the same UUID for a fresh
+        // session. That is ordinary startup recovery, not retained conversation
+        // evidence. Keep workspace assignment fail closed until the exact resume
+        // route and destination tools have been qualified through the runtime.
+        WorkspaceHandoverQualification::Unqualified {
+            reason: "Claude exact resume at the destination with retained history has not been qualified; same-ID fresh recovery is not conversation continuation",
+        }
+    }
     fn name(&self) -> &str {
         "Claude"
     }
@@ -519,6 +528,59 @@ pub(crate) fn claude_output_has_bypass_permissions_consent_prompt(output: &str) 
 mod tests {
     use super::*;
     use wardian_core::models::{ClaudeProviderConfig, ProviderConfig};
+
+    #[test]
+    fn handover_remains_unqualified_without_native_continuation_evidence() {
+        assert!(matches!(
+            make_provider().workspace_handover_qualification(),
+            WorkspaceHandoverQualification::Unqualified { .. }
+        ));
+    }
+
+    #[test]
+    fn resume_uses_exact_source_identity_without_fresh_or_fork_flags() {
+        let config = AgentConfig {
+            session_id: "wardian-roster-id".into(),
+            resume_session: Some("source-provider-id".into()),
+            fresh_provider_session_id: Some("stale-fresh-id".into()),
+            folder: "destination-workspace".into(),
+            session_name: "retained-name".into(),
+            ..Default::default()
+        };
+        let args = make_provider().get_spawn_args(&config, true);
+        assert_eq!(args.iter().filter(|arg| *arg == "--resume").count(), 1);
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair[0] == "--resume" && pair[1] == "source-provider-id" }));
+        for excluded in [
+            "--session-id",
+            "--fork-session",
+            "--continue",
+            "--name",
+            "wardian-roster-id",
+            "stale-fresh-id",
+        ] {
+            assert!(!args.iter().any(|arg| arg == excluded), "{excluded}");
+        }
+    }
+
+    #[test]
+    fn destination_folder_does_not_change_resume_identity_arguments() {
+        let source = AgentConfig {
+            session_id: "wardian-roster-id".into(),
+            resume_session: Some("source-provider-id".into()),
+            folder: "source-workspace".into(),
+            ..Default::default()
+        };
+        let mut destination = source.clone();
+        destination.folder = "destination-workspace".into();
+        assert_eq!(
+            make_provider().get_spawn_args(&source, true),
+            make_provider().get_spawn_args(&destination, true),
+        );
+        // Actual child/tool cwd is a manager and runtime assertion, not an argv
+        // inference. The qualification test above stays explicitly fail closed.
+    }
 
     fn make_provider() -> ClaudeProvider {
         ClaudeProvider::new()
