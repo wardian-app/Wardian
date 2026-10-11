@@ -7,7 +7,9 @@ use crate::utils::strip_ansi_controls;
 
 mod continuation;
 pub mod history;
-pub(crate) use continuation::{continuation_path, continuation_root};
+pub(crate) use continuation::{
+    continuation_path, continuation_root, optional_continuation_root_override,
+};
 
 /// The concrete `AgentProvider` implementation for Claude Code CLI.
 pub struct ClaudeProvider;

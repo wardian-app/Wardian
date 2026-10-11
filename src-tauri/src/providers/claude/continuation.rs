@@ -173,6 +173,33 @@ pub(crate) fn continuation_root(config: &AgentConfig, child_cwd: &Path) -> Resul
     }
 }
 
+/// Pin an explicitly selected configuration root without changing Claude's
+/// native default credential/config lookup. A default transcript root is not
+/// equivalent to setting CLAUDE_CONFIG_DIR to that directory.
+pub(crate) fn optional_continuation_root_override(
+    config: &AgentConfig,
+    child_cwd: &Path,
+) -> Result<Option<PathBuf>, String> {
+    if config.provider != "claude" {
+        return Err("Claude child root override requires the Claude provider".into());
+    }
+    let selector = root_selector();
+    if config.exact_resume.is_some() {
+        let binding = receipt(config)?;
+        if selector != binding.root_selector {
+            return Err(
+                "Claude configuration root selector changed after continuation preparation".into(),
+            );
+        }
+        let root = continuation_root(config, child_cwd)?;
+        Ok(binding.root_selector.as_ref().map(|_| root))
+    } else {
+        selector
+            .map(|_| history::config_root(child_cwd))
+            .transpose()
+    }
+}
+
 /// Canonical log source for a validated Claude generation, never a destination
 /// project-folder guess or an arbitrary different provider's receipt.
 pub(crate) fn continuation_path(config: &AgentConfig) -> Option<PathBuf> {
@@ -286,6 +313,89 @@ mod tests {
             prepared.config_root
         );
         assert_eq!(continuation_path(&restored), Some(prepared.canonical_path));
+    }
+
+    #[test]
+    fn default_child_root_does_not_override_native_config_lookup() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let mut fixture = Fixture::new();
+        prepare(&mut fixture.config, &fixture.context).unwrap();
+        let Some(ExactResumeSourceBinding::AppendOnlyTranscript(binding)) = fixture
+            .config
+            .exact_resume
+            .as_mut()
+            .unwrap()
+            .source
+            .as_mut()
+        else {
+            unreachable!()
+        };
+        // Simulate a restored receipt captured with the native default selector.
+        // Its independently captured canonical transcript authority stays pinned.
+        binding.root_selector = None;
+        unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") };
+        assert_eq!(
+            optional_continuation_root_override(&fixture.config, &fixture.context.launch_cwd)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            continuation_root(&fixture.config, &fixture.context.launch_cwd).unwrap(),
+            std::fs::canonicalize(&fixture.root).unwrap()
+        );
+        assert_eq!(
+            continuation_path(&fixture.config),
+            Some(std::fs::canonicalize(&fixture.path).unwrap())
+        );
+        let fresh = AgentConfig {
+            provider: "claude".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            optional_continuation_root_override(&fresh, &fixture.context.launch_cwd).unwrap(),
+            None
+        );
+        unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", "") };
+        assert_eq!(
+            optional_continuation_root_override(&fresh, &fixture.context.launch_cwd).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_child_root_pins_receipt_and_rejects_selector_changes() {
+        let _lock = crate::utils::wardian_test_env_lock();
+        let mut fixture = Fixture::new();
+        prepare(&mut fixture.config, &fixture.context).unwrap();
+        let expected = std::fs::canonicalize(&fixture.root).unwrap();
+        let changed_cwd = fixture.context.launch_cwd.join("rotated-workspace");
+        assert_eq!(
+            optional_continuation_root_override(&fixture.config, &changed_cwd).unwrap(),
+            Some(expected)
+        );
+        unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") };
+        assert!(
+            optional_continuation_root_override(&fixture.config, &changed_cwd)
+                .unwrap_err()
+                .contains("selector changed")
+        );
+        unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", "relative-root") };
+        let fresh = AgentConfig {
+            provider: "claude".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            optional_continuation_root_override(&fresh, &changed_cwd).unwrap(),
+            Some(changed_cwd.join("relative-root"))
+        );
+        assert!(optional_continuation_root_override(
+            &AgentConfig {
+                provider: "codex".into(),
+                ..Default::default()
+            },
+            &changed_cwd
+        )
+        .is_err());
     }
 
     #[test]

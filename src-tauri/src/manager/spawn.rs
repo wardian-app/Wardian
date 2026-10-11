@@ -2660,12 +2660,17 @@ async fn spawn_agent_inner(
     } else {
         None
     };
+    let claude_root_override = if config.provider == "claude" {
+        crate::providers::claude::optional_continuation_root_override(&config, &launch_cwd)?
+    } else {
+        None
+    };
     let mut cmd = CommandBuilder::new(&launch_spec.executable);
     for arg in &launch_spec.args {
         cmd.arg(arg);
     }
     cmd.cwd(&launch_cwd);
-    if let Some(root) = claude_launch_root.as_ref() {
+    if let Some(root) = claude_root_override.as_ref() {
         cmd.env("CLAUDE_CONFIG_DIR", root);
     }
     apply_terminal_identity_env(&mut cmd);

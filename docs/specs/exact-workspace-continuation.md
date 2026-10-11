@@ -58,9 +58,11 @@ revalidates the retained receipt after drain and immediately before launch;
 failure cannot substitute a newly discovered source for an existing receipt.
 
 Claude and Pi retain append-only transcript identity and a confirmed byte-prefix
-digest. Claude also records its configuration selector and pins the child to the
-canonical captured root, so rotating a workspace projection cannot silently
-select another transcript. Watchers and telemetry consume the same source.
+digest. Claude records its configuration selector. An explicit selector pins the
+child to the canonical captured root; an absent selector preserves the native
+default configuration lookup rather than setting a transcript directory as an
+override. Rotating a workspace projection cannot select another transcript.
+Watchers and telemetry consume the same captured source.
 Antigravity requires independently owned, stable projection paths matching all
 persisted provider workspace fields. A receipt cannot grant projection ownership.
 OpenCode records its actual materialized store and immutable completed history

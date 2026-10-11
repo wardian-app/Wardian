@@ -3070,7 +3070,7 @@ fn native_command(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     if config.provider == "claude" {
-        let root = crate::providers::claude::continuation_root(
+        let root = crate::providers::claude::optional_continuation_root_override(
             &config,
             exact_launch_cwd.as_deref().unwrap_or(&spec.workspace),
         )
@@ -3081,7 +3081,9 @@ fn native_command(
                 false,
             )
         })?;
-        command.env("CLAUDE_CONFIG_DIR", root);
+        if let Some(root) = root {
+            command.env("CLAUDE_CONFIG_DIR", root);
+        }
     }
     crate::manager::apply_managed_cli_path_to_process(&mut command);
     crate::manager::apply_process_provider_runtime_env(&spec.provider, &mut command).map_err(

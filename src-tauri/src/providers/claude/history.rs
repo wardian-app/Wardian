@@ -215,7 +215,7 @@ fn prepare_in(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => return Err("Claude exact Resume transcript metadata is unavailable".into()),
             Ok(metadata) if !metadata.is_file() => {
-                return Err("Claude exact Resume transcript is not a regular file".into())
+                return Err("Claude exact Resume transcript is not a regular file".into());
             }
             Ok(_) => {}
         }
