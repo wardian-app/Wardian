@@ -228,23 +228,18 @@ pub(super) struct CodexAttachGuard {
 /// Own the exact starting PTY before any fallible reader/broker setup. Cleanup
 /// survives cancellation and joins this child before releasing its owner slot.
 pub(super) struct StartingCodexTui {
-    child: Option<Box<dyn portable_pty::Child + Send>>,
+    child: Option<super::codex_stop::StartingRuntime>,
     owner: Option<(Arc<NativeDeliveryBroker>, String, u64)>,
-    runtime: Option<(
-        Arc<crate::state::terminal_session::TerminalSessionBroker>,
-        u64,
-    )>,
 }
 
 impl StartingCodexTui {
     pub(super) fn new(
-        child: Box<dyn portable_pty::Child + Send>,
+        child: super::codex_stop::StartingRuntime,
         owner: Option<(Arc<NativeDeliveryBroker>, String, u64)>,
     ) -> Self {
         Self {
             child: Some(child),
             owner,
-            runtime: None,
         }
     }
 
@@ -257,7 +252,8 @@ impl StartingCodexTui {
         let child = self
             .child
             .as_mut()
-            .ok_or_else(|| CodexSharedError::unsupported("captured TUI missing"))?;
+            .ok_or_else(|| CodexSharedError::unsupported("captured TUI missing"))?
+            .child();
         match child.try_wait() {
             Ok(None) => Ok(()),
             _ => Err(CodexSharedError::unsupported(
@@ -268,56 +264,42 @@ impl StartingCodexTui {
 
     pub(super) fn runtime(
         &mut self,
-        broker: Arc<crate::state::terminal_session::TerminalSessionBroker>,
+        _broker: Arc<crate::state::terminal_session::TerminalSessionBroker>,
         generation: u64,
     ) {
-        if self.owner.is_some() {
-            self.runtime = Some((broker, generation));
-        }
+        self.child
+            .as_mut()
+            .expect("starting runtime")
+            .terminal_generation(generation);
     }
 
-    pub(super) fn attached(mut self) -> Box<dyn portable_pty::Child + Send> {
+    pub(super) fn attached(mut self) -> super::codex_stop::StartedProcess {
         self.owner = None;
-        self.runtime = None;
         self.child
             .take()
-            .expect("starting PTY child retained until attachment")
+            .expect("starting runtime retained until attachment")
+            .finish()
     }
 
     fn cleanup(&mut self) -> Option<tokio::task::JoinHandle<()>> {
-        let (broker, agent_id, generation) = self.owner.take()?;
-        let mut child = self.child.take()?;
-        let runtime = self.runtime.take();
+        let owner = self.owner.take();
+        let starting = self.child.take()?;
+        let stopped = starting.begin_stop()?;
         Some(tokio::spawn(async move {
-            // The detached cleanup task retains ownership even if spawn's
-            // caller disappears while waiting for the blocking PTY child.
-            let stopped = tokio::task::spawn_blocking(move || loop {
-                if matches!(child.try_wait(), Ok(Some(_))) {
-                    return;
-                }
-                #[cfg(windows)]
-                if let Some(pid) = child.process_id() {
-                    let _ = crate::utils::process::force_kill_process_tree(pid);
-                }
-                let _ = child.kill();
-                if child.wait().is_ok() {
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            })
-            .await;
-            if stopped.is_err() {
-                // No observed exit: retain the owner slot, preventing replacement.
-                crate::utils::logging::log_debug("Codex TUI cleanup ended without observed exit");
+            // The shared registry owns exact child/job cleanup even if this
+            // observer is cancelled. Provider attachment is released after exit.
+            if let Err(error) = stopped.wait().await {
+                crate::utils::logging::log_debug(&format!(
+                    "Native startup cleanup retained: {error}"
+                ));
                 return;
             }
-            if let Some((terminal, runtime_generation)) = runtime {
-                let _ = terminal
-                    .terminate_runtime(&agent_id, runtime_generation)
-                    .await;
-            }
-            if let Err(error) = broker.dispose_codex_generation(&agent_id, generation).await {
-                crate::utils::logging::log_debug(&format!("Codex captured TUI cleanup: {error}"));
+            if let Some((broker, agent_id, generation)) = owner {
+                if let Err(error) = broker.dispose_codex_generation(&agent_id, generation).await {
+                    crate::utils::logging::log_debug(&format!(
+                        "Codex captured TUI cleanup: {error}"
+                    ));
+                }
             }
         }))
     }

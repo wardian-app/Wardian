@@ -43,10 +43,7 @@ pub use crate::utils::fs::*;
 pub use crate::utils::logging::{log_debug, log_terminal_trace_bytes, log_terminal_trace_note};
 pub use crate::utils::process::new_headless_command;
 #[cfg(windows)]
-pub use crate::utils::process::{
-    app_process_supervisor_active, assign_pid_to_job, create_kill_on_close_job,
-    force_kill_process_tree,
-};
+pub use crate::utils::process::{create_kill_on_close_job, force_kill_process_tree};
 pub use crate::utils::shell::build_program_launch;
 
 use crate::state::{ActiveAgent, AppState};

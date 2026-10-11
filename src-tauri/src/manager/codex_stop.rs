@@ -1,4 +1,4 @@
-//! Retained stop fences for captured Codex and Pi PTY/background runtimes.
+//! Retained native-runtime stop fences, independent of current provider selection.
 //! Lifecycle callers register synchronously before their first await. A waiter
 //! never owns the child handles; only observed exit releases the process fence.
 use crate::state::terminal_session::{TerminalBrokerError, TerminalSessionBroker};
@@ -30,13 +30,23 @@ enum Status {
     Exited,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StopPolicy {
+    LegacyCodex,
+    RetainedChild,
+    ContainedJob,
+}
+
 struct Entry {
+    identity_matches: bool,
+    owns_runtime: bool,
     keys: Vec<Key>,
     runtime: Mutex<Option<ActiveAgent>>,
     status: watch::Sender<Status>,
     timeout: Duration,
     terminal: Option<TerminalCleanup>,
-    provider: &'static str,
+    provider: String,
+    policy: StopPolicy,
     generation: Option<u64>,
     status_arc: Arc<Mutex<String>>,
     terminal_complete: std::sync::atomic::AtomicBool,
@@ -56,7 +66,7 @@ impl TerminalCleanup {
         {
             Ok(()) | Err(TerminalBrokerError::SessionNotFound) => Ok(()),
             Err(error) => Err(format!(
-                "Cannot terminate captured Codex terminal generation {}; fence retained: {error}",
+                "Cannot terminate captured native terminal generation {}; fence retained: {error}",
                 self.generation
             )),
         }
@@ -71,8 +81,24 @@ pub(crate) fn prepare_stop(home: &Path, agent_id: &str) -> Result<StopRegistrati
 
 /// Pi cleanup uses only captured child handles, never a discovered PID tree.
 pub(crate) fn prepare_pi_stop(home: &Path, agent_id: &str) -> Result<StopRegistration, String> {
+    prepare_runtime_stop(home, agent_id, "pi")
+}
+
+/// Reserve native stop identity before launch or roster capture. Windows
+/// candidates use contained ownership; existing Codex/Pi uncontained policies
+/// remain available, and capture upgrades them when a prelaunch job is present.
+pub(crate) fn prepare_runtime_stop(
+    home: &Path,
+    agent_id: &str,
+    provider: &str,
+) -> Result<StopRegistration, String> {
     let mut registration = prepare_stop(home, agent_id)?;
-    registration.provider = "pi";
+    registration.provider = provider.to_owned();
+    registration.policy = match provider {
+        "codex" => StopPolicy::LegacyCodex,
+        "pi" => StopPolicy::RetainedChild,
+        _ => StopPolicy::ContainedJob,
+    };
     Ok(registration)
 }
 
@@ -85,7 +111,8 @@ fn prepare_with_timeout(
         key: key(home, agent_id)?,
         timeout,
         terminal: None,
-        provider: "codex",
+        provider: "codex".into(),
+        policy: StopPolicy::LegacyCodex,
     })
 }
 
@@ -94,7 +121,8 @@ pub(crate) struct StopRegistration {
     key: Key,
     timeout: Duration,
     terminal: Option<(Arc<TerminalSessionBroker>, tokio::runtime::Handle)>,
-    provider: &'static str,
+    provider: String,
+    policy: StopPolicy,
 }
 
 impl StopRegistration {
@@ -106,7 +134,7 @@ impl StopRegistration {
         broker: Arc<TerminalSessionBroker>,
     ) -> Result<Self, String> {
         let executor = tokio::runtime::Handle::try_current()
-            .map_err(|error| format!("Cannot reserve Codex terminal cleanup executor: {error}"))?;
+            .map_err(|error| format!("Cannot reserve native terminal cleanup executor: {error}"))?;
         self.terminal = Some((broker, executor));
         Ok(self)
     }
@@ -125,7 +153,36 @@ impl StopRegistration {
                 generation,
             })
         });
+        // Snapshot identity and containment before mutable roster config can
+        // change. Cleanup never consults a later provider selection.
+        let identity_matches = {
+            let config = agent
+                .config
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            config.session_id == self.key.1 && config.provider == self.provider
+        };
+        let owns_runtime = agent.child_process.is_some()
+            || !agent.background_processes.is_empty()
+            || agent.process_id.is_some()
+            || agent.runtime_generation.is_some();
+        #[cfg(windows)]
+        let owns_runtime = owns_runtime || agent.job_object.is_some();
+        let policy = self.policy;
+        #[cfg(windows)]
+        let policy = if agent
+            .job_object
+            .as_ref()
+            .is_some_and(|job| job.contained_from_launch())
+        {
+            StopPolicy::ContainedJob
+        } else {
+            policy
+        };
         let entry = Arc::new(Entry {
+            identity_matches,
+            owns_runtime,
+            policy,
             keys: vec![self.key],
             generation: agent.runtime_generation,
             status_arc: agent.current_status.clone(),
@@ -168,11 +225,12 @@ impl Drop for StopGuard {
 pub(crate) struct StopHandle(Arc<Entry>);
 
 impl StopHandle {
-    pub(crate) fn provider_label(&self) -> &'static str {
-        if self.0.provider == "pi" {
-            "Pi"
-        } else {
-            "Codex"
+    pub(crate) fn provider_label(&self) -> &str {
+        match self.0.provider.as_str() {
+            "pi" => "Pi",
+            "opencode" => "OpenCode",
+            "codex" => "Codex",
+            provider => provider,
         }
     }
 
@@ -208,6 +266,9 @@ impl StopHandle {
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
         };
+        if entry.policy == StopPolicy::ContainedJob {
+            return Err("Contained runtime requires a verified job join; root-only exit cannot release its fence; explicit retry required".into());
+        }
         if let Some(agent) = runtime.as_mut() {
             if !poll_exited(agent)? {
                 return Ok(false);
@@ -324,21 +385,24 @@ fn start(entry: &Arc<Entry>, allow_captured: bool) {
         return;
     }
     let worker = entry.clone();
-    let spawned = std::thread::Builder::new().name("codex-stop".into()).spawn(move || {
+    let spawned = std::thread::Builder::new().name("native-stop".into()).spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut runtime = worker.runtime.lock().unwrap_or_else(|error| error.into_inner());
             if let Some(agent) = runtime.as_mut() {
-                {
-                    let config = agent.config.lock().unwrap_or_else(|error| error.into_inner());
-                    if config.session_id != worker.keys[0].1 || config.provider != worker.provider {
-                        return Err("Captured runtime does not match the reserved Codex identity; runtime retained".into());
-                    }
+                if !worker.identity_matches {
+                    return Err("Captured runtime does not match reserved native identity; runtime retained".into());
                 }
                 if let Some(terminal) = &worker.terminal {
                     terminal.terminate(&worker.keys[0].1)?;
                 }
                 worker.terminal_complete.store(true, std::sync::atomic::Ordering::Release);
-                stop_and_join(agent, worker.timeout, worker.provider == "pi")?;
+                if worker.owns_runtime {
+                    match worker.policy {
+                        StopPolicy::ContainedJob => stop_contained_runtime(agent)?,
+                        StopPolicy::RetainedChild => stop_and_join(agent, worker.timeout, true)?,
+                        StopPolicy::LegacyCodex => stop_and_join(agent, worker.timeout, false)?,
+                    }
+                }
             }
             // Terminal cleanup (when captured) and every child exit completed
             // before ActiveAgent Drop and release of the retained stop fence.
@@ -374,6 +438,47 @@ fn release(entry: &Arc<Entry>) {
         if map.get(key).is_some_and(Vec::is_empty) {
             map.remove(key);
         }
+    }
+}
+
+/// Runs on the retained stop worker, so cancellation of the IPC waiter cannot
+/// drop the runtime or admit a replacement. A failed join keeps the fence.
+fn stop_contained_runtime(agent: &mut ActiveAgent) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        if !agent.background_processes.is_empty() {
+            return Err(
+                "Contained runtime stop cannot verify background ownership; runtime retained"
+                    .into(),
+            );
+        }
+        let job = agent
+            .job_object
+            .as_ref()
+            .filter(|job| job.contained_from_launch())
+            .ok_or(
+                "Contained runtime stop requires the retained prelaunch job; runtime retained",
+            )?;
+        let child = agent
+            .child_process
+            .as_mut()
+            .ok_or("Contained runtime stop requires the retained child; runtime retained")?;
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .map_err(|error| format!("Cannot create native stop executor: {error}"))?;
+        executor.block_on(job.stop_and_join(child.as_mut()))?;
+        // Only the verified job/member/child receipt permits these handles to drop.
+        agent.child_process.take();
+        agent.job_object.take();
+        agent.process_id = None;
+        agent.runtime_generation = None;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = agent;
+        Err("Contained runtime stop is Windows-only; runtime retained".into())
     }
 }
 
@@ -481,4 +586,141 @@ fn poll_exited(agent: &mut ActiveAgent) -> Result<bool, String> {
         }
     }
     Ok(agent.child_process.is_none() && agent.background_processes.is_empty())
+}
+
+/// Own the spawned child and prelaunch job before any terminal setup await.
+/// This startup guard and PendingRuntime hand off to the same stop registry.
+pub(crate) struct StartingRuntime {
+    runtime: Option<ActiveAgent>,
+    registration: Option<StopRegistration>,
+    started: bool,
+}
+
+pub(crate) struct StartedProcess {
+    pub(crate) child: Box<dyn portable_pty::Child + Send>,
+    #[cfg(windows)]
+    pub(crate) job: Option<crate::utils::process::RuntimeProcessJob>,
+}
+
+impl StartingRuntime {
+    pub(crate) fn prepare(
+        home: &Path,
+        config: &wardian_core::models::AgentConfig,
+        terminal: Arc<TerminalSessionBroker>,
+    ) -> Result<Self, String> {
+        let registration = if cfg!(windows) || matches!(config.provider.as_str(), "codex" | "pi") {
+            Some(
+                prepare_runtime_stop(home, &config.session_id, &config.provider)?
+                    .with_terminal_cleanup(terminal)?,
+            )
+        } else {
+            None
+        };
+        let runtime = ActiveAgent {
+            config: Arc::new(Mutex::new(config.clone())),
+            child_process: None,
+            background_processes: Vec::new(),
+            memory_capability: None,
+            runtime_generation: None,
+            process_id: None,
+            query_count: Arc::new(Mutex::new(0)),
+            init_timestamp: Arc::new(Mutex::new(None)),
+            last_query_timestamp: Arc::new(Mutex::new(None)),
+            current_status: Arc::new(Mutex::new("Starting".into())),
+            last_status_at: Arc::new(Mutex::new(None)),
+            watch_state: Arc::new(Mutex::new(crate::state::AgentWatchState::new(
+                config.session_id.clone(),
+                4096,
+                262_144,
+            ))),
+            terminal_title: Arc::new(Mutex::new(String::new())),
+            last_output_at: Arc::new(Mutex::new(None)),
+            log_path: Arc::new(Mutex::new(None)),
+            log_last_modified: Arc::new(Mutex::new(None)),
+            #[cfg(windows)]
+            job_object: None,
+        };
+        Ok(Self {
+            runtime: Some(runtime),
+            registration,
+            started: false,
+        })
+    }
+
+    /// Infallible handoff in the expression receiving the successful spawn.
+    pub(crate) fn attach(
+        mut self,
+        child: Box<dyn portable_pty::Child + Send>,
+        #[cfg(windows)] job: Option<crate::utils::process::RuntimeProcessJob>,
+    ) -> Self {
+        let runtime = self.runtime.as_mut().expect("prepared startup runtime");
+        runtime.process_id = child.process_id();
+        runtime.child_process = Some(child);
+        #[cfg(windows)]
+        {
+            runtime.job_object = job;
+        }
+        self.started = true;
+        self
+    }
+
+    pub(crate) fn child(&mut self) -> &mut dyn portable_pty::Child {
+        self.runtime
+            .as_mut()
+            .unwrap()
+            .child_process
+            .as_mut()
+            .expect("starting child")
+            .as_mut()
+    }
+
+    pub(crate) fn process_id(&self) -> Option<u32> {
+        self.runtime.as_ref().and_then(|runtime| runtime.process_id)
+    }
+
+    pub(crate) fn terminal_generation(&mut self, generation: u64) {
+        self.runtime.as_mut().unwrap().runtime_generation = Some(generation);
+    }
+
+    pub(crate) fn finish(mut self) -> StartedProcess {
+        self.started = false;
+        self.registration.take();
+        let runtime = self.runtime.as_mut().unwrap();
+        runtime.process_id = None;
+        runtime.runtime_generation = None;
+        StartedProcess {
+            child: runtime
+                .child_process
+                .take()
+                .expect("starting child retained until attachment"),
+            #[cfg(windows)]
+            job: runtime.job_object.take(),
+        }
+    }
+
+    pub(crate) fn begin_stop(mut self) -> Option<StopHandle> {
+        self.stop()
+    }
+
+    fn stop(&mut self) -> Option<StopHandle> {
+        if !std::mem::take(&mut self.started) {
+            return None;
+        }
+        let mut runtime = self.runtime.take().unwrap();
+        if let Some(registration) = self.registration.take() {
+            Some(registration.capture(runtime).begin_stop())
+        } else {
+            // Preserve ordinary uncontained/non-Windows preattachment Drop.
+            drop(runtime.child_process.take());
+            runtime.process_id = None;
+            runtime.runtime_generation = None;
+            None
+        }
+    }
+}
+
+impl Drop for StartingRuntime {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
 }
