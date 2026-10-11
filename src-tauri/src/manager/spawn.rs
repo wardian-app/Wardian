@@ -7,6 +7,7 @@ use crate::providers::claude::{
     effective_claude_permission_mode, ClaudeUserEventKind,
 };
 use crate::providers::codex::CodexProvider;
+use crate::providers::pi::exact_resume::PiExactResumePlan;
 use crate::providers::transcript::{
     bind_pi_watch_message, extract_transcript_message, CodexWatchBindingState,
 };
@@ -2228,6 +2229,14 @@ async fn spawn_agent_inner(
     let mut pi_launch_plan = (config.provider == "pi")
         .then(|| pi_history::PiLaunchPlan::prepare(&config))
         .transpose()?;
+    // Reserved PendingFresh identities stay on the existing fresh route. Every
+    // materialized exact resume uses the adapter plan, including ordinary Resume.
+    let pi_exact_resume_plan = pi_launch_plan
+        .as_ref()
+        .and_then(|plan| plan.resume_path())
+        .is_some()
+        .then(|| PiExactResumePlan::prepare(&config))
+        .transpose()?;
     let provider_generation = app_state
         .interactions
         .start_provider_input_generation(&config.session_id, ProviderInputReadiness::Booting, None)
@@ -2357,7 +2366,9 @@ async fn spawn_agent_inner(
         .as_ref()
         .and_then(|plan| plan.resume_path().map(std::path::Path::to_owned));
     let pi_has_saved_session = is_restored && pi_resume_session_file.is_some();
-    let provider_cwd = if config.provider == "pi" {
+    let provider_cwd = if let Some(plan) = &pi_exact_resume_plan {
+        plan.destination().to_path_buf()
+    } else if config.provider == "pi" {
         pi_session_project_cwd(
             &config.session_id,
             &cwd,
@@ -2370,14 +2381,24 @@ async fn spawn_agent_inner(
     };
     // Keep provider_cwd as the logical workspace for arguments, config and
     // records; only the OS process cwd may use the short habitat alias.
-    let launch_cwd = interactive_provider_launch_cwd(
-        &config.provider,
-        &config.session_id,
-        habitat_root.as_deref(),
-        &cwd,
-        &provider_cwd,
-        pi_has_saved_session,
-    )?;
+    let launch_cwd = if pi_exact_resume_plan.is_some() {
+        crate::utils::codex_home::prepare_habitat_cwd_alias(
+            &config.session_id,
+            habitat_root.as_deref(),
+            &cwd,
+            &provider_cwd,
+        )?
+        .unwrap_or_else(|| provider_cwd.clone())
+    } else {
+        interactive_provider_launch_cwd(
+            &config.provider,
+            &config.session_id,
+            habitat_root.as_deref(),
+            &cwd,
+            &provider_cwd,
+            pi_has_saved_session,
+        )?
+    };
     let claude_workspace_trust_display_path = claude_trust_display_path_for_assigned_workspace(
         &config.provider,
         &config.folder,
@@ -2595,6 +2616,18 @@ async fn spawn_agent_inner(
     if let Some(plan) = &pi_launch_plan {
         plan.validate_args(&provider_args)?;
     }
+    let (bin, provider_args) = if let Some(plan) = &pi_exact_resume_plan {
+        if pi_launch_plan
+            .as_ref()
+            .and_then(|history| history.resume_path())
+            != Some(plan.session_file())
+        {
+            return Err("Pi exact resume plan disagrees with canonical history".into());
+        }
+        plan.materialize(&provider_args, provider_generation)?
+    } else {
+        (bin, provider_args)
+    };
     let launch_spec = interactive_provider_launch(&config.provider, &bin, &provider_args)?;
     log_debug(&format!(
         "[Wardian] PTY spawn: provider={} exe={} arg_count={} cwd={}",
@@ -2711,6 +2744,9 @@ async fn spawn_agent_inner(
     // Capture the existing transcript boundary while the provider is still
     // unable to write, then start the watcher from that exact byte offset.
     if let Some(plan) = &mut pi_launch_plan {
+        plan.revalidate()?;
+    }
+    if let Some(plan) = &pi_exact_resume_plan {
         plan.revalidate()?;
     }
     let pi_log_baseline = pi_launch_plan
