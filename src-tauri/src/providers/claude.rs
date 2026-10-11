@@ -3,6 +3,8 @@ use wardian_core::models::AgentConfig;
 
 use crate::utils::strip_ansi_controls;
 
+pub mod history;
+
 /// The concrete `AgentProvider` implementation for Claude Code CLI.
 pub struct ClaudeProvider;
 
