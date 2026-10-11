@@ -1,5 +1,7 @@
 mod agent_lifecycle;
+mod claude_composer;
 mod pi_startup;
+use claude_composer::claude_output_has_ready_prompt;
 use pi_startup::pi_output_has_startup_ready_prompt;
 
 pub(crate) mod codex_menu_status;
@@ -2951,33 +2953,6 @@ pub(crate) async fn wait_for_provider_turn_started_after_submit(
     Err(format!(
         "Timed out waiting for {session_id} provider turn start after terminal submit"
     ))
-}
-
-fn claude_output_has_ready_prompt(output: &str) -> bool {
-    let cleaned = strip_ansi_controls(output).replace('\r', "\n");
-    let mut trailing_metadata_lines = 0usize;
-    for line in cleaned.lines().rev().map(str::trim) {
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('❯') {
-            return true;
-        }
-        if trailing_metadata_lines < 4 && claude_ready_prompt_trailing_metadata_line(line) {
-            trailing_metadata_lines += 1;
-            continue;
-        }
-        return false;
-    }
-    false
-}
-
-fn claude_ready_prompt_trailing_metadata_line(line: &str) -> bool {
-    if line.contains('⏵') {
-        return true;
-    }
-    line.chars()
-        .all(|ch| ch == '─' || ch == '-' || ch.is_whitespace())
 }
 
 fn gemini_output_has_ready_prompt(output: &str) -> bool {
