@@ -443,6 +443,7 @@ struct AgentConfigCompat {
     pub custom_args: Option<String>,
     pub session_persistence: AgentSessionPersistenceOverride,
     pub conversation_logging: AgentConversationLoggingSetting,
+    pub fresh_provider_session_id: Option<String>,
     pub provider_config: Option<serde_json::Value>,
     pub sandbox: Option<bool>,
     pub yolo: Option<bool>,
@@ -493,6 +494,7 @@ impl Default for AgentConfigCompat {
             custom_args: default.custom_args,
             session_persistence: default.session_persistence,
             conversation_logging: default.conversation_logging,
+            fresh_provider_session_id: None,
             provider_config: None,
             sandbox: None,
             yolo: None,
@@ -587,6 +589,11 @@ impl AgentConfigCompat {
 
 impl From<AgentConfigCompat> for AgentConfig {
     fn from(compat: AgentConfigCompat) -> Self {
+        let pending_pi_session = if compat.provider == "pi" && compat.resume_session.is_none() {
+            compat.fresh_provider_session_id.clone()
+        } else {
+            None
+        };
         let legacy_provider_config = compat.legacy_provider_config();
         let default_provider_config = ProviderConfig::default_for_provider(&compat.provider);
         let had_nested_provider_config = compat.provider_config.is_some();
@@ -622,7 +629,7 @@ impl From<AgentConfigCompat> for AgentConfig {
             custom_args: compat.custom_args,
             session_persistence: compat.session_persistence,
             conversation_logging: compat.conversation_logging,
-            fresh_provider_session_id: None,
+            fresh_provider_session_id: pending_pi_session,
             provider_config,
             provider_config_encoding: if had_nested_provider_config {
                 ProviderConfigEncoding::Nested
@@ -670,6 +677,17 @@ impl<'de> Deserialize<'de> for AgentConfig {
 }
 
 impl AgentConfig {
+    /// A reserved Pi identity remains fresh until its owned history is persisted.
+    /// Confirmed sessions may retain a runtime capture marker, which is not pending.
+    pub fn pending_pi_session_id(&self) -> Option<&str> {
+        if self.provider != "pi" || self.resume_session.is_some() {
+            return None;
+        }
+        self.fresh_provider_session_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+    }
+
     pub fn claude_config(&self) -> ClaudeProviderConfig {
         match &self.provider_config {
             ProviderConfig::Claude(config) if provider_key(&self.provider) == "claude" => {
@@ -870,6 +888,9 @@ impl AgentConfig {
         map.serialize_entry("custom_args", &self.custom_args)?;
         map.serialize_entry("session_persistence", &self.session_persistence)?;
         map.serialize_entry("conversation_logging", &self.conversation_logging)?;
+        if let Some(id) = self.pending_pi_session_id() {
+            map.serialize_entry("fresh_provider_session_id", id)?;
+        }
         Ok(())
     }
 
@@ -960,6 +981,63 @@ mod tests {
     use super::*;
     use crate::conversations::AgentConversationLoggingSetting;
     use crate::models::AgentSessionPersistenceOverride;
+
+    #[test]
+    fn pending_pi_identity_survives_saved_off_reload_but_confirmed_marker_does_not() {
+        let mut config = AgentConfig {
+            provider: "pi".into(),
+            session_id: "wardian-agent".into(),
+            fresh_provider_session_id: Some("reserved-pi-session".into()),
+            is_off: true,
+            ..Default::default()
+        };
+        for encoding in [
+            ProviderConfigEncoding::LegacyFlat,
+            ProviderConfigEncoding::Nested,
+        ] {
+            config.provider_config_encoding = encoding;
+            let value = serde_json::to_value(&config).unwrap();
+            assert_eq!(value["fresh_provider_session_id"], "reserved-pi-session");
+            let restored: AgentConfig = serde_json::from_value(value).unwrap();
+            assert_eq!(
+                restored.pending_pi_session_id(),
+                Some("reserved-pi-session")
+            );
+            assert!(restored.is_off);
+            assert_eq!(restored.session_id, config.session_id);
+        }
+        config.resume_session = Some("reserved-pi-session".into());
+        let value = serde_json::to_value(&config).unwrap();
+        assert!(value.get("fresh_provider_session_id").is_none());
+        let restored: AgentConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.resume_session, config.resume_session);
+        assert_eq!(restored.fresh_provider_session_id, None);
+    }
+
+    #[test]
+    fn legacy_and_other_provider_records_do_not_gain_pending_pi_identity() {
+        for provider in ["pi", "codex", "claude", "gemini", "mock"] {
+            let value = serde_json::json!({
+                "provider":provider, "resume_session":"existing",
+                "fresh_provider_session_id":"untrusted-marker"
+            });
+            let config: AgentConfig = serde_json::from_value(value).unwrap();
+            assert_eq!(config.fresh_provider_session_id, None);
+            assert_eq!(config.pending_pi_session_id(), None);
+            let mut config = config;
+            config.resume_session = None;
+            config.fresh_provider_session_id = Some("runtime-only".into());
+            if provider != "pi" {
+                assert!(serde_json::to_value(config)
+                    .unwrap()
+                    .get("fresh_provider_session_id")
+                    .is_none());
+            }
+        }
+        let legacy: AgentConfig =
+            serde_json::from_value(serde_json::json!({"provider":"pi"})).unwrap();
+        assert_eq!(legacy.pending_pi_session_id(), None);
+    }
 
     #[test]
     fn agent_config_serde_roundtrip() {

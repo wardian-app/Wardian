@@ -383,7 +383,8 @@ mod tests {
             .await
             .expect("interaction");
 
-        let started = std::time::Instant::now();
+        // Deadline and cancellation observation are checked with paused time in
+        // manager::headless. This real-process test includes OS cleanup and persistence.
         let error = run_headless_process_prompt(
             &state,
             HeadlessProcessPromptRequest {
@@ -409,7 +410,6 @@ mod tests {
             crate::manager::HeadlessRunErrorKind::Uncertain
         );
         assert!(error.contains("exceeded its"));
-        assert!(started.elapsed() < Duration::from_secs(2));
         let attempts = wardian_core::db::list_interaction_delivery_attempts(&interaction.id)
             .expect("attempts");
         assert_eq!(attempts.len(), 1);

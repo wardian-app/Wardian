@@ -18,7 +18,13 @@ Wardian does not install provider accounts, complete browser sign-in, create pro
 
 Wardian waits for the provider's current editor before releasing its startup lease. Pi's resumed editor can show its workspace and model footer after the startup banner has scrolled away. OpenCode's resumed editor can show model and provider details without a product name in the commands footer. Those editor frames establish readiness; a loading screen, incomplete frame, or transcript text alone does not.
 
+After compaction, Pi can display unknown context usage such as `?/272k (auto)` until its next model response. Wardian recognizes that footer when the current editor is ready, so restoring the session does not require a new prompt to establish usage statistics.
+
 ## Credential and Session Identity Safety
+
+Pi reserves a fresh conversation ID before its first start. An Off agent keeps that pending ID across save and reload and starts it as a fresh session. Pi writes its session history after an assistant response; Wardian confirms the matching owned history before saving the ID for subsequent resume. Terminal readiness alone does not establish resumable history. A previously confirmed session with missing history still fails strict resume.
+
+If Pi writes history just before pause, the next start can recover the unique complete owned history and resume its exact file. An incomplete file with the pending ID blocks a fresh launch because Pi would reopen it; the ID and history remain intact. Use New Session to reserve a new conversation ID. Ambiguous, changed, malformed, or unreadable history produces a preparation error instead of selecting or creating another conversation. Custom arguments cannot override Wardian's session selector or owned history directory. Pending-history inspection is bounded to 4,096 directory entries, 16 MiB per record and 64 MiB across the inspected prefixes.
 
 Wardian keeps its stable agent UUID separate from the provider's conversation identifier. Claude and Pi receive distinct caller-owned provider IDs. Codex creates a distinct local rollout UUID and resumes it exactly, OpenCode binds the exact `ses_...` ID returned by its current run, and Antigravity records only the workspace mapping proven to have changed after the first real user prompt. Structured initialization events can confirm that bound ID, but they cannot replace it.
 

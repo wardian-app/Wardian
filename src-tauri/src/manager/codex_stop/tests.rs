@@ -3,6 +3,56 @@ use super::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use wardian_core::models::AgentConfig;
 
+#[tokio::test]
+async fn missing_pi_child_handle_cannot_become_late_exit_evidence() {
+    let home = tempfile::tempdir().unwrap();
+    let signals = Arc::new(Signals::default());
+    let mut candidate = agent("missing-pi-child", &signals);
+    candidate.config.lock().unwrap().provider = "pi".into();
+    // The fixture retains the missing handle separately for owned teardown.
+    // No real process or numeric PID exists in this invalid snapshot.
+    let missing = candidate.child_process.take();
+    let handle = prepare_pi_stop(home.path(), "missing-pi-child")
+        .unwrap()
+        .capture(candidate)
+        .begin_stop();
+    assert!(handle
+        .wait()
+        .await
+        .unwrap_err()
+        .contains("captured child handle is missing"));
+    assert!(handle
+        .observe_exit()
+        .unwrap_err()
+        .contains("captured child handle is missing"));
+    assert_eq!(handle.provider_label(), "Pi");
+    assert_eq!(signals.kills.load(Ordering::SeqCst), 0);
+    assert_eq!(signals.drops.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        entries(&key(home.path(), "missing-pi-child").unwrap()).len(),
+        1
+    );
+    assert!(matches!(*handle.0.status.borrow(), Status::Failed(_)));
+
+    // Restore only this no-process fixture's owned handle and prove its exit.
+    handle
+        .0
+        .runtime
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .child_process = missing;
+    signals.exited.store(true, Ordering::SeqCst);
+    retry_stop(home.path(), "missing-pi-child").unwrap();
+    handle.wait().await.unwrap();
+    assert!(handle.observe_exit().unwrap());
+    await_quiescent(home.path(), "missing-pi-child")
+        .await
+        .unwrap();
+    assert_eq!(signals.drops.load(Ordering::SeqCst), 1);
+}
+
 #[derive(Debug, Default)]
 struct Signals {
     exited: AtomicBool,

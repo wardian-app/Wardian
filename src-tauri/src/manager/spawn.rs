@@ -7,7 +7,6 @@ use crate::providers::claude::{
     effective_claude_permission_mode, ClaudeUserEventKind,
 };
 use crate::providers::codex::CodexProvider;
-use crate::providers::pi::PiProvider;
 use crate::providers::transcript::{
     bind_pi_watch_message, extract_transcript_message, CodexWatchBindingState,
 };
@@ -17,7 +16,7 @@ use crate::utils::fs::*;
 use crate::utils::logging::{log_debug, log_terminal_trace_bytes, log_terminal_trace_note};
 use crate::utils::PtyUtf8Decoder;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{BufRead, Read, Seek, Write};
 use tauri::{AppHandle, Emitter, Manager};
 use wardian_core::control::{ProviderInputReadiness, WatchTranscriptMessage};
@@ -30,6 +29,8 @@ use super::codex_onboarding::{
     SpawnPublication, SpawnedAgent, SynchronousCodexFinalizationContext,
 };
 use super::codex_terminal_theme::CodexTerminalThemeProbeResponder;
+#[cfg(windows)]
+use super::conpty_startup::ConptyStartupProbeResponder;
 
 use super::claude::{
     claude_accepted_sessions, claude_log_paths, claude_permission_hook_matches_session,
@@ -70,36 +71,6 @@ const CLAUDE_TRUST_SELECTION_TIMEOUT: std::time::Duration = std::time::Duration:
 fn complete_jsonl_record(pending: &mut String, fragment: &str) -> Option<String> {
     pending.push_str(fragment);
     pending.ends_with('\n').then(|| std::mem::take(pending))
-}
-
-pub(crate) fn claude_stop_event_message(
-    event: &serde_json::Value,
-    accepted_sessions: &[String],
-) -> Option<WatchTranscriptMessage> {
-    if event.get("hook_event_name").and_then(|v| v.as_str()) != Some("Stop")
-        || !accepted_sessions
-            .iter()
-            .any(|session_id| claude_permission_hook_matches_session(event, session_id))
-    {
-        return None;
-    }
-    let prompt_id = event
-        .get("prompt_id")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|value| uuid::Uuid::parse_str(value).is_ok())?;
-    let text = event
-        .get("last_assistant_message")
-        .and_then(|v| v.as_str())
-        .filter(|value| !value.trim().is_empty())?;
-    Some(WatchTranscriptMessage {
-        role: "assistant".to_string(),
-        text: text.to_string(),
-        provider: "claude".to_string(),
-        turn_id: Some(prompt_id.to_string()),
-        source: Some("claude_stop_hook".to_string()),
-        provider_provenance: None,
-    })
 }
 
 fn interactive_provider_launch_cwd(
@@ -229,6 +200,7 @@ impl Drop for SpawnPublicationDisposition {
 struct SpawnPublicationGate {
     unpublished_failure: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     registration: Option<std::sync::Arc<RegistrationPublicationState>>,
+    pi_bridge: Option<std::sync::Arc<crate::delivery::pi_bridge::PiBridgeOwner>>,
 }
 
 /// Registration may put a runtime in the map before its roster and provider
@@ -313,12 +285,6 @@ fn pi_bridge_child_handoff_code(process_id: Option<u32>) -> &'static str {
         Some(process_id) if process_id != 0 => "process_registered",
         Some(_) => "process_id_zero",
         None => "process_id_unavailable",
-    }
-}
-
-fn retain_pi_fresh_provider_session(config: &mut AgentConfig) {
-    if let Some(fresh) = config.fresh_provider_session_id.clone() {
-        config.resume_session = Some(fresh);
     }
 }
 
@@ -585,23 +551,13 @@ struct PiLogCursor {
     boundary: Vec<u8>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PiFileIdentity(u64, u64);
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PiFileIdentity(std::sync::Arc<same_file::Handle>);
 
-fn pi_file_identity(metadata: &std::fs::Metadata) -> Option<PiFileIdentity> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Some(PiFileIdentity(metadata.dev(), metadata.ino()))
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        // Stable Rust does not expose Windows' by-handle file index yet.
-        // Creation time is stable across appends, while the boundary check below
-        // also detects in-place rewrites and same-timestamp replacements.
-        Some(PiFileIdentity(metadata.creation_time(), 0))
-    }
+fn pi_file_identity(file: &std::fs::File) -> Option<PiFileIdentity> {
+    same_file::Handle::from_file(file.try_clone().ok()?)
+        .ok()
+        .map(|identity| PiFileIdentity(std::sync::Arc::new(identity)))
 }
 
 fn pi_log_boundary(file: &mut std::fs::File, offset: u64) -> Option<(u64, Vec<u8>)> {
@@ -624,33 +580,16 @@ fn refresh_pi_log_boundary(file: &mut std::fs::File, cursor: &mut PiLogCursor) -
     Some(())
 }
 
-fn pi_log_baseline(
-    session_dir: &std::path::Path,
-    provider_session_id: &str,
-) -> Option<PiLogBaseline> {
-    let path = PiProvider::session_file(session_dir, provider_session_id)?;
+fn pi_log_baseline_for_path(path: std::path::PathBuf) -> Option<PiLogBaseline> {
     let mut file = std::fs::File::open(&path).ok()?;
     let metadata = file.metadata().ok()?;
     let mut cursor = PiLogCursor {
         offset: metadata.len(),
-        identity: pi_file_identity(&metadata),
+        identity: pi_file_identity(&file),
         ..Default::default()
     };
     refresh_pi_log_boundary(&mut file, &mut cursor)?;
     Some(PiLogBaseline { path, cursor })
-}
-
-fn restored_pi_log_baseline(config: &AgentConfig, is_restored: bool) -> Option<PiLogBaseline> {
-    if !is_restored || config.provider != "pi" {
-        return None;
-    }
-    let provider_session_id = config
-        .resume_session
-        .as_deref()
-        .map(str::trim)
-        .filter(|session_id| !session_id.is_empty())?;
-    let session_dir = PiProvider::session_dir(&config.session_id)?;
-    pi_log_baseline(&session_dir, provider_session_id)
 }
 
 fn open_pi_log_at_cursor(
@@ -659,10 +598,11 @@ fn open_pi_log_at_cursor(
 ) -> Option<std::fs::File> {
     let mut file = std::fs::File::open(path).ok()?;
     let metadata = file.metadata().ok()?;
-    let identity = pi_file_identity(&metadata);
+    let identity = pi_file_identity(&file);
     let identity_changed = cursor
         .identity
-        .zip(identity)
+        .as_ref()
+        .zip(identity.as_ref())
         .is_some_and(|(before, after)| before != after);
     let boundary_changed = if cursor.boundary.is_empty() {
         false
@@ -1947,8 +1887,27 @@ fn release_provider_spawn_lease_after_readiness<R: tauri::Runtime>(
     bootstrap_complete: std::sync::Arc<std::sync::atomic::AtomicBool>,
     app: AppHandle<R>,
     runtime_generation: u64,
-    gate: SpawnPublicationGate,
+    mut gate: SpawnPublicationGate,
 ) -> tokio::task::JoinHandle<()> {
+    if let Some(bridge) = gate.pi_bridge.take() {
+        // The returned handle observes completion. Aborting that observer must
+        // not drop the owned lease or cancel retained child cleanup.
+        let worker = tokio::spawn(pi_startup::monitor(
+            lease,
+            pi_startup::PiStartupContext {
+                status: current_status,
+                session_id,
+                bootstrap: bootstrap_complete,
+                app,
+                runtime_generation,
+                gate,
+                bridge,
+            },
+        ));
+        return tokio::spawn(async move {
+            let _ = worker.await;
+        });
+    }
     tokio::spawn(async move {
         let owner = lease.owner().clone();
         let mut last_renewal = std::time::Instant::now();
@@ -2083,6 +2042,7 @@ pub async fn spawn_agent(
         SpawnPublicationGate {
             unpublished_failure: Some(unpublished_failure),
             registration: None,
+            ..Default::default()
         },
     )
     .await?
@@ -2109,6 +2069,7 @@ pub async fn spawn_agent_with_lease(
         SpawnPublicationGate {
             unpublished_failure: Some(unpublished_failure),
             registration: None,
+            ..Default::default()
         },
     )
     .await?
@@ -2132,6 +2093,7 @@ pub(crate) async fn spawn_agent_provisionally(
         SpawnPublicationGate {
             unpublished_failure: None,
             registration: Some(registration),
+            ..Default::default()
         },
     )
     .await
@@ -2152,6 +2114,7 @@ pub(crate) async fn spawn_agent_for_registration(
         SpawnPublicationGate {
             unpublished_failure: None,
             registration: Some(registration),
+            ..Default::default()
         },
     )
     .await?
@@ -2165,7 +2128,7 @@ async fn spawn_agent_inner(
     initial_timestamp: Option<String>,
     publication: SpawnPublication,
     inherited_lease: Option<wardian_core::conversation_lease::PersistedConversationLeaseGuard>,
-    gate: SpawnPublicationGate,
+    mut gate: SpawnPublicationGate,
 ) -> Result<SpawnedAgent, String> {
     let spawn_started_at = std::time::Instant::now();
     super::validate_session_values_for_launch(
@@ -2174,6 +2137,10 @@ async fn spawn_agent_inner(
     )?;
     let provider = ProviderFactory::resolve(&config.provider)?;
     crate::providers::readiness::ensure_provider_available_for_launch(&config.provider)?;
+    if config.provider == "pi" {
+        let home = crate::utils::fs::get_wardian_home().ok_or("Could not locate Wardian home")?;
+        super::codex_stop::await_quiescent(&home, &config.session_id).await?;
+    }
 
     let cwd = crate::utils::fs::resolve_cwd(&config.folder, &config.session_id);
     let antigravity_database_baseline = if config.provider == "antigravity"
@@ -2260,6 +2227,9 @@ async fn spawn_agent_inner(
         }));
     }
 
+    let mut pi_launch_plan = (config.provider == "pi")
+        .then(|| pi_history::PiLaunchPlan::prepare(&config))
+        .transpose()?;
     let provider_generation = app_state
         .interactions
         .start_provider_input_generation(&config.session_id, ProviderInputReadiness::Booting, None)
@@ -2297,11 +2267,6 @@ async fn spawn_agent_inner(
         .map_err(|e| format!("Failed to open pty: {}", e))?;
 
     let (bin, mut provider_args) = provider.get_executable();
-    let claude_hook = if config.provider == "claude" {
-        Some(ensure_claude_permission_hook(&config.session_id)?)
-    } else {
-        None
-    };
     let pi_receipt = if config.provider == "pi" {
         Some(super::pi_receipt::Receipt::prepare(&config)?)
     } else {
@@ -2390,20 +2355,9 @@ async fn spawn_agent_inner(
             }
         }
     }
-    let pi_resume_session_file = if config.provider == "pi" && is_restored {
-        config
-            .resume_session
-            .as_deref()
-            .map(str::trim)
-            .filter(|session_id| !session_id.is_empty())
-            .and_then(|provider_session_id| {
-                PiProvider::session_dir(&config.session_id).and_then(|session_dir| {
-                    PiProvider::session_file(&session_dir, provider_session_id)
-                })
-            })
-    } else {
-        None
-    };
+    let pi_resume_session_file = pi_launch_plan
+        .as_ref()
+        .and_then(|plan| plan.resume_path().map(std::path::Path::to_owned));
     let pi_has_saved_session = is_restored && pi_resume_session_file.is_some();
     let provider_cwd = if config.provider == "pi" {
         pi_session_project_cwd(
@@ -2465,11 +2419,28 @@ async fn spawn_agent_inner(
             std::collections::HashSet::new()
         };
 
-    if config.provider == "claude" {
-        if let Some(hook) = claude_hook.as_ref() {
-            provider_args.push("--settings".to_string());
-            provider_args.push(hook.settings_arg.clone());
-        }
+    // A Claude launch records Stop rounds only when Claude supplies a
+    // supported turn verdict and Wardian may own its telemetry export. Claude
+    // Code currently supplies none, so the launch only prunes old records.
+    let mut claude_verdict_launch = if config.provider == "claude" {
+        Some(super::claude_verdict::launch::VerdictLaunch::prepare(
+            &config.session_id,
+            &provider_cwd,
+            &claude_accepted_sessions(&config),
+        )?)
+    } else {
+        None
+    };
+    let claude_hook = match claude_verdict_launch.as_ref() {
+        Some(launch) => Some(ensure_claude_permission_hook(
+            &config.session_id,
+            launch.hook_capture().as_ref(),
+        )?),
+        None => None,
+    };
+    if let Some(hook) = claude_hook.as_ref() {
+        provider_args.push("--settings".to_string());
+        provider_args.push(hook.settings_arg.clone());
     }
 
     let background_processes = Vec::new();
@@ -2477,7 +2448,10 @@ async fn spawn_agent_inner(
         .resume_session
         .as_deref()
         .is_some_and(|s| !s.is_empty());
-    let spawn_args = provider.get_spawn_args(&config, is_resume);
+    let mut spawn_args = provider.get_spawn_args(&config, is_resume);
+    if let Some(plan) = &pi_launch_plan {
+        plan.apply_args(&mut spawn_args)?;
+    }
     let spawn_args = finalize_interactive_spawn_args(
         &config.provider,
         is_restored,
@@ -2579,11 +2553,9 @@ async fn spawn_agent_inner(
                 ) {
                     Ok(path) => Some(path),
                     Err(error) => {
-                        log_debug(&format!(
-                            "[Wardian] Pi bridge unavailable for {}: {}",
-                            config.session_id, error
+                        return Err(format!(
+                            "Pi bridge preparation failed before launch: {error}"
                         ));
-                        None
                     }
                 };
             if let Some(extension_path) = extension_path {
@@ -2604,11 +2576,9 @@ async fn spawn_agent_inner(
                 {
                     Ok(plan) => Some(plan),
                     Err(error) => {
-                        log_debug(&format!(
-                            "[Wardian] Pi bridge unavailable for {}: {}",
-                            config.session_id, error
+                        return Err(format!(
+                            "Pi bridge preparation failed before launch: {error}"
                         ));
-                        None
                     }
                 }
             } else {
@@ -2623,6 +2593,9 @@ async fn spawn_agent_inner(
     if let Some(attachment) = pi_attachment.as_ref() {
         provider_args.push("-e".into());
         provider_args.push(attachment.extension_path().to_string_lossy().into_owned());
+    }
+    if let Some(plan) = &pi_launch_plan {
+        plan.validate_args(&provider_args)?;
     }
     let launch_spec = interactive_provider_launch(&config.provider, &bin, &provider_args)?;
     log_debug(&format!(
@@ -2739,7 +2712,20 @@ async fn spawn_agent_inner(
     // A restored Pi process can append its first turn immediately after spawn.
     // Capture the existing transcript boundary while the provider is still
     // unable to write, then start the watcher from that exact byte offset.
-    let pi_log_baseline = restored_pi_log_baseline(&config, is_restored);
+    if let Some(plan) = &mut pi_launch_plan {
+        plan.revalidate()?;
+    }
+    let pi_log_baseline = pi_launch_plan
+        .as_ref()
+        .and_then(|plan| plan.resume_path())
+        .and_then(|path| pi_log_baseline_for_path(path.to_owned()));
+    if pi_launch_plan
+        .as_ref()
+        .is_some_and(|plan| plan.resume_path().is_some())
+        && pi_log_baseline.is_none()
+    {
+        return Err("Pi restored history baseline unavailable".into());
+    }
 
     // The transition lease acquired before native owner preparation remains
     // held through PTY creation and publication.
@@ -3053,6 +3039,8 @@ async fn spawn_agent_inner(
         let mut had_pty_output = false;
         let mut opencode_chunks_logged = 0usize;
         let mut codex_terminal_theme_responder = CodexTerminalThemeProbeResponder::default();
+        #[cfg(windows)]
+        let mut conpty_startup_responder = ConptyStartupProbeResponder::default();
         let mut antigravity_turn_completion_gate = AntigravityTurnCompletionGate::default();
         let mut startup_prompt_pending = true;
         let mut codex_choice_pending = false;
@@ -3069,6 +3057,22 @@ async fn spawn_agent_inner(
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
+                    #[cfg(windows)]
+                    {
+                        let pending = conpty_startup_responder.finish();
+                        if !pending.is_empty() {
+                            let _ = crate::state::terminal_session::forward_terminal_output(
+                                &terminal_sessions,
+                                &sid_for_pty,
+                                reader_runtime_generation,
+                                &pending,
+                            );
+                            let _ = pty_emit_app.emit(
+                                "agent-pty-output-ready",
+                                serde_json::json!({ "session_id": sid_for_pty }),
+                            );
+                        }
+                    }
                     log_terminal_trace_note(&sid_for_pty, &provider_name_for_pty, "pty EOF");
                     if provider_name_for_pty == "opencode" {
                         log_debug(&format!(
@@ -3109,11 +3113,30 @@ async fn spawn_agent_inner(
                         crate::utils::runtime_profile::RuntimeMetric::PtyRead,
                         n as u64,
                     );
+                    #[cfg(windows)]
+                    let (startup_response, presentation_output) =
+                        conpty_startup_responder.process_chunk(&buf[..n]);
+                    #[cfg(not(windows))]
+                    let presentation_output = &buf[..n];
+                    #[cfg(windows)]
+                    if let Some(response) = startup_response {
+                        if let Err(error) = terminal_sessions.send_privileged_input_blocking(
+                            &sid_for_pty,
+                            reader_runtime_generation,
+                            response.to_vec(),
+                        ) {
+                            log_terminal_trace_note(
+                                &sid_for_pty,
+                                &provider_name_for_pty,
+                                &format!("ConPTY startup reply failed: {error}"),
+                            );
+                        }
+                    }
                     if let Err(error) = crate::state::terminal_session::forward_terminal_output(
                         &terminal_sessions,
                         &sid_for_pty,
                         reader_runtime_generation,
-                        &buf[..n],
+                        &presentation_output,
                     ) {
                         log_terminal_trace_note(
                             &sid_for_pty,
@@ -4011,6 +4034,7 @@ async fn spawn_agent_inner(
             .as_ref()
             .map(|baseline| baseline.cursor.clone())
             .unwrap_or_default();
+        let watcher_plan = pi_launch_plan.take().expect("Pi launch plan prepared");
 
         let receipt = pi_receipt.clone().expect("Pi receipt prepared");
         let watcher_receipt = receipt.clone();
@@ -4018,6 +4042,8 @@ async fn spawn_agent_inner(
         let receipt_executor = tokio::runtime::Handle::current();
         let watcher = std::thread::spawn(move || {
             let mut cursor = watcher_initial_cursor;
+            let mut history = pi_history::HistoryConfirmation::default();
+            let mut history_path = None;
             loop {
                 let current = watcher_current_status
                     .lock()
@@ -4043,34 +4069,30 @@ async fn spawn_agent_inner(
                     .lock()
                     .ok()
                     .and_then(|config| expected_caller_owned_identity(&config).map(str::to_string));
-                let path = provider_session_id
-                    .as_deref()
-                    .and_then(|provider_session_id| {
-                        let cached = watcher_log_path
-                            .lock()
-                            .ok()
-                            .and_then(|path| path.clone())
-                            .filter(|path| path.is_file());
-                        cached.or_else(|| {
-                            PiProvider::session_dir(&watcher_session).and_then(|session_dir| {
-                                PiProvider::session_file(&session_dir, provider_session_id)
-                            })
-                        })
-                    });
+                let path = provider_session_id.as_deref().and_then(|_| {
+                    let cached = watcher_log_path
+                        .lock()
+                        .ok()
+                        .and_then(|path| path.clone())
+                        .filter(|path| path.is_file())
+                        .filter(|path| watcher_plan.admits(path));
+                    cached.or_else(|| watcher_plan.session_file())
+                });
 
                 if let Some(path) = path {
                     if let Ok(mut stored_path) = watcher_log_path.lock() {
                         *stored_path = Some(path.clone());
                     }
                     if let Some(file) = open_pi_log_at_cursor(&path, &mut cursor) {
+                        if cursor.offset == 0 || history_path.as_ref() != Some(&path) {
+                            history.reset(&path);
+                            history_path = Some(path.clone());
+                        }
                         let mut reader = std::io::BufReader::new(file);
                         let mut line = String::new();
-                        loop {
-                            line.clear();
-                            let read = reader.read_line(&mut line).unwrap_or(0);
-                            if read == 0 {
-                                break;
-                            }
+                        while let Some(read) =
+                            pi_history::read_complete_record(&mut reader, &mut line)
+                        {
                             crate::utils::runtime_profile::record_event(
                                 crate::utils::runtime_profile::RuntimeMetric::ProviderLogRead,
                                 read as u64,
@@ -4085,6 +4107,9 @@ async fn spawn_agent_inner(
                                 continue;
                             };
                             let raw_line = parsed.to_string();
+                            if let Some(id) = provider_session_id.as_deref() {
+                                history.observe(&parsed, id);
+                            }
                             if let Some(mut message) = extract_transcript_message("pi", &raw_line) {
                                 if let Some(provider_session_id) = provider_session_id.as_deref() {
                                     bind_pi_watch_message(
@@ -4105,12 +4130,7 @@ async fn spawn_agent_inner(
                                         &watcher_config,
                                         &watcher_init_timestamp,
                                     ) {
-                                        Ok(_) => {
-                                            if let Ok(mut config) = watcher_config.lock() {
-                                                retain_pi_fresh_provider_session(&mut config);
-                                            }
-                                            persist_runtime_agent_configs(&watcher_app);
-                                        }
+                                        Ok(_) => {}
                                         Err(error) => {
                                             log_debug(&format!(
                                                 "[WARDIAN] Rejected Pi initialization identity: {error}"
@@ -4148,6 +4168,23 @@ async fn spawn_agent_inner(
                         }
                         let mut file = reader.into_inner();
                         let _ = refresh_pi_log_boundary(&mut file, &mut cursor);
+                        if history.confirmed(&path) {
+                            if let Some(id) = provider_session_id.as_deref() {
+                                let state = watcher_app.state::<AppState>();
+                                if let Err(error) =
+                                    receipt_executor.block_on(pi_history::publish_resume_identity(
+                                        &state,
+                                        &watcher_config,
+                                        runtime_generation,
+                                        id,
+                                    ))
+                                {
+                                    log_debug(&format!(
+                                        "[WARDIAN] Pi history publication remains pending: {error}"
+                                    ));
+                                }
+                            }
+                        }
                     }
                 }
                 watcher_profile.finish(0);
@@ -4173,9 +4210,6 @@ async fn spawn_agent_inner(
         let watcher_watch_state = watch_state.clone();
         let watcher_skip_existing_log = is_restored;
         let hook_event_log = claude_hook.as_ref().map(|hook| hook.event_log_path.clone());
-        let hook_completion_event_dir = claude_hook
-            .as_ref()
-            .map(|hook| hook.completion_event_dir.clone());
         let waiting_for_permission = std::sync::Arc::new(std::sync::Mutex::new(false));
         let log_waiting_for_permission = waiting_for_permission.clone();
 
@@ -4367,14 +4401,15 @@ async fn spawn_agent_inner(
             let hook_app = app.clone();
             let hook_session = config.session_id.clone();
             let hook_runtime_generation = runtime_generation;
-            let hook_completion_event_dir = hook_completion_event_dir.clone();
             let hook_accepted_sessions = claude_accepted_sessions(&config);
+            let mut verdict_tracker = claude_verdict_launch
+                .take()
+                .map(|launch| launch.into_tracker(hook_accepted_sessions.clone()));
             let hook_current_status = current_status.clone();
             let hook_waiting_for_permission = waiting_for_permission.clone();
 
             std::thread::spawn(move || {
                 let mut offset = 0;
-                let mut pending_completion_events = HashSet::new();
                 loop {
                     let current = hook_current_status
                         .lock()
@@ -4447,64 +4482,15 @@ async fn spawn_agent_inner(
                         }
                     }
 
-                    if let Some(completion_event_dir) = hook_completion_event_dir.as_ref() {
-                        if let Ok(events) = std::fs::read_dir(completion_event_dir) {
-                            for entry in events.flatten() {
-                                let event_path = entry.path();
-                                if event_path.extension().and_then(|ext| ext.to_str())
-                                    != Some("json")
-                                {
-                                    continue;
-                                }
-                                let Ok(contents) = std::fs::read_to_string(&event_path) else {
-                                    continue;
-                                };
-                                let Ok(parsed) =
-                                    serde_json::from_str::<serde_json::Value>(&contents)
-                                else {
-                                    let _ = std::fs::rename(
-                                        &event_path,
-                                        event_path.with_extension("invalid"),
-                                    );
-                                    log_debug("[Wardian] Quarantined malformed Claude Stop hook outbox record");
-                                    continue;
-                                };
-                                if parsed.get("hook_event_name").and_then(|v| v.as_str())
-                                    != Some("Stop")
-                                {
-                                    let _ = std::fs::rename(
-                                        &event_path,
-                                        event_path.with_extension("ignored"),
-                                    );
-                                    continue;
-                                }
-                                if !hook_accepted_sessions.iter().any(|session_id| {
-                                    claude_permission_hook_matches_session(&parsed, session_id)
-                                }) {
-                                    continue;
-                                }
-                                let Some(message) =
-                                    claude_stop_event_message(&parsed, &hook_accepted_sessions)
-                                else {
-                                    let _ = std::fs::rename(
-                                        &event_path,
-                                        event_path.with_extension("ignored"),
-                                    );
-                                    log_debug("[Wardian] Ignored Claude Stop hook outbox record without prompt identity or assistant text");
-                                    continue;
-                                };
-                                let evidence_id = message.turn_id.as_deref().unwrap_or_default();
-                                if !pending_completion_events.insert(evidence_id.to_string()) {
-                                    continue;
-                                }
-                                super::emit_agent_turn_completed_with_message(
-                                    &hook_app,
-                                    &hook_session,
-                                    hook_runtime_generation,
-                                    Some(message),
-                                    event_path,
-                                );
-                            }
+                    if let Some(tracker) = verdict_tracker.as_mut() {
+                        for settled in tracker.poll() {
+                            super::emit_settled_claude_completion(
+                                &hook_app,
+                                &hook_session,
+                                hook_runtime_generation,
+                                &settled,
+                                tracker.dir().to_path_buf(),
+                            );
                         }
                     }
 
@@ -4918,6 +4904,7 @@ async fn spawn_agent_inner(
             })
         });
     }
+    gate.pi_bridge = pi_attachment.as_ref().map(|plan| plan.owner());
     release_provider_spawn_lease_after_readiness(
         spawn_lease,
         current_status,
@@ -4980,9 +4967,28 @@ pub async fn resize_pty(
 }
 
 #[cfg(test)]
+#[path = "spawn/pi_startup_tests.rs"]
+mod pi_startup_tests;
+
+#[path = "spawn/pi_startup.rs"]
+mod pi_startup;
+
+#[path = "spawn/pi_history.rs"]
+mod pi_history;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::pi::PiProvider;
     use wardian_core::models::{AgentProvider, CodexProviderConfig, ProviderConfig};
+
+    fn pi_log_baseline(
+        session_dir: &std::path::Path,
+        provider_session_id: &str,
+    ) -> Option<PiLogBaseline> {
+        let path = PiProvider::session_file(session_dir, provider_session_id)?;
+        pi_log_baseline_for_path(path)
+    }
 
     #[test]
     fn claude_jsonl_reader_waits_for_the_complete_record() {
@@ -4993,37 +4999,6 @@ mod tests {
             Some(r#"{"type":"result"}"#.to_string() + "\n")
         );
         assert!(pending.is_empty());
-    }
-
-    #[test]
-    fn claude_stop_hook_accepts_only_successful_session_bound_assistant_turns() {
-        let event = serde_json::json!({
-            "hook_event_name": "Stop",
-            "session_id": "claude-session",
-            "prompt_id": "00000000-0000-0000-0000-000000000001",
-            "last_assistant_message": "  completed response  "
-        });
-        let accepted = vec!["claude-session".to_string()];
-        let message = claude_stop_event_message(&event, &accepted).expect("valid Stop event");
-        assert_eq!(message.role, "assistant");
-        assert_eq!(message.provider, "claude");
-        assert_eq!(message.text, "  completed response  ");
-        assert_eq!(
-            message.turn_id.as_deref(),
-            Some("00000000-0000-0000-0000-000000000001")
-        );
-
-        let mut failure = event.clone();
-        failure["hook_event_name"] = serde_json::Value::String("StopFailure".to_string());
-        assert!(claude_stop_event_message(&failure, &accepted).is_none());
-        assert!(claude_stop_event_message(&event, &["different-session".to_string()]).is_none());
-
-        let mut invalid_id = event.clone();
-        invalid_id["prompt_id"] = serde_json::Value::String("not-a-uuid".to_string());
-        assert!(claude_stop_event_message(&invalid_id, &accepted).is_none());
-        let mut empty_response = event;
-        empty_response["last_assistant_message"] = serde_json::Value::String("  ".to_string());
-        assert!(claude_stop_event_message(&empty_response, &accepted).is_none());
     }
 
     #[test]
@@ -5779,6 +5754,7 @@ mod tests {
             SpawnPublicationGate {
                 unpublished_failure: Some(failed.clone()),
                 registration: None,
+                ..Default::default()
             },
         );
         assert!(acquire_provider_spawn_lease(&config).is_err());
@@ -5844,6 +5820,7 @@ mod tests {
                 SpawnPublicationGate {
                     unpublished_failure: Some(disposition.failure_signal()),
                     registration: None,
+                    ..Default::default()
                 },
             );
             ready.send(watcher).unwrap();
@@ -5904,6 +5881,7 @@ mod tests {
                 SpawnPublicationGate {
                     unpublished_failure: None,
                     registration: Some(publication.clone()),
+                    ..Default::default()
                 },
             );
             tokio::time::sleep(std::time::Duration::from_millis(350)).await;
@@ -6090,24 +6068,6 @@ mod tests {
     }
 
     #[test]
-    fn pi_fresh_provider_session_promotion_retains_fresh_marker() {
-        let mut config = AgentConfig {
-            provider: "pi".to_string(),
-            session_id: "wardian-session".to_string(),
-            fresh_provider_session_id: Some("pi-fresh-session".to_string()),
-            ..Default::default()
-        };
-
-        retain_pi_fresh_provider_session(&mut config);
-
-        assert_eq!(config.resume_session.as_deref(), Some("pi-fresh-session"));
-        assert_eq!(
-            config.fresh_provider_session_id.as_deref(),
-            Some("pi-fresh-session")
-        );
-    }
-
-    #[test]
     fn opencode_http_launch_accepts_fresh_identity_then_rejects_invalid_identity() {
         assert!(opencode_http_launch_identity_is_valid(None));
         assert!(opencode_http_launch_identity_is_valid(Some("ses_exact")));
@@ -6223,7 +6183,7 @@ mod tests {
             .any(|message| message.text == "old"));
     }
 
-    fn agent_without_pty() -> crate::state::ActiveAgent {
+    pub(super) fn agent_without_pty() -> crate::state::ActiveAgent {
         crate::state::ActiveAgent {
             config: std::sync::Arc::new(std::sync::Mutex::new(AgentConfig::default())),
             child_process: None,

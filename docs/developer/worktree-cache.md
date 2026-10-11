@@ -65,6 +65,9 @@ The launcher uses a separate `launcher-targets/<repo-key>/<worktree-key>` lane. 
 ownership markers and exclusive claims belong to that launcher lane, with
 claims outside compiler output directories. A crashed claim is refused until
 an explicit ownership decision; no automatic stale-claim cleanup occurs.
+For one operator-qualified ended claim, use the receipt-bound recovery command
+in the [Rust cache guide](./rust-build-cache.md); it archives claim metadata
+without cleaning or moving compiler outputs.
 
 Direct Cargo invocations do not acquire the launcher's claim. Their
 `direct-targets` lanes are unowned and non-prunable even when no claim exists; inspection

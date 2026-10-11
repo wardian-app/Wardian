@@ -83,6 +83,11 @@ pub(super) fn sync_registered_provider_session(
     active_config: &mut wardian_core::models::AgentConfig,
     actual_resume: Option<String>,
 ) {
+    if config.pending_pi_session_id().is_some() {
+        active_config.resume_session = None;
+        active_config.fresh_provider_session_id = config.fresh_provider_session_id.clone();
+        return;
+    }
     let persisted_resume = super::persisted_resume_session_for_provider(actual_resume);
     let fresh_provider_session =
         fresh_provider_session_for_initial_capture(config, persisted_resume.as_deref());
@@ -96,6 +101,9 @@ pub(super) fn promote_fresh_provider_session_fields(
     provider: &str,
     config: &mut wardian_core::models::AgentConfig,
 ) -> bool {
+    if config.pending_pi_session_id().is_some() {
+        return false;
+    }
     let Some(fresh_provider_session_id) = config
         .fresh_provider_session_id
         .as_deref()
@@ -121,6 +129,20 @@ pub(super) fn promote_fresh_provider_session_fields(
     // identity. Serialization omits this runtime-only field.
     config.fresh_provider_session_id = Some(fresh_provider_session_id);
     true
+}
+
+/// Clear reserves a Pi identity; it does not establish resumable history.
+/// Other manual providers retain their existing clear-finalization behavior.
+pub(super) fn finalize_clear_provider_session_fields(
+    provider: &str,
+    config: &mut wardian_core::models::AgentConfig,
+) {
+    if super::provider_uses_manual_session_id(provider) && config.pending_pi_session_id().is_none()
+    {
+        if let Some(fresh) = config.fresh_provider_session_id.take() {
+            config.resume_session = Some(fresh);
+        }
+    }
 }
 
 pub(super) async fn lock_agent_lifecycle(
@@ -330,7 +352,7 @@ where
     guard.begin_stop().wait().await
 }
 
-/// Finite launch/registration guard: uncommitted Codex runtimes transfer their
+/// Finite launch/registration guard: uncommitted Codex and Pi runtimes transfer their
 /// child handles and exact terminal generation into retained cancellation cleanup.
 /// Installed ActiveAgent Drop is unchanged.
 pub(super) struct PendingRuntime {
@@ -344,13 +366,15 @@ impl PendingRuntime {
         config: &wardian_core::models::AgentConfig,
         terminal_sessions: &std::sync::Arc<crate::state::terminal_session::TerminalSessionBroker>,
     ) -> Result<Self, String> {
-        let registration = if config.provider == "codex" {
+        let registration = if matches!(config.provider.as_str(), "codex" | "pi") {
             let home =
                 crate::utils::fs::get_wardian_home().ok_or("Could not locate Wardian home")?;
-            Some(
+            let registration = if config.provider == "pi" {
+                crate::manager::codex_stop::prepare_pi_stop(&home, &config.session_id)?
+            } else {
                 crate::manager::codex_stop::prepare_stop(&home, &config.session_id)?
-                    .with_terminal_cleanup(terminal_sessions.clone())?,
-            )
+            };
+            Some(registration.with_terminal_cleanup(terminal_sessions.clone())?)
         } else {
             None
         };
@@ -431,9 +455,70 @@ impl PendingStop {
     pub(super) async fn failure(self, error: String) -> String {
         if let Some(handle) = self.0 {
             if let Err(stop_error) = handle.wait().await {
-                return format!("{error}; Codex cleanup retained: {stop_error}");
+                return format!(
+                    "{error}; {} cleanup retained: {stop_error}",
+                    handle.provider_label()
+                );
             }
         }
         error
     }
+}
+
+pub(super) fn prepare_resume_config_in_place(
+    config: &mut wardian_core::models::AgentConfig,
+) -> Result<(), String> {
+    crate::manager::validate_config_for_launch(config)?;
+
+    let resolved_persistence = super::resolved_session_persistence(config);
+
+    // Waking an unwritten Pi session preserves its reserved identity even when
+    // the ordinary persistence policy asks for resume or a fresh conversation.
+    if config.pending_pi_session_id().is_some() {
+        let native_id = config.pending_pi_session_id().unwrap().to_owned();
+        let directory = crate::providers::pi::PiProvider::session_dir(&config.session_id)
+            .ok_or("Pi pending history directory unavailable")?;
+        if let Some(binding) =
+            crate::providers::pi::history::inspect_owned_history(&directory, &native_id)?.complete
+        {
+            binding.revalidate()?;
+            // Pause can join the watcher before its first post-flush poll. This
+            // positive owned history recovers the canonical identity; ordinary
+            // prepared-config publication still owns the durable transition.
+            config.resume_session = Some(native_id);
+        }
+        config.is_off = false;
+        return Ok(());
+    }
+    config.fresh_provider_session_id = None;
+    if resolved_persistence == super::AgentSessionPersistence::Fresh {
+        config.is_off = false;
+        config.resume_session = None;
+        if super::provider_uses_manual_session_id(&config.provider) {
+            config.fresh_provider_session_id = Some(uuid::Uuid::new_v4().to_string());
+        }
+        return Ok(());
+    }
+
+    super::restore_antigravity_workspace_conversation(config)?;
+
+    let Some(resume_session) = config
+        .resume_session
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        if super::provider_allows_deferred_session_identity(&config.provider) {
+            config.is_off = false;
+            return Ok(());
+        }
+        return Err(format!(
+            "{} cannot resume without an exact provider session identity",
+            config.provider
+        ));
+    };
+    let provider = config.provider.clone();
+    crate::manager::apply_provider_identity(&provider, config, &resume_session)?;
+    config.is_off = false;
+
+    Ok(())
 }

@@ -5,13 +5,13 @@ This document captures the practical runtime differences between Wardian's suppo
 ## Shared Wardian Invariants
 
 Startup publishes the saved roster as `Restoring` placeholders and retains each
-agent's lifecycle claim until its provider or failure state is published. Pending
-Claude `Stop` records in
-`<wardian-home>/agents/<agent-id>/claude/turn-completions/` are replayed under
+agent's lifecycle claim until its provider or failure state is published.
+Settled but uncommitted Claude completions in
+`<wardian-home>/agents/<agent-id>/claude/turn-verdicts/` are replayed under
 those existing claims before providers launch, including for saved Off agents.
 Replay must not reacquire a claimed lifecycle gate: doing so blocks startup
 before any provider can launch. Inbox completion IDs make replay idempotent;
-records are acknowledged only after the corresponding Inbox item is persisted.
+a prompt is recorded as committed only after its Inbox item is persisted.
 
 - The Rust backend remains the source of truth for provider process lifecycle, session IDs, PTY ownership, and status telemetry.
 - Every provider receives Wardian's `system_include_directories`, which are resolved from `common`, `classes/<class>`, and `agents/<session_id>`.
@@ -672,6 +672,24 @@ Startup readiness uses the current generation's visible terminal frame. The Pi
 footer may wrap or truncate a long workspace path; readiness still requires its
 workspace and model context. Loading, error, and stale historical frames cannot
 release queued input.
+
+For resumed TUI sessions with the Wardian messaging bridge, startup conversation
+exclusion also waits for the authenticated bridge handshake. Its 35-second
+overall startup budget starts at the first registration of the actual child and
+ends at authenticated readiness. Preparing the listener does not arm this timer.
+HELLO and READY each retain a five-second maximum, capped by the remaining
+overall budget; connection, welcome writing, and other authentication awaits
+cannot extend that budget. Repeated registration cannot change the child or
+reset its deadline. Cancellation and failed spawn dispose an unregistered
+listener promptly. This allowance is a bounded startup policy, not a measured
+provider performance guarantee. A terminal bridge
+failure transfers the exact runtime into retained child cleanup. Successful
+termination requests and terminal EOF do not prove exit. Wardian publishes
+`Error` and releases the exact lease acquisition only after observing every
+captured child exit. Failed or uncertain cleanup publishes `Action Needed` and
+keeps the retained runtime fence and lease; later exit observation may complete
+cleanup without another termination request. Cancelling a startup observer does
+not cancel cleanup. Saved session identity and history are preserved.
 
 Pi's `--approve` and `--no-approve` flags control project-local configuration,
 extensions, and skills. They do not sandbox the shell tool or extensions.

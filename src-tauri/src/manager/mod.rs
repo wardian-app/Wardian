@@ -1,10 +1,13 @@
 pub(crate) mod classes;
 pub(crate) mod claude;
+pub(crate) mod claude_verdict;
 pub(crate) mod codex;
 pub(crate) mod codex_onboarding;
 pub(crate) mod codex_shared;
 pub(crate) mod codex_stop;
 mod codex_terminal_theme;
+#[cfg(any(windows, test))]
+mod conpty_startup;
 pub(crate) mod headless;
 pub(crate) mod opencode;
 pub(crate) mod pi_receipt;
@@ -699,7 +702,7 @@ async fn status_observation_belongs_to_current_agent(
     })
 }
 
-async fn record_provider_input_from_status_state(
+pub(crate) async fn record_provider_input_from_status_state(
     state: &AppState,
     session_id: &str,
     next_status: &str,
@@ -771,24 +774,23 @@ pub(crate) fn emit_agent_turn_completed(
     });
 }
 
-/// Persists a provider-confirmed Claude Stop-hook event before projecting it to
-/// the UI. The hook outbox keeps failed writes available for retry and startup
-/// replay until the canonical Inbox item is committed.
-pub(crate) fn emit_agent_turn_completed_with_message(
+/// Persists a settled Claude final answer before projecting it to the UI,
+/// then records the commit in the launch directory so startup replay does not
+/// recreate the card. Persistence retries while the runtime stays current.
+pub(crate) fn emit_settled_claude_completion(
     app: &AppHandle,
     session_id: &str,
     runtime_generation: u64,
-    message: Option<wardian_core::control::WatchTranscriptMessage>,
-    outbox_path: std::path::PathBuf,
+    settled: &claude_verdict::SettledCompletion,
+    launch_dir: std::path::PathBuf,
 ) {
+    let Some(completion) = claude_verdict::launch::inbox_completion(settled) else {
+        return;
+    };
     let completion_app = app.clone();
     let completion_session_id = session_id.to_string();
-    let completion = claude_turn_completion(message.as_ref(), &outbox_path);
     tauri::async_runtime::spawn(async move {
         let state = completion_app.state::<AppState>();
-        let Some(completion) = completion else {
-            return;
-        };
         let turn_completion::PersistedCompletion::Committed {
             agent_name,
             item_id,
@@ -803,6 +805,7 @@ pub(crate) fn emit_agent_turn_completed_with_message(
         else {
             return;
         };
+        record_claude_completion_commit(&launch_dir, &completion.evidence_id);
         record_agent_turn_completed_for_watch(&state, &completion_session_id).await;
         let _ = completion_app.emit(
             "agent-turn-completed",
@@ -818,14 +821,6 @@ pub(crate) fn emit_agent_turn_completed_with_message(
             &item_id,
         )
         .await;
-        if let Err(error) = std::fs::remove_file(&outbox_path) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                log_debug(&format!(
-                    "[Wardian] Failed to acknowledge persisted Claude Stop event {}: {error}",
-                    outbox_path.display()
-                ));
-            }
-        }
 
         crate::commands::change_snapshot::snapshot_completed_turn(
             state.inner(),
@@ -835,45 +830,24 @@ pub(crate) fn emit_agent_turn_completed_with_message(
     });
 }
 
-/// Accepts only a non-empty assistant answer carrying Claude's prompt ID.
-fn claude_turn_completion(
-    message: Option<&wardian_core::control::WatchTranscriptMessage>,
-    outbox_path: &std::path::Path,
-) -> Option<turn_completion::TurnCompletion> {
-    let message =
-        message.filter(|message| message.provider == "claude" && message.role == "assistant")?;
-    let (timestamp, timestamp_source) = completion_timestamp_from_outbox(outbox_path);
-    turn_completion::TurnCompletion::new(
-        message.turn_id.as_deref()?,
-        &message.text,
-        timestamp,
-        timestamp_source,
-    )
-}
-
-fn claude_completion_message_for_config(
-    config: &AgentConfig,
-    event: &serde_json::Value,
-) -> Option<wardian_core::control::WatchTranscriptMessage> {
-    if config.provider != "claude" {
-        return None;
+fn record_claude_completion_commit(launch_dir: &std::path::Path, prompt_id: &str) {
+    if let Err(error) = claude_verdict::launch::record_committed(launch_dir, prompt_id) {
+        // The card is already durable; replay re-upserts the same card ID.
+        log_debug(&format!(
+            "[Wardian] Could not record committed Claude completion {prompt_id}: {error}"
+        ));
     }
-    let accepted_sessions = claude::claude_accepted_sessions(config);
-    spawn::claude_stop_event_message(event, &accepted_sessions)
 }
 
-/// Replays durable Claude Stop records before saved providers are launched.
-/// This covers intentionally Off agents, which have no process watcher to
-/// discover an outbox record left by an interrupted persistence attempt.
+/// Replays settled Claude completions that were not yet committed when the
+/// app stopped, before saved providers are launched. This covers
+/// intentionally Off agents, which have no watcher to finish the work.
 /// Startup already holds each publication's lifecycle claim; replay borrows
 /// those claims and never tries to acquire the same non-reentrant gate again.
-pub(crate) async fn replay_claude_completion_outboxes<R: tauri::Runtime>(
+pub(crate) async fn replay_settled_claude_completions<R: tauri::Runtime>(
     app: &AppHandle<R>,
     publications: &[&crate::startup_restore::RestorePublication],
 ) {
-    let Some(home) = get_wardian_home() else {
-        return;
-    };
     let state = app.state::<AppState>();
     for publication in publications {
         let Some(config) = publication.current_config(&state).await else {
@@ -882,111 +856,51 @@ pub(crate) async fn replay_claude_completion_outboxes<R: tauri::Runtime>(
         if config.provider != "claude" {
             continue;
         }
-        let completion_dir = home
-            .join("agents")
-            .join(&config.session_id)
-            .join("claude")
-            .join("turn-completions");
-        let Ok(entries) = std::fs::read_dir(&completion_dir) else {
-            continue;
-        };
-        let mut outbox_paths = entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
-            .collect::<Vec<_>>();
-        outbox_paths.sort();
-
-        for outbox_path in outbox_paths {
-            let Ok(contents) = std::fs::read_to_string(&outbox_path) else {
-                continue;
-            };
-            let Ok(event) = serde_json::from_str::<serde_json::Value>(&contents) else {
-                let _ = std::fs::rename(&outbox_path, outbox_path.with_extension("invalid"));
-                log_debug("[Wardian] Quarantined malformed Claude Stop hook outbox record during startup replay");
-                continue;
-            };
-            if event
-                .get("hook_event_name")
-                .and_then(serde_json::Value::as_str)
-                != Some("Stop")
-            {
-                let _ = std::fs::rename(&outbox_path, outbox_path.with_extension("ignored"));
-                continue;
-            }
-
-            let accepted_sessions = claude::claude_accepted_sessions(&config);
-            let session_matches = accepted_sessions.iter().any(|session_id| {
-                claude::claude_permission_hook_matches_session(&event, session_id)
-            });
-            if !session_matches {
-                continue;
-            }
-            let Some(message) = claude_completion_message_for_config(&config, &event) else {
-                let _ = std::fs::rename(&outbox_path, outbox_path.with_extension("ignored"));
-                log_debug("[Wardian] Ignored Claude Stop hook outbox record without prompt identity or assistant text during startup replay");
-                continue;
-            };
-            let Some(completion) = claude_turn_completion(Some(&message), &outbox_path) else {
-                continue;
-            };
-            let item_id =
-                turn_completion::completion_item_id(&config.session_id, &completion.evidence_id);
-            let queue_guard = state.queue_io_lock.lock().await;
-            let mut items = crate::utils::queue::load_items();
-            let already_committed = items
-                .iter()
-                .any(|item| item.get("id").and_then(serde_json::Value::as_str) == Some(&item_id));
-            if !already_committed {
-                let item = turn_completion::completion_inbox_item(
-                    &config.session_id,
-                    &config.session_name,
-                    &completion,
-                );
-                items.insert(0, item);
-                if let Err(error) = crate::utils::queue::save_items(&items) {
-                    log_debug(&format!(
-                        "[Wardian] Startup replay could not persist Claude completion for {}: {error}; retaining Stop hook outbox record",
-                        config.session_id
-                    ));
-                    drop(queue_guard);
+        let accepted_sessions = claude::claude_accepted_sessions(&config);
+        for launch_dir in claude_verdict::launch::launch_dirs(&config.session_id) {
+            let mut tracker = claude_verdict::launch::VerdictTracker::open(
+                launch_dir.clone(),
+                accepted_sessions.clone(),
+                None,
+            );
+            for settled in tracker.poll() {
+                let Some(completion) = claude_verdict::launch::inbox_completion(&settled) else {
                     continue;
+                };
+                let item_id = turn_completion::completion_item_id(
+                    &config.session_id,
+                    &completion.evidence_id,
+                );
+                let queue_guard = state.queue_io_lock.lock().await;
+                let mut items = crate::utils::queue::load_items();
+                let already_committed = items.iter().any(|item| {
+                    item.get("id").and_then(serde_json::Value::as_str) == Some(&item_id)
+                });
+                if !already_committed {
+                    let item = turn_completion::completion_inbox_item(
+                        &config.session_id,
+                        &config.session_name,
+                        &completion,
+                    );
+                    items.insert(0, item);
+                    if let Err(error) = crate::utils::queue::save_items(&items) {
+                        log_debug(&format!(
+                            "[Wardian] Startup replay could not persist Claude completion for {}: {error}; it stays pending for the next startup",
+                            config.session_id
+                        ));
+                        drop(queue_guard);
+                        continue;
+                    }
                 }
-            }
-
-            let active_item = turn_completion::active_completion(&items, &item_id);
-            let removal = std::fs::remove_file(&outbox_path);
-            if let Err(error) = removal {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    log_debug(&format!(
-                        "[Wardian] Failed to acknowledge startup-replayed Claude Stop event {}: {error}",
-                        outbox_path.display()
-                    ));
+                let active_item = turn_completion::active_completion(&items, &item_id);
+                record_claude_completion_commit(&launch_dir, &completion.evidence_id);
+                drop(queue_guard);
+                if active_item.is_some() {
+                    let _ = app.emit("inbox-updated", ());
                 }
-            }
-            drop(queue_guard);
-            if active_item.is_some() {
-                let _ = app.emit("inbox-updated", ());
             }
         }
     }
-}
-
-fn completion_timestamp_from_outbox(path: &std::path::Path) -> (i64, &'static str) {
-    let timestamp = path
-        .metadata()
-        .and_then(|metadata| metadata.modified())
-        .ok()
-        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|elapsed| elapsed.as_millis().min(i64::MAX as u128) as i64);
-    timestamp
-        .map(|value| (value, "hook_outbox_mtime"))
-        .unwrap_or_else(|| {
-            (
-                chrono::Utc::now().timestamp_millis(),
-                "processing_time_fallback",
-            )
-        })
 }
 
 pub(crate) fn emit_agent_turn_started(app: &AppHandle, session_id: &str) {
@@ -1863,25 +1777,8 @@ mod tests {
     }
 
     #[test]
-    fn replayed_claude_completion_uses_outbox_file_time() {
-        let directory = tempfile::tempdir().expect("temp outbox");
-        let path = directory.path().join("event.json");
-        std::fs::write(&path, "{}").expect("write outbox event");
-
-        let first = completion_timestamp_from_outbox(&path);
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let replay = completion_timestamp_from_outbox(&path);
-
-        assert_eq!(first.1, "hook_outbox_mtime");
-        assert_eq!(
-            replay, first,
-            "replaying the same outbox record must preserve completion chronology"
-        );
-    }
-
-    #[test]
-    fn startup_replay_accepts_a_saved_off_claude_agent_with_matching_identity() {
-        let config = AgentConfig {
+    fn startup_replay_accepts_saved_off_claude_identities() {
+        let resumed = AgentConfig {
             session_id: "agent-1".to_string(),
             session_name: "Claude".to_string(),
             provider: "claude".to_string(),
@@ -1889,35 +1786,12 @@ mod tests {
             resume_session: Some("claude-session-1".to_string()),
             ..AgentConfig::default()
         };
-        let event = serde_json::json!({
-            "hook_event_name": "Stop",
-            "session_id": "claude-session-1",
-            "prompt_id": "f2d85983-9df6-4c82-92ae-5a3500bf0a16",
-            "last_assistant_message": "completed while the agent was saved Off",
-        });
-
-        let message = claude_completion_message_for_config(&config, &event)
-            .expect("saved-Off Claude identities remain eligible for outbox replay");
-        assert_eq!(message.provider, "claude");
-        assert_eq!(message.role, "assistant");
         assert_eq!(
-            message.turn_id.as_deref(),
-            Some("f2d85983-9df6-4c82-92ae-5a3500bf0a16")
+            claude::claude_accepted_sessions(&resumed),
+            ["agent-1".to_string(), "claude-session-1".to_string()]
         );
-        assert_eq!(message.text, "completed while the agent was saved Off");
 
-        let wrong_session = serde_json::json!({
-            "hook_event_name": "Stop",
-            "session_id": "other-session",
-            "prompt_id": "f2d85983-9df6-4c82-92ae-5a3500bf0a16",
-            "last_assistant_message": "must not be attributed to this agent",
-        });
-        assert!(claude_completion_message_for_config(&config, &wrong_session).is_none());
-    }
-
-    #[test]
-    fn startup_replay_accepts_saved_off_fresh_claude_using_wardian_session_id() {
-        let config = AgentConfig {
+        let fresh = AgentConfig {
             session_id: "fresh-agent-id".to_string(),
             session_name: "Claude".to_string(),
             provider: "claude".to_string(),
@@ -1926,22 +1800,10 @@ mod tests {
             fresh_provider_session_id: None,
             ..AgentConfig::default()
         };
-        let event = serde_json::json!({
-            "hook_event_name": "Stop",
-            "session_id": "fresh-agent-id",
-            "prompt_id": "8b918a55-8314-4ea7-bd2e-c3bf53135079",
-            "last_assistant_message": "fresh Claude turn completed before shutdown",
-        });
-
-        let message = claude_completion_message_for_config(&config, &event)
-            .expect("fresh saved-Off Claude replay accepts its fallback provider session ID");
-        assert_eq!(message.provider, "claude");
-        assert_eq!(message.role, "assistant");
         assert_eq!(
-            message.turn_id.as_deref(),
-            Some("8b918a55-8314-4ea7-bd2e-c3bf53135079")
+            claude::claude_accepted_sessions(&fresh),
+            ["fresh-agent-id".to_string()]
         );
-        assert_eq!(message.text, "fresh Claude turn completed before shutdown");
     }
 
     #[test]
@@ -3250,6 +3112,29 @@ mod tests {
 
     #[test]
     fn worktree_build_env_rejects_unregistered_worktree() {
+        let env_lock = crate::utils::wardian_test_env_lock();
+        struct CargoOutputs([(&'static str, Option<std::ffi::OsString>); 3]);
+        impl Drop for CargoOutputs {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let previous_outputs = [
+            "CARGO_TARGET_DIR",
+            "CARGO_BUILD_TARGET_DIR",
+            "CARGO_BUILD_BUILD_DIR",
+        ]
+        .map(|key| (key, std::env::var_os(key)));
+        let outputs_guard = CargoOutputs(previous_outputs.clone());
+        // Registration rejection applies only when explicit output policy is absent.
+        for (key, _) in &previous_outputs {
+            std::env::remove_var(key);
+        }
         let temp = tempfile::tempdir().expect("temp");
         let source = temp.path().join("Wardian");
         let worktree = temp.path().join("Wardian.wt").join("debugging");
@@ -3270,6 +3155,12 @@ mod tests {
         assert!(worktree_build_env(&config)
             .unwrap_err()
             .contains("not registered"));
+        drop(outputs_guard);
+        for (key, value) in &previous_outputs {
+            assert_eq!(&std::env::var_os(key), value, "must restore {key}");
+        }
+        drop(temp);
+        drop(env_lock);
     }
 
     #[test]

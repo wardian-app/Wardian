@@ -23,6 +23,16 @@ no claim or deletion authority, and qualified artifacts remain protected inputs.
 Separate lanes duplicate Cargo working sets. Only the launcher's owned lanes
 have explicit bounded retention; both may reuse the same 10 GB compiler store.
 
+Visibility-rewritten dead-code analysis has one closed `deadcode/` output leaf
+under the existing launcher target and parent claim. Its source copy remains
+under `rust-deadcode/<copy-key>/`. Normal compiler dependencies, fingerprints and
+incremental state cannot be shared with that copy. This adds no separate claim
+or compiler store. Cargo callbacks select the leaf through the launcher API;
+Tauri callbacks explicitly bind child Cargo environment routing to the active
+normal target. Unique routing variables remain absent from the parent compiler
+environment, and intentional custom overrides retain the rejection/direct-Cargo
+policy.
+
 ## Configuration ownership
 
 The repository's tracked minimal local `target-dir = "target"` config stays

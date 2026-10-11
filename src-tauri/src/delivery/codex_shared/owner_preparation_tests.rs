@@ -6,6 +6,132 @@ use crate::utils::{codex_home::TEST_ROOTS, codex_messaging::TEST_NATIVE_HOME};
 use std::path::PathBuf;
 
 #[tokio::test]
+async fn startup_observation_initialized_home_waits_before_owner_preparation() {
+    use std::future::Future;
+    use std::task::Poll;
+    let _lock = crate::utils::wardian_test_env_lock_async().await;
+    let fixture = Fixture::new();
+    let habitat = fixture.neutral();
+    std::fs::create_dir_all(habitat_codex_home(&habitat)).unwrap();
+    let home = crate::utils::get_wardian_home().unwrap();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let observer = std::thread::spawn(move || {
+        crate::utils::codex_home::with_index_observation(&home, "agent", |_| {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(())
+        })
+    });
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let mut timings = OwnerStartTimings::default();
+    let startup = super::prepare_owner_habitat_after_observation(
+        &fixture.workspace,
+        "",
+        "agent",
+        &mut timings,
+        tokio::time::Instant::now() + super::STARTUP_TIMEOUT,
+        std::future::pending(),
+    );
+    tokio::pin!(startup);
+    let first = std::future::poll_fn(|cx| Poll::Ready(startup.as_mut().poll(cx))).await;
+    release_tx.send(()).unwrap();
+    assert_eq!(observer.join().unwrap(), Some(Ok(())));
+    assert!(
+        first.is_pending(),
+        "startup must await its own observer; got {first:?}"
+    );
+    assert!(startup.await.is_ok());
+}
+
+#[tokio::test]
+async fn startup_observation_genuine_competing_owner_still_fails_closed() {
+    let _lock = crate::utils::wardian_test_env_lock_async().await;
+    let fixture = Fixture::new();
+    let home = crate::utils::get_wardian_home().unwrap();
+    let _foreign = crate::utils::codex_home::acquire_preparation(&home, "agent").unwrap();
+    let mut timings = OwnerStartTimings::default();
+    let error = super::prepare_owner_habitat_after_observation(
+        &fixture.workspace,
+        "",
+        "agent",
+        &mut timings,
+        tokio::time::Instant::now() + super::STARTUP_TIMEOUT,
+        std::future::pending(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error
+        .message
+        .contains("preparation busy or lock unavailable"));
+    assert!(!error.provider_boundary_crossed);
+    assert!(!home.join("agents/agent/habitat/.codex").exists());
+}
+
+#[tokio::test(start_paused = true)]
+async fn startup_observation_deadline_and_cancellation_do_not_prepare_or_reserve_home() {
+    use std::future::Future;
+    use std::task::Poll;
+    let _lock = crate::utils::wardian_test_env_lock_async().await;
+    let fixture = Fixture::new();
+    let home = crate::utils::get_wardian_home().unwrap();
+    let turn = crate::utils::codex_home::preparation_turn(&home, "agent").unwrap();
+    let observer = turn.clone().try_lock_owned().unwrap();
+    let mut timings = OwnerStartTimings::default();
+    let error = {
+        let startup = super::prepare_owner_habitat_after_observation(
+            &fixture.workspace,
+            "",
+            "agent",
+            &mut timings,
+            tokio::time::Instant::now() + super::STARTUP_TIMEOUT,
+            std::future::pending(),
+        );
+        tokio::pin!(startup);
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(startup.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        tokio::time::advance(super::STARTUP_TIMEOUT).await;
+        startup.await.unwrap_err()
+    };
+    assert!(error.message.contains("timed out"));
+    let error = {
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let startup = super::prepare_owner_habitat_after_observation(
+            &fixture.workspace,
+            "",
+            "agent",
+            &mut timings,
+            tokio::time::Instant::now() + super::STARTUP_TIMEOUT,
+            async {
+                let _ = cancel_rx.await;
+            },
+        );
+        tokio::pin!(startup);
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(startup.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        cancel_tx.send(()).unwrap();
+        startup.await.unwrap_err()
+    };
+    assert!(error.message.contains("cancelled"));
+    assert_eq!(timings.habitat_workspace, std::time::Duration::ZERO);
+    assert!(!home.join("agents").exists());
+    assert!(!home.join("locks").exists());
+    drop(observer);
+    assert!(
+        turn.try_lock_owned().is_ok(),
+        "cancelled waiters must release their queue positions"
+    );
+}
+
+#[tokio::test]
 async fn unsupported_reviewer_is_rejected_before_owner_home_preparation() {
     let _lock = crate::utils::wardian_test_env_lock_async().await;
     let fixture = Fixture::new();

@@ -284,6 +284,30 @@ fn prepare_owner_habitat(
     Ok((habitat, codex_home))
 }
 
+/// Wait only for this process's observer, within the original startup budget.
+/// A foreign preparation owner still fails at the unchanged nonblocking OS gate.
+async fn prepare_owner_habitat_after_observation(
+    workspace: &std::path::Path,
+    class_name: &str,
+    agent_id: &str,
+    timings: &mut OwnerStartTimings,
+    deadline: tokio::time::Instant,
+    cancelled: impl Future<Output = ()>,
+) -> Result<(PathBuf, PathBuf), CodexSharedError> {
+    let home = crate::utils::get_wardian_home()
+        .ok_or_else(|| CodexSharedError::unsupported("Wardian home unavailable"))?;
+    let turn = crate::utils::codex_home::preparation_turn(&home, agent_id)
+        .map_err(CodexSharedError::unsupported)?;
+    tokio::pin!(cancelled);
+    let _turn = tokio::select! {
+        biased;
+        _ = &mut cancelled => return Err(CodexSharedError::unsupported("Codex owner startup cancelled before home preparation")),
+        _ = tokio::time::sleep_until(deadline) => return Err(CodexSharedError::unsupported("Codex owner startup timed out before home preparation")),
+        turn = turn.lock_owned() => turn,
+    };
+    prepare_owner_habitat(workspace, class_name, agent_id, timings)
+}
+
 /// Launch identity only. After any private saved-reviewer checkpoint is evicted,
 /// the ordinary TUI cold-loads the thread before attachment is published.
 #[derive(Clone)]
@@ -369,12 +393,17 @@ impl CodexSharedOwner {
             }
         }
         timings.quiescent = quiescent_at.elapsed();
-        let (habitat, codex_home) = prepare_owner_habitat(
+        let preparation_deadline =
+            tokio::time::Instant::from_std(timings.started_at) + STARTUP_TIMEOUT;
+        let (habitat, codex_home) = prepare_owner_habitat_after_observation(
             &spec.workspace,
             &spec.config.agent_class,
             &spec.target_agent_id,
             &mut timings,
-        )?;
+            preparation_deadline,
+            &mut cancelled,
+        )
+        .await?;
         let socket = attachment::default_socket(&codex_home)?;
         phase(&mut timings.socket_recovery, || {
             attachment::recover_stale_socket(&socket)

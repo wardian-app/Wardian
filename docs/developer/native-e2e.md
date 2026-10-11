@@ -159,6 +159,72 @@ PowerShell:
 node --test e2e-native/tests/http-fixture-cleanup.test.mjs
 ```
 
+### Runner input contracts before App launch
+
+When changing a native-run wrapper, test the runtime producer's serialized
+output through the exact frozen consumer and shell that the run will invoke.
+Use harmless owned fixtures before occupying the shared native slot. Replace
+only the final App/provider launch; keep the complete preceding input path
+unchanged, including argument construction, serialization, initialization,
+every actual file read and all admission checks.
+
+A `SourceOnly` admission mode must call the same runtime producer and validate
+its complete output. Rebuilding input from an already accepted parent inventory
+misses runtime-only entries. Sharing a consumer, passing a producer/consumer
+composition test or checking an initial input prefix proves only that subset.
+For example, a copied package can pass composition while omitting the
+transport plan, protocol manifest or strict-root initialization that a later
+pre-App branch reads. Exercise those reads and validations in the same
+whole-path positive, without bypasses or reconstructed intermediate inputs.
+
+Retain that complete unchanged pre-App positive and focused negatives for the
+changed boundary in the project's normal tests and CI. Cover:
+
+- Zero, one and multiple arguments or entries. Empty strings, spaces, quotes
+  and trailing backslashes must survive the actual serialized argument consumer.
+- Identity timestamps as literal strings, preserving every fractional digit.
+  Compare process births from the same API. A lower-precision projection cannot
+  establish an exact birth match or physical closure.
+- Pins for every literal path the consumer actually reads, including required
+  aliases, metadata, transport plans and protocol manifests. Enforce the
+  required file attributes, including read-only metadata, as well as hashes.
+- Strict ancestor and root validation against the real package layout. An
+  equivalent filename or a file outside the admitted root does not qualify the
+  literal read. Exercise missing reads, wrong ancestors/roots and changed
+  attributes as focused negatives, with refusal before App launch.
+- Outer control metadata outside the inner run's reserved output namespace.
+  Test collisions as negatives; preserve the namespace guard.
+
+The maintained Windows supervisor regression is a bounded argv contract test:
+
+```sh
+node --test scripts/native-e2e-windows-supervisor.test.mjs
+```
+
+PowerShell (Windows):
+
+```powershell
+node --test scripts/native-e2e-windows-supervisor.test.mjs
+```
+
+It uses the actual `createWindowsSupervisorPlan` producer and
+`native-e2e-windows-supervisor.ps1` consumer under Windows PowerShell 5.1
+(`powershell.exe`). An owned compiled recorder accepts genuinely zero child
+arguments; the suite checks 0/1/N round trips, literal seven-fraction ISO
+identity strings, child exit codes, malformed input, launch failure and Job
+cleanup. The existing Windows CI job runs it after Node setup; non-Windows
+runs skip it explicitly. Preserve the canonical shell, argument quoting and
+Job ownership. PowerShell 7-only JSON switches such as `-DateKind` do not apply
+to this consumer.
+
+These tests establish the supervisor boundary only. They do not qualify a
+private QA package's complete runtime producer or pre-App path, and the
+zero-argument fix does not repair missing inputs, initialization or namespace
+conflicts elsewhere. Label composition and prefix checks as partial evidence.
+Even a complete pre-App contract pass does not establish normal product
+behavior. This contract adds no permission or acknowledgement step for
+unchanged, already-qualified work.
+
 ### Concurrent runs
 
 Two native runs can execute at the same time. Every run claims its own

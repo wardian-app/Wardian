@@ -271,15 +271,87 @@ mod tests {
 
     const DEFAULT: &str = "[build]\ntarget-dir = \"target\"\n";
 
+    const CARGO_OUTPUT_KEYS: [&str; 3] = [
+        "CARGO_TARGET_DIR",
+        "CARGO_BUILD_TARGET_DIR",
+        "CARGO_BUILD_BUILD_DIR",
+    ];
+
     struct Fixture {
+        // Field order keeps cleanup and environment restoration inside the lock.
         _temp: tempfile::TempDir,
+        // Restore the override before releasing the environment lock.
+        _cache_root: FixtureCacheRoot,
+        _env_lock: tokio::sync::MutexGuard<'static, ()>,
         source: PathBuf,
+        cache_root: PathBuf,
+    }
+
+    struct FixtureCacheRoot {
+        previous: Option<std::ffi::OsString>,
+        previous_outputs: [Option<std::ffi::OsString>; 3],
+        before_restore: Option<Box<dyn FnOnce()>>,
+    }
+
+    impl FixtureCacheRoot {
+        fn new(root: Option<&Path>, _env_lock: &tokio::sync::MutexGuard<'static, ()>) -> Self {
+            let previous = std::env::var_os("WARDIAN_RUST_CACHE_ROOT");
+            let previous_outputs = CARGO_OUTPUT_KEYS.map(std::env::var_os);
+            for key in CARGO_OUTPUT_KEYS {
+                std::env::remove_var(key);
+            }
+            match root {
+                Some(root) => std::env::set_var("WARDIAN_RUST_CACHE_ROOT", root),
+                None => std::env::remove_var("WARDIAN_RUST_CACHE_ROOT"),
+            }
+            Self {
+                previous,
+                previous_outputs,
+                before_restore: None,
+            }
+        }
+    }
+
+    impl Drop for FixtureCacheRoot {
+        fn drop(&mut self) {
+            if let Some(observe) = self.before_restore.take() {
+                observe();
+            }
+            for (key, previous) in CARGO_OUTPUT_KEYS.iter().zip(&mut self.previous_outputs) {
+                match previous.take() {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            match self.previous.take() {
+                Some(root) => std::env::set_var("WARDIAN_RUST_CACHE_ROOT", root),
+                None => std::env::remove_var("WARDIAN_RUST_CACHE_ROOT"),
+            }
+        }
     }
 
     impl Fixture {
         fn new(config: Option<&str>) -> Self {
+            Self::with_canonical_source(config, |source, _, _| {
+                absolute_existing_path(source).unwrap()
+            })
+        }
+
+        fn with_canonical_source(
+            config: Option<&str>,
+            canonicalize: impl FnOnce(
+                &Path,
+                &mut FixtureCacheRoot,
+                &tokio::sync::MutexGuard<'static, ()>,
+            ) -> PathBuf,
+        ) -> Self {
+            // Acquire first so constructor failures also clean up before unlocking.
+            let env_lock = crate::utils::wardian_test_env_lock();
             let temp = tempfile::tempdir().unwrap();
             let source = temp.path().join("project");
+            // Launcher overrides must not redirect synthetic repositories into shared caches.
+            let cache_root = source.with_file_name("project.cargo-cache");
+            let mut cache_root_guard = FixtureCacheRoot::new(Some(&cache_root), &env_lock);
             fs::create_dir_all(&source).unwrap();
             fs::write(source.join("Cargo.toml"), "[workspace]\n").unwrap();
             let cwd = source.to_str().unwrap();
@@ -298,9 +370,15 @@ mod tests {
                 &["-c", "commit.gpgsign=false", "commit", "-qm", "fixture"],
             )
             .unwrap();
+            // Finish fallible work while these remain locals: a partially built
+            // aggregate unwinds its operands in reverse evaluation order.
+            let source = canonicalize(&source, &mut cache_root_guard, &env_lock);
             Self {
                 _temp: temp,
-                source: absolute_existing_path(&source).unwrap(),
+                _cache_root: cache_root_guard,
+                _env_lock: env_lock,
+                source,
+                cache_root,
             }
         }
 
@@ -321,6 +399,120 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fixture_constructor_unwind_restores_and_cleans_up_before_next_mutex_owner() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Arc};
+
+        let held_on_restore = Arc::new(AtomicBool::new(false));
+        let mut waiter = None;
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Fixture::with_canonical_source(None, |source, cache_guard, env_lock| {
+                let mutex = tokio::sync::MutexGuard::mutex(env_lock);
+                let expected = cache_guard.previous.clone();
+                let temp_root = source.parent().unwrap().to_path_buf();
+                let (ready_tx, ready_rx) = mpsc::channel();
+                let (restore_tx, restore_rx) = mpsc::channel();
+                let observed = held_on_restore.clone();
+                cache_guard.before_restore = Some(Box::new(move || {
+                    // Keep the waiting thread gated until this observation so
+                    // it cannot mask an early unlock by owning the mutex itself.
+                    observed.store(mutex.try_lock().is_err(), Ordering::SeqCst);
+                    let _ = restore_tx.send(());
+                }));
+                waiter = Some(std::thread::spawn(move || {
+                    ready_tx.send(mutex.try_lock().is_err()).unwrap();
+                    restore_rx.recv().unwrap();
+                    let _lock = mutex.blocking_lock();
+                    (
+                        std::env::var_os("WARDIAN_RUST_CACHE_ROOT") == expected,
+                        !temp_root.exists(),
+                    )
+                }));
+                assert!(ready_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap());
+                panic!("injected canonicalization failure");
+            });
+        }));
+        assert!(failed.is_err());
+        let (restored, cleaned) = waiter.unwrap().join().unwrap();
+        assert!(held_on_restore.load(Ordering::SeqCst));
+        assert!(restored);
+        assert!(cleaned);
+    }
+
+    #[test]
+    fn fixture_cache_root_restores_inherited_override() {
+        let env_lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("fixture-cache");
+        let inherited_root = temp.path().join("inherited-cache");
+        for inherited in [Some(inherited_root.as_path()), None] {
+            // This outer guard restores the runner's original environment even on panic.
+            let original = std::env::var_os("WARDIAN_RUST_CACHE_ROOT");
+            let inherited_guard = FixtureCacheRoot::new(inherited, &env_lock);
+            let expected = inherited.map(|path| path.as_os_str().to_os_string());
+            let override_guard = FixtureCacheRoot::new(Some(&root), &env_lock);
+            assert_eq!(
+                std::env::var_os("WARDIAN_RUST_CACHE_ROOT"),
+                Some(root.clone().into_os_string())
+            );
+            drop(override_guard);
+            assert_eq!(std::env::var_os("WARDIAN_RUST_CACHE_ROOT"), expected);
+            drop(inherited_guard);
+            assert_eq!(std::env::var_os("WARDIAN_RUST_CACHE_ROOT"), original);
+        }
+        // Both post-drop assertions must run before another test can change the variable.
+        drop(temp);
+        drop(env_lock);
+    }
+
+    #[test]
+    fn fixture_cache_root_restores_cargo_outputs_after_drop_and_unwind() {
+        let env_lock = crate::utils::wardian_test_env_lock();
+        let original = CARGO_OUTPUT_KEYS.map(std::env::var_os);
+        // Preserve the runner's environment while seeding present and absent cases.
+        let runner_guard = FixtureCacheRoot::new(None, &env_lock);
+        for present in [true, false] {
+            let expected = CARGO_OUTPUT_KEYS
+                .map(|key| present.then(|| std::ffi::OsString::from(format!("inherited-{key}"))));
+            for (key, value) in CARGO_OUTPUT_KEYS.iter().zip(&expected) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+
+            let fixture_guard = FixtureCacheRoot::new(None, &env_lock);
+            for key in CARGO_OUTPUT_KEYS {
+                assert_eq!(std::env::var_os(key), None, "fixture must clear {key}");
+            }
+            drop(fixture_guard);
+            for (key, value) in CARGO_OUTPUT_KEYS.iter().zip(&expected) {
+                assert_eq!(&std::env::var_os(key), value, "drop must restore {key}");
+            }
+
+            let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _fixture_guard = FixtureCacheRoot::new(None, &env_lock);
+                for key in CARGO_OUTPUT_KEYS {
+                    assert_eq!(std::env::var_os(key), None, "fixture must clear {key}");
+                }
+                panic!("exercise Cargo output restoration during unwind");
+            }));
+            assert!(unwind.is_err());
+            for (key, value) in CARGO_OUTPUT_KEYS.iter().zip(&expected) {
+                assert_eq!(&std::env::var_os(key), value, "unwind must restore {key}");
+            }
+        }
+        drop(runner_guard);
+        for (key, value) in CARGO_OUTPUT_KEYS.iter().zip(&original) {
+            assert_eq!(&std::env::var_os(key), value, "runner must retain {key}");
+        }
+        // Restoration assertions stay inside the shared environment lock.
+        drop(env_lock);
+    }
+
     fn config_target(worktree: &Path) -> PathBuf {
         let document = fs::read_to_string(worktree.join(".cargo/config.toml"))
             .unwrap()
@@ -336,11 +528,12 @@ mod tests {
         let f = Fixture::new(None);
         let tree = f.create("first");
         let target = config_target(&tree);
-        assert!(target.starts_with(
-            f.source
-                .with_file_name("project.cargo-cache")
-                .join("direct-targets")
-        ));
+        // Windows canonicalizes the source but preserves the override's lexical spelling.
+        let fixture_target_root = f.cache_root.join("direct-targets");
+        assert!(
+            target.starts_with(&fixture_target_root),
+            "managed target {target:?} is outside configured fixture root {fixture_target_root:?}"
+        );
         assert_eq!(
             target,
             managed_worktree_cargo_target(&f.source, &tree)

@@ -5,6 +5,7 @@ mod copy_metadata;
 mod habitat_alias;
 mod migration;
 mod platform;
+mod preparation_turn;
 
 mod storage;
 #[cfg(test)]
@@ -21,6 +22,7 @@ pub(crate) use habitat_alias::{
     cleanup_habitat_alias, is_owned_habitat_workspace_alias, prepare_habitat_cwd_alias,
     HABITAT_ALIAS_RECORD,
 };
+pub(crate) use preparation_turn::preparation_turn;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 pub(crate) use storage::HomePreparationGuard;
@@ -59,6 +61,37 @@ pub(crate) fn acquire_preparation(
         }
     }
     Ok(guard)
+}
+
+/// Observation yields to queued startup and never prepares an absent SDK home.
+/// The first resolution is advisory: validate the current mapping under the OS
+/// gate before reading it. Drop the OS guard before releasing the local turn.
+pub(crate) fn with_index_observation(
+    home: &Path,
+    agent_id: &str,
+    observe: impl FnOnce(&Path) -> Result<(), String>,
+) -> Option<Result<(), String>> {
+    if !resolve_managed_home(home, agent_id).ok()?.is_dir() {
+        return None;
+    }
+    let _turn = preparation_turn(home, agent_id)
+        .ok()?
+        .try_lock_owned()
+        .ok()?;
+    with_locked_index_observation(home, agent_id, observe)
+}
+
+fn with_locked_index_observation(
+    home: &Path,
+    agent_id: &str,
+    observe: impl FnOnce(&Path) -> Result<(), String>,
+) -> Option<Result<(), String>> {
+    let _preparation = acquire_preparation(home, agent_id).ok()?;
+    let projected_home = resolve_managed_home(home, agent_id).ok()?;
+    if !projected_home.is_dir() {
+        return None;
+    }
+    Some(observe(&projected_home))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
