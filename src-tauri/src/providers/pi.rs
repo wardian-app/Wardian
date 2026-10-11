@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use wardian_core::models::provider::{AgentEvent, AgentProvider};
 use wardian_core::models::AgentConfig;
 
+pub(crate) mod exact_resume;
 pub(crate) mod history;
 pub(super) mod provenance;
 
@@ -71,6 +72,97 @@ impl PiProvider {
                 && parsed.get("id").and_then(|value| value.as_str()) == Some(provider_session_id))
             .then_some(path)
         })
+    }
+
+    pub(crate) fn spawn_args(
+        &self,
+        config: &AgentConfig,
+        is_resume: bool,
+        materialize: bool,
+    ) -> Vec<String> {
+        let pi = config.pi_config();
+        let mut args = vec!["--tui-mode".into(), "regular".into()];
+
+        if let Some(session_dir) = Self::session_dir(&config.session_id) {
+            if materialize {
+                let _ = std::fs::create_dir_all(&session_dir);
+            }
+            args.push("--session-dir".into());
+            args.push(session_dir.to_string_lossy().to_string());
+        }
+
+        if is_resume && config.pending_pi_session_id().is_none() {
+            if let Some(session_id) = config
+                .resume_session
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                args.push("--session".into());
+                args.push(session_id.into());
+            }
+        } else if let Some(session_id) = config
+            .fresh_provider_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            args.push("--session-id".into());
+            args.push(session_id.into());
+            if !config.session_name.trim().is_empty() {
+                args.push("--name".into());
+                args.push(config.session_name.clone());
+            }
+        }
+
+        if let Some(model) = config
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            args.push("--model".into());
+            args.push(model.into());
+        }
+        if let Some(thinking) = pi
+            .reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| {
+                matches!(
+                    *value,
+                    "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+                )
+            })
+        {
+            args.push("--thinking".into());
+            args.push(thinking.into());
+        }
+        match pi.project_trust.as_deref().map(str::trim) {
+            Some("approve") => args.push("--approve".into()),
+            Some("ignore") => args.push("--no-approve".into()),
+            _ => {}
+        }
+        if pi.no_tools.unwrap_or(false) {
+            args.push("--no-tools".into());
+        }
+        if let Some(tools) = pi.tools.filter(|values| !values.is_empty()) {
+            args.push("--tools".into());
+            args.push(tools.join(","));
+        }
+        if let Some(tools) = pi.exclude_tools.filter(|values| !values.is_empty()) {
+            args.push("--exclude-tools".into());
+            args.push(tools.join(","));
+        }
+        if pi.offline.unwrap_or(false) {
+            args.push("--offline".into());
+        }
+
+        Self::append_context_args(&mut args, config);
+        if let Some(custom) = config.custom_args.as_deref().and_then(shlex::split) {
+            args.extend(custom);
+        }
+        args
     }
 
     fn append_context_args(args: &mut Vec<String>, config: &AgentConfig) {
@@ -170,87 +262,7 @@ impl AgentProvider for PiProvider {
     }
 
     fn get_spawn_args(&self, config: &AgentConfig, is_resume: bool) -> Vec<String> {
-        let pi = config.pi_config();
-        let mut args = vec!["--tui-mode".into(), "regular".into()];
-
-        if let Some(session_dir) = Self::session_dir(&config.session_id) {
-            let _ = std::fs::create_dir_all(&session_dir);
-            args.push("--session-dir".into());
-            args.push(session_dir.to_string_lossy().to_string());
-        }
-
-        if is_resume && config.pending_pi_session_id().is_none() {
-            if let Some(session_id) = config
-                .resume_session
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                args.push("--session".into());
-                args.push(session_id.into());
-            }
-        } else if let Some(session_id) = config
-            .fresh_provider_session_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            args.push("--session-id".into());
-            args.push(session_id.into());
-            if !config.session_name.trim().is_empty() {
-                args.push("--name".into());
-                args.push(config.session_name.clone());
-            }
-        }
-
-        if let Some(model) = config
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            args.push("--model".into());
-            args.push(model.into());
-        }
-        if let Some(thinking) = pi
-            .reasoning_effort
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| {
-                matches!(
-                    *value,
-                    "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
-                )
-            })
-        {
-            args.push("--thinking".into());
-            args.push(thinking.into());
-        }
-        match pi.project_trust.as_deref().map(str::trim) {
-            Some("approve") => args.push("--approve".into()),
-            Some("ignore") => args.push("--no-approve".into()),
-            _ => {}
-        }
-        if pi.no_tools.unwrap_or(false) {
-            args.push("--no-tools".into());
-        }
-        if let Some(tools) = pi.tools.filter(|values| !values.is_empty()) {
-            args.push("--tools".into());
-            args.push(tools.join(","));
-        }
-        if let Some(tools) = pi.exclude_tools.filter(|values| !values.is_empty()) {
-            args.push("--exclude-tools".into());
-            args.push(tools.join(","));
-        }
-        if pi.offline.unwrap_or(false) {
-            args.push("--offline".into());
-        }
-
-        Self::append_context_args(&mut args, config);
-        if let Some(custom) = config.custom_args.as_deref().and_then(shlex::split) {
-            args.extend(custom);
-        }
-        args
+        self.spawn_args(config, is_resume, true)
     }
 
     fn parse_output(&self, line: &str) -> Option<AgentEvent> {

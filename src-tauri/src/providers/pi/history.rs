@@ -18,6 +18,30 @@ pub(crate) struct SessionFileBinding {
 }
 
 impl SessionFileBinding {
+    /// Read-only SDK opening receipt. Old histories must never enter an API
+    /// which may migrate and rewrite them during open.
+    pub(crate) fn sdk_open_receipt(&self, native_id: &str) -> Result<serde_json::Value, String> {
+        self.revalidate()?;
+        let mut reader = BufReader::new(plain_file(&self.path)?);
+        let mut line = String::new();
+        bounded_line(&mut reader, &mut line)?;
+        let header: serde_json::Value =
+            serde_json::from_str(line.trim_end()).map_err(history_error)?;
+        if header["type"] != "session" || header["id"].as_str() != Some(native_id) {
+            return Err("Pi exact SDK resume history identity changed".into());
+        }
+        if header["version"].as_u64() != Some(3) {
+            return Err(
+                "Pi exact SDK resume requires current v3 history; migration is not permitted"
+                    .into(),
+            );
+        }
+        Ok(serde_json::json!({
+            "prefixBytes": self.prefix_len,
+            "prefixSha256": self.prefix_hash.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+        }))
+    }
+
     /// Append-only progress is allowed; replacement or changed confirmation
     /// bytes must fail before the provider receives an exact-file selector.
     pub(crate) fn revalidate(&self) -> Result<(), String> {
