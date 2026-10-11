@@ -46,6 +46,7 @@ describe("native E2E tiers", () => {
       "terminal-presentation-broker-native.test.mjs",
       "workbench-persistence-native.test.mjs",
       "workbench-runtime-lifecycle-native.test.mjs",
+      "worktree-session-continuity-native.test.mjs",
     ]);
   });
 

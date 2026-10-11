@@ -333,6 +333,7 @@ pub struct CodexSharedOwner {
     interactive: bool,
     initial_context: String,
     policy: policy::ExpectedPolicy,
+    workspace: PathBuf,
     socket: attachment::OwnedSocket,
     launch_config: Mutex<Option<super::launch_config::LaunchConfigGuard>>,
     settings_operation: Mutex<()>,
@@ -559,6 +560,7 @@ impl CodexSharedOwner {
                     let result = initial_checkpoint::prepare_saved_resume(
                         &client, &policy,
                         spec.config.resume_session.as_deref().expect("saved resume"),
+                        &spec.workspace,
                         &mut || attachment::child_alive(&mut child),
                         initialization_deadline,
                         &observed_version,
@@ -616,6 +618,7 @@ impl CodexSharedOwner {
                     &spec.config.session_name,
                 ),
                 policy,
+                workspace: spec.workspace.clone(),
                 socket: owned_socket.expect("initialized owner captured its socket"),
                 launch_config: Mutex::new(launch_config),
                 settings_operation: Mutex::new(()),
@@ -700,6 +703,7 @@ impl CodexSharedOwner {
                 ));
             }
             self.policy.validate(&response)?;
+            self.policy.validate_workspace(&response, &self.workspace)?;
             attachment::require_observed_thread(&self.client, &id).await?;
             if response["thread"]["canAcceptDirectInput"] != true {
                 return Err(CodexSharedError::unsupported(
