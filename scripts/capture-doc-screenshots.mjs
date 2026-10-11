@@ -232,7 +232,7 @@ async function main() {
     await page.locator('[data-testid="sidebar-tab-agent-config"]').click();
     await page.waitForTimeout(500);
     await page.locator('[data-testid="spawn-agent-name"]').fill("docs-demo");
-    await page.locator('[data-testid="spawn-workspace-path"]').fill("<absolute-workspace-path>");
+    await page.locator('[data-testid="spawn-workspace-path"]').fill("");
     await page.locator('[data-testid="spawn-agent-name"]').waitFor({ timeout: 10_000 });
     await page.locator('[data-testid="spawn-workspace-path"]').blur();
     await capture(page, "spawn-agent/spawn-form.png");

@@ -18,9 +18,9 @@ import { openSurface, surfacePanel } from "../fixtures/workbench";
 
 async function installCustomCloneIpcMock(
   page: Page,
-  options: { includeInitialAgent?: boolean; includeRecentSortFixture?: boolean } = {},
+  options: { includeInitialAgent?: boolean; includeRecentSortFixture?: boolean; includeMockedSpawn?: boolean } = {},
 ) {
-  await page.addInitScript(({ includeInitialAgent, includeRecentSortFixture }) => {
+  await page.addInitScript(({ includeInitialAgent, includeRecentSortFixture, includeMockedSpawn }) => {
     type Agent = {
       session_id: string;
       session_name: string;
@@ -59,8 +59,10 @@ async function installCustomCloneIpcMock(
     const tauriWindow = window as Window & {
       __TAURI_INTERNALS__?: Record<string, unknown>;
       __TAURI_EVENT_PLUGIN_INTERNALS__?: Record<string, unknown>;
+      workspaceRequests: { command: string; args?: Record<string, unknown> }[];
     };
 
+    tauriWindow.workspaceRequests = [];
     tauriWindow.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
       unregisterListener: () => undefined,
     };
@@ -80,6 +82,19 @@ async function installCustomCloneIpcMock(
       },
       convertFileSrc: (filePath: string) => filePath,
       invoke: async (command: string, args?: Record<string, unknown>) => {
+        if (includeMockedSpawn && (command === "validate_directory_path" || command === "spawn_agent")) {
+          tauriWindow.workspaceRequests.push({ command, args });
+          if (command === "validate_directory_path") return true;
+          const req = args?.req as { folder: string; sessionName: string; agentClass: string };
+          return {
+            session_id: "portable-workspace-fixture",
+            session_name: req.sessionName,
+            agent_class: req.agentClass,
+            folder: req.folder,
+            provider: "claude",
+            is_off: false,
+          };
+        }
         if (command === "get_workbench_boot_config") return { safe_mode: false };
         if (command === "load_workbench_state") {
           return {
@@ -270,6 +285,36 @@ async function installCustomCloneIpcMock(
     };
   }, options);
 }
+
+test("portable workspace guidance preserves normal entry and mocked submission", async ({ page }) => {
+  await installCustomCloneIpcMock(page, { includeInitialAgent: false, includeMockedSpawn: true });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("app-shell").waitFor();
+  await page.getByTestId("sidebar-tab-agent-config").click();
+  const workspace = page.getByTestId("spawn-workspace-path");
+  await expect(workspace).toHaveValue("C:/projects/e2e");
+  await workspace.fill("");
+  await expect(workspace).toHaveAttribute("placeholder", "Enter workspace path");
+  await expect(page.getByTestId("spawn-submit")).toBeDisabled();
+  await page.screenshot({
+    path: path.join("e2e", "screenshots", "spawn-agent", new Date().toISOString().replace(/[:.]/g, "-"), "empty-workspace.png"),
+    animations: "disabled",
+  });
+
+  const enteredPath = "/projects/my app";
+  await page.getByTestId("spawn-agent-name").fill("portable-workspace");
+  await workspace.fill(enteredPath);
+  await expect(page.getByTestId("spawn-submit")).toBeEnabled();
+  await page.getByTestId("spawn-submit").click();
+  await expect(workspace).toHaveValue("");
+  const requests = await page.evaluate(() => (window as Window & {
+    workspaceRequests: { command: string; args?: Record<string, unknown> }[];
+  }).workspaceRequests);
+  expect(requests).toContainEqual({ command: "validate_directory_path", args: { path: enteredPath } });
+  expect(requests).toContainEqual({ command: "spawn_agent", args: {
+    req: expect.objectContaining({ folder: enteredPath, sessionName: "portable-workspace" }),
+  } });
+});
 
 test.describe("Agent Spawn Form", () => {
   test.describe.configure({ mode: "serial" });

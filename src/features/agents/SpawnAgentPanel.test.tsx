@@ -82,6 +82,48 @@ describe("SpawnAgentPanel", () => {
     mockSpawnInvokes();
   });
 
+  it("shows portable guidance without treating the placeholder as a workspace", async () => {
+    useSettingsStore.setState({ default_workspace: "" });
+    render(
+      <SpawnAgentPanel
+        agentClasses={[{ name: "Generalist", description: "", is_default: true }]}
+        onSpawned={() => {}}
+      />,
+    );
+
+    const workspace = screen.getByTestId("spawn-workspace-path");
+    expect(workspace).toHaveAttribute("placeholder", "Enter workspace path");
+    expect(workspace).toHaveValue("");
+    expect(screen.getByTestId("spawn-submit")).toBeDisabled();
+    expect(invokeMock).not.toHaveBeenCalledWith("validate_directory_path", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith("spawn_agent", expect.anything());
+  });
+
+  it.each(["/projects/my-app", "C:\\projects\\my-app"])(
+    "validates and submits the entered workspace unchanged: %s",
+    async (folder) => {
+      useSettingsStore.setState({ default_workspace: "" });
+      const user = userEvent.setup();
+      const onSpawned = vi.fn();
+      render(
+        <SpawnAgentPanel
+          agentClasses={[{ name: "Generalist", description: "", is_default: true }]}
+          onSpawned={onSpawned}
+        />,
+      );
+
+      await user.type(screen.getByTestId("spawn-workspace-path"), folder);
+      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("validate_directory_path", { path: folder }));
+      await user.click(screen.getByTestId("spawn-submit"));
+      expect(invokeMock).toHaveBeenCalledWith("spawn_agent", {
+        req: expect.objectContaining({ folder }),
+      });
+      expect(onSpawned).toHaveBeenCalledWith(spawnResponse);
+      expect(screen.getByTestId("spawn-workspace-path")).toHaveValue("");
+      expect(screen.getByTestId("spawn-workspace-path")).toHaveAttribute("placeholder", "Enter workspace path");
+    },
+  );
+
   it("lists OpenCode as a provider option", async () => {
     render(
       <SpawnAgentPanel
