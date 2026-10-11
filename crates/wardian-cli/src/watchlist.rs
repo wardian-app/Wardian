@@ -275,13 +275,81 @@ pub fn handle_watchlist(args: WatchlistArgs) -> Result<String, CliError> {
     }
 }
 
+/// Validate an explicit existing team before provider creation. The index lock
+/// fences concurrent team deletion/rename until the membership is published.
+/// An unteamed spawn neither reads nor mutates team state.
+pub(crate) fn spawn_with_team(
+    target: Option<&str>,
+    spawn: impl FnOnce() -> Result<AgentIdentity, CliError>,
+) -> Result<(AgentIdentity, Option<TeamSummary>), CliError> {
+    let Some(target) = target else {
+        return spawn().map(|agent| (agent, None));
+    };
+    let result = spawn_with_team_at(&wardian_home()?, target, spawn)?;
+    // Notification must occur after releasing the index lock.
+    let _ = live::notify_watchlists_changed();
+    Ok((result.0, Some(result.1)))
+}
+
+fn spawn_with_team_at(
+    home: &Path,
+    target: &str,
+    spawn: impl FnOnce() -> Result<AgentIdentity, CliError>,
+) -> Result<(AgentIdentity, TeamSummary), CliError> {
+    let _process_lock = watchlist_process_lock(home)?;
+    let mut state = crate::disk::load_watchlist_state_at(home)
+        .map_err(|error| CliError::generic(error.to_string()))?;
+    let index = resolve_team_index(&state, target)?;
+    let team_id = state.teams[index].id.clone();
+    let agent = spawn()?;
+
+    let team = state
+        .teams
+        .iter_mut()
+        .find(|team| team.id == team_id)
+        .expect("validated team retained while moving membership");
+    if !team.agent_ids.contains(&agent.uuid) {
+        team.agent_ids.push(agent.uuid.clone());
+    }
+    let team = team.clone();
+    remove_agents_from_other_teams(
+        &mut state,
+        std::slice::from_ref(&agent.uuid),
+        Some(&team_id),
+    );
+    prune_dangling_watchlist_entries(&mut state);
+    if let Err(cause) = persist_state_at(home, &state) {
+        let mut error = CliError::backend(
+            ExitCode::Generic,
+            "spawn_team_membership_failed",
+            format!(
+                "Agent {} was created, but team membership was not confirmed: {}",
+                agent.uuid, cause.message
+            ),
+        );
+        error.hint = Some("Inspect the created agent and team; do not repeat spawn. Use wardian team add to repair membership.".to_string());
+        error.details = Some(Box::new(
+            serde_json::json!({ "agent": agent, "team_id": team_id, "cause": cause.code }),
+        ));
+        return Err(error);
+    }
+    Ok((agent, team))
+}
+
 fn load_state() -> Result<WatchlistState, CliError> {
     crate::disk::load_watchlist_state().map_err(|error| CliError::generic(error.to_string()))
 }
 
 fn persist_state(state: &WatchlistState) -> Result<(), CliError> {
     let home = wardian_home()?;
-    let previous_state = load_state()?;
+    persist_state_at(&home, state)?;
+    let _ = live::notify_watchlists_changed();
+    Ok(())
+}
+
+fn persist_state_at(home: &Path, state: &WatchlistState) -> Result<(), CliError> {
+    let previous_state = crate::disk::load_watchlist_state_at(home)
+        .map_err(|error| CliError::generic(error.to_string()))?;
     let previous_teams = previous_state
         .teams
         .iter()
@@ -290,9 +358,9 @@ fn persist_state(state: &WatchlistState) -> Result<(), CliError> {
             agent_ids: team.agent_ids.clone(),
         })
         .collect::<Vec<_>>();
-    save_state(&home, state)?;
-    if let Err(topology_error) = seed_topology(&home, &previous_teams, state) {
-        if let Err(restore_error) = save_state(&home, &previous_state) {
+    save_state(home, state)?;
+    if let Err(topology_error) = seed_topology(home, &previous_teams, state) {
+        if let Err(restore_error) = save_state(home, &previous_state) {
             return Err(CliError::generic(format!(
                 "topology seeding failed: {}; restoring watchlist failed: {}",
                 topology_error.message, restore_error.message
@@ -300,7 +368,6 @@ fn persist_state(state: &WatchlistState) -> Result<(), CliError> {
         }
         return Err(topology_error);
     }
-    let _ = live::notify_watchlists_changed();
     Ok(())
 }
 
@@ -699,5 +766,220 @@ fn slugify(name: &str) -> String {
         "item".to_string()
     } else {
         slug
+    }
+}
+
+#[cfg(test)]
+mod spawn_team_tests {
+    use super::*;
+    use wardian_core::identity::StatusSource;
+
+    fn agent() -> AgentIdentity {
+        AgentIdentity {
+            name: "new-coder".into(),
+            uuid: "new-agent".into(),
+            description: String::new(),
+            class: "Coder".into(),
+            provider: "mock".into(),
+            status: "idle".into(),
+            pid: None,
+            started_at: None,
+            workspace: None,
+            last_status_at: None,
+            status_source: StatusSource::Live,
+            visibility: None,
+        }
+    }
+
+    fn seed(home: &Path) {
+        let state = WatchlistState {
+            version: 2,
+            teams: vec![
+                TeamSummary {
+                    id: "dev".into(),
+                    name: "Dev Team".into(),
+                    agent_ids: vec!["existing".into()],
+                },
+                TeamSummary {
+                    id: "other".into(),
+                    name: "Other".into(),
+                    agent_ids: vec!["new-agent".into(), "other-agent".into()],
+                },
+            ],
+            watchlists: vec![WatchlistSummary {
+                id: "dev-watch".into(),
+                name: "Dev".into(),
+                agent_ids: vec![],
+                entries: vec![WatchlistEntry::Team {
+                    team_id: "dev".into(),
+                }],
+            }],
+        };
+        save_state(home, &state).unwrap();
+    }
+
+    #[test]
+    fn explicit_team_spawn_resolves_name_and_id_and_publishes_membership_and_edges() {
+        for target in ["Dev Team", "dev"] {
+            let home = tempfile::tempdir().unwrap();
+            seed(home.path());
+            let (created, receipt) =
+                spawn_with_team_at(home.path(), target, || Ok(agent())).unwrap();
+            assert_eq!(created.uuid, "new-agent");
+            assert_eq!(receipt.id, "dev");
+            assert_eq!(receipt.agent_ids, ["existing", "new-agent"]);
+            let state = crate::disk::load_watchlist_state_at(home.path()).unwrap();
+            assert_eq!(state.teams[0], receipt);
+            assert_eq!(state.teams[1].agent_ids, ["other-agent"]);
+            assert_eq!(
+                state.watchlists[0].entries,
+                [WatchlistEntry::Team {
+                    team_id: "dev".into()
+                }]
+            );
+            let topology = wardian_core::topology::load_topology(home.path());
+            assert!(topology
+                .edges
+                .iter()
+                .any(|edge| (edge.a == "existing" && edge.b == "new-agent")
+                    || (edge.a == "new-agent" && edge.b == "existing")));
+        }
+    }
+
+    #[test]
+    fn invalid_or_ambiguous_team_never_calls_spawn_or_changes_membership() {
+        let home = tempfile::tempdir().unwrap();
+        seed(home.path());
+        let before = crate::disk::load_watchlist_state_at(home.path()).unwrap();
+        let error = spawn_with_team_at(home.path(), "missing", || {
+            panic!("must not create provider")
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "not_found");
+        assert_eq!(
+            crate::disk::load_watchlist_state_at(home.path()).unwrap(),
+            before
+        );
+        let mut ambiguous = before.clone();
+        ambiguous.teams[1].name = "Dev Team".into();
+        save_state(home.path(), &ambiguous).unwrap();
+        let error = spawn_with_team_at(home.path(), "Dev Team", || {
+            panic!("must not create provider")
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "ambiguous_target");
+        assert_eq!(
+            crate::disk::load_watchlist_state_at(home.path()).unwrap(),
+            ambiguous
+        );
+    }
+
+    #[test]
+    fn failed_spawn_leaves_team_state_unchanged() {
+        let home = tempfile::tempdir().unwrap();
+        seed(home.path());
+        let before = crate::disk::load_watchlist_state_at(home.path()).unwrap();
+        let error = spawn_with_team_at(home.path(), "dev", || {
+            Err(CliError::generic("provider unavailable"))
+        })
+        .unwrap_err();
+        assert_eq!(error.message, "provider unavailable");
+        assert_eq!(
+            crate::disk::load_watchlist_state_at(home.path()).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn topology_failure_reports_created_identity_and_restores_membership() {
+        let home = tempfile::tempdir().unwrap();
+        seed(home.path());
+        let before = crate::disk::load_watchlist_state_at(home.path()).unwrap();
+        std::fs::create_dir(home.path().join("topology.lock")).unwrap();
+        let error = spawn_with_team_at(home.path(), "dev", || Ok(agent())).unwrap_err();
+        assert_eq!(error.code, "spawn_team_membership_failed");
+        assert_eq!(
+            error.details.as_ref().unwrap()["agent"]["uuid"],
+            "new-agent"
+        );
+        assert_eq!(error.details.as_ref().unwrap()["team_id"], "dev");
+        assert!(error.hint.unwrap().contains("do not repeat spawn"));
+        assert_eq!(
+            crate::disk::load_watchlist_state_at(home.path()).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn team_index_is_locked_during_provider_creation() {
+        let home = tempfile::tempdir().unwrap();
+        seed(home.path());
+        spawn_with_team_at(home.path(), "dev", || {
+            let competing = File::options()
+                .read(true)
+                .write(true)
+                .open(home.path().join("watchlists/index.lock"))
+                .unwrap();
+            assert!(competing.try_lock_exclusive().is_err());
+            assert_eq!(
+                crate::disk::load_watchlist_state_at(home.path())
+                    .unwrap()
+                    .teams[0]
+                    .agent_ids,
+                ["existing"]
+            );
+            Ok(agent())
+        })
+        .unwrap();
+        let released = File::options()
+            .read(true)
+            .write(true)
+            .open(home.path().join("watchlists/index.lock"))
+            .unwrap();
+        released.try_lock_exclusive().unwrap();
+    }
+
+    #[test]
+    fn team_spawn_preserves_suppressed_communication_edge() {
+        let home = tempfile::tempdir().unwrap();
+        seed(home.path());
+        let mut topology = wardian_core::topology::Topology::default();
+        topology
+            .suppressed_seed_pairs
+            .push(wardian_core::topology::IgnoredPair {
+                a: "existing".into(),
+                b: "new-agent".into(),
+            });
+        wardian_core::topology::save_topology(home.path(), &topology).unwrap();
+        spawn_with_team_at(home.path(), "dev", || Ok(agent())).unwrap();
+        let after = wardian_core::topology::load_topology(home.path());
+        assert_eq!(after.suppressed_seed_pairs, topology.suppressed_seed_pairs);
+        assert!(!after
+            .edges
+            .iter()
+            .any(|edge| edge.a == "existing" && edge.b == "new-agent"));
+    }
+
+    #[test]
+    fn selected_empty_team_is_populated_before_pruning() {
+        let habitat = tempfile::tempdir().unwrap();
+        seed(habitat.path());
+        let mut state = crate::disk::load_watchlist_state_at(habitat.path()).unwrap();
+        state.teams[0].agent_ids.clear();
+        save_state(habitat.path(), &state).unwrap();
+        let (_, membership) = spawn_with_team_at(habitat.path(), "dev", || Ok(agent())).unwrap();
+        assert_eq!(membership.agent_ids, ["new-agent"]);
+        assert_eq!(
+            crate::disk::load_watchlist_state_at(habitat.path())
+                .unwrap()
+                .teams[0],
+            membership
+        );
+    }
+    #[test]
+    fn omitted_team_keeps_spawn_unteamed() {
+        let (created, membership) = spawn_with_team(None, || Ok(agent())).unwrap();
+        assert_eq!(created.uuid, "new-agent");
+        assert!(membership.is_none());
     }
 }
