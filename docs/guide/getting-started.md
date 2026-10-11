@@ -175,7 +175,7 @@ Use a read-only prompt for the first run. After you trust the provider, you can 
 
 When a configured agent completes a provider turn with a final response, Wardian adds that response as a completion item to **Inbox**. Press `Ctrl+P` / `Cmd+P`, or select the **+** button in a Workbench pane, and choose **Inbox**. To keep the agent beside Inbox, leave Inbox active and choose **Open to Side** for that agent in the right roster.
 
-For Claude, Wardian records the final response when Claude's interactive session fires its successful turn-stop event. Each item represents one completed provider turn; it does not claim the larger task is finished.
+Each item represents one completed provider turn; it does not claim the larger task is finished. Interactive Claude sessions are the exception: Claude Code does not report whether a turn really ended successfully, so Wardian adds no completion item for them.
 
 ![Wardian Inbox showing a completed first agent task with a summary](../assets/screenshots/queue/completed-result.png)
 
@@ -211,7 +211,7 @@ Start with the visible failure point:
 - Provider command not found: verify the provider command works in a normal terminal and that Wardian is using the same shell.
 - Provider asks for authentication: complete the provider sign-in flow, then restart the agent.
 - Agent stays Off or Error: check the agent terminal output and provider runtime notes.
-- Inbox stays empty: confirm the provider completed the turn successfully. An interim assistant message or a turn that ended with a provider error does not create a completion item.
+- Inbox stays empty: confirm the provider completed the turn successfully. An interim assistant message or a turn that ended with a provider error does not create a completion item. Interactive Claude sessions create no automatic completion item.
 
 Related docs:
 

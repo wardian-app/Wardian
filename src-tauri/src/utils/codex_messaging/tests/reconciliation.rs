@@ -1,23 +1,36 @@
 use super::*;
 use crate::utils::fs::{prepare_provider_habitat, sync_codex_agent_home};
 
-struct PreparationContext(Option<std::ffi::OsString>);
+struct PreparationContext {
+    old_home: Option<std::ffi::OsString>,
+    old_codex_home: Option<std::ffi::OsString>,
+}
 
 impl PreparationContext {
     fn set(home: &Path, native: &Path) -> Self {
-        let old = std::env::var_os("WARDIAN_HOME");
+        let old_home = std::env::var_os("WARDIAN_HOME");
+        let old_codex_home = std::env::var_os("CODEX_HOME");
         std::env::set_var("WARDIAN_HOME", home);
+        // Exercise the default source through this fixture's native-home seam.
+        std::env::remove_var("CODEX_HOME");
         TEST_NATIVE_HOME.with(|value| *value.borrow_mut() = Some(native.to_owned()));
-        Self(old)
+        Self {
+            old_home,
+            old_codex_home,
+        }
     }
 }
 
 impl Drop for PreparationContext {
     fn drop(&mut self) {
         TEST_NATIVE_HOME.with(|value| *value.borrow_mut() = None);
-        match self.0.take() {
+        match self.old_home.take() {
             Some(value) => std::env::set_var("WARDIAN_HOME", value),
             None => std::env::remove_var("WARDIAN_HOME"),
+        }
+        match self.old_codex_home.take() {
+            Some(value) => std::env::set_var("CODEX_HOME", value),
+            None => std::env::remove_var("CODEX_HOME"),
         }
     }
 }

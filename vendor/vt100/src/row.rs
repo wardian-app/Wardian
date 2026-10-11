@@ -62,15 +62,26 @@ impl Row {
     }
 
     pub fn truncate(&mut self, len: u16) {
-        self.cells.truncate(usize::from(len));
-        self.wrapped = false;
-        let last_cell = &mut self.cells[usize::from(len) - 1];
-        if last_cell.is_wide() {
-            last_cell.clear(*last_cell.attrs());
+        let new_len = usize::from(len);
+        if new_len < self.cells.len() {
+            self.cells.truncate(new_len);
+            if let Some(last_cell) = self.cells.last_mut() {
+                if last_cell.is_wide() {
+                    last_cell.clear(*last_cell.attrs());
+                }
+            }
         }
+        self.wrapped = false;
     }
 
     pub fn resize(&mut self, len: u16, cell: crate::Cell) {
+        if usize::from(len) == self.cells.len() {
+            return;
+        }
+        if usize::from(len) < self.cells.len() {
+            self.truncate(len);
+            return;
+        }
         self.cells.resize(usize::from(len), cell);
         self.wrapped = false;
     }
@@ -495,6 +506,35 @@ impl Row {
 
         finish_hyperlink(contents, &mut active_hyperlink);
         (prev_pos, prev_attrs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resizing_to_the_same_width_preserves_wrapping() {
+        let mut row = Row::new(40);
+        row.wrap(true);
+
+        row.resize(40, crate::Cell::new());
+
+        assert!(row.wrapped());
+    }
+
+    #[test]
+    fn shrinking_clears_a_wide_glyph_cut_at_the_right_edge() {
+        let mut row = Row::new(40);
+        let attrs = crate::attrs::Attrs::default();
+        row.cells[19].set('界', attrs);
+        row.cells[20].set(' ', attrs);
+        row.cells[20].set_wide_continuation(true);
+
+        row.resize(20, crate::Cell::new());
+
+        assert!(!row.cells[19].is_wide());
+        assert!(row.cells[19].contents().is_empty());
     }
 }
 

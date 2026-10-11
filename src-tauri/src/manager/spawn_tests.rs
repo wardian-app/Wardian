@@ -32,13 +32,26 @@ fn shared_codex_tui_args_preserve_identity_without_overriding_screen_mode() {
     let workspace = Path::new("workspace");
     let model = "gpt-5.6-luna";
     let thread_id = "019db2f3-22de-7861-8bc6-1b86db1686db";
+    let permissions: Vec<String> = [
+        "--sandbox",
+        "workspace-write",
+        "--ask-for-approval",
+        "on-request",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
 
-    let fresh = codex_shared_tui_args(prefix.clone(), Some(model), None, workspace);
+    let fresh = codex_shared_tui_args(prefix.clone(), &permissions, Some(model), None, workspace);
     assert_eq!(
         fresh,
         vec![
             "codex-wrapper",
             "--wrapper-option",
+            "--sandbox",
+            "workspace-write",
+            "--ask-for-approval",
+            "on-request",
             "--model",
             model,
             "--cd",
@@ -46,12 +59,22 @@ fn shared_codex_tui_args_preserve_identity_without_overriding_screen_mode() {
         ]
     );
 
-    let resumed = codex_shared_tui_args(prefix, Some(model), Some(thread_id), workspace);
+    let resumed = codex_shared_tui_args(
+        prefix,
+        &permissions,
+        Some(model),
+        Some(thread_id),
+        workspace,
+    );
     assert_eq!(
         resumed,
         vec![
             "codex-wrapper",
             "--wrapper-option",
+            "--sandbox",
+            "workspace-write",
+            "--ask-for-approval",
+            "on-request",
             "--model",
             model,
             "resume",
@@ -64,6 +87,50 @@ fn shared_codex_tui_args_preserve_identity_without_overriding_screen_mode() {
     assert!(!resumed.iter().any(|argument| argument == "-c"));
     assert!(!fresh.iter().any(|argument| argument == "--no-alt-screen"));
     assert!(!resumed.iter().any(|argument| argument == "--no-alt-screen"));
+}
+
+#[test]
+fn shared_codex_tui_keeps_unset_model_with_readonly_and_bypass_choices() {
+    for (permissions, resume_id, expected) in [
+        (
+            vec!["--sandbox", "read-only", "--ask-for-approval", "never"],
+            None,
+            vec![
+                "wrapper",
+                "--sandbox",
+                "read-only",
+                "--ask-for-approval",
+                "never",
+                "--cd",
+                "workspace",
+            ],
+        ),
+        (
+            vec!["--dangerously-bypass-approvals-and-sandbox"],
+            Some("saved-native-id"),
+            vec![
+                "wrapper",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "resume",
+                "saved-native-id",
+                "--cd",
+                "workspace",
+            ],
+        ),
+    ] {
+        let permissions: Vec<String> = permissions.into_iter().map(str::to_owned).collect();
+        let args = codex_shared_tui_args(
+            vec!["wrapper".into()],
+            &permissions,
+            None,
+            resume_id,
+            Path::new("workspace"),
+        );
+        assert_eq!(args, expected);
+        for forbidden in ["--remote", "-c", "--approve-for-me", "--model"] {
+            assert!(!args.iter().any(|arg| arg == forbidden));
+        }
+    }
 }
 
 #[test]

@@ -1387,6 +1387,8 @@ pub enum AgentCommand {
     },
     /// Restart the provider while preserving the Wardian agent and its history.
     Restart { target: String },
+    /// Archive the current conversation and start a fresh session, including for Off agents.
+    NewSession { target: String },
     /// Pause an agent's provider process.
     Pause { target: String },
     /// Resume a paused agent.
@@ -2552,6 +2554,26 @@ mod tests {
             panic!()
         };
         assert!(matches!(args.command, Some(AgentCommand::Pause { .. })));
+    }
+
+    #[test]
+    fn parses_agent_new_session_and_discovers_required_target() {
+        let cli = Cli::try_parse_from(["wardian", "agent", "new-session", "coder-a1"]).unwrap();
+        let Command::Agent(args) = cli.command else {
+            panic!("expected Agent command")
+        };
+        assert!(
+            matches!(args.command, Some(AgentCommand::NewSession { target }) if target == "coder-a1")
+        );
+        assert!(Cli::try_parse_from(["wardian", "agent", "new-session"]).is_err());
+        let schema = crate::schema::render(&["agent".into(), "new-session".into()]).unwrap();
+        let schema: serde_json::Value = serde_json::from_str(&schema).unwrap();
+        assert_eq!(schema["command"], "wardian agent new-session");
+        assert!(schema["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|argument| { argument["name"] == "target" && argument["required"] == true }));
     }
 
     #[test]

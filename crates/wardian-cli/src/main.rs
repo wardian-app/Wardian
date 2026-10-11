@@ -1,3 +1,4 @@
+mod agent_control;
 mod args;
 mod artifact;
 mod automation_invoker;
@@ -302,9 +303,10 @@ fn handle_agent(args: AgentArgs) -> Result<String, CliError> {
             force,
         }) => handle_agent_delete(target, confirm, *force),
         Some(AgentCommand::Rename { target, new_name }) => handle_agent_rename(target, new_name),
-        Some(AgentCommand::Restart { target }) => handle_agent_restart(target),
-        Some(AgentCommand::Pause { target }) => handle_agent_pause(target),
-        Some(AgentCommand::Resume { target }) => handle_agent_resume(target),
+        Some(AgentCommand::Restart { target }) => agent_control::restart(target),
+        Some(AgentCommand::NewSession { target }) => agent_control::new_session(target),
+        Some(AgentCommand::Pause { target }) => agent_control::pause(target),
+        Some(AgentCommand::Resume { target }) => agent_control::resume(target),
         Some(AgentCommand::Spawn {
             provider,
             class,
@@ -396,31 +398,6 @@ fn handle_agent_rename(target: &str, new_name: &str) -> Result<String, CliError>
     serde_json::to_string(&response)
         .map(|json| format!("{json}\n"))
         .map_err(|error| CliError::generic(error.to_string()))
-}
-
-fn handle_agent_restart(target: &str) -> Result<String, CliError> {
-    live::agent_restart(target).map_err(control_error)?;
-    Ok(format!(
-        "{}\n",
-        serde_json::to_string(&serde_json::json!({"schema":1,"ok":true,"target":target,"preserved":["agent","habitat","session_history"]}))
-            .unwrap()
-    ))
-}
-
-fn handle_agent_pause(target: &str) -> Result<String, CliError> {
-    live::agent_pause(target).map_err(control_error)?;
-    Ok(format!(
-        "{}\n",
-        serde_json::to_string(&serde_json::json!({"schema":1,"ok":true,"target":target})).unwrap()
-    ))
-}
-
-fn handle_agent_resume(target: &str) -> Result<String, CliError> {
-    live::agent_resume(target).map_err(control_error)?;
-    Ok(format!(
-        "{}\n",
-        serde_json::to_string(&serde_json::json!({"schema":1,"ok":true,"target":target})).unwrap()
-    ))
 }
 
 fn handle_agent_spawn(

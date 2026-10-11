@@ -193,11 +193,14 @@ its sequence barrier but retain the last accurate fitted frame. They stop
 writing later output to that old-width xterm. Once ordered post-geometry output
 arrives, the desktop feed requests one fresh snapshot for all presentations,
 sizes each xterm to its source grid, and resumes replay. While the provider has
-not repainted, the old frame remains visible with a pending status. Input is
-gated through the transition; the acknowledged owner may explicitly enable
-keyboard input to prompt recovery, with a warning that keys may affect an unseen
-prompt. Mouse coordinates and binary input remain gated. A lease transfer
-revokes that manual keyboard allowance.
+not repainted, the old frame remains visible; the routine geometry transition
+has no prompt or overlay. A live owner on the current runtime generation can
+continue typing, including escape-sequence keys and bracketed paste. Mouse
+reports, cursor-position reports, and binary input remain gated until a
+current-generation frame matches the broker geometry and the renderer fits that
+grid exactly. Lease loss or runtime replacement still rejects owner input. A
+degraded formatting snapshot keeps its factual status indicator, while ordinary
+keyboard input remains available.
 
 Pending is bounded. A provider that has nothing new to draw after a resize (an
 Ink prompt after a vertical-only change) never repaints, so after one second
@@ -214,12 +217,10 @@ replacement such as New Session) and a resize the broker clamps back to its
 current size produce no snapshot and no repaint, so the owner keeps its ready
 status instead of waiting for output an idle provider will never send.
 
-The first owner resize is an exception for ordinary typed text: once the
-reported viewport equals the broker's committed geometry, the owner can type
-while the first repaint is pending. Escape-sequence and binary input stay
-gated. After a post-geometry snapshot resolves that first transition as ready
-or degraded, later silent resizes retain the explicit keyboard recovery
-requirement.
+Keyboard continuity applies to every owner resize, including repeated silent
+resizes and snapshot recovery. Coordinate-dependent input remains unavailable
+until the rendered source frame and committed geometry agree; the PTY lease and
+runtime generation remain mandatory for all input.
 
 ### Alternate-screen application ownership
 
@@ -356,8 +357,9 @@ fixed delay as evidence that a provider is ready for a structured message.
   lease rejection, fallback, resync, replay gaps, bounded snapshots, generation
   changes, geometry ordering, and shutdown.
 - Frontend unit/integration tests prove desktop fan-out, cursor recovery,
-  renderer budgets, mirror fitting, presentation state updates, and explicit
-  activation UI.
+  renderer budgets, mirror fitting, presentation state updates, explicit
+  activation UI, and owner keyboard continuity while stale-frame coordinate
+  input remains gated.
 - Browser E2E can prove presentation controls and mirror labels using mocked
   data, but cannot prove PTY resize, IPC, or native stream ordering.
 - Native E2E proves desktop owner/mirror races, stable geometry, gap-free

@@ -4,15 +4,21 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { waitForMockStartup } from "../lib/mock-startup.mjs";
 
 import {
   createNativeHarness,
   ensureNativeAppBuilt,
   freezeBuiltCliForRun,
+  prebuiltCliForRun,
   prepareIsolatedHome,
   startNativeSession,
   waitForAppShell,
   watchStep,
+  startTauriEventCapture,
+  readTauriEventCapture,
+  stopTauriEventCapture,
 } from "../lib/harness.mjs";
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
@@ -27,6 +33,8 @@ const WRITE_RECEIPT_SESSION_NAME = `E2E-NATIVE-WRITE-RECEIPT-${RUN_ID}`;
 const WATCH_READABLE_SESSION_NAME = `E2E-CLI-WATCH-READABLE-${RUN_ID}`;
 
 function buildCli(harness) {
+  const prebuilt = prebuiltCliForRun(harness, skipNativeBuild);
+  if (prebuilt) return prebuilt;
   const result = spawnSync(
     "cargo",
     ["build", "-p", "wardian-cli", "--bin", "wardian-cli"],
@@ -131,6 +139,45 @@ function runCliOk(cliPath, harness, args) {
     `wardian ${args.join(" ")} failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
   );
   return result;
+}
+
+/** Observe this runtime's Init and exclusion release before seeding test status. */
+async function runCliWithMockStartup(cliPath, harness, driver, args, sessionId = null) {
+  const capture = await startTauriEventCapture(driver, "agent-json-event");
+  try {
+    const startedAt = new Date().toISOString();
+    const result = runCliOk(cliPath, harness, args);
+    const agentId = sessionId ?? JSON.parse(result.stdout).agent.uuid;
+    const config = JSON.parse(readFileSync(
+      path.join(harness.isolatedHome, "settings", "state.json"), "utf8",
+    )).find((agent) => agent.session_id === agentId);
+    const providerSessionId = config?.fresh_provider_session_id ?? config?.resume_session;
+    const proof = await waitForMockStartup({
+      sessionId: agentId, providerSessionId, startedAt,
+      readEvents: () => readTauriEventCapture(driver, capture),
+      readLeases: async () => {
+        try {
+          return JSON.parse(readFileSync(
+            path.join(harness.isolatedHome, "runtime", "conversation-leases.json"), "utf8",
+          ));
+        } catch (error) {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        }
+      },
+    });
+    console.info(`[native-startup] ${JSON.stringify({ session_id: agentId,
+      provider_session_id: providerSessionId, init_timestamp: proof.init.data.timestamp,
+      pending_leases: 0 })}`);
+    return result;
+  } finally {
+    await stopTauriEventCapture(driver, capture);
+  }
+}
+
+function consumedArtifact(filePath) {
+  const bytes = readFileSync(filePath);
+  return { sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length };
 }
 
 async function waitForWatchStatus(cliPath, harness, target, status, timeoutMs = 30000) {
@@ -437,6 +484,67 @@ test("native app-created off agent is readable through the CLI", { timeout: 1800
   assert.equal(statusResult.stdout, "off\n");
 });
 
+test("native CLI New Session starts an Off agent and preserves its configuration", { timeout: 180000 }, async (t) => {
+  await withMockScenario("action_needed", async () => {
+    const harness = await createNativeHarness();
+    if (!skipNativeBuild) ensureNativeAppBuilt(harness);
+    prepareIsolatedHome(harness);
+    const cliPath = buildCli(harness);
+    const session = await startNativeSession(harness);
+    t.after(async () => session.close());
+    await waitForAppShell(session.driver, 20000);
+    const agent = await createMockAgent(session.driver, harness.repoRoot, {
+      sessionId: null,
+      sessionName: `E2E-CLI-NEW-${RUN_ID}`,
+      isOff: true,
+    });
+    const readConfig = () => JSON.parse(
+      readFileSync(path.join(harness.isolatedHome, "settings", "state.json"), "utf8"),
+    ).find((config) => config.session_id === agent.session_id);
+    const original = readConfig();
+    assert.equal(original.is_off, true);
+    // Public Mock spawn assigns a provider identity even while Off. The null
+    // request means no identity was supplied by this fixture.
+    assert.ok(original.resume_session);
+    const missing = runCli(cliPath, harness, ["agent", "new-session", "missing-new-session-agent"]);
+    assert.equal(missing.status, 2, missing.stderr);
+    assert.match(missing.stderr, /"code":"not_found"/);
+    assert.deepEqual(readConfig(), original);
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const previous = readConfig();
+      const archives = JSON.parse(runCliOk(cliPath, harness, [
+        "conversation", "list", "--agent", agent.session_id,
+      ]).stdout).conversations;
+      const priorIds = archives.map((entry) => entry.conversation_id);
+      const result = await runCliWithMockStartup(cliPath, harness, session.driver,
+        ["agent", "new-session", agent.session_id], agent.session_id);
+      assert.equal(JSON.parse(result.stdout).ok, true);
+      const current = readConfig();
+      for (const field of ["session_id", "session_name", "provider", "agent_class", "folder", "model", "provider_config"]) {
+        assert.deepEqual(current[field], original[field], `New Session changed ${field}`);
+      }
+      assert.equal(current.is_off, false);
+      assert.ok(current.resume_session);
+      assert.notEqual(current.resume_session, previous.resume_session);
+      const after = JSON.parse(runCliOk(cliPath, harness, [
+        "conversation", "list", "--agent", agent.session_id,
+      ]).stdout).conversations;
+      for (const id of priorIds) {
+        assert.ok(after.some((entry) => entry.conversation_id === id), `lost archive ${id}`);
+      }
+      const live = JSON.parse(runCliOk(cliPath, harness, ["agent", "show", agent.session_id]).stdout).agent;
+      assert.equal(live.uuid, agent.session_id);
+      assert.notEqual(live.status, "off");
+      runCliOk(cliPath, harness, ["agent", "pause", agent.session_id]);
+      await waitForCliField(cliPath, harness, agent.session_id, "status", "off");
+    }
+    t.diagnostic(JSON.stringify({ consumed_artifacts: {
+      app: consumedArtifact(harness.appPath), cli: consumedArtifact(cliPath),
+    } }));
+  });
+});
+
 test("native automations run off agents headlessly for resumed and fresh conversations", { timeout: 180000 }, async (t) => {
   await withMockScenario("headless_delayed", async () => {
     const harness = await createNativeHarness();
@@ -557,6 +665,9 @@ test("native CLI control commands operate through the running app", { timeout: 1
     prepareIsolatedHome(harness);
 
     const cliPath = buildCli(harness);
+    t.diagnostic(JSON.stringify({ consumed_artifacts: {
+      app: consumedArtifact(harness.appPath), cli: consumedArtifact(cliPath),
+    } }));
     const workspacePath = path.join(harness.repoRoot, "e2e-native");
 
     let session;
@@ -573,7 +684,7 @@ test("native CLI control commands operate through the running app", { timeout: 1
 
     await waitForAppShell(session.driver, 20000);
     await watchStep(harness, "Wardian app shell is ready");
-    const spawnResult = runCliOk(cliPath, harness, [
+    const spawnResult = await runCliWithMockStartup(cliPath, harness, session.driver, [
       "agent",
       "spawn",
       "--provider",
@@ -619,10 +730,11 @@ test("native CLI control commands operate through the running app", { timeout: 1
       "action_required",
       "--timeout",
       "30s",
-      "--field",
-      "status",
     ]);
-    assert.equal(waitResult.stdout, "action_required\n");
+    const waited = JSON.parse(waitResult.stdout);
+    assert.equal(waited.schema, 1);
+    assert.equal(waited.agent.uuid, source.uuid);
+    assert.equal(waited.agent.status, "action_required");
 
     const updatedWorkspace = path.join(harness.repoRoot, "crates");
     const updateResult = runCliOk(cliPath, harness, [
@@ -659,7 +771,7 @@ test("native CLI control commands operate through the running app", { timeout: 1
     );
 
     await watchStep(harness, `Cloning ${CONTROL_SESSION_NAME} through the CLI`);
-    const cloneResult = runCliOk(cliPath, harness, [
+    const cloneResult = await runCliWithMockStartup(cliPath, harness, session.driver, [
       "agent",
       "clone",
       CONTROL_SESSION_NAME,
@@ -683,15 +795,26 @@ test("native CLI control commands operate through the running app", { timeout: 1
     await waitForCliField(cliPath, harness, CONTROL_CLONE_NAME, "status", "off");
 
     await watchStep(harness, `Resuming ${CONTROL_CLONE_NAME} through the CLI`);
-    runCliOk(cliPath, harness, ["agent", "resume", CONTROL_CLONE_NAME]);
+    await runCliWithMockStartup(cliPath, harness, session.driver,
+      ["agent", "resume", CONTROL_CLONE_NAME], cloneAgent.uuid);
     await setAgentStatus(session.driver, cloneAgent.uuid, "action_required");
     await waitForCliField(cliPath, harness, CONTROL_CLONE_NAME, "status", "action_required");
 
-    await watchStep(harness, `Killing ${CONTROL_CLONE_NAME} through the CLI`);
-    runCliOk(cliPath, harness, ["agent", "kill", CONTROL_CLONE_NAME, "--confirm"]);
-    const killedShow = runCli(cliPath, harness, ["agent", CONTROL_CLONE_NAME]);
-    assert.equal(killedShow.status, 2, killedShow.stderr);
-    assert.match(killedShow.stderr, /"code":"not_found"/);
+    await watchStep(harness, `Deleting ${CONTROL_CLONE_NAME} through the CLI`);
+    const deleteResult = runCliOk(cliPath, harness, [
+      "agent",
+      "delete",
+      CONTROL_CLONE_NAME,
+      "--confirm",
+      CONTROL_CLONE_NAME,
+      "--force",
+    ]);
+    const deleted = JSON.parse(deleteResult.stdout);
+    assert.equal(deleted.deleted, true);
+    assert.equal(deleted.target, CONTROL_CLONE_NAME);
+    const deletedShow = runCli(cliPath, harness, ["agent", CONTROL_CLONE_NAME]);
+    assert.equal(deletedShow.status, 2, deletedShow.stderr);
+    assert.match(deletedShow.stderr, /"code":"not_found"/);
 
 
   });

@@ -13,7 +13,6 @@ const CLI_CONSUMERS = [
   "browser-default-address-native.test.mjs",
   "browser-surface-native.test.mjs",
   "cli-shared-state-native.test.mjs",
-  "provider-advanced-config-native.test.mjs",
   "provider-delivery-real-native.test.mjs",
   "topology-cli-native.test.mjs",
   "worktree-cli-native.test.mjs",

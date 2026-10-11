@@ -570,7 +570,8 @@ pub async fn run_headless_with_options(
     };
     let (bin, _) = provider.get_executable();
     let claude_hook = if provider_name == "claude" {
-        ensure_claude_permission_hook(wardian_session_id).ok()
+        // Headless runs report their own result; they record no Stop rounds.
+        ensure_claude_permission_hook(wardian_session_id, None).ok()
     } else {
         None
     };

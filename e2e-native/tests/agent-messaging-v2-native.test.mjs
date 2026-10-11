@@ -1,6 +1,6 @@
 // @tier nightly — Paired MCP clients exercise the native store without provider turns.
 import test from "node:test";
-import { messageCli } from "../lib/canonical-messaging.mjs";
+import { messageCli, offAgentNativeBinding } from "../lib/canonical-messaging.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -10,7 +10,7 @@ import { startStdioRpc } from "../lib/stdio-json-rpc.mjs";
 import { createNativeHarness, ensureNativeAppBuilt, prepareIsolatedHome, startNativeSession, waitForAppShell, invokeTauri } from "../lib/harness.mjs";
 
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
-const TOOLS = ["followup_task", "interrupt_agent", "list_agents", "receive_messages", "reply", "send_message"];
+const TOOLS = ["followup_task", "interrupt_agent", "list_agents", "receive_messages", "reply", "send_message", "wait_agent"];
 
 function receipt(result) {
   const item = result?.content?.find((entry) => entry.type === "text");
@@ -39,13 +39,6 @@ function watch(cli, home, cwd, target) {
   delete env.WARDIAN_SESSION_ID;
   return JSON.parse(execFileSync(cli, ["agent", "watch", target, "--include", "events,delivery", "--tail", "0", "--timeout", "5s"],
     { cwd, env, encoding: "utf8", timeout: 10_000, windowsHide: true }));
-}
-
-function nativeBinding(cli, home, cwd, target) {
-  const env = { ...process.env, WARDIAN_HOME: home };
-  delete env.WARDIAN_SESSION_ID;
-  return JSON.parse(execFileSync(cli, ["delivery", "capabilities", target],
-    { cwd, env, encoding: "utf8", timeout: 10_000, windowsHide: true })).binding ?? null;
 }
 
 test("v2 information has consistent sender and receiver semantics without starting a turn", { timeout: 180_000 }, async (t) => {
@@ -82,13 +75,15 @@ test("v2 information has consistent sender and receiver semantics without starti
     report.artifact_sha256.cli = hash(await fs.readFile(cli));
     assert.equal(hash(await fs.readFile(installedCli)), report.artifact_sha256.cli,
       "The tested MCP CLI must match the application's installed CLI");
+    // Use the maintained Off mock-agent setup: this native store test must
+    // not require an installed or authenticated real provider.
     const agents = [];
     for (const name of ["Message-Sender", "Message-Receiver"]) {
       const workspace = path.join(harness.isolatedHome, "workspaces", name);
       await fs.mkdir(workspace, { recursive: true });
       agents.push(await invokeTauri(session.driver, "spawn_agent", { req: {
         sessionName: name, agentClass: "TestClass", folder: workspace, isOff: true,
-        resumeSession: null, configOverride: { provider: "codex", model: "gpt-5.4-mini", conversation_logging: "enabled" },
+        resumeSession: null, configOverride: { provider: "mock", conversation_logging: "enabled" },
       } }));
     }
     const [sender, receiver] = agents;
@@ -98,7 +93,9 @@ test("v2 information has consistent sender and receiver semantics without starti
     clients.push(receiverClient);
     const before = watch(cli, harness.isolatedHome, harness.repoRoot, receiver.session_id);
     assert.equal(before.agent.status.toLowerCase(), "off");
-    assert.equal(nativeBinding(cli, harness.isolatedHome, harness.repoRoot, receiver.session_id), null);
+    const nativeBefore = offAgentNativeBinding(cli, harness.isolatedHome, harness.repoRoot,
+      receiver.session_id, before.agent.provider);
+    assert.equal(nativeBefore.binding, null);
     const initialConfig = (await invokeTauri(session.driver, "list_agents")).find((agent) => agent.session_id === receiver.session_id);
     assert.ok(initialConfig);
     const initialProviderSession = initialConfig.resume_session ?? null;
@@ -129,13 +126,17 @@ test("v2 information has consistent sender and receiver semantics without starti
     assert.equal(late.messages[0].message, lateBody);
     const after = watch(cli, harness.isolatedHome, harness.repoRoot, receiver.session_id);
     assert.equal(after.agent.status.toLowerCase(), "off");
-    assert.equal(nativeBinding(cli, harness.isolatedHome, harness.repoRoot, receiver.session_id), null,
+    assert.equal(after.agent.provider, before.agent.provider, "Information must preserve the mock provider");
+    const nativeAfter = offAgentNativeBinding(cli, harness.isolatedHome, harness.repoRoot,
+      receiver.session_id, after.agent.provider);
+    assert.deepEqual(nativeAfter, nativeBefore,
       "Information must not create a native provider owner");
     const finalConfig = (await invokeTauri(session.driver, "list_agents")).find((agent) => agent.session_id === receiver.session_id);
     assert.ok(finalConfig);
     assert.equal(finalConfig.resume_session ?? null, initialProviderSession,
       "Information must not replace or create provider identity after off-agent preparation");
-    report.cases.paired_information = { status: "pass", sent, page, replay, acknowledged, empty_wait: empty, late, before, after };
+    report.cases.paired_information = { status: "pass", sent, page, replay, acknowledged, empty_wait: empty,
+      late, before, after, native_before: nativeBefore, native_after: nativeAfter };
     report.status = "pass";
   } catch (error) {
     report.status = "fail";

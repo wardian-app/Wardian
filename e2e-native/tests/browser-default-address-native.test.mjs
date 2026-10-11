@@ -11,12 +11,14 @@ import {
   createNativeHarness,
   ensureNativeAppBuilt,
   freezeBuiltCliForRun,
+  prebuiltCliForRun,
   invokeTauri,
   prepareIsolatedHome,
   startNativeSession,
   waitForAppShell,
 } from "../lib/harness.mjs";
 import { waitForWorkbenchReady } from "../lib/workbench.mjs";
+import { closeHttpFixture } from "../lib/httpFixture.mjs";
 
 /**
  * Proves that `wardian browser open` with no URL lands on the workspace's
@@ -54,12 +56,14 @@ async function serveFixture(t) {
     response.end(FIXTURE);
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise((resolve) => server.close(resolve)));
+  t.after(() => closeHttpFixture(server));
   return server.address().port;
 }
 
-/** Builds `wardian-cli` and returns its path, matching the other native tests. */
+/** Return this run's CLI, preserving prebuilt inputs before the ordinary build. */
 function buildCli(harness) {
+  const prebuilt = prebuiltCliForRun(harness, skipNativeBuild);
+  if (prebuilt) return prebuilt;
   const build = spawnSync("cargo", ["build", "-p", "wardian-cli", "--bin", "wardian-cli"], {
     cwd: harness.repoRoot,
     encoding: "utf8",

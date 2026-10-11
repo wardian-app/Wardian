@@ -41,7 +41,7 @@ async function waitIdle(driver, sessionId, timeoutMs = 180_000) {
   }, timeoutMs, `Claude session ${sessionId} did not reach idle`);
 }
 
-test("Claude interactive Stop hook persists one canonical Inbox completion and preserves a workspace hook",
+test("Claude creates no unverifiable Inbox completion after a hook continuation and preserves a workspace hook",
   { timeout: 360_000 }, async (t) => {
     if (process.env[OPT_IN] !== "1") {
       t.skip(`Set ${OPT_IN}=1; no provider turn was submitted`);
@@ -84,13 +84,25 @@ test("Claude interactive Stop hook persists one canonical Inbox completion and p
     }));
 
     const hookOutput = path.join(projectClaude, "workspace-stop-events.jsonl");
+    const token = randomBytes(8).toString("hex").toUpperCase();
+    const first = `CLAUDE_INBOX_FIRST_${token}`;
+    const expected = `CLAUDE_INBOX_FINAL_${token}`;
+    // The workspace hook blocks the first answer once, so Claude continues the
+    // same prompt; only the second answer is final.
+    const block = JSON.stringify({
+      decision: "block",
+      reason: `Now reply with exactly ${expected} and nothing else.`,
+    });
     const hookScript = path.join(projectClaude,
       process.platform === "win32" ? "workspace-stop-hook.ps1" : "workspace-stop-hook.cjs");
     const hookScriptBody = process.platform === "win32"
       ? [
         "$payload = [Console]::In.ReadToEnd()",
         "if (-not [String]::IsNullOrWhiteSpace($payload)) {",
-        `  [System.IO.File]::AppendAllText('${hookOutput.replaceAll("'", "''")}', $payload + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))`,
+        `  [System.IO.File]::AppendAllText('${hookOutput.replaceAll("'", "''")}', ($payload -replace "[\`r\`n]+", ' ') + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))`,
+        "  if (-not ($payload | ConvertFrom-Json).stop_hook_active) {",
+        `    Write-Output '${block.replaceAll("'", "''")}'`,
+        "  }",
         "}",
         "",
       ].join("\n")
@@ -98,7 +110,11 @@ test("Claude interactive Stop hook persists one canonical Inbox completion and p
         "const fs = require('node:fs');",
         "const chunks = [];",
         "process.stdin.on('data', chunk => chunks.push(chunk));",
-        `process.stdin.on('end', () => fs.appendFileSync(${JSON.stringify(hookOutput)}, Buffer.concat(chunks).toString() + '\\n'));`,
+        "process.stdin.on('end', () => {",
+        "  const payload = Buffer.concat(chunks).toString();",
+        `  fs.appendFileSync(${JSON.stringify(hookOutput)}, payload.replace(/[\\r\\n]+/g, ' ') + '\\n');`,
+        `  if (!JSON.parse(payload).stop_hook_active) process.stdout.write(${JSON.stringify(block)});`,
+        "});",
         "",
       ].join("\n");
     await fs.writeFile(hookScript, hookScriptBody, "utf8");
@@ -115,7 +131,7 @@ test("Claude interactive Stop hook persists one canonical Inbox completion and p
       harness_sha256: createHash("sha256").update(await fs.readFile(new URL(import.meta.url))).digest("hex"),
       started_at: new Date().toISOString(),
       provider_version: null,
-      cases: { catalog: "not_run", user_hook_coexistence: "not_run", stop_to_inbox: "not_run" },
+      cases: { catalog: "not_run", user_hook_coexistence: "not_run", continued_turn_without_verdict: "not_run" },
     };
     const reportPath = path.join(harness.isolatedHome, "claude-inbox-stop-report.json");
     const save = async () => fs.writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
@@ -161,8 +177,14 @@ test("Claude interactive Stop hook persists one canonical Inbox completion and p
     assert.equal(owned.agent.model, config.model);
     await waitIdle(owned.session.driver, owned.agent.session_id);
 
-    const expected = `CLAUDE_INBOX_STOP_${randomBytes(8).toString("hex").toUpperCase()}`;
-    const prompt = `No tools. Reply with exactly ${expected} and nothing else.`;
+    const launchRoot = path.join(harness.isolatedHome, "agents", owned.agent.session_id, "claude", "turn-verdicts");
+    const launches = (await fs.readdir(launchRoot)).sort();
+    const launch = JSON.parse(await fs.readFile(path.join(launchRoot, launches.at(-1), "launch.json"), "utf8"));
+    // Claude Code exposes no supported interactive turn-end verdict (#1492).
+    assert.equal(launch.verification, "unavailable");
+    assert.match(launch.unavailable_reason, /turn-end verdict/);
+
+    const prompt = `No tools. Reply with exactly ${first} and nothing else.`;
     const receipt = await invokeTauri(owned.session.driver, "submit_prompt_to_agent", {
       sessionId: owned.agent.session_id,
       prompt,
@@ -180,33 +202,31 @@ test("Claude interactive Stop hook persists one canonical Inbox completion and p
     }, 180_000, "Claude provider-authored final answer was not observed");
     await waitIdle(owned.session.driver, owned.agent.session_id);
 
-    const queue = await owned.session.driver.wait(async () => {
-      const items = await invokeTauri(owned.session.driver, "load_queue_items");
-      const item = items.find((entry) => entry.type === "agent_completed"
-        && entry.agent_session_id === owned.agent.session_id);
-      return item ? { items, item } : false;
-    }, 30_000, "Claude Stop hook did not persist an Inbox completion");
-    const matches = queue.items.filter((item) => item.id === queue.item.id);
-    assert.equal(matches.length, 1, "one provider turn must create exactly one stable Inbox item");
-    assert.equal(queue.item.response_text.trim(), transcript.answer.text.trim());
-    assert.equal(queue.item.response_text.trim(), expected);
-    assert.equal(queue.item.evidence_source, "provider_runtime");
-    assert.equal(queue.item.timestamp_source, "hook_outbox_mtime");
-    assert.match(queue.item.evidence_id, /^[0-9a-f-]{36}$/i);
+    // The finished turn still produces no card: nothing proves it final.
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+    const items = await invokeTauri(owned.session.driver, "load_queue_items");
+    assert.ok(!items.some((item) => item.type === "agent_completed"
+      && item.agent_session_id === owned.agent.session_id),
+    "an interactive Claude turn without a provider verdict must not create a completion");
 
     const userEvents = (await fs.readFile(hookOutput, "utf8"))
       .trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
-    const userEvent = userEvents.find((event) => event.hook_event_name === "Stop"
-      && event.prompt_id === queue.item.evidence_id);
-    assert.ok(userEvent, "the workspace Stop hook must run alongside Wardian's injected hook");
+    const finalRound = userEvents.find((event) => event.hook_event_name === "Stop"
+      && event.last_assistant_message?.trim() === expected);
+    assert.ok(finalRound, "the workspace hook must see the final round");
+    const rounds = userEvents.filter((event) => event.hook_event_name === "Stop"
+      && event.prompt_id === finalRound.prompt_id);
+    assert.equal(rounds.length, 2, "the workspace hook must see the blocked and the final round");
+    assert.equal(rounds[0].stop_hook_active, false);
+    assert.equal(rounds[0].last_assistant_message.trim(), first);
+    assert.equal(rounds[1].stop_hook_active, true);
+    assert.equal(rounds[1].last_assistant_message.trim(), expected);
     report.cases.user_hook_coexistence = { status: "pass", stop_events: userEvents.length };
-    report.cases.stop_to_inbox = {
+    report.cases.continued_turn_without_verdict = {
       status: "pass",
-      provider_authored_answer: true,
-      canonical_item_count: matches.length,
-      exact_response_preserved: true,
-      prompt_identity_matches: true,
-      timestamp_source: queue.item.timestamp_source,
+      provider_authored_answer: transcript.answer.text.trim() === expected,
+      verification: launch.verification,
+      completion_items: 0,
     };
     report.cleanup = { status: "pending" };
     await save();

@@ -448,10 +448,20 @@ impl BrowserSession {
     }
 
     async fn evaluate(&self, expression: &str) -> Result<Value, BrowserError> {
+        self.evaluate_session(&self.cdp_session().await, expression)
+            .await
+    }
+
+    /// Keeps a captured page identity bound to the request that supplies its value.
+    async fn evaluate_session(
+        &self,
+        session_id: &str,
+        expression: &str,
+    ) -> Result<Value, BrowserError> {
         let result = self
             .connection
             .call_session(
-                &self.cdp_session().await,
+                session_id,
                 "Runtime.evaluate",
                 json!({
                     "expression": expression,
@@ -581,6 +591,16 @@ impl BrowserSession {
         field: PageField,
         selector: Option<&str>,
     ) -> Result<String, BrowserError> {
+        self.get_session(&self.cdp_session().await, field, selector)
+            .await
+    }
+
+    async fn get_session(
+        &self,
+        session_id: &str,
+        field: PageField,
+        selector: Option<&str>,
+    ) -> Result<String, BrowserError> {
         let expression = match (field, selector) {
             (PageField::Url, _) => "window.location.href".to_string(),
             (PageField::Title, _) => "document.title".to_string(),
@@ -597,7 +617,7 @@ impl BrowserSession {
                 json!(selector)
             ),
         };
-        let value = self.evaluate(&expression).await?;
+        let value = self.evaluate_session(session_id, &expression).await?;
         Ok(value.as_str().unwrap_or_default().to_string())
     }
 
@@ -1200,6 +1220,11 @@ impl BrowserSession {
         let Ok(page) = equip_target(&self.connection, target_id).await else {
             return;
         };
+        // Destruction can arrive while equip_target is still awaiting a page
+        // call, before this actor has published an attached stack entry.
+        if self.connection.target_is_retired(target_id).await {
+            return;
+        }
         let (viewport, streaming) = {
             let state = self.state.read().await;
             (state.viewport, !state.screencast_viewers.is_empty())
@@ -1219,6 +1244,9 @@ impl BrowserSession {
                 }),
             )
             .await;
+        if self.connection.target_is_retired(target_id).await {
+            return;
+        }
         if streaming {
             let _ = self
                 .connection
@@ -1251,6 +1279,12 @@ impl BrowserSession {
         // script in the popup, and a popup that greets you with `alert` would
         // otherwise hold attach and detach for a whole protocol timeout.
         drop(_transition);
+        // Cover destruction racing the stream/stack transition too. Restoration
+        // runs after releasing the transition lock and before publishing metadata.
+        if self.connection.target_is_retired(target_id).await {
+            self.release_popup(target_id, events).await;
+            return;
+        }
         // A popup that finished loading before this attach emits nothing
         // further, so its address is read rather than waited for.
         self.resync_presented_page(events).await;
@@ -1262,6 +1296,9 @@ impl BrowserSession {
         target_id: &str,
         events: &broadcast::Sender<BrowserSessionEvent>,
     ) {
+        // Also retire on the ordinary/inventory close path. Its stack removal
+        // may win the race with the independent destruction watcher.
+        self.connection.retire_target(target_id).await;
         let _transition = self.screencast_transition.lock().await;
         let restored = {
             let mut targets = self.targets.write().await;
@@ -1415,16 +1452,36 @@ impl BrowserSession {
 
     /// Re-reads what the presented page says about itself and republishes it.
     async fn resync_presented_page(&self, events: &broadcast::Sender<BrowserSessionEvent>) {
-        if let Ok(url) = self.get(PageField::Url, None).await {
-            self.state.write().await.url = url;
-        }
-        if let Ok(title) = self.get(PageField::Title, None).await {
-            self.state.write().await.title = title;
-        }
+        self.refresh_page_metadata(PageField::Url).await;
+        self.refresh_page_metadata(PageField::Title).await;
         let _ = events.send(BrowserSessionEvent::State {
             browser_id: self.browser_id.clone(),
             summary: self.summary().await,
         });
+    }
+
+    /// Applies a metadata reply only while its target remains presented.
+    /// Inventory-based closure can restore another page while this call awaits
+    /// its reply; the target read lock fences that change through the state write.
+    async fn refresh_page_metadata(&self, field: PageField) {
+        let session_id = self.cdp_session().await;
+        self.refresh_session_metadata(&session_id, field).await;
+    }
+
+    async fn refresh_session_metadata(&self, session_id: &str, field: PageField) {
+        let Ok(value) = self.get_session(session_id, field, None).await else {
+            return;
+        };
+        let targets = self.targets.read().await;
+        if targets.last().map(|target| target.cdp_session_id.as_str()) != Some(session_id) {
+            return;
+        }
+        let mut state = self.state.write().await;
+        match field {
+            PageField::Url => state.url = value,
+            PageField::Title => state.title = value,
+            _ => {}
+        }
     }
 
     /// Drops one attachment and hands the lease on if it held it.
@@ -2213,6 +2270,7 @@ impl BrowserSessionBroker {
 
     /// Translates protocol events into session state and surface events.
     fn spawn_event_pump(&self, session: Arc<BrowserSession>) {
+        self.spawn_target_destruction_watcher(Arc::clone(&session));
         let mut receiver = session.connection.subscribe();
         let events = self.events.clone();
         let sessions = Arc::clone(&self.sessions);
@@ -2266,6 +2324,34 @@ impl BrowserSessionBroker {
                     Some(_) => continue,
                 }
                 handle_protocol_event(&session, &events, event).await;
+            }
+        });
+    }
+
+    /// Retires target calls independently of the pump's awaited page work.
+    /// A destroyed popup cannot answer the title/load call holding up that pump.
+    /// Subscribe before it starts any owned target work; this watcher only
+    /// retires protocol callers, leaving stack/state/stream changes to the pump.
+    fn spawn_target_destruction_watcher(&self, session: Arc<BrowserSession>) {
+        let mut receiver = session.connection.subscribe();
+        tokio::spawn(async move {
+            if session.connection.is_closed() {
+                return;
+            }
+            loop {
+                let event = match receiver.recv().await {
+                    Ok(event) => event,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => return,
+                };
+                if event.method == DISCONNECTED_METHOD {
+                    return;
+                }
+                if event.method == "Target.targetDestroyed" {
+                    if let Some(target_id) = event.params.get("targetId").and_then(Value::as_str) {
+                        session.connection.retire_target(target_id).await;
+                    }
+                }
             }
         });
     }
@@ -2724,9 +2810,7 @@ async fn handle_protocol_event(
                 let mut state = session.state.write().await;
                 state.load_state = LoadState::Complete;
             }
-            if let Ok(title) = session.get(PageField::Title, None).await {
-                session.state.write().await.title = title;
-            }
+            session.refresh_page_metadata(PageField::Title).await;
             let _ = events.send(BrowserSessionEvent::State {
                 browser_id,
                 summary: session.summary().await,
@@ -2940,16 +3024,7 @@ async fn resynchronize(
     session: &Arc<BrowserSession>,
     events: &broadcast::Sender<BrowserSessionEvent>,
 ) {
-    if let Ok(url) = session.get(PageField::Url, None).await {
-        session.state.write().await.url = url;
-    }
-    if let Ok(title) = session.get(PageField::Title, None).await {
-        session.state.write().await.title = title;
-    }
-    let _ = events.send(BrowserSessionEvent::State {
-        browser_id: session.browser_id().to_string(),
-        summary: session.summary().await,
-    });
+    session.resync_presented_page(events).await;
 }
 
 /// Flattens either console event shape into one level/text pair.
@@ -3635,5 +3710,538 @@ mod tests {
             "a still-present target must not be popped optimistically"
         );
         server.abort();
+    }
+
+    enum PopupLivenessCommand {
+        Create,
+        HoldFrameTree,
+        ReleaseFrameTree,
+        LoadWithHeldTitle,
+        HoldMetadata,
+        ReleaseMetadata,
+        Destroy,
+        ReleaseTitle,
+        ReleaseBase,
+        Finish,
+    }
+
+    struct PopupLivenessFake {
+        connection: Arc<CdpConnection>,
+        commands: tokio::sync::mpsc::UnboundedSender<PopupLivenessCommand>,
+        held: tokio::sync::mpsc::UnboundedReceiver<Value>,
+        title_released: Arc<std::sync::atomic::AtomicBool>,
+        server: JoinHandle<()>,
+    }
+
+    impl Drop for PopupLivenessFake {
+        fn drop(&mut self) {
+            // A failed prerequisite must not leave the fake socket or its calls alive.
+            self.server.abort();
+        }
+    }
+
+    impl PopupLivenessFake {
+        async fn new(withhold_title: bool) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let endpoint = format!("ws://{}", listener.local_addr().expect("address"));
+            let (commands, mut incoming) = tokio::sync::mpsc::unbounded_channel();
+            let (held_tx, held) = tokio::sync::mpsc::unbounded_channel();
+            let title_released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let released = Arc::clone(&title_released);
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.expect("accept");
+                let mut socket = accept_async(stream).await.expect("websocket");
+                let mut title_id = None;
+                let mut base_id = None;
+                let mut frame_tree_id = None;
+                let mut hold_frame_tree = false;
+                let mut hold_metadata = false;
+                let mut metadata_reply = None;
+                let mut withhold_title = withhold_title;
+                loop {
+                    let frame = tokio::select! {
+                        command = incoming.recv() => match command.expect("fixture command") {
+                            PopupLivenessCommand::Create => json!({
+                                "method": "Target.targetCreated",
+                                "params": { "targetInfo": {
+                                    "type": "page", "targetId": "popup-target",
+                                    "openerId": "base-target"
+                                } }
+                            }),
+                            PopupLivenessCommand::HoldFrameTree => {
+                                hold_frame_tree = true;
+                                continue;
+                            }
+                            PopupLivenessCommand::ReleaseFrameTree => {
+                                hold_frame_tree = false;
+                                held_tx.send(json!({ "released": "frame-tree" })).expect("release receipt");
+                                json!({ "id": frame_tree_id.take().expect("held frame tree"), "result": {
+                                    "frameTree": { "frame": { "id": "popup-frame" } }
+                                } })
+                            }
+                            PopupLivenessCommand::LoadWithHeldTitle => {
+                                withhold_title = true;
+                                released.store(false, std::sync::atomic::Ordering::SeqCst);
+                                json!({ "sessionId": "popup-session", "method": "Page.loadEventFired", "params": {} })
+                            }
+                            PopupLivenessCommand::HoldMetadata => {
+                                hold_metadata = true;
+                                held_tx.send(json!({ "holding": "metadata" })).expect("hold receipt");
+                                continue;
+                            }
+                            PopupLivenessCommand::ReleaseMetadata => {
+                                hold_metadata = false;
+                                metadata_reply.take().expect("held metadata")
+                            }
+                            PopupLivenessCommand::Destroy => json!({
+                                "method": "Target.targetDestroyed",
+                                "params": { "targetId": "popup-target" }
+                            }),
+                            PopupLivenessCommand::ReleaseTitle => {
+                                released.store(true, std::sync::atomic::Ordering::SeqCst);
+                                let Some(id) = title_id.take() else { continue };
+                                json!({ "id": id, "result": { "result": {
+                                    "type": "string", "value": "Second"
+                                } } })
+                            }
+                            PopupLivenessCommand::ReleaseBase => json!({
+                                "id": base_id.take().expect("held base call"),
+                                "result": { "result": {
+                                    "type": "string", "value": "base-still-live"
+                                } }
+                            }),
+                            PopupLivenessCommand::Finish => {
+                                socket.close(None).await.expect("close fake socket");
+                                return;
+                            }
+                        },
+                        message = socket.next() => {
+                            let Some(Ok(Message::Text(text))) = message else { return };
+                            let request: Value = serde_json::from_str(text.as_ref())
+                                .expect("JSON-RPC request");
+                            let id = request["id"].as_u64().expect("request id");
+                            let method = request["method"].as_str().expect("request method");
+                            let popup = request["sessionId"] == "popup-session";
+                            let result = match method {
+                                "Target.attachToTarget" => {
+                                    assert_eq!(request["params"]["targetId"], "popup-target");
+                                    json!({ "sessionId": "popup-session" })
+                                }
+                                "Page.enable" | "Runtime.enable" | "Log.enable"
+                                | "Network.enable" | "Emulation.setDeviceMetricsOverride" => json!({}),
+                                "Page.getFrameTree" => {
+                                    if popup && hold_frame_tree {
+                                        frame_tree_id = Some(id);
+                                        held_tx.send(request.clone()).expect("frame tree receipt");
+                                        continue;
+                                    }
+                                    json!({ "frameTree": {
+                                        "frame": { "id": if popup { "popup-frame" } else { "base-frame" } }
+                                    } })
+                                }
+                                "Runtime.evaluate" => {
+                                    let expression = request["params"]["expression"]
+                                        .as_str().expect("expression");
+                                    if hold_metadata {
+                                        let value = match expression {
+                                            "window.location.href" if popup => "http://fixture/second",
+                                            "window.location.href" => "http://fixture/popup-host",
+                                            "document.title" if popup => "Second",
+                                            "document.title" => "Popup Host",
+                                            _ => panic!("unexpected held metadata: {expression}"),
+                                        };
+                                        metadata_reply = Some(json!({ "id": id, "result": {
+                                            "result": { "type": "string", "value": value }
+                                        } }));
+                                        held_tx.send(request.clone()).expect("metadata receipt");
+                                        continue;
+                                    }
+                                    if expression == "hold-live-base" {
+                                        assert_eq!(request["sessionId"], "base-session");
+                                        base_id = Some(id);
+                                        held_tx.send(request.clone()).expect("base receipt");
+                                        continue;
+                                    }
+                                    if popup && expression == "document.title" {
+                                        held_tx.send(request.clone()).expect("title receipt");
+                                        if withhold_title {
+                                            title_id = Some(id);
+                                            continue;
+                                        }
+                                        released.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    }
+                                    let value = match expression {
+                                        "window.location.href" if popup => "http://fixture/second",
+                                        "window.location.href" => "http://fixture/popup-host",
+                                        "document.title" if popup => "Second",
+                                        "document.title" => "Popup Host",
+                                        _ => panic!("unexpected evaluation: {expression}"),
+                                    };
+                                    json!({ "result": { "type": "string", "value": value } })
+                                }
+                                _ => panic!("unexpected fake CDP method: {method}"),
+                            };
+                            json!({ "id": id, "result": result })
+                        }
+                    };
+                    socket
+                        .send(Message::Text(frame.to_string().into()))
+                        .await
+                        .expect("send fake CDP frame");
+                }
+            });
+            let connection = CdpConnection::connect(&endpoint).await.expect("connect");
+            Self {
+                connection,
+                commands,
+                held,
+                title_released,
+                server,
+            }
+        }
+
+        fn send(&self, command: PopupLivenessCommand) {
+            self.commands.send(command).expect("send fixture command");
+        }
+
+        async fn next_held(&mut self) -> Value {
+            timeout(Duration::from_secs(2), self.held.recv())
+                .await
+                .expect("fake must observe the requested RPC")
+                .expect("RPC receipt")
+        }
+
+        async fn finish(&mut self) {
+            self.send(PopupLivenessCommand::Finish);
+            timeout(Duration::from_secs(2), &mut self.server)
+                .await
+                .expect("fake server must join")
+                .expect("fake server task");
+        }
+    }
+
+    async fn wait_for_restored_opener(
+        session: &BrowserSession,
+        events: &mut broadcast::Receiver<BrowserSessionEvent>,
+    ) {
+        loop {
+            let summary = session.summary().await;
+            if !summary.popup
+                && summary.url == "http://fixture/popup-host"
+                && summary.title == "Popup Host"
+            {
+                return;
+            }
+            events.recv().await.expect("session state event");
+        }
+    }
+
+    async fn exercise_popup_self_close(withhold_title: bool) {
+        let mut fake = PopupLivenessFake::new(withhold_title).await;
+        let session = fake_popup_session(Arc::clone(&fake.connection));
+        session.targets.write().await.truncate(1);
+        {
+            let mut state = session.state.write().await;
+            state.url = "http://fixture/popup-host".to_string();
+            state.title = "Popup Host".to_string();
+            state.main_frame_id = Some("base-frame".to_string());
+            state.known_targets.remove("popup-target");
+        }
+        // Construct only the pump's in-memory owner. An empty registry means
+        // disconnect cleanup cannot touch the fake's empty filesystem paths.
+        let (events, _) = broadcast::channel(8);
+        let broker = BrowserSessionBroker {
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            next_short_ref: AtomicU32::new(1),
+            events,
+            profile_root: PathBuf::new(),
+            download_root: PathBuf::new(),
+            pending_surface_opens: Mutex::new(Vec::new()),
+        };
+        let mut state_events = broker.subscribe();
+        let mut wire_events = fake.connection.subscribe();
+        broker.spawn_event_pump(Arc::clone(&session));
+        fake.send(PopupLivenessCommand::Create);
+        let title_request = fake.next_held().await;
+        assert_eq!(title_request["sessionId"], "popup-session");
+        assert_eq!(title_request["params"]["expression"], "document.title");
+        assert_eq!(session.cdp_session().await, "popup-session");
+        assert_eq!(session.summary().await.url, "http://fixture/second");
+
+        let connection = Arc::clone(&fake.connection);
+        let base_call = tokio::spawn(async move {
+            connection
+                .call_session(
+                    "base-session",
+                    "Runtime.evaluate",
+                    json!({ "expression": "hold-live-base" }),
+                )
+                .await
+        });
+        let base_request = fake.next_held().await;
+        assert_eq!(base_request["sessionId"], "base-session");
+        assert!(!base_call.is_finished(), "base call must really be pending");
+        fake.send(PopupLivenessCommand::Destroy);
+        // This observes the actual reader/parser broadcast, not a direct
+        // handler call. Loss or fixture startup failure is a prerequisite error.
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let event = wire_events.recv().await.expect("protocol event");
+                if event.method == "Target.targetDestroyed" {
+                    assert_eq!(event.params["targetId"], "popup-target");
+                    assert!(event.session_id.is_none());
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("destruction must reach the real CDP reader");
+
+        let restored = timeout(
+            Duration::from_secs(2),
+            wait_for_restored_opener(&session, &mut state_events),
+        )
+        .await;
+        let title_still_held = !fake
+            .title_released
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let base_still_pending = !base_call.is_finished();
+        // Release only after recording the liveness result. BASE can then
+        // finish normally, so the regression fails at its intended assertion.
+        fake.send(PopupLivenessCommand::ReleaseTitle);
+        let cleanup_restored = timeout(
+            Duration::from_secs(2),
+            wait_for_restored_opener(&session, &mut state_events),
+        )
+        .await;
+        fake.send(PopupLivenessCommand::ReleaseBase);
+        let base_result = timeout(Duration::from_secs(2), base_call).await;
+        let restored_session = session.cdp_session().await;
+        let restored_frame = session.state.read().await.main_frame_id.clone();
+        let popup_known = session
+            .state
+            .read()
+            .await
+            .known_targets
+            .contains("popup-target");
+        fake.finish().await;
+
+        assert!(
+            cleanup_restored.is_ok(),
+            "opener must restore after fixture release"
+        );
+        assert!(
+            restored.is_ok(),
+            "destroyed popup must restore its opener before the withheld title reply is released"
+        );
+        if withhold_title {
+            assert!(
+                title_still_held,
+                "liveness must not be supplied by releasing the fake reply"
+            );
+        }
+        assert!(
+            base_still_pending,
+            "popup destruction must not cancel a live base-session RPC"
+        );
+        let base_value = base_result
+            .expect("base call must join")
+            .expect("base caller task")
+            .expect("live base RPC must succeed");
+        assert_eq!(base_value["result"]["value"], "base-still-live");
+        assert_eq!(restored_session, "base-session");
+        assert_eq!(restored_frame.as_deref(), Some("base-frame"));
+        assert!(!popup_known);
+    }
+
+    #[tokio::test]
+    async fn self_closing_popup_restores_opener_before_withheld_title_reply() {
+        exercise_popup_self_close(true).await;
+    }
+
+    #[tokio::test]
+    async fn ordinary_self_closing_popup_preserves_live_base_call() {
+        exercise_popup_self_close(false).await;
+    }
+
+    fn popup_liveness_broker() -> BrowserSessionBroker {
+        let (events, _) = broadcast::channel(8);
+        BrowserSessionBroker {
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            next_short_ref: AtomicU32::new(1),
+            events,
+            profile_root: PathBuf::new(),
+            download_root: PathBuf::new(),
+            pending_surface_opens: Mutex::new(Vec::new()),
+        }
+    }
+
+    async fn popup_liveness_base(connection: Arc<CdpConnection>) -> Arc<BrowserSession> {
+        let session = fake_popup_session(connection);
+        session.targets.write().await.truncate(1);
+        {
+            let mut state = session.state.write().await;
+            state.url = "http://fixture/popup-host".to_string();
+            state.title = "Popup Host".to_string();
+            state.main_frame_id = Some("base-frame".to_string());
+            state.known_targets.remove("popup-target");
+        }
+        session
+    }
+
+    #[tokio::test]
+    async fn metadata_refresh_queries_its_captured_session_across_presentation_changes() {
+        let mut fake = PopupLivenessFake::new(false).await;
+        let session = popup_liveness_base(Arc::clone(&fake.connection)).await;
+        for (field, expected) in [
+            (PageField::Url, "http://fixture/popup-host"),
+            (PageField::Title, "Popup Host"),
+        ] {
+            // Pause at the capture/dispatch boundary used by refresh_page_metadata.
+            // A popup becomes presented before dispatch, then closes before apply.
+            let captured_session = session.cdp_session().await;
+            session.targets.write().await.push(AttachedTarget {
+                target_id: "popup-target".to_string(),
+                cdp_session_id: "popup-session".to_string(),
+            });
+            fake.send(PopupLivenessCommand::HoldMetadata);
+            assert_eq!(fake.next_held().await["holding"], "metadata");
+            let refresh_session = Arc::clone(&session);
+            let refresh = tokio::spawn(async move {
+                refresh_session
+                    .refresh_session_metadata(&captured_session, field)
+                    .await;
+            });
+            let request = fake.next_held().await;
+            session.targets.write().await.truncate(1);
+            fake.send(PopupLivenessCommand::ReleaseMetadata);
+            timeout(Duration::from_secs(2), refresh)
+                .await
+                .expect("metadata refresh must join")
+                .expect("metadata refresh task");
+            let summary = session.summary().await;
+            let actual = match field {
+                PageField::Url => summary.url,
+                PageField::Title => summary.title,
+                _ => unreachable!("metadata field"),
+            };
+            assert_eq!(request["sessionId"], "base-session");
+            assert_eq!(
+                actual, expected,
+                "popup metadata must not replace the opener"
+            );
+        }
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn popup_destruction_retires_a_withheld_load_title_and_ignores_its_late_reply() {
+        let mut fake = PopupLivenessFake::new(false).await;
+        let session = popup_liveness_base(Arc::clone(&fake.connection)).await;
+        let broker = popup_liveness_broker();
+        let mut events = broker.subscribe();
+        broker.spawn_event_pump(Arc::clone(&session));
+        fake.send(PopupLivenessCommand::Create);
+        let initial_title = fake.next_held().await;
+        assert_eq!(initial_title["params"]["expression"], "document.title");
+        timeout(Duration::from_secs(2), async {
+            while session.summary().await.title != "Second" {
+                events.recv().await.expect("popup state");
+            }
+        })
+        .await
+        .expect("initial popup metadata");
+        fake.send(PopupLivenessCommand::LoadWithHeldTitle);
+        let held = fake.next_held().await;
+        assert_eq!(held["sessionId"], "popup-session");
+        assert_eq!(held["params"]["expression"], "document.title");
+        fake.send(PopupLivenessCommand::Destroy);
+        let restored = timeout(
+            Duration::from_secs(2),
+            wait_for_restored_opener(&session, &mut events),
+        )
+        .await;
+        let title_still_held = !fake
+            .title_released
+            .load(std::sync::atomic::Ordering::SeqCst);
+        fake.send(PopupLivenessCommand::ReleaseTitle);
+        timeout(Duration::from_secs(2), async {
+            while !fake
+                .title_released
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("late reply released");
+        // The reply to this new base call follows the late popup reply on the
+        // same websocket, so reading it also proves the late frame was consumed.
+        let live_title = timeout(Duration::from_secs(2), session.get(PageField::Title, None)).await;
+        let summary = session.summary().await;
+        fake.finish().await;
+        assert!(
+            restored.is_ok(),
+            "load-title wait must not block destruction"
+        );
+        assert!(title_still_held, "restoration must precede the late reply");
+        assert_eq!(
+            live_title.expect("live call joins").expect("live title"),
+            "Popup Host"
+        );
+        assert!(!summary.popup);
+        assert_eq!(summary.title, "Popup Host");
+        assert_eq!(summary.url, "http://fixture/popup-host");
+    }
+
+    #[tokio::test]
+    async fn destruction_during_popup_equipment_cannot_publish_the_dead_target() {
+        let mut fake = PopupLivenessFake::new(false).await;
+        let session = popup_liveness_base(Arc::clone(&fake.connection)).await;
+        let broker = popup_liveness_broker();
+        broker.spawn_event_pump(Arc::clone(&session));
+        fake.send(PopupLivenessCommand::HoldFrameTree);
+        fake.send(PopupLivenessCommand::Create);
+        let held = fake.next_held().await;
+        assert_eq!(held["method"], "Page.getFrameTree");
+        assert_eq!(held["sessionId"], "popup-session");
+        assert_eq!(session.cdp_session().await, "base-session");
+        assert!(session
+            .state
+            .read()
+            .await
+            .known_targets
+            .contains("popup-target"));
+        fake.send(PopupLivenessCommand::Destroy);
+        let destruction_processed = timeout(Duration::from_secs(2), async {
+            while session
+                .state
+                .read()
+                .await
+                .known_targets
+                .contains("popup-target")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        fake.send(PopupLivenessCommand::ReleaseFrameTree);
+        assert_eq!(fake.next_held().await["released"], "frame-tree");
+        let live_title = timeout(Duration::from_secs(2), session.get(PageField::Title, None)).await;
+        let summary = session.summary().await;
+        let presented = session.cdp_session().await;
+        fake.finish().await;
+        assert!(
+            destruction_processed.is_ok(),
+            "equipment must unblock before its late reply"
+        );
+        assert_eq!(
+            live_title.expect("live call joins").expect("live title"),
+            "Popup Host"
+        );
+        assert_eq!(presented, "base-session");
+        assert!(!summary.popup);
+        assert_eq!(summary.title, "Popup Host");
+        assert_eq!(summary.url, "http://fixture/popup-host");
     }
 }

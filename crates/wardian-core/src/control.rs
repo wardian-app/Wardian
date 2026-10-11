@@ -36,6 +36,10 @@ pub enum ControlRequest {
     AgentRestart {
         target: String,
     },
+    /// Run the desktop New Session lifecycle, preserving the agent and archives.
+    AgentNewSession {
+        target: String,
+    },
     AgentPause {
         target: String,
     },
@@ -1154,6 +1158,22 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains(r#""command":"agent_restart""#));
         assert!(json.contains(r#""target":"coder-a1""#));
+    }
+
+    #[test]
+    fn agent_new_session_request_requires_target_and_round_trips() {
+        let json = r#"{"command":"agent_new_session","target":"coder-a1"}"#;
+        let request: ControlRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            request,
+            ControlRequest::AgentNewSession {
+                target: "coder-a1".to_string(),
+            }
+        );
+        assert_eq!(serde_json::to_string(&request).unwrap(), json);
+        assert!(
+            serde_json::from_str::<ControlRequest>(r#"{"command":"agent_new_session"}"#).is_err()
+        );
     }
 
     #[test]

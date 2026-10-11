@@ -1,4 +1,4 @@
-//! Restrict journal contents to allowlisted strings, booleans, and string arrays.
+//! Restrict journal contents to allowlisted, typed startup configuration leaves.
 use super::{failure, CodexSharedError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -15,6 +15,7 @@ pub(super) enum Leaf {
     String(String),
     Strings(Vec<String>),
     Boolean(bool),
+    Integer(i64),
 }
 
 impl Leaf {
@@ -24,6 +25,9 @@ impl Leaf {
         }
         if let Some(boolean) = item.as_bool() {
             return Some(Self::Boolean(boolean));
+        }
+        if let Some(integer) = item.as_integer() {
+            return Some(Self::Integer(integer));
         }
         item.as_array().and_then(|array| {
             array
@@ -45,6 +49,7 @@ impl Leaf {
                 value(array)
             }
             Self::Boolean(boolean) => value(*boolean),
+            Self::Integer(integer) => value(*integer),
         }
     }
 }
@@ -63,6 +68,7 @@ pub(super) fn validate(path: &[String], leaf: &Leaf) -> Result<(), CodexSharedEr
     let allowed = match path {
         [key] => match key.as_str() {
             "check_for_update_on_startup" => matches!(leaf, Leaf::Boolean(_)),
+            "thread_unload_delay_secs" => matches!(leaf, Leaf::Integer(value) if *value >= 0),
             "model"
             | "model_reasoning_effort"
             | "sandbox_mode"

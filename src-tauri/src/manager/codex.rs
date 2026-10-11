@@ -94,17 +94,21 @@ pub(crate) fn codex_session_file_path(
     session_id: &str,
     wardian_agent_dir: Option<&str>,
 ) -> Option<std::path::PathBuf> {
+    let upstream = crate::utils::codex_home::resolve_upstream_home().ok()?;
     if let Some(agent_dir) = wardian_agent_dir {
         let projected_home = std::path::Path::new(agent_dir)
             .join("habitat")
             .join(".codex");
+        if upstream.explicit {
+            crate::utils::fs::validate_codex_upstream_projection(&upstream.path, &projected_home)
+                .ok()?;
+        }
         if let Some(path) = codex_session_file_path_in(&projected_home, session_id) {
             return Some(path);
         }
     }
 
-    let global_home = dirs::home_dir()?.join(".codex");
-    codex_session_file_path_in(&global_home, session_id)
+    codex_session_file_path_in(&upstream.path, session_id)
 }
 
 pub(crate) fn codex_log_lookup_session_id(resume_session: Option<&str>) -> Option<&str> {

@@ -9,6 +9,7 @@ import {
   createNativeHarness,
   ensureNativeAppBuilt,
   freezeBuiltCliForRun,
+  prebuiltCliForRun,
   prepareIsolatedHome,
   startNativeSession,
   waitForAppShell,
@@ -25,6 +26,8 @@ const GAMMA_PROVIDER_SESSION_ID = `e2e-topology-gamma-${RUN_ID}`;
 const GAMMA_SESSION_NAME = `E2E-TOPOLOGY-GAMMA-${RUN_ID}`;
 
 function buildCli(harness) {
+  const prebuilt = prebuiltCliForRun(harness, skipNativeBuild);
+  if (prebuilt) return prebuilt;
   const result = spawnSync(
     "cargo",
     ["build", "-p", "wardian-cli", "--bin", "wardian-cli"],

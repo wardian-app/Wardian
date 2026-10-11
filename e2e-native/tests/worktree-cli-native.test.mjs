@@ -9,6 +9,7 @@ import {
   createNativeHarness,
   ensureNativeAppBuilt,
   freezeBuiltCliForRun,
+  prebuiltCliForRun,
   prepareIsolatedHome,
   startNativeSession,
   waitForAppShell,
@@ -64,6 +65,8 @@ function seedGitRepo(harness) {
 }
 
 function buildCli(harness) {
+  const prebuilt = prebuiltCliForRun(harness, skipNativeBuild);
+  if (prebuilt) return prebuilt;
   runProcess("cargo", ["build", "-p", "wardian-cli", "--bin", "wardian-cli"], {
     cwd: harness.repoRoot,
   });

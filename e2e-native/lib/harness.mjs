@@ -10,7 +10,9 @@ import { Builder, By, Capabilities, until } from "selenium-webdriver";
 import {
   resolveBuiltCliPath,
   resolveExistingCliPath,
+  resolveExplicitNativeApp,
   resolveNativeAppArtifact,
+  validatePairedNativeCli,
 } from "./native-artifact-resolution.mjs";
 
 import { allocateSessionPorts, assertPortOwnedBy, portIsFree } from "./sessionPorts.mjs";
@@ -131,10 +133,30 @@ export function resolveSharedCliPath() {
 }
 
 /**
+ * Return the already-frozen, packaged CLI for a prebuilt run before any Cargo
+ * entry or replacement. The ordinary build route receives null. Revalidate
+ * the app/CLI bytes so a missing or changed input cannot become a build fallback.
+ */
+export function prebuiltCliForRun(harness, skipBuild = false) {
+  if (!skipBuild && !harness.pairedCli) return null;
+  if (!harness.cliPath) {
+    throw new Error("A prebuilt run requires the harness's frozen CLI.");
+  }
+  return validatePairedNativeCli({
+    appPath: harness.appPath,
+    cliPath: harness.cliPath,
+    platform: harness.platform ?? process.platform,
+  }).cliPath;
+}
+
+/**
  * Resolve a just-built CLI from Cargo's configured target and freeze it into
  * this run's private home before a caller starts using it.
  */
 export function freezeBuiltCliForRun(harness) {
+  if (harness.pairedCli) {
+    throw new Error("An explicit paired CLI cannot be replaced by a compiler output.");
+  }
   const sourcePath = resolveBuiltCliPath({
     repoRoot: harness.repoRoot,
     env: process.env,
@@ -216,7 +238,12 @@ function compactText(value, maxLength = 1200) {
 export async function createNativeHarness() {
   const watchMode = readBooleanEnv("WARDIAN_E2E_WATCH");
   const runId = process.env.WARDIAN_E2E_RUN_ID || nativeRunId();
-  const appPath = resolveAppPath();
+  const pairedCli = Object.prototype.hasOwnProperty.call(process.env, "WARDIAN_NATIVE_CLI");
+  // Resolve the pair first: default app resolution can invoke Cargo metadata.
+  const explicitCli = pairedCli ? resolveSharedCliPath() : null;
+  const appPath = pairedCli ? validatePairedNativeCli({
+    appPath: resolveExplicitNativeApp({ repoRoot, env: process.env }), cliPath: explicitCli,
+  }).appPath : resolveAppPath();
   return {
     runId,
     repoRoot,
@@ -227,7 +254,8 @@ export async function createNativeHarness() {
     // Where the CLI is built by consumers that use the shared target. Frozen
     // per run alongside the app so a concurrent rebuild cannot replace it
     // mid-run either.
-    sharedCliPath: resolveSharedCliPath(),
+    sharedCliPath: explicitCli ?? resolveSharedCliPath(),
+    pairedCli,
     ownsGeneratedHome: ownsGeneratedHome(),
     isolatedHome: resolveIsolatedHome(runId),
     tauriDriverPath: resolveTauriDriverPath(),
@@ -309,6 +337,9 @@ export function ensureNativeAppBuilt(
     resolveAppPathImpl = resolveAppPath,
   } = {},
 ) {
+  if (harness.pairedCli) {
+    throw new Error("Explicit paired native artifacts require skip-build operation.");
+  }
   const build = spawnSyncImpl(
     buildInvocation.command,
     buildInvocation.args,
@@ -337,13 +368,6 @@ export function ensureNativeAppBuilt(
 }
 
 export function prepareIsolatedHome(harness) {
-  // Claim by run id, not pid. The runner claims the home and then spawns this
-  // process, so a pid comparison would see the live parent as a foreign holder
-  // and make the run refuse its own home.
-  harness.homeLock = acquireHomeLock({
-    home: harness.isolatedHome,
-    runId: harness.runId,
-  }).lock;
   if (!isSafeNativeE2EHome(harness.isolatedHome)) {
     throw new Error(
       `Refusing to reset unsafe native E2E home: ${harness.isolatedHome}. ` +
@@ -351,6 +375,14 @@ export function prepareIsolatedHome(harness) {
         `or a path under ${path.join(repoRoot, ".tmp", "e2e-native")}.`,
     );
   }
+
+  // Validate before claiming: acquisition creates directories and may replace
+  // a stale lock. An unsafe path must be rejected without either side effect.
+  // Claim by run id so the runner and its child retain the same ownership.
+  harness.homeLock = acquireHomeLock({
+    home: harness.isolatedHome,
+    runId: harness.runId,
+  }).lock;
 
   let lastError = null;
   for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -390,6 +422,7 @@ export function prepareIsolatedHome(harness) {
     home: harness.isolatedHome,
     appPath: harness.appPath,
     cliPath: harness.sharedCliPath,
+    pairedCli: harness.pairedCli,
   });
   if (harness.frozenArtifacts.app) {
     harness.appPath = harness.frozenArtifacts.app.path;

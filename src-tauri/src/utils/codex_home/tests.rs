@@ -11,6 +11,45 @@ struct Fixture {
     root: PathBuf,
 }
 
+#[test]
+fn startup_observation_absent_home_does_not_create_preparation_lock() {
+    let fixture = Fixture::new();
+    std::fs::create_dir_all(fixture.home.join("agents/new/habitat")).unwrap();
+    assert!(with_index_observation(&fixture.home, "new", |_| {
+        panic!("absent SDK home must not be observed")
+    })
+    .is_none());
+    assert!(
+        !fixture.home.join("locks").exists(),
+        "observation must not reserve an absent owner's preparation gate"
+    );
+    let _owner = acquire_preparation(&fixture.home, "new").unwrap();
+}
+
+#[test]
+fn startup_observation_revalidates_mapping_under_preparation_gate() {
+    let fixture = Fixture::new();
+    let advisory = resolve_managed_home(&fixture.home, "agent").unwrap();
+    assert_eq!(advisory, fixture.source);
+    // A completed owner change between precheck and gate must not authorize the
+    // previously resolved tree. The production gated half resolves it anew.
+    std::fs::rename(&fixture.source, fixture.source.with_file_name("retired")).unwrap();
+    assert!(with_locked_index_observation(&fixture.home, "agent", |_| {
+        panic!("stale advisory path must never be consumed")
+    })
+    .is_none());
+    std::fs::create_dir(&fixture.source).unwrap();
+    std::fs::write(fixture.source.join("replacement"), b"new owner tree").unwrap();
+    assert_eq!(
+        with_locked_index_observation(&fixture.home, "agent", |current| {
+            assert!(current.join("replacement").is_file());
+            assert!(!current.join("unknown").exists());
+            Ok(())
+        }),
+        Some(Ok(()))
+    );
+}
+
 impl Fixture {
     fn new() -> Self {
         let mut builder = tempfile::Builder::new();

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use wardian_core::models::provider::{AgentEvent, AgentProvider};
 use wardian_core::models::AgentConfig;
 
+pub(crate) mod history;
 pub(super) mod provenance;
 
 pub struct PiProvider;
@@ -36,6 +37,18 @@ impl PiProvider {
 
     /// Resolves only the JSONL whose header binds the requested Pi session ID.
     pub fn session_file(session_dir: &Path, provider_session_id: &str) -> Option<PathBuf> {
+        Self::session_file_excluding(
+            session_dir,
+            provider_session_id,
+            &std::collections::HashSet::new(),
+        )
+    }
+
+    pub(crate) fn session_file_excluding(
+        session_dir: &Path,
+        provider_session_id: &str,
+        excluded: &std::collections::HashSet<PathBuf>,
+    ) -> Option<PathBuf> {
         let provider_session_id = provider_session_id.trim();
         if provider_session_id.is_empty() {
             return None;
@@ -44,6 +57,9 @@ impl PiProvider {
         let entries = std::fs::read_dir(session_dir).ok()?;
         entries.filter_map(Result::ok).find_map(|entry| {
             let path = entry.path();
+            if excluded.contains(&path) {
+                return None;
+            }
             if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
                 return None;
             }
@@ -163,7 +179,7 @@ impl AgentProvider for PiProvider {
             args.push(session_dir.to_string_lossy().to_string());
         }
 
-        if is_resume {
+        if is_resume && config.pending_pi_session_id().is_none() {
             if let Some(session_id) = config
                 .resume_session
                 .as_deref()

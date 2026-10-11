@@ -1,8 +1,35 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 
 const execute = promisify(execFile);
+
+/**
+ * Mock has no native transport, so its absence oracle is the exact capability
+ * rejection. Pair this with Off status and unchanged provider/session checks;
+ * unrelated command failures must never become an empty binding.
+ */
+export function offAgentNativeBinding(cli, home, cwd, target, provider, executeSync = execFileSync) {
+  assert.equal(provider, "mock", "The Off fixture must retain its mock provider");
+  const env = { ...process.env, WARDIAN_HOME: home };
+  delete env.WARDIAN_SESSION_ID;
+  try {
+    executeSync(cli, ["delivery", "capabilities", target], {
+      cwd, env, encoding: "utf8", timeout: 10_000, windowsHide: true, maxBuffer: 64 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (error) {
+    if (error.status !== 1 || error.signal !== null || typeof error.stdout !== "string"
+      || error.stdout.trim() || typeof error.stderr !== "string" || error.stderr.length > 64 * 1024) throw error;
+    let payload;
+    try { payload = JSON.parse(error.stderr); } catch { throw error; }
+    assert.deepEqual(payload, { schema: 1, error: {
+      code: "not_supported", message: "mock has no Wardian native transport", hint: null,
+    } }, "Only the known mock capability rejection proves unsupported native transport");
+    return { provider, native_supported: false, binding: null, capability_error: payload.error };
+  }
+  throw new Error("Off mock unexpectedly returned native transport capabilities");
+}
 
 /** One managed-origin operation. A lost receipt is never retried. */
 export async function messageCli(cli, home, cwd, sender, args) {

@@ -4,12 +4,16 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import childProcess, { spawnSync } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import net from "node:net";
+import { freezeRunArtifacts } from "../lib/frozenArtifacts.mjs";
 
 import {
   assertNativePreflight,
   createNativeHarness,
   ensureNativeAppBuilt,
+  freezeBuiltCliForRun,
   formatAppShellTimeoutMessage,
   isRetryableNativeSessionStartError,
   nativeAppBuildArgs,
@@ -27,6 +31,158 @@ test("native session startup retries transient WebDriver transport failures", ()
     true,
   );
   assert.equal(isRetryableNativeSessionStartError(new Error("application assertion failed")), false);
+});
+
+test("explicit pair forbids compiler entry points", () => {
+  const harness = { pairedCli: true, repoRoot: "unused", isolatedHome: "unused" };
+  assert.throws(() => ensureNativeAppBuilt(harness, {
+    buildInvocation: { command: "must-not-start", args: [] },
+    spawnSyncImpl: () => { throw new Error("A paired input must never compile"); },
+  }), /require skip-build operation/);
+  assert.throws(() => freezeBuiltCliForRun(harness), /cannot be replaced by a compiler output/);
+});
+
+test("explicit pair missing its app rejects through the harness before process or port setup", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wardian-missing-pair-"));
+  const isolatedHome = path.join(root, "must-not-create");
+  const values = { WARDIAN_NATIVE_APP: undefined, WARDIAN_NATIVE_CLI: "unused-cli.exe",
+    WARDIAN_NATIVE_SKIP_BUILD: "1", WARDIAN_E2E_NATIVE_HOME: isolatedHome };
+  const previousEnv = new Map(Object.keys(values).map((key) => [key, process.env[key]]));
+  const originalSpawnSync = childProcess.spawnSync;
+  const originalSpawn = childProcess.spawn;
+  const originalListen = net.Server.prototype.listen;
+  let processCalls = 0;
+  let portCalls = 0;
+  try {
+    for (const [key, value] of Object.entries(values)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    const rejectProcess = () => { processCalls++; throw new Error("No metadata or driver process is permitted"); };
+    childProcess.spawnSync = rejectProcess;
+    childProcess.spawn = rejectProcess;
+    syncBuiltinESMExports();
+    net.Server.prototype.listen = () => { portCalls++; throw new Error("No port setup is permitted"); };
+    await assert.rejects(() => createNativeHarness(), (error) => error.code === "EXPLICIT_CLI_APP_REQUIRED");
+    assert.equal(processCalls, 0);
+    assert.equal(portCalls, 0);
+    assert.equal(fs.existsSync(isolatedHome), false);
+  } finally {
+    childProcess.spawnSync = originalSpawnSync;
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    net.Server.prototype.listen = originalListen;
+    for (const [key, value] of previousEnv) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit pair preserves the canonical app through public harness construction", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wardian-canonical-pair-"));
+  const appDir = path.join(root, "app");
+  const aliasDir = path.join(root, "alias");
+  const app = path.join(appDir, process.platform === "win32" ? "Wardian.exe" : "Wardian");
+  const cliName = process.platform === "win32" ? "wardian-cli.exe" : "wardian-cli";
+  const alias = path.join(aliasDir, path.basename(app));
+  const cli = path.join(root, cliName);
+  const resourceDir = process.platform === "darwin" ? path.join(root, "Resources")
+    : process.platform === "linux" ? path.join(root, "lib", "Wardian") : appDir;
+  const values = { WARDIAN_NATIVE_APP: alias, WARDIAN_NATIVE_CLI: cli,
+    WARDIAN_NATIVE_SKIP_BUILD: "1", WARDIAN_E2E_NATIVE_HOME: path.join(root, "must-not-create") };
+  const previousEnv = new Map(Object.keys(values).map((key) => [key, process.env[key]]));
+  const originalSpawnSync = childProcess.spawnSync;
+  let processCalls = 0;
+  try {
+    fs.mkdirSync(path.join(resourceDir, "bin"), { recursive: true });
+    fs.mkdirSync(appDir, { recursive: true });
+    fs.mkdirSync(aliasDir);
+    fs.writeFileSync(app, "canonical app");
+    fs.writeFileSync(cli, "paired cli");
+    fs.writeFileSync(path.join(resourceDir, "bin", cliName), "paired cli");
+    fs.symlinkSync(app, alias, "file");
+    Object.assign(process.env, values);
+    childProcess.spawnSync = () => { processCalls++; throw new Error("No Cargo probe is permitted"); };
+    syncBuiltinESMExports();
+    const harness = await createNativeHarness();
+    assert.equal(harness.appPath, fs.realpathSync(app));
+    assert.equal(harness.appArtifact.path, fs.realpathSync(app));
+    assert.equal(harness.sharedCliPath, fs.realpathSync(cli));
+    assert.equal(processCalls, 0);
+    assert.equal(fs.existsSync(values.WARDIAN_E2E_NATIVE_HOME), false);
+  } finally {
+    childProcess.spawnSync = originalSpawnSync;
+    syncBuiltinESMExports();
+    for (const [key, value] of previousEnv) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit pair freezes declared Windows assets through the public harness", { skip: process.platform !== "win32" }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wardian-declared-pair-"));
+  const appDir = path.join(root, "target", "release");
+  const cliDir = path.join(root, "selected-cli");
+  const app = path.join(appDir, "Wardian.exe");
+  const cli = path.join(cliDir, "wardian-cli.exe");
+  const isolatedHome = path.join(root, "wardian-e2e-native-declared-assets");
+  const assets = new Map([
+    [path.join("agent_prompts", "Coder.md"), "declared prompt v1"],
+    [path.join("_up_", "scripts", "mock-agent.cjs"), "declared script v1"],
+    [path.join("_up_", "scripts", "nested-é中", "fixture.txt"), "nested script asset"],
+  ]);
+  const values = { WARDIAN_NATIVE_APP: app, WARDIAN_NATIVE_CLI: cli,
+    WARDIAN_NATIVE_SKIP_BUILD: "1", WARDIAN_E2E_NATIVE_HOME: isolatedHome };
+  const previousEnv = new Map(Object.keys(values).map((key) => [key, process.env[key]]));
+  const originalSpawnSync = childProcess.spawnSync;
+  let processCalls = 0;
+  try {
+    fs.mkdirSync(path.join(appDir, "resources", "bin"), { recursive: true });
+    fs.mkdirSync(cliDir, { recursive: true });
+    fs.writeFileSync(app, "paired app");
+    fs.writeFileSync(cli, "paired cli");
+    fs.writeFileSync(path.join(appDir, "resources", "bin", "wardian-cli.exe"), "paired cli");
+    for (const [relative, content] of assets) {
+      fs.mkdirSync(path.dirname(path.join(appDir, relative)), { recursive: true });
+      fs.writeFileSync(path.join(appDir, relative), content);
+    }
+    const unrelated = ["compiler-stamp.txt", path.join("_up_", "private", "owner.json")];
+    for (const relative of unrelated) {
+      fs.mkdirSync(path.dirname(path.join(appDir, relative)), { recursive: true });
+      fs.writeFileSync(path.join(appDir, relative), "unrelated compiler input");
+    }
+    fs.mkdirSync(path.join(cliDir, "agent_prompts"));
+    fs.writeFileSync(path.join(cliDir, "agent_prompts", "Foreign.md"), "CLI sibling runtime");
+    Object.assign(process.env, values);
+    childProcess.spawnSync = () => { processCalls++; throw new Error("No compiler or native process is permitted"); };
+    syncBuiltinESMExports();
+    const harness = await createNativeHarness();
+    prepareIsolatedHome(harness);
+    const frozenDir = harness.frozenArtifacts.dir;
+    for (const [relative, content] of assets) {
+      assert.equal(fs.readFileSync(path.join(frozenDir, relative), "utf8"), content, relative);
+    }
+    assert.equal(fs.existsSync(path.join(frozenDir, "scripts")), false, "nested resource path must retain _up_");
+    for (const relative of unrelated) assert.equal(fs.existsSync(path.join(frozenDir, relative)), false, relative);
+    assert.equal(fs.existsSync(path.join(frozenDir, "agent_prompts", "Foreign.md")), false);
+    for (const [relative] of assets) fs.writeFileSync(path.join(appDir, relative), "replacement after freeze");
+    const newRelative = path.join("_up_", "scripts", "later-fixture.txt");
+    fs.writeFileSync(path.join(appDir, newRelative), "new declared leaf");
+    freezeRunArtifacts({ home: isolatedHome, appPath: app, cliPath: cli, pairedCli: true, platform: "win32" });
+    for (const [relative, content] of assets) {
+      assert.equal(fs.readFileSync(path.join(frozenDir, relative), "utf8"), content, "later freezes preserve existing assets");
+    }
+    assert.equal(fs.readFileSync(path.join(frozenDir, newRelative), "utf8"), "new declared leaf");
+    assert.equal(processCalls, 0);
+  } finally {
+    childProcess.spawnSync = originalSpawnSync;
+    syncBuiltinESMExports();
+    for (const [key, value] of previousEnv) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("native preflight reports missing tauri-driver clearly", () => {

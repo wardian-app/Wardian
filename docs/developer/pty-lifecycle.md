@@ -14,6 +14,14 @@ Legacy versions without this protocol must be closed explicitly. This lock
 does not prove provider exit or release prior-provider holds. See
 [Desktop Home Ownership](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-10-02-desktop-home-ownership.md).
 
+Codex owner startup and background index observation share a process-local,
+per-home and per-agent preparation turn. Observation skips absent SDK homes and
+yields to queued startup. Startup awaits an active local observation within its
+original startup deadline and cancellation signal, before preparing the
+habitat. The existing nonblocking OS preparation lock still rejects competing
+owners in other processes. Observation revalidates the managed-home mapping
+under that OS lock; an earlier existence check never authorizes a stale tree.
+
 ## 🌉 Cross-Platform PTY Layer
 Wardian utilizes the `portable-pty` crate to provide a consistent PTY interface across different operating systems.
 
@@ -39,6 +47,25 @@ Recovery reports the current pane dimensions before requesting ownership, and
 checks again when queued activation runs that no owner has appeared.
 Read-only, hidden, and suspended views stay passive,
 and a second view cannot automatically take an existing owner's lease.
+
+### Windows console startup handshake
+
+The bundled ConPTY requests the cursor position and primary device attributes
+before the provider starts. Wardian answers this opening sequence through the
+generation-scoped backend input channel. The reader holds fragmented opening
+queries until it recognizes the complete handshake, then consumes those queries
+so a mounted renderer cannot answer them again. Nonmatching bytes, the optional
+window command, subsequent output, and an incomplete prefix at EOF are preserved.
+A fresh embedded PTY reports cell `1,1` and VT100 advanced video capabilities.
+Startup can therefore proceed while its terminal pane is hidden or still
+mounting. Subsequent provider queries retain their existing handlers.
+
+ConPTY 1.24 waits up to three seconds for the device-attributes reply. That wait
+consumes the provider's startup budget when only a frontend renderer can answer.
+The backend handshake removes this dependency while preserving the existing
+provider deadlines. See Microsoft's
+[ConPTY DA1 startup change](https://github.com/microsoft/terminal/pull/20536)
+for the upstream wait behavior.
 
 ## 🛡️ Process Integrity (Windows Job Objects)
 To prevent orphaned provider and console-host processes when Wardian crashes or is force-closed, the Windows implementation uses **Job Objects** via the `win32job` crate.

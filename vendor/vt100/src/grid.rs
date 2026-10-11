@@ -5,6 +5,7 @@ pub struct Grid {
     size: Size,
     pos: Pos,
     saved_pos: Pos,
+    saved_pos_abs_row: usize,
     rows: Vec<crate::row::Row>,
     scroll_top: u16,
     scroll_bottom: u16,
@@ -21,6 +22,7 @@ impl Grid {
             size,
             pos: Pos::default(),
             saved_pos: Pos::default(),
+            saved_pos_abs_row: 0,
             rows: vec![],
             scroll_top: 0,
             scroll_bottom: size.rows - 1,
@@ -47,9 +49,28 @@ impl Grid {
         crate::row::Row::new(self.size.cols)
     }
 
+    fn push_scrollback_row(
+        &mut self,
+        row: crate::row::Row,
+        rebase_saved_cursor_on_eviction: bool,
+    ) {
+        if self.scrollback_len == 0 {
+            return;
+        }
+
+        self.scrollback.push_back(row);
+        while self.scrollback.len() > self.scrollback_len {
+            self.scrollback.pop_front();
+            if rebase_saved_cursor_on_eviction {
+                self.saved_pos_abs_row = self.saved_pos_abs_row.saturating_sub(1);
+            }
+        }
+    }
+
     pub fn clear(&mut self) {
         self.pos = Pos::default();
         self.saved_pos = Pos::default();
+        self.saved_pos_abs_row = self.scrollback.len();
         for row in self.drawing_rows_mut() {
             row.clear(crate::attrs::Attrs::default());
         }
@@ -64,39 +85,70 @@ impl Grid {
     }
 
     pub fn set_size(&mut self, size: Size) {
+        let old_rows = usize::from(self.size.rows);
+        let new_rows = usize::from(size.rows);
+
         if size.cols != self.size.cols {
             for row in &mut self.rows {
                 row.wrap(false);
+                row.resize(size.cols, crate::Cell::new());
+            }
+        }
+        self.size = size;
+
+        if self.rows.is_empty() {
+            self.rows.resize(new_rows, self.new_row());
+        } else if new_rows < old_rows {
+            let rows_to_remove = old_rows - new_rows;
+            let cursor_row = usize::from(self.pos.row);
+            let rows_below_cursor = old_rows.saturating_sub(cursor_row + 1);
+            let rows_from_bottom = rows_to_remove.min(rows_below_cursor);
+            self.rows.truncate(old_rows - rows_from_bottom);
+
+            let rows_from_top = rows_to_remove - rows_from_bottom;
+            for _ in 0..rows_from_top {
+                let removed = self.rows.remove(0);
+                if self.scrollback_len > 0 {
+                    self.push_scrollback_row(removed, true);
+                } else {
+                    self.saved_pos_abs_row = self.saved_pos_abs_row.saturating_sub(1);
+                }
+            }
+            self.pos.row = self.pos.row.saturating_sub(rows_from_top as u16);
+        } else if new_rows > old_rows {
+            for _ in 0..new_rows - old_rows {
+                #[cfg(not(windows))]
+                if self.rows.len() <= usize::from(self.pos.row) + 1 {
+                    if let Some(mut row) = self.scrollback.pop_back() {
+                        row.resize(size.cols, crate::Cell::new());
+                        // xterm's generic resize path restores history above a
+                        // cursor that has no blank rows beneath it.
+                        self.rows.insert(0, row);
+                        self.pos.row = self.pos.row.saturating_add(1);
+                        continue;
+                    }
+                }
+
+                // xterm's ConPTY path leaves history in scrollback on growth.
+                self.rows.push(self.new_row());
             }
         }
 
-        if self.scroll_bottom == self.size.rows - 1 {
-            self.scroll_bottom = size.rows - 1;
-        }
+        self.scrollback_offset =
+            self.scrollback_offset.min(self.scrollback.len());
 
-        self.size = size;
-        for row in &mut self.rows {
-            row.resize(size.cols, crate::Cell::new());
-        }
-        self.rows.resize(usize::from(size.rows), self.new_row());
-
-        if self.scroll_bottom >= size.rows {
-            self.scroll_bottom = size.rows - 1;
-        }
-        if self.scroll_bottom < self.scroll_top {
-            self.scroll_top = 0;
-        }
+        self.scroll_top = 0;
+        self.scroll_bottom = size.rows - 1;
 
         self.row_clamp_top(false);
         self.row_clamp_bottom(false);
         self.col_clamp();
 
-        if self.saved_pos.row > self.size.rows - 1 {
-            self.saved_pos.row = self.size.rows - 1;
-        }
-        if self.saved_pos.col > self.size.cols - 1 {
-            self.saved_pos.col = self.size.cols - 1;
-        }
+        self.saved_pos.row = self
+            .saved_pos_abs_row
+            .saturating_sub(self.scrollback.len())
+            .min(new_rows - 1) as u16;
+        self.saved_pos.col = self.saved_pos.col.min(size.cols - 1);
     }
 
     pub fn pos(&self) -> Pos {
@@ -115,11 +167,19 @@ impl Grid {
 
     pub fn save_cursor(&mut self) {
         self.saved_pos = self.pos;
+        self.saved_pos_abs_row = self
+            .scrollback
+            .len()
+            .saturating_add(usize::from(self.pos.row));
         self.saved_origin_mode = self.origin_mode;
     }
 
     pub fn restore_cursor(&mut self) {
         self.pos = self.saved_pos;
+        self.pos.row = self
+            .saved_pos_abs_row
+            .saturating_sub(self.scrollback.len())
+            .min(usize::from(self.size.rows - 1)) as u16;
         self.origin_mode = self.saved_origin_mode;
     }
 
@@ -564,10 +624,8 @@ impl Grid {
                 .insert(usize::from(self.scroll_bottom) + 1, self.new_row());
             let removed = self.rows.remove(usize::from(self.scroll_top));
             if self.scrollback_len > 0 && !self.scroll_region_active() {
-                self.scrollback.push_back(removed);
-                while self.scrollback.len() > self.scrollback_len {
-                    self.scrollback.pop_front();
-                }
+                // xterm leaves savedY absolute across ordinary ring eviction.
+                self.push_scrollback_row(removed, false);
                 if self.scrollback_offset > 0 {
                     self.scrollback_offset =
                         self.scrollback.len().min(self.scrollback_offset + 1);

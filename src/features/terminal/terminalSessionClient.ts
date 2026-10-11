@@ -143,6 +143,9 @@ export class TerminalSessionClient {
   #drainInFlight = false;
   #drainQueued = false;
   #destroyed = false;
+  #destruction: Promise<void> | null = null;
+  #lifetimeEpoch = 0;
+  #pendingRegistrations = 0;
   #applicationVisible = terminalApplicationVisible;
   #foregroundSnapshotRequired = !terminalApplicationVisible;
   #applicationVisibilityEpoch = 0;
@@ -184,6 +187,7 @@ export class TerminalSessionClient {
     return true;
   }
 
+  /** Attach within a live client lifetime, after any teardown of its shared consumer. */
   async registerPresentation(
     registration: TerminalPresentationRegistration,
     callbacks: TerminalPresentationCallbacks,
@@ -192,50 +196,75 @@ export class TerminalSessionClient {
     if (registration.session_id !== this.sessionId) {
       throw new Error("Presentation registration targets a different terminal session");
     }
-    const result = await this.#serialize(async () => {
-      await this.#ensureListeners();
-      this.#destroyed = false;
-      const binding: PresentationBinding = {
-        ownerToken: options?.ownerToken ?? Symbol("terminal-presentation"),
-        callbacks,
-        registration,
-        state: null,
-        runtimeGeneration: 0,
-        appliedSequence: 0,
-      };
-      this.#presentations.set(registration.presentation_id, binding);
-      try {
-        const result = await invoke<TerminalPresentationRegistrationResult>(
-          "register_terminal_presentation",
-          { request: registration },
-        );
-        if (!result) {
-          this.#presentations.delete(registration.presentation_id);
-          throw new Error("TerminalSessionProtocolUnavailable");
+    this.#pendingRegistrations += 1;
+    try {
+      const result = await this.#serialize(async () => {
+        // The consumer ID belongs to the session. Finish its old unsubscribe
+        // before a remount can subscribe again or attach new listeners.
+        await this.#destruction;
+        const current = terminalSessionClients.get(this.sessionId);
+        if (current && current !== this) {
+          throw new Error("Terminal session client was superseded");
         }
-        if (this.#presentations.get(registration.presentation_id) !== binding) {
+        this.#destroyed = false;
+        terminalSessionClients.set(this.sessionId, this);
+        const lifetimeEpoch = this.#lifetimeEpoch;
+        const assertCurrentLifetime = () => {
+          if (this.#destroyed || this.#lifetimeEpoch !== lifetimeEpoch) {
+            throw new Error("Terminal session client was destroyed during registration");
+          }
+        };
+        await this.#ensureListeners();
+        assertCurrentLifetime();
+        const binding: PresentationBinding = {
+          ownerToken: options?.ownerToken ?? Symbol("terminal-presentation"),
+          callbacks,
+          registration,
+          state: null,
+          runtimeGeneration: 0,
+          appliedSequence: 0,
+        };
+        this.#presentations.set(registration.presentation_id, binding);
+        try {
+          const result = await invoke<TerminalPresentationRegistrationResult>(
+            "register_terminal_presentation",
+            { request: registration },
+          );
+          assertCurrentLifetime();
+          if (!result) {
+            this.#presentations.delete(registration.presentation_id);
+            throw new Error("TerminalSessionProtocolUnavailable");
+          }
+          if (this.#presentations.get(registration.presentation_id) !== binding) {
+            return result;
+          }
+          binding.state = result.presentation;
+          this.#setBrokerState(result.broker_state);
+          await options?.beforeInitialSnapshot?.(result);
+          assertCurrentLifetime();
+          if (this.#presentations.get(registration.presentation_id) !== binding) {
+            return result;
+          }
+          await this.#applySnapshot(binding, result.initial_snapshot);
+          assertCurrentLifetime();
+          await this.#ensureSubscription(result.broker_state.runtime_generation);
+          assertCurrentLifetime();
           return result;
+        } catch (error) {
+          // A restoring placeholder can register before its PTY exists. Keep the
+          // logical binding and retry when the broker announces a newer runtime.
+          if (!String(error).includes("SessionNotFound")) {
+            this.#presentations.delete(registration.presentation_id);
+          }
+          throw error;
         }
-        binding.state = result.presentation;
-        this.#setBrokerState(result.broker_state);
-        await options?.beforeInitialSnapshot?.(result);
-        if (this.#presentations.get(registration.presentation_id) !== binding) {
-          return result;
-        }
-        await this.#applySnapshot(binding, result.initial_snapshot);
-        await this.#ensureSubscription(result.broker_state.runtime_generation);
-        return result;
-      } catch (error) {
-        // A restoring placeholder can register before its PTY exists. Keep the
-        // logical binding and retry when the broker announces a newer runtime.
-        if (!String(error).includes("SessionNotFound")) {
-          this.#presentations.delete(registration.presentation_id);
-        }
-        throw error;
-      }
-    });
-    this.#scheduleForegroundResumeIfNeeded();
-    return result;
+      });
+      this.#scheduleForegroundResumeIfNeeded();
+      return result;
+    } finally {
+      this.#pendingRegistrations -= 1;
+      this.#releaseDestroyedClient();
+    }
   }
 
   async updatePresentation(
@@ -660,35 +689,81 @@ export class TerminalSessionClient {
     });
   }
 
+  /** Retire this lifetime and finish its listener/subscription teardown before reuse. */
   async destroy() {
+    if (this.#destruction) {
+      return this.#destruction;
+    }
     if (this.#destroyed) {
+      this.#releaseDestroyedClient();
       return;
     }
     this.#destroyed = true;
+    this.#lifetimeEpoch += 1;
     this.#drainQueued = false;
-    const subscribed = this.#subscription !== null;
+    const subscription = this.#subscription;
+    const listenerSetup = this.#listenerSetup;
+    const eventUnlisten = this.#eventUnlisten;
+    const lifecycleUnlisten = this.#lifecycleUnlisten;
     this.#subscription = null;
-    if (subscribed) {
-      try {
-        await invoke("unsubscribe_terminal_events", {
-          request: { session_id: this.sessionId, consumer_id: this.#consumerId },
-        });
-      } catch {
-        // The runtime may have ended before the final local presentation.
-      }
-    }
-    this.#eventUnlisten?.();
-    this.#lifecycleUnlisten?.();
     this.#eventUnlisten = null;
     this.#lifecycleUnlisten = null;
     this.#listenerSetup = null;
-    terminalSessionClients.delete(this.sessionId);
+    const destruction = (async () => {
+      if (subscription) {
+        try {
+          // A delayed subscribe must settle before its shared consumer can be
+          // removed. Otherwise it can recreate the consumer after teardown.
+          await subscription;
+        } catch {
+          // A failed subscribe may still have reached the backend.
+        }
+        try {
+          await invoke("unsubscribe_terminal_events", {
+            request: { session_id: this.sessionId, consumer_id: this.#consumerId },
+          });
+        } catch {
+          // The runtime may have ended before the final local presentation.
+        }
+      }
+      try {
+        await listenerSetup;
+      } catch {
+        // Failed setup has no completed listeners beyond those retained here.
+      }
+      eventUnlisten?.();
+      lifecycleUnlisten?.();
+    })();
+    this.#destruction = destruction;
+    try {
+      await destruction;
+    } finally {
+      if (this.#destruction === destruction) {
+        this.#destruction = null;
+      }
+      this.#releaseDestroyedClient();
+    }
+  }
+
+  #releaseDestroyedClient() {
+    // Keep the teardown barrier discoverable until unsubscribe finishes, even
+    // when a retired registration was the last pending user of this feed.
+    // Late teardown must neither evict a remount nor delete a successor.
+    if (
+      this.#destroyed &&
+      this.#destruction === null &&
+      this.#pendingRegistrations === 0 &&
+      terminalSessionClients.get(this.sessionId) === this
+    ) {
+      terminalSessionClients.delete(this.sessionId);
+    }
   }
 
   async #ensureListeners() {
     if (this.#listenerSetup) {
       return this.#listenerSetup;
     }
+    const lifetimeEpoch = this.#lifetimeEpoch;
     this.#listenerSetup = Promise.all([
       listen<TerminalEventsReady>("terminal-session-events-ready", (event) => {
         if (event.payload.session_id !== this.sessionId) {
@@ -699,7 +774,7 @@ export class TerminalSessionClient {
         }
         this.queueDrain();
       }).then((unlisten) => {
-        if (this.#destroyed) {
+        if (this.#destroyed || this.#lifetimeEpoch !== lifetimeEpoch) {
           unlisten();
         } else {
           this.#eventUnlisten = unlisten;
@@ -764,7 +839,7 @@ export class TerminalSessionClient {
           }).catch(() => undefined);
         },
       ).then((unlisten) => {
-        if (this.#destroyed) {
+        if (this.#destroyed || this.#lifetimeEpoch !== lifetimeEpoch) {
           unlisten();
         } else {
           this.#lifecycleUnlisten = unlisten;

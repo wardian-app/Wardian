@@ -5,6 +5,11 @@ worktree a distinct central compiler target. Use the launcher for ordinary
 checks and tests; a source checkout's running release artifacts are never a
 compiler target for a worktree.
 
+Protected-input manifests cover both the compiler target and its sibling claim
+directory. Overlapping protection rejects a claim before either directory is
+created. Cleanup and owned release recheck protection; a claim that becomes
+protected remains intact rather than being removed.
+
 ```bash
 npm run rust:check
 npm run rust:test
@@ -25,6 +30,10 @@ Unsupported commands and global options are rejected before target claims or
 process launch. In particular, `clean`, `run`, `install`, and external Cargo
 subcommands are not forwarded. Use the explicit retention command for owned
 inactive launcher outputs. Formatting remains available to normal verification.
+
+`rust:cache -- inspect` reports the exact `owner_sha256` and `marker_sha256`
+alongside a claim's parsed owner identity. These hashes bind explicit recovery
+to the selected worktree generation.
 
 ## Explicit dependency setup
 
@@ -81,6 +90,7 @@ root. Copied exports and fixtures must supply an explicit
   sccache-identity.json            setup record
   tools/                          explicit dependency setup attempts
   launcher-targets/<repo-key>/<tree-key>/ claimed, prunable compiler outputs
+    deadcode/                     visibility-copy compiler outputs
   direct-targets/<repo-key>/<tree-key>/   ordinary Cargo outputs, inspect only
   claims/<repo-key>/<tree-key>/    exclusive launcher claims
   pruning/                        explicit prune quarantine
@@ -101,6 +111,25 @@ separate targets and claims. The launcher uses Cargo arguments to select its
 target, removing inherited routing variables only when they agree with that
 target. Conflicting custom targets fail before compilation; use direct Cargo
 for an intentionally different target.
+
+The Rust dead-code pass keeps its rewritten source copy under
+`rust-deadcode/<copy-key>/` and compiles it into the separate `deadcode/` leaf.
+Both remain inside the existing exclusive parent claim. Analysis never reuses
+the normal target's `deps`, fingerprints or incremental outputs. The leaf is
+not a separate target generation or claim, and callers cannot select arbitrary
+descendants. The compiler launcher preserves an explicit target's path spelling
+for both target and build directories after verifying its physical destination.
+
+`withRustCache` removes unique Cargo routing environment variables from the
+parent process. Cargo callbacks should use `cargoInvocation`; it selects the
+normal target through arguments, or the closed analysis leaf with
+`output: 'deadcode'`. Callbacks that launch Cargo indirectly through Tauri can
+use `callbackCargoEnvironment` to set `CARGO_TARGET_DIR`,
+`CARGO_BUILD_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR` on that child only. It
+validates the live target marker and claim token, retains wrapper and incremental
+settings, and rejects conflicting custom routes. Derive artifact lookup from
+the returned child's target directory. Join every child before the synchronous
+callback returns and releases its claim.
 
 The existing machine-wide Cargo home continues to share registry archives,
 unpacked source, and Git dependency caches. No per-worktree Cargo home is
@@ -213,10 +242,59 @@ private quarantine. Claims alone cannot protect a target used by direct Cargo;
 the separate namespaces are necessary for retention safety.
 
 Crashes leave claims visible. A PID alone is not proof of inactivity; there is
-no automatic stale-claim repair. Inspect and reconcile ownership before a human
-removes a stale claim. A qualified or running artifact belongs outside compiler
-targets in an independently hashed immutable bundle. Pruning never migrates
-inputs, deletes qualified bundles, or makes a source/release claim.
+no automatic stale-claim repair. An operator or explicitly authorized test
+controller may archive one claim only after establishing physical closure and
+supplying its receipt. The command validates the receipt's binding and shape;
+it cannot independently prove that historical process events occurred.
+
+```bash
+npm run rust:cache -- recover-ended-claim \
+  --owner-sha256 <owner-json-sha256> \
+  --marker-sha256 <target-marker-sha256> \
+  --closure-receipt <absolute-private-receipt-path>
+```
+
+PowerShell:
+
+```powershell
+npm run rust:cache -- recover-ended-claim `
+  --owner-sha256 <owner-json-sha256> `
+  --marker-sha256 <target-marker-sha256> `
+  --closure-receipt <absolute-private-receipt-path>
+```
+
+The JSON receipt uses schema `1` and kind `rust-cache-ended-claim-recovery`.
+It binds `repo_key`, `worktree_key`, both supplied hashes, and the exact owner
+`{token, pid, started}`. It includes `disposition: "ended"`, an
+`evidence_producer`, an ISO-8601 `observed_at`, and a `closure` with
+`complete: true`, a root process matching the recorded PID, and every owned
+descendant. Each process record must state `joined: true` and closed streams
+(`stdin: "closed"`, `stdout: "eof"`, `stderr: "eof"`). The closure basis is
+either `owned-process-handles-joined` or `owned-job-zero`. The Job basis also
+requires an observed `active_process_count: 0`; omit Job fields when that count
+was not observed. An original owned child handle can identify a directly
+captured test child without presenting its launch timestamp as an OS birth
+identity. Use captured OS birth identities wherever those identify processes.
+PID absence, timestamps, expiry, a bare `ended` assertion, incomplete
+descendants, unknown generations, or missing joins/stream closure do not
+qualify.
+
+Recovery refuses changed owner or marker bytes, unknown marker formats, extra
+claim contents, links, multiply linked metadata, and protected target/claim/
+quarantine paths. It moves only the selected claim metadata and exact receipt
+into `claim-recovery/<repo-key>/<worktree-key>/<owner-sha256>`; compiler target
+contents are left in place. A per-worktree reservation blocks new launcher
+claims and pruning until the archived outcome is durable. If finalization fails
+after the move, the archive and reservation remain, the command reports partial
+completion, and repeated commands refuse to mutate that attempt. A successful
+recovery releases the reservation so the normal launcher can claim the target.
+The command reports `closure_basis` from the validated receipt and persists it
+with the outcome; repeated recovery verifies that field against the archived
+receipt before returning the prior result.
+
+A qualified or running artifact belongs outside compiler targets in an
+independently hashed immutable bundle. Pruning never migrates inputs, deletes
+qualified bundles, or makes a source/release claim.
 
 ## Evidence required before performance claims
 

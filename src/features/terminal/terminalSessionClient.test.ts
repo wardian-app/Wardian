@@ -242,6 +242,159 @@ describe("TerminalSessionClient", () => {
     expect(__terminalSessionClientTesting.clientCount()).toBe(0);
   });
 
+
+  it("delivers later output after a remount queued during consumer teardown", async () => {
+    const unsubscribing = deferred<void>();
+    const finishUnsubscribe = deferred<void>();
+    const applied: number[][] = [];
+    tauri.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      const request = (args as { request?: { presentation_id?: string } } | undefined)?.request;
+      if (command === "register_terminal_presentation") return registeredResult(request?.presentation_id ?? "missing");
+      if (command === "subscribe_terminal_events") return { broker_state: brokerState(), initial_snapshot: snapshot() };
+      if (command === "unregister_terminal_presentation") return brokerState();
+      if (command === "unsubscribe_terminal_events") {
+        unsubscribing.resolve();
+        await finishUnsubscribe.promise;
+        return undefined;
+      }
+      if (command === "read_terminal_events") return eventsBatch([{ type: "output", sequence: 1, runtime_generation: 1, bytes: [65] }], 1);
+      if (command === "ack_terminal_events") return { accepted_sequence: 1, latest_sequence: 1 };
+      throw new Error("Unexpected command: " + command);
+    });
+    const first = terminalSessionClientFor("agent-1");
+    await first.registerPresentation(registration("pane-a"), {
+      applySnapshot: () => undefined, applyEvents: () => undefined,
+    });
+    const closing = first.unregisterPresentation("pane-a");
+    await unsubscribing.promise;
+    const remounted = terminalSessionClientFor("agent-1");
+    const reopening = remounted.registerPresentation(registration("pane-a"), {
+      applySnapshot: () => undefined,
+      applyEvents: events => { applied.push(events.map(event => event.sequence)); },
+    });
+    finishUnsubscribe.resolve();
+    await closing;
+    await reopening;
+    emit("terminal-session-events-ready", { session_id: "agent-1", runtime_generation: 1, latest_sequence: 1 });
+    await vi.waitFor(() => expect(applied).toEqual([[1]]));
+    expect(terminalSessionClientFor("agent-1")).toBe(remounted);
+  });
+
+  it("retires delayed listener setup before a queued remount can attach", async () => {
+    const setupStarted = deferred<void>();
+    const finishSetup = deferred<void>();
+    const { listen } = await import("@tauri-apps/api/event");
+    // The real mocked listen function must delay its completion, just like the
+    // native plugin's registration IPC; handlers remain owned by their setup.
+    const originalListen = vi.mocked(listen).getMockImplementation();
+    if (!originalListen) throw new Error("Missing event mock");
+    let calls = 0;
+    vi.mocked(listen).mockImplementation(async (...args) => {
+      const unlisten = await originalListen(...args);
+      if (++calls <= 2) {
+        setupStarted.resolve();
+        await finishSetup.promise;
+      }
+      return unlisten;
+    });
+    const applied: number[][] = [];
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === "register_terminal_presentation") return registeredResult("pane-a");
+      if (command === "subscribe_terminal_events") return { broker_state: brokerState(), initial_snapshot: snapshot() };
+      if (command === "read_terminal_events") return eventsBatch([{ type: "output", sequence: 1, runtime_generation: 1, bytes: [65] }], 1);
+      if (command === "ack_terminal_events") return { accepted_sequence: 1, latest_sequence: 1 };
+      if (command === "unsubscribe_terminal_events") return undefined;
+      throw new Error("Unexpected command: " + command);
+    });
+    const client = terminalSessionClientFor("agent-1");
+    try {
+      const retired = client.registerPresentation(registration("pane-a"), {
+        applySnapshot: () => undefined, applyEvents: () => undefined,
+      }).then(() => false, () => true);
+      await setupStarted.promise;
+      const closing = client.destroy();
+      const reopening = client.registerPresentation(registration("pane-a"), {
+        applySnapshot: () => undefined,
+        applyEvents: events => { applied.push(events.map(event => event.sequence)); },
+      });
+      finishSetup.resolve();
+      await closing;
+      await reopening;
+      expect(await retired).toBe(true);
+      emit("terminal-session-events-ready", { session_id: "agent-1", runtime_generation: 1, latest_sequence: 1 });
+      await vi.waitFor(() => expect(applied).toEqual([[1]]));
+      expect(terminalSessionClientFor("agent-1")).toBe(client);
+    } finally {
+      finishSetup.resolve();
+      vi.mocked(listen).mockImplementation(originalListen);
+      await client.destroy();
+    }
+  });
+
+  it("finishes a pending subscription before teardown removes its consumer", async () => {
+    const subscribing = deferred<void>();
+    const finishSubscription = deferred<void>();
+    const unsubscribing = deferred<void>();
+    const finishUnsubscribe = deferred<void>();
+    const applied: number[][] = [];
+    let subscriptionCount = 0;
+    let consumerPresent = false;
+    tauri.invoke.mockImplementation(async (command: string) => {
+      if (command === "register_terminal_presentation") return registeredResult("pane-a");
+      if (command === "subscribe_terminal_events") {
+        if (++subscriptionCount === 1) {
+          subscribing.resolve();
+          await finishSubscription.promise;
+        }
+        consumerPresent = true;
+        return { broker_state: brokerState(), initial_snapshot: snapshot() };
+      }
+      if (command === "unsubscribe_terminal_events") {
+        unsubscribing.resolve();
+        await finishUnsubscribe.promise;
+        consumerPresent = false;
+        return undefined;
+      }
+      if (command === "read_terminal_events") {
+        expect(consumerPresent).toBe(true);
+        return eventsBatch([{ type: "output", sequence: 1, runtime_generation: 1, bytes: [65] }], 1);
+      }
+      if (command === "ack_terminal_events") return { accepted_sequence: 1, latest_sequence: 1 };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const client = terminalSessionClientFor("agent-1");
+    const retired = client.registerPresentation(registration("pane-a"), {
+      applySnapshot: () => undefined, applyEvents: () => undefined,
+    }).then(() => false, () => true);
+    await subscribing.promise;
+    const closing = client.destroy();
+    await settle();
+    const unsubscribedBeforeResponse = tauri.invoke.mock.calls.some(
+      ([command]) => command === "unsubscribe_terminal_events",
+    );
+    finishSubscription.resolve();
+    const registrationRetired = await retired;
+    await unsubscribing.promise;
+    const remounted = terminalSessionClientFor("agent-1");
+    const reopening = remounted.registerPresentation(registration("pane-a"), {
+      applySnapshot: () => undefined,
+      applyEvents: events => { applied.push(events.map(event => event.sequence)); },
+    });
+    await settle();
+    const subscriptionsBeforeUnsubscribeCompletes = subscriptionCount;
+    finishUnsubscribe.resolve();
+    await closing;
+    await reopening;
+    expect(unsubscribedBeforeResponse).toBe(false);
+    expect(registrationRetired).toBe(true);
+    expect(remounted).toBe(client);
+    expect(subscriptionsBeforeUnsubscribeCompletes).toBe(1);
+    expect(consumerPresent).toBe(true);
+    emit("terminal-session-events-ready", { session_id: "agent-1", runtime_generation: 1, latest_sequence: 1 });
+    await vi.waitFor(() => expect(applied).toEqual([[1]]));
+    expect(terminalSessionClientFor("agent-1")).toBe(client);
+  });
+
   it("resumes from a snapshot barrier without replaying background output or changing geometry", async () => {
     const appliedEvents: number[][] = [];
     const appliedSnapshots: string[] = [];

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { By, until } from "selenium-webdriver";
+import { By, Key, until } from "selenium-webdriver";
 
 import {
   createNativeHarness,
@@ -13,6 +13,9 @@ import {
   startNativeSession,
   waitForAppShell,
 } from "../lib/harness.mjs";
+import {
+  readTerminalDebugSnapshot,
+} from "../lib/terminal-debug.mjs";
 import { openWorkbenchSurface } from "../lib/workbench.mjs";
 
 const skipNativeBuild = process.env.WARDIAN_NATIVE_SKIP_BUILD === "1";
@@ -20,6 +23,7 @@ const RUN_ID = `${process.pid}-${Date.now()}`;
 const PROVIDER_SESSION_ID = `e2e-clear-repaint-${RUN_ID}`;
 const SESSION_NAME = `E2E-Clear-Repaint-${RUN_ID}`;
 const SCREENSHOT_DIR = process.env.WARDIAN_CLEAR_REPAINT_SCREENSHOT_DIR ?? null;
+const INPUT_CAPTURE_PATH = path.join(os.tmpdir(), `wardian-clear-repaint-input-${RUN_ID}.txt`);
 
 async function invokeTauri(driver, command, args = {}) {
   const result = await driver.executeAsyncScript((cmd, payload, done) => {
@@ -49,14 +53,31 @@ function createQuietMockScript() {
   const scriptPath = path.join(os.tmpdir(), `wardian-clear-repaint-${RUN_ID}.cjs`);
   fs.writeFileSync(scriptPath, `
 "use strict";
+const fs = require("node:fs");
 const providerSessionId = process.env.WARDIAN_MOCK_SESSION_ID;
+const inputCapturePath = process.env.WARDIAN_MOCK_INPUT_CAPTURE_PATH;
 if (!providerSessionId) throw new Error("WARDIAN_MOCK_SESSION_ID is required");
+if (!inputCapturePath) throw new Error("WARDIAN_MOCK_INPUT_CAPTURE_PATH is required");
 process.stdout.write(JSON.stringify({
   type: "init",
   session_id: providerSessionId,
   timestamp: new Date().toISOString(),
 }) + "\\n");
 process.stdout.write("quiet-start:" + providerSessionId + "\\r\\n");
+let pendingInput = "";
+process.stdin.on("data", (chunk) => {
+  fs.appendFileSync(inputCapturePath, chunk.toString("hex") + "\\n");
+  pendingInput += chunk.toString();
+  let newline = pendingInput.search(/[\\r\\n]/);
+  while (newline >= 0) {
+    const line = pendingInput.slice(0, newline).trim();
+    pendingInput = pendingInput.slice(newline + 1);
+    if (line === "paint-bottom-prompt") {
+      process.stdout.write("\\x1b[999;1Hbottom-prompt>");
+    }
+    newline = pendingInput.search(/[\\r\\n]/);
+  }
+});
 setInterval(() => {}, 1000);
 process.stdin.resume();
 `, "utf8");
@@ -87,10 +108,28 @@ async function readTerminalState(driver, sessionId) {
   }, sessionId);
 }
 
-async function saveScreenshot(driver, name) {
+async function sendTerminalInput(driver, sessionId, presentationId, input) {
+  const snapshot = await readTerminalDebugSnapshot(driver, presentationId);
+  assert.equal(snapshot?.broker?.ownerPresentationId, presentationId, "Expected terminal input owner");
+  await invokeTauri(driver, "send_terminal_presentation_input", {
+    request: {
+      session_id: sessionId,
+      presentation_id: presentationId,
+      runtime_generation: snapshot.broker.runtimeGeneration,
+      lease_epoch: snapshot.broker.leaseEpoch,
+      input,
+    },
+  });
+}
+
+async function saveScreenshot(driver, sessionId, name) {
   if (!SCREENSHOT_DIR) return;
   fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
-  const png = await driver.takeScreenshot();
+  const host = await driver.findElement(By.css(
+    `[data-testid="agent-session-surface"][data-resource-key=${JSON.stringify(sessionId)}] `
+    + `[data-testid="agent-terminal-host"]`,
+  ));
+  const png = await host.takeScreenshot();
   fs.writeFileSync(path.join(SCREENSHOT_DIR, `${name}.png`), png, "base64");
 }
 
@@ -101,16 +140,22 @@ test(
     const harness = await createNativeHarness();
     const mockScript = createQuietMockScript();
     const previousMockScript = process.env.WARDIAN_MOCK_SCRIPT;
+    const previousInputCapturePath = process.env.WARDIAN_MOCK_INPUT_CAPTURE_PATH;
     let session = null;
+    fs.rmSync(INPUT_CAPTURE_PATH, { force: true });
     process.env.WARDIAN_MOCK_SCRIPT = mockScript;
+    process.env.WARDIAN_MOCK_INPUT_CAPTURE_PATH = INPUT_CAPTURE_PATH;
 
     t.after(async () => {
       try {
         await session?.close();
       } finally {
         fs.rmSync(mockScript, { force: true });
+        fs.rmSync(INPUT_CAPTURE_PATH, { force: true });
         if (previousMockScript === undefined) delete process.env.WARDIAN_MOCK_SCRIPT;
         else process.env.WARDIAN_MOCK_SCRIPT = previousMockScript;
+        if (previousInputCapturePath === undefined) delete process.env.WARDIAN_MOCK_INPUT_CAPTURE_PATH;
+        else process.env.WARDIAN_MOCK_INPUT_CAPTURE_PATH = previousInputCapturePath;
       }
     });
 
@@ -160,17 +205,40 @@ test(
       const state = await readTerminalState(driver, sessionId);
       return { ok: state.mode === "owner", state };
     });
-    await saveScreenshot(driver, "before-new-session");
+    const presentationId = await host.getAttribute("data-terminal-presentation-id");
+    assert.ok(presentationId, "Expected the Workbench terminal host to expose its presentation ID");
+    await sendTerminalInput(driver, sessionId, presentationId, "paint-bottom-prompt\r");
+    await waitFor("bottom prompt paint", 15000, async () => {
+      const snapshot = await readSnapshot();
+      return { ok: snapshot.visible_grid.includes("bottom-prompt>"), snapshot };
+    });
+    await saveScreenshot(driver, sessionId, "before-new-session");
 
     // A vertical-only resize gives an Ink-style provider nothing new to draw,
-    // so it stays silent. The owner must still settle at the committed size.
+    // so it stays silent. The owner keeps normal keyboard input throughout the
+    // settle without submitting a draft or changing the prompt.
     await driver.manage().window().setRect({ width: 1400, height: 760 });
+    const terminalInput = await host.findElement(By.css(".xterm-helper-textarea"));
+    await driver.executeScript((element) => element.focus(), terminalInput);
+    await driver.actions().sendKeys("resize-draft", Key.ARROW_UP, Key.ESCAPE).perform();
+    const rawDraft = Buffer.from("resize-draft\x1b[A\x1b", "utf8").toString("hex");
+    await waitFor("raw resize-time keyboard draft", 10000, async () => {
+      const captured = fs.existsSync(INPUT_CAPTURE_PATH)
+        ? fs.readFileSync(INPUT_CAPTURE_PATH, "utf8").replace(/\s+/g, "")
+        : "";
+      return { ok: captured.includes(rawDraft), captured };
+    });
     let afterResize = null;
     for (let sample = 0; sample < 50; sample += 1) {
       afterResize = { state: await readTerminalState(driver, sessionId) };
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    await saveScreenshot(driver, "after-vertical-resize");
+    await saveScreenshot(driver, sessionId, "after-vertical-resize");
+    const resizedSnapshot = await readSnapshot();
+    assert.ok(
+      resizedSnapshot.visible_grid.includes("bottom-prompt>"),
+      `The bottom prompt must survive the native vertical resize: ${resizedSnapshot.visible_grid}`,
+    );
     assert.equal(
       afterResize.state.notice, null,
       `A silent provider must not leave the owner waiting for a repaint: ${JSON.stringify(afterResize.state)}`,
@@ -201,7 +269,7 @@ test(
       afterClear = { state };
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    await saveScreenshot(driver, "after-new-session");
+    await saveScreenshot(driver, sessionId, "after-new-session");
     assert.deepEqual(
       [...observedNotices], [],
       `New Session must not leave a repaint notice: ${JSON.stringify(afterClear.state)}`,

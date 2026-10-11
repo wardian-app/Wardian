@@ -14,6 +14,7 @@ use wardian_core::models::git::{
 };
 
 mod cargo_worktree_config;
+mod worktree_removal;
 pub(crate) use cargo_worktree_config::managed_worktree_cargo_target;
 use cargo_worktree_config::{remove_generated_cargo_config, write_cargo_worktree_config};
 
@@ -1289,7 +1290,7 @@ pub(crate) fn remove_worktree_without_force(
     workspace_path: &Path,
     worktree_path: &Path,
 ) -> Result<(), String> {
-    cleanup_generated_worktree_build_caches(workspace_path, worktree_path)?;
+    worktree_removal::cleanup_generated_worktree_build_caches(workspace_path, worktree_path)?;
     remove_worktree_with_options(workspace_path, worktree_path, false)
 }
 
@@ -1297,35 +1298,8 @@ pub(crate) fn remove_worktree_with_force(
     workspace_path: &Path,
     worktree_path: &Path,
 ) -> Result<(), String> {
-    cleanup_generated_worktree_build_caches(workspace_path, worktree_path)?;
+    worktree_removal::cleanup_generated_worktree_build_caches(workspace_path, worktree_path)?;
     remove_worktree_with_options(workspace_path, worktree_path, true)
-}
-
-fn cleanup_generated_worktree_build_caches(
-    workspace_path: &Path,
-    worktree_path: &Path,
-) -> Result<(), String> {
-    let workspace_path = absolute_existing_path(workspace_path)?;
-    let worktree_path = absolute_worktree_target_path(&workspace_path, worktree_path);
-
-    if workspace_path.join("Cargo.toml").is_file() {
-        remove_generated_cargo_config(&worktree_path, &workspace_path)?;
-    }
-
-    if workspace_path.join("package.json").is_file() {
-        remove_generated_cache_link(
-            &worktree_path.join("node_modules"),
-            &workspace_path.join("node_modules"),
-        )?;
-    }
-
-    if workspace_path.join("pyproject.toml").is_file()
-        || workspace_path.join("requirements.txt").is_file()
-    {
-        remove_generated_cache_link(&worktree_path.join(".venv"), &workspace_path.join(".venv"))?;
-    }
-
-    Ok(())
 }
 
 fn git_tracks_relative_path(repo_path: &Path, relative_path: &str) -> Result<bool, String> {
@@ -2093,34 +2067,6 @@ dddddddddddddddddddddddddddddddddddddddd\x1f\x1ffeature/review\x1fInitial commit
             .trim(),
             "wardian/reused"
         );
-    }
-
-    #[test]
-    fn remove_worktree_without_force_cleans_generated_cache_redirects() {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = temp.path().join("workspace");
-        let worktree = temp.path().join("agents").join("agent-1").join("worktree");
-        std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::write(
-            workspace.join("Cargo.toml"),
-            "[package]\nname = \"sample\"\n",
-        )
-        .unwrap();
-
-        let cwd = workspace.to_str().unwrap();
-        run_git(cwd, &["init"]).unwrap();
-        run_git(cwd, &["config", "user.email", "test@example.com"]).unwrap();
-        run_git(cwd, &["config", "user.name", "Wardian Test"]).unwrap();
-        run_git(cwd, &["add", "Cargo.toml"]).unwrap();
-        run_git(cwd, &["commit", "-m", "initial"]).unwrap();
-
-        create_worktree_with_build_caches(&workspace, &worktree, "wardian/repo-agent").unwrap();
-        assert!(worktree.join(".cargo").join("config.toml").exists());
-
-        remove_worktree_without_force(&workspace, &worktree).unwrap();
-
-        assert!(!worktree.exists());
-        assert!(!git_worktree_contains_path(&workspace, &worktree).unwrap());
     }
 
     #[test]

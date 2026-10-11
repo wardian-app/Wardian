@@ -8,6 +8,8 @@ import { useOnboardingStore } from "../store/useOnboardingStore";
 import { deriveCurrentThought } from "../utils/statusUtils";
 import { GraphView } from "./GraphView";
 
+const graphCommit = vi.hoisted(() => vi.fn<(edgeIds: string[]) => void>());
+
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn().mockResolvedValue(undefined),
 }));
@@ -16,67 +18,75 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn().mockResolvedValue(() => {}),
 }));
 
-vi.mock("../features/graph/GraphCanvas", () => ({
-  GraphCanvas: ({
-    projection,
-    resetSignal,
-    onSelectAgent,
-    onContextMenu,
-    onCanvasContextMenu,
-    showAllLabels,
-    connectMode,
-    selectedEdgeId,
-    onSelectEdge,
-  }: {
-    projection: {
-      nodes: Array<{ id: string; x: number; y: number; status: string; color: string }>;
-      commEdges: Array<{ id: string }>;
-    };
-    resetSignal?: number;
-    onSelectAgent: (id: string) => void;
-    onContextMenu: (id: string, x: number, y: number) => void;
-    onCanvasContextMenu?: (x: number, y: number) => void;
-    showAllLabels?: boolean;
-    connectMode?: boolean;
-    selectedEdgeId?: string | null;
-    onSelectEdge?: (edgeId: string) => void;
-  }) => (
-    <>
-      <button
-        data-testid="mock-graph-node"
-        data-show-all-labels={showAllLabels === false ? "false" : "true"}
-        data-connect-mode={connectMode ? "true" : "false"}
-        data-selected-edge={selectedEdgeId ?? "none"}
-        data-node-positions={JSON.stringify(projection.nodes.map((n) => [n.id, n.x, n.y]))}
-        data-node-statuses={JSON.stringify(projection.nodes.map((n) => [n.id, n.status]))}
-        data-node-colors={JSON.stringify(projection.nodes.map((n) => [n.id, n.color]))}
-        data-comm-edge-ids={JSON.stringify(projection.commEdges.map((e) => e.id))}
-        onClick={() => onSelectAgent("a")}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          onContextMenu("a", 12, 24);
-        }}
-      >
-        node-a reset-{resetSignal ?? 0}
-      </button>
-      <button
-        data-testid="mock-graph-edge"
-        onClick={() => onSelectEdge?.("a--b")}
-      >
-        edge-a--b
-      </button>
-      <button
-        data-testid="mock-graph-stage"
-        onContextMenu={(event) => {
-          event.preventDefault();
-          onCanvasContextMenu?.(12, 24);
-        }}
-      >
-        graph-stage
-      </button>
-    </>
-  ),
-}));
+vi.mock("../features/graph/GraphCanvas", async () => {
+  const { useLayoutEffect } = await import("react");
+  return {
+    GraphCanvas: ({
+      projection,
+      resetSignal,
+      onSelectAgent,
+      onContextMenu,
+      onCanvasContextMenu,
+      showAllLabels,
+      connectMode,
+      selectedEdgeId,
+      onSelectEdge,
+    }: {
+      projection: {
+        nodes: Array<{ id: string; x: number; y: number; status: string; color: string }>;
+        commEdges: Array<{ id: string }>;
+      };
+      resetSignal?: number;
+      onSelectAgent: (id: string) => void;
+      onContextMenu: (id: string, x: number, y: number) => void;
+      onCanvasContextMenu?: (x: number, y: number) => void;
+      showAllLabels?: boolean;
+      connectMode?: boolean;
+      selectedEdgeId?: string | null;
+      onSelectEdge?: (edgeId: string) => void;
+    }) => {
+      useLayoutEffect(() => {
+        graphCommit(projection.commEdges.map((edge) => edge.id));
+      }, [projection]);
+      return (
+        <>
+          <button
+            data-testid="mock-graph-node"
+            data-show-all-labels={showAllLabels === false ? "false" : "true"}
+            data-connect-mode={connectMode ? "true" : "false"}
+            data-selected-edge={selectedEdgeId ?? "none"}
+            data-node-positions={JSON.stringify(projection.nodes.map((n) => [n.id, n.x, n.y]))}
+            data-node-statuses={JSON.stringify(projection.nodes.map((n) => [n.id, n.status]))}
+            data-node-colors={JSON.stringify(projection.nodes.map((n) => [n.id, n.color]))}
+            data-comm-edge-ids={JSON.stringify(projection.commEdges.map((e) => e.id))}
+            onClick={() => onSelectAgent("a")}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              onContextMenu("a", 12, 24);
+            }}
+          >
+            node-a reset-{resetSignal ?? 0}
+          </button>
+          <button
+            data-testid="mock-graph-edge"
+            onClick={() => onSelectEdge?.("a--b")}
+          >
+            edge-a--b
+          </button>
+          <button
+            data-testid="mock-graph-stage"
+            onContextMenu={(event) => {
+              event.preventDefault();
+              onCanvasContextMenu?.(12, 24);
+            }}
+          >
+            graph-stage
+          </button>
+        </>
+      );
+    },
+  };
+});
 
 const agent = (id: string, folder = "C:/repo"): AgentConfig => ({
   session_id: id,
@@ -145,6 +155,7 @@ const defaultProps = {
 
 describe("GraphView", () => {
   beforeEach(async () => {
+    graphCommit.mockReset();
     Object.values(handlers).forEach((handler) => handler.mockClear());
     const { invoke } = await import("@tauri-apps/api/core");
     vi.mocked(invoke).mockReset();
@@ -917,6 +928,51 @@ describe("GraphView", () => {
   });
 
   describe("layout freeze", () => {
+    it("re-runs layout when clicked before the topology commit's passive effects", async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const { listen } = await import("@tauri-apps/api/event");
+      const listeners = new Map<string, () => void>();
+      vi.mocked(listen).mockImplementation(async (event: string, handler: unknown) => {
+        listeners.set(event, handler as () => void);
+        return () => {};
+      });
+      let edges: Array<{ a: string; b: string; origin: string }> = [
+        { a: "a", b: "b", origin: "manual" },
+      ];
+      vi.mocked(invoke).mockImplementation(async (command: string) => {
+        if (command === "get_topology") {
+          return { edges, ignored_pairs: [], fallback_groups: [] };
+        }
+        if (command === "get_pair_activity") return pairPage([]);
+        return undefined;
+      });
+      render(<GraphView {...defaultProps} />);
+      const node = screen.getByTestId("mock-graph-node");
+      await waitFor(() => {
+        expect(JSON.parse(node.getAttribute("data-comm-edge-ids")!)).toEqual(["a--b"]);
+      });
+      const frozenPositions = node.getAttribute("data-node-positions");
+      const rerun = screen.getByRole("button", { name: "Re-run layout" });
+      let clicked = false;
+      graphCommit.mockImplementation((edgeIds) => {
+        if (!clicked && edgeIds.length === 0) {
+          clicked = true;
+          // A committed canvas can trigger an action before the parent's
+          // pending passive effect runs. Keep this ordering deterministic.
+          rerun.click();
+        }
+      });
+      edges = [];
+      listeners.get("topology-changed")!();
+      await waitFor(() => {
+        expect(clicked).toBe(true);
+        expect(JSON.parse(node.getAttribute("data-comm-edge-ids")!)).toEqual([]);
+        expect(node.getAttribute("data-node-positions")).not.toBe(frozenPositions);
+      });
+      vi.mocked(listen).mockReset();
+      vi.mocked(listen).mockResolvedValue(() => {});
+    });
+
     it("keeps node positions fixed across topology changes until Re-run layout", async () => {
       const { invoke } = await import("@tauri-apps/api/core");
       const { listen } = await import("@tauri-apps/api/event");

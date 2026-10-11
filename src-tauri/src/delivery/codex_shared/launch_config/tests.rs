@@ -202,6 +202,47 @@ fn boolean_launch_leaf_is_scoped_to_the_startup_update_setting() {
 }
 
 #[test]
+fn zero_unload_overlay_restores_saved_or_absent_integer_and_rejects_other_shapes() {
+    for original in [
+        "# saved preferences\n",
+        "thread_unload_delay_secs = 60 # saved\n",
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("config.toml");
+        fs::write(&path, original).unwrap();
+        let mut guard =
+            prepare_tui_launch_config(home.path(), &args(&["thread_unload_delay_secs=0"])).unwrap();
+        assert_eq!(
+            read(home.path())["thread_unload_delay_secs"].as_integer(),
+            Some(0)
+        );
+        guard.restore().unwrap();
+        let restored = read(home.path());
+        assert_eq!(
+            restored
+                .get("thread_unload_delay_secs")
+                .and_then(toml_edit::Item::as_integer),
+            if original.contains("= 60") {
+                Some(60)
+            } else {
+                None
+            },
+        );
+        assert!(fs::read_to_string(path).unwrap().contains("# saved"));
+        assert!(!home.path().join(journal::FILE).exists());
+    }
+    for assignment in [
+        "thread_unload_delay_secs=-1",
+        "thread_unload_delay_secs='0'",
+        "thread_unload_delay_secs=true",
+        "model=0",
+        "check_for_update_on_startup=0",
+    ] {
+        assert!(leaves::parse(&args(&[assignment])).is_err());
+    }
+}
+
+#[test]
 fn duplicate_keys_last_wins_and_repeated_restore_is_a_noop() {
     let home = tempfile::tempdir().unwrap();
     let path = home.path().join("config.toml");

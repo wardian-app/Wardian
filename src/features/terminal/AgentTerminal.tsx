@@ -83,6 +83,8 @@ const RENDERER_DISPOSE_GRACE_MS = 30_000;
 // resize has nothing new to draw) would otherwise leave the presentation on the
 // old frame at the old size forever, so the broker's own frame settles it.
 const GEOMETRY_QUIET_SETTLE_MS = 1_000;
+const GEOMETRY_SNAPSHOT_RETRY_MS = 250;
+const MAX_GEOMETRY_SNAPSHOT_ATTEMPTS = 3;
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
 
 type TitleHandlerRef = {
@@ -169,14 +171,25 @@ type TerminalSessionEntry = {
   frameGeometry: { cols: number; rows: number } | null;
   frameGeneration: number;
   pendingGeometry: boolean;
-  ownerGeometryTransitionSettled: boolean;
   repaintRequestedForGeometry: boolean;
   preserveOwnerScrollback: boolean;
   snapshotStatus: "ready" | "pending" | "degraded";
   snapshotDegradation: "missing_formatted_state" | "invalid_formatted_state" | null;
-  allowPendingKeyboard: boolean;
+  geometrySettleEpoch: number;
+  presentationBindingEpoch: number;
   geometrySettleTimer?: ReturnType<typeof setTimeout> | null;
   onSnapshotStatusChange?: (status: "ready" | "pending" | "degraded", reason: TerminalSessionEntry["snapshotDegradation"]) => void;
+};
+
+type GeometrySettleIdentity = {
+  epoch: number;
+  sessionId: string;
+  presentationId: string;
+  terminalClient: TerminalSessionEntry["terminalClient"];
+  presentationBindingEpoch: number;
+  generation: number;
+  leaseEpoch: number;
+  ownerPresentationId: string | null;
 };
 
 const terminalSessionMap = new Map<string, TerminalSessionEntry>();
@@ -1105,13 +1118,44 @@ async function reportTerminalSize(
     entry.brokerState?.owner_presentation_id === entry.presentationId &&
     entry.brokerState.pending_activation === null &&
     (entry.brokerState.geometry.cols !== cols || entry.brokerState.geometry.rows !== rows);
-  const previousStatus = entry.snapshotStatus;
+  const previousTransition = {
+    pendingGeometry: entry.pendingGeometry,
+    repaintRequestedForGeometry: entry.repaintRequestedForGeometry,
+    snapshotStatus: entry.snapshotStatus,
+  };
+  const transitionGeneration = entry.generation;
+  const transitionPresentationId = entry.presentationId;
+  const transitionClient = entry.terminalClient;
+  const transitionBindingEpoch = entry.presentationBindingEpoch;
+  const transitionLeaseEpoch = entry.brokerState?.lease_epoch;
+  let transitionEpoch: number | null = null;
+  let resizeAttempted = false;
   if (enteringOwnerTransition) {
+    entry.geometrySettleEpoch += 1;
+    transitionEpoch = entry.geometrySettleEpoch;
     entry.pendingGeometry = true;
     entry.repaintRequestedForGeometry = false;
-    entry.allowPendingKeyboard = false;
     setSnapshotStatus(entry, "pending");
   }
+  const ownsCurrentTransition = () => {
+    const state = entry.brokerState;
+    return transitionEpoch !== null &&
+      entry.geometrySettleEpoch === transitionEpoch &&
+      entry.generation === transitionGeneration &&
+      entry.presentationId === transitionPresentationId &&
+      entry.terminalClient === transitionClient &&
+      entry.presentationBindingEpoch === transitionBindingEpoch &&
+      state?.runtime_generation === transitionGeneration &&
+      state.runtime_state === "live" &&
+      state.lease_epoch === transitionLeaseEpoch &&
+      state.owner_presentation_id === transitionPresentationId &&
+      state.pending_activation === null;
+  };
+  const restorePreviousTransition = () => {
+    entry.pendingGeometry = previousTransition.pendingGeometry;
+    entry.repaintRequestedForGeometry = previousTransition.repaintRequestedForGeometry;
+    setSnapshotStatus(entry, previousTransition.snapshotStatus);
+  };
   try {
     if (entry.legacyMode) {
       await terminalCompatibilityAdapter.resize(entry.sessionId, cols, rows);
@@ -1127,6 +1171,7 @@ async function reportTerminalSize(
       entry.brokerState?.geometry.cols !== cols || entry.brokerState?.geometry.rows !== rows;
     if (ownsRuntime && needsNativeResize) {
       entry.geometrySequence += 1;
+      resizeAttempted = true;
       const result = await entry.terminalClient.resize(
         entry.presentationId,
         entry.geometrySequence,
@@ -1137,19 +1182,26 @@ async function reportTerminalSize(
         previousBrokerGeometry !== null && result.geometry?.cols === previousBrokerGeometry.cols &&
         result.geometry.rows === previousBrokerGeometry.rows;
       if (enteringOwnerTransition &&
-          (result.decision.status !== "accepted" || unchangedByBroker)) {
+          (result.decision.status !== "accepted" || unchangedByBroker) &&
+          ownsCurrentTransition()) {
         // A rejected resize, or one the broker clamped back to the current
-        // canonical size, produces no PTY resize and therefore no repaint.
-        entry.pendingGeometry = false;
-        setSnapshotStatus(entry, previousStatus);
+        // canonical size, produces no PTY resize. Restore any earlier pending
+        // transition as a coherent status/geometry pair.
+        restorePreviousTransition();
       }
       entry.pendingForceResize = false;
     }
     entry.lastReportedSize = { cols, rows };
   } catch {
-    if (enteringOwnerTransition) {
-      entry.pendingGeometry = false;
-      setSnapshotStatus(entry, previousStatus);
+    if (enteringOwnerTransition && ownsCurrentTransition()) {
+      if (resizeAttempted) {
+        // The resize IPC may have committed before its response was lost. Keep
+        // the frame pending and let a broker snapshot resolve the uncertainty.
+        entry.pendingGeometry = true;
+        setSnapshotStatus(entry, "pending");
+      } else {
+        restorePreviousTransition();
+      }
     }
     // Leave lastReportedSize untouched so the next fit can retry. Poisoning the
     // cache here would block resizes for PTYs that come back up (e.g. after clear).
@@ -1210,7 +1262,6 @@ function setSnapshotStatus(entry: TerminalSessionEntry, status: TerminalSessionE
   entry.snapshotStatus = status;
   if (status === "ready") {
     entry.snapshotDegradation = null;
-    entry.allowPendingKeyboard = false;
   }
   if (status === "pending") {
     scheduleGeometrySettle(entry);
@@ -1227,60 +1278,146 @@ function cancelGeometrySettle(entry: TerminalSessionEntry) {
   entry.geometrySettleTimer = null;
 }
 
-function scheduleGeometrySettle(entry: TerminalSessionEntry) {
+function invalidateGeometrySettle(entry: TerminalSessionEntry) {
+  entry.geometrySettleEpoch += 1;
   cancelGeometrySettle(entry);
-  if (entry.legacyMode || entry.disposed) return;
+  if (entry.pendingGeometry && entry.snapshotStatus === "pending") {
+    scheduleGeometrySettle(entry);
+  }
+}
+
+function setEntryBrokerState(entry: TerminalSessionEntry, state: TerminalBrokerState) {
+  const previous = entry.brokerState;
+  entry.brokerState = state;
+  if (previous &&
+      previous.runtime_generation === state.runtime_generation &&
+      previous.runtime_state === state.runtime_state &&
+      previous.lease_epoch === state.lease_epoch &&
+      previous.owner_presentation_id === state.owner_presentation_id &&
+      previous.pending_activation?.activation_id === state.pending_activation?.activation_id &&
+      previous.geometry.cols === state.geometry.cols &&
+      previous.geometry.rows === state.geometry.rows) {
+    return;
+  }
+
+  // A lease, runtime, or canonical geometry change retires snapshots already
+  // in flight. Pending work may resume against the newly observed identity.
+  invalidateGeometrySettle(entry);
+}
+
+function captureGeometrySettleIdentity(entry: TerminalSessionEntry): GeometrySettleIdentity | null {
+  const state = entry.brokerState;
+  if (!state || state.runtime_generation !== entry.generation ||
+      state.runtime_state !== "live" || state.pending_activation !== null) {
+    return null;
+  }
+  return {
+    epoch: entry.geometrySettleEpoch,
+    sessionId: entry.sessionId,
+    presentationId: entry.presentationId,
+    terminalClient: entry.terminalClient,
+    presentationBindingEpoch: entry.presentationBindingEpoch,
+    generation: entry.generation,
+    leaseEpoch: state.lease_epoch,
+    ownerPresentationId: state.owner_presentation_id,
+  };
+}
+
+function geometrySettleIsCurrent(entry: TerminalSessionEntry, identity: GeometrySettleIdentity) {
+  const state = entry.brokerState;
+  return !entry.disposed && entry.snapshotStatus === "pending" && entry.pendingGeometry &&
+    entry.geometrySettleEpoch === identity.epoch &&
+    entry.sessionId === identity.sessionId &&
+    entry.presentationId === identity.presentationId &&
+    entry.terminalClient === identity.terminalClient &&
+    entry.presentationBindingEpoch === identity.presentationBindingEpoch &&
+    entry.generation === identity.generation &&
+    state?.runtime_generation === identity.generation &&
+    state.runtime_state === "live" &&
+    state.lease_epoch === identity.leaseEpoch &&
+    state.owner_presentation_id === identity.ownerPresentationId &&
+    state.pending_activation === null;
+}
+
+function scheduleGeometrySettle(
+  entry: TerminalSessionEntry,
+  attempt = 0,
+  identity = captureGeometrySettleIdentity(entry),
+) {
+  cancelGeometrySettle(entry);
+  if (entry.legacyMode || !identity || !geometrySettleIsCurrent(entry, identity)) return;
+  const delay = attempt === 0
+    ? GEOMETRY_QUIET_SETTLE_MS
+    : Math.min(GEOMETRY_SNAPSHOT_RETRY_MS * (2 ** (attempt - 1)), GEOMETRY_QUIET_SETTLE_MS);
   entry.geometrySettleTimer = setTimeout(() => {
     entry.geometrySettleTimer = null;
-    void settleQuietGeometry(entry);
-  }, GEOMETRY_QUIET_SETTLE_MS);
+    void settleQuietGeometry(entry, identity, attempt);
+  }, delay);
+}
+
+function retryGeometrySettle(
+  entry: TerminalSessionEntry,
+  identity: GeometrySettleIdentity,
+  attempt: number,
+) {
+  const nextAttempt = attempt + 1;
+  if (nextAttempt >= MAX_GEOMETRY_SNAPSHOT_ATTEMPTS ||
+      !geometrySettleIsCurrent(entry, identity)) {
+    return;
+  }
+  scheduleGeometrySettle(entry, nextAttempt, identity);
 }
 
 /**
  * Ends a geometry transition the provider never repainted. The broker's parser
- * already holds the terminal at the committed geometry, so its snapshot is the
- * accurate frame; later provider output still applies on top. This reads state
- * only: it sends nothing to the provider.
+ * owns the current screen state, and later provider output continues to apply
+ * after recovery. This reads state only and sends nothing to the provider.
  */
-async function settleQuietGeometry(entry: TerminalSessionEntry) {
-  const generation = entry.generation;
-  const stillPending = () => !entry.disposed && entry.snapshotStatus === "pending" &&
-    entry.pendingGeometry && entry.generation === generation;
+async function settleQuietGeometry(
+  entry: TerminalSessionEntry,
+  identity: GeometrySettleIdentity,
+  attempt: number,
+) {
+  const stillPending = () => geometrySettleIsCurrent(entry, identity);
   if (!stillPending()) return;
   try {
     await entry.terminalClient.requestPresentationSnapshot(entry.presentationId, stillPending);
+    if (stillPending()) retryGeometrySettle(entry, identity, attempt);
   } catch {
-    // The presentation was unregistered or the runtime is transitioning. A
-    // later geometry transition arms a new settle.
+    if (stillPending()) retryGeometrySettle(entry, identity, attempt);
   }
 }
 
-function canEnablePendingKeyboard(entry: TerminalSessionEntry) {
+function hasCurrentTerminalOwner(entry: TerminalSessionEntry) {
   const state = entry.brokerState;
   return state?.owner_presentation_id === entry.presentationId &&
-    state.pending_activation === null && state.runtime_generation === entry.generation;
+    state.pending_activation === null && state.runtime_state === "live" &&
+    state.runtime_generation === entry.generation;
 }
 
-function canSendTerminalInput(entry: TerminalSessionEntry, data?: string) {
-  if (!canEnablePendingKeyboard(entry)) return false;
-  const fit = entry.renderer?.canonicalFit;
-  if (data !== undefined && entry.allowPendingKeyboard &&
-      (entry.pendingGeometry || entry.snapshotStatus === "degraded")) {
-    // A deliberate keyboard recovery action cannot grant coordinate input.
-    return !/\x1b\[(?:<\d+;\d+;\d+[Mm]|\d+;\d+;\d+M|M|\d+;\d+R)/.test(data);
-  }
+function hasAccurateTerminalGeometry(entry: TerminalSessionEntry) {
   const state = entry.brokerState;
-  if (data !== undefined && !entry.ownerGeometryTransitionSettled &&
-      entry.pendingGeometry && entry.snapshotStatus === "pending" &&
-      entry.lastReportedSize?.cols === state?.geometry.cols &&
-      entry.lastReportedSize?.rows === state?.geometry.rows) {
-    // A stale source frame cannot safely map mouse or cursor coordinates.
-    // xterm's ordinary keyboard text has no dependency on that frame.
-    return !/[\x1b\x9b]/.test(data);
-  }
-  return !entry.pendingGeometry &&
-    entry.snapshotStatus === "ready" && fit?.scale === 1 && !fit.pan &&
-    fit.cols === state?.geometry.cols && fit.rows === state?.geometry.rows;
+  const fit = entry.renderer?.canonicalFit;
+  // A plain degraded projection has no authoritative VT cursor or mode state.
+  return Boolean(state && entry.snapshotStatus === "ready" && !entry.pendingGeometry &&
+    entry.frameGeneration === state.runtime_generation &&
+    entry.frameGeometry?.cols === state.geometry.cols &&
+    entry.frameGeometry.rows === state.geometry.rows &&
+    fit?.scale === 1 && !fit.pan &&
+    fit.cols === state.geometry.cols && fit.rows === state.geometry.rows);
+}
+
+function containsCoordinateDependentTerminalInput(data: string) {
+  // While the rendered frame is stale, key reports remain usable. Mouse
+  // reports and CPR values encode cells in that frame and must wait for sync.
+  return /(?:\x1b\[|\x9b)(?:<\d+;\d+;\d+[Mm]|\d+;\d+;\d+M|M[\s\S]{3}|(?:\?)?\d+;\d+R)/.test(data);
+}
+
+function canSendTerminalInput(entry: TerminalSessionEntry, data?: string, keyboardInput = false) {
+  if (!hasCurrentTerminalOwner(entry)) return false;
+  if (data === undefined) return hasAccurateTerminalGeometry(entry);
+  return keyboardInput || !containsCoordinateDependentTerminalInput(data) ||
+    hasAccurateTerminalGeometry(entry);
 }
 
 function sizeRendererToSource(entry: TerminalSessionEntry, cols: number, rows: number) {
@@ -1498,9 +1635,9 @@ async function applyBrokerSnapshot(
       entry.frameGeneration === snapshot.runtime_generation) {
     // A geometry acknowledgement is a sequence barrier, not provider paint.
     // Keep the last accurate source frame fitted until later output arrives.
+    entry.geometrySettleEpoch += 1;
     entry.pendingGeometry = true;
     entry.repaintRequestedForGeometry = false;
-    entry.allowPendingKeyboard = false;
     entry.preserveOwnerScrollback = Boolean(
       options.preserveLocalScrollback && renderer &&
       snapshot.scrollback.length === 0 &&
@@ -1511,21 +1648,17 @@ async function applyBrokerSnapshot(
     return;
   }
   entry.brokerDecoder = new TextDecoder();
-  // A rejected resize can roll status back to ready without a frame. Only a
-  // post-geometry snapshot consumes the first owner's keyboard allowance.
-  const wasPendingGeometry = entry.pendingGeometry && entry.snapshotStatus === "pending";
   const replay = decodeTerminalSnapshot(snapshot);
   if (replay.kind === "degraded" && entry.frameGeometry &&
       entry.frameGeneration === snapshot.runtime_generation) {
     if (entry.frameGeometry.cols !== snapshot.geometry.cols ||
         entry.frameGeometry.rows !== snapshot.geometry.rows) {
+      entry.geometrySettleEpoch += 1;
       if (!entry.pendingGeometry) entry.repaintRequestedForGeometry = false;
       entry.pendingGeometry = true;
-      entry.allowPendingKeyboard = false;
       applyCanonicalGeometry(entry, snapshot.geometry.cols, snapshot.geometry.rows);
     }
     entry.snapshotDegradation = replay.reason;
-    if (entry.pendingGeometry) entry.ownerGeometryTransitionSettled = true;
     setSnapshotStatus(entry, "degraded");
     return;
   }
@@ -1601,7 +1734,6 @@ async function applyBrokerSnapshot(
   entry.repaintRequestedForGeometry = false;
   entry.preserveOwnerScrollback = false;
   entry.snapshotDegradation = replay.kind === "degraded" ? replay.reason : null;
-  if (wasPendingGeometry) entry.ownerGeometryTransitionSettled = true;
   setSnapshotStatus(entry, replay.kind === "formatted" ? "ready" : "degraded");
   terminalSessionMap.get(terminalKey)?.titleHandlerRef.current?.(entry.latestTitle ?? "");
 }
@@ -1643,9 +1775,9 @@ async function applyBrokerEvents(
       await flush();
       if (entry.frameGeometry && (entry.frameGeometry.cols !== event.geometry.cols ||
           entry.frameGeometry.rows !== event.geometry.rows)) {
+        entry.geometrySettleEpoch += 1;
         entry.pendingGeometry = true;
         entry.repaintRequestedForGeometry = false;
-        entry.allowPendingKeyboard = false;
         setSnapshotStatus(entry, "pending");
       }
       applyCanonicalGeometry(entry, event.geometry.cols, event.geometry.rows);
@@ -2098,12 +2230,12 @@ async function getOrCreateTerminalSession(
     frameGeometry: null,
     frameGeneration: 0,
     pendingGeometry: false,
-    ownerGeometryTransitionSettled: false,
     repaintRequestedForGeometry: false,
     preserveOwnerScrollback: false,
     snapshotStatus: "ready",
     snapshotDegradation: null,
-    allowPendingKeyboard: false,
+    geometrySettleEpoch: 0,
+    presentationBindingEpoch: 0,
     cursorRegistration,
   };
 
@@ -2328,8 +2460,14 @@ function createRenderer(terminalKey: string, entry: TerminalSessionEntry) {
     snapshotOverlay: null,
   };
 
+  const pendingKeyboardSequences = new Set<string>();
+  term.onKey(({ key }) => pendingKeyboardSequences.add(key));
   term.onData((data) => {
-    if (!entry.legacyMode && !canSendTerminalInput(entry, data)) return;
+    // xterm emits onKey immediately before onData for physical keyboard input.
+    // Use that origin to distinguish modified function keys such as Ctrl+F3
+    // (CSI 1;5R) from an identical cursor-position report.
+    const keyboardInput = pendingKeyboardSequences.delete(data);
+    if (!entry.legacyMode && !canSendTerminalInput(entry, data, keyboardInput)) return;
     if ((data === "\x1b[I" || data === "\x1b[O") && entry.provider !== "opencode") {
       return;
     }
@@ -2340,6 +2478,12 @@ function createRenderer(terminalKey: string, entry: TerminalSessionEntry) {
     const input = filterProviderTerminalInput(entry.provider, data);
     if (input.length === 0) {
       return;
+    }
+    if (entry.pendingGeometry && entry.snapshotStatus === "degraded") {
+      // A fresh owner keystroke is the recovery signal after one failed
+      // post-output snapshot. The next provider output may now carry a usable
+      // formatted frame, without a separate keyboard-enable control.
+      entry.repaintRequestedForGeometry = false;
     }
     if (entry.provider !== "opencode" && term.buffer.active.viewportY < term.buffer.active.baseY) {
       term.scrollToBottom();
@@ -2569,7 +2713,6 @@ export const AgentTerminal = memo(function AgentTerminal({
   const [rendererReady, setRendererReady] = useState(false);
   const [snapshotStatus, setSnapshotStatusView] = useState<TerminalSessionEntry["snapshotStatus"]>("ready");
   const [snapshotDegradation, setSnapshotDegradationView] = useState<TerminalSessionEntry["snapshotDegradation"]>(null);
-  const [canRecoverKeyboard, setCanRecoverKeyboard] = useState(false);
   const [rendererMountRevision, setRendererMountRevision] = useState(0);
   const terminalFontSize = useSettingsStore((state) => state.terminalFontSize);
   const terminalFontFamily = useSettingsStore((state) => state.terminalFontFamily);
@@ -2786,7 +2929,7 @@ export const AgentTerminal = memo(function AgentTerminal({
         });
         if (suspended) {
           entry.presentationState = suspended.presentation;
-          entry.brokerState = suspended.broker_state;
+          setEntryBrokerState(entry, suspended.broker_state);
         }
       } catch {
         // Recovery remains retryable even if the broker disappears concurrently.
@@ -2862,7 +3005,7 @@ export const AgentTerminal = memo(function AgentTerminal({
         }
         if (result) {
           entry.presentationState = result.presentation;
-          entry.brokerState = result.broker_state;
+          setEntryBrokerState(entry, result.broker_state);
           if (
             result.presentation.requires_resync &&
             result.broker_state.owner_presentation_id === presentationId
@@ -3208,11 +3351,9 @@ export const AgentTerminal = memo(function AgentTerminal({
         entry = session;
         setSnapshotStatusView(session.snapshotStatus);
         setSnapshotDegradationView(session.snapshotDegradation);
-        setCanRecoverKeyboard(Boolean(canEnablePendingKeyboard(session)));
         session.onSnapshotStatusChange = (status, reason) => {
           setSnapshotStatusView(status);
           setSnapshotDegradationView(reason);
-          setCanRecoverKeyboard(Boolean(canEnablePendingKeyboard(session)));
         };
         session.onRendererEvicted = () => {
           rendererEvictedRef.current = true;
@@ -3341,9 +3482,7 @@ export const AgentTerminal = memo(function AgentTerminal({
             if (!isMounted || session.disposed) {
               return;
             }
-            session.brokerState = state;
-            if (!canEnablePendingKeyboard(session)) session.allowPendingKeyboard = false;
-            setCanRecoverKeyboard(Boolean(canEnablePendingKeyboard(session)));
+            setEntryBrokerState(session, state);
             if (presentationObserverMountedRef.current) {
               onPresentationStateChangeRef.current?.(state, session.presentationState);
             }
@@ -3359,9 +3498,7 @@ export const AgentTerminal = memo(function AgentTerminal({
               return;
             }
             session.presentationState = result.presentation;
-            session.brokerState = result.broker_state;
-            if (!canEnablePendingKeyboard(session)) session.allowPendingKeyboard = false;
-            setCanRecoverKeyboard(Boolean(canEnablePendingKeyboard(session)));
+            setEntryBrokerState(session, result.broker_state);
             if (presentationObserverMountedRef.current) {
               onPresentationStateChangeRef.current?.(result.broker_state, result.presentation);
             }
@@ -3416,14 +3553,12 @@ export const AgentTerminal = memo(function AgentTerminal({
           onLeaseDecision: (decision) => {
             if (!isMounted || session.disposed) return;
             if (session.brokerState && decision.runtime_generation >= session.brokerState.runtime_generation) {
-              session.brokerState = {
+              setEntryBrokerState(session, {
                 ...session.brokerState,
                 runtime_generation: decision.runtime_generation,
                 lease_epoch: decision.lease_epoch,
                 owner_presentation_id: decision.owner_presentation_id,
-              };
-              if (!canEnablePendingKeyboard(session)) session.allowPendingKeyboard = false;
-              setCanRecoverKeyboard(Boolean(canEnablePendingKeyboard(session)));
+              });
               if (presentationObserverMountedRef.current) {
                 onPresentationStateChangeRef.current?.(
                   session.brokerState,
@@ -3445,6 +3580,8 @@ export const AgentTerminal = memo(function AgentTerminal({
             presentationOwnerTokenRef.current,
           );
           if (rebound) {
+            session.presentationBindingEpoch += 1;
+            invalidateGeometrySettle(session);
             await awaitBackendReadyAndFit();
             const reconciled = await session.terminalClient.updatePresentation(presentationId, {
               desired_geometry:
@@ -3459,7 +3596,7 @@ export const AgentTerminal = memo(function AgentTerminal({
             }
             if (reconciled) {
               session.presentationState = reconciled.presentation;
-              session.brokerState = reconciled.broker_state;
+              setEntryBrokerState(session, reconciled.broker_state);
             }
             await session.terminalClient.requestPresentationSnapshot(presentationId);
           } else {
@@ -3484,7 +3621,7 @@ export const AgentTerminal = memo(function AgentTerminal({
               return;
             }
             session.presentationState = result.presentation;
-            session.brokerState = result.broker_state;
+            setEntryBrokerState(session, result.broker_state);
             const latestLifecycle = presentationLifecycleRef.current;
             const lifecycleChangedDuringRegistration =
               latestLifecycle.visibility !== registrationLifecycle.visibility ||
@@ -3503,7 +3640,7 @@ export const AgentTerminal = memo(function AgentTerminal({
               }
               if (reconciled) {
                 session.presentationState = reconciled.presentation;
-                session.brokerState = reconciled.broker_state;
+                setEntryBrokerState(session, reconciled.broker_state);
               }
             }
           }
@@ -3531,7 +3668,7 @@ export const AgentTerminal = memo(function AgentTerminal({
               return;
             }
             if (activation?.ack) {
-              session.brokerState = activation.ack.broker_state;
+              setEntryBrokerState(session, activation.ack.broker_state);
               currentBrokerState = activation.ack.broker_state;
             }
           }
@@ -3674,7 +3811,7 @@ export const AgentTerminal = memo(function AgentTerminal({
         return;
       }
       entry.presentationState = result.presentation;
-      entry.brokerState = result.broker_state;
+      setEntryBrokerState(entry, result.broker_state);
       if (presentationObserverMountedRef.current) {
         onPresentationStateChangeRef.current?.(result.broker_state, result.presentation);
       }
@@ -3683,20 +3820,20 @@ export const AgentTerminal = memo(function AgentTerminal({
         visibility === "visible" &&
         renderState === "mounted" &&
         requestedInteraction === "interactive" &&
-        entry.brokerState.owner_presentation_id === null
+        entry.brokerState?.owner_presentation_id === null
       ) {
         const activation = await entry.terminalClient.activateWhenUnowned(presentationId);
         if (cancelled) {
           return;
         }
         if (activation?.ack) {
-          entry.brokerState = activation.ack.broker_state;
+          setEntryBrokerState(entry, activation.ack.broker_state);
         }
       }
       if (
         renderState === "mounted" &&
         result.presentation.requires_resync &&
-        entry.brokerState.owner_presentation_id === presentationId
+        entry.brokerState?.owner_presentation_id === presentationId
       ) {
         await entry.terminalClient.resyncOwner(presentationId);
       }
@@ -3876,23 +4013,10 @@ export const AgentTerminal = memo(function AgentTerminal({
           </button>
         </div>
       )}
-      {snapshotStatus !== "ready" && !initError && (
+      {snapshotStatus === "degraded" && !initError && (
         <div data-testid="terminal-snapshot-status" className="absolute right-2 top-2 z-30 max-w-72 rounded border border-wardian-border bg-[var(--color-wardian-card)] px-2 py-1 text-xs text-muted shadow">
-          <span>{snapshotStatus === "pending" ? "Waiting for terminal repaint" :
-            snapshotDegradation === "invalid_formatted_state" ? "Terminal formatting invalid" :
-              "Terminal formatting unavailable"}</span>
-          {canRecoverKeyboard && (
-            <div className="mt-1">
-              <p>The provider has not repainted. Keys may affect an unseen prompt.</p>
-              <button type="button" className="mt-1 rounded border border-current px-2 py-0.5" onClick={() => {
-                const entry = terminalSessionMap.get(terminalKey);
-                if (!entry || !canEnablePendingKeyboard(entry)) return;
-                entry.allowPendingKeyboard = true;
-                entry.repaintRequestedForGeometry = false;
-                focusTerminal();
-              }}>Enable keyboard input</button>
-            </div>
-          )}
+          <span>{snapshotDegradation === "invalid_formatted_state" ? "Terminal formatting invalid" :
+            "Terminal formatting unavailable"}</span>
         </div>
       )}
       <div
@@ -3945,6 +4069,9 @@ export const AgentTerminal = memo(function AgentTerminal({
 export const __terminalTesting = {
   applyBrokerSnapshot,
   canSendTerminalInput,
+  cancelGeometrySettle,
+  invalidateGeometrySettle,
+  setEntryBrokerState,
   reportTerminalSize,
   captureSnapshotOverlay,
   demoteSessionToDom,

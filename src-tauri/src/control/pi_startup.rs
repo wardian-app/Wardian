@@ -42,7 +42,11 @@ pub(super) fn pi_output_has_startup_ready_prompt(output: &str) -> bool {
     }
 
     frame.iter().enumerate().any(|(index, line)| {
-        if !line.contains("%/") || !line.contains("(auto)") || line.split_whitespace().count() < 2 {
+        // Pi reports unknown context usage after compaction as ?/capacity.
+        if !(line.contains("%/") || line.contains("?/"))
+            || !line.contains("(auto)")
+            || line.split_whitespace().count() < 2
+        {
             return false;
         }
         let footer_is_current = index + 1 == frame.len()
@@ -116,7 +120,8 @@ fn pi_line_is_blocking_status(line: &str) -> bool {
         return true;
     }
 
-    let footer_like = normalized.contains("%/") || normalized.contains("(auto)");
+    let footer_like =
+        normalized.contains("%/") || normalized.contains("?/") || normalized.contains("(auto)");
     footer_like
         && ["loading", "starting", "connecting"]
             .iter()
@@ -126,6 +131,33 @@ fn pi_line_is_blocking_status(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::pi_output_has_startup_ready_prompt;
+
+    #[test]
+    fn unknown_context_after_compaction_allows_only_a_current_ready_editor() {
+        let ready = "Previous answer\n────────────────────────────────\n\n────────────────────────────────\n<workspace-root>/project\n↑4.0k ↓9 $0.001 (sub) ?/272k (auto) (provider) model • high";
+        assert!(pi_output_has_startup_ready_prompt(ready));
+        assert!(pi_output_has_startup_ready_prompt(&format!(
+            "pi v0.84.2\n{ready}"
+        )));
+        for blocking in [
+            "Loading model…",
+            "Error: provider authentication failed",
+            "No models available. Use /login.",
+        ] {
+            assert!(!pi_output_has_startup_ready_prompt(&format!(
+                "pi v0.84.2\n{blocking}\n{ready}"
+            )));
+            assert!(!pi_output_has_startup_ready_prompt(&format!(
+                "{ready}\n{blocking}"
+            )));
+        }
+        assert!(!pi_output_has_startup_ready_prompt(
+            &ready.replace("────────────────────────────────\n\n", "")
+        ));
+        assert!(!pi_output_has_startup_ready_prompt(
+            &ready.replace("\n\n────────────────", "\nDraft\n────────────────")
+        ));
+    }
 
     #[test]
     fn resumed_editor_is_ready_without_the_scrolled_startup_banner() {

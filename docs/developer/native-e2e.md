@@ -4,6 +4,10 @@ Wardian uses a native Tauri/WebDriver harness for tests that must exercise real 
 
 ## Setup
 
+Use Node.js 24 LTS for the native suite. Canonical state evidence checks use
+the built-in `node:sqlite` module, which is unavailable in Node.js 20. The
+nightly workflow verifies SQLite support before building the app.
+
 Run the cross-platform setup command:
 
 ```bash
@@ -48,6 +52,53 @@ $env:WARDIAN_NATIVE_APP = '<artifact-path>'
 npm run test:e2e:native:fast -- <native-test-file>
 ```
 
+For a prebuilt app and its matching CLI, also set `WARDIAN_NATIVE_CLI` and
+`WARDIAN_NATIVE_SKIP_BUILD=1`. The CLI must have the platform executable name
+(`wardian-cli.exe` on Windows, `wardian-cli` on POSIX) and match the CLI in the
+app's packaged resources. Invalid pairs stop before Cargo metadata, isolated
+home preparation, or driver startup. App-backed runs without this override
+freeze the CLI packaged with the app, then validate the copied pair before
+launch. A later Cargo debug build cannot replace an app's staged release CLI.
+All maintained CLI setup callers check paired and skip-build inputs before
+Cargo entry. They revalidate the already-frozen CLI against the app's packaged
+bytes; missing or mismatched inputs fail without a compiler fallback.
+Missing, nonregular, or conflicting packaged CLIs fail before copying the run's
+binaries. Equivalent direct and nested copies retain the app loader's direct
+path precedence. CLI-only runs and explicit post-build CLI freezing retain
+Cargo's effective target selection, including its preference for a debug CLI.
+
+POSIX shell:
+
+```bash
+WARDIAN_NATIVE_SKIP_BUILD=1 \
+WARDIAN_NATIVE_APP='<absolute-app-path>' \
+WARDIAN_NATIVE_CLI='<absolute-paired-cli-path>' \
+npm run test:e2e:native:fast -- <native-test-file>
+```
+
+PowerShell:
+
+```powershell
+$env:WARDIAN_NATIVE_SKIP_BUILD = '1'
+$env:WARDIAN_NATIVE_APP = '<absolute-app-path>'
+$env:WARDIAN_NATIVE_CLI = '<absolute-paired-cli-path>'
+npm run test:e2e:native:fast -- <native-test-file>
+```
+
+Pair validation follows the app's maintained resource loader: Windows uses
+the executable directory; macOS bundles use `Contents/Resources`; Linux
+bundles carry `usr/lib/Wardian` alongside `usr/bin`. Ordinary Cargo
+`target/<profile>` and `target/<triple>/<profile>` outputs with `.cargo-lock`
+use the executable directory. Within the resource root, the installed CLI is
+selected from `bin/` first, then `resources/bin/`. Isolated POSIX pairs must
+carry their own resources rather than use a separate system installation.
+The run freezes the app's runtime and the CLI file, then checks the copied
+pair. Libraries or resources adjacent to the separate CLI are not imported.
+Windows pairs also retain the declared `agent_prompts/` and `_up_/scripts/`
+folders at their original relative paths. Repeated freezes preserve existing
+resource files and copy missing leaves; unrelated compiler outputs stay outside
+the frozen runtime.
+
 `e2e-native/tests/artifact-presentation-native.test.mjs` proves the artifact
 control path with real IPC: an isolated mock agent presents an authorized
 Markdown file through the built CLI, Wardian routes a non-focused Files tab,
@@ -86,6 +137,94 @@ You can also target a specific file:
 npm run test:e2e:native:fast -- e2e-native/tests/opencode-native.test.mjs
 ```
 
+### HTTP fixture cleanup
+
+Browser fixtures use `closeHttpFixture` from `e2e-native/lib/httpFixture.mjs`
+to stop their HTTP listener and close only that server's accepted HTTP connections.
+The close starts before the connections are drained. A live browser can keep a
+socket open without sending a request, so awaiting `server.close()` alone can
+block the later after hook that stops the browser. Register cleanup after the
+fixture starts; call it after the fixture's assertions have completed.
+
+The CI-tier connection and after-hook regression runs without Tauri or a
+provider. Run it directly with Node:
+
+```sh
+node --test e2e-native/tests/http-fixture-cleanup.test.mjs
+```
+
+PowerShell:
+
+```powershell
+node --test e2e-native/tests/http-fixture-cleanup.test.mjs
+```
+
+### Runner input contracts before App launch
+
+When changing a native-run wrapper, test the runtime producer's serialized
+output through the exact frozen consumer and shell that the run will invoke.
+Use harmless owned fixtures before occupying the shared native slot. Replace
+only the final App/provider launch; keep the complete preceding input path
+unchanged, including argument construction, serialization, initialization,
+every actual file read and all admission checks.
+
+A `SourceOnly` admission mode must call the same runtime producer and validate
+its complete output. Rebuilding input from an already accepted parent inventory
+misses runtime-only entries. Sharing a consumer, passing a producer/consumer
+composition test or checking an initial input prefix proves only that subset.
+For example, a copied package can pass composition while omitting the
+transport plan, protocol manifest or strict-root initialization that a later
+pre-App branch reads. Exercise those reads and validations in the same
+whole-path positive, without bypasses or reconstructed intermediate inputs.
+
+Retain that complete unchanged pre-App positive and focused negatives for the
+changed boundary in the project's normal tests and CI. Cover:
+
+- Zero, one and multiple arguments or entries. Empty strings, spaces, quotes
+  and trailing backslashes must survive the actual serialized argument consumer.
+- Identity timestamps as literal strings, preserving every fractional digit.
+  Compare process births from the same API. A lower-precision projection cannot
+  establish an exact birth match or physical closure.
+- Pins for every literal path the consumer actually reads, including required
+  aliases, metadata, transport plans and protocol manifests. Enforce the
+  required file attributes, including read-only metadata, as well as hashes.
+- Strict ancestor and root validation against the real package layout. An
+  equivalent filename or a file outside the admitted root does not qualify the
+  literal read. Exercise missing reads, wrong ancestors/roots and changed
+  attributes as focused negatives, with refusal before App launch.
+- Outer control metadata outside the inner run's reserved output namespace.
+  Test collisions as negatives; preserve the namespace guard.
+
+The maintained Windows supervisor regression is a bounded argv contract test:
+
+```sh
+node --test scripts/native-e2e-windows-supervisor.test.mjs
+```
+
+PowerShell (Windows):
+
+```powershell
+node --test scripts/native-e2e-windows-supervisor.test.mjs
+```
+
+It uses the actual `createWindowsSupervisorPlan` producer and
+`native-e2e-windows-supervisor.ps1` consumer under Windows PowerShell 5.1
+(`powershell.exe`). An owned compiled recorder accepts genuinely zero child
+arguments; the suite checks 0/1/N round trips, literal seven-fraction ISO
+identity strings, child exit codes, malformed input, launch failure and Job
+cleanup. The existing Windows CI job runs it after Node setup; non-Windows
+runs skip it explicitly. Preserve the canonical shell, argument quoting and
+Job ownership. PowerShell 7-only JSON switches such as `-DateKind` do not apply
+to this consumer.
+
+These tests establish the supervisor boundary only. They do not qualify a
+private QA package's complete runtime producer or pre-App path, and the
+zero-argument fix does not repair missing inputs, initialization or namespace
+conflicts elsewhere. Label composition and prefix checks as partial evidence.
+Even a complete pre-App contract pass does not establish normal product
+behavior. This contract adds no permission or acknowledgement step for
+unchanged, already-qualified work.
+
 ### Concurrent runs
 
 Two native runs can execute at the same time. Every run claims its own
@@ -123,6 +262,8 @@ The path must be under the OS temp directory and begin with
 `wardian-e2e-native`, or sit under `.tmp/e2e-native` in the repository. The
 harness resets the home it is given, and that guard is what stops a reset from
 reaching an unrelated directory.
+The harness checks this guard before acquiring the home lock. Rejecting an
+unsafe path leaves its directories, contents, and existing lock unchanged.
 
 A run writes `.native-e2e-lock/owner.json` into its home and removes it on exit.
 The harness snapshots the lock object returned by `acquireHomeLock(...).lock`.
@@ -186,7 +327,15 @@ The CLI shared-state smoke can be run directly:
 npm run test:e2e:native:fast -- e2e-native/tests/cli-shared-state-native.test.mjs
 ```
 
-It starts the native app with an isolated `WARDIAN_HOME`, creates agents through both Tauri IPC and live CLI control, then runs the local `wardian-cli` binary against the same home. The smoke asserts live app state is readable, explicit `agent spawn --provider --class` works, `send --wait-until` can drive a mock action-required turn to idle, and lifecycle commands affect the running app. The CLI still falls back to `state.db` when the desktop app is not running.
+It starts the native app with an isolated `WARDIAN_HOME`, creates agents through both Tauri IPC and live CLI control, then runs the local `wardian-cli` binary against the same home. The smoke asserts live app state is readable, explicit `agent spawn --provider --class` works, `agent wait --until` observes the requested status, and lifecycle commands affect the running app. The CLI still falls back to `state.db` when the desktop app is not running.
+
+The control fixture captures Mock Init events before each spawn, clone and
+resume. It requires the launch's agent and provider identities, a fresh Init,
+and release of persisted conversation exclusion before seeding status or
+exercising lifecycle commands. A seeded visible status does not prove startup
+completion. Skip-build and explicit paired runs consume the harness's frozen
+CLI without another Cargo build; the control case records the consumed app and
+CLI hashes and sizes.
 
 ### Workbench and Terminal Presentation Package
 

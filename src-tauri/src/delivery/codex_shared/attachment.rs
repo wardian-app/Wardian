@@ -1,4 +1,6 @@
 //! Admission checks for a fresh private daemon whose only thread loader is its TUI.
+#[cfg(test)]
+use super::policy::ExpectedPolicy;
 use super::*;
 use std::path::{Path, PathBuf};
 
@@ -365,93 +367,6 @@ pub(super) async fn inject_initial_context(
     Ok(())
 }
 
-/// Check effective thread policy, not just the arguments sent to the daemon.
-pub(super) struct ExpectedPolicy(Vec<(String, String)>);
-
-impl ExpectedPolicy {
-    pub(super) fn from_server_args(args: &[String]) -> Result<Self, CodexSharedError> {
-        let mut fields = Vec::new();
-        for pair in args.windows(2).filter(|pair| pair[0] == "-c") {
-            let document: toml_edit::DocumentMut = pair[1]
-                .parse()
-                .map_err(|_| CodexSharedError::unsupported("invalid generated server policy"))?;
-            for (key, response_key) in [
-                ("model", "model"),
-                ("approval_policy", "approvalPolicy"),
-                ("approvals_reviewer", "approvalsReviewer"),
-                ("sandbox_mode", "sandbox"),
-                ("model_reasoning_effort", "reasoningEffort"),
-            ] {
-                if let Some(value) = document.get(key).and_then(toml_edit::Item::as_str) {
-                    fields.push((response_key.to_owned(), value.to_owned()));
-                }
-            }
-        }
-        Ok(Self(fields))
-    }
-
-    /// Validate the transient selection without changing the saved agent settings.
-    pub(super) fn expect_launch_model(
-        &mut self,
-        model: Option<&str>,
-    ) -> Result<(), CodexSharedError> {
-        let Some(model) = model else { return Ok(()) };
-        if let Some((_, configured)) = self.0.iter().find(|(key, _)| key == "model") {
-            if configured != model {
-                return Err(CodexSharedError::unsupported(
-                    "resolved Codex launch model changed configured model",
-                ));
-            }
-        } else {
-            self.0.push(("model".into(), model.into()));
-        }
-        Ok(())
-    }
-
-    /// Stock Codex clears an unset persisted effort on a cold ID-only resume,
-    /// even when the daemon received an explicit effort override. Carry the
-    /// agent's configured preferences across that per-thread boundary as well.
-    pub(super) fn background_resume_params(&self, thread_id: &str) -> Value {
-        let mut params = json!({"threadId": thread_id});
-        for (key, value) in &self.0 {
-            match key.as_str() {
-                "model" => params["model"] = json!(value),
-                "reasoningEffort" => {
-                    params["config"] = json!({"model_reasoning_effort": value});
-                }
-                _ => {}
-            }
-        }
-        params
-    }
-
-    pub(super) fn validate(&self, response: &Value) -> Result<(), CodexSharedError> {
-        for (key, expected) in &self.0 {
-            let expected = if key == "sandbox" {
-                match expected.as_str() {
-                    "danger-full-access" => "dangerFullAccess",
-                    "workspace-write" => "workspaceWrite",
-                    "read-only" => "readOnly",
-                    value => value,
-                }
-            } else {
-                expected.as_str()
-            };
-            let actual = if key == "sandbox" {
-                &response[key]["type"]
-            } else {
-                &response[key]
-            };
-            if actual.as_str() != Some(expected) {
-                return Err(CodexSharedError::unsupported(format!(
-                    "local Codex thread changed configured {key}; attachment rejected"
-                )));
-            }
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,12 +488,14 @@ mod tests {
         .map(str::to_owned)
         .collect();
         let policy = ExpectedPolicy::from_server_args(&args).unwrap();
-        let response = json!({"model":"selected", "approvalPolicy":"on-request", "sandbox":{"type":"workspaceWrite"}});
+        let response = json!({"model":"selected", "approvalPolicy":"on-request", "sandbox":{"type":"workspaceWrite"}, "approvalsReviewer":"user"});
         assert!(policy.validate(&response).is_ok());
         for (key, value) in [
             ("model", json!("default")),
             ("approvalPolicy", json!("never")),
             ("sandbox", json!({"type":"dangerFullAccess"})),
+            ("sandbox", json!({"type":"readOnly"})),
+            ("approvalsReviewer", json!("auto_review")),
         ] {
             let mut changed = response.clone();
             changed[key] = value;
@@ -602,17 +519,17 @@ mod tests {
         let policy = ExpectedPolicy::from_server_args(&args).unwrap();
         assert_eq!(
             policy.background_resume_params("fresh-seed"),
-            json!({"threadId":"fresh-seed", "model":"gpt-5.6-luna",
+            json!({"threadId":"fresh-seed", "model":"gpt-5.6-luna", "approvalsReviewer":"user",
                 "config":{"model_reasoning_effort":"low"}})
         );
         assert!(policy
-            .validate(&json!({"model":"gpt-5.6-luna", "reasoningEffort":"low"}))
+            .validate(&json!({"model":"gpt-5.6-luna", "reasoningEffort":"low", "approvalsReviewer":"user"}))
             .is_ok());
         for response in [
-            json!({"model":"gpt-5.6-luna", "reasoningEffort":"high"}),
-            json!({"model":"unexpected-model", "reasoningEffort":"low"}),
-            json!({"model":"gpt-5.6-luna", "reasoningEffort":null}),
-            json!({"model":"gpt-5.6-luna"}),
+            json!({"model":"gpt-5.6-luna", "reasoningEffort":"high", "approvalsReviewer":"user"}),
+            json!({"model":"unexpected-model", "reasoningEffort":"low", "approvalsReviewer":"user"}),
+            json!({"model":"gpt-5.6-luna", "reasoningEffort":null, "approvalsReviewer":"user"}),
+            json!({"model":"gpt-5.6-luna", "approvalsReviewer":"user"}),
         ] {
             assert!(policy.validate(&response).is_err());
         }
@@ -620,7 +537,7 @@ mod tests {
             ExpectedPolicy::from_server_args(&[])
                 .unwrap()
                 .background_resume_params("inherit-defaults"),
-            json!({"threadId":"inherit-defaults"})
+            json!({"threadId":"inherit-defaults", "approvalsReviewer":"user"})
         );
         let mut inherited = ExpectedPolicy::from_server_args(&[
             "-c".into(),
@@ -631,10 +548,12 @@ mod tests {
             .expect_launch_model(Some("historical-model"))
             .unwrap();
         assert!(inherited
-            .validate(&json!({"model":"historical-model","reasoningEffort":"low"}))
+            .validate(&json!({"model":"historical-model","reasoningEffort":"low","approvalsReviewer":"user"}))
             .is_ok());
         assert!(inherited
-            .validate(&json!({"model":"changed-model","reasoningEffort":"low"}))
+            .validate(
+                &json!({"model":"changed-model","reasoningEffort":"low","approvalsReviewer":"user"})
+            )
             .is_err());
         assert!(inherited
             .expect_launch_model(Some("changed-model"))
