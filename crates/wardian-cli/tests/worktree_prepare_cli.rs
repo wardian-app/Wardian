@@ -86,6 +86,8 @@ fn prepare_requires_no_sender_and_preserves_response_and_backend_rejection() {
         request,
         json!({"command":"agent_worktree_prepare","source":"/repo","name":"review","reference":"HEAD~1"})
     );
+    // Each exchange owns its transport namespace; Unix socket files outlive listeners.
+    let home = tempfile::tempdir().unwrap();
     let server = endpoint(
         home.path(),
         json!({"schema":1,"error":{"code":"request_failed","message":"occupied target"}}),
