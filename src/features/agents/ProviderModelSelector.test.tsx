@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -32,6 +32,151 @@ describe("ProviderModelSelector", () => {
     const discoveryCalls = invokeMock.mock.calls.length;
     await user.click(screen.getByRole("button", { name: "Choose model" }));
     expect(invokeMock.mock.calls).toHaveLength(discoveryCalls);
+  });
+
+  // #1626 is stacked on #1615: these exercise its explicitly activated deferred picker.
+  const deferredProps = { idPrefix: "deferred-focus", provider: "codex", selection: {}, onSelectionChange: vi.fn(), deferDiscovery: true };
+  const discoveredCatalog = {
+    provider: "codex", version: "test", source: "live_catalog", refresh_error: null,
+    models: [{ id: "test-model", display_name: "Test model", effort_options: [], default_effort: null, is_default: true }],
+  };
+
+  function delayCatalog() {
+    let resolve: (catalog: unknown) => void = () => {};
+    let reject: (reason: Error) => void = () => {};
+    invokeMock.mockReturnValueOnce(new Promise((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    }));
+    return { resolve, reject };
+  }
+
+  it.each(["{Enter}", " "])("transfers focus after delayed deferred discovery activated with %s", async (key) => {
+    const pending = delayCatalog();
+    const user = userEvent.setup();
+    render(<ProviderModelSelector {...deferredProps} />);
+    screen.getByRole("button", { name: "Choose model" }).focus();
+    expect(invokeMock).not.toHaveBeenCalled();
+    await user.keyboard(key);
+    const selector = screen.getByRole("combobox", { name: "Model" });
+    expect(selector).toBeDisabled();
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    // Repeating activation while the original request is pending must not rediscover.
+    await user.keyboard(key);
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    await act(async () => pending.resolve(discoveredCatalog));
+    expect(selector).toBeEnabled();
+    expect(selector).toHaveFocus();
+  });
+
+  it.each(["tab", "focus", "pointer", "away-and-back"])("leaves moved-away focus alone during deferred discovery (%s)", async (interaction) => {
+    const pending = delayCatalog();
+    const user = userEvent.setup();
+    render(<><ProviderModelSelector {...deferredProps} /><button>Elsewhere</button><div data-testid="blank">Blank area</div></>);
+    screen.getByRole("button", { name: "Choose model" }).focus();
+    await user.keyboard("{Enter}");
+    const elsewhere = screen.getByRole("button", { name: "Elsewhere" });
+    if (interaction === "tab") await user.tab();
+    if (interaction === "focus" || interaction === "away-and-back") elsewhere.focus();
+    if (interaction === "pointer" || interaction === "away-and-back") await user.click(screen.getByTestId("blank"));
+    const focusedBeforeResolution = document.activeElement;
+    await act(async () => pending.resolve(discoveredCatalog));
+    expect(screen.getByRole("combobox", { name: "Model" })).toBeEnabled();
+    expect(document.activeElement).toBe(focusedBeforeResolution);
+    expect(screen.getByRole("combobox", { name: "Model" })).not.toHaveFocus();
+  });
+
+  it.each(["provider", "identity", "disabled"])("retires deferred focus intent when %s changes during discovery", async (change) => {
+    const pending = delayCatalog();
+    const user = userEvent.setup();
+    const view = render(<ProviderModelSelector {...deferredProps} />);
+    screen.getByRole("button", { name: "Choose model" }).focus();
+    await user.keyboard("{Enter}");
+    const nextProps = {
+      ...deferredProps,
+      provider: change === "provider" ? "claude" : deferredProps.provider,
+      idPrefix: change === "identity" ? "different-session" : deferredProps.idPrefix,
+      disabled: change === "disabled",
+    };
+    view.rerender(<ProviderModelSelector {...nextProps} />);
+    await act(async () => pending.resolve(discoveredCatalog));
+    expect(document.activeElement).toBe(document.body);
+    if (change === "provider" || change === "disabled") {
+      expect(screen.getByRole("button", { name: "Choose model" })).toBeInTheDocument();
+      expect(screen.queryByRole("option", { name: "Test model" })).not.toBeInTheDocument();
+    }
+  });
+
+  it("keeps repeated activations independent after an interrupted request", async () => {
+    const first = delayCatalog();
+    const second = delayCatalog();
+    const user = userEvent.setup();
+    const view = render(<ProviderModelSelector {...deferredProps} />);
+    screen.getByRole("button", { name: "Choose model" }).focus();
+    await user.keyboard("{Enter}");
+    view.rerender(<ProviderModelSelector {...deferredProps} disabled />);
+    view.rerender(<ProviderModelSelector {...deferredProps} />);
+    // The parent's activated provider resumes discovery once read-only mode ends.
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+    await act(async () => first.resolve(discoveredCatalog));
+    expect(screen.getByRole("combobox", { name: "Model" })).toBeDisabled();
+    await act(async () => second.resolve(discoveredCatalog));
+    expect(screen.getByRole("combobox", { name: "Model" })).toBeEnabled();
+    expect(screen.getByRole("combobox", { name: "Model" })).not.toHaveFocus();
+  });
+
+  it.each(["empty", "error"])("does not defer a focus jump until an automatic retry after an initial %s result", async (result) => {
+    vi.useFakeTimers();
+    try {
+      const pending = delayCatalog();
+      invokeMock.mockResolvedValue(discoveredCatalog);
+      render(<ProviderModelSelector {...deferredProps} />);
+      const trigger = screen.getByRole("button", { name: "Choose model" });
+      trigger.focus();
+      fireEvent.click(trigger);
+      await act(async () => {
+        if (result === "empty") pending.resolve({ ...discoveredCatalog, models: [] });
+        else pending.reject(new Error("Catalog unavailable"));
+      });
+      expect(screen.getByRole("combobox", { name: "Model" })).toBeDisabled();
+      await act(async () => vi.advanceTimersByTimeAsync(5 * 60 * 1000));
+      expect(screen.getByRole("combobox", { name: "Model" })).toBeEnabled();
+      expect(screen.getByRole("combobox", { name: "Model" })).not.toHaveFocus();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not steal focus on refresh after transferring it once", async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = delayCatalog();
+      invokeMock.mockResolvedValue(discoveredCatalog);
+      render(<><ProviderModelSelector {...deferredProps} /><button>Elsewhere</button></>);
+      const trigger = screen.getByRole("button", { name: "Choose model" });
+      trigger.focus();
+      fireEvent.click(trigger);
+      await act(async () => pending.resolve(discoveredCatalog));
+      expect(screen.getByRole("combobox", { name: "Model" })).toHaveFocus();
+      screen.getByRole("button", { name: "Elsewhere" }).focus();
+      await act(async () => vi.advanceTimersByTimeAsync(5 * 60 * 1000));
+      expect(screen.getByRole("button", { name: "Elsewhere" })).toHaveFocus();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retires pending focus intent on unmount", async () => {
+    const pending = delayCatalog();
+    const user = userEvent.setup();
+    const view = render(<ProviderModelSelector {...deferredProps} />);
+    screen.getByRole("button", { name: "Choose model" }).focus();
+    await user.keyboard("{Enter}");
+    view.unmount();
+    render(<button>Replacement</button>);
+    screen.getByRole("button", { name: "Replacement" }).focus();
+    await act(async () => pending.resolve(discoveredCatalog));
+    expect(screen.getByRole("button", { name: "Replacement" })).toHaveFocus();
   });
 
   it("uses live provider model capabilities to keep effort compatible with the selected model", async () => {
