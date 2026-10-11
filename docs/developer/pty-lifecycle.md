@@ -296,3 +296,15 @@ Some TUIs repaint by moving the cursor home and rewriting the current viewport i
 ### PTY Output Batching
 
 The frontend drain path batches PTY output before writing into xterm instead of issuing one write per small chunk. This reduces render pressure during bursty output and improves scrolling behavior for TUI-heavy providers such as OpenCode.
+
+
+### Contained OpenCode Pause acknowledgement
+
+On Windows, normal lifecycle stop of a prelaunch-contained OpenCode runtime
+captures the exact job and PTY child into retained stop ownership before any
+terminal shutdown await. Pause acknowledges only after the retained child,
+captured job members, and job emptiness prove tree exit. The stop worker
+survives cancellation of the IPC waiter. A join failure retains both ownership
+and a stop fence; resume and other replacement launch paths await that fence.
+No provider request is replayed by stop or explicit stop retry. Legacy
+uncontained runtimes retain their existing best-effort cleanup policy.

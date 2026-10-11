@@ -301,12 +301,38 @@ where
             .config
             .clone()
     };
-    let is_codex = config
+    let provider = config
         .lock()
         .map_err(|_| "Agent configuration lock poisoned")?
         .provider
-        == "codex";
-    if !is_codex {
+        .clone();
+    let contained_opencode = if provider == "opencode" {
+        #[cfg(windows)]
+        {
+            let agents = state.agents.lock().await;
+            agents.get(session_id).is_some_and(|agent| {
+                agent
+                    .job_object
+                    .as_ref()
+                    .is_some_and(|job| job.contained_from_launch())
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    } else {
+        false
+    };
+    if provider != "codex" && !contained_opencode {
+        // An earlier failed/cancelled OpenCode stop must still fence replacement,
+        // even though its captured handles have left the roster.
+        if provider == "opencode" {
+            let home =
+                crate::utils::fs::get_wardian_home().ok_or("Could not locate Wardian home")?;
+            crate::manager::codex_stop::retry_stop(&home, session_id)?;
+            crate::manager::codex_stop::await_quiescent(&home, session_id).await?;
+        }
         return Ok(());
     }
     let home = crate::utils::fs::get_wardian_home().ok_or("Could not locate Wardian home")?;
@@ -314,7 +340,11 @@ where
     crate::manager::codex_stop::await_quiescent(&home, session_id).await?;
     // Validate while the roster still owns the runtime. Lifecycle exclusion
     // covers the interval until capture; this token does not fence owner startup.
-    let registration = crate::manager::codex_stop::prepare_stop(&home, session_id)?;
+    let registration = if contained_opencode {
+        crate::manager::codex_stop::prepare_opencode_stop(&home, session_id)?
+    } else {
+        crate::manager::codex_stop::prepare_stop(&home, session_id)?
+    };
     let (guard, generation) = {
         let mut agents = state.agents.lock().await;
         let agent = agents

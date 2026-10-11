@@ -2137,7 +2137,7 @@ async fn spawn_agent_inner(
     )?;
     let provider = ProviderFactory::resolve(&config.provider)?;
     crate::providers::readiness::ensure_provider_available_for_launch(&config.provider)?;
-    if config.provider == "pi" {
+    if matches!(config.provider.as_str(), "pi" | "opencode") {
         let home = crate::utils::fs::get_wardian_home().ok_or("Could not locate Wardian home")?;
         super::codex_stop::await_quiescent(&home, &config.session_id).await?;
     }

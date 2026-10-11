@@ -1,4 +1,4 @@
-//! Retained stop fences for captured Codex and Pi PTY/background runtimes.
+//! Retained stop fences for captured Codex, Pi and contained OpenCode runtimes.
 //! Lifecycle callers register synchronously before their first await. A waiter
 //! never owns the child handles; only observed exit releases the process fence.
 use crate::state::terminal_session::{TerminalBrokerError, TerminalSessionBroker};
@@ -73,6 +73,16 @@ pub(crate) fn prepare_stop(home: &Path, agent_id: &str) -> Result<StopRegistrati
 pub(crate) fn prepare_pi_stop(home: &Path, agent_id: &str) -> Result<StopRegistration, String> {
     let mut registration = prepare_stop(home, agent_id)?;
     registration.provider = "pi";
+    Ok(registration)
+}
+
+/// OpenCode retains its exact contained job and child until verified tree exit.
+pub(crate) fn prepare_opencode_stop(
+    home: &Path,
+    agent_id: &str,
+) -> Result<StopRegistration, String> {
+    let mut registration = prepare_stop(home, agent_id)?;
+    registration.provider = "opencode";
     Ok(registration)
 }
 
@@ -169,10 +179,10 @@ pub(crate) struct StopHandle(Arc<Entry>);
 
 impl StopHandle {
     pub(crate) fn provider_label(&self) -> &'static str {
-        if self.0.provider == "pi" {
-            "Pi"
-        } else {
-            "Codex"
+        match self.0.provider {
+            "pi" => "Pi",
+            "opencode" => "OpenCode",
+            _ => "Codex",
         }
     }
 
@@ -338,7 +348,11 @@ fn start(entry: &Arc<Entry>, allow_captured: bool) {
                     terminal.terminate(&worker.keys[0].1)?;
                 }
                 worker.terminal_complete.store(true, std::sync::atomic::Ordering::Release);
-                stop_and_join(agent, worker.timeout, worker.provider == "pi")?;
+                if worker.provider == "opencode" {
+                    stop_contained_opencode(agent)?;
+                } else {
+                    stop_and_join(agent, worker.timeout, worker.provider == "pi")?;
+                }
             }
             // Terminal cleanup (when captured) and every child exit completed
             // before ActiveAgent Drop and release of the retained stop fence.
@@ -374,6 +388,44 @@ fn release(entry: &Arc<Entry>) {
         if map.get(key).is_some_and(Vec::is_empty) {
             map.remove(key);
         }
+    }
+}
+
+/// Runs on the retained stop worker, so cancellation of the IPC waiter cannot
+/// drop the runtime or admit a replacement. A failed join keeps the fence.
+fn stop_contained_opencode(agent: &mut ActiveAgent) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        if !agent.background_processes.is_empty() {
+            return Err(
+                "OpenCode stop cannot verify background ownership; runtime retained".into(),
+            );
+        }
+        let job = agent
+            .job_object
+            .as_ref()
+            .filter(|job| job.contained_from_launch())
+            .ok_or("OpenCode stop requires the retained prelaunch job; runtime retained")?;
+        let child = agent
+            .child_process
+            .as_mut()
+            .ok_or("OpenCode stop requires the retained child; runtime retained")?;
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .map_err(|error| format!("Cannot create OpenCode stop executor: {error}"))?;
+        executor.block_on(job.stop_and_join(child.as_mut()))?;
+        // Only the verified job/member/child receipt permits these handles to drop.
+        agent.child_process.take();
+        agent.job_object.take();
+        agent.process_id = None;
+        agent.runtime_generation = None;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = agent;
+        Err("Contained OpenCode stop is Windows-only; runtime retained".into())
     }
 }
 
