@@ -41,6 +41,31 @@ export function ProviderModelSelector({
   // under provider B.
   const loadEpochRef = useRef(0);
 
+  const modelSelectRef = useRef<HTMLSelectElement>(null);
+  const pendingFocusRef = useRef(false);
+
+  useEffect(() => {
+    pendingFocusRef.current = false;
+    if (!deferDiscovery || disabled) return;
+    // Removing the discovery button drops focus to the document. Only restore
+    // that lost focus; any subsequent navigation permanently cancels this intent.
+    const cancelFocus = () => { pendingFocusRef.current = false; };
+    const cancelNavigation = (event: KeyboardEvent) => {
+      if (event.key === "Tab" || event.key === "Escape") cancelFocus();
+    };
+    document.addEventListener("focusin", cancelFocus);
+    document.addEventListener("pointerdown", cancelFocus, true);
+    document.addEventListener("keydown", cancelNavigation, true);
+    window.addEventListener("blur", cancelFocus);
+    return () => {
+      cancelFocus();
+      document.removeEventListener("focusin", cancelFocus);
+      document.removeEventListener("pointerdown", cancelFocus, true);
+      document.removeEventListener("keydown", cancelNavigation, true);
+      window.removeEventListener("blur", cancelFocus);
+    };
+  }, [deferDiscovery, disabled, provider, idPrefix]);
+
   const loadCatalog = useCallback(
     async (forceRefresh: boolean) => {
       if (!provider?.trim()) {
@@ -109,6 +134,18 @@ export function ProviderModelSelector({
   const modelId = `${idPrefix}-model`;
   const effortId = `${idPrefix}-effort`;
 
+  useEffect(() => {
+    if (!pendingFocusRef.current || loading || (catalog === null && error === null)) return;
+    // Consume even an empty/failed result: an automatic retry must not resurrect
+    // focus intent from an interaction that finished several minutes earlier.
+    pendingFocusRef.current = false;
+    const selector = modelSelectRef.current;
+    if (discoveryEnabled && !disabled && selector && !selector.disabled
+      && (document.activeElement === document.body || document.activeElement === null)) {
+      selector.focus();
+    }
+  }, [catalog, error, loading, discoveryEnabled, disabled]);
+
   const chooseModel = (nextModel: string) => {
     if (disabled) return;
     const nextResolvedModel = nextModel
@@ -132,7 +169,10 @@ export function ProviderModelSelector({
         aria-label="Choose model"
         className="rounded border border-wardian-light px-2 py-1 text-[11px] text-muted-neutral hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
         disabled={disabled || !provider?.trim()}
-        onClick={() => setActivatedProvider(provider ?? null)}
+        onClick={(event) => {
+          pendingFocusRef.current = document.activeElement === event.currentTarget;
+          setActivatedProvider(provider ?? null);
+        }}
         type="button"
       >
         {selection.model || "Provider default"}
@@ -153,6 +193,7 @@ export function ProviderModelSelector({
                 : "w-full rounded border border-wardian-light bg-[var(--color-wardian-input-bg)] px-2 py-1.5 text-xs text-primary outline-none transition-colors focus:border-[var(--color-wardian-accent)] disabled:cursor-not-allowed disabled:opacity-60"}
               disabled={disabled || loading || models.length === 0}
               id={modelId}
+              ref={modelSelectRef}
               onChange={(event) => chooseModel(event.target.value)}
               value={modelValue}
             >
