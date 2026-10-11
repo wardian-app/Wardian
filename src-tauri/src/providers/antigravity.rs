@@ -154,6 +154,87 @@ impl AntigravityProvider {
             .join(format!("{conversation_id}.db"))
     }
 
+    /// Validates the exact current-format conversation before a resume can
+    /// mutate Wardian state. The CLI silently creates a fresh conversation for
+    /// a missing ID, so a filename or workspace-cache binding is insufficient.
+    /// Empty materialized conversations are valid; legacy transcripts alone
+    /// cannot establish that the current CLI can resume the source.
+    ///
+    /// Query a private DB/WAL snapshot: SQLite read-only opens can create SHM
+    /// sidecars. This guard never opens the authoritative source with SQLite.
+    /// Call again after draining the old process before launching its successor.
+    pub fn validate_authoritative_resume_source(
+        home: &Path,
+        conversation_id: &str,
+    ) -> Result<PathBuf, String> {
+        if conversation_id.is_empty()
+            || !conversation_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err("Antigravity resume requires a safe exact conversation ID".to_string());
+        }
+        let database = Self::conversation_database_path(home, conversation_id);
+        let snapshot = tempfile::tempdir()
+            .map_err(|error| format!("Cannot snapshot Antigravity resume source: {error}"))?;
+        let snapshot_database = snapshot.path().join("source.db");
+        let copy_file = |source: &Path, destination: &Path| -> Result<(), String> {
+            let metadata = std::fs::symlink_metadata(source)
+                .map_err(|error| format!("Antigravity resume source is unavailable: {error}"))?;
+            if !metadata.file_type().is_file() {
+                return Err("Antigravity resume source must be a regular file".to_string());
+            }
+            std::fs::copy(source, destination)
+                .map_err(|error| format!("Cannot snapshot Antigravity resume source: {error}"))?;
+            Ok(())
+        };
+        copy_file(&database, &snapshot_database)?;
+        let mut wal_name = database.as_os_str().to_os_string();
+        wal_name.push("-wal");
+        let wal = PathBuf::from(wal_name);
+        match std::fs::symlink_metadata(&wal) {
+            Ok(_) => copy_file(&wal, &snapshot.path().join("source.db-wal"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Cannot inspect Antigravity resume WAL: {error}")),
+        }
+        // A rollback journal requires recovery against the source. Do not
+        // mistake an uncommitted/recovering store for an authoritative snapshot.
+        let mut journal_name = database.as_os_str().to_os_string();
+        journal_name.push("-journal");
+        if Path::new(&journal_name)
+            .try_exists()
+            .map_err(|error| format!("Cannot inspect Antigravity resume journal: {error}"))?
+        {
+            return Err("Antigravity resume source has an unresolved rollback journal".to_string());
+        }
+        let validate = || -> rusqlite::Result<bool> {
+            let connection = Connection::open_with_flags(
+                &snapshot_database,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            let integrity: String =
+                connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+            if integrity != "ok" {
+                return Ok(false);
+            }
+            connection.prepare("SELECT idx, step_type, step_payload FROM steps LIMIT 0")?;
+            let mut statement =
+                connection.prepare("SELECT cascade_id FROM trajectory_meta LIMIT 2")?;
+            let identities = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(identities.len() == 1 && identities[0] == conversation_id)
+        };
+        match validate() {
+            Ok(true) => Ok(database),
+            Ok(false) => {
+                Err("Antigravity resume source identity or integrity does not match".to_string())
+            }
+            Err(error) => Err(format!(
+                "Antigravity resume source is not a valid authoritative conversation: {error}"
+            )),
+        }
+    }
     pub fn conversation_database_ids(home: &Path) -> HashSet<String> {
         std::fs::read_dir(home.join("conversations"))
             .into_iter()
@@ -188,7 +269,7 @@ impl AntigravityProvider {
             })
             .filter(|conversation_id| {
                 let database = Self::conversation_database_path(home, conversation_id);
-                database_contains_steps_table(&database)
+                Self::validate_authoritative_resume_source(home, conversation_id).is_ok()
                     && database_metadata_matches_workspace(&database, workspace)
             });
         let conversation_id = matches.next()?;
@@ -808,6 +889,174 @@ mod tests {
     use super::*;
     use rusqlite::params;
 
+    fn create_resume_source(home: &Path, id: &str) -> Connection {
+        std::fs::create_dir_all(home.join("conversations")).expect("source directory");
+        let connection =
+            Connection::open(AntigravityProvider::conversation_database_path(home, id))
+                .expect("create source");
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+            CREATE TABLE steps (idx INTEGER, step_type INTEGER, step_payload BLOB);
+            CREATE TABLE trajectory_meta (trajectory_id TEXT, cascade_id TEXT);",
+            )
+            .expect("native schema");
+        connection
+            .execute(
+                "INSERT INTO trajectory_meta VALUES ('different-trajectory', ?1)",
+                [id],
+            )
+            .expect("native identity");
+        connection
+    }
+
+    fn source_store_bytes(home: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut entries = std::fs::read_dir(home.join("conversations"))
+            .expect("source directory")
+            .map(|entry| {
+                let path = entry.expect("source entry").path();
+                let bytes = std::fs::read(&path).expect("source bytes");
+                (path, bytes)
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        entries
+    }
+
+    #[test]
+    fn authoritative_resume_accepts_empty_native_identity_from_wal_without_source_mutation() {
+        let temp = tempfile::tempdir().expect("temporary provider home");
+        let home = temp.path();
+        // Keep the writer open so schema/identity remain in the WAL rather than
+        // the base database. No user row is needed for a materialized session.
+        let _writer = create_resume_source(home, "source-session");
+        let before = source_store_bytes(home);
+        assert_eq!(
+            AntigravityProvider::validate_authoritative_resume_source(home, "source-session")
+                .expect("exact empty source"),
+            AntigravityProvider::conversation_database_path(home, "source-session")
+        );
+        assert_eq!(source_store_bytes(home), before);
+    }
+
+    #[test]
+    fn authoritative_resume_preserves_history_and_ignores_destination_cache() {
+        let temp = tempfile::tempdir().expect("temporary provider home");
+        let home = temp.path();
+        let writer = create_resume_source(home, "source-session");
+        writer
+            .execute(
+                "INSERT INTO steps VALUES (0, 14, ?1)",
+                params![protobuf_message_field(
+                    19,
+                    protobuf_string_field(2, "retained-context")
+                )],
+            )
+            .expect("source history");
+        drop(writer);
+        let _other = create_resume_source(home, "destination-session");
+        std::fs::create_dir_all(home.join("cache")).expect("cache directory");
+        let cache = home.join("cache/last_conversations.json");
+        std::fs::write(&cache, r#"{"/destination":"destination-session"}"#)
+            .expect("destination cache");
+        let before = source_store_bytes(home);
+        let cache_before = std::fs::read(&cache).expect("cache bytes");
+        let exact =
+            AntigravityProvider::validate_authoritative_resume_source(home, "source-session")
+                .expect("source identity");
+        let history_copy = temp.path().join("history-proof.db");
+        std::fs::copy(&exact, &history_copy).expect("private history proof");
+        assert_eq!(
+            AntigravityProvider::conversation_messages_from_database(&history_copy)
+                .expect("source messages")[0]
+                .text,
+            "retained-context"
+        );
+        assert_eq!(source_store_bytes(home), before);
+        assert_eq!(std::fs::read(cache).expect("cache after"), cache_before);
+    }
+
+    #[test]
+    fn authoritative_resume_rejects_missing_corrupt_legacy_and_mismatched_sources() {
+        let temp = tempfile::tempdir().expect("temporary provider home");
+        let home = temp.path();
+        let writer = create_resume_source(home, "wrong-identity");
+        writer
+            .execute(
+                "UPDATE trajectory_meta SET cascade_id = 'other-session'",
+                [],
+            )
+            .expect("mismatched native identity");
+        drop(writer);
+        std::fs::write(
+            AntigravityProvider::conversation_database_path(home, "corrupt"),
+            b"not sqlite",
+        )
+        .expect("corrupt source");
+        let transcript = AntigravityProvider::transcript_path(home, "legacy-only");
+        std::fs::create_dir_all(transcript.parent().expect("transcript parent"))
+            .expect("legacy directory");
+        std::fs::write(&transcript, b"{}").expect("legacy transcript");
+        let before = source_store_bytes(home);
+        for id in [
+            "missing",
+            "corrupt",
+            "wrong-identity",
+            "legacy-only",
+            "../escape",
+            "",
+            "source/session",
+            " source",
+        ] {
+            assert!(
+                AntigravityProvider::validate_authoritative_resume_source(home, id).is_err(),
+                "must reject {id:?}"
+            );
+        }
+        assert_eq!(source_store_bytes(home), before);
+        assert_eq!(std::fs::read(transcript).expect("legacy after"), b"{}");
+    }
+
+    #[test]
+    fn authoritative_resume_rejects_missing_or_ambiguous_metadata_and_recovery_journal() {
+        let temp = tempfile::tempdir().expect("temporary provider home");
+        let home = temp.path();
+        let writer = create_resume_source(home, "source-session");
+        writer
+            .execute(
+                "INSERT INTO trajectory_meta VALUES ('another-trajectory', 'source-session')",
+                [],
+            )
+            .expect("ambiguous identity");
+        assert!(
+            AntigravityProvider::validate_authoritative_resume_source(home, "source-session")
+                .is_err()
+        );
+        writer
+            .execute("DELETE FROM trajectory_meta", [])
+            .expect("missing identity");
+        assert!(
+            AntigravityProvider::validate_authoritative_resume_source(home, "source-session")
+                .is_err()
+        );
+        writer
+            .execute(
+                "INSERT INTO trajectory_meta VALUES ('trajectory', 'source-session')",
+                [],
+            )
+            .expect("restore identity");
+        drop(writer);
+        let database = AntigravityProvider::conversation_database_path(home, "source-session");
+        let mut journal = database.as_os_str().to_os_string();
+        journal.push("-journal");
+        std::fs::write(PathBuf::from(journal), b"unresolved").expect("recovery journal");
+        let before = source_store_bytes(home);
+        assert!(
+            AntigravityProvider::validate_authoritative_resume_source(home, "source-session")
+                .is_err()
+        );
+        assert_eq!(source_store_bytes(home), before);
+    }
     #[test]
     fn bootstrap_requires_a_changed_workspace_mapping() {
         assert_eq!(
@@ -1323,9 +1572,13 @@ SET dp0=%~dp0
             connection
                 .execute_batch(
                     "CREATE TABLE steps (idx INTEGER, step_type INTEGER, step_payload BLOB);\
-                     CREATE TABLE trajectory_metadata_blob (id TEXT PRIMARY KEY, data BLOB);",
+                     CREATE TABLE trajectory_metadata_blob (id TEXT PRIMARY KEY, data BLOB);\
+                     CREATE TABLE trajectory_meta (cascade_id TEXT);",
                 )
                 .expect("create schema");
+            connection
+                .execute("INSERT INTO trajectory_meta VALUES (?1)", [conversation_id])
+                .expect("native conversation identity");
             let uri = workspace_file_uri(metadata_workspace);
             connection
                 .execute(
