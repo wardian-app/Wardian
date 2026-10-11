@@ -276,18 +276,27 @@ impl OpenCodeHttpOwner {
             }
         }
 
-        let mut url = self.session_url("")?;
-        url.query_pairs_mut()
-            .append_pair("directory", &self.binding.workspace.to_string_lossy());
-        let session = self.get_json(url).await?;
+        // Session.directory records the conversation's origin and remains unchanged
+        // on exact-session resume. The request instance supplies the execution cwd.
+        let path = self.get_json(self.root_url("path")?).await?;
+        let directory = path.get("directory").and_then(Value::as_str);
+        if directory.is_none()
+            || directory.is_some_and(|value| !same_directory(value, &self.binding.workspace))
+        {
+            return Err(OpenCodeHttpError::new(
+                OpenCodeHttpErrorCode::SessionMismatch,
+                false,
+                None,
+                "OpenCode execution directory did not match the launch proof",
+            ));
+        }
+        let session = self.get_json(self.session_url("")?).await?;
         let session_id = session
             .get("id")
             .and_then(Value::as_str)
             .or_else(|| session.get("sessionID").and_then(Value::as_str));
-        let directory = session.get("directory").and_then(Value::as_str);
         if session_id != Some(self.binding.provider_session_id())
-            || directory.is_none()
-            || directory.is_some_and(|value| !same_directory(value, &self.binding.workspace))
+            || session.get("directory").and_then(Value::as_str).is_none()
         {
             return Err(OpenCodeHttpError::new(
                 OpenCodeHttpErrorCode::SessionMismatch,
@@ -590,6 +599,12 @@ impl OpenCodeHttpOwner {
     fn request(&self, method: Method, url: Url) -> reqwest::RequestBuilder {
         self.client
             .request(method, url)
+            // Every operation, including prompt_async, must select the same
+            // destination instance even when the TUI process starts in habitat.
+            .header(
+                "x-opencode-directory",
+                encode_directory_header(&self.binding.workspace.to_string_lossy()),
+            )
             .basic_auth(&self.binding.username, Some(&self.binding.password))
     }
 
@@ -658,14 +673,42 @@ async fn read_response_body(response: reqwest::Response) -> Result<Vec<u8>, Open
     Ok(body)
 }
 
+/// OpenCode decodes this header as a URI component. Encode UTF-8 and literal
+/// percent signs so every valid filesystem path fits an HTTP header unchanged.
+fn encode_directory_header(directory: &str) -> String {
+    let mut encoded = String::new();
+    for byte in directory.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write;
+            write!(&mut encoded, "%{byte:02X}").expect("write to String");
+        }
+    }
+    encoded
+}
+
 fn same_directory(remote: &str, expected: &std::path::Path) -> bool {
-    let normalize = |value: String| {
-        value
-            .replace('\\', "/")
-            .trim_end_matches('/')
-            .to_ascii_lowercase()
+    // OpenCode resolves junctions/symlinks in /path; the launch proof can name
+    // Wardian's habitat projection of that same destination.
+    let expected = expected
+        .canonicalize()
+        .unwrap_or_else(|_| expected.to_path_buf());
+    let normalize = |value: &str| {
+        let value = value.strip_prefix(r"\\?\").unwrap_or(value);
+        #[cfg(windows)]
+        {
+            value
+                .replace('\\', "/")
+                .trim_end_matches('/')
+                .to_ascii_lowercase()
+        }
+        #[cfg(not(windows))]
+        {
+            value.trim_end_matches('/').to_string()
+        }
     };
-    normalize(remote.to_string()) == normalize(expected.to_string_lossy().to_string())
+    normalize(remote) == normalize(&expected.to_string_lossy())
 }
 
 #[cfg(test)]
@@ -793,6 +836,105 @@ mod tests {
             }
         });
         (owner_for_test(port, 7, 11), server)
+    }
+
+    fn verification_owner_for_test(
+        session_id: &str,
+        execution_directory: Option<String>,
+    ) -> (OpenCodeHttpOwner, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("verification listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let owner = owner_for_test(port, 7, 11);
+        let expected_directory = owner.binding.workspace.to_string_lossy().to_string();
+        let directory = execution_directory.unwrap_or_else(|| {
+            owner
+                .binding
+                .workspace
+                .canonicalize()
+                .expect("canonical cwd")
+                .to_string_lossy()
+                .to_string()
+        });
+        let session_id = session_id.to_string();
+        let server = std::thread::spawn(move || {
+            for (route, body) in [
+                (
+                    "/global/health",
+                    serde_json::json!({"healthy":true,"version":"1.19.0"}),
+                ),
+                ("/path", serde_json::json!({"directory":directory})),
+                (
+                    "/session/ses_test",
+                    serde_json::json!({"id":session_id,"directory":"/historical-source"}),
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().expect("verification request");
+                let request = read_http_request(&mut stream);
+                let request = String::from_utf8_lossy(&request);
+                assert!(request.starts_with(&format!("GET {route} HTTP/1.1")));
+                assert!(request.to_ascii_lowercase().contains(&format!(
+                    "x-opencode-directory: {}",
+                    encode_directory_header(&expected_directory).to_ascii_lowercase()
+                )));
+                let body = body.to_string();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).expect("verification response");
+                // Incorrect execution cwd must fail before reading the session,
+                // and every verification request is read-only.
+                if route == "/path" && directory == "/wrong-destination" {
+                    break;
+                }
+            }
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            assert!(
+                listener.accept().is_err(),
+                "verification mutated provider state"
+            );
+        });
+        (owner, server)
+    }
+
+    #[tokio::test]
+    async fn binding_accepts_exact_session_with_historical_source_directory() {
+        let (owner, server) = verification_owner_for_test("ses_test", None);
+        let verification = owner.verify_binding().await.expect("resumed binding");
+        assert_eq!(verification.provider_session_id, "ses_test");
+        assert!(same_directory(
+            &verification.directory,
+            &owner.binding.workspace
+        ));
+        server.join().expect("verification server");
+    }
+
+    #[tokio::test]
+    async fn binding_rejects_wrong_execution_directory_before_mutation() {
+        let (owner, server) =
+            verification_owner_for_test("ses_test", Some("/wrong-destination".into()));
+        let error = owner.verify_binding().await.expect_err("wrong destination");
+        assert_eq!(error.code, OpenCodeHttpErrorCode::SessionMismatch);
+        assert!(!error.provider_boundary_crossed);
+        server.join().expect("verification server");
+    }
+
+    #[tokio::test]
+    async fn binding_rejects_different_session_at_correct_destination_before_mutation() {
+        let (owner, server) = verification_owner_for_test("ses_other", None);
+        let error = owner
+            .verify_binding()
+            .await
+            .expect_err("wrong conversation");
+        assert_eq!(error.code, OpenCodeHttpErrorCode::SessionMismatch);
+        assert!(!error.provider_boundary_crossed);
+        server.join().expect("verification server");
+    }
+
+    #[test]
+    fn directory_header_preserves_unicode_percent_and_spaces() {
+        assert_eq!(
+            encode_directory_header("/destination-é-% 東京"),
+            "/destination-%C3%A9-%25%20%E6%9D%B1%E4%BA%AC".replace('/', "%2F")
+        );
     }
 
     #[test]
@@ -1021,6 +1163,12 @@ data: {"sessionID":"ses_test"}
                 .expect("submit headers");
             let request_text = String::from_utf8_lossy(&request[..header_end]);
             assert!(request_text.starts_with("POST /session/ses_test/prompt_async HTTP/1.1"));
+            let directory_header =
+                encode_directory_header(&std::env::current_dir().expect("cwd").to_string_lossy());
+            assert!(request_text.to_ascii_lowercase().contains(&format!(
+                "x-opencode-directory: {}",
+                directory_header.to_ascii_lowercase()
+            )));
             let body: Value =
                 serde_json::from_slice(&request[header_end + 4..]).expect("submit body");
             assert_eq!(body["messageID"], provider_message_id);
