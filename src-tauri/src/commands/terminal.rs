@@ -597,8 +597,8 @@ async fn resize_user_terminal_master(
     .map_err(|e| format!("Failed to resize user terminal: {}", e))
 }
 
-fn user_terminal_exited(session: &UserTerminalSession) -> bool {
-    session.exited.lock().map(|value| *value).unwrap_or(true)
+fn user_terminal_exited(session: &mut UserTerminalSession) -> Result<bool, String> {
+    session.has_exited()
 }
 
 #[tauri::command]
@@ -610,7 +610,12 @@ pub async fn ensure_user_terminal(
 ) -> Result<String, String> {
     let (existing_master, current_session_id) = {
         let mut session = state.user_terminal.lock().await;
-        if session.as_ref().is_some_and(user_terminal_exited) {
+        if session
+            .as_mut()
+            .map(user_terminal_exited)
+            .transpose()?
+            .unwrap_or(false)
+        {
             UserTerminalSession::take_for_replacement(&mut session).await?;
         }
 
@@ -648,11 +653,11 @@ pub async fn send_binary_input_to_user_terminal(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let tx = {
-        let session = state.user_terminal.lock().await;
+        let mut session = state.user_terminal.lock().await;
         let terminal = session
-            .as_ref()
+            .as_mut()
             .ok_or("User terminal is not running".to_string())?;
-        if user_terminal_exited(terminal) {
+        if user_terminal_exited(terminal)? {
             return Err("User terminal has exited".to_string());
         }
         terminal.stdin_tx.clone()
@@ -723,11 +728,11 @@ pub async fn restart_user_terminal(
 pub async fn set_user_terminal_cwd(path: String, state: State<'_, AppState>) -> Result<(), String> {
     let path = validate_user_terminal_cwd(&path)?;
     let (tx, command) = {
-        let session = state.user_terminal.lock().await;
+        let mut session = state.user_terminal.lock().await;
         let terminal = session
-            .as_ref()
+            .as_mut()
             .ok_or("User terminal is not running".to_string())?;
-        if user_terminal_exited(terminal) {
+        if user_terminal_exited(terminal)? {
             return Err("User terminal has exited".to_string());
         }
         (

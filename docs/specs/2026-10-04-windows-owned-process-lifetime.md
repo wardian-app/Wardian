@@ -37,6 +37,16 @@ thread lookup or resume failure terminates and joins only the retained child
 handle. No historical PID, parent-PID sweep or unrelated process is a cleanup
 authority.
 
+## User terminal replacement
+
+A descendant can retain the ConPTY output pipe after the interactive shell root
+exits. PTY EOF therefore does not establish whether the root is reusable.
+Reopening the terminal checks its retained child handle as well as the reader's
+exit flag. A wait error preserves the original session. A confirmed root exit
+still goes through the existing verified job stop-and-join gate before a new
+session replaces it, so surviving descendants cannot be carried into the new
+terminal.
+
 ## Thread identity
 
 Stable Rust and Tokio do not expose the initial thread handle. A Tool Help
