@@ -849,7 +849,10 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
     expect(actionBox.height).toBeGreaterThanOrEqual(44);
     await expectChatTextUnobscured(beforeActions, action);
 
-    await action.click();
+    await action.focus();
+    await expect(action).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(action).toHaveAttribute("aria-expanded", "true");
     const menu = row.getByRole("menu");
     await expect(menu).toBeVisible();
     const menuBox = await menu.boundingBox();
@@ -871,6 +874,30 @@ test("remote mobile shell renders team-ordered watchlist and opens agent detail"
       await captureChatCopyLayoutScreenshot("mobile-copy-layout.png", page.locator('[data-testid="remote-agent-detail"]'));
     }
     await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    await expect(action).toHaveAttribute("aria-expanded", "false");
+    await expect(action).toBeFocused();
+
+    await page.keyboard.press("Space");
+    await expect(menu).toBeVisible();
+    await expect(action).toHaveAttribute("aria-expanded", "true");
+    await page.keyboard.press("Tab");
+    await expect(copyItem).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    await expect(action).toHaveAttribute("aria-expanded", "false");
+    await expect(action).toBeFocused();
+
+    await page.keyboard.press("Enter");
+    await expect(menu).toBeVisible();
+    await expect(action).toHaveAttribute("aria-expanded", "true");
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    await expect(action).toHaveAttribute("aria-expanded", "false");
+    await expect(action).toBeFocused();
+    if (row === messageRows[1]) {
+      await captureChatCopyLayoutScreenshot("mobile-copy-escape-focus.png", page.locator('[data-testid="remote-agent-detail"]'));
+    }
   }
   await page.getByRole("button", { name: "Show all" }).click();
   await expect(page.getByTestId("chat-work-group")).toHaveAttribute("data-expanded", "true");
