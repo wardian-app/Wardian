@@ -593,6 +593,10 @@ async fn opencode_test_server(
                 "version": "test",
             }),
         ),
+        (Method::GET, "/path") => opencode_json_response(
+            StatusCode::OK,
+            serde_json::json!({ "directory": workspace }),
+        ),
         (Method::GET, "/session/ses_r13_test") => opencode_json_response(
             StatusCode::OK,
             serde_json::json!({

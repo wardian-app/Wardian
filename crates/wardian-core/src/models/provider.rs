@@ -80,6 +80,22 @@ pub trait AgentProvider: Send + Sync {
         }
     }
 
+    /// Validate exact continuation through the native broker's own transport.
+    /// Interactive workspace qualification does not imply transport parity.
+    fn validate_native_exact_resume(&self, config: &AgentConfig) -> Result<(), String> {
+        self.validate_exact_resume(config)
+    }
+
+    /// Validate a staged ordinary Resume before disposal. Providers that route
+    /// materialized resumes through a stricter launcher must reject here too.
+    /// Fresh and pending initialization retain their provider-owned route.
+    fn validate_resume_launch(&self, config: &AgentConfig) -> Result<(), String> {
+        if config.exact_resume.is_some() {
+            self.validate_exact_resume(config)?;
+        }
+        Ok(())
+    }
+
     /// Resolves the executable binary and any OS-specific base arguments.
     /// Returns `(binary_name, base_args)`.
     fn get_executable(&self) -> (String, Vec<String>);

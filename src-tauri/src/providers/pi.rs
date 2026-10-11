@@ -203,6 +203,24 @@ impl PiProvider {
 }
 
 impl AgentProvider for PiProvider {
+    fn validate_native_exact_resume(&self, config: &AgentConfig) -> Result<(), String> {
+        config.validate_exact_resume_identity()?;
+        Err("Pi exact continuation requires the SDK interactive bridge; native RPC destination resume is not qualified".into())
+    }
+
+    fn validate_resume_launch(&self, config: &AgentConfig) -> Result<(), String> {
+        config.validate_exact_resume_identity()?;
+        if config.resume_session.is_some() || config.exact_resume.is_some() {
+            exact_resume::PiExactResumePlan::prepare(config)?;
+        }
+        Ok(())
+    }
+
+    fn validate_exact_resume(&self, config: &AgentConfig) -> Result<(), String> {
+        config.validate_exact_resume_identity()?;
+        exact_resume::PiExactResumePlan::prepare(config).map(|_| ())
+    }
+
     fn name(&self) -> &str {
         "Pi"
     }

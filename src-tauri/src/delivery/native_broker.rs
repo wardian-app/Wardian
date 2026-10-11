@@ -2933,7 +2933,7 @@ fn native_command(
             error(NativeDeliveryErrorCode::UnsupportedProvider, message, false)
         })?;
         provider
-            .validate_exact_resume(&exact_config)
+            .validate_native_exact_resume(&exact_config)
             .map_err(|message| {
                 error(
                     NativeDeliveryErrorCode::CapabilityUnavailable,
@@ -3917,6 +3917,33 @@ mod tests {
         assert!(!failure.provider_boundary_crossed);
         assert!(failure.message.contains("not qualified"));
         assert_eq!(spec.config.resume_session.as_deref(), Some("source-id"));
+    }
+
+    #[test]
+    fn exact_pi_rpc_rejects_stock_cli_cwd_before_provider_boundary() {
+        let mut config = AgentConfig {
+            provider: "pi".into(),
+            resume_session: Some(uuid::Uuid::new_v4().to_string()),
+            ..AgentConfig::default()
+        };
+        config.require_exact_resume();
+        let before = serde_json::to_value(&config).unwrap();
+        let spec = NativeSessionSpec {
+            target_agent_id: "roster-id".into(),
+            provider: "pi".into(),
+            generation: 2,
+            workspace: PathBuf::from("."),
+            config,
+        };
+        let failure = native_command(&spec, NativeProviderProtocol::PiRpc, None)
+            .err()
+            .expect("unqualified exact RPC rejected before command construction");
+        assert_eq!(failure.code, NativeDeliveryErrorCode::CapabilityUnavailable);
+        assert!(!failure.provider_boundary_crossed);
+        assert!(failure
+            .message
+            .contains("native RPC destination resume is not qualified"));
+        assert_eq!(serde_json::to_value(&spec.config).unwrap(), before);
     }
 
     #[test]

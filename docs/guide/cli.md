@@ -758,6 +758,13 @@ assignment remains supported across platforms. If shutdown or replacement is unc
 until the provider candidate and reservation have been inspected. Do not remove that record while candidate exit
 is unconfirmed.
 
+A workspace assignment records an exact continuation requirement for later
+Resume and native dispatch. Interactive handover qualification does not imply
+native RPC support. Pi's SDK interactive bridge accepts the assigned destination;
+exact continuation through its stock CLI RPC route is refused before startup
+because that route retains the saved directory. Ordinary unmarked RPC recovery
+keeps its existing behavior.
+
 `team` and `watchlist` read and write `<wardian-home>/watchlists/index.json`. Read commands accept the current v2 shape with global teams and legacy flat watchlist arrays, then return `schema: 1` JSON for automation. Mutation commands write canonical v2 JSON with camelCase storage keys, resolve agent names or UUIDs through the same roster state as `agent list`, and update `topology.json` when team creation, add, or split operations seed new team clique edges. If the desktop app is running for the same `WARDIAN_HOME`, the CLI sends a best-effort reload notification so the roster picks up the change. `message send team:<name> <message>` is still not implemented.
 
 Team mutation validation rejects duplicate team names, unknown agents, ambiguous names, and operations that would leave a team empty. Deleting a team removes dangling team entries from watchlists. Removing or splitting team members does not remove existing topology edges; the communication graph remains user-owned after a team has seeded edges.

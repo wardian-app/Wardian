@@ -281,3 +281,57 @@ fn clone_and_new_session_do_not_inherit_exact_source_requirement() {
     prepare_clear_config(&mut config).unwrap();
     assert!(config.exact_resume.is_none());
 }
+
+#[test]
+fn unmarked_pi_resume_rejects_sdk_options_before_owner_disposal() {
+    let _lock = crate::utils::wardian_test_env_lock();
+    let root = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("WARDIAN_HOME");
+    std::env::set_var("WARDIAN_HOME", root.path());
+    let id = uuid::Uuid::new_v4().to_string();
+    for pending_fresh in [false, true] {
+        let mut config = configuration("pi", root.path());
+        config.resume_session = Some(id.clone());
+        config.fresh_provider_session_id = None;
+        config.custom_args = Some("'unclosed".into());
+        if pending_fresh {
+            config.resume_session = None;
+            config.fresh_provider_session_id = Some(id.clone());
+            config.session_persistence = AgentSessionPersistenceOverride::Fresh;
+            let dir = crate::providers::pi::PiProvider::session_dir(&config.session_id).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("materialized.jsonl"), format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"cwd\":\"source\"}}\n{{\"type\":\"message\",\"message\":{{\"role\":\"assistant\"}}}}\n"
+            )).unwrap();
+            assert!(config.pending_pi_session_id().is_some());
+        }
+        assert!(config.exact_resume.is_none());
+        let before = serde_json::to_value(&config).unwrap();
+        let error = workspace_resume::validate_resume_launch_before_stop(&config).unwrap_err();
+        assert!(
+            error.contains("Pi exact resume custom arguments have invalid quoting"),
+            "{error}"
+        );
+        // This shared read-only boundary runs before stop/holds/reservations and
+        // cannot publish the staged configuration or touch a runtime owner.
+        assert_eq!(serde_json::to_value(&config).unwrap(), before);
+    }
+    match previous {
+        Some(value) => std::env::set_var("WARDIAN_HOME", value),
+        None => std::env::remove_var("WARDIAN_HOME"),
+    }
+}
+
+#[test]
+fn pi_pending_initialization_does_not_require_materialized_sdk_history() {
+    let mut config = AgentConfig {
+        provider: "pi".into(),
+        resume_session: None,
+        ..Default::default()
+    };
+    config.reset_provider_config_for_provider();
+    ProviderFactory::resolve("pi")
+        .unwrap()
+        .validate_resume_launch(&config)
+        .unwrap();
+}

@@ -95,6 +95,13 @@ pub(super) async fn finish_worktree_mutation(
     Ok(())
 }
 
+/// Read-only preparation preserves the published config and owner on failure.
+pub(super) fn validate_resume_launch_before_stop(config: &AgentConfig) -> Result<(), String> {
+    let mut prepared = config.clone();
+    prepare_resume_config_for_runtime(&mut prepared, 0)?;
+    ProviderFactory::resolve(&prepared.provider)?.validate_resume_launch(&prepared)
+}
+
 pub(super) async fn resume_agent_inner(
     session_id: String,
     state: State<'_, AppState>,
@@ -129,10 +136,8 @@ pub(super) async fn resume_agent_inner(
     let initial_config = lifecycle_config_for_session(&state, &session_id).await?;
     let starts_fresh = workspace_change.is_none()
         && resolved_session_persistence(&initial_config) == AgentSessionPersistence::Fresh;
-    if !starts_fresh && initial_config.exact_resume.is_some() {
-        initial_config.validate_exact_resume_identity()?;
-        ProviderFactory::resolve(&initial_config.provider)?
-            .validate_exact_resume(&initial_config)?;
+    if !starts_fresh || initial_config.pending_pi_session_id().is_some() {
+        validate_resume_launch_before_stop(&initial_config)?;
     }
     let workspace_handover = workspace_change.is_some();
     let mut workspace_reservation = if let Some(mutation) = workspace_change.as_ref() {

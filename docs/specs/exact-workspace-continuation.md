@@ -34,3 +34,17 @@ it across process restarts. This record is a continuity contract, not a credenti
 or authority to control another process. No provider is newly qualified by storing
 it, and adapters remain disabled until actual identity, destination execution and
 retained-history qualification passes.
+
+Ordinary Resume has a separate read-only `validate_resume_launch` seam before
+owner disposal. Its default enforces any durable exact requirement. Adapters
+that require a stricter launcher for every materialized Resume must validate
+unmarked existing agents here as well. Preparation stages configuration without
+publishing it, including PendingPi recovery; configured Fresh policy cannot skip
+validation when a pending identity has acquired complete history. Genuinely
+pending initialization retains the provider's fresh launch route.
+
+Native-broker exact continuation has its own transport preflight. Interactive
+qualification cannot imply RPC parity. Pi's stock RPC launch retains the saved
+header cwd, so exact-required RPC fails before provider startup until a supported
+destination override exists. Ordinary unmarked RPC recovery retains its existing
+behavior; the SDK interactive bridge consumes the assigned destination.
