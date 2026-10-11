@@ -22,6 +22,11 @@ pub enum ControlRequest {
         request: crate::agent_messaging::AgentMessagingRequest,
         origin: MessageOrigin,
     },
+    ControllerMessaging {
+        request: crate::agent_messaging::AgentMessagingRequest,
+        token: ControllerSecret,
+        resource: String,
+    },
     AgentList,
     AgentDelete {
         target: String,
@@ -1811,4 +1816,30 @@ mod tests {
 
         assert_eq!(value, DeliveryTransportKind::HeadlessProcess);
     }
+}
+
+/// Authentication material on the local control pipe; never print in diagnostics.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct ControllerSecret(String);
+impl ControllerSecret {
+    pub fn new(token: String) -> Self {
+        Self(token)
+    }
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+impl std::fmt::Debug for ControllerSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ControllerSecret([REDACTED])")
+    }
+}
+/// Derive a bounded canonical admission key while retaining typed request-ID separation.
+pub fn controller_request_key(mailbox_owner: &str, request_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "{mailbox_owner}:{:x}",
+        Sha256::digest(request_id.as_bytes())
+    )
 }

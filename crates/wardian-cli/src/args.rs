@@ -10,6 +10,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Explicit local-owner issuance and revocation of external controller access.
+    Controller(crate::controller::ControllerArgs),
     /// Serve the explicit local agent messaging tool over MCP.
     Mcp {
         #[command(subcommand)]

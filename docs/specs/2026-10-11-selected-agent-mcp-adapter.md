@@ -1,58 +1,27 @@
-# Optional selected-agent MCP adapter
+# Optional selected-agent and external-controller MCP bridge
 
-- Status: Local prototype; no runtime activation or cloud connectivity
+- Status: Implemented; runtime activation and public HTTPS routing are explicit owner actions
 - Date: 2026-10-11
-- Related: #57 (MCP cognitive interface); #29 (extension architecture)
+- Related: #57 (MCP cognitive interface)
 
 ## Decision
 
-Keep the public application unchanged. Provide a dependency-free optional Node
-adapter under `extensions/selected-agent-bridge/` using `wardian mcp serve` as
-the sole integration seam. Unlike the historical cross-provider bridge proposal,
-current MCP already exposes canonical information, tasks, receive, wait, reply
-and interruption. The prototype requires no provider internals, terminal input,
-database writes, counterfeit identities or new control protocol.
+Keep the application surface small: optional dependency-free Node transport plus an explicit native controller capability port. Existing managed-agent stdio clients retain their identity and behavior. External clients use a separate named controller UUID and `controller:<uuid>` mailbox, never a copied agent identity. Controllers have no provider process, agent record, workspace assignment or lifecycle generation.
 
-The fixed operator policy names the existing managed host's own sender, matching
-home/native CLI, selected exact recipient UUIDs and allowed tools. The backend
-remains the owner of canonical delivery records and identity validation. Selection
-constrains outgoing routes and roster discovery; receive/reply operate on the
-sender's mailbox with its existing permissions. This is a local convenience
-boundary, not new authentication or a sandbox against local users.
+Owner-issued grants select exact agent UUIDs, explicit operation scopes and one canonical HTTPS resource. Only credential hashes persist. Creation, listing and revocation are local owner CLI actions; verification emits secret-free policy. Native canonical dispatch independently checks the grant, target, capability and resource, including acknowledgement and quiet wait revocation. A redacted credential DTO is confined to the new ControllerMessaging control request; existing MessageOrigin privileges are not widened.
 
-The adapter inherits the host's `WARDIAN_SESSION_ID` without overriding it.
-Before any tool dispatch it requires that inherited identity to match the policy.
-An external assistant with no managed identity is rejected; a policy UUID cannot
-mint attribution. A sanctioned external-controller principal remains a backend
-design prerequisite, not something this adapter creates by copying another agent.
+The existing canonical interaction database already supports namespaced sender and cursor owners without agent foreign keys. Reuse ordinary admission, provider delivery claims, worker replies and native completion outbox. Information does not enqueue work. Tasks require both submit and wake capability. Controllers read only their own durable mailbox and cannot reply as workers. Controller replies never trigger provider spawn for the controller owner.
 
-Information remains non-waking; work returns a request receipt; reply/wait/receive
-keep Wardian's correlation and cursor rules. Interrupt is separately permitted
-and never inferred from MCP cancellation. One persistent serialized stdio session
-preserves upstream admission semantics. The adapter rejects reused tool-call IDs
-and never retries lost receipts. Cross-session exactly-once behavior is not claimed.
+## Transport and activation
 
-## Delivery boundary
+Local controller clients use native `mcp serve --controller` with environment-only token and exact resource. The optional HTTP gateway verifies the native grant before dispatch and disclosure, validates Host/Origin, bounds frames/messages/waits and records metadata-only audit events. It uses stateless MCP 2025-11-25 POST JSON responses; receive/wait provide polling instead of SSE. A stable typed JSON-RPC request ID yields a principal-bound canonical admission key. Payload collisions reject; no automatic retries or request-specific cancellation are implied.
 
-Supported local transport: newline JSON-RPC stdio subprocesses, MCP 2025-11-25
-and 2025-06-18, tools-only surface. This cannot connect a cloud assistant to a
-local machine. No listener, tunnel, credentials, provider tool grants, persistent
-configuration or live external identity is installed. The existing remote gateway
-has a separate authenticated app contract; it is not assumed to be remote MCP.
-Cloud reachability and least-privilege external principal issuance remain blocked
-on an approved transport/authentication design and end-to-end runtime evidence.
+The gateway binds loopback only when deliberately started with configuration and `--listen`. Remote integration requires an operator-managed HTTPS route and a client supporting manually provisioned bearer headers. OAuth login, dynamic registration, automatic connector installation, tunnel provisioning, persistent startup and public exposure are outside this release. Cloud clients cannot reach a local stdio process or loopback socket alone. No runtime grant or route is created by installation/build/tests.
 
-## Evidence and publication scope
+The system constrains remote callers, not arbitrary processes with the same local OS account. Revocation stops subsequent operations and result disclosure; it cannot undo work already admitted before the change. MCP cancellation notifications and disconnected clients do not retract durable tasks. Interrupt is a separately scoped current-turn operation, not process termination or cancellation of a particular request.
 
-The extension suite tests routing/policy rejection, roster sanitization, literal
-payloads, operation distinctions, opaque cursors, advisory cancellation, duplicate
-IDs, lost receipts, bounded framing, subprocess identity projection and deadline
-failure. Path-filtered Linux/Windows CI keeps these tests independently reachable.
-Native CLI discovery smoke invokes no agent operation and proves only protocol
-compatibility. No live delivery claim follows from mock or discovery evidence.
+## Verification and documentation
 
-The extension README owns setup, limits and troubleshooting. No application
-UI, CLI command, docs site navigation or provider defaults change; no screenshot
-refresh is applicable. Keep personal policy files and test runtime identities out
-of this public repository. This slice relates to #57 without claiming to complete
-its wider spawn/workflow/storage scope or the general plugin architecture in #29.
+Extension tests cover selected routing, mixed identity rejection, scoped tool discovery, authentication/revocation/audience, audit failure, literal text, typed request IDs, bounded frames, child termination and real subprocess protocol exchanges. Native tests use isolated homes to exercise canonical task admission, provider claims, worker replies, acknowledgement, completion outbox and revocation. An opt-in native acceptance driver connects transient HTTP through the actual compiled CLI to the real canonical handler and a mock worker; it verifies non-waking information, one durable task under replay and reply acknowledgement.
+
+The extension CONTROLLERS guide documents owner setup and exact integration limits; CLI and messaging developer guides link to it. No application UI or provider defaults change, so no screenshot refresh applies. This feature addresses direct selected-agent control in #57, without claiming its wider workflow, spawn and storage vision.

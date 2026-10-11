@@ -1,4 +1,8 @@
-# Selected-agent MCP bridge (local prototype)
+# Selected-agent MCP bridge
+
+For an external assistant without a managed Wardian identity, use the separate
+[external controller mode](CONTROLLERS.md), with owner-issued scoped grants and
+optional HTTP transport. The managed adapter documented below retains its existing identity.
 
 This optional, dependency-free adapter launches the existing native `wardian mcp
 serve` server and exposes only the operator's selected tools and exact recipient

@@ -750,3 +750,48 @@ fn startup_information_snapshot_includes_replies_excludes_tasks_and_later_arriva
         later.record.id
     );
 }
+
+#[test]
+fn controller_mailbox_receives_durable_native_outcome_without_provider_record() {
+    let conn = database();
+    let controller = "controller:5e4128db-ad03-4c5f-818a-70c3a024b2b0";
+    let admitted = admit(
+        &conn,
+        Admission {
+            sender: controller,
+            recipient: "receiver",
+            message: "work",
+            idempotency_key: Some("controller-task"),
+            task: true,
+            generation: 4,
+        },
+    )
+    .unwrap();
+    let claim = claim_next_task(&conn, "receiver", 4).unwrap().unwrap();
+    let binding = bind_task_turn(&conn, &claim, "codex", "session", "turn", "start").unwrap();
+    record_task_turn_outcome(&conn, &binding, ReplyStatus::Done, "native terminal answer").unwrap();
+    let replies = recover_task_turn_outcomes(&conn).unwrap();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].record.target_session_ids, [controller]);
+    let page = receive(&conn, controller, None, None, 100).unwrap();
+    assert_eq!(page.messages.len(), 1);
+    assert_eq!(
+        page.messages[0].parent_interaction_id.as_deref(),
+        Some(admitted.record.id.as_str())
+    );
+    assert_eq!(page.messages[0].sender, "receiver");
+    assert_eq!(page.messages[0].message, "native terminal answer");
+    assert!(receive(
+        &conn,
+        "different-controller",
+        Some(&page.next_cursor),
+        None,
+        100
+    )
+    .is_err());
+    assert!(recover_task_turn_outcomes(&conn).unwrap().is_empty());
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM agents", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+}

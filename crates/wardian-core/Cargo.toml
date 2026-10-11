@@ -26,6 +26,7 @@ subtle = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1.49.0", features = ["sync", "macros", "rt", "rt-multi-thread", "time"] }
 uuid = { workspace = true }
+url = "2"
 
 [target.'cfg(windows)'.dependencies]
 junction = "1"
