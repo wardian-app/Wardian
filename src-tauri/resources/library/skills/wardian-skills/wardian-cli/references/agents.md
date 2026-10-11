@@ -149,6 +149,12 @@ wardian agent worktree join reviewer-a1 --worktree <absolute-worktree-path-or-id
 wardian agent worktree disable reviewer-a1
 ```
 
-These commands use the live desktop endpoint and clear the target session after
-the assignment changes so the provider starts fresh. `disable` removes the
+These commands use the live desktop endpoint and preserve the target conversation while moving its runtime workspace. `disable` removes the
 assignment only; it does not delete the physical worktree.
+
+Worktree enable, join, and disable preserve the exact provider conversation identity.
+Off agents remain Off on every platform. Active handover supports Codex and mock on Windows; other providers and platforms are refused before shutdown until separately qualified. Supported active agents resume in the selected folder through the ordinary
+replacement transaction. The explicit move temporarily uses Resume while retaining the
+configured persistence policy. An unconfirmed candidate leaves a durable
+`<wardian-home>/runtime/workspace-handovers/` reservation that blocks target deletion
+until candidate exit and the reservation have been inspected.

@@ -116,6 +116,7 @@ async fn both_cold_load_paths_serialize_captured_policy_on_the_actual_transport(
             let method = if let Some(id) = resume_id {
                 expected["threadId"] = json!(id);
                 expected["excludeTurns"] = json!(true);
+                expected["cwd"] = json!("workspace");
                 "thread/resume"
             } else {
                 expected["cwd"] = json!("workspace");
@@ -138,7 +139,7 @@ async fn both_cold_load_paths_serialize_captured_policy_on_the_actual_transport(
                 socket
                     .send(Message::Text(
                         json!({"id":request["id"], "result":{
-                            "thread":{"id":"saved-thread"}, "model":"configured-model",
+                            "thread":{"id":"saved-thread"}, "cwd":"workspace", "model":"configured-model",
                             "reasoningEffort":"high", "sandbox":{"type":response_sandbox},
                             "approvalPolicy":expected_approval, "approvalsReviewer":"user",
                         }})
@@ -235,4 +236,18 @@ fn policy_rejection_diagnostics_are_bounded_and_whitelisted() {
         assert!(!error.message.contains("/private"));
         assert!(!error.provider_boundary_crossed);
     }
+}
+
+#[test]
+fn changed_workspace_requires_provider_confirmation() {
+    let policy = ExpectedPolicy::from_server_args(&[]).unwrap();
+    assert!(policy
+        .validate_workspace(&json!({"cwd":"new-workspace"}), Path::new("new-workspace"))
+        .is_ok());
+    assert!(policy
+        .validate_workspace(&json!({"cwd":"old-workspace"}), Path::new("new-workspace"))
+        .is_err());
+    assert!(policy
+        .validate_workspace(&json!({}), Path::new("new-workspace"))
+        .is_err());
 }

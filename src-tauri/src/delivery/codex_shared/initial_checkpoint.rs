@@ -151,6 +151,7 @@ pub(super) async fn prepare_saved_resume(
     client: &CodexSharedClient,
     policy: &ExpectedPolicy,
     id: &str,
+    workspace: &std::path::Path,
     alive: &mut impl FnMut() -> Result<(), CodexSharedError>,
     deadline: tokio::time::Instant,
     observed_version: &str,
@@ -162,13 +163,14 @@ pub(super) async fn prepare_saved_resume(
             "initial checkpoint startup budget exhausted before write",
         ));
     }
-    prepare_with_timeout(client, policy, id, alive, remaining).await
+    prepare_with_timeout(client, policy, id, workspace, alive, remaining).await
 }
 
 async fn prepare_with_timeout(
     client: &CodexSharedClient,
     policy: &ExpectedPolicy,
     id: &str,
+    workspace: &std::path::Path,
     alive: &mut impl FnMut() -> Result<(), CodexSharedError>,
     timeout: std::time::Duration,
 ) -> Result<(), CodexSharedError> {
@@ -177,7 +179,10 @@ async fn prepare_with_timeout(
         alive()?;
         let mut events = client.initial_notifications.subscribe();
         let activity = client.initial_activity_sequence.load(Ordering::Acquire);
-        let response = client.resume_metadata(policy.initial_resume_params(id)).await?;
+        let mut params = policy.initial_resume_params(id);
+        params["cwd"] = json!(workspace);
+        let response = client.resume_metadata(params).await?;
+        policy.validate_workspace(&response, workspace)?;
         private_client(client)?;
         alive()?;
         quiet_response(&response, id)?;

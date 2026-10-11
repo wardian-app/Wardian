@@ -3,8 +3,8 @@
 Git remains the source of truth for worktree registration. Agent assignment is
 owned by Wardian's workspace records. Use `wardian agent worktree enable` and
 `join` for new managed assignments; ordinary project worktrees belong beside
-the primary checkout under `<source-checkout>.wt/`. These commands clear the
-target provider session. A harness subagent uses its coordinator's prepared
+the primary checkout under `<source-checkout>.wt/`. These commands preserve the
+target provider conversation through a workspace handover. A harness subagent uses its coordinator's prepared
 checkout with an explicit working directory; creating a worktree does not
 require creating another permanent agent.
 
@@ -106,3 +106,16 @@ nested-separator paths, checking distinct keys, direct lanes, and registration;
 Windows regressions retain separator and case equivalence. They do not establish
 provider restart or native build acceptance. Complete the repository's normal verification and independent review
 before publication.
+
+Worktree enable, join, and disable preserve the exact provider conversation identity.
+Off agents remain Off; active agents resume in the selected folder through the ordinary
+replacement transaction. The explicit move temporarily uses Resume while retaining the
+configured persistence policy. An unconfirmed candidate leaves a durable
+`<wardian-home>/runtime/workspace-handovers/` reservation that blocks target deletion
+until candidate exit and the reservation have been inspected.
+
+Worktree handover drains the stopped provider's remaining history before replacement can rotate its log, using the existing conversation logging policy. A capture failure withholds replacement and leaves the published folder unchanged.
+
+Active handover requires an owned runtime-tree exit receipt and is qualified only for Codex and mock on Windows. Other providers and platforms, and legacy or uncontained active runtimes, are rejected during preflight until separately qualified. Off assignment remains available across platforms. Unconfirmed shutdown retains conversation and target protection instead of rotating the log.
+
+Before shutdown, handover also acquires an exact prior-provider hold using the existing conversation lease architecture. Unlike the lifecycle lease, that hold survives expiry and restart. Only confirmed owned exit releases the newly acquired hold; pre-existing holds are preserved.
