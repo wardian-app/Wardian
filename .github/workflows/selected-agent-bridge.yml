@@ -1,0 +1,25 @@
+name: Selected Agent Bridge
+on:
+  pull_request:
+    paths:
+      - 'extensions/selected-agent-bridge/**'
+      - '.github/workflows/selected-agent-bridge.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'extensions/selected-agent-bridge/**'
+      - '.github/workflows/selected-agent-bridge.yml'
+permissions:
+  contents: read
+jobs:
+  stdio:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - run: npm --prefix extensions/selected-agent-bridge test
