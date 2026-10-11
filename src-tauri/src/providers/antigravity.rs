@@ -1056,6 +1056,79 @@ SET dp0=%~dp0
         );
     }
 
+    #[test]
+    fn workspace_change_keeps_exact_resume_id() {
+        let provider = make_provider();
+        let mut config = make_antigravity_config(AntigravityProviderConfig::default());
+        config.resume_session = Some("source-conversation".into());
+        config.folder = "source-workspace".into();
+        let source_args = provider.get_spawn_args(&config, true);
+        config.folder = "destination-workspace".into();
+        let destination_args = provider.get_spawn_args(&config, true);
+
+        assert_eq!(source_args, destination_args);
+        assert!(destination_args
+            .windows(2)
+            .any(|pair| { pair == ["--conversation", "source-conversation"] }));
+    }
+
+    #[test]
+    fn exact_history_binding_ignores_destination_index_and_never_falls_back() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path();
+        std::fs::create_dir_all(home.join("cache")).expect("cache dir");
+        std::fs::write(
+            home.join("cache/last_conversations.json"),
+            r#"{"destination-workspace":"destination-conversation"}"#,
+        )
+        .expect("destination index");
+        for (id, text) in [
+            ("source-conversation", "source-only prior context"),
+            ("destination-conversation", "unrelated destination history"),
+        ] {
+            let path = AntigravityProvider::conversation_database_path(home, id);
+            std::fs::create_dir_all(path.parent().expect("database parent")).expect("database dir");
+            let connection = Connection::open(path).expect("open database");
+            connection
+                .execute_batch(
+                    "CREATE TABLE steps (idx INTEGER, step_type INTEGER, step_payload BLOB);",
+                )
+                .expect("steps schema");
+            connection
+                .execute(
+                    "INSERT INTO steps (idx, step_type, step_payload) VALUES (0, 14, ?1)",
+                    params![protobuf_message_field(19, protobuf_string_field(2, text))],
+                )
+                .expect("retained user history");
+        }
+        let source_path =
+            AntigravityProvider::conversation_database_path(home, "source-conversation");
+        let index_before = std::fs::read(home.join("cache/last_conversations.json")).unwrap();
+        let source_before = std::fs::read(&source_path).unwrap();
+        assert_eq!(
+            AntigravityProvider::conversation_for_workspace(
+                home,
+                Path::new("destination-workspace")
+            )
+            .as_deref(),
+            Some("destination-conversation")
+        );
+        assert_eq!(
+            AntigravityProvider::conversation_log_path(home, "source-conversation"),
+            Some(source_path.clone())
+        );
+        let messages = AntigravityProvider::conversation_messages_from_database(&source_path)
+            .expect("decode exact source history");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, AgentChatRole::User);
+        assert_eq!(messages[0].text, "source-only prior context");
+        assert!(AntigravityProvider::conversation_log_path(home, "missing-source").is_none());
+        assert_eq!(std::fs::read(source_path).unwrap(), source_before);
+        assert_eq!(
+            std::fs::read(home.join("cache/last_conversations.json")).unwrap(),
+            index_before
+        );
+    }
     fn protobuf_varint(value: u64) -> Vec<u8> {
         let mut value = value;
         let mut bytes = Vec::new();
