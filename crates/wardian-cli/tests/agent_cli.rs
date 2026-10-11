@@ -536,3 +536,37 @@ fn list_accepts_output_fields_after_subcommand() {
         .any(|agent| agent["name"] == "coder-a1" && agent["status"] == "processing"));
     assert!(!stdout.contains(r#""uuid""#));
 }
+
+#[test]
+fn spawn_help_exposes_explicit_team_selection() {
+    let output = Command::new(env!("CARGO_BIN_EXE_wardian-cli"))
+        .args(["agent", "spawn", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("--team"));
+}
+
+#[test]
+fn invalid_spawn_team_is_rejected_before_contacting_provider() {
+    let home = seed_home();
+    let output = Command::new(env!("CARGO_BIN_EXE_wardian-cli"))
+        .env("WARDIAN_HOME", home.path())
+        .env_remove("WARDIAN_SESSION_ID")
+        .args([
+            "agent",
+            "spawn",
+            "--provider",
+            "codex",
+            "--class",
+            "Coder",
+            "--team",
+            "missing",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "not_found");
+    assert!(error["error"]["message"].as_str().unwrap().contains("Team"));
+}

@@ -55,6 +55,11 @@ impl WatchlistEntry {
 pub fn load_watchlist_state() -> io::Result<WatchlistState> {
     let home = wardian_core::paths::wardian_home()
         .ok_or_else(|| io::Error::other("WARDIAN_HOME not set"))?;
+    load_watchlist_state_at(&home)
+}
+
+/// Read a specific habitat without changing the process environment.
+pub(crate) fn load_watchlist_state_at(home: &std::path::Path) -> io::Result<WatchlistState> {
     let path = home.join("watchlists").join("index.json");
     if !path.exists() {
         return Ok(empty_watchlist_state());

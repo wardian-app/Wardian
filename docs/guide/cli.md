@@ -885,6 +885,18 @@ blueprints still return `ok: true` on stdout and exit 0.
 }
 ```
 
+### Explicit team selection at creation
+
+Use an existing team name or ID to create an agent in that team:
+
+```bash
+wardian agent spawn --provider codex --class Coder --name project-coder --workspace <absolute-workspace-path> --team "Project Dev"
+```
+
+The same command works in PowerShell. Omit `--team` for deliberately unteamed creation. Invalid or ambiguous selection fails before provider creation; use the team ID to disambiguate. The JSON creation receipt includes `team` with its ID, name and member IDs. Identity `--field` projections retain their bare-value output. Existing team watchlist entries include the new member, and communication edges follow the existing team seeding and suppression rules.
+
+Team selection and membership publication hold the team index lock across creation so another team mutation cannot invalidate the selection. If creation succeeds but membership persistence fails, `spawn_team_membership_failed` reports the created agent identity and selected team ID. Inspect them and repair with `wardian team add`; repeating spawn would create another agent.
+
 ## Related Links
 
 - [Getting Started](./getting-started.md)

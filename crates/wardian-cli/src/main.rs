@@ -17,6 +17,7 @@ mod memory;
 mod messaging;
 mod output;
 mod schema;
+mod spawn;
 mod telemetry;
 mod watchlist;
 use args::{
@@ -312,9 +313,10 @@ fn handle_agent(args: AgentArgs) -> Result<String, CliError> {
             class,
             name,
             workspace,
+            team: _,
             model,
             reasoning_effort,
-        }) => handle_agent_spawn(
+        }) => spawn::handle_agent_spawn(
             provider,
             class,
             name.as_deref(),
@@ -398,20 +400,6 @@ fn handle_agent_rename(target: &str, new_name: &str) -> Result<String, CliError>
     serde_json::to_string(&response)
         .map(|json| format!("{json}\n"))
         .map_err(|error| CliError::generic(error.to_string()))
-}
-
-fn handle_agent_spawn(
-    provider: &str,
-    class: &str,
-    name: Option<&str>,
-    workspace: Option<&str>,
-    model: Option<&str>,
-    reasoning_effort: Option<&str>,
-    args: &AgentArgs,
-) -> Result<String, CliError> {
-    let agent = live::agent_spawn(provider, class, name, workspace, model, reasoning_effort)
-        .map_err(control_error)?;
-    render_show(&agent, &render_options(args))
 }
 
 fn handle_agent_models(provider: &str, force_refresh: bool) -> Result<String, CliError> {

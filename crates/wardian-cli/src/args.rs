@@ -1403,6 +1403,9 @@ pub enum AgentCommand {
         name: Option<String>,
         #[arg(long)]
         workspace: Option<String>,
+        /// Existing team name or ID. Omit to create an unteamed agent.
+        #[arg(long)]
+        team: Option<String>,
         /// Provider-discovered model identifier. Omit for the provider default.
         #[arg(long)]
         model: Option<String>,
