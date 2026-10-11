@@ -12,7 +12,15 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 pub struct ClaudePermissionHookPaths {
     pub settings_arg: String,
     pub event_log_path: std::path::PathBuf,
-    pub completion_event_dir: std::path::PathBuf,
+}
+
+/// Per-launch Stop round capture for an interactive Claude session.
+pub struct ClaudeStopRoundCapture {
+    /// Append-only log that receives one line per Stop hook invocation.
+    pub round_log: std::path::PathBuf,
+    /// Extra `env` entries for the launch's `--settings`, when Wardian owns
+    /// the launch's telemetry export.
+    pub settings_env: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 pub fn get_wardian_home() -> Option<std::path::PathBuf> {
@@ -184,6 +192,7 @@ pub fn habitat_codex_home(habitat_root: &std::path::Path) -> std::path::PathBuf 
 
 pub fn ensure_claude_permission_hook(
     session_id: &str,
+    stop_rounds: Option<&ClaudeStopRoundCapture>,
 ) -> Result<ClaudePermissionHookPaths, String> {
     let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
     let hook_root = wardian_home.join("agents").join(session_id).join("claude");
@@ -192,17 +201,9 @@ pub fn ensure_claude_permission_hook(
     let event_log_path = hook_root.join("permission-requests.jsonl");
     std::fs::write(&event_log_path, "").map_err(|e| e.to_string())?;
 
-    // Stop hook outputs are durable outbox records. Wardian removes each only
-    // after its Inbox item has been committed, so restart can safely replay it.
-    let completion_event_dir = hook_root.join("turn-completions");
-    std::fs::create_dir_all(&completion_event_dir).map_err(|e| e.to_string())?;
-
     let script_path = write_claude_permission_hook_script(&hook_root, &event_log_path)?;
     let command = claude_permission_hook_command(&script_path);
-    let completion_script_path =
-        write_claude_completion_hook_script(&hook_root, &completion_event_dir)?;
-    let completion_command = claude_permission_hook_command(&completion_script_path);
-    let settings_arg = serde_json::json!({
+    let mut settings = serde_json::json!({
         "hooks": {
             "PermissionRequest": [
                 {
@@ -214,25 +215,32 @@ pub fn ensure_claude_permission_hook(
                         }
                     ]
                 }
-            ],
-            "Stop": [
-                {
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": completion_command,
-                        }
-                    ]
-                }
             ]
         }
-    })
-    .to_string();
+    });
+    if let Some(capture) = stop_rounds {
+        // Stop records are only candidates: Wardian pairs each with Claude's
+        // post-decision telemetry before treating its text as a final answer.
+        let round_script_path = write_claude_stop_round_hook_script(&hook_root)?;
+        let round_command = claude_hook_command_with_target(&round_script_path, &capture.round_log);
+        settings["hooks"]["Stop"] = serde_json::json!([
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": round_command,
+                    }
+                ]
+            }
+        ]);
+        if let Some(env) = capture.settings_env.as_ref() {
+            settings["env"] = serde_json::Value::Object(env.clone());
+        }
+    }
 
     Ok(ClaudePermissionHookPaths {
-        settings_arg,
+        settings_arg: settings.to_string(),
         event_log_path,
-        completion_event_dir,
     })
 }
 
@@ -1909,26 +1917,40 @@ fn write_claude_permission_hook_script(
     }
 }
 
-fn write_claude_completion_hook_script(
+/// Writes the Stop hook that appends Claude's payload, as one JSONL line, to
+/// the launch's round log named by its first argument. Raw line breaks in a
+/// JSON document are insignificant whitespace, so folding them keeps the
+/// record valid and the append a single line.
+fn write_claude_stop_round_hook_script(
     hook_root: &std::path::Path,
-    event_dir: &std::path::Path,
 ) -> Result<std::path::PathBuf, String> {
     #[cfg(windows)]
     {
-        let script_path = hook_root.join("claude-stop-hook.ps1");
-        let script = format!(
-            "$payload = [Console]::In.ReadToEnd()\nif ([string]::IsNullOrWhiteSpace($payload)) {{ exit 0 }}\n$target = Join-Path '{}' ([guid]::NewGuid().ToString('N') + '.json')\n$temp = $target + '.tmp'\n[System.IO.File]::WriteAllText($temp, $payload, [System.Text.UTF8Encoding]::new($false))\nMove-Item -LiteralPath $temp -Destination $target\n",
-            escape_powershell_single_quoted(&event_dir.to_string_lossy())
+        let script_path = hook_root.join("claude-stop-round-hook.ps1");
+        let script = concat!(
+            "param([Parameter(Mandatory = $true)][string]$Target)\n",
+            "$buffer = New-Object System.IO.MemoryStream\n",
+            "[Console]::OpenStandardInput().CopyTo($buffer)\n",
+            "$payload = [System.Text.Encoding]::UTF8.GetString($buffer.ToArray())\n",
+            "if ([string]::IsNullOrWhiteSpace($payload)) { exit 0 }\n",
+            "$line = ($payload -replace \"[`r`n]+\", ' ').Trim() + \"`n\"\n",
+            "[System.IO.File]::AppendAllText($Target, $line, [System.Text.UTF8Encoding]::new($false))\n",
         );
         std::fs::write(&script_path, script).map_err(|e| e.to_string())?;
         Ok(script_path)
     }
     #[cfg(not(windows))]
     {
-        let script_path = hook_root.join("claude-stop-hook.sh");
-        let script = format!(
-            "#!/bin/sh\nset -eu\numask 077\ntmp=$(mktemp '{}'/stop-XXXXXX)\ntrap 'rm -f \"$tmp\"' EXIT HUP INT TERM\ncat > \"$tmp\"\nmv \"$tmp\" \"$tmp.json\"\n",
-            escape_posix_single_quoted(&event_dir.to_string_lossy())
+        let script_path = hook_root.join("claude-stop-round-hook.sh");
+        let script = concat!(
+            "#!/bin/sh\n",
+            "set -eu\n",
+            "umask 077\n",
+            "target=$1\n",
+            "payload=$(cat)\n",
+            "[ -n \"$payload\" ] || exit 0\n",
+            "line=$(printf '%s' \"$payload\" | tr '\\r\\n' '  ')\n",
+            "printf '%s\\n' \"$line\" >> \"$target\"\n",
         );
         std::fs::write(&script_path, script).map_err(|e| e.to_string())?;
         use std::os::unix::fs::PermissionsExt;
@@ -1938,6 +1960,28 @@ fn write_claude_completion_hook_script(
         permissions.set_mode(0o755);
         std::fs::set_permissions(&script_path, permissions).map_err(|e| e.to_string())?;
         Ok(script_path)
+    }
+}
+
+fn claude_hook_command_with_target(
+    script_path: &std::path::Path,
+    target: &std::path::Path,
+) -> String {
+    #[cfg(windows)]
+    {
+        format!(
+            "{} \"{}\"",
+            claude_permission_hook_command(script_path),
+            target.to_string_lossy()
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        format!(
+            "{} '{}'",
+            claude_permission_hook_command(script_path),
+            escape_posix_single_quoted(&target.to_string_lossy())
+        )
     }
 }
 
@@ -2174,7 +2218,7 @@ mod tests {
         projected_link_matches_target, provider_uses_projected_workspace,
         resolve_opencode_runtime_roots, resolve_system_include_directories, sync_codex_agent_home,
         sync_codex_home_indexes_from, sync_opencode_config_dir, wardian_memory_instructions,
-        write_habitat_instruction_files,
+        write_habitat_instruction_files, ClaudeStopRoundCapture,
     };
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3458,7 +3502,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_hook_scripts_preserve_existing_completion_and_write_stop_payload() {
+    fn claude_stop_round_hook_appends_one_line_per_invocation() {
         let _guard = crate::utils::wardian_test_env_lock();
         let root = unique_temp_dir("claude-hook apostrophe ' dollar $ space");
         unsafe { std::env::set_var("WARDIAN_HOME", root.to_str().unwrap()) };
@@ -3468,37 +3512,36 @@ mod tests {
             .join("session-123")
             .join("claude")
             .join("permission-requests.jsonl");
-        let completion_dir = root
-            .join("agents")
-            .join("session-123")
-            .join("claude")
-            .join("turn-completions");
         std::fs::create_dir_all(stale_log.parent().unwrap()).expect("create hook dir");
         std::fs::write(&stale_log, "{\"tool_name\":\"Bash\"}\n").expect("write stale hook event");
-        std::fs::create_dir_all(&completion_dir).expect("create completion outbox");
-        let prompt_id = "00000000-0000-0000-0000-000000000001";
-        std::fs::write(
-            completion_dir.join(format!("{prompt_id}.json")),
-            format!("{{\"prompt_id\":\"{prompt_id}\"}}"),
-        )
-        .expect("write retained completion event");
+        let round_log = root.join("launch ' $").join("stop-rounds.jsonl");
+        std::fs::create_dir_all(round_log.parent().unwrap()).expect("create launch dir");
+        let mut env = serde_json::Map::new();
+        env.insert("OTEL_LOGS_EXPORTER".into(), "otlp".into());
+        let capture = ClaudeStopRoundCapture {
+            round_log: round_log.clone(),
+            settings_env: Some(env),
+        };
 
-        let paths = ensure_claude_permission_hook("session-123").expect("ensure hook");
+        let paths =
+            ensure_claude_permission_hook("session-123", Some(&capture)).expect("ensure hook");
+        let without_capture =
+            ensure_claude_permission_hook("session-123", None).expect("ensure hook");
 
         unsafe { std::env::remove_var("WARDIAN_HOME") };
         assert_eq!(
-            std::fs::read_to_string(paths.event_log_path).expect("read hook log"),
+            std::fs::read_to_string(&paths.event_log_path).expect("read hook log"),
             ""
-        );
-        assert_eq!(
-            std::fs::read_to_string(paths.completion_event_dir.join(format!("{prompt_id}.json")))
-                .expect("read completion outbox record"),
-            format!("{{\"prompt_id\":\"{prompt_id}\"}}")
         );
         let settings: serde_json::Value =
             serde_json::from_str(&paths.settings_arg).expect("hook settings json");
         assert!(settings["hooks"]["Stop"].is_array());
         assert!(settings["hooks"]["PermissionRequest"].is_array());
+        assert_eq!(settings["env"]["OTEL_LOGS_EXPORTER"], "otlp");
+        let bare: serde_json::Value =
+            serde_json::from_str(&without_capture.settings_arg).expect("hook settings json");
+        assert!(bare["hooks"].get("Stop").is_none());
+        assert!(bare.get("env").is_none());
 
         let command = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
@@ -3510,74 +3553,64 @@ mod tests {
                 command.contains("'\"'\"'"),
                 "single-quote shell escape missing"
             );
-            assert!(
-                command.contains("$"),
-                "fixture path should exercise dollar quoting"
-            );
         }
         #[cfg(windows)]
-        assert!(command.contains("-File \""));
+        assert!(command.contains("-File \"") && command.ends_with("stop-rounds.jsonl\""));
 
-        let script_path = paths
-            .completion_event_dir
-            .parent()
-            .expect("hook root")
-            .join(if cfg!(windows) {
-                "claude-stop-hook.ps1"
+        let script_path =
+            paths
+                .event_log_path
+                .parent()
+                .expect("hook root")
+                .join(if cfg!(windows) {
+                    "claude-stop-round-hook.ps1"
+                } else {
+                    "claude-stop-round-hook.sh"
+                });
+        let payloads: [&[u8]; 2] = [
+            b"{\"hook_event_name\":\"Stop\",\n \"last_assistant_message\":\"first \\u00e9\"}\n",
+            "{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"second é\"}".as_bytes(),
+        ];
+        for payload in payloads {
+            let mut process = if cfg!(windows) {
+                let mut command = std::process::Command::new("powershell");
+                command.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
+                command.arg(&script_path);
+                command
             } else {
-                "claude-stop-hook.sh"
-            });
-        let mut process = if cfg!(windows) {
-            let mut command = std::process::Command::new("powershell");
-            command.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
-            command.arg(script_path);
-            command
-        } else {
-            let mut command = std::process::Command::new("sh");
-            command.arg(script_path);
-            command
+                let mut command = std::process::Command::new("sh");
+                command.arg(&script_path);
+                command
+            }
+            .arg(&round_log)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("run generated Stop hook script");
+            use std::io::Write;
+            process
+                .stdin
+                .take()
+                .expect("hook stdin")
+                .write_all(payload)
+                .expect("write hook payload");
+            let output = process.wait_with_output().expect("wait for hook script");
+            assert!(
+                output.status.success(),
+                "generated hook script failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("run generated Stop hook script");
-        use std::io::Write;
-        process
-            .stdin
-            .take()
-            .expect("hook stdin")
-            .write_all(b"{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"done\"}\n")
-            .expect("write hook payload");
-        let output = process.wait_with_output().expect("wait for hook script");
-        assert!(
-            output.status.success(),
-            "generated hook script failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let records = std::fs::read_dir(&paths.completion_event_dir)
-            .expect("read completion outbox")
-            .flatten()
-            .filter(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .is_some_and(|extension| extension == "json")
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            records.len(),
-            2,
-            "the generated hook should add one durable record"
-        );
-        assert!(records.iter().any(|entry| {
-            std::fs::read_to_string(entry.path())
-                .ok()
-                .is_some_and(|contents| {
-                    contents
-                        == "{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"done\"}\n"
-                })
-        }));
+
+        let contents = std::fs::read_to_string(&round_log).expect("read round log");
+        let lines = contents.lines().collect::<Vec<_>>();
+        assert!(contents.ends_with('\n'));
+        assert_eq!(lines.len(), 2, "one line per Stop invocation: {contents:?}");
+        let first: serde_json::Value = serde_json::from_str(lines[0]).expect("first line json");
+        let second: serde_json::Value = serde_json::from_str(lines[1]).expect("second line json");
+        assert_eq!(first["last_assistant_message"], "first é");
+        assert_eq!(second["last_assistant_message"], "second é");
         let _ = std::fs::remove_dir_all(&root);
     }
 

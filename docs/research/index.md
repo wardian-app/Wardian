@@ -17,3 +17,7 @@ Research documents are not product evaluations, affiliation claims, endorsements
 - [Shared Agent Memory References](./shared-agent-memory-references.md)
 - [Skill Manager References](./skill-manager-references.md)
 - [Automation Design References](./automation-design-references.md)
+
+## Provider Capability Records
+
+- [Claude Interactive Turn Verdict](./claude-interactive-turn-verdict.md)

@@ -10,7 +10,7 @@ Use Inbox to review finished work, catch failed automation runs, read an importa
 
 Wardian records these items:
 
-- **Work finished**: an agent or automation reached a terminal outcome. When an agent finishes a turn with an answer, Wardian creates one card that holds that answer. This works for every provider and does not require the Wardian window to be open; the card also reaches the mobile Inbox. Wardian never turns generic Idle transitions, terminal output, provider control commands, interrupted or failed turns, or an unconfigured session ID into a completion card. If Wardian cannot identify the turn's final answer, it skips the automatic card.
+- **Work finished**: an agent or automation reached a terminal outcome. When an agent finishes a turn with an answer, Wardian creates one card that holds that answer. This works without the Wardian window open, and the card also reaches the mobile Inbox. Interactive Claude sessions are the exception: Claude Code does not report whether a turn really ended successfully, so Wardian creates no automatic completion card for them rather than guess. Wardian never turns generic Idle transitions, terminal output, provider control commands, interrupted or failed turns, or an unconfigured session ID into a completion card. If Wardian cannot identify the turn's final answer, it skips the automatic card.
 - **Important update**: an agent explicitly sends a concise user-facing update with `wardian notify update`. Use this for a material result, a significant limitation, or a change that affects the user's next decision.
 - **Approval request**: an agent explicitly sends a structured request with `wardian notify approval`. It names the proposed action, why it is risky, the available choices, and an expiry. Provider-native permission prompts remain provider-sourced **Action needed** items.
 - **Automation outcome**: an automation completed or failed. Automation approval nodes also project their waiting decision into Inbox; the automation engine remains authoritative for its state and resolution.
@@ -142,7 +142,7 @@ Inbox alert preferences live in **Settings > Inbox** and are per event type. Des
 
 - Items older than seven days are ignored by the legacy completion projection when it loads.
 - CLI Inbox reads use the same seven-day cutoff and a bounded 200-item source page; a `truncated` result includes `next_offset` for older data.
-- Automatic completion cards use only a canonical final provider response. Open the source session or ask the agent for a summary when no automatic card appears.
+- Automatic completion cards use only a canonical final provider response. Interactive Claude turns produce none until Claude Code exposes a supported turn verdict. Open the source session or ask the agent for a summary when no automatic card appears.
 - Provider approval-looking text does not create generic manual choices. Wardian shows buttons only for explicit provider choices or a structured `notify approval` request.
 - Clearing read items removes the completion projection for the active Wardian home. Durable notify history and automation state retain their own lifecycle; cleared automation run identities are retained only as Inbox triage markers.
 
