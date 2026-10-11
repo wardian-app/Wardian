@@ -369,13 +369,18 @@ the owner keeps draining and discards later stderr. Startup failure and owner
 shutdown terminate the process tree, then wait up to 500 ms for stderr EOF before
 aborting the reader if a descendant still holds the pipe open.
 
+Codex cold-indexes projected session history before opening its local socket.
+The owner waits while its captured child is alive and remains cancellable; a
+fixed startup deadline cannot establish that this installed provider is
+unsupported. Socket presence still requires the unchanged proxy, version,
+home, direct-input, and no-turn injection checks before attachment.
+
 The startup timing line also carries `socket_wait_resources`. On Windows the
 owner retains a query-only duplicate of its daemon's process handle and samples
 CPU time and I/O counters around the socket wait. It logs elapsed sampling time,
 kernel and user CPU time in microseconds, and read/write/other operation and byte
 deltas. An unavailable query, changed identity, counter rollback, or unsupported
-platform produces `null`. Sampling preserves the original socket deadline and
-does not retry provider work. These are process accounting counters, including
+platform produces `null`. Sampling does not extend bounded waits or retry provider work. These are process accounting counters, including
 device and pipe I/O, not disk throughput or a backfill phase diagnosis. They
 exclude descendant processes and contain no paths or provider text.
 

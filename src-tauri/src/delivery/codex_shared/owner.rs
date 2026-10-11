@@ -500,13 +500,13 @@ impl CodexSharedOwner {
         let start = async {
             // A private socket must appear while our daemon is alive. No controller
             // RPC is retried, and a proxy handshake failure is final.
-            // Fix the original deadline before optional OS queries so sampling
-            // cannot extend the socket-wait budget.
-            let socket_deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+            // Codex cold-indexes projected history before opening its socket.
+            // Indexing has no fixed-duration bound or readiness RPC. Keep the
+            // wait cancellable and child-bound; validate protocol once ready.
             let resources = startup_resources::StartupResourceObserver::start(&child);
             let socket_wait = observe_socket_wait(
                 &socket,
-                socket_deadline,
+                None,
                 async { let _ = (&mut cancelled).await; },
                 || observe_child_liveness(&mut child),
             )
@@ -781,7 +781,7 @@ fn restore_launch_overlay(
 /// path or provider output; presence is not a handshake or attachment receipt.
 pub(super) async fn observe_socket_wait<C, F>(
     socket: &std::path::Path,
-    deadline: tokio::time::Instant,
+    deadline: Option<tokio::time::Instant>,
     cancelled: C,
     mut child_liveness: F,
 ) -> SocketWaitDiagnostic
@@ -806,7 +806,7 @@ where
 /// Wait only for socket presence while the captured child remains alive.
 pub(super) async fn wait_for_socket(
     socket: &std::path::Path,
-    deadline: tokio::time::Instant,
+    deadline: Option<tokio::time::Instant>,
     mut child_liveness: impl FnMut() -> ChildLiveness,
 ) -> SocketWaitOutcome {
     loop {
@@ -818,7 +818,7 @@ pub(super) async fn wait_for_socket(
         if socket_presence(socket) == SocketPresence::Present {
             return SocketWaitOutcome::Ready;
         }
-        if tokio::time::Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
             return SocketWaitOutcome::TimedOut;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
