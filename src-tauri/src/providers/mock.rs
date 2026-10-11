@@ -1,4 +1,4 @@
-use wardian_core::models::provider::{AgentEvent, AgentProvider};
+use wardian_core::models::provider::{AgentEvent, AgentProvider, WorkspaceHandoverQualification};
 use wardian_core::models::AgentConfig;
 
 /// A deterministic mock provider for automated testing.
@@ -98,6 +98,10 @@ impl MockProvider {
 }
 
 impl AgentProvider for MockProvider {
+    fn workspace_handover_qualification(&self) -> WorkspaceHandoverQualification {
+        WorkspaceHandoverQualification::ExactConversationAtDestination
+    }
+
     fn name(&self) -> &str {
         "Mock"
     }

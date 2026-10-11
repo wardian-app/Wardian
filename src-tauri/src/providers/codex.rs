@@ -1,5 +1,5 @@
 use crate::utils::CodexRuntimePolicy;
-use wardian_core::models::provider::{AgentEvent, AgentProvider};
+use wardian_core::models::provider::{AgentEvent, AgentProvider, WorkspaceHandoverQualification};
 use wardian_core::models::{AgentConfig, CodexProviderConfig};
 
 /// Provider adapter for the OpenAI Codex CLI.
@@ -502,6 +502,10 @@ fn effective_codex_runtime_policy(
 }
 
 impl AgentProvider for CodexProvider {
+    fn workspace_handover_qualification(&self) -> WorkspaceHandoverQualification {
+        WorkspaceHandoverQualification::ExactConversationAtDestination
+    }
+
     fn name(&self) -> &str {
         "Codex"
     }

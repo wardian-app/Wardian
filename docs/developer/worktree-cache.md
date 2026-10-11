@@ -119,3 +119,19 @@ Worktree handover drains the stopped provider's remaining history before replace
 Active handover requires an owned runtime-tree exit receipt and is qualified only for Codex and mock on Windows. Other providers and platforms, and legacy or uncontained active runtimes, are rejected during preflight until separately qualified. Off assignment remains available across platforms. Unconfirmed shutdown retains conversation and target protection instead of rotating the log.
 
 Before shutdown, handover also acquires an exact prior-provider hold using the existing conversation lease architecture. Unlike the lifecycle lease, that hold survives expiry and restart. Only confirmed owned exit releases the newly acquired hold; pre-existing holds are preserved.
+
+### Provider handover qualification
+
+Worktree preparation is independent of providers. Off assignment preserves the
+conversation without launching a provider. Active assignment asks the provider
+adapter for its typed `WorkspaceHandoverQualification`; ordinary Resume and
+persistent messaging support do not qualify workspace handover. Adapters default
+to an explicit unqualified reason until exact identity, effective destination cwd
+and retained history are verified. Current qualified adapters are Codex and mock.
+
+The actual runtime must independently supply an owned tree-exit receipt before
+closing-history drain and replacement publication. This currently limits active
+handover to supported Windows runtimes. New adapter qualification must preserve
+these shared transaction rules and prove actual relative tool execution at the
+destination, prior context and durable/rendered history with the same native
+conversation identity. Missing-history fresh-session fallback is not continuity.

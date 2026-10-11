@@ -29,6 +29,18 @@ pub enum AgentEvent {
     Unknown,
 }
 
+/// Qualification for resuming the exact conversation after a workspace change.
+///
+/// This is independent of ordinary Resume or messaging transport capabilities.
+/// Qualification requires observed identity, effective destination cwd and
+/// retained history. Runtime-tree shutdown authority is checked separately for
+/// the actual running instance before any handover mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceHandoverQualification {
+    ExactConversationAtDestination,
+    Unqualified { reason: &'static str },
+}
+
 /// Abstraction over a specific agent CLI harness (Gemini, Claude, Codex, etc.).
 ///
 /// Implementations encapsulate the provider-specific binary resolution,
@@ -36,6 +48,15 @@ pub enum AgentEvent {
 pub trait AgentProvider: Send + Sync {
     /// Returns the human-readable display name (e.g., `"Gemini"`).
     fn name(&self) -> &str;
+
+    /// Fail closed until this adapter's exact-conversation workspace handover
+    /// has been qualified. Implementations must not infer this from accepting
+    /// a resume argument or advertising a persistent messaging session.
+    fn workspace_handover_qualification(&self) -> WorkspaceHandoverQualification {
+        WorkspaceHandoverQualification::Unqualified {
+            reason: "exact conversation identity, destination cwd and retained history have not been qualified",
+        }
+    }
 
     /// Resolves the executable binary and any OS-specific base arguments.
     /// Returns `(binary_name, base_args)`.

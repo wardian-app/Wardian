@@ -40,6 +40,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn workspace_handover_requires_adapter_qualification_not_generic_resume_support() {
+        use wardian_core::models::provider::WorkspaceHandoverQualification;
+        for provider_name in [
+            "claude",
+            "codex",
+            "gemini",
+            "antigravity",
+            "opencode",
+            "pi",
+            "mock",
+        ] {
+            let provider = ProviderFactory::resolve(provider_name).unwrap();
+            let qualification = provider.workspace_handover_qualification();
+            if matches!(provider_name, "codex" | "mock") {
+                assert_eq!(
+                    qualification,
+                    WorkspaceHandoverQualification::ExactConversationAtDestination
+                );
+            } else {
+                assert!(
+                    matches!(qualification, WorkspaceHandoverQualification::Unqualified { reason } if !reason.is_empty()),
+                    "{provider_name}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn resolve_gemini_succeeds() {
         let provider = ProviderFactory::resolve("gemini");
         assert!(provider.is_ok());

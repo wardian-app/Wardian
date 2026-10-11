@@ -26,8 +26,11 @@ pub(super) fn prepare_workspace_resume_config(
     let persistence = prepared.session_persistence;
     prepared.session_persistence = AgentSessionPersistenceOverride::Resume;
     prepare_resume_config_for_runtime(&mut prepared, 0)?;
-    if !matches!(prepared.provider.as_str(), "codex" | "mock") {
-        return Err(format!("Active worktree handover is not qualified for provider {}; turn the agent Off before assigning a different workspace", prepared.provider));
+    match ProviderFactory::resolve(&prepared.provider)?.workspace_handover_qualification() {
+        wardian_core::models::provider::WorkspaceHandoverQualification::ExactConversationAtDestination => {}
+        wardian_core::models::provider::WorkspaceHandoverQualification::Unqualified { reason } => {
+            return Err(format!("Active worktree handover is not qualified for provider {}: {reason}; turn the agent Off before assigning a different workspace", prepared.provider));
+        }
     }
     prepared.session_persistence = persistence;
     Ok(prepared)
