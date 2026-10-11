@@ -751,15 +751,22 @@ needed; the update never restarts or interrupts the running provider itself.
 Managed worktree agents must use
 `agent worktree join` or `agent worktree disable` instead.
 
-`agent worktree list` returns the worktrees currently managed by Wardian with source folder, worktree folder, display name, and member agent IDs. `agent worktree enable`, `join`, and `disable` are live-control commands. They reuse the same backend logic as the Source Control panel and force a fresh agent session after changing the runtime workspace. `disable` removes the assignment only; it does not delete the physical worktree folder.
+`agent worktree list` returns the worktrees currently managed by Wardian with source folder, worktree folder, display name, and member agent IDs. `agent worktree enable`, `join`, and `disable` are live-control commands. They reuse the same backend logic as the Source Control panel. Assignment preserves the exact provider conversation identity. An Off agent stays Off; an active agent resumes that conversation in the selected folder. The folder is published only after replacement commits. This explicit handover uses Resume for the move even when ordinary Resume is configured as Fresh, and preserves the configured policy. `disable` removes the assignment only; it does not delete the physical worktree folder. A malformed or missing
+provider identity prevents active handover before the provider is stopped. Active handover also requires an
+owned runtime-tree exit receipt. Active handover is qualified only for Codex and mock on Windows; other providers and platforms are refused before shutdown until separately qualified. Legacy or
+uncontained active runtimes, including POSIX PTYs without such a receipt, are refused during preflight. Off
+assignment remains supported across platforms. If shutdown or replacement is unconfirmed, a retained `<wardian-home>/runtime/workspace-handovers/` record blocks deletion of the target
+until the provider candidate and reservation have been inspected. Do not remove that record while candidate exit
+is unconfirmed.
+
 `agent worktree prepare` uses the live desktop endpoint but requires no managed
 caller or target agent. It creates a new unassigned Git worktree at the explicit
 commit under the primary checkout's sibling `<project>.wt/<name>` and runs the
 existing build-cache setup. Git owns registration; there is no additional
 registry. Names use lowercase letters, digits and hyphens; branch
 `wardian/<name>` and the target path must both be unused. Preparation leaves
-agent assignments and provider sessions intact. A later `join` remains an
-explicit fresh-session transition. If cache setup fails after creation, the
+agent assignments and provider sessions intact. A later `join` uses the
+session-preserving assignment described above. If cache setup fails after creation, the
 checkout is retained and the error explains that state; no cleanup runs.
 
 

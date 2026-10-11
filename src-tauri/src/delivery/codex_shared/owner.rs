@@ -333,6 +333,7 @@ pub struct CodexSharedOwner {
     interactive: bool,
     initial_context: String,
     policy: policy::ExpectedPolicy,
+    workspace: PathBuf,
     socket: attachment::OwnedSocket,
     launch_config: Mutex<Option<super::launch_config::LaunchConfigGuard>>,
     settings_operation: Mutex<()>,
@@ -471,7 +472,11 @@ impl CodexSharedOwner {
             })?)
         };
         let child_spawn_at = std::time::Instant::now();
-        let mut child = match command.spawn() {
+        #[cfg(windows)]
+        let child_result = crate::utils::process::spawn_owned_command_in_job(&mut command, &job);
+        #[cfg(not(windows))]
+        let child_result = crate::utils::process::spawn_owned_command(&mut command);
+        let mut child = match child_result {
             Ok(child) => child,
             Err(error) => {
                 restore_launch_overlay(&mut launch_config)?;
@@ -480,6 +485,7 @@ impl CodexSharedOwner {
                 )));
             }
         };
+        #[cfg(unix)]
         let child_pid = child
             .id()
             .expect("newly spawned Codex owner must have a process identifier");
@@ -488,19 +494,6 @@ impl CodexSharedOwner {
             .take()
             .expect("Codex owner stderr was configured as piped");
         let mut stderr_capture = CodexStderrCapture::start(stderr, stderr_redaction);
-        #[cfg(windows)]
-        if let Err(error) =
-            crate::utils::process::assign_pid_to_job(&job, child_pid, "Codex shared owner")
-        {
-            let _ = tokio::task::spawn_blocking(move || {
-                crate::utils::process::force_kill_process_tree(child_pid)
-            })
-            .await;
-            terminate_starting_child(&mut child).await;
-            timings.record_stderr_diagnostic(stderr_capture.finish_startup().await);
-            restore_launch_overlay(&mut launch_config)?;
-            return Err(CodexSharedError::unsupported(error));
-        }
         timings.child_spawn = child_spawn_at.elapsed();
         let mut connected = None;
         let mut owned_socket = None;
@@ -508,13 +501,13 @@ impl CodexSharedOwner {
         let start = async {
             // A private socket must appear while our daemon is alive. No controller
             // RPC is retried, and a proxy handshake failure is final.
-            // Fix the original deadline before optional OS queries so sampling
-            // cannot extend the socket-wait budget.
-            let socket_deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+            // Codex cold-indexes projected history before opening its socket.
+            // Indexing has no fixed-duration bound or readiness RPC. Keep the
+            // wait cancellable and child-bound; validate protocol once ready.
             let resources = startup_resources::StartupResourceObserver::start(&child);
             let socket_wait = observe_socket_wait(
                 &socket,
-                socket_deadline,
+                None,
                 async { let _ = (&mut cancelled).await; },
                 || observe_child_liveness(&mut child),
             )
@@ -567,6 +560,7 @@ impl CodexSharedOwner {
                     let result = initial_checkpoint::prepare_saved_resume(
                         &client, &policy,
                         spec.config.resume_session.as_deref().expect("saved resume"),
+                        &spec.workspace,
                         &mut || attachment::child_alive(&mut child),
                         initialization_deadline,
                         &observed_version,
@@ -624,6 +618,7 @@ impl CodexSharedOwner {
                     &spec.config.session_name,
                 ),
                 policy,
+                workspace: spec.workspace.clone(),
                 socket: owned_socket.expect("initialized owner captured its socket"),
                 launch_config: Mutex::new(launch_config),
                 settings_operation: Mutex::new(()),
@@ -708,6 +703,7 @@ impl CodexSharedOwner {
                 ));
             }
             self.policy.validate(&response)?;
+            self.policy.validate_workspace(&response, &self.workspace)?;
             attachment::require_observed_thread(&self.client, &id).await?;
             if response["thread"]["canAcceptDirectInput"] != true {
                 return Err(CodexSharedError::unsupported(
@@ -789,7 +785,7 @@ fn restore_launch_overlay(
 /// path or provider output; presence is not a handshake or attachment receipt.
 pub(super) async fn observe_socket_wait<C, F>(
     socket: &std::path::Path,
-    deadline: tokio::time::Instant,
+    deadline: Option<tokio::time::Instant>,
     cancelled: C,
     mut child_liveness: F,
 ) -> SocketWaitDiagnostic
@@ -814,7 +810,7 @@ where
 /// Wait only for socket presence while the captured child remains alive.
 pub(super) async fn wait_for_socket(
     socket: &std::path::Path,
-    deadline: tokio::time::Instant,
+    deadline: Option<tokio::time::Instant>,
     mut child_liveness: impl FnMut() -> ChildLiveness,
 ) -> SocketWaitOutcome {
     loop {
@@ -826,7 +822,7 @@ pub(super) async fn wait_for_socket(
         if socket_presence(socket) == SocketPresence::Present {
             return SocketWaitOutcome::Ready;
         }
-        if tokio::time::Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
             return SocketWaitOutcome::TimedOut;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

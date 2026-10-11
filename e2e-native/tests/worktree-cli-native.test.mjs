@@ -224,6 +224,7 @@ process.stdin.resume(); setInterval(() => {}, 1000);
     WORKTREE_NAME,
   ]);
   assert.equal(enabled.ok, true);
+  assert.equal(enabled.cleared_session, false);
   assert.equal(enabled.agent?.uuid, sessionId);
   assert.equal(enabled.agent?.name, SESSION_NAME);
   assert.ok(enabled.worktree?.worktree_folder, `missing worktree in response: ${JSON.stringify(enabled)}`);
@@ -238,19 +239,19 @@ process.stdin.resume(); setInterval(() => {}, 1000);
   assert.ok(listedWorktree, `enabled worktree missing from CLI list: ${JSON.stringify(listed)}`);
   assert.equal(listedWorktree.worktree_folder, normalizeForWardianRecords(worktreeFolder));
 
-  // Legacy Clear starts a provider; await its real publication fence before
-  // issuing another lifecycle operation. Preparation itself crosses no fence.
-  await session.driver.wait(() => {
-    const leasePath = path.join(harness.isolatedHome, "runtime", "conversation-leases.json");
-    if (!fs.existsSync(leasePath)) return false;
-    const state = JSON.parse(fs.readFileSync(leasePath, "utf8"));
-    assert.equal(state.schema, 1);
-    assert.ok(Array.isArray(state.leases));
-    return !state.leases.some(lease => lease.agent_id === sessionId);
-  }, 20000, "Legacy enable provider did not release its published startup fence");
+  // Composed Off assignment preserves its identity without launching a provider.
+  const enabledAgents = await session.driver.executeAsyncScript((done) => {
+    window.__TAURI_INTERNALS__.invoke("list_agents").then(done);
+  });
+  const enabledConfig = enabledAgents.find(agent => agent.session_id === sessionId);
+  assert.equal(enabledConfig.is_off, true);
+  assert.equal(enabledConfig.resume_session, spawnedAgent.resume_session);
+  assert.deepEqual(fs.readFileSync(activeRecords), providerRecordBytes);
+  process.kill(providerRecord.pid, 0);
 
   const disabled = runCli(cliPath, harness, ["agent", "worktree", "disable", SESSION_NAME]);
   assert.equal(disabled.ok, true);
+  assert.equal(disabled.cleared_session, false);
   assert.equal(disabled.agent?.uuid, sessionId);
   assert.equal(disabled.agent?.name, SESSION_NAME);
   assert.equal(disabled.worktree ?? null, null);

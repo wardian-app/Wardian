@@ -11,7 +11,7 @@ async fn socket_wait_stays_pending_until_the_path_appears() {
     let checks = std::cell::Cell::new(0);
     let waiting = owner::observe_socket_wait(
         &socket,
-        tokio::time::Instant::now() + Duration::from_secs(60),
+        Some(tokio::time::Instant::now() + Duration::from_secs(60)),
         std::future::pending(),
         || {
             checks.set(checks.get() + 1);
@@ -54,7 +54,7 @@ async fn socket_wait_checks_child_exit_before_accepting_a_present_path() {
     let alive = std::cell::Cell::new(true);
     let waiting = owner::observe_socket_wait(
         &socket,
-        tokio::time::Instant::now() + Duration::from_secs(60),
+        Some(tokio::time::Instant::now() + Duration::from_secs(60)),
         std::future::pending(),
         || {
             if alive.get() {
@@ -97,7 +97,7 @@ async fn socket_wait_timeout_records_elapsed_and_bounded_diagnostic() {
     let checks = std::cell::Cell::new(0);
     let diagnostic = owner::observe_socket_wait(
         &socket,
-        tokio::time::Instant::now(),
+        Some(tokio::time::Instant::now()),
         std::future::pending(),
         || {
             checks.set(checks.get() + 1);
@@ -141,7 +141,7 @@ async fn socket_wait_yields_to_caller_cancellation_without_advancing_startup() {
         let startup = async {
             let diagnostic = owner::observe_socket_wait(
                 &socket,
-                tokio::time::Instant::now() + Duration::from_secs(60),
+                Some(tokio::time::Instant::now() + Duration::from_secs(60)),
                 async {
                     let _ = cancelled.await;
                 },
@@ -247,4 +247,69 @@ async fn queued_initialize_fails_on_connection_exit_without_fabricating_readines
     })
     .await
     .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn cold_socket_indexing_can_finish_after_the_previous_startup_budget() {
+    use std::future::Future;
+    #[cfg(unix)]
+    use std::os::unix::net::UnixListener;
+    use std::task::Poll;
+    #[cfg(windows)]
+    use uds_windows::UnixListener;
+
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("control.sock");
+    let started = tokio::time::Instant::now();
+    let waiting = owner::observe_socket_wait(&socket, None, std::future::pending(), || {
+        owner::ChildLiveness::Alive
+    });
+    tokio::pin!(waiting);
+    assert!(
+        std::future::poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    tokio::time::advance(STARTUP_TIMEOUT + Duration::from_secs(1)).await;
+    assert!(
+        std::future::poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    let _listener = UnixListener::bind(&socket).unwrap();
+    tokio::time::advance(Duration::from_millis(50)).await;
+    let diagnostic = waiting.await;
+    assert_eq!(diagnostic.outcome, owner::SocketWaitOutcome::Ready);
+    assert!(tokio::time::Instant::now() - started > STARTUP_TIMEOUT);
+    assert_eq!(diagnostic.child_liveness, owner::ChildLiveness::Alive);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cold_socket_indexing_remains_cancellable_after_the_previous_budget() {
+    use std::future::Future;
+    use std::task::Poll;
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("control.sock");
+    let (cancel, cancelled) = oneshot::channel::<()>();
+    let started = tokio::time::Instant::now();
+    let waiting = owner::observe_socket_wait(
+        &socket,
+        None,
+        async {
+            let _ = cancelled.await;
+        },
+        || owner::ChildLiveness::Alive,
+    );
+    tokio::pin!(waiting);
+    assert!(
+        std::future::poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    tokio::time::advance(STARTUP_TIMEOUT + Duration::from_secs(1)).await;
+    cancel.send(()).unwrap();
+    let diagnostic = waiting.await;
+    assert_eq!(diagnostic.outcome, owner::SocketWaitOutcome::Cancelled);
+    assert!(tokio::time::Instant::now() - started > STARTUP_TIMEOUT);
+    assert!(!socket.exists());
 }

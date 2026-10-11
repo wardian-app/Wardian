@@ -45,7 +45,7 @@ pub(super) async fn handle_agent_worktree_enable(
         worktree,
         previous_worktree: None,
         branch_name: Some(branch_name),
-        cleared_session: true,
+        cleared_session: false,
     };
     ok_json(&response)
 }
@@ -89,7 +89,7 @@ pub(super) async fn handle_agent_worktree_join(
         worktree: worktree_for_member(&worktrees, &uuid).or(Some(target_worktree)),
         previous_worktree: None,
         branch_name: None,
-        cleared_session: true,
+        cleared_session: false,
     };
     ok_json(&response)
 }
@@ -121,7 +121,7 @@ pub(super) async fn handle_agent_worktree_disable(
         worktree: None,
         previous_worktree,
         branch_name: None,
-        cleared_session: true,
+        cleared_session: false,
     };
     ok_json(&response)
 }

@@ -15,6 +15,7 @@ async fn prepare_saved_resume(
         client,
         policy,
         id,
+        std::path::Path::new("workspace"),
         alive,
         tokio::time::Instant::now() + STARTUP_TIMEOUT,
         "0.160.0",
@@ -121,6 +122,7 @@ async fn fixture(
                         "auto_review"
                     };
                     let mut response = metadata(reviewer);
+                    response["cwd"] = json!("workspace");
                     if resumes == 1 {
                         if case == Case::Busy {
                             response["thread"]["status"]["type"] = json!("active");
@@ -254,7 +256,7 @@ async fn private_checkpoint_requires_applied_then_real_eviction_and_keeps_owner_
     );
     assert_eq!(
         frames[0]["params"],
-        json!({"threadId":"saved", "excludeTurns":true,
+        json!({"threadId":"saved", "excludeTurns":true, "cwd":"workspace",
         "model":"configured-model", "sandbox":"workspace-write", "approvalPolicy":"on-request",
         "config":{"model_reasoning_effort":"high"}})
     );
@@ -343,6 +345,7 @@ async fn submitted_only_wrong_or_missing_events_and_conflicts_do_not_complete_pr
             &client,
             &policy(),
             "saved",
+            std::path::Path::new("workspace"),
             &mut || Ok(()),
             if missing_event {
                 Duration::from_secs(2)
@@ -449,6 +452,7 @@ async fn ineligible_version_or_expired_deadline_rejects_before_preload() {
             &client,
             &policy(),
             "saved",
+            std::path::Path::new("workspace"),
             &mut || Ok(()),
             tokio::time::Instant::now() + STARTUP_TIMEOUT,
             version,
@@ -465,6 +469,7 @@ async fn ineligible_version_or_expired_deadline_rejects_before_preload() {
         &client,
         &policy(),
         "saved",
+        std::path::Path::new("workspace"),
         &mut || Ok(()),
         tokio::time::Instant::now(),
         "0.160.0",

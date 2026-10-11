@@ -168,9 +168,11 @@ impl ExpectedPolicy {
         workspace: &Path,
     ) -> Result<Value, CodexSharedError> {
         if let Some(id) = resume_id.filter(|id| !id.is_empty()) {
-            client
-                .resume_metadata(self.background_resume_params(id))
-                .await
+            let mut params = self.background_resume_params(id);
+            params["cwd"] = json!(workspace);
+            let response = client.resume_metadata(params).await?;
+            self.validate_workspace(&response, workspace)?;
+            Ok(response)
         } else {
             client
                 .request_with_timeout(
@@ -180,6 +182,24 @@ impl ExpectedPolicy {
                 )
                 .await
         }
+    }
+
+    /// Check the provider's effective directory before publishing its owner.
+    pub(super) fn validate_workspace(
+        &self,
+        response: &Value,
+        workspace: &Path,
+    ) -> Result<(), CodexSharedError> {
+        let actual = response["cwd"].as_str().ok_or_else(|| {
+            CodexSharedError::unsupported("Codex resume omitted effective workspace")
+        })?;
+        let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if canonical(Path::new(actual)) != canonical(workspace) {
+            return Err(CodexSharedError::unsupported(
+                "Codex resume returned a different effective workspace",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn validate(&self, response: &Value) -> Result<(), CodexSharedError> {

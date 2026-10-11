@@ -1,3 +1,6 @@
+mod workspace_reservation;
+mod workspace_resume;
+mod workspace_stop;
 use crate::manager::{self, roster_io::save_live_state};
 use crate::providers::antigravity::AntigravityProvider;
 use crate::providers::ProviderFactory;
@@ -16,6 +19,7 @@ use wardian_core::models::{
     AgentConfig, AgentSessionPersistence, AgentSessionPersistenceOverride, DeployedSkillRef,
     ProviderConfig,
 };
+use workspace_resume::{finish_worktree_mutation, WorkspaceMutation, WorktreeLifecycle};
 
 #[path = "agent_lifecycle.rs"]
 mod agent_lifecycle;
@@ -2811,268 +2815,7 @@ pub async fn resume_agent(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
-    manager::log_debug(&format!(
-        "[WARDIAN] resume_agent called for session: {}",
-        session_id
-    ));
-    let lifecycle_lease =
-        acquire_agent_lifecycle_transition_lease_for_session(&state, &session_id, "resume").await?;
-    let mut lifecycle_heartbeat = LifecycleLeaseHeartbeat::start(lifecycle_lease.owner().clone());
-    let _lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
-    lifecycle_heartbeat.ensure_active("resume")?;
-    let initial_config = lifecycle_config_for_session(&state, &session_id).await?;
-    let starts_fresh =
-        resolved_session_persistence(&initial_config) == AgentSessionPersistence::Fresh;
-    let codex_stops_before_preflight = starts_fresh && initial_config.provider == "codex";
-    if codex_stops_before_preflight {
-        stop_native_owner_with_before_capture(&state, &session_id, false, |agent| {
-            hold_previous_provider_before_rotation(agent, &lifecycle_lease).map(|_| ())
-        })
-        .await?;
-    } else {
-        stop_native_owner(&state, &session_id, false).await?;
-    }
-    let snapshot = {
-        let agents = state.agents.lock().await;
-        let agent = agents
-            .get(&session_id)
-            .ok_or_else(|| format!("Agent {} not found", session_id))?;
-        capture_resume_runtime_snapshot(agent)
-    };
-    lifecycle_heartbeat.ensure_active("resume")?;
-
-    // Detach the paused runtime's status incarnation before a new provider is
-    // spawned. A late event from the old PTY must not become current while the
-    // replacement is bootstrapping.
-    let staged_status_arc = {
-        let mut agents = state.agents.lock().await;
-        let agent = agents
-            .get_mut(&session_id)
-            .ok_or_else(|| format!("Agent {} not found", session_id))?;
-        lifecycle_heartbeat.ensure_active("resume")?;
-        replace_agent_status_incarnation(agent, "Processing...")
-    };
-    manager::publish_agent_status(&app, &session_id, &staged_status_arc);
-
-    let status_before_resume = snapshot.current_status.clone();
-    let mut config = snapshot.config.clone();
-    let fresh_pending_boundary =
-        if starts_fresh {
-            crate::commands::chat::archive_agent_chat_events_until_stable_for_lifecycle(
-                &state,
-                &session_id,
-            )
-            .await
-            .map_err(|error| {
-                format!("Failed to acquire the closing provider log before fresh resume: {error}")
-            })?;
-            let snapshot =
-                match crate::commands::chat::agent_archive_capture_snapshot(&state, &session_id)
-                    .await
-                {
-                    Ok(snapshot) => snapshot,
-                    Err(error) => {
-                        restore_agent_status_after_failed_runtime_start(
-                            &state,
-                            &app,
-                            &session_id,
-                            &status_before_resume,
-                        )
-                        .await;
-                        return Err(format!(
-                    "Failed to capture the closing conversation before fresh resume: {error}"
-                ));
-                    }
-                };
-            let pending = match prepare_conversation_boundary(snapshot) {
-                Ok(pending) => pending,
-                Err(error) => {
-                    restore_agent_status_after_failed_runtime_start(
-                        &state,
-                        &app,
-                        &session_id,
-                        &status_before_resume,
-                    )
-                    .await;
-                    return Err(format!(
-                        "Failed to prepare the closing conversation before fresh resume: {error}"
-                    ));
-                }
-            };
-            if let Err(error) = stage_conversation_boundary(&state, &pending) {
-                restore_agent_status_after_failed_runtime_start(
-                    &state,
-                    &app,
-                    &session_id,
-                    &status_before_resume,
-                )
-                .await;
-                return Err(format!(
-                    "Failed to stage the closing conversation before fresh resume: {error}"
-                ));
-            }
-            Some(pending)
-        } else {
-            None
-        };
-    let persistence_override = config.session_persistence;
-    config.session_persistence = if starts_fresh {
-        AgentSessionPersistenceOverride::Fresh
-    } else {
-        AgentSessionPersistenceOverride::Resume
-    };
-    if let Err(error) = prepare_resume_config_for_runtime(&mut config, snapshot.query_count) {
-        restore_agent_status_after_failed_runtime_start(
-            &state,
-            &app,
-            &session_id,
-            &status_before_resume,
-        )
-        .await;
-        return Err(error);
-    }
-    config.session_persistence = persistence_override;
-    if let Err(error) = prepare_provider_owned_fresh_identity(&mut config).await {
-        restore_agent_status_after_failed_runtime_start(
-            &state,
-            &app,
-            &session_id,
-            &status_before_resume,
-        )
-        .await;
-        return Err(error);
-    }
-    let pending = PendingRuntime::prepare(&config, &state.terminal_sessions)?;
-    lifecycle_heartbeat.ensure_active("resume")?;
-    let (mut old_runtime, previous_hold_owner) = {
-        let mut agents = state.agents.lock().await;
-        let agent = agents
-            .get_mut(&session_id)
-            .ok_or_else(|| format!("Agent {} not found", session_id))?;
-        let previous_hold_owner = if starts_fresh && !codex_stops_before_preflight {
-            hold_previous_provider_before_rotation(agent, &lifecycle_lease)?
-        } else {
-            None
-        };
-        (
-            take_agent_runtime_for_termination(agent),
-            previous_hold_owner,
-        )
-    };
-    if let Some(runtime_generation) = old_runtime.runtime_generation {
-        if let Err(error) = state
-            .terminal_sessions
-            .terminate_and_remove_runtime(&session_id, runtime_generation)
-            .await
-        {
-            manager::log_debug(&format!(
-                "[WARDIAN] old terminal runtime already unavailable during resume {session_id}: {error}"
-            ));
-        }
-    }
-    manager::terminate_rotated_agent_process(&mut old_runtime, previous_hold_owner.as_ref())
-        .await?;
-    let mut publication_disposition = manager::SpawnPublicationDisposition::new();
-    let unpublished_failure = publication_disposition.failure_signal();
-    let mut new_active = match spawn_replacement_under_lifecycle_lease(
-        app.clone(),
-        config.clone(),
-        !starts_fresh,
-        (!starts_fresh)
-            .then_some(snapshot.init_timestamp.clone())
-            .flatten(),
-        ReplacementSpawnLease {
-            lease: lifecycle_lease,
-            unpublished_failure: unpublished_failure.clone(),
-        },
-        &mut lifecycle_heartbeat,
-        "resume",
-    )
-    .await
-    {
-        Ok(active) => pending.attach(active),
-        Err(error) => {
-            restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error")
-                .await;
-            return Err(error);
-        }
-    };
-    if let Err(error) = lifecycle_heartbeat.ensure_active("resume") {
-        let error = new_active.stop_after_failure(error).await;
-        let error = retain_uncertain_replacement_until_expiry(&unpublished_failure, error);
-        restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error").await;
-        return Err(error);
-    }
-    restore_runtime_state_after_resume(&mut new_active, &snapshot, starts_fresh);
-    promote_fresh_provider_session_after_resume(&config.provider, &mut new_active);
-    let new_config = new_active.config.lock().unwrap().clone();
-    let new_created_at = new_active.init_timestamp.lock().unwrap().clone();
-    let new_status_arc = new_active.current_status.clone();
-    let mut pending_new_active = new_active;
-    if let Err(error) = lifecycle_heartbeat.ensure_active("resume") {
-        let error = pending_new_active.stop_after_failure(error).await;
-        let error = retain_uncertain_replacement_until_expiry(&unpublished_failure, error);
-        restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error").await;
-        return Err(error);
-    }
-    let commit_result = {
-        let mut agents = state.agents.lock().await;
-        let order = state.agent_order.lock().await;
-        lifecycle_heartbeat.ensure_active("resume").and_then(|_| {
-            commit_resume_replacement(
-                &state,
-                &mut agents,
-                &order,
-                &session_id,
-                pending_new_active.slot(),
-                &snapshot.config,
-                snapshot.init_timestamp.as_deref(),
-                &new_config,
-                new_created_at.as_deref(),
-                starts_fresh,
-                fresh_pending_boundary.as_ref(),
-            )
-        })
-    };
-    let (mut old_agent, session_close_context, replacement_journal) = match commit_result {
-        Ok(result) => result,
-        Err(error) => {
-            let error = pending_new_active.stop_after_failure(error).await;
-            let error = retain_uncertain_replacement_until_expiry(&unpublished_failure, error);
-            restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error")
-                .await;
-            return Err(error);
-        }
-    };
-    publication_disposition.commit();
-    manager::publish_agent_status(&app, &session_id, &new_status_arc);
-
-    manager::terminate_active_agent_process(&mut old_agent);
-
-    let _ = app.emit(
-        "agent-terminal-cleared",
-        terminal_cleared_payload(&session_id),
-    );
-    let _ = app.emit("agents-updated", ());
-    let _ = app.emit(
-        "agent-pty-output-ready",
-        terminal_cleared_payload(&session_id),
-    );
-    if let Some(context) = session_close_context {
-        if let Err(error) =
-            crate::automation::session_close::invoke_matching(app.clone(), context).await
-        {
-            return Err(format!(
-                "The agent resumed, but its session-close automation was not durably accepted: {error}"
-            ));
-        }
-    }
-    if let Err(error) = replacement_journal.complete() {
-        manager::log_debug(&format!(
-            "[WARDIAN] resume journal cleanup deferred for {session_id}: {error}"
-        ));
-    }
-    Ok(())
+    workspace_resume::resume_agent_inner(session_id, state, app, None).await
 }
 
 #[tauri::command]
@@ -4360,15 +4103,12 @@ pub async fn enable_agent_worktree(
     if session_id.is_empty() {
         return Err("Session id is required".to_string());
     }
+    let _worktree_assignment = workspace_resume::protect_worktree_assignment()?;
     let lifecycle_lease =
-        acquire_agent_lifecycle_transition_lease_for_session(&state, &session_id, "clear").await?;
+        acquire_agent_lifecycle_transition_lease_for_session(&state, &session_id, "resume").await?;
     let lifecycle_heartbeat = LifecycleLeaseHeartbeat::start(lifecycle_lease.owner().clone());
     let lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
-    lifecycle_heartbeat.ensure_active("clear")?;
-    let archive_snapshot =
-        crate::commands::chat::agent_archive_capture_snapshot(&state, &session_id)
-            .await
-            .ok();
+    lifecycle_heartbeat.ensure_active("resume")?;
 
     let worktree_name = worktree_name
         .as_deref()
@@ -4405,7 +4145,7 @@ pub async fn enable_agent_worktree(
     };
 
     let workspace_path = std::path::PathBuf::from(&workspace_folder);
-    lifecycle_heartbeat.ensure_active("clear")?;
+    lifecycle_heartbeat.ensure_active("resume")?;
     if worktree_path.exists() {
         ensure_existing_worktree_is_git_registered(&workspace_path, &worktree_path)?;
         crate::commands::git::setup_worktree_build_caches(&worktree_path, &workspace_path)?;
@@ -4420,54 +4160,16 @@ pub async fn enable_agent_worktree(
         }
     }
 
-    lifecycle_heartbeat.ensure_active("clear")?;
-    let (lifecycle_guard, lifecycle_lease, lifecycle_heartbeat) = {
-        let mut roster = lock_agent_roster_for_save(&state).await?;
-        let Some(agent) = roster.agents.get_mut(&session_id) else {
-            return Err(format!("Agent {} not found", session_id));
-        };
-        lifecycle_heartbeat.ensure_active("clear")?;
-        {
-            let mut config = agent.config.lock().unwrap();
-            enable_worktree_config(&mut config, &worktree_path);
-        }
-        let context = (lifecycle_guard, lifecycle_lease, lifecycle_heartbeat);
-        roster.save(context).await?
-    };
-    let _ = app.emit("agents-updated", ());
-
-    clear_agent_after_worktree_mutation(
+    lifecycle_heartbeat.ensure_active("resume")?;
+    finish_worktree_mutation(
         session_id,
         state,
         app,
-        archive_snapshot,
-        lifecycle_guard,
-        lifecycle_lease,
-        lifecycle_heartbeat,
-    )
-    .await
-}
-
-async fn clear_agent_after_worktree_mutation(
-    session_id: String,
-    state: State<'_, AppState>,
-    app: AppHandle,
-    archive_snapshot: Option<crate::commands::chat::AgentArchiveCaptureSnapshot>,
-    lifecycle_guard: tokio::sync::OwnedMutexGuard<()>,
-    lifecycle_lease: wardian_core::conversation_lease::PersistedConversationLeaseGuard,
-    lifecycle_heartbeat: LifecycleLeaseHeartbeat,
-) -> Result<(), String> {
-    let reason = Some("worktree_switch".to_string());
-    clear_agent_session_inner(
-        session_id,
-        reason,
-        state,
-        app,
-        archive_snapshot,
-        ClearAgentLifecycle {
-            guard: Some(lifecycle_guard),
-            lease: Some(lifecycle_lease),
-            heartbeat: Some(lifecycle_heartbeat),
+        WorkspaceMutation::Enable(worktree_path),
+        WorktreeLifecycle {
+            guard: lifecycle_guard,
+            lease: lifecycle_lease,
+            heartbeat: lifecycle_heartbeat,
         },
     )
     .await
@@ -4505,15 +4207,12 @@ pub async fn assign_agent_worktree(
     if session_id.is_empty() {
         return Err("Session id is required".to_string());
     }
+    let _worktree_assignment = workspace_resume::protect_worktree_assignment()?;
     let lifecycle_lease =
-        acquire_agent_lifecycle_transition_lease_for_session(&state, &session_id, "clear").await?;
+        acquire_agent_lifecycle_transition_lease_for_session(&state, &session_id, "resume").await?;
     let lifecycle_heartbeat = LifecycleLeaseHeartbeat::start(lifecycle_lease.owner().clone());
     let lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
-    lifecycle_heartbeat.ensure_active("clear")?;
-    let archive_snapshot =
-        crate::commands::chat::agent_archive_capture_snapshot(&state, &session_id)
-            .await
-            .ok();
+    lifecycle_heartbeat.ensure_active("resume")?;
     let worktree_path = std::path::Path::new(worktree_folder.trim());
     if !worktree_path.is_dir() {
         return Err("Worktree folder does not exist".to_string());
@@ -4532,42 +4231,31 @@ pub async fn assign_agent_worktree(
     let managed_worktree =
         find_assignable_worktree(&configs, &wardian_home, &worktree_folder, discovered)
             .ok_or_else(|| "Worktree is not managed by Wardian".to_string())?;
-    lifecycle_heartbeat.ensure_active("clear")?;
-    let (lifecycle_guard, lifecycle_lease, lifecycle_heartbeat) = {
-        let mut roster = lock_agent_roster_for_save(&state).await?;
-        let Some(agent) = roster.agents.get_mut(&session_id) else {
-            return Err(format!("Agent {} not found", session_id));
-        };
-        lifecycle_heartbeat.ensure_active("clear")?;
-        {
-            let mut config = agent.config.lock().unwrap();
-            let source_folder = config
-                .git_worktree_source
-                .as_deref()
-                .map(str::trim)
-                .filter(|folder| !folder.is_empty())
-                .unwrap_or(config.folder.trim())
-                .to_string();
-            validate_assignable_worktree_for_agent(
-                &source_folder,
-                &managed_worktree,
-                worktree_path,
-            )?;
-            assign_worktree_config(&mut config, &worktree_folder)?;
-        }
-        let context = (lifecycle_guard, lifecycle_lease, lifecycle_heartbeat);
-        roster.save(context).await?
-    };
-    let _ = app.emit("agents-updated", ());
-
-    clear_agent_after_worktree_mutation(
+    lifecycle_heartbeat.ensure_active("resume")?;
+    {
+        let agents = state.agents.lock().await;
+        let agent = agents
+            .get(&session_id)
+            .ok_or_else(|| format!("Agent {session_id} not found"))?;
+        let config = agent.config.lock().unwrap();
+        let source_folder = config
+            .git_worktree_source
+            .as_deref()
+            .map(str::trim)
+            .filter(|folder| !folder.is_empty())
+            .unwrap_or(config.folder.trim());
+        validate_assignable_worktree_for_agent(source_folder, &managed_worktree, worktree_path)?;
+    }
+    finish_worktree_mutation(
         session_id,
         state,
         app,
-        archive_snapshot,
-        lifecycle_guard,
-        lifecycle_lease,
-        lifecycle_heartbeat,
+        WorkspaceMutation::Join(worktree_folder),
+        WorktreeLifecycle {
+            guard: lifecycle_guard,
+            lease: lifecycle_lease,
+            heartbeat: lifecycle_heartbeat,
+        },
     )
     .await
 }
@@ -4633,6 +4321,10 @@ pub async fn delete_agent_worktree(
         }
         return Err("Selected worktree is not registered with its source workspace".to_string());
     }
+    workspace_reservation::reject_reserved_workspace(
+        &wardian_home,
+        std::path::Path::new(&worktree_folder),
+    )?;
     let managed_worktree = find_deletable_worktree_for_source(
         &configs,
         &wardian_home,
@@ -4665,40 +4357,24 @@ pub async fn disable_agent_worktree(
     if session_id.is_empty() {
         return Err("Session id is required".to_string());
     }
+    let _worktree_assignment = workspace_resume::protect_worktree_assignment()?;
     let lifecycle_lease =
-        acquire_agent_lifecycle_transition_lease_for_session(&state, &session_id, "clear").await?;
+        acquire_agent_lifecycle_transition_lease_for_session(&state, &session_id, "resume").await?;
     let lifecycle_heartbeat = LifecycleLeaseHeartbeat::start(lifecycle_lease.owner().clone());
     let lifecycle_guard = lock_agent_lifecycle(&state, &session_id).await;
-    lifecycle_heartbeat.ensure_active("clear")?;
-    let archive_snapshot =
-        crate::commands::chat::agent_archive_capture_snapshot(&state, &session_id)
-            .await
-            .ok();
+    lifecycle_heartbeat.ensure_active("resume")?;
 
-    lifecycle_heartbeat.ensure_active("clear")?;
-    let (lifecycle_guard, lifecycle_lease, lifecycle_heartbeat) = {
-        let mut roster = lock_agent_roster_for_save(&state).await?;
-        let Some(agent) = roster.agents.get_mut(&session_id) else {
-            return Err(format!("Agent {} not found", session_id));
-        };
-        lifecycle_heartbeat.ensure_active("clear")?;
-        {
-            let mut config = agent.config.lock().unwrap();
-            disable_worktree_config(&mut config)?;
-        }
-        let context = (lifecycle_guard, lifecycle_lease, lifecycle_heartbeat);
-        roster.save(context).await?
-    };
-    let _ = app.emit("agents-updated", ());
-
-    clear_agent_after_worktree_mutation(
+    lifecycle_heartbeat.ensure_active("resume")?;
+    finish_worktree_mutation(
         session_id,
         state,
         app,
-        archive_snapshot,
-        lifecycle_guard,
-        lifecycle_lease,
-        lifecycle_heartbeat,
+        WorkspaceMutation::Disable,
+        WorktreeLifecycle {
+            guard: lifecycle_guard,
+            lease: lifecycle_lease,
+            heartbeat: lifecycle_heartbeat,
+        },
     )
     .await
 }
@@ -4729,6 +4405,10 @@ pub async fn reorder_agents<R: tauri::Runtime>(
 #[cfg(test)]
 #[path = "agent/lifecycle_transition_tests.rs"]
 mod lifecycle_transition_tests;
+
+#[cfg(test)]
+#[path = "agent/worktree_session_regression_tests.rs"]
+mod worktree_session_regression_tests;
 
 #[cfg(test)]
 mod tests {
