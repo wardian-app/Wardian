@@ -1479,6 +1479,18 @@ pub enum AgentCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum AgentWorktreeCommand {
+    /// Prepare an unassigned project worktree without changing any provider session.
+    Prepare {
+        /// Absolute source repository path (a linked checkout is also accepted).
+        #[arg(long)]
+        source: String,
+        /// New worktree directory name; creates branch wardian/<name>.
+        #[arg(long)]
+        name: String,
+        /// Explicit commit or revision to start from.
+        #[arg(long = "ref")]
+        reference: String,
+    },
     /// List managed worktrees and agent assignments.
     List,
     /// Create and assign a managed worktree, starting a fresh provider session.
@@ -2744,6 +2756,33 @@ mod tests {
             args.command,
             Some(AgentCommand::Wait { next: true, .. })
         ));
+    }
+
+    #[test]
+    fn parses_agent_worktree_prepare_without_a_target() {
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "agent",
+            "worktree",
+            "prepare",
+            "--source",
+            "/repo",
+            "--name",
+            "review-fixes",
+            "--ref",
+            "HEAD~1",
+        ])
+        .unwrap();
+        let Command::Agent(args) = cli.command else {
+            panic!("expected Agent")
+        };
+        assert!(matches!(args.command, Some(AgentCommand::Worktree {
+            command: AgentWorktreeCommand::Prepare { source, name, reference }
+        }) if source == "/repo" && name == "review-fixes" && reference == "HEAD~1"));
+        assert!(Cli::try_parse_from([
+            "wardian", "agent", "worktree", "prepare", "--source", "/repo", "--name", "review"
+        ])
+        .is_err());
     }
 
     #[test]

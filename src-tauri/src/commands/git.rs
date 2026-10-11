@@ -14,9 +14,11 @@ use wardian_core::models::git::{
 };
 
 mod cargo_worktree_config;
+mod worktree_prepare;
 mod worktree_removal;
 pub(crate) use cargo_worktree_config::managed_worktree_cargo_target;
 use cargo_worktree_config::{remove_generated_cargo_config, write_cargo_worktree_config};
+pub(crate) use worktree_prepare::{local_branch_exists, prepare_worktree};
 
 /// Run a git command in the given directory and return stdout as a String.
 ///
@@ -1273,17 +1275,6 @@ pub(crate) fn create_worktree_with_build_caches(
 
     let worktree_path = absolute_existing_path(&worktree_path)?;
     setup_worktree_build_caches(&worktree_path, &workspace_path)
-}
-
-fn local_branch_exists(workspace: &str, branch: &str) -> Result<bool, String> {
-    let reference = format!("refs/heads/{branch}");
-    Ok(!run_git_allowing_status(
-        workspace,
-        &["rev-parse", "--verify", "--quiet", &reference],
-        &[0, 1],
-    )?
-    .trim()
-    .is_empty())
 }
 
 pub(crate) fn remove_worktree_without_force(
