@@ -167,3 +167,51 @@ test('real installed SDK restores exact history, destination resources/tools and
       assert.equal(sdk.SessionManager.open(file, launch.sessionDir, launch.cwd).getSessionId(), id);
     } finally { await runtime.dispose(); }
   });
+
+
+test('actual SDK path normalization preserves exact binding while distinct authorities reject',
+  { skip: !process.env.PI_SDK_PACKAGE_ROOT }, async () => {
+    const { root, launch, prefix } = fixture();
+    const { SessionManager } = await import(pathToFileURL(path.join(process.env.PI_SDK_PACKAGE_ROOT,
+      'dist/core/session-manager.js')));
+    const accepted = new Error('read-only binding guard accepted');
+    let crossed = 0;
+    const probe = open => ({ CURRENT_SESSION_VERSION: 3,
+      parseArgs: () => ({ diagnostics: [], unknownFlags: new Map() }),
+      SessionManager: { open }, getAgentDir: () => root,
+      // Stop before trust, runtime, extension loading or any model/tool request.
+      ProjectTrustStore: class { constructor() { crossed++; throw accepted; } },
+    });
+    const args = ['--session', launch.sessionFile, '--session-dir', launch.sessionDir];
+    const spelling = process.platform === 'win32' ? launch.cwd.replaceAll('\\', '/')
+      : `${launch.cwd}${path.sep}.${path.sep}`;
+    assert.notEqual(spelling, launch.cwd);
+    assert.equal(path.resolve(spelling), path.resolve(launch.cwd));
+    for (const cwd of [launch.cwd, spelling]) {
+      await assert.rejects(createExactRuntime(probe((file, directory, requestedCwd) =>
+        SessionManager.open(file, directory, requestedCwd)), { ...launch, cwd }, args),
+        error => error === accepted);
+      assert.deepEqual(fs.readFileSync(launch.sessionFile), prefix);
+    }
+    assert.equal(crossed, 2);
+    const wrongCwd = path.join(root, 'wrong-destination'); fs.mkdirSync(wrongCwd);
+    await assert.rejects(createExactRuntime(probe((file, directory) =>
+      SessionManager.open(file, directory, wrongCwd)), launch, args), /binding changed/);
+    const otherDirectory = path.join(root, 'other-session-directory'); fs.mkdirSync(otherDirectory);
+    const otherFile = path.join(otherDirectory, path.basename(launch.sessionFile));
+    fs.writeFileSync(otherFile, prefix);
+    await assert.rejects(createExactRuntime(probe(() => SessionManager.open(otherFile, otherDirectory,
+      launch.cwd)), launch, args), /binding changed/);
+    await assert.rejects(createExactRuntime(probe((file, directory, cwd) => {
+      const manager = SessionManager.open(file, directory, cwd);
+      return { getSessionId: () => 'different-session', getSessionFile: () => manager.getSessionFile(),
+        getCwd: () => manager.getCwd() };
+    }), launch, args), /binding changed/);
+    await assert.rejects(createExactRuntime(probe((file, directory, cwd) => {
+      const manager = SessionManager.open(file, directory, cwd);
+      fs.renameSync(file, `${file}.previous`); fs.writeFileSync(file, prefix);
+      return manager;
+    }), launch, args), /binding changed/);
+    assert.equal(crossed, 2);
+    assert.deepEqual(fs.readFileSync(launch.sessionFile), prefix);
+  });

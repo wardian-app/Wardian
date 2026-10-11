@@ -193,7 +193,7 @@ export async function createExactRuntime(sdk, launch, args, host = {}) {
   const manager = sdk.SessionManager.open(launch.sessionFile, launch.sessionDir, launch.cwd);
   const after = fs.statSync(launch.sessionFile, { bigint: true });
   if (after.dev !== stat.dev || after.ino !== stat.ino || manager.getSessionId() !== launch.sessionId
-      || path.resolve(manager.getSessionFile()) !== launch.sessionFile || manager.getCwd() !== launch.cwd)
+      || path.resolve(manager.getSessionFile()) !== launch.sessionFile || path.resolve(manager.getCwd()) !== path.resolve(launch.cwd))
     throw new Error('Pi exact SDK resume binding changed');
   const agentDir = host.agentDir ?? sdk.getAgentDir();
   const trustStore = new sdk.ProjectTrustStore(agentDir);
