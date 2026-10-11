@@ -284,7 +284,7 @@ export const SpawnAgentPanel: React.FC<Props> = ({ agentClasses, onSpawned }) =>
                 data-testid="spawn-workspace-path"
                 data-tour-target="spawn-workspace-path"
                 className="w-full bg-[var(--color-wardian-input-bg)] border border-wardian-light rounded px-3 py-2 text-sm text-primary focus:outline-none focus:border-[var(--color-wardian-accent)] transition-colors pr-10"
-                placeholder="C:/projects/my-app"
+                placeholder="Enter workspace path"
                 value={newFolder}
                 onChange={(e) => setNewFolder(e.currentTarget.value)}
               />
