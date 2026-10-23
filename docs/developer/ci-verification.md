@@ -126,6 +126,18 @@ The local sequence covers the frontend, backend, and documentation quality
 steps. PR screenshot/code-claim checks, dependency audits, coverage uploads,
 and browser/native suites remain CI- or environment-specific.
 
+## Dependency audits
+
+CI runs `cargo audit` with only the two documented RustSec ignores in the
+workflow, plus `npm audit --audit-level=high`. The Windows updater dependency
+uses an immutable official plugins-workspace revision because the latest
+published updater still selects vulnerable `zip` 4; this revision selects
+`zip` 9 and requires Tauri 2.12. Replace the Git pin with a registry release
+when a published updater selects `zip` 9 or newer and its Tauri requirement is
+met by Wardian's pin. The updater's default archive feature remains enabled.
+Keep the npm API on Tauri's matching minor and the updater npm binding at the
+same exact version as its Rust crate so the native CLI mismatch guard passes.
+
 The hosted `Backend (macOS - Codex Home ACL)` job runs the focused Codex home
 platform tests on `macos-latest`. Its native fixtures check that a private
 directory without an extended ACL is accepted and one with an ACL entry is
