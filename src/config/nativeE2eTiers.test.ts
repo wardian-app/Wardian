@@ -43,6 +43,7 @@ describe("native E2E tiers", () => {
       "mock-startup.test.mjs",
       "native-cli-consumer.test.mjs",
       "remote-gateway-native.test.mjs",
+      "replacement-roster-admission-native.test.mjs",
       "terminal-presentation-broker-native.test.mjs",
       "workbench-persistence-native.test.mjs",
       "workbench-runtime-lifecycle-native.test.mjs",

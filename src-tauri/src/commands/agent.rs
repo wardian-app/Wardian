@@ -3008,42 +3008,32 @@ pub async fn resume_agent(
     let new_config = new_active.config.lock().unwrap().clone();
     let new_created_at = new_active.init_timestamp.lock().unwrap().clone();
     let new_status_arc = new_active.current_status.clone();
-    let mut pending_new_active = new_active;
-    if let Err(error) = lifecycle_heartbeat.ensure_active("resume") {
-        let error = pending_new_active.stop_after_failure(error).await;
-        let error = retain_uncertain_replacement_until_expiry(&unpublished_failure, error);
-        restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error").await;
-        return Err(error);
-    }
-    let commit_result = {
-        let mut agents = state.agents.lock().await;
-        let order = state.agent_order.lock().await;
-        lifecycle_heartbeat.ensure_active("resume").and_then(|_| {
-            commit_resume_replacement(
-                &state,
-                &mut agents,
-                &order,
-                &session_id,
-                pending_new_active.slot(),
-                &snapshot.config,
-                snapshot.init_timestamp.as_deref(),
-                &new_config,
-                new_created_at.as_deref(),
-                starts_fresh,
-                fresh_pending_boundary.as_ref(),
-            )
-        })
-    };
-    let (mut old_agent, session_close_context, replacement_journal) = match commit_result {
-        Ok(result) => result,
-        Err(error) => {
-            let error = pending_new_active.stop_after_failure(error).await;
-            let error = retain_uncertain_replacement_until_expiry(&unpublished_failure, error);
-            restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error")
-                .await;
-            return Err(error);
-        }
-    };
+    let (pending_new_active, commit_result) = new_active
+        .commit_after_roster_admission(
+            agent_lifecycle::PendingRuntimeAdmissionContext::new(
+                (&state, &app, &session_id),
+                (&lifecycle_heartbeat, &unpublished_failure),
+                "resume",
+            ),
+            |pending, agents, order, barrier| {
+                commit_resume_replacement(
+                    &state,
+                    agents,
+                    order,
+                    &session_id,
+                    pending.slot(),
+                    &snapshot.config,
+                    snapshot.init_timestamp.as_deref(),
+                    &new_config,
+                    new_created_at.as_deref(),
+                    starts_fresh,
+                    fresh_pending_boundary.as_ref(),
+                    barrier,
+                )
+            },
+        )
+        .await?;
+    let (mut old_agent, session_close_context, replacement_journal) = commit_result;
     publication_disposition.commit();
     manager::publish_agent_status(&app, &session_id, &new_status_arc);
 
@@ -3072,6 +3062,7 @@ pub async fn resume_agent(
             "[WARDIAN] resume journal cleanup deferred for {session_id}: {error}"
         ));
     }
+    drop(pending_new_active);
     Ok(())
 }
 
@@ -3281,6 +3272,7 @@ fn begin_agent_replacement_journal(
     new_created_at: Option<&str>,
     pending_archive: Option<&PendingConversationBoundary>,
     boundary_reason: Option<ConversationBoundaryReason>,
+    barrier: wardian_core::agent_replacement::AgentRosterBarrier,
 ) -> Result<
     (
         wardian_core::agent_replacement::ReplacementJournalGuard,
@@ -3309,6 +3301,7 @@ fn begin_agent_replacement_journal(
             archive_conversation_id.clone(),
             archive_expected,
         ),
+        barrier,
     )
     .map_err(|error| format!("Failed to create the agent replacement journal: {error}"))?;
     let session_close_context = boundary_reason.map(|boundary_reason| {
@@ -3339,6 +3332,7 @@ fn commit_clear_replacement(
     new_created_at: Option<&str>,
     boundary_reason: ConversationBoundaryReason,
     pending_archive: &PendingConversationBoundary,
+    barrier: wardian_core::agent_replacement::AgentRosterBarrier,
 ) -> Result<
     (
         ActiveAgent,
@@ -3363,6 +3357,7 @@ fn commit_clear_replacement(
         new_created_at,
         Some(pending_archive),
         Some(boundary_reason),
+        barrier,
     )?;
 
     if let Err(error) = manager::try_save_state_snapshot_unlocked(&proposed_state_snapshot) {
@@ -3489,6 +3484,7 @@ fn commit_resume_replacement(
     new_created_at: Option<&str>,
     starts_fresh: bool,
     pending_archive: Option<&PendingConversationBoundary>,
+    barrier: wardian_core::agent_replacement::AgentRosterBarrier,
 ) -> Result<
     (
         ActiveAgent,
@@ -3517,6 +3513,7 @@ fn commit_resume_replacement(
         new_created_at,
         pending_archive,
         starts_fresh.then_some(ConversationBoundaryReason::Clear),
+        barrier,
     )?;
     if let Err(error) = manager::try_save_state_snapshot_unlocked(&proposed_state_snapshot) {
         let rollback_error = rollback_agent_replacement(
@@ -3940,42 +3937,32 @@ async fn clear_agent_session_inner(
     let new_config = new_active.config.lock().unwrap().clone();
     let new_created_at = new_active.init_timestamp.lock().unwrap().clone();
     let new_status_arc = new_active.current_status.clone();
-    let mut pending_new_active = new_active;
-    if let Err(error) = lifecycle_heartbeat.ensure_active("clear") {
-        let error = pending_new_active.stop_after_failure(error).await;
-        let error = retain_uncertain_replacement_until_expiry(&unpublished_failure, error);
-        restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error").await;
-        return Err(error);
-    }
-    let commit_result = {
-        let mut agents = state.agents.lock().await;
-        let order = state.agent_order.lock().await;
-        lifecycle_heartbeat.ensure_active("clear").and_then(|_| {
-            commit_clear_replacement(
-                &state,
-                &mut agents,
-                &order,
-                &session_id,
-                pending_new_active.slot(),
-                &original_config,
-                prepared.init_timestamp.as_deref(),
-                &new_config,
-                new_created_at.as_deref(),
-                boundary_reason,
-                &pending_archive,
-            )
-        })
-    };
-    let (mut displaced_agent, session_close_context, replacement_journal) = match commit_result {
-        Ok(result) => result,
-        Err(error) => {
-            let error = pending_new_active.stop_after_failure(error).await;
-            let error = retain_uncertain_replacement_until_expiry(&unpublished_failure, error);
-            restore_agent_status_after_failed_runtime_start(&state, &app, &session_id, "Error")
-                .await;
-            return Err(error);
-        }
-    };
+    let (pending_new_active, commit_result) = new_active
+        .commit_after_roster_admission(
+            agent_lifecycle::PendingRuntimeAdmissionContext::new(
+                (&state, &app, &session_id),
+                (&lifecycle_heartbeat, &unpublished_failure),
+                "clear",
+            ),
+            |pending, agents, order, barrier| {
+                commit_clear_replacement(
+                    &state,
+                    agents,
+                    order,
+                    &session_id,
+                    pending.slot(),
+                    &original_config,
+                    prepared.init_timestamp.as_deref(),
+                    &new_config,
+                    new_created_at.as_deref(),
+                    boundary_reason,
+                    &pending_archive,
+                    barrier,
+                )
+            },
+        )
+        .await?;
+    let (mut displaced_agent, session_close_context, replacement_journal) = commit_result;
     publication_disposition.commit();
     manager::terminate_active_agent_process(&mut displaced_agent);
     manager::publish_agent_status(&app, &session_id, &new_status_arc);
@@ -4004,6 +3991,7 @@ async fn clear_agent_session_inner(
             "[WARDIAN] replacement journal cleanup deferred for {session_id}: {error}"
         ));
     }
+    drop(pending_new_active);
     Ok(())
 }
 
@@ -8988,6 +8976,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             .conversation_archive
             .fail_next_rollover_after_close_for_test();
         let failed_commit = {
+            let roster_barrier = super::agent_lifecycle::tests::acquire_test_roster_barrier();
             let mut agents = state.agents.lock().await;
             let order = state.agent_order.lock().await;
             commit_clear_replacement(
@@ -9002,6 +8991,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
                 None,
                 wardian_core::conversations::ConversationBoundaryReason::Clear,
                 &pending_boundary,
+                roster_barrier,
             )
         };
         let failed_commit_error = match failed_commit {
@@ -9031,6 +9021,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             Some(staged_conversation_id.as_str())
         );
         let (_displaced, context, journal) = {
+            let roster_barrier = super::agent_lifecycle::tests::acquire_test_roster_barrier();
             let mut agents = state.agents.lock().await;
             let order = state.agent_order.lock().await;
             commit_clear_replacement(
@@ -9045,6 +9036,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
                 None,
                 wardian_core::conversations::ConversationBoundaryReason::Clear,
                 &pending_boundary,
+                roster_barrier,
             )
             .expect("retry replacement commit")
         };
@@ -9159,6 +9151,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
             .fail_next_rollover_after_close_for_test();
 
         let commit_error = {
+            let roster_barrier = super::agent_lifecycle::tests::acquire_test_roster_barrier();
             let mut agents = state.agents.lock().await;
             let order = state.agent_order.lock().await;
             match commit_resume_replacement(
@@ -9173,6 +9166,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
                 None,
                 true,
                 Some(&pending_boundary),
+                roster_barrier,
             ) {
                 Ok(_) => panic!("boundary failure must abort fresh resume replacement"),
                 Err(error) => error,
@@ -9211,6 +9205,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         );
 
         let (_displaced, context, journal) = {
+            let roster_barrier = super::agent_lifecycle::tests::acquire_test_roster_barrier();
             let mut agents = state.agents.lock().await;
             let order = state.agent_order.lock().await;
             commit_resume_replacement(
@@ -9225,6 +9220,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
                 None,
                 true,
                 Some(&pending_boundary),
+                roster_barrier,
             )
             .expect("retry fresh-resume replacement")
         };
@@ -9345,6 +9341,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         std::fs::create_dir_all(temp.path().join("settings").join("state.json"))
             .expect("create state.json failure fixture");
         let commit_error = {
+            let roster_barrier = super::agent_lifecycle::tests::acquire_test_roster_barrier();
             let mut agents = state.agents.lock().await;
             let order = state.agent_order.lock().await;
             match commit_clear_replacement(
@@ -9359,6 +9356,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
                 None,
                 wardian_core::conversations::ConversationBoundaryReason::Clear,
                 &pending_boundary,
+                roster_barrier,
             ) {
                 Ok(_) => panic!("state persistence failure must abort replacement"),
                 Err(error) => error,
@@ -9467,6 +9465,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         })
         .expect("make isolated database read-only");
         let commit_error = {
+            let roster_barrier = super::agent_lifecycle::tests::acquire_test_roster_barrier();
             let mut agents = state.agents.lock().await;
             let order = state.agent_order.lock().await;
             match commit_clear_replacement(
@@ -9481,6 +9480,7 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
                 None,
                 wardian_core::conversations::ConversationBoundaryReason::Clear,
                 &pending_boundary,
+                roster_barrier,
             ) {
                 Ok(_) => panic!("SQLite persistence failure must abort replacement"),
                 Err(error) => error,
