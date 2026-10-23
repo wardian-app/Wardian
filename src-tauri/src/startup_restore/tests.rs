@@ -1387,6 +1387,54 @@ async fn publish_error_placeholder(
     status
 }
 
+async fn publish_headless_placeholder(
+    state: &AppState,
+    config: &AgentConfig,
+) -> std::sync::Arc<std::sync::Mutex<String>> {
+    let publication = RestorePublication::begin(state, &config.session_id)
+        .await
+        .expect("initial restore claim");
+    let status = publication
+        .publish(
+            state,
+            crate::restored_agent_without_process(
+                config.clone(),
+                "Headless",
+                String::new(),
+                None,
+                None,
+            ),
+        )
+        .await;
+    drop(publication);
+    status
+}
+
+fn headless_execution_lease(
+    config: &AgentConfig,
+    mode: &str,
+    started_at: chrono::DateTime<chrono::Utc>,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) -> wardian_core::conversation_lease::ConversationLease {
+    wardian_core::conversation_lease::ConversationLease {
+        agent_id: config.session_id.clone(),
+        provider: config.provider.clone(),
+        resume_session: if mode == "background_resume" {
+            super::provider_restore_session_identity(config).to_string()
+        } else {
+            String::new()
+        },
+        owner_kind: "automation_run".into(),
+        owner_id: "run-1/node-1".into(),
+        acquisition_id: "acquisition-1".into(),
+        owner_node_id: Some("node-1".into()),
+        mode: mode.into(),
+        started_at: started_at.to_rfc3339(),
+        heartbeat_at: started_at.to_rfc3339(),
+        expires_at: expires_at.to_rfc3339(),
+    }
+}
+
 #[test]
 fn restore_retry_is_scheduled_only_for_the_reported_active_lifecycle_lease() {
     let config = AgentConfig {
@@ -1411,30 +1459,19 @@ fn restore_retry_is_scheduled_only_for_the_reported_active_lifecycle_lease() {
         heartbeat_at: "2026-09-27T11:55:00Z".into(),
         expires_at: expiry.to_rfc3339(),
     };
-    let error = format!(
-        "provider startup was withheld because conversation {} is leased by {} {} ({})",
-        config.session_id, lease.owner_kind, lease.owner_id, lease.mode
-    );
-
     assert_eq!(
-        super::retryable_lifecycle_restore_lease(&config, &error, std::slice::from_ref(&lease)),
+        super::retryable_lifecycle_restore_lease(&config, &lease),
         Some(lease.clone())
     );
-    assert!(super::retryable_lifecycle_restore_lease(
-        &config,
-        "provider startup failed for another reason",
-        std::slice::from_ref(&lease),
-    )
-    .is_none());
 
     let mut background = lease.clone();
     background.mode = "background_resume".into();
-    assert!(super::retryable_lifecycle_restore_lease(&config, &error, &[background]).is_none());
+    assert!(super::retryable_lifecycle_restore_lease(&config, &background).is_none());
 
     let mut expired = lease.clone();
     expired.expires_at = "2026-09-27T11:59:59Z".into();
     assert_eq!(
-        super::retryable_lifecycle_restore_lease(&config, &error, &[expired.clone()]),
+        super::retryable_lifecycle_restore_lease(&config, &expired),
         Some(expired),
         "an expiry race still schedules a retry through the normal gates"
     );
@@ -1442,27 +1479,15 @@ fn restore_retry_is_scheduled_only_for_the_reported_active_lifecycle_lease() {
     let mut provider_spawn = lease.clone();
     provider_spawn.owner_kind = "provider_spawn".into();
     provider_spawn.owner_id = "81884:restore-attempt".into();
-    let provider_spawn_error = format!(
-        "provider startup was withheld because conversation {} is leased by {} {} ({})",
-        config.session_id, provider_spawn.owner_kind, provider_spawn.owner_id, provider_spawn.mode
-    );
     assert_eq!(
-        super::retryable_lifecycle_restore_lease(
-            &config,
-            &provider_spawn_error,
-            std::slice::from_ref(&provider_spawn),
-        ),
+        super::retryable_lifecycle_restore_lease(&config, &provider_spawn),
         Some(provider_spawn)
     );
 
     let mut pause = lease.clone();
     pause.owner_id = "pause:operation".into();
-    let pause_error = format!(
-        "provider startup was withheld because conversation {} is leased by {} {} ({})",
-        config.session_id, pause.owner_kind, pause.owner_id, pause.mode
-    );
     assert!(
-        super::retryable_lifecycle_restore_lease(&config, &pause_error, &[pause]).is_none(),
+        super::retryable_lifecycle_restore_lease(&config, &pause).is_none(),
         "a pause lease must never trigger an automatic restore"
     );
 
@@ -1472,13 +1497,7 @@ fn restore_retry_is_scheduled_only_for_the_reported_active_lifecycle_lease() {
         ..lease
     };
     uncertain.expires_at = "9999-12-31T23:59:59Z".into();
-    let uncertain_error = format!(
-        "provider startup was withheld because conversation {} is leased by {} {} ({})",
-        config.session_id, uncertain.owner_kind, uncertain.owner_id, uncertain.mode
-    );
-    assert!(
-        super::retryable_lifecycle_restore_lease(&config, &uncertain_error, &[uncertain]).is_none()
-    );
+    assert!(super::retryable_lifecycle_restore_lease(&config, &uncertain).is_none());
 }
 
 #[tokio::test(start_paused = true)]
@@ -1518,7 +1537,7 @@ async fn restore_retry_runner_waits_without_a_gate_then_calls_the_normal_spawn_g
                 );
                 attempts_for_task.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 let lease =
-                    crate::manager::spawn::provider_spawn_lease_for_launch(&task_config, None)
+                    crate::manager::spawn::provider_spawn_lease_for_startup(&task_config, None)
                         .expect("the normal provider spawn lease is still used");
                 drop(lease);
                 drop(publication);
@@ -1780,7 +1799,7 @@ async fn restore_retry_hands_its_exact_provider_spawn_lease_to_launch() {
         wardian_core::conversation_lease::ConversationLeaseAcquireOutcome::Acquired
     ));
     assert!(
-        crate::manager::spawn::provider_spawn_lease_for_launch(&config, None).is_err(),
+        crate::manager::spawn::provider_spawn_lease_for_startup(&config, None).is_err(),
         "the first restore must wait for the previous lifecycle owner"
     );
 
@@ -1799,15 +1818,17 @@ async fn restore_retry_hands_its_exact_provider_spawn_lease_to_launch() {
         },
         || async { Some(()) },
         move |publication, ()| async move {
-            let lease = crate::manager::spawn::acquire_restore_retry_spawn_lease(
+            let lease = crate::manager::spawn::acquire_restore_retry_spawn_lease_for_startup(
                 std::slice::from_ref(&retry_config),
                 &retry_config,
-            )?
+            )
+            .map_err(|error| error.to_string())?
             .expect("saved config still permits retry");
             assert_eq!(lease.owner().owner_kind, "provider_spawn");
             let owner = lease.owner().clone();
             let mut inherited =
-                crate::manager::spawn::provider_spawn_lease_for_launch(&retry_config, Some(lease))?;
+                crate::manager::spawn::provider_spawn_lease_for_startup(&retry_config, Some(lease))
+                    .map_err(|error| error.to_string())?;
             assert_eq!(inherited.owner(), &owner);
             assert!(wardian_core::conversation_lease::load_leases_checked()?
                 .iter()
@@ -1851,7 +1872,7 @@ async fn restore_retry_does_not_resurrect_a_cross_process_removed_agent() {
             move || async move { wait_released.await.is_ok() },
             || async { Some(()) },
             move |publication, ()| async move {
-                let lease = crate::manager::spawn::acquire_restore_retry_spawn_lease(
+                let lease = crate::manager::spawn::acquire_restore_retry_spawn_lease_for_startup(
                     std::slice::from_ref(&check_config),
                     &check_config,
                 )
@@ -1909,7 +1930,7 @@ async fn restore_retry_does_not_override_a_cross_process_config_edit_or_pause() 
             move || async move { wait_released.await.is_ok() },
             || async { Some(()) },
             move |publication, ()| async move {
-                let lease = crate::manager::spawn::acquire_restore_retry_spawn_lease(
+                let lease = crate::manager::spawn::acquire_restore_retry_spawn_lease_for_startup(
                     std::slice::from_ref(&check_config),
                     &check_config,
                 )
@@ -1949,7 +1970,7 @@ async fn restore_retry_does_not_override_a_cross_process_config_edit_or_pause() 
     };
     crate::manager::try_save_state_snapshot(std::slice::from_ref(&paused))
         .expect("other process pauses agent");
-    let no_spawn_lease = crate::manager::spawn::acquire_restore_retry_spawn_lease(
+    let no_spawn_lease = crate::manager::spawn::acquire_restore_retry_spawn_lease_for_startup(
         std::slice::from_ref(&config),
         &config,
     )
@@ -2387,4 +2408,446 @@ fn expired_background_lease_does_not_claim_headless_ownership() {
         &[lease],
         "2026-09-23T12:00:00Z"
     ));
+}
+
+#[test]
+fn headless_startup_retry_requires_the_exact_saved_execution_intent() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-10-23T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let config = AgentConfig {
+        session_id: "headless-resume-agent".into(),
+        provider: "mock".into(),
+        resume_session: Some("saved-provider-session".into()),
+        ..Default::default()
+    };
+    let expected = headless_execution_lease(
+        &config,
+        "background_resume",
+        now,
+        now + chrono::Duration::minutes(5),
+    );
+    assert_eq!(
+        super::retryable_headless_execution_restore_lease(&config, &expected),
+        Some(expected.clone())
+    );
+
+    let mut renewed = expected.clone();
+    renewed.heartbeat_at = (now + chrono::Duration::minutes(1)).to_rfc3339();
+    renewed.expires_at = (now + chrono::Duration::minutes(6)).to_rfc3339();
+    assert!(super::same_headless_execution_lease_generation(
+        &renewed, &expected
+    ));
+
+    for (field, mutate) in [
+        ("acquisition", 0),
+        ("node", 1),
+        ("mode", 2),
+        ("owner", 3),
+        ("start", 4),
+    ] {
+        let mut changed = expected.clone();
+        match mutate {
+            0 => changed.acquisition_id.push_str("-new"),
+            1 => changed.owner_node_id = Some("node-2".into()),
+            2 => changed.mode = "background_fresh".into(),
+            3 => changed.owner_id = "run-2/node-1".into(),
+            _ => changed.started_at = (now + chrono::Duration::seconds(1)).to_rfc3339(),
+        }
+        assert!(
+            !super::same_headless_execution_lease_generation(&changed, &expected),
+            "a changed {field} identifies a different lease generation"
+        );
+    }
+
+    let fresh_config = AgentConfig {
+        session_id: "headless-fresh-agent".into(),
+        provider: "mock".into(),
+        ..Default::default()
+    };
+    let fresh = headless_execution_lease(
+        &fresh_config,
+        "background_fresh",
+        now,
+        now + chrono::Duration::minutes(5),
+    );
+    assert!(fresh.resume_session.is_empty());
+    assert!(super::retryable_headless_execution_restore_lease(&fresh_config, &fresh).is_some());
+
+    let mut invalid_cases = Vec::new();
+    let mut wrong_session = expected.clone();
+    wrong_session.resume_session = "other-provider-session".into();
+    invalid_cases.push(wrong_session);
+    let mut wrong_agent = expected.clone();
+    wrong_agent.agent_id = "other-agent".into();
+    invalid_cases.push(wrong_agent);
+    let mut wrong_provider = expected.clone();
+    wrong_provider.provider = "claude".into();
+    invalid_cases.push(wrong_provider);
+    let mut missing_node = expected.clone();
+    missing_node.owner_node_id = None;
+    invalid_cases.push(missing_node);
+    let mut missing_acquisition = expected.clone();
+    missing_acquisition.acquisition_id.clear();
+    invalid_cases.push(missing_acquisition);
+    let mut blank_owner = expected.clone();
+    blank_owner.owner_id.clear();
+    invalid_cases.push(blank_owner);
+    let mut unknown_mode = expected.clone();
+    unknown_mode.mode = "lifecycle_transition".into();
+    invalid_cases.push(unknown_mode);
+    for invalid in invalid_cases {
+        assert!(super::retryable_headless_execution_restore_lease(&config, &invalid).is_none());
+    }
+
+    let paused = AgentConfig {
+        is_off: true,
+        ..config.clone()
+    };
+    assert!(super::retryable_headless_execution_restore_lease(&paused, &expected).is_none());
+    let mut invalid_date = expected;
+    invalid_date.started_at = "not-a-date".into();
+    assert!(super::retryable_headless_execution_restore_lease(&config, &invalid_date).is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn headless_startup_retry_waits_for_renewal_then_admits_once_after_exact_release() {
+    let _environment = crate::utils::wardian_test_env_lock_async().await;
+    let _home = TestHome::new();
+    let config = AgentConfig {
+        session_id: uuid::Uuid::new_v4().to_string(),
+        provider: "mock".into(),
+        provider_config: ProviderConfig::Mock(Default::default()),
+        resume_session: Some("saved-headless-session".into()),
+        ..Default::default()
+    };
+    crate::manager::try_save_state_snapshot(std::slice::from_ref(&config))
+        .expect("persist the selected foreground intent");
+    let base = chrono::DateTime::parse_from_rfc3339("2026-10-23T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let lease = headless_execution_lease(
+        &config,
+        "background_resume",
+        base,
+        base + chrono::Duration::seconds(4),
+    );
+    let leases = std::sync::Arc::new(std::sync::Mutex::new(vec![lease.clone()]));
+    let clock_started = tokio::time::Instant::now();
+    let state = std::sync::Arc::new(AppState::new());
+    let expected_status = publish_headless_placeholder(&state, &config).await;
+    let task_state = state.clone();
+    let task_config = config.clone();
+    let attempt_config = task_config.clone();
+    let wait_config = config.clone();
+    let task_status = expected_status.clone();
+    let wait_leases = leases.clone();
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let attempts_for_task = attempts.clone();
+    let state_for_attempt = state.clone();
+    let retry = tokio::spawn(async move {
+        super::retry_once_after_headless_execution_lease_clear(
+            &task_state,
+            &task_config,
+            &task_status,
+            move || async move {
+                super::wait_for_headless_execution_restore_lease(
+                    &wait_config,
+                    &lease,
+                    move || Ok(wait_leases.lock().unwrap().clone()),
+                    move || {
+                        base + chrono::Duration::from_std(clock_started.elapsed())
+                            .expect("tokio elapsed duration is representable")
+                    },
+                )
+                .await
+                .expect("the lease store remains readable")
+            },
+            || async { Some(()) },
+            move |publication, ()| async move {
+                assert!(
+                    state_for_attempt
+                        .try_lock_agent_lifecycle(&attempt_config.session_id)
+                        .await
+                        .is_none(),
+                    "the retry must hold the lifecycle gate only after waiting"
+                );
+                let home = crate::utils::get_wardian_home().expect("isolated test home");
+                let saved_configs: Vec<AgentConfig> = serde_json::from_slice(
+                    &std::fs::read(home.join("settings/state.json")).expect("read saved roster"),
+                )
+                .expect("parse saved roster");
+                assert_eq!(saved_configs.len(), 1);
+                assert_eq!(
+                    serde_json::to_value(&saved_configs[0]).expect("serialize saved config"),
+                    serde_json::to_value(&attempt_config).expect("serialize expected config")
+                );
+                let admitted =
+                    crate::manager::spawn::acquire_restore_retry_spawn_lease_for_startup(
+                        std::slice::from_ref(&attempt_config),
+                        &attempt_config,
+                    )
+                    .expect("the latest saved roster still allows admission")
+                    .expect("the ordinary provider-spawn lease is acquired");
+                assert_eq!(admitted.owner().owner_kind, "provider_spawn");
+                attempts_for_task.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                drop(admitted);
+                drop(publication);
+            },
+        )
+        .await
+    });
+
+    tokio::task::yield_now().await;
+    let lifecycle_probe = state.try_lock_agent_lifecycle(&config.session_id).await;
+    assert!(
+        lifecycle_probe.is_some(),
+        "lease waiting must hold no lifecycle gate"
+    );
+    drop(lifecycle_probe);
+    assert!(!retry.is_finished());
+
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    tokio::task::yield_now().await;
+    {
+        let mut current = leases.lock().unwrap();
+        current[0].heartbeat_at = (base + chrono::Duration::seconds(2)).to_rfc3339();
+        current[0].expires_at = (base + chrono::Duration::seconds(12)).to_rfc3339();
+    }
+    tokio::time::advance(std::time::Duration::from_secs(6)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !retry.is_finished(),
+        "renewal keeps the exact generation active"
+    );
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 0);
+
+    leases.lock().unwrap().clear();
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    retry
+        .await
+        .unwrap()
+        .expect("retry after exact owner release");
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
+    assert!(wardian_core::conversation_lease::load_leases_checked()
+        .expect("read provider lease after admission")
+        .is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn headless_startup_retry_refuses_expired_replacement_foreign_and_uncertain_owners() {
+    let config = AgentConfig {
+        session_id: "headless-owner-fence".into(),
+        provider: "mock".into(),
+        resume_session: Some("saved-session".into()),
+        ..Default::default()
+    };
+    let base = chrono::DateTime::parse_from_rfc3339("2026-10-23T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let expected = headless_execution_lease(
+        &config,
+        "background_resume",
+        base,
+        base + chrono::Duration::minutes(5),
+    );
+
+    let mut expired = expected.clone();
+    expired.expires_at = (base - chrono::Duration::seconds(1)).to_rfc3339();
+    assert!(super::wait_for_headless_execution_restore_lease(
+        &config,
+        &expired,
+        || Ok(vec![expired.clone()]),
+        || base,
+    )
+    .await
+    .unwrap());
+
+    let mut replacement = expected.clone();
+    replacement.acquisition_id = "new-acquisition".into();
+    let mut foreign = expected.clone();
+    foreign.owner_kind = "agent_lifecycle".into();
+    foreign.owner_id = "resume:other-operation".into();
+    foreign.mode = "lifecycle_transition".into();
+    let mut uncertain = expected.clone();
+    uncertain.owner_kind = "prior_provider_hold".into();
+    uncertain.owner_id = "unconfirmed-provider-exit".into();
+    uncertain.mode = "uncertain_previous_provider".into();
+
+    for current in [replacement, foreign, uncertain] {
+        assert!(
+            !super::wait_for_headless_execution_restore_lease(
+                &config,
+                &expected,
+                || Ok(vec![current.clone()]),
+                || base,
+            )
+            .await
+            .unwrap(),
+            "a changed, foreign, or uncertain owner cancels the one startup retry"
+        );
+    }
+}
+
+#[tokio::test]
+async fn headless_retry_rechecks_owner_at_admission_after_release_race() {
+    let _environment = crate::utils::wardian_test_env_lock_async().await;
+    let _home = TestHome::new();
+    let config = AgentConfig {
+        session_id: uuid::Uuid::new_v4().to_string(),
+        provider: "mock".into(),
+        provider_config: ProviderConfig::Mock(Default::default()),
+        resume_session: Some("saved-session".into()),
+        ..Default::default()
+    };
+    crate::manager::try_save_state_snapshot(std::slice::from_ref(&config))
+        .expect("persist the saved foreground intent");
+    let now = chrono::Utc::now();
+    let expected = headless_execution_lease(
+        &config,
+        "background_resume",
+        now,
+        now + chrono::Duration::minutes(5),
+    );
+    let state = std::sync::Arc::new(AppState::new());
+    let status = publish_headless_placeholder(&state, &config).await;
+    let task_state = state.clone();
+    let task_config = config.clone();
+    let wait_config = config.clone();
+    let result = super::retry_once_after_headless_execution_lease_clear(
+        &state,
+        &config,
+        &status,
+        move || async move {
+            assert!(
+                super::retryable_headless_execution_restore_lease(&wait_config, &expected)
+                    .is_some()
+            );
+            true
+        },
+        || async { Some(()) },
+        move |publication, ()| async move {
+            let mut replacement = headless_execution_lease(
+                &task_config,
+                "background_resume",
+                now,
+                now + chrono::Duration::minutes(5),
+            );
+            replacement.acquisition_id = "replacement-acquisition".into();
+            assert!(matches!(
+                wardian_core::conversation_lease::try_acquire_lease(
+                    replacement.clone(),
+                    &now.to_rfc3339(),
+                )
+                .expect("the competing automation owner persists"),
+                wardian_core::conversation_lease::ConversationLeaseAcquireOutcome::Acquired
+            ));
+            let replacement_guard =
+                wardian_core::conversation_lease::PersistedConversationLeaseGuard::new(
+                    &replacement,
+                );
+            let admission = crate::manager::spawn::acquire_restore_retry_spawn_lease_for_startup(
+                std::slice::from_ref(&task_config),
+                &task_config,
+            );
+            let error = admission.expect_err("new ownership wins the admission race");
+            assert_eq!(
+                error.conflict_lease(),
+                Some(&replacement),
+                "admission returns the exact replacement generation"
+            );
+            assert!(task_state
+                .try_lock_agent_lifecycle(&task_config.session_id)
+                .await
+                .is_none());
+            drop(replacement_guard);
+            drop(publication);
+            true
+        },
+    )
+    .await;
+    assert_eq!(result, Some(true));
+    assert!(wardian_core::conversation_lease::load_leases_checked()
+        .expect("read the released competing lease")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn headless_startup_retry_refuses_stale_paused_or_runtime_placeholders() {
+    #[derive(Clone, Copy, Debug)]
+    enum Change {
+        StatusArc,
+        Config,
+        Paused,
+        Process,
+        Generation,
+    }
+
+    for change in [
+        Change::StatusArc,
+        Change::Config,
+        Change::Paused,
+        Change::Process,
+        Change::Generation,
+    ] {
+        let state = std::sync::Arc::new(AppState::new());
+        let config = AgentConfig {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            provider: "mock".into(),
+            resume_session: Some("saved-session".into()),
+            ..Default::default()
+        };
+        let status = publish_headless_placeholder(&state, &config).await;
+        let supplied_status = if matches!(change, Change::StatusArc) {
+            std::sync::Arc::new(std::sync::Mutex::new("Headless".into()))
+        } else {
+            status
+        };
+        {
+            let mut agents = state.agents.lock().await;
+            let active = agents.get_mut(&config.session_id).unwrap();
+            match change {
+                Change::StatusArc => {}
+                Change::Config => active.config.lock().unwrap().description = "edited".into(),
+                Change::Paused => active.config.lock().unwrap().is_off = true,
+                Change::Process => active.process_id = Some(1234),
+                Change::Generation => active.runtime_generation = Some(7),
+            }
+        }
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_task = attempts.clone();
+        let retry = super::retry_once_after_headless_execution_lease_clear(
+            &state,
+            &config,
+            &supplied_status,
+            || async { true },
+            || async { Some(()) },
+            move |publication, ()| async move {
+                attempts_for_task.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                drop(publication);
+            },
+        )
+        .await;
+        assert!(
+            retry.is_none(),
+            "stale placeholder {change:?} cannot be claimed"
+        );
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+
+    let state = AppState::new();
+    let paused = AgentConfig {
+        session_id: "headless-already-off".into(),
+        is_off: true,
+        ..Default::default()
+    };
+    assert!(
+        RestorePublication::begin_retry_if_current_headless_execution(
+            &state,
+            &paused,
+            &std::sync::Arc::new(std::sync::Mutex::new("Headless".into())),
+        )
+        .await
+        .is_none()
+    );
 }
