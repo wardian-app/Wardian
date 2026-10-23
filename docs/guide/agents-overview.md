@@ -31,6 +31,12 @@ agent wait for its restoration to finish. Once a save succeeds, later resume
 actions use the saved settings, including the choice to start a fresh provider
 conversation. This also applies to paused agents.
 
+If startup finds an active automation run using an agent's provider session, it
+keeps the agent visible as **Headless** until that exact run releases its
+conversation lease. Wardian then makes one guarded restore attempt when the
+saved agent is still on and unchanged. If ownership changes or cannot be
+verified, the agent stays Headless until a later app restart or manual action.
+
 Interactive terminals use the same color capabilities when Wardian is opened
 manually or by automation. The first visible terminal fits an unowned session
 to its pane automatically, including when the session finishes restoring after

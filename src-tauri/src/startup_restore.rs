@@ -10,8 +10,7 @@ use std::sync::{Arc, Mutex};
 /// their existing handling.
 pub(crate) fn retryable_lifecycle_restore_lease(
     config: &wardian_core::models::AgentConfig,
-    spawn_error: &str,
-    leases: &[wardian_core::conversation_lease::ConversationLease],
+    lease: &wardian_core::conversation_lease::ConversationLease,
 ) -> Option<wardian_core::conversation_lease::ConversationLease> {
     let resume_session = config
         .resume_session
@@ -25,23 +24,50 @@ pub(crate) fn retryable_lifecycle_restore_lease(
         })
         .unwrap_or_default()
         .trim();
-    let lease = leases.iter().find(|lease| {
-        if !is_retryable_restore_owner(lease)
-            || lease.mode != "lifecycle_transition"
-            || (lease.agent_id != config.session_id
-                && (resume_session.is_empty() || lease.resume_session != resume_session))
-        {
-            return false;
-        }
-        spawn_error
-            == format!(
-                "provider startup was withheld because conversation {} is leased by {} {} ({})",
-                config.session_id, lease.owner_kind, lease.owner_id, lease.mode
-            )
-    })?;
-
+    if !is_retryable_restore_owner(lease)
+        || lease.mode != "lifecycle_transition"
+        || (lease.agent_id != config.session_id
+            && (resume_session.is_empty() || lease.resume_session != resume_session))
+    {
+        return None;
+    }
     chrono::DateTime::parse_from_rfc3339(&lease.expires_at).ok()?;
     Some(lease.clone())
+}
+
+pub(crate) fn retryable_headless_execution_restore_lease(
+    config: &wardian_core::models::AgentConfig,
+    lease: &wardian_core::conversation_lease::ConversationLease,
+) -> Option<wardian_core::conversation_lease::ConversationLease> {
+    let resume_session = provider_restore_session_identity(config);
+    let matching_intent = match lease.mode.as_str() {
+        "background_fresh" => lease.resume_session.is_empty(),
+        "background_resume" => !resume_session.is_empty() && lease.resume_session == resume_session,
+        _ => false,
+    };
+    if config.is_off
+        || lease.owner_kind != "automation_run"
+        || lease.owner_id.trim().is_empty()
+        || lease.acquisition_id.trim().is_empty()
+        || lease
+            .owner_node_id
+            .as_deref()
+            .is_none_or(|node_id| node_id.trim().is_empty())
+        || lease.agent_id != config.session_id
+        || lease.provider != config.provider
+        || !matching_intent
+    {
+        return None;
+    }
+    chrono::DateTime::parse_from_rfc3339(&lease.started_at).ok()?;
+    chrono::DateTime::parse_from_rfc3339(&lease.expires_at).ok()?;
+    Some(lease.clone())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StartupRestoreRetryKind {
+    LifecycleLease,
+    HeadlessExecutionLease,
 }
 
 const RESTORE_LEASE_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
@@ -52,11 +78,52 @@ const RESTORE_LEASE_RECHECK_INTERVAL: std::time::Duration = std::time::Duration:
 pub(crate) async fn wait_for_lifecycle_restore_lease(
     config: &wardian_core::models::AgentConfig,
     expected_lease: &wardian_core::conversation_lease::ConversationLease,
+    load_leases: impl FnMut()
+        -> Result<Vec<wardian_core::conversation_lease::ConversationLease>, String>,
+    now: impl Fn() -> chrono::DateTime<chrono::Utc>,
+) -> Result<bool, String> {
+    wait_for_restore_lease_clear(
+        config,
+        expected_lease,
+        load_leases,
+        now,
+        same_retryable_lease_generation,
+    )
+    .await
+}
+
+pub(crate) async fn wait_for_headless_execution_restore_lease(
+    config: &wardian_core::models::AgentConfig,
+    expected_lease: &wardian_core::conversation_lease::ConversationLease,
+    load_leases: impl FnMut()
+        -> Result<Vec<wardian_core::conversation_lease::ConversationLease>, String>,
+    now: impl Fn() -> chrono::DateTime<chrono::Utc>,
+) -> Result<bool, String> {
+    if retryable_headless_execution_restore_lease(config, expected_lease).is_none() {
+        return Ok(false);
+    }
+    wait_for_restore_lease_clear(
+        config,
+        expected_lease,
+        load_leases,
+        now,
+        same_headless_execution_lease_generation,
+    )
+    .await
+}
+
+async fn wait_for_restore_lease_clear(
+    config: &wardian_core::models::AgentConfig,
+    expected_lease: &wardian_core::conversation_lease::ConversationLease,
     mut load_leases: impl FnMut() -> Result<
         Vec<wardian_core::conversation_lease::ConversationLease>,
         String,
     >,
     now: impl Fn() -> chrono::DateTime<chrono::Utc>,
+    same_generation: fn(
+        &wardian_core::conversation_lease::ConversationLease,
+        &wardian_core::conversation_lease::ConversationLease,
+    ) -> bool,
 ) -> Result<bool, String> {
     loop {
         let now = now();
@@ -80,11 +147,10 @@ pub(crate) async fn wait_for_lifecycle_restore_lease(
         }
         if active_conflicts
             .iter()
-            .any(|lease| !same_retryable_lease_generation(lease, expected_lease))
+            .any(|lease| !same_generation(lease, expected_lease))
         {
-            // A different lifecycle operation, active provider, or uncertain
-            // prior provider owns this conversation. Keep the normal safety
-            // gates authoritative and do not spend the one retry on it.
+            // A different generation or uncertain owner is authoritative.
+            // Do not spend the one startup retry on it.
             return Ok(false);
         }
 
@@ -135,6 +201,27 @@ fn same_retryable_lease_generation(
         && current.agent_id == expected.agent_id
         && current.provider == expected.provider
         && current.resume_session == expected.resume_session
+        && current.owner_node_id == expected.owner_node_id
+}
+
+fn same_headless_execution_lease_generation(
+    current: &wardian_core::conversation_lease::ConversationLease,
+    expected: &wardian_core::conversation_lease::ConversationLease,
+) -> bool {
+    current.owner_kind == "automation_run"
+        && matches!(
+            current.mode.as_str(),
+            "background_fresh" | "background_resume"
+        )
+        && current.owner_kind == expected.owner_kind
+        && current.owner_id == expected.owner_id
+        && current.acquisition_id == expected.acquisition_id
+        && current.owner_node_id == expected.owner_node_id
+        && current.mode == expected.mode
+        && current.started_at == expected.started_at
+        && current.agent_id == expected.agent_id
+        && current.provider == expected.provider
+        && current.resume_session == expected.resume_session
 }
 
 fn is_retryable_restore_owner(lease: &wardian_core::conversation_lease::ConversationLease) -> bool {
@@ -176,6 +263,44 @@ where
     let publication =
         RestorePublication::begin_retry_if_current_error(state, expected_config, expected_status)
             .await?;
+    Some(attempt(publication, slot).await)
+}
+
+pub(crate) async fn retry_once_after_headless_execution_lease_clear<
+    Wait,
+    WaitFuture,
+    Slot,
+    Output,
+    AcquireSlot,
+    AcquireSlotFuture,
+    Attempt,
+    AttemptFuture,
+>(
+    state: &AppState,
+    expected_config: &wardian_core::models::AgentConfig,
+    expected_status: &Arc<Mutex<String>>,
+    wait_until_clear: Wait,
+    acquire_slot: AcquireSlot,
+    attempt: Attempt,
+) -> Option<Output>
+where
+    Wait: FnOnce() -> WaitFuture,
+    WaitFuture: Future<Output = bool>,
+    AcquireSlot: FnOnce() -> AcquireSlotFuture,
+    AcquireSlotFuture: Future<Output = Option<Slot>>,
+    Attempt: FnOnce(RestorePublication, Slot) -> AttemptFuture,
+    AttemptFuture: Future<Output = Output>,
+{
+    if !wait_until_clear().await {
+        return None;
+    }
+    let slot = acquire_slot().await?;
+    let publication = RestorePublication::begin_retry_if_current_headless_execution(
+        state,
+        expected_config,
+        expected_status,
+    )
+    .await?;
     Some(attempt(publication, slot).await)
 }
 
@@ -240,6 +365,27 @@ impl RestorePublication {
         expected_config: &wardian_core::models::AgentConfig,
         expected_status: &Arc<Mutex<String>>,
     ) -> Option<Self> {
+        Self::begin_retry_if_current_status(state, expected_config, expected_status, "Error").await
+    }
+
+    pub(crate) async fn begin_retry_if_current_headless_execution(
+        state: &AppState,
+        expected_config: &wardian_core::models::AgentConfig,
+        expected_status: &Arc<Mutex<String>>,
+    ) -> Option<Self> {
+        if expected_config.is_off {
+            return None;
+        }
+        Self::begin_retry_if_current_status(state, expected_config, expected_status, "Headless")
+            .await
+    }
+
+    async fn begin_retry_if_current_status(
+        state: &AppState,
+        expected_config: &wardian_core::models::AgentConfig,
+        expected_status: &Arc<Mutex<String>>,
+        required_status: &str,
+    ) -> Option<Self> {
         let session_id = &expected_config.session_id;
         let lifecycle = state.lock_agent_lifecycle(session_id).await;
         let is_current_error = {
@@ -255,9 +401,10 @@ impl RestorePublication {
                 _ => false,
             };
             std::sync::Arc::ptr_eq(&agent.current_status, expected_status)
-                && *current_status == "Error"
+                && *current_status == required_status
                 && agent.runtime_generation.is_none()
                 && agent.process_id.is_none()
+                && !current_config.is_off
                 && configs_match
         };
         if !is_current_error {

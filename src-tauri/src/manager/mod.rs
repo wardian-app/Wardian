@@ -32,7 +32,7 @@ pub use headless::{
 pub(crate) use session_identity::{
     apply_provider_identity, validate_config_for_launch, validate_session_values_for_launch,
 };
-pub use spawn::{resize_pty, spawn_agent, spawn_agent_with_lease};
+pub use spawn::{resize_pty, spawn_agent_with_lease};
 pub(crate) use spawn::{
     spawn_agent_for_registration, spawn_agent_provisionally, RegistrationPublicationState,
     SpawnPublicationDisposition,

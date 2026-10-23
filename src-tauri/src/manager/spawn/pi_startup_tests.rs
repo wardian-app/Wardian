@@ -136,7 +136,7 @@ async fn failure_case(case: Case) {
         resume_session: Some(uuid::Uuid::new_v4().to_string()),
         ..Default::default()
     };
-    let lease = acquire_provider_spawn_lease(&config).expect("owned startup lease");
+    let lease = acquire_provider_spawn_lease_for_startup(&config).expect("owned startup lease");
     let owner = lease.owner().clone();
     let app = tauri::test::mock_app();
     app.manage(AppState::new());
@@ -255,7 +255,7 @@ async fn failure_case(case: Case) {
     }
     if early_idle {
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(acquire_provider_spawn_lease(&config).is_err());
+        assert!(acquire_provider_spawn_lease_for_startup(&config).is_err());
         assert_eq!(signals.kills.load(Ordering::SeqCst), 0);
     }
     let mut socket =
@@ -277,14 +277,14 @@ async fn failure_case(case: Case) {
     if case == Case::PendingRegistration {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(signals.kills.load(Ordering::SeqCst), 0);
-        assert!(acquire_provider_spawn_lease(&config).is_err());
+        assert!(acquire_provider_spawn_lease_for_startup(&config).is_err());
         publication.commit();
     }
     if let Some(displaced) = displaced {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(signals.kills.load(Ordering::SeqCst), 0);
         assert_eq!(other.kills.load(Ordering::SeqCst), 0);
-        assert!(acquire_provider_spawn_lease(&config).is_err());
+        assert!(acquire_provider_spawn_lease_for_startup(&config).is_err());
         // Owned rescue supplies exit proof without granting the stale monitor
         // any authority over the replacement runtime.
         let handle = crate::manager::codex_stop::prepare_pi_stop(&home, &config.session_id)
@@ -341,10 +341,10 @@ async fn failure_case(case: Case) {
                 .is_err()
         );
     }
-    assert!(acquire_provider_spawn_lease(&config).is_err());
+    assert!(acquire_provider_spawn_lease_for_startup(&config).is_err());
     // EOF/status alone is not proof that the retained child exited.
     *status.lock().unwrap() = "Off".into();
-    assert!(acquire_provider_spawn_lease(&config).is_err());
+    assert!(acquire_provider_spawn_lease_for_startup(&config).is_err());
     signals.exited.store(true, Ordering::SeqCst);
     if !cancel_observer {
         tokio::time::timeout(Duration::from_secs(2), watcher)
@@ -388,6 +388,7 @@ async fn failure_case(case: Case) {
     );
     assert_eq!(other.kills.load(Ordering::SeqCst), 0);
     other.exited.store(true, Ordering::SeqCst);
-    let replacement = acquire_provider_spawn_lease(&config).expect("ordinary recovery can acquire");
+    let replacement =
+        acquire_provider_spawn_lease_for_startup(&config).expect("ordinary recovery can acquire");
     drop(replacement);
 }
