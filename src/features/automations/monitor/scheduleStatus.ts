@@ -26,6 +26,7 @@ export function scheduleSummaryLabel(schedule: ScheduleDefinition): string {
 /** Status color (semantic theme var) for a schedule's last/active state. */
 export function scheduleStatusColor(schedule: AutomationSchedule): string {
   if (schedule.is_paused) return 'var(--color-wardian-warning)';
+  if (schedule.last_run_status === 'missed') return 'var(--color-wardian-warning)';
   if (schedule.last_run_status) return automationRunStatusColor(schedule.last_run_status);
   return 'var(--color-wardian-text-muted)';
 }
@@ -33,6 +34,7 @@ export function scheduleStatusColor(schedule: AutomationSchedule): string {
 /** Operational status label shown in dense automation monitor rows. */
 export function scheduleStatusLabel(schedule: AutomationSchedule): string {
   if (schedule.is_paused) return 'Paused';
+  if (schedule.last_run_status === 'missed') return 'Missed';
   if (schedule.last_run_status === 'running') return 'Running';
   if (schedule.last_run_status === 'failed') return 'Failed';
   if (schedule.last_run_status === 'completed') return 'Scheduled';

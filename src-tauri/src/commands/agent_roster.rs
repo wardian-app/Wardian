@@ -58,6 +58,13 @@ pub(crate) fn saved_roster_absent(wardian_home: Option<&std::path::Path>) -> boo
     )
 }
 
+pub(crate) fn automation_startup_ready(
+    roster_restore_persisted: bool,
+    saved_roster_was_absent: bool,
+) -> bool {
+    roster_restore_persisted || saved_roster_was_absent
+}
+
 fn roster_restored(state: &AppState) -> bool {
     state.agent_roster_restored.load(Ordering::Acquire)
 }
@@ -88,10 +95,14 @@ mod tests {
     #[test]
     fn only_a_confirmed_absent_saved_roster_vouches_without_restoring() {
         let home = tempfile::tempdir().expect("temp home");
+        let saved_roster_was_absent = saved_roster_absent(Some(home.path()));
         assert!(
-            saved_roster_absent(Some(home.path())),
+            saved_roster_was_absent,
             "a home with no saved roster has nothing left to restore"
         );
+        assert!(automation_startup_ready(false, saved_roster_was_absent));
+        assert!(automation_startup_ready(true, false));
+        assert!(!automation_startup_ready(false, false));
 
         // A saved roster that startup failed to parse still records agents
         // that may exist; its failure must not authorize pruning them.
@@ -99,11 +110,19 @@ mod tests {
         std::fs::create_dir_all(&settings).expect("settings dir");
         std::fs::write(settings.join("state.json"), "not json").expect("malformed roster");
         assert!(!saved_roster_absent(Some(home.path())));
+        assert!(!automation_startup_ready(
+            false,
+            saved_roster_absent(Some(home.path()))
+        ));
 
         // An unreadable entry in place of the file is not an absence either.
         std::fs::remove_file(settings.join("state.json")).expect("remove roster");
         std::fs::create_dir(settings.join("state.json")).expect("unreadable roster");
         assert!(!saved_roster_absent(Some(home.path())));
+        assert!(!automation_startup_ready(
+            false,
+            saved_roster_absent(Some(home.path()))
+        ));
 
         assert!(
             !saved_roster_absent(None),

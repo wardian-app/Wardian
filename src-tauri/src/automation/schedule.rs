@@ -13,7 +13,9 @@ use wardian_core::engine::{
     Event, EventKind, RunState, RunStatus,
 };
 use wardian_core::models::InvocationKind;
-use wardian_core::schedule::{load_schedules, plan_tick, save_schedules, FireRequest};
+use wardian_core::schedule::{
+    mutate_schedules, plan_tick, reconcile_startup_schedules, FireRequest,
+};
 
 const TICK_SECS: u64 = 5;
 
@@ -171,15 +173,25 @@ async fn fire_request(app: &AppHandle, req: &FireRequest) {
 }
 
 fn mark_error(schedule_id: &str, message: &str) {
-    let mut schedules = load_schedules();
-    if let Some(schedule) = schedules
-        .iter_mut()
-        .find(|schedule| schedule.id == schedule_id)
-    {
-        schedule.last_run_status = Some("failed".to_string());
-        schedule.last_run_error = Some(message.to_string());
+    if let Err(error) = mutate_schedules(|schedules| {
+        let changed = schedules
+            .iter_mut()
+            .find(|schedule| schedule.id == schedule_id)
+            .is_some_and(|schedule| {
+                let status = Some("failed".to_string());
+                let error = Some(message.to_string());
+                let changed =
+                    schedule.last_run_status != status || schedule.last_run_error != error;
+                schedule.last_run_status = status;
+                schedule.last_run_error = error;
+                changed
+            });
+        Ok(((), changed))
+    }) {
+        crate::utils::logging::log_debug(&format!(
+            "[automation] scheduler could not persist failed run status: {error}"
+        ));
     }
-    let _ = save_schedules(&schedules);
     crate::utils::logging::log_debug(&format!("[automation] scheduler: {message}"));
 }
 
@@ -245,60 +257,60 @@ fn mark_finished_from_checkpoint(schedule_id: &str, run_root: &std::path::Path) 
 }
 
 fn mark_run_status(schedule_id: &str, status: String, error: Option<String>) {
-    let mut schedules = load_schedules();
-    if let Some(schedule) = schedules
-        .iter_mut()
-        .find(|schedule| schedule.id == schedule_id)
-    {
-        schedule.last_run_status = Some(status);
-        schedule.last_run_error = error;
+    if let Err(persist_error) = mutate_schedules(|schedules| {
+        let changed = schedules
+            .iter_mut()
+            .find(|schedule| schedule.id == schedule_id)
+            .is_some_and(|schedule| {
+                let changed = schedule.last_run_status.as_deref() != Some(status.as_str())
+                    || schedule.last_run_error != error;
+                schedule.last_run_status = Some(status);
+                schedule.last_run_error = error;
+                changed
+            });
+        Ok(((), changed))
+    }) {
+        crate::utils::logging::log_debug(&format!(
+            "[automation] scheduler could not persist run status: {persist_error}"
+        ));
     }
-    let _ = save_schedules(&schedules);
 }
 
-fn persist_runtime(
-    processed: &[wardian_core::models::AutomationSchedule],
-    removed: &std::collections::HashSet<String>,
-) -> bool {
-    let mut fresh = load_schedules();
-    let original_len = fresh.len();
-    fresh.retain(|schedule| !removed.contains(&schedule.id));
-    let mut changed = fresh.len() != original_len;
-
-    for fresh_schedule in fresh.iter_mut() {
-        if let Some(processed_schedule) = processed
+fn plan_and_persist_tick(now_ms: u64) -> std::io::Result<(Vec<FireRequest>, bool)> {
+    mutate_schedules(|schedules| {
+        let before_len = schedules.len();
+        let before_deadlines = schedules
             .iter()
-            .find(|schedule| schedule.id == fresh_schedule.id)
-        {
-            let runtime_changed = fresh_schedule.next_run_epoch_ms
-                != processed_schedule.next_run_epoch_ms
-                || fresh_schedule.paused_remaining_ms != processed_schedule.paused_remaining_ms
-                || fresh_schedule.schedule.occurrence_count
-                    != processed_schedule.schedule.occurrence_count
-                || fresh_schedule.last_run_status != processed_schedule.last_run_status
-                || fresh_schedule.last_run_error != processed_schedule.last_run_error
-                || fresh_schedule.last_run_epoch_ms != processed_schedule.last_run_epoch_ms;
-
-            if runtime_changed {
-                fresh_schedule.next_run_epoch_ms = processed_schedule.next_run_epoch_ms;
-                fresh_schedule.paused_remaining_ms = processed_schedule.paused_remaining_ms;
-                fresh_schedule.schedule.occurrence_count =
-                    processed_schedule.schedule.occurrence_count;
-                fresh_schedule.last_run_status = processed_schedule.last_run_status.clone();
-                fresh_schedule.last_run_error = processed_schedule.last_run_error.clone();
-                fresh_schedule.last_run_epoch_ms = processed_schedule.last_run_epoch_ms;
-                changed = true;
-            }
-        }
-    }
-
-    if changed {
-        let _ = save_schedules(&fresh);
-    }
-    changed
+            .map(|schedule| (schedule.id.clone(), schedule.next_run_epoch_ms))
+            .collect::<HashMap<_, _>>();
+        let fires = plan_tick(schedules, now_ms);
+        let changed = !fires.is_empty()
+            || schedules.len() != before_len
+            || schedules.iter().any(|schedule| {
+                before_deadlines.get(&schedule.id) != Some(&schedule.next_run_epoch_ms)
+            });
+        Ok(((fires, changed), changed))
+    })
 }
 
 pub async fn start_scheduler(app: AppHandle) {
+    let startup_cutoff_ms = chrono::Utc::now().timestamp_millis() as u64;
+    let changed = match mutate_schedules(|schedules| {
+        let changed = reconcile_startup_schedules(schedules, startup_cutoff_ms);
+        Ok((changed, changed))
+    }) {
+        Ok(changed) => changed,
+        Err(error) => {
+            crate::utils::logging::log_debug(&format!(
+                "[automation] scheduler withheld because startup schedule reconciliation could not be persisted: {error}"
+            ));
+            return;
+        }
+    };
+    if changed {
+        let _ = app.emit("schedules-updated", ());
+    }
+
     let state = app.state::<crate::state::AppState>();
     {
         let mut handle = state.automation_scheduler_handle.lock().await;
@@ -316,29 +328,20 @@ pub async fn start_scheduler(app: AppHandle) {
                 continue;
             }
 
-            let mut schedules = load_schedules();
-            if schedules.is_empty() {
-                continue;
-            }
-
-            let before: std::collections::HashSet<String> = schedules
-                .iter()
-                .map(|schedule| schedule.id.clone())
-                .collect();
             let now_ms = chrono::Utc::now().timestamp_millis() as u64;
-            let fires = plan_tick(&mut schedules, now_ms);
-            let after: std::collections::HashSet<String> = schedules
-                .iter()
-                .map(|schedule| schedule.id.clone())
-                .collect();
-            let removed: std::collections::HashSet<String> =
-                before.difference(&after).cloned().collect();
-
-            persist_runtime(&schedules, &removed);
+            let (fires, changed) = match plan_and_persist_tick(now_ms) {
+                Ok(result) => result,
+                Err(error) => {
+                    crate::utils::logging::log_debug(&format!(
+                        "[automation] scheduler tick skipped because schedules could not be persisted: {error}"
+                    ));
+                    continue;
+                }
+            };
             for req in &fires {
                 fire_request(&app_clone, req).await;
             }
-            if !fires.is_empty() {
+            if changed {
                 let _ = app_clone.emit("schedules-updated", ());
             }
         }
@@ -574,16 +577,17 @@ edges:
         let _env = EnvGuard::set(home.path(), &mock_script_path());
         let now = chrono::Utc::now().timestamp_millis() as u64;
         let schedules = vec![schedule(false, now + 60_000)];
-        wardian_core::schedule::save_schedules(&schedules).unwrap();
+        wardian_core::schedule::mutate_schedules(|stored| {
+            stored.extend(schedules);
+            Ok(((), true))
+        })
+        .unwrap();
 
         let path = home.path().join("library").join("schedules.json");
         let before = std::fs::metadata(&path).unwrap().modified().unwrap();
-        let processed = wardian_core::schedule::load_schedules();
-
-        assert!(!persist_runtime(
-            &processed,
-            &std::collections::HashSet::new()
-        ));
+        let (fires, changed) = plan_and_persist_tick(now).unwrap();
+        assert!(fires.is_empty());
+        assert!(!changed);
         assert_eq!(
             std::fs::metadata(&path).unwrap().modified().unwrap(),
             before

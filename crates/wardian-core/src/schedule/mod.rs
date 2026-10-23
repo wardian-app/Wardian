@@ -2,8 +2,10 @@
 
 use crate::models::{AutomationAssignments, ScheduleDefinition};
 use chrono::{Datelike, TimeZone};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
 use crate::models::AutomationSchedule;
@@ -17,9 +19,35 @@ use crate::models::AutomationSchedule;
 /// projection bounded.
 pub const MAX_WEEKLY_REPEAT_EVERY: u32 = 520;
 
+fn local_datetime_at(now_ms: u64) -> Option<chrono::DateTime<chrono::Local>> {
+    chrono::Local
+        .timestamp_millis_opt(i64::try_from(now_ms).ok()?)
+        .single()
+}
+
 /// Next future fire time in epoch-ms for `schedule`, or `None` if the schedule
 /// can never fire again. Missed slots are skipped.
 pub fn compute_next_run(schedule: &ScheduleDefinition, now_ms: u64) -> Option<u64> {
+    compute_next_run_with_boundary(schedule, now_ms, false)
+}
+
+fn compute_next_run_at_or_after(schedule: &ScheduleDefinition, cutoff_ms: u64) -> Option<u64> {
+    compute_next_run_with_boundary(schedule, cutoff_ms, true)
+}
+
+fn compute_next_run_with_boundary(
+    schedule: &ScheduleDefinition,
+    now_ms: u64,
+    inclusive: bool,
+) -> Option<u64> {
+    let follows_boundary = |candidate_ms| {
+        if inclusive {
+            candidate_ms >= now_ms
+        } else {
+            candidate_ms > now_ms
+        }
+    };
+
     match schedule.schedule_type.as_str() {
         "interval" => {
             let mins = schedule.interval_minutes.unwrap_or(0) as u64;
@@ -38,7 +66,7 @@ pub fn compute_next_run(schedule: &ScheduleDefinition, now_ms: u64) -> Option<u6
             let hour: u32 = parts[0].parse().unwrap_or(0);
             let minute: u32 = parts[1].parse().unwrap_or(0);
 
-            let now_local = chrono::Local::now();
+            let now_local = local_datetime_at(now_ms)?;
             let today = now_local.date_naive();
             let target_time = chrono::NaiveTime::from_hms_opt(hour, minute, 0)?;
             let target_naive = today.and_time(target_time);
@@ -47,7 +75,7 @@ pub fn compute_next_run(schedule: &ScheduleDefinition, now_ms: u64) -> Option<u6
                 .earliest()?;
 
             let target_ms = target_local.timestamp_millis() as u64;
-            if target_ms > now_ms {
+            if follows_boundary(target_ms) {
                 Some(target_ms)
             } else {
                 Some(target_ms + 86_400_000)
@@ -84,7 +112,7 @@ pub fn compute_next_run(schedule: &ScheduleDefinition, now_ms: u64) -> Option<u6
                 return None;
             }
             let repeat_weeks = schedule.repeat_every.max(1) as i64;
-            let now_local = chrono::Local::now();
+            let now_local = local_datetime_at(now_ms)?;
             let mut best: Option<u64> = None;
 
             let search_days = repeat_weeks.checked_mul(7)?.checked_add(7)? as u32;
@@ -108,7 +136,7 @@ pub fn compute_next_run(schedule: &ScheduleDefinition, now_ms: u64) -> Option<u6
                                 .earliest()
                             {
                                 let candidate_ms = candidate_local.timestamp_millis() as u64;
-                                if candidate_ms > now_ms {
+                                if follows_boundary(candidate_ms) {
                                     best = Some(
                                         best.map_or(candidate_ms, |b: u64| b.min(candidate_ms)),
                                     );
@@ -136,7 +164,7 @@ pub fn compute_next_run(schedule: &ScheduleDefinition, now_ms: u64) -> Option<u6
                 _ => return None,
             };
 
-            let now_local = chrono::Local::now();
+            let now_local = local_datetime_at(now_ms)?;
             let target_time = chrono::NaiveTime::from_hms_opt(hour, minute, 0)?;
             let mut best: Option<u64> = None;
 
@@ -155,7 +183,7 @@ pub fn compute_next_run(schedule: &ScheduleDefinition, now_ms: u64) -> Option<u6
                             .earliest()
                         {
                             let candidate_ms = candidate_local.timestamp_millis() as u64;
-                            if candidate_ms > now_ms {
+                            if follows_boundary(candidate_ms) {
                                 best =
                                     Some(best.map_or(candidate_ms, |b: u64| b.min(candidate_ms)));
                             }
@@ -192,7 +220,7 @@ pub fn compute_next_run(schedule: &ScheduleDefinition, now_ms: u64) -> Option<u6
                         .earliest()
                     {
                         let candidate_ms = candidate_local.timestamp_millis() as u64;
-                        if candidate_ms > now_ms {
+                        if follows_boundary(candidate_ms) {
                             best = Some(best.map_or(candidate_ms, |b: u64| b.min(candidate_ms)));
                         }
                     }
@@ -429,13 +457,58 @@ pub fn load_schedules() -> Vec<AutomationSchedule> {
     }
 }
 
-/// Write all schedules atomically (temp file + rename) so a crash mid-write cannot truncate.
-pub fn save_schedules(schedules: &[AutomationSchedule]) -> std::io::Result<()> {
-    let path = crate::paths::schedules_path()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no wardian home"))?;
+/// Serialize one schedule read-modify-write across the app and CLI processes.
+///
+/// The changed flag keeps scheduler ticks from rewriting an unchanged file.
+/// A malformed existing file fails closed so no mutation can silently replace
+/// the operator's schedule set with an empty one.
+pub fn mutate_schedules<T>(
+    mutate: impl FnOnce(&mut Vec<AutomationSchedule>) -> std::io::Result<(T, bool)>,
+) -> std::io::Result<T> {
+    let path = crate::paths::schedules_path().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "Wardian home is unavailable")
+    })?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path.with_extension("lock"))?;
+    FileExt::lock_exclusive(&lock)?;
+
+    let mut schedules = read_schedules_for_mutation(&path)?;
+    let (result, changed) = mutate(&mut schedules)?;
+    if changed {
+        write_schedules_to_path(&path, &schedules)?;
+    }
+    Ok(result)
+}
+
+fn read_schedules_for_mutation(path: &std::path::Path) -> std::io::Result<Vec<AutomationSchedule>> {
+    match std::fs::read_to_string(path) {
+        Ok(body) => serde_json::from_str::<ScheduleFile>(&body)
+            .map(|file| file.schedules)
+            .map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "refusing to overwrite malformed {}: {error}",
+                        path.display()
+                    ),
+                )
+            }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
+fn write_schedules_to_path(
+    path: &std::path::Path,
+    schedules: &[AutomationSchedule],
+) -> std::io::Result<()> {
     let file = ScheduleFile {
         schema: 1,
         schedules: schedules.to_vec(),
@@ -444,7 +517,7 @@ pub fn save_schedules(schedules: &[AutomationSchedule]) -> std::io::Result<()> {
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, &path)?;
+    std::fs::rename(&tmp, path)?;
     Ok(())
 }
 
@@ -480,6 +553,25 @@ fn is_expired(schedule: &AutomationSchedule, now_ms: u64) -> bool {
     }
 }
 
+fn candidate_within_end_condition(schedule: &ScheduleDefinition, candidate_ms: u64) -> bool {
+    if schedule.end_condition != "on_date" {
+        return true;
+    }
+    let Some(end_date) = schedule
+        .end_date
+        .as_deref()
+        .and_then(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+    else {
+        return false;
+    };
+    local_datetime_at(candidate_ms).is_some_and(|candidate| candidate.date_naive() <= end_date)
+}
+
+fn next_startup_occurrence(schedule: &ScheduleDefinition, cutoff_ms: u64) -> Option<u64> {
+    compute_next_run_at_or_after(schedule, cutoff_ms)
+        .filter(|candidate| candidate_within_end_condition(schedule, *candidate))
+}
+
 fn fire_request(schedule: &AutomationSchedule) -> FireRequest {
     FireRequest {
         schedule_id: schedule.id.clone(),
@@ -503,8 +595,67 @@ fn advance_after_fire(schedule: &mut AutomationSchedule, now_ms: u64) -> bool {
         return true;
     }
 
-    schedule.next_run_epoch_ms = compute_next_run(&schedule.schedule, now_ms);
+    schedule.next_run_epoch_ms = compute_next_run(&schedule.schedule, now_ms)
+        .filter(|candidate| candidate_within_end_condition(&schedule.schedule, *candidate));
     schedule.next_run_epoch_ms.is_none() && schedule.schedule.schedule_type == "specific_dates"
+}
+
+/// Reconcile overdue schedules once when the live scheduler activates.
+///
+/// Occurrences strictly before `startup_cutoff_ms` elapsed while the app was
+/// offline. Recurring schedules move to their next future occurrence. Missed
+/// one-time and exhausted specific-date schedules remain available for manual
+/// Run now.
+/// This is deliberately separate from `plan_tick`, so ordinary delayed ticks
+/// still dispatch their due work.
+pub fn reconcile_startup_schedules(
+    schedules: &mut Vec<AutomationSchedule>,
+    startup_cutoff_ms: u64,
+) -> bool {
+    let mut changed = false;
+    let mut remove_ids = Vec::new();
+
+    for schedule in schedules.iter_mut() {
+        if !schedule.schedule.active || schedule.is_paused {
+            continue;
+        }
+
+        if is_expired(schedule, startup_cutoff_ms) {
+            remove_ids.push(schedule.id.clone());
+            continue;
+        }
+
+        let Some(next_run) = schedule.next_run_epoch_ms else {
+            continue;
+        };
+        if next_run >= startup_cutoff_ms {
+            continue;
+        }
+
+        let next_run = if schedule.schedule.schedule_type == "one_time" {
+            None
+        } else {
+            next_startup_occurrence(&schedule.schedule, startup_cutoff_ms)
+        };
+        let missed_once = schedule.schedule.schedule_type == "one_time"
+            || (schedule.schedule.schedule_type == "specific_dates" && next_run.is_none());
+        if schedule.next_run_epoch_ms != next_run {
+            schedule.next_run_epoch_ms = next_run;
+            changed = true;
+        }
+        if missed_once && schedule.last_run_status.as_deref() != Some("missed") {
+            // Keep actual run time, error, and occurrence count as run history.
+            schedule.last_run_status = Some("missed".to_string());
+            changed = true;
+        }
+    }
+
+    if !remove_ids.is_empty() {
+        schedules.retain(|schedule| !remove_ids.iter().any(|id| id == &schedule.id));
+        changed = true;
+    }
+
+    changed
 }
 
 /// Advance one tick. Mutates `schedules` and returns due fire requests.
@@ -523,7 +674,8 @@ pub fn plan_tick(schedules: &mut Vec<AutomationSchedule>, now_ms: u64) -> Vec<Fi
         }
 
         let Some(next_run) = schedule.next_run_epoch_ms else {
-            schedule.next_run_epoch_ms = compute_next_run(&schedule.schedule, now_ms);
+            schedule.next_run_epoch_ms = compute_next_run(&schedule.schedule, now_ms)
+                .filter(|candidate| candidate_within_end_condition(&schedule.schedule, *candidate));
             continue;
         };
 
@@ -548,6 +700,35 @@ pub fn plan_tick(schedules: &mut Vec<AutomationSchedule>, now_ms: u64) -> Vec<Fi
 mod tests {
     use super::*;
     use crate::models::ScheduleDefinition;
+
+    struct TestHome {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        _home: tempfile::TempDir,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl TestHome {
+        fn new() -> Self {
+            let guard = crate::tests::env_lock();
+            let home = tempfile::tempdir().expect("temp home");
+            let previous = std::env::var_os("WARDIAN_HOME");
+            std::env::set_var("WARDIAN_HOME", home.path());
+            Self {
+                _guard: guard,
+                _home: home,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for TestHome {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("WARDIAN_HOME", value),
+                None => std::env::remove_var("WARDIAN_HOME"),
+            }
+        }
+    }
 
     fn sample_schedule(id: &str) -> crate::models::AutomationSchedule {
         crate::models::AutomationSchedule {
@@ -585,6 +766,119 @@ mod tests {
             active: true,
             ..Default::default()
         }
+    }
+
+    fn startup_transaction_then_operator_mutation(
+        operator_mutation: impl FnOnce(&mut Vec<crate::models::AutomationSchedule>) + Send + 'static,
+    ) -> Vec<crate::models::AutomationSchedule> {
+        let _home = TestHome::new();
+        let cutoff = 1_800_000_000_000_u64;
+        let mut overdue = sample_schedule("startup-race");
+        overdue.next_run_epoch_ms = Some(cutoff - 1);
+        mutate_schedules(|schedules| {
+            schedules.push(overdue);
+            Ok(((), true))
+        })
+        .expect("seed schedule");
+
+        let startup_has_reconciled = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let release_startup = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let operator_is_ready = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let startup_ready = startup_has_reconciled.clone();
+        let startup_release = release_startup.clone();
+        let startup = std::thread::spawn(move || {
+            mutate_schedules(|schedules| {
+                let changed = reconcile_startup_schedules(schedules, cutoff);
+                startup_ready.wait();
+                startup_release.wait();
+                Ok(((), changed))
+            })
+            .expect("startup transaction");
+        });
+
+        let operator_ready = operator_is_ready.clone();
+        let operator = std::thread::spawn(move || {
+            operator_ready.wait();
+            mutate_schedules(|schedules| {
+                operator_mutation(schedules);
+                Ok(((), true))
+            })
+            .expect("operator transaction");
+        });
+
+        startup_has_reconciled.wait();
+        operator_is_ready.wait();
+        release_startup.wait();
+        startup.join().expect("join startup writer");
+        operator.join().expect("join operator writer");
+        try_load_schedules().expect("read final schedules")
+    }
+
+    #[test]
+    fn startup_reconciliation_serializes_with_pause() {
+        let schedules = startup_transaction_then_operator_mutation(|schedules| {
+            let schedule = schedules
+                .iter_mut()
+                .find(|schedule| schedule.id == "startup-race")
+                .expect("startup schedule");
+            schedule.is_paused = true;
+            schedule.paused_remaining_ms = schedule.next_run_epoch_ms;
+            schedule.next_run_epoch_ms = None;
+        });
+        assert!(schedules[0].is_paused);
+        assert_eq!(schedules[0].next_run_epoch_ms, None);
+    }
+
+    #[test]
+    fn startup_reconciliation_serializes_with_remove() {
+        let schedules = startup_transaction_then_operator_mutation(|schedules| {
+            schedules.retain(|schedule| schedule.id != "startup-race");
+        });
+        assert!(schedules.is_empty());
+    }
+
+    #[test]
+    fn startup_reconciliation_serializes_with_input_and_assignments_update() {
+        let schedules = startup_transaction_then_operator_mutation(|schedules| {
+            let schedule = schedules
+                .iter_mut()
+                .find(|schedule| schedule.id == "startup-race")
+                .expect("startup schedule");
+            schedule.input = serde_json::json!({"release": "operator-edit"});
+            schedule.assignments.insert(
+                "reviewer".into(),
+                crate::models::AutomationRoleAssignment::TemporaryProvider {
+                    provider: "gemini".into(),
+                    workspace: Some("/review".into()),
+                    model: Some("gemini-pro".into()),
+                    effort: Some("high".into()),
+                },
+            );
+        });
+        assert_eq!(
+            schedules[0].input,
+            serde_json::json!({"release": "operator-edit"})
+        );
+        assert!(schedules[0].assignments.contains_key("reviewer"));
+    }
+
+    #[test]
+    fn malformed_schedule_storage_is_never_overwritten_by_mutation() {
+        let _home = TestHome::new();
+        let path = crate::paths::schedules_path().expect("schedule path");
+        std::fs::create_dir_all(path.parent().unwrap()).expect("schedule directory");
+        let malformed = b"{ this is not schedule JSON";
+        std::fs::write(&path, malformed).expect("write malformed fixture");
+
+        let error = mutate_schedules(|schedules| {
+            schedules.push(sample_schedule("must-not-replace"));
+            Ok(((), true))
+        })
+        .expect_err("malformed storage must fail closed");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read(path).unwrap(), malformed);
     }
 
     #[test]
@@ -651,12 +945,474 @@ mod tests {
     }
 
     #[test]
+    fn startup_reconciliation_skips_offline_occurrences_without_recording_runs() {
+        use chrono::TimeZone;
+
+        let cutoff = 1_800_000_000_000_u64;
+        let cutoff_local = chrono::Local
+            .timestamp_millis_opt(cutoff as i64)
+            .single()
+            .unwrap();
+        let missed_date = cutoff_local.date_naive().pred_opt().unwrap();
+        let future_date = cutoff_local.date_naive().succ_opt().unwrap();
+        let past_date_run = chrono::Local
+            .from_local_datetime(
+                &missed_date
+                    .and_hms_opt(9, 0, 0)
+                    .expect("valid missed local time"),
+            )
+            .earliest()
+            .unwrap()
+            .timestamp_millis() as u64;
+
+        let mut recurring = sample_schedule("recurring");
+        recurring.next_run_epoch_ms = Some(cutoff - 1);
+        recurring.schedule.occurrence_count = 2;
+        recurring.last_run_status = Some("completed".into());
+        recurring.last_run_epoch_ms = Some(cutoff - 3_600_000);
+
+        let mut one_time = sample_schedule("one-time");
+        one_time.schedule.schedule_type = "one_time".into();
+        one_time.schedule.run_at = Some("2020-01-01T00:00:00-05:00".into());
+        one_time.schedule.end_condition = "after_occurrences".into();
+        one_time.schedule.max_occurrences = Some(2);
+        one_time.schedule.occurrence_count = 1;
+        one_time.next_run_epoch_ms = Some(cutoff - 2);
+        one_time.last_run_status = Some("completed".into());
+        one_time.last_run_error = Some("prior run detail".into());
+        one_time.last_run_epoch_ms = Some(cutoff - 3_600_000);
+        one_time.bindings.insert("reviewer".into(), "codex".into());
+
+        let mut specific_dates = sample_schedule("specific-dates");
+        specific_dates.schedule.schedule_type = "specific_dates".into();
+        specific_dates.schedule.time_of_day = Some("09:00".into());
+        specific_dates.schedule.specific_dates = Some(vec![
+            missed_date.format("%Y-%m-%d").to_string(),
+            future_date.format("%Y-%m-%d").to_string(),
+        ]);
+        specific_dates.schedule.end_condition = "after_occurrences".into();
+        specific_dates.schedule.max_occurrences = Some(10);
+        specific_dates.next_run_epoch_ms = Some(past_date_run);
+        specific_dates.schedule.occurrence_count = 4;
+        specific_dates.last_run_status = Some("completed".into());
+        specific_dates.last_run_error = Some("prior specific-date detail".into());
+        specific_dates.last_run_epoch_ms = Some(cutoff - 86_400_000);
+
+        let mut exhausted_specific_dates = sample_schedule("exhausted-specific-dates");
+        exhausted_specific_dates.schedule.schedule_type = "specific_dates".into();
+        exhausted_specific_dates.schedule.time_of_day = Some("09:00".into());
+        exhausted_specific_dates.schedule.specific_dates =
+            Some(vec![missed_date.format("%Y-%m-%d").to_string()]);
+        exhausted_specific_dates.schedule.end_condition = "never".into();
+        exhausted_specific_dates.next_run_epoch_ms = Some(past_date_run);
+        exhausted_specific_dates.schedule.occurrence_count = 3;
+        exhausted_specific_dates.last_run_status = Some("completed".into());
+        exhausted_specific_dates.last_run_error = Some("prior exhausted-date detail".into());
+        exhausted_specific_dates.last_run_epoch_ms = Some(cutoff - 172_800_000);
+
+        let mut exact_boundary = sample_schedule("exact-boundary");
+        exact_boundary.next_run_epoch_ms = Some(cutoff);
+
+        let mut paused = sample_schedule("paused");
+        paused.next_run_epoch_ms = Some(cutoff - 1);
+        paused.is_paused = true;
+
+        let mut expired = sample_schedule("expired");
+        expired.next_run_epoch_ms = Some(cutoff - 1);
+        expired.schedule.end_condition = "after_occurrences".into();
+        expired.schedule.max_occurrences = Some(2);
+        expired.schedule.occurrence_count = 2;
+
+        let mut schedules = vec![
+            recurring,
+            one_time,
+            specific_dates,
+            exhausted_specific_dates,
+            exact_boundary,
+            paused,
+            expired,
+        ];
+
+        assert!(reconcile_startup_schedules(&mut schedules, cutoff));
+        assert_eq!(
+            schedules.len(),
+            6,
+            "expired schedules keep normal expiry behavior"
+        );
+
+        let recurring = schedules
+            .iter()
+            .find(|schedule| schedule.id == "recurring")
+            .unwrap();
+        assert!(recurring.next_run_epoch_ms.unwrap() > cutoff);
+        assert_eq!(recurring.schedule.occurrence_count, 2);
+        assert_eq!(recurring.last_run_status.as_deref(), Some("completed"));
+        assert_eq!(recurring.last_run_epoch_ms, Some(cutoff - 3_600_000));
+
+        let one_time = schedules
+            .iter()
+            .find(|schedule| schedule.id == "one-time")
+            .unwrap();
+        assert_eq!(one_time.last_run_status.as_deref(), Some("missed"));
+        assert_eq!(one_time.next_run_epoch_ms, None);
+        assert_eq!(one_time.last_run_epoch_ms, Some(cutoff - 3_600_000));
+        assert_eq!(one_time.last_run_error.as_deref(), Some("prior run detail"));
+        assert_eq!(one_time.schedule.occurrence_count, 1);
+        assert_eq!(one_time.schedule.end_condition, "after_occurrences");
+        assert_eq!(one_time.schedule.max_occurrences, Some(2));
+        assert_eq!(
+            one_time.bindings.get("reviewer").map(String::as_str),
+            Some("codex")
+        );
+
+        let specific_dates = schedules
+            .iter()
+            .find(|schedule| schedule.id == "specific-dates")
+            .unwrap();
+        assert_eq!(specific_dates.last_run_status.as_deref(), Some("completed"));
+        assert_eq!(
+            specific_dates.last_run_error.as_deref(),
+            Some("prior specific-date detail")
+        );
+        assert_eq!(specific_dates.schedule.occurrence_count, 4);
+        assert_eq!(specific_dates.schedule.end_condition, "after_occurrences");
+        assert_eq!(specific_dates.schedule.max_occurrences, Some(10));
+        assert_eq!(specific_dates.last_run_epoch_ms, Some(cutoff - 86_400_000));
+        let next_specific_date = specific_dates.next_run_epoch_ms.unwrap();
+        assert!(next_specific_date > cutoff);
+        assert_eq!(
+            chrono::Local
+                .timestamp_millis_opt(next_specific_date as i64)
+                .single()
+                .unwrap()
+                .date_naive(),
+            future_date,
+        );
+
+        let exhausted = schedules
+            .iter()
+            .find(|schedule| schedule.id == "exhausted-specific-dates")
+            .unwrap();
+        assert_eq!(exhausted.last_run_status.as_deref(), Some("missed"));
+        assert_eq!(
+            exhausted.last_run_error.as_deref(),
+            Some("prior exhausted-date detail")
+        );
+        assert_eq!(exhausted.last_run_epoch_ms, Some(cutoff - 172_800_000));
+        assert_eq!(exhausted.next_run_epoch_ms, None);
+        assert_eq!(exhausted.schedule.occurrence_count, 3);
+        assert_eq!(exhausted.schedule.end_condition, "never");
+
+        assert_eq!(
+            schedules
+                .iter()
+                .find(|schedule| schedule.id == "exact-boundary")
+                .unwrap()
+                .next_run_epoch_ms,
+            Some(cutoff),
+            "an occurrence exactly at startup remains due",
+        );
+        assert_eq!(
+            schedules
+                .iter()
+                .find(|schedule| schedule.id == "paused")
+                .unwrap()
+                .next_run_epoch_ms,
+            Some(cutoff - 1),
+        );
+        assert_eq!(
+            plan_tick(
+                &mut vec![schedules
+                    .iter()
+                    .find(|schedule| schedule.id == "exact-boundary")
+                    .unwrap()
+                    .clone()],
+                cutoff + 5_000,
+            )
+            .len(),
+            1,
+            "the first delayed active tick still fires the exact-boundary occurrence",
+        );
+
+        let timezone_one_time = ScheduleDefinition {
+            schedule_type: "one_time".into(),
+            run_at: Some("2020-01-01T00:00:00-05:00".into()),
+            ..Default::default()
+        };
+        let expected_epoch = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00-05:00")
+            .unwrap()
+            .timestamp_millis() as u64;
+        assert_eq!(
+            compute_next_run(&timezone_one_time, expected_epoch - 1),
+            Some(expected_epoch)
+        );
+
+        use crate::models::{AgentConversationMode, AutomationRoleAssignment, BusyPolicy};
+
+        let mut manual_one_time = schedules
+            .iter()
+            .find(|schedule| schedule.id == "one-time")
+            .unwrap()
+            .clone();
+        manual_one_time.next_run_epoch_ms = Some(cutoff);
+        manual_one_time.input = serde_json::json!({"report_date": "2026-10-22", "dry_run": true});
+        manual_one_time.provider = Some("claude".into());
+        manual_one_time.workspace = Some("/workspace/one-time".into());
+        let one_time_assignments = std::collections::HashMap::from([(
+            "reviewer".into(),
+            AutomationRoleAssignment::TemporaryProvider {
+                provider: "gemini".into(),
+                workspace: Some("/workspace/reviewer".into()),
+                model: Some("gemini-pro".into()),
+                effort: Some("high".into()),
+            },
+        )]);
+        manual_one_time.assignments = one_time_assignments.clone();
+        let one_time_bindings = manual_one_time.bindings.clone();
+
+        let mut manual_specific_dates = schedules
+            .iter()
+            .find(|schedule| schedule.id == "exhausted-specific-dates")
+            .unwrap()
+            .clone();
+        manual_specific_dates.next_run_epoch_ms = Some(cutoff);
+        manual_specific_dates.input = serde_json::json!({"edition": "winter", "notify": false});
+        manual_specific_dates.provider = Some("codex".into());
+        manual_specific_dates.workspace = Some("/workspace/specific-date".into());
+        let specific_date_assignments = std::collections::HashMap::from([(
+            "publisher".into(),
+            AutomationRoleAssignment::Agent {
+                agent_id: "agent-publisher".into(),
+                conversation: AgentConversationMode::FreshBackground,
+                busy_policy: BusyPolicy::Queue,
+            },
+        )]);
+        manual_specific_dates.assignments = specific_date_assignments.clone();
+
+        let fires = plan_tick(&mut vec![manual_one_time, manual_specific_dates], cutoff);
+        assert_eq!(
+            fires.len(),
+            2,
+            "manual Run now remains available for retained one-off schedules"
+        );
+        let one_time_fire = fires
+            .iter()
+            .find(|fire| fire.schedule_id == "one-time")
+            .unwrap();
+        assert_eq!(
+            one_time_fire.input,
+            serde_json::json!({"report_date": "2026-10-22", "dry_run": true})
+        );
+        assert_eq!(one_time_fire.bindings, one_time_bindings);
+        assert_eq!(one_time_fire.assignments, one_time_assignments);
+        assert_eq!(one_time_fire.provider.as_deref(), Some("claude"));
+        assert_eq!(
+            one_time_fire.workspace.as_deref(),
+            Some("/workspace/one-time")
+        );
+
+        let specific_date_fire = fires
+            .iter()
+            .find(|fire| fire.schedule_id == "exhausted-specific-dates")
+            .unwrap();
+        assert_eq!(
+            specific_date_fire.input,
+            serde_json::json!({"edition": "winter", "notify": false})
+        );
+        assert_eq!(specific_date_fire.assignments, specific_date_assignments);
+        assert_eq!(specific_date_fire.provider.as_deref(), Some("codex"));
+        assert_eq!(
+            specific_date_fire.workspace.as_deref(),
+            Some("/workspace/specific-date")
+        );
+    }
+
+    #[test]
+    fn startup_calendar_roll_forward_keeps_occurrences_at_the_cutoff_due() {
+        use chrono::TimeZone;
+
+        let cutoff_local = chrono::Local
+            .with_ymd_and_hms(2026, 10, 23, 9, 0, 0)
+            .single()
+            .unwrap();
+        let cutoff = cutoff_local.timestamp_millis() as u64;
+        let previous_day = cutoff_local.date_naive().pred_opt().unwrap();
+        let previous_occurrence = chrono::Local
+            .from_local_datetime(&previous_day.and_hms_opt(9, 0, 0).unwrap())
+            .earliest()
+            .unwrap()
+            .timestamp_millis() as u64;
+
+        let mut daily = sample_schedule("daily-at-cutoff");
+        daily.schedule = ScheduleDefinition {
+            schedule_type: "daily".into(),
+            time_of_day: Some("09:00".into()),
+            active: true,
+            ..Default::default()
+        };
+        daily.next_run_epoch_ms = Some(previous_occurrence);
+        daily.last_run_status = Some("completed".into());
+        let mut daily_schedules = vec![daily];
+        assert!(reconcile_startup_schedules(&mut daily_schedules, cutoff));
+        assert_eq!(daily_schedules[0].next_run_epoch_ms, Some(cutoff));
+        assert_eq!(
+            daily_schedules[0].last_run_status.as_deref(),
+            Some("completed")
+        );
+        assert_eq!(plan_tick(&mut daily_schedules, cutoff + 5_000).len(), 1);
+
+        let mut specific = sample_schedule("specific-date-at-cutoff");
+        specific.schedule = ScheduleDefinition {
+            schedule_type: "specific_dates".into(),
+            time_of_day: Some("09:00".into()),
+            specific_dates: Some(vec![cutoff_local
+                .date_naive()
+                .format("%Y-%m-%d")
+                .to_string()]),
+            active: true,
+            ..Default::default()
+        };
+        specific.next_run_epoch_ms = Some(previous_occurrence);
+        let mut specific_schedules = vec![specific];
+        assert!(reconcile_startup_schedules(&mut specific_schedules, cutoff));
+        assert_eq!(specific_schedules[0].next_run_epoch_ms, Some(cutoff));
+        assert_eq!(plan_tick(&mut specific_schedules, cutoff + 5_000).len(), 1);
+    }
+
+    #[test]
+    fn specific_date_startup_projection_respects_end_date_and_keeps_manual_run() {
+        use chrono::TimeZone;
+
+        let cutoff_local = chrono::Local
+            .with_ymd_and_hms(2026, 10, 23, 12, 0, 0)
+            .single()
+            .unwrap();
+        let cutoff = cutoff_local.timestamp_millis() as u64;
+        let candidate_date = cutoff_local
+            .date_naive()
+            .succ_opt()
+            .unwrap()
+            .succ_opt()
+            .unwrap();
+        let previous_date = cutoff_local.date_naive().pred_opt().unwrap();
+        let previous_occurrence = chrono::Local
+            .from_local_datetime(&previous_date.and_hms_opt(9, 0, 0).unwrap())
+            .earliest()
+            .unwrap()
+            .timestamp_millis() as u64;
+        let candidate = chrono::Local
+            .from_local_datetime(&candidate_date.and_hms_opt(9, 0, 0).unwrap())
+            .earliest()
+            .unwrap()
+            .timestamp_millis() as u64;
+
+        for (id, end_offset, should_project) in [
+            ("before-end", 1_i64, true),
+            ("on-end", 0_i64, true),
+            ("after-end", -1_i64, false),
+        ] {
+            let end_date = candidate_date
+                .checked_add_signed(chrono::Duration::days(end_offset))
+                .unwrap();
+            let expected_end_date = end_date.format("%Y-%m-%d").to_string();
+            let mut schedule = sample_schedule(id);
+            schedule.schedule = ScheduleDefinition {
+                schedule_type: "specific_dates".into(),
+                time_of_day: Some("09:00".into()),
+                specific_dates: Some(vec![candidate_date.format("%Y-%m-%d").to_string()]),
+                end_condition: "on_date".into(),
+                end_date: Some(expected_end_date.clone()),
+                active: true,
+                ..Default::default()
+            };
+            schedule.next_run_epoch_ms = Some(previous_occurrence);
+            schedule.last_run_status = Some("completed".into());
+            schedule.last_run_error = Some("prior failure detail".into());
+            schedule.input = serde_json::json!({"edition": "winter"});
+
+            let mut schedules = vec![schedule];
+            assert!(reconcile_startup_schedules(&mut schedules, cutoff));
+            let projected = &schedules[0];
+            assert_eq!(
+                projected.next_run_epoch_ms,
+                should_project.then_some(candidate)
+            );
+            assert_eq!(
+                projected.last_run_status.as_deref(),
+                Some(if should_project {
+                    "completed"
+                } else {
+                    "missed"
+                })
+            );
+            assert_eq!(
+                projected.last_run_error.as_deref(),
+                Some("prior failure detail")
+            );
+            assert_eq!(projected.input, serde_json::json!({"edition": "winter"}));
+            assert_eq!(
+                projected.schedule.end_date.as_deref(),
+                Some(expected_end_date.as_str())
+            );
+
+            if !should_project {
+                let mut still_missed = vec![projected.clone()];
+                assert!(plan_tick(&mut still_missed, cutoff + 5_000).is_empty());
+                assert_eq!(still_missed[0].next_run_epoch_ms, None);
+                assert_eq!(still_missed[0].last_run_status.as_deref(), Some("missed"));
+
+                let mut manually_due = projected.clone();
+                manually_due.next_run_epoch_ms = Some(cutoff);
+                let fires = plan_tick(&mut vec![manually_due], cutoff);
+                assert_eq!(
+                    fires.len(),
+                    1,
+                    "Run now remains available before expiration"
+                );
+                assert_eq!(fires[0].input, serde_json::json!({"edition": "winter"}));
+            }
+        }
+    }
+
+    #[test]
+    fn calendar_projection_uses_the_supplied_cutoff_in_local_time() {
+        use chrono::{Datelike, TimeZone, Timelike};
+
+        let cutoff = chrono::Local
+            .with_ymd_and_hms(2020, 5, 2, 8, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis() as u64;
+        let schedule = ScheduleDefinition {
+            schedule_type: "daily".into(),
+            time_of_day: Some("09:00".into()),
+            ..Default::default()
+        };
+
+        let next = compute_next_run(&schedule, cutoff).unwrap();
+        let next_local = chrono::Local
+            .timestamp_millis_opt(next as i64)
+            .single()
+            .unwrap();
+        assert_eq!(
+            next_local.date_naive(),
+            chrono::NaiveDate::from_ymd_opt(2020, 5, 2).unwrap()
+        );
+        assert_eq!((next_local.hour(), next_local.minute()), (9, 0));
+        assert_eq!(next_local.weekday(), chrono::Weekday::Sat);
+    }
+
+    #[test]
     fn save_then_load_round_trips() {
         let _guard = crate::tests::env_lock();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("WARDIAN_HOME", dir.path());
         let scheds = vec![sample_schedule("s1")];
-        save_schedules(&scheds).unwrap();
+        mutate_schedules(|schedules| {
+            schedules.extend(scheds);
+            Ok(((), true))
+        })
+        .unwrap();
         let loaded = load_schedules();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, "s1");

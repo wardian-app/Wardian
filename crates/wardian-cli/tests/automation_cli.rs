@@ -597,3 +597,111 @@ fn automation_schedule_update_preserves_identity_and_unspecified_configuration()
         .unwrap()
         .ends_with("second-workspace"));
 }
+
+#[test]
+fn schedule_assignment_stdin_does_not_hold_mutation_lock() {
+    use std::{io::Write, process::Stdio, sync::mpsc, thread, time::Duration};
+
+    let home = TempDir::new().unwrap();
+    seed_demo_automation(&home);
+    let added = automation_command(
+        &home,
+        &[
+            "automation",
+            "schedule",
+            "add",
+            "--blueprint",
+            "demo",
+            "--name",
+            "Open stdin update",
+            "--every",
+            "60",
+            "--workspace",
+            home.path().to_str().unwrap(),
+        ],
+    );
+    let id = added["schedule"]["id"].as_str().unwrap().to_owned();
+    let assignments = serde_json::json!({
+        "planner": {
+            "target_type": "temporary_provider",
+            "provider": "mock",
+            "workspace": home.path().to_string_lossy(),
+        }
+    });
+
+    let mut update = Command::new(bin())
+        .args([
+            "automation",
+            "schedule",
+            "update",
+            id.as_str(),
+            "--assignments",
+            "-",
+        ])
+        .env("WARDIAN_HOME", home.path())
+        .env_remove("WARDIAN_SESSION_ID")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut update_stdin = update.stdin.take().unwrap();
+    update_stdin
+        .write_all(assignments.to_string().as_bytes())
+        .unwrap();
+    thread::sleep(Duration::from_millis(250));
+    let update_waited_for_eof = update.try_wait().unwrap().is_none();
+
+    let (pause_sender, pause_receiver) = mpsc::channel();
+    let pause_home = home.path().to_path_buf();
+    let pause_id = id.clone();
+    thread::spawn(move || {
+        let output = Command::new(bin())
+            .args(["automation", "schedule", "pause", pause_id.as_str()])
+            .env("WARDIAN_HOME", pause_home)
+            .env_remove("WARDIAN_SESSION_ID")
+            .output()
+            .unwrap();
+        let _ = pause_sender.send(output);
+    });
+
+    let pause_before_eof = pause_receiver.recv_timeout(Duration::from_secs(5));
+    drop(update_stdin);
+    let update_output = update.wait_with_output().unwrap();
+    let (pause_completed_before_eof, pause_output) = match pause_before_eof {
+        Ok(output) => (true, output),
+        Err(mpsc::RecvTimeoutError::Timeout) => (
+            false,
+            pause_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("pause should finish after assignment stdin closes"),
+        ),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("pause subprocess exited without returning its result")
+        }
+    };
+
+    assert!(
+        update_waited_for_eof,
+        "update did not remain open awaiting stdin EOF"
+    );
+    assert!(
+        pause_completed_before_eof,
+        "pause waited for the assignment producer to close stdin"
+    );
+    assert!(
+        update_output.status.success(),
+        "update failed: {}",
+        String::from_utf8_lossy(&update_output.stderr)
+    );
+    assert!(
+        pause_output.status.success(),
+        "pause failed: {}",
+        String::from_utf8_lossy(&pause_output.stderr)
+    );
+
+    let persisted = automation_command(&home, &["automation", "schedule", "list"]);
+    let schedule = &persisted["schedules"][0];
+    assert_eq!(schedule["is_paused"], true);
+    assert_eq!(schedule["assignments"]["planner"]["provider"], "mock");
+}

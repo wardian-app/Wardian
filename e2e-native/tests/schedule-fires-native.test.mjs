@@ -84,6 +84,186 @@ async function waitForCompletedRun(home, blueprintId, timeoutMs = 30000) {
   assert.fail(`Timed out waiting for a completed run under ${base}`);
 }
 
+async function waitForSchedules(driver, predicate, timeoutMs = 20000) {
+  const startedAt = Date.now();
+  let schedules = [];
+  while (Date.now() - startedAt < timeoutMs) {
+    schedules = await invokeTauri(driver, "schedule_list");
+    if (predicate(schedules)) return schedules;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  assert.fail(`Timed out waiting for startup schedule reconciliation: ${JSON.stringify(schedules)}`);
+}
+
+function automationRunDirectories(home, blueprintId) {
+  const base = path.join(home, "logs", "automations", blueprintId);
+  if (!fs.existsSync(base)) return [];
+  return fs.readdirSync(base, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name);
+}
+
+function localDateDaysAgo(days) {
+  const date = new Date();
+  date.setDate(date.getDate() - days);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+test("startup skips overdue schedule catch-up while retained one-time Run now still fires", { timeout: 180000 }, async (t) => {
+  const harness = await createNativeHarness();
+
+  try {
+    if (!skipNativeBuild) {
+      ensureNativeAppBuilt(harness);
+    }
+    assert.ok(harness.appPath);
+  } catch (error) {
+    t.skip(String(error));
+    return;
+  }
+
+  prepareIsolatedHome(harness);
+  seedBlueprint(harness.isolatedHome);
+
+  const seedNow = Date.now();
+  const lastActualRun = seedNow - 2 * 24 * 60 * 60 * 1000;
+  const schedulesPath = path.join(harness.isolatedHome, "library", "schedules.json");
+  fs.writeFileSync(schedulesPath, JSON.stringify({
+    schema: 1,
+    schedules: [
+      {
+        id: "offline-recurring",
+        blueprint_id: "sched-fires",
+        name: "Offline recurring schedule",
+        provider: "mock",
+        workspace: harness.isolatedHome,
+        input: { symbol: "SHOULD-NOT-RUN" },
+        bindings: {},
+        assignments: {},
+        schedule: {
+          schedule_type: "interval",
+          interval_minutes: 60,
+          active: true,
+          occurrence_count: 4,
+          end_condition: "never",
+        },
+        next_run_epoch_ms: seedNow - 60_000,
+        paused_remaining_ms: null,
+        is_paused: false,
+        last_run_status: "completed",
+        last_run_error: null,
+        last_run_epoch_ms: lastActualRun,
+      },
+      {
+        id: "offline-one-time",
+        blueprint_id: "sched-fires",
+        name: "Offline one-time schedule",
+        provider: "mock",
+        workspace: harness.isolatedHome,
+        input: { symbol: "OFFLINE-RETRO" },
+        bindings: {},
+        assignments: {},
+        schedule: {
+          schedule_type: "one_time",
+          run_at: new Date(seedNow - 24 * 60 * 60 * 1000).toISOString(),
+          active: true,
+          occurrence_count: 1,
+          end_condition: "after_occurrences",
+          max_occurrences: 3,
+        },
+        next_run_epoch_ms: seedNow - 60_000,
+        paused_remaining_ms: null,
+        is_paused: false,
+        last_run_status: "failed",
+        last_run_error: "preserve historical failure detail",
+        last_run_epoch_ms: lastActualRun,
+      },
+      {
+        id: "offline-specific-dates",
+        blueprint_id: "sched-fires",
+        name: "Exhausted specific dates",
+        provider: "mock",
+        workspace: harness.isolatedHome,
+        input: { symbol: "SHOULD-NOT-RUN" },
+        bindings: {},
+        assignments: {},
+        schedule: {
+          schedule_type: "specific_dates",
+          time_of_day: "00:00",
+          specific_dates: [localDateDaysAgo(1)],
+          active: true,
+          occurrence_count: 6,
+          end_condition: "never",
+        },
+        next_run_epoch_ms: seedNow - 60_000,
+        paused_remaining_ms: null,
+        is_paused: false,
+        last_run_status: "completed",
+        last_run_error: null,
+        last_run_epoch_ms: lastActualRun,
+      },
+    ],
+  }, null, 2), "utf8");
+
+  const prevScript = process.env.WARDIAN_MOCK_SCRIPT;
+  const prevScenario = process.env.WARDIAN_MOCK_SCENARIO;
+  const prevDelay = process.env.WARDIAN_MOCK_DELAY_MS;
+  process.env.WARDIAN_MOCK_SCRIPT = mockScriptPath(harness.repoRoot);
+  process.env.WARDIAN_MOCK_SCENARIO = "basic";
+  process.env.WARDIAN_MOCK_DELAY_MS = "0";
+
+  let session;
+  t.after(async () => {
+    if (session) {
+      await session.close();
+    }
+    restore("WARDIAN_MOCK_SCRIPT", prevScript);
+    restore("WARDIAN_MOCK_SCENARIO", prevScenario);
+    restore("WARDIAN_MOCK_DELAY_MS", prevDelay);
+  });
+
+  try {
+    session = await startNativeSession(harness);
+  } catch (error) {
+    t.skip(String(error));
+    return;
+  }
+
+  await waitForAppShell(session.driver, 20000);
+
+  const schedules = await waitForSchedules(session.driver, (loaded) => {
+    const byId = new Map(loaded.map((schedule) => [schedule.id, schedule]));
+    return byId.get("offline-recurring")?.next_run_epoch_ms > Date.now()
+      && byId.get("offline-recurring")?.schedule.occurrence_count === 4
+      && byId.get("offline-recurring")?.last_run_status === "completed"
+      && byId.get("offline-one-time")?.next_run_epoch_ms === null
+      && byId.get("offline-one-time")?.last_run_status === "missed"
+      && byId.get("offline-specific-dates")?.next_run_epoch_ms === null
+      && byId.get("offline-specific-dates")?.last_run_status === "missed";
+  });
+  const byId = new Map(schedules.map((schedule) => [schedule.id, schedule]));
+  assert.equal(byId.get("offline-recurring").schedule.occurrence_count, 4);
+  assert.equal(byId.get("offline-recurring").last_run_epoch_ms, lastActualRun);
+  assert.equal(byId.get("offline-one-time").schedule.occurrence_count, 1);
+  assert.equal(byId.get("offline-one-time").last_run_error, "preserve historical failure detail");
+  assert.equal(byId.get("offline-one-time").last_run_epoch_ms, lastActualRun);
+  assert.equal(byId.get("offline-specific-dates").schedule.occurrence_count, 6);
+  assert.deepEqual(automationRunDirectories(harness.isolatedHome, "sched-fires"), []);
+
+  await new Promise((resolve) => setTimeout(resolve, 6500));
+  assert.deepEqual(
+    automationRunDirectories(harness.isolatedHome, "sched-fires"),
+    [],
+    "startup reconciliation must not launch missed automation on the scheduler's first tick",
+  );
+
+  await invokeTauri(session.driver, "schedule_run_now", { id: "offline-one-time" });
+  const state = await waitForCompletedRun(harness.isolatedHome, "sched-fires");
+  assert.equal(state.status, "completed");
+  assert.equal(state.registry?.trigger?.output?.symbol, "OFFLINE-RETRO");
+  assert.equal(automationRunDirectories(harness.isolatedHome, "sched-fires").length, 1);
+});
+
 test("the automation scheduler tick loop fires a scheduled run", { timeout: 180000 }, async (t) => {
   const harness = await createNativeHarness();
 
