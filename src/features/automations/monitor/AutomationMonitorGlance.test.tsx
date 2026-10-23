@@ -39,6 +39,15 @@ const pausedSchedule: AutomationSchedule = {
   is_paused: true,
 };
 
+const missedOneTimeSchedule: AutomationSchedule = {
+  ...heartbeatSchedule,
+  id: 'schedule-missed-one-time',
+  name: 'Missed nightly report',
+  schedule: { schedule_type: 'one_time', active: true, occurrence_count: 0 },
+  next_run_epoch_ms: null,
+  last_run_status: 'missed',
+};
+
 const assignedSchedule: AutomationSchedule = {
   ...heartbeatSchedule,
   id: 'schedule-editorial',
@@ -159,6 +168,27 @@ describe('AutomationMonitorGlance', () => {
     expect(within(heartbeatRow).getByLabelText(/run passive heartbeat now/i)).toHaveAttribute('title', 'Run now');
     expect(within(heartbeatRow).queryByText('Run now')).toBeNull();
     expect(within(screen.getByTestId('automation-glance-row-schedule-broken')).getByRole('alert')).toHaveTextContent('Last scheduled run failed');
+  });
+
+  it('keeps a missed one-time schedule visible with Run now available', () => {
+    const onRunScheduleNow = vi.fn();
+    render(
+      <AutomationMonitorGlance
+        agents={[]}
+        schedules={[missedOneTimeSchedule]}
+        activeRuns={[]}
+        onOpenRun={() => {}}
+        onOpenMonitor={() => {}}
+        onPauseSchedule={() => {}}
+        onResumeSchedule={() => {}}
+        onRunScheduleNow={onRunScheduleNow}
+      />,
+    );
+
+    const missedRow = screen.getByTestId('automation-glance-row-schedule-missed-one-time');
+    expect(within(missedRow).getByText('Missed')).toBeInTheDocument();
+    fireEvent.click(within(missedRow).getByRole('button', { name: 'Run Missed nightly report now' }));
+    expect(onRunScheduleNow).toHaveBeenCalledWith('schedule-missed-one-time');
   });
 
   it('prioritizes attention items before active and upcoming work', () => {

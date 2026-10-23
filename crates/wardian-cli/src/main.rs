@@ -23,7 +23,6 @@ use args::{
     AgentArgs, AgentCommand, AgentWorktreeCommand, AutomationArgs, AutomationCommand,
     AutomationScheduleCommand, AutomationSessionCloseCommand, Cli, Command, ConversationArgs,
     ConversationCommand, DeliveryArgs, DeliveryCommand, NotifyArgs, NotifyCommand,
-    ScheduleDefinitionArgs,
 };
 use clap::Parser;
 use errors::{handle_parse_error, parse_error, CliError, ExitCode};
@@ -39,9 +38,7 @@ use wardian_core::control::{
     AutomationRunResponse, InboxNotificationKind, InboxNotificationPayload,
 };
 use wardian_core::identity::{self, ListFilters, Scope};
-use wardian_core::models::{
-    AutomationAssignments, LibraryEntry, LibraryIndexNode, ScheduleDefinition,
-};
+use wardian_core::models::{AutomationAssignments, LibraryEntry, LibraryIndexNode};
 
 fn main() {
     std::process::exit(run());
@@ -949,7 +946,7 @@ fn render_automation_normalize(path: &str, write: bool) -> Result<String, CliErr
 
 fn render_automation_schedule(command: AutomationScheduleCommand) -> Result<String, CliError> {
     use wardian_core::models::AutomationSchedule;
-    use wardian_core::schedule::{compute_next_run, load_schedules, save_schedules};
+    use wardian_core::schedule::{compute_next_run, load_schedules, mutate_schedules};
     use AutomationScheduleCommand as C;
 
     match command {
@@ -973,11 +970,14 @@ fn render_automation_schedule(command: AutomationScheduleCommand) -> Result<Stri
             }
             automation_invoker::validate_schedule_provider(provider.as_deref())?;
             let _blueprint = automation_invoker::validate_schedule_blueprint(&blueprint)?;
-            let schedule = build_schedule_definition(&cadence, None)?;
+            let schedule = automation_invoker::build_schedule_definition(&cadence, None)?;
             let workspace = resolve_schedule_workspace(&workspace)?;
             let input = automation_invoker::parse_automation_exec_input(input.as_deref())?;
-            let (bindings, assignments) =
-                parse_schedule_assignments(&bind, assignments.as_deref(), None)?;
+            let assignments = assignments
+                .as_deref()
+                .map(|raw| json_input::parse::<AutomationAssignments>(raw, "--assignments"))
+                .transpose()?;
+            let (bindings, assignments) = parse_schedule_assignments(&bind, assignments, None)?;
             let now = current_epoch_ms();
             let record = AutomationSchedule {
                 id: wardian_core::engine::driver::new_run_id(),
@@ -1000,9 +1000,11 @@ fn render_automation_schedule(command: AutomationScheduleCommand) -> Result<Stri
                 last_run_epoch_ms: None,
                 schedule,
             };
-            let mut all = load_schedules();
-            all.push(record.clone());
-            save_schedules(&all).map_err(|error| CliError::generic(error.to_string()))?;
+            let record = mutate_schedules(|all| {
+                all.push(record.clone());
+                Ok((record, true))
+            })
+            .map_err(|error| CliError::generic(error.to_string()))?;
             render_json(serde_json::json!({
                 "schema": 1,
                 "ok": true,
@@ -1022,107 +1024,133 @@ fn render_automation_schedule(command: AutomationScheduleCommand) -> Result<Stri
             paused,
             active,
         } => {
-            let mut all = load_schedules();
-            let schedule = all
-                .iter_mut()
-                .find(|schedule| schedule.id == id)
-                .ok_or_else(|| CliError::generic(format!("schedule not found: {id}")))?;
-
-            let blueprint_id = blueprint.unwrap_or_else(|| schedule.blueprint_id.clone());
-            let _blueprint = automation_invoker::validate_schedule_blueprint(&blueprint_id)?;
-            let schedule_changed =
-                schedule_definition_args_set(&cadence) || cadence.repeat_every.is_some();
-            let end_changed = cadence.end.is_some()
-                || cadence.end_date.is_some()
-                || cadence.max_occurrences.is_some();
-            if !schedule_changed
-                && cadence.end.is_none()
-                && (cadence.end_date.is_some() || cadence.max_occurrences.is_some())
-            {
-                return Err(CliError::generic(
-                    "--end-date and --max-occurrences require --end",
-                ));
-            }
-            if !schedule_changed && !end_changed {
-                if schedule.schedule.end_condition.trim().is_empty() {
-                    schedule.schedule.end_condition = "never".into();
+            if let Some(name) = name.as_deref() {
+                if name.trim().is_empty() {
+                    return Err(CliError::generic("schedule name must not be empty"));
                 }
-                wardian_core::schedule::validate_schedule_definition(&schedule.schedule)
-                    .map_err(CliError::generic)?;
             }
-            let next_definition = if schedule_changed || end_changed {
-                Some(build_schedule_definition(
-                    &cadence,
-                    Some(&schedule.schedule),
-                )?)
-            } else {
-                None
-            };
             automation_invoker::validate_schedule_provider(provider.as_deref())?;
-            let next_workspace = match workspace {
-                Some(workspace) => Some(resolve_schedule_workspace(&workspace)?),
-                None => schedule
-                    .workspace
-                    .as_deref()
-                    .map(resolve_schedule_workspace)
-                    .transpose()?,
-            };
-            let (next_bindings, next_assignments) = parse_schedule_assignments(
-                &bind,
-                assignments.as_deref(),
-                Some((schedule.bindings.clone(), schedule.assignments.clone())),
-            )?;
+            let requested_workspace = workspace
+                .as_deref()
+                .map(resolve_schedule_workspace)
+                .transpose()?;
             let next_input = input
                 .as_deref()
                 .map(|value| automation_invoker::parse_automation_exec_input(Some(value)))
                 .transpose()?;
+            let parsed_assignments = assignments
+                .as_deref()
+                .map(|raw| json_input::parse::<AutomationAssignments>(raw, "--assignments"))
+                .transpose()?;
             let now = current_epoch_ms();
-            let was_paused = schedule.is_paused;
-            let cadence_changed = next_definition.is_some();
-            schedule.blueprint_id = blueprint_id;
-            if let Some(name) = name {
-                if name.trim().is_empty() {
-                    return Err(CliError::generic("schedule name must not be empty"));
-                }
-                schedule.name = name;
-            }
-            if let Some(provider) = provider {
-                schedule.provider = Some(provider);
-            }
-            schedule.workspace = next_workspace;
-            if let Some(input) = next_input {
-                schedule.input = input;
-            }
-            schedule.bindings = next_bindings;
-            schedule.assignments = next_assignments;
-            if let Some(definition) = next_definition {
-                schedule.schedule = definition;
-            }
+            let updated = mutate_schedules(|all| {
+                let schedule = all
+                    .iter_mut()
+                    .find(|schedule| schedule.id == id)
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("schedule not found: {id}"),
+                        )
+                    })?;
 
-            if paused {
-                schedule.is_paused = true;
-                schedule.paused_remaining_ms = schedule
-                    .next_run_epoch_ms
-                    .map(|next_run| next_run.saturating_sub(now));
-                schedule.next_run_epoch_ms = None;
-            } else if active {
-                schedule.is_paused = false;
-                schedule.paused_remaining_ms = None;
-                schedule.next_run_epoch_ms = compute_next_run(&schedule.schedule, now);
-            } else if cadence_changed {
-                schedule.next_run_epoch_ms = if was_paused {
-                    None
+                let blueprint_id = blueprint.unwrap_or_else(|| schedule.blueprint_id.clone());
+                let _blueprint = automation_invoker::validate_schedule_blueprint(&blueprint_id)
+                    .map_err(schedule_cli_io_error)?;
+                let schedule_changed = automation_invoker::schedule_definition_args_set(&cadence)
+                    || cadence.repeat_every.is_some();
+                let end_changed = cadence.end.is_some()
+                    || cadence.end_date.is_some()
+                    || cadence.max_occurrences.is_some();
+                if !schedule_changed
+                    && cadence.end.is_none()
+                    && (cadence.end_date.is_some() || cadence.max_occurrences.is_some())
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "--end-date and --max-occurrences require --end",
+                    ));
+                }
+                if !schedule_changed && !end_changed {
+                    if schedule.schedule.end_condition.trim().is_empty() {
+                        schedule.schedule.end_condition = "never".into();
+                    }
+                    wardian_core::schedule::validate_schedule_definition(&schedule.schedule)
+                        .map_err(|error| {
+                            std::io::Error::new(std::io::ErrorKind::InvalidInput, error)
+                        })?;
+                }
+                let next_definition = if schedule_changed || end_changed {
+                    Some(
+                        automation_invoker::build_schedule_definition(
+                            &cadence,
+                            Some(&schedule.schedule),
+                        )
+                        .map_err(schedule_cli_io_error)?,
+                    )
                 } else {
-                    compute_next_run(&schedule.schedule, now)
+                    None
                 };
-            }
-            if schedule.workspace.is_none() {
-                return Err(CliError::generic(
-                    "schedule has no workspace; provide --workspace",
-                ));
-            }
-            let updated = schedule.clone();
-            save_schedules(&all).map_err(|error| CliError::generic(error.to_string()))?;
+                let next_workspace = match requested_workspace {
+                    Some(workspace) => Some(workspace),
+                    None => schedule
+                        .workspace
+                        .as_deref()
+                        .map(resolve_schedule_workspace)
+                        .transpose()
+                        .map_err(schedule_cli_io_error)?,
+                };
+                let (next_bindings, next_assignments) = parse_schedule_assignments(
+                    &bind,
+                    parsed_assignments,
+                    Some((schedule.bindings.clone(), schedule.assignments.clone())),
+                )
+                .map_err(schedule_cli_io_error)?;
+                let was_paused = schedule.is_paused;
+                let cadence_changed = next_definition.is_some();
+                schedule.blueprint_id = blueprint_id;
+                if let Some(name) = name {
+                    schedule.name = name;
+                }
+                if let Some(provider) = provider {
+                    schedule.provider = Some(provider);
+                }
+                schedule.workspace = next_workspace;
+                if let Some(input) = next_input {
+                    schedule.input = input;
+                }
+                schedule.bindings = next_bindings;
+                schedule.assignments = next_assignments;
+                if let Some(definition) = next_definition {
+                    schedule.schedule = definition;
+                }
+
+                if paused {
+                    schedule.is_paused = true;
+                    schedule.paused_remaining_ms = schedule
+                        .next_run_epoch_ms
+                        .map(|next_run| next_run.saturating_sub(now));
+                    schedule.next_run_epoch_ms = None;
+                } else if active {
+                    schedule.is_paused = false;
+                    schedule.paused_remaining_ms = None;
+                    schedule.next_run_epoch_ms = compute_next_run(&schedule.schedule, now);
+                } else if cadence_changed {
+                    schedule.next_run_epoch_ms = if was_paused {
+                        None
+                    } else {
+                        compute_next_run(&schedule.schedule, now)
+                    };
+                }
+                if schedule.workspace.is_none() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "schedule has no workspace; provide --workspace",
+                    ));
+                }
+                Ok((schedule.clone(), true))
+            })
+            .map_err(|error| CliError::generic(error.to_string()))?;
             render_json(serde_json::json!({
                 "schema": 1,
                 "ok": true,
@@ -1150,14 +1178,17 @@ fn render_automation_schedule(command: AutomationScheduleCommand) -> Result<Stri
             schedule.next_run_epoch_ms = Some(current_epoch_ms());
         }),
         C::Remove { id } => {
-            let mut all = load_schedules();
-            let before = all.len();
-            all.retain(|schedule| schedule.id != id);
-            save_schedules(&all).map_err(|error| CliError::generic(error.to_string()))?;
+            let removed = mutate_schedules(|all| {
+                let before = all.len();
+                all.retain(|schedule| schedule.id != id);
+                let removed = before - all.len();
+                Ok((removed, removed != 0))
+            })
+            .map_err(|error| CliError::generic(error.to_string()))?;
             render_json(serde_json::json!({
                 "schema": 1,
                 "ok": true,
-                "removed": before - all.len(),
+                "removed": removed,
             }))
         }
     }
@@ -1266,178 +1297,21 @@ fn mutate_schedule(
     id: &str,
     mutate: impl FnOnce(&mut wardian_core::models::AutomationSchedule),
 ) -> Result<String, CliError> {
-    use wardian_core::schedule::{load_schedules, save_schedules};
-    let mut all = load_schedules();
-    let found = all.iter_mut().find(|schedule| schedule.id == id);
-    let ok = found.is_some();
-    if let Some(schedule) = found {
-        mutate(schedule);
-    }
-    save_schedules(&all).map_err(|error| CliError::generic(error.to_string()))?;
+    use wardian_core::schedule::mutate_schedules;
+    let ok = mutate_schedules(|all| {
+        let found = all.iter_mut().find(|schedule| schedule.id == id);
+        let ok = found.is_some();
+        if let Some(schedule) = found {
+            mutate(schedule);
+        }
+        Ok((ok, ok))
+    })
+    .map_err(|error| CliError::generic(error.to_string()))?;
     render_json(serde_json::json!({ "schema": 1, "ok": ok }))
 }
 
-fn build_schedule_definition(
-    args: &ScheduleDefinitionArgs,
-    base: Option<&ScheduleDefinition>,
-) -> Result<ScheduleDefinition, CliError> {
-    let mut definition = base.cloned().unwrap_or_else(|| ScheduleDefinition {
-        active: true,
-        ..Default::default()
-    });
-    let cadence_set = schedule_definition_args_set(args);
-    if !cadence_set && base.is_none() {
-        return Err(CliError::generic(
-            "specify one of --every / --daily / --weekly / --monthly / --specific-dates / --at",
-        ));
-    }
-    if let Some(minutes) = args.every {
-        definition.schedule_type = "interval".into();
-        definition.interval_minutes = Some(minutes);
-        definition.time_of_day = None;
-        definition.days_of_week = None;
-        definition.days_of_month = None;
-        definition.specific_dates = None;
-        definition.run_at = None;
-    } else if let Some(time) = args.daily.clone() {
-        definition.schedule_type = "daily".into();
-        definition.time_of_day = Some(time);
-        definition.interval_minutes = None;
-        definition.days_of_week = None;
-        definition.days_of_month = None;
-        definition.specific_dates = None;
-        definition.run_at = None;
-    } else if let Some(spec) = args.weekly.as_deref() {
-        let (days, time) = spec
-            .split_once('@')
-            .ok_or_else(|| CliError::generic("--weekly expects Days@HH:MM, e.g. Mon,Fri@09:30"))?;
-        definition.schedule_type = "weekly".into();
-        definition.days_of_week = Some(days.split(',').map(|day| day.trim().to_string()).collect());
-        definition.time_of_day = Some(time.to_string());
-        definition.interval_minutes = None;
-        definition.days_of_month = None;
-        definition.specific_dates = None;
-        definition.run_at = None;
-        if base.is_none_or(|base| base.schedule_type != "weekly") {
-            definition.repeat_every = 1;
-        }
-    } else if let Some(spec) = args.monthly.as_deref() {
-        let (days, time) = spec.split_once('@').ok_or_else(|| {
-            CliError::generic("--monthly expects day numbers@HH:MM, e.g. 1,15@09:30")
-        })?;
-        let days = days
-            .split(',')
-            .map(|day| {
-                day.trim()
-                    .parse::<u32>()
-                    .map_err(|_| CliError::generic(format!("invalid monthly day `{}`", day.trim())))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        definition.schedule_type = "monthly".into();
-        definition.days_of_month = Some(days);
-        definition.time_of_day = Some(time.to_string());
-        definition.interval_minutes = None;
-        definition.days_of_week = None;
-        definition.specific_dates = None;
-        definition.run_at = None;
-    } else if let Some(spec) = args.specific_dates.as_deref() {
-        let (dates, time) = spec.split_once('@').ok_or_else(|| {
-            CliError::generic(
-                "--specific-dates expects YYYY-MM-DD dates@HH:MM, e.g. 2026-09-01,2026-09-15@09:30",
-            )
-        })?;
-        let dates = dates
-            .split(',')
-            .map(|date| date.trim().to_string())
-            .collect::<Vec<_>>();
-        definition.schedule_type = "specific_dates".into();
-        definition.specific_dates = Some(dates);
-        definition.time_of_day = Some(time.to_string());
-        definition.interval_minutes = None;
-        definition.days_of_week = None;
-        definition.days_of_month = None;
-        definition.run_at = None;
-    } else if let Some(when) = args.at.clone() {
-        definition.schedule_type = "one_time".into();
-        definition.run_at = Some(when);
-        definition.interval_minutes = None;
-        definition.time_of_day = None;
-        definition.days_of_week = None;
-        definition.days_of_month = None;
-        definition.specific_dates = None;
-    }
-    if let Some(repeat_every) = args.repeat_every {
-        if repeat_every == 0 {
-            return Err(CliError::generic(
-                "--repeat-every must be greater than zero",
-            ));
-        }
-        if definition.schedule_type != "weekly" {
-            return Err(CliError::generic(
-                "--repeat-every is only supported for weekly schedules",
-            ));
-        }
-        definition.repeat_every = repeat_every;
-    }
-    apply_end_condition(args, &mut definition)?;
-    if definition.end_condition.trim().is_empty() {
-        definition.end_condition = "never".into();
-    }
-    wardian_core::schedule::validate_schedule_definition(&definition).map_err(CliError::generic)?;
-    Ok(definition)
-}
-
-fn schedule_definition_args_set(args: &ScheduleDefinitionArgs) -> bool {
-    args.every.is_some()
-        || args.daily.is_some()
-        || args.weekly.is_some()
-        || args.monthly.is_some()
-        || args.specific_dates.is_some()
-        || args.at.is_some()
-}
-
-fn apply_end_condition(
-    args: &ScheduleDefinitionArgs,
-    definition: &mut ScheduleDefinition,
-) -> Result<(), CliError> {
-    if args.end.is_none() && (args.end_date.is_some() || args.max_occurrences.is_some()) {
-        return Err(CliError::generic(
-            "--end-date and --max-occurrences require --end",
-        ));
-    }
-    let Some(end) = args.end.as_deref() else {
-        return Ok(());
-    };
-    match end {
-        "never" => {
-            definition.end_condition = "never".into();
-            definition.end_date = None;
-            definition.max_occurrences = None;
-        }
-        "on_date" => {
-            let end_date = args
-                .end_date
-                .clone()
-                .ok_or_else(|| CliError::generic("--end on_date requires --end-date"))?;
-            definition.end_condition = "on_date".into();
-            definition.end_date = Some(end_date);
-            definition.max_occurrences = None;
-        }
-        "after_occurrences" => {
-            let max_occurrences = args.max_occurrences.ok_or_else(|| {
-                CliError::generic("--end after_occurrences requires --max-occurrences")
-            })?;
-            definition.end_condition = "after_occurrences".into();
-            definition.end_date = None;
-            definition.max_occurrences = Some(max_occurrences);
-        }
-        other => {
-            return Err(CliError::generic(format!(
-                "invalid --end `{other}`; expected never, on_date, or after_occurrences"
-            )));
-        }
-    }
-    Ok(())
+fn schedule_cli_io_error(error: CliError) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, error.message)
 }
 
 fn resolve_schedule_workspace(value: &str) -> Result<String, CliError> {
@@ -1448,10 +1322,10 @@ fn resolve_schedule_workspace(value: &str) -> Result<String, CliError> {
 
 fn parse_schedule_assignments(
     bind: &[String],
-    typed_json: Option<&str>,
+    typed: Option<AutomationAssignments>,
     existing: Option<(HashMap<String, String>, AutomationAssignments)>,
 ) -> Result<(HashMap<String, String>, AutomationAssignments), CliError> {
-    if bind.is_empty() && typed_json.is_none() {
+    if bind.is_empty() && typed.is_none() {
         let Some((bindings, assignments)) = existing else {
             return Ok((HashMap::new(), AutomationAssignments::new()));
         };
@@ -1460,22 +1334,11 @@ fn parse_schedule_assignments(
     }
 
     let explicit_bindings = automation_invoker::parse_automation_bindings(bind)?;
-    let typed = typed_json
-        .map(|raw| json_input::parse::<AutomationAssignments>(raw, "--assignments"))
-        .transpose()?;
-    let assignments = if let Some(typed) = typed {
-        wardian_core::automation::assignment::normalize_assignments(
-            Some(typed),
-            &explicit_bindings,
-            wardian_core::models::InvocationKind::Scheduled,
-        )
-    } else {
-        wardian_core::automation::assignment::normalize_assignments(
-            None,
-            &explicit_bindings,
-            wardian_core::models::InvocationKind::Scheduled,
-        )
-    };
+    let assignments = wardian_core::automation::assignment::normalize_assignments(
+        typed,
+        &explicit_bindings,
+        wardian_core::models::InvocationKind::Scheduled,
+    );
     let assignments = canonicalize_schedule_assignments(assignments)?;
     let mut bindings = wardian_core::automation::assignment::legacy_bindings(&assignments);
     bindings.extend(explicit_bindings);

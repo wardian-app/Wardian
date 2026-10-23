@@ -583,6 +583,11 @@ pub fn run() {
 
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
+                let wardian_home = manager::get_wardian_home();
+                let saved_roster_was_absent = commands::agent_roster::saved_roster_absent(
+                    wardian_home.as_deref(),
+                );
+                let mut roster_restore_persisted = false;
                 let startup_leases = wardian_core::conversation_lease::load_leases_checked();
 
                 match &startup_leases {
@@ -598,10 +603,7 @@ pub fn run() {
                         );
                     }
                 }
-                crate::automation::schedule::start_scheduler(app_handle.clone()).await;
-                crate::automation::listener::start(app_handle.clone()).await;
-
-                if let Some(app_dir) = manager::get_wardian_home() {
+                if let Some(app_dir) = wardian_home.as_ref() {
                     let state_path = app_dir.join("settings/state.json");
                     if let Ok(data) = std::fs::read_to_string(state_path) {
                         if let Ok(configs) = serde_json::from_str::<Vec<AgentConfig>>(&data) {
@@ -676,7 +678,7 @@ pub fn run() {
                                     commands::agent::prepare_restored_config_for_spawn(&mut config)
                                 {
                                     let _ = wardian_core::registry_reconciliation::record_quarantine(
-                                        &app_dir,
+                                        app_dir,
                                         &config.session_id,
                                         Some(&config.session_name),
                                         &format!("agent restoration was skipped: {error}"),
@@ -909,6 +911,7 @@ pub fn run() {
                             .await
                             {
                                 Ok(()) => {
+                                    roster_restore_persisted = true;
                                     let retries = std::mem::take(
                                         &mut *pending_lifecycle_retries
                                             .lock()
@@ -945,9 +948,7 @@ pub fn run() {
                 // exists but could not be read or parsed stays unvouched: its
                 // agents may still exist, so their absence proves nothing.
                 // Idempotent after the pass-1 mark above.
-                if commands::agent_roster::saved_roster_absent(
-                    manager::get_wardian_home().as_deref(),
-                ) {
+                if saved_roster_was_absent {
                     commands::agent_roster::mark_agent_roster_restored(&app_handle);
                 }
                 for recovered in recovered_replacements {
@@ -976,6 +977,17 @@ pub fn run() {
                             recovered.session_id
                         ));
                     }
+                }
+                if commands::agent_roster::automation_startup_ready(
+                    roster_restore_persisted,
+                    saved_roster_was_absent,
+                ) {
+                    crate::automation::schedule::start_scheduler(app_handle.clone()).await;
+                    crate::automation::listener::start(app_handle.clone()).await;
+                } else {
+                    utils::logging::log_debug(
+                        "[WARDIAN] automation triggers withheld because the saved agent roster was not restored",
+                    );
                 }
             });
             Ok(())

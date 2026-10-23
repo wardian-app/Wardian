@@ -66,8 +66,9 @@ export function AutomationGlanceCard(props: AutomationGlanceCardProps) {
     );
     const nextRun = schedule.is_paused ? null : schedule.next_run_epoch_ms;
     const statusLabel = scheduleStatusLabel(schedule);
-    const scheduleIssue = schedule.last_run_error?.trim()
-      || (schedule.last_run_status === 'failed' ? 'Last scheduled run failed' : null);
+    const scheduleIssue = schedule.last_run_status === 'failed'
+      ? schedule.last_run_error?.trim() || 'Last scheduled run failed'
+      : null;
 
     return (
       <article

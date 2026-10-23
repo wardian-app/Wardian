@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AutomationMonitor } from './AutomationMonitor';
-import { buildMonitorModel } from './monitorModel';
+import { buildMonitorModel, groupActivities } from './monitorModel';
 import { formatAutomationTime } from './automationTime';
 import type { RunSummary } from '../run/runTypes';
 import type { AutomationSchedule, ListenerView } from '../../../types/automation';
@@ -1170,6 +1170,34 @@ describe('AutomationMonitor', () => {
       tone: 'error',
       issue: 'Provider crashed',
     });
+  });
+
+  it('shows missed schedules in All and Needs attention without counting them as failed', () => {
+    const model = buildMonitorModel([], [{
+      id: 'schedule-missed',
+      blueprint_id: 'missed-report',
+      name: 'Missed report',
+      input: { report_date: 'yesterday' },
+      bindings: { reviewer: 'codex' },
+      assignments: {},
+      schedule: { schedule_type: 'one_time', active: true, occurrence_count: 0 },
+      is_paused: false,
+      next_run_epoch_ms: null,
+      last_run_status: 'missed',
+      last_run_error: 'retained prior run detail',
+      last_run_epoch_ms: Date.UTC(2026, 5, 1, 18, 0, 0),
+    }]);
+    const activity = model.activities[0];
+
+    expect(model.stats.failedCount).toBe(0);
+    expect(activity).toMatchObject({
+      section: 'attention',
+      statusLabel: 'Missed',
+      tone: 'warning',
+      issue: null,
+    });
+    expect(groupActivities(model.activities, 'all').attention).toContain(activity);
+    expect(groupActivities(model.activities, 'attention').attention).toContain(activity);
   });
 
   it('does not let an older completed run hide the latest scheduled launch failure', () => {
