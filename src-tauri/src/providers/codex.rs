@@ -159,6 +159,7 @@ impl CodexProvider {
             set("model_reasoning_effort", effort);
         }
         if policy.full_auto {
+            set("approvals_reviewer", "user");
             set("sandbox_mode", "danger-full-access");
             set("approval_policy", "never");
         } else if policy.approval_policy == "approve-for-me" {
@@ -166,6 +167,7 @@ impl CodexProvider {
             set("approval_policy", "on-request");
             set("approvals_reviewer", "guardian_subagent");
         } else {
+            set("approvals_reviewer", "user");
             set("sandbox_mode", &policy.sandbox_mode);
             set("approval_policy", &policy.approval_policy);
         }

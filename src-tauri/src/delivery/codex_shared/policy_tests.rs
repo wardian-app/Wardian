@@ -1,5 +1,6 @@
 use super::*;
 use futures_util::{SinkExt, StreamExt};
+use std::fs;
 use tokio_tungstenite::tungstenite::Message;
 use wardian_core::models::{AgentConfig, CodexProviderConfig, ProviderConfig};
 
@@ -210,6 +211,63 @@ fn generated_policy_rejects_inherited_reviewers_on_attachment() {
         let mut missing = response;
         missing.as_object_mut().unwrap().remove("approvalsReviewer");
         assert!(policy.validate(&missing).is_err());
+    }
+}
+
+#[test]
+fn generated_args_overlay_pins_inherited_reviewer_before_attachment() {
+    for (sandbox, approval, full_auto, response_sandbox, response_approval) in [
+        ("read-only", "never", false, "readOnly", "never"),
+        (
+            "workspace-write",
+            "on-request",
+            false,
+            "workspaceWrite",
+            "on-request",
+        ),
+        (
+            "workspace-write",
+            "on-request",
+            true,
+            "dangerFullAccess",
+            "never",
+        ),
+    ] {
+        let args = configured_args(sandbox, approval, full_auto);
+        let policy = ExpectedPolicy::from_server_args(&args).unwrap();
+        assert!(policy.tui_permission_args().is_ok());
+
+        let home = tempfile::tempdir().unwrap();
+        let config_path = home.path().join("config.toml");
+        fs::write(&config_path, "approvals_reviewer = 'auto_review'\n").unwrap();
+        let mut guard =
+            super::super::launch_config::prepare_tui_launch_config(home.path(), &args).unwrap();
+        let overlay: toml_edit::DocumentMut =
+            fs::read_to_string(&config_path).unwrap().parse().unwrap();
+        let response = json!({
+            "model":"configured-model", "reasoningEffort":"high",
+            "sandbox":{"type":response_sandbox}, "approvalPolicy":response_approval,
+            "approvalsReviewer":overlay["approvals_reviewer"].as_str().unwrap(),
+        });
+        policy
+            .validate(&response)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+
+        guard.restore().unwrap();
+        let restored: toml_edit::DocumentMut =
+            fs::read_to_string(&config_path).unwrap().parse().unwrap();
+        assert_eq!(restored["approvals_reviewer"].as_str(), Some("auto_review"));
+
+        let mut guard =
+            super::super::launch_config::prepare_tui_launch_config(home.path(), &args).unwrap();
+        let mut externally_edited: toml_edit::DocumentMut =
+            fs::read_to_string(&config_path).unwrap().parse().unwrap();
+        externally_edited["approvals_reviewer"] = toml_edit::value("human");
+        fs::write(&config_path, externally_edited.to_string()).unwrap();
+        guard.restore().unwrap();
+        let restored: toml_edit::DocumentMut =
+            fs::read_to_string(&config_path).unwrap().parse().unwrap();
+        assert_eq!(restored["approvals_reviewer"].as_str(), Some("human"));
     }
 }
 
