@@ -521,6 +521,9 @@ mod tests {
             folder: "C:/work/alpha".into(),
             ..Default::default()
         };
+        let barrier = wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
+            .expect("roster barrier")
+            .expect("roster barrier acquired");
         let journal = wardian_core::agent_replacement::ReplacementJournalGuard::begin(
             wardian_core::agent_replacement::PendingAgentReplacement::new(
                 "clear",
@@ -532,6 +535,7 @@ mod tests {
                 None,
                 false,
             ),
+            barrier,
         )
         .expect("begin active replacement");
 

@@ -137,6 +137,45 @@ You can also target a specific file:
 npm run test:e2e:native:fast -- e2e-native/tests/opencode-native.test.mjs
 ```
 
+### Replacement roster contention
+
+The focused replacement roster admission test holds the real core roster
+barrier while `clear_agent_session` prepares its replacement runtime. It uses
+the native app shell and Tauri IPC directly, with no workbench presentation
+assertions. It checks that exactly one replacement candidate starts, no
+replacement journal appears before admission, `list_agents` remains usable, and
+the candidate commits with a new provider session after the holder releases the
+barrier.
+
+Build the standalone holder utility through the Rust cache launcher. Use the
+compiler-artifact JSON record whose target name is
+replacement_roster_barrier_holder; pass its executable value to the native
+runner. Both full and fast native runs require this prebuilt helper and fail
+when its path is missing or invalid. The fast runner also skips the app build.
+The utility does nothing unless it receives the explicit `--hold` argument;
+standard Cargo test arguments leave it inactive. Native execution passes only
+`--hold` after validating the exact prebuilt executable path.
+
+```bash
+npm run rust:cache -- cargo test -p wardian-core --test replacement_roster_barrier_holder --no-run --message-format=json
+WARDIAN_NATIVE_ROSTER_BARRIER_HOLDER='<compiler-artifact executable>' WARDIAN_NATIVE_SKIP_BUILD=1 npm run test:e2e:native:fast -- e2e-native/tests/replacement-roster-admission-native.test.mjs
+```
+
+PowerShell:
+
+```powershell
+npm run rust:cache -- cargo test -p wardian-core --test replacement_roster_barrier_holder --no-run --message-format=json
+$env:WARDIAN_NATIVE_ROSTER_BARRIER_HOLDER = '<compiler-artifact executable>'
+$env:WARDIAN_NATIVE_SKIP_BUILD = '1'
+npm run test:e2e:native:fast -- e2e-native/tests/replacement-roster-admission-native.test.mjs
+```
+
+The holder requires WARDIAN_HOME, WARDIAN_E2E_NATIVE_HOME, and its explicit
+WARDIAN_NATIVE_ROSTER_BARRIER_HOME to resolve to the same harness-owned home.
+It checks the native harness owner record and run ID, then waits for a matching
+nonce release from the test or EOF. The native harness sends the exact release
+and joins the holder before continuing. Do not point it at a normal user home.
+
 ### HTTP fixture cleanup
 
 Browser fixtures use `closeHttpFixture` from `e2e-native/lib/httpFixture.mjs`

@@ -96,17 +96,11 @@ pub struct ReplacementJournalGuard {
 }
 
 impl ReplacementJournalGuard {
-    pub fn begin(record: PendingAgentReplacement) -> io::Result<Self> {
-        let lock = acquire_agent_roster_barrier(false)?.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "another agent replacement is being committed",
-            )
-        })?;
+    pub fn begin(record: PendingAgentReplacement, barrier: AgentRosterBarrier) -> io::Result<Self> {
         let path = journal_path(&record.session_id)?;
         write_json_atomic(&path, &record)?;
         Ok(Self {
-            _lock: lock,
+            _lock: barrier,
             path,
             record,
             completed: false,
@@ -431,6 +425,12 @@ fn journal_paths(directory: &Path) -> io::Result<Vec<PathBuf>> {
 mod tests {
     use super::*;
 
+    fn begin_with_barrier(record: PendingAgentReplacement) -> io::Result<ReplacementJournalGuard> {
+        let barrier = acquire_agent_roster_barrier(true)?
+            .expect("blocking roster barrier acquisition returns a barrier");
+        ReplacementJournalGuard::begin(record, barrier)
+    }
+
     fn set_state(home: &Path, config: &AgentConfig) {
         fs::create_dir_all(home.join("settings")).unwrap();
         write_json_atomic(
@@ -459,7 +459,7 @@ mod tests {
             ..original.clone()
         };
         set_state(home.path(), &replacement);
-        let guard = ReplacementJournalGuard::begin(PendingAgentReplacement::new(
+        let guard = begin_with_barrier(PendingAgentReplacement::new(
             "fresh_resume",
             "agent-1",
             original.clone(),
@@ -516,7 +516,7 @@ mod tests {
             ..original.clone()
         };
         set_state(home.path(), &original);
-        let mut guard = ReplacementJournalGuard::begin(PendingAgentReplacement::new(
+        let mut guard = begin_with_barrier(PendingAgentReplacement::new(
             "fresh_resume",
             "agent-2",
             original,
@@ -569,7 +569,7 @@ mod tests {
                 ..original.clone()
             };
             set_state(home.path(), &replacement);
-            let mut journal = ReplacementJournalGuard::begin(PendingAgentReplacement::new(
+            let mut journal = begin_with_barrier(PendingAgentReplacement::new(
                 "fresh_resume",
                 &session_id,
                 original,
@@ -611,7 +611,7 @@ mod tests {
             ..Default::default()
         };
         set_state(home.path(), &config);
-        let journal = ReplacementJournalGuard::begin(PendingAgentReplacement::new(
+        let journal = begin_with_barrier(PendingAgentReplacement::new(
             "clear",
             "agent-busy",
             config.clone(),
@@ -627,7 +627,15 @@ mod tests {
             recover_pending_replacements(false).unwrap(),
             RecoveryStatus::Busy
         );
+        assert!(
+            acquire_agent_roster_barrier(false).unwrap().is_none(),
+            "journal guard must retain the exact admitted roster barrier"
+        );
         journal.complete().unwrap();
+        let released = acquire_agent_roster_barrier(false)
+            .unwrap()
+            .expect("journal completion releases its admitted barrier");
+        drop(released);
         unsafe { std::env::remove_var("WARDIAN_HOME") };
     }
 
@@ -678,7 +686,7 @@ mod tests {
             },
         )
         .unwrap();
-        let mut journal = ReplacementJournalGuard::begin(PendingAgentReplacement::new(
+        let mut journal = begin_with_barrier(PendingAgentReplacement::new(
             "clear",
             "agent-boundary-crash",
             original,
@@ -730,7 +738,7 @@ mod tests {
             folder: home.path().to_string_lossy().to_string(),
             ..Default::default()
         };
-        let next_journal = ReplacementJournalGuard::begin(PendingAgentReplacement::new(
+        let next_journal = begin_with_barrier(PendingAgentReplacement::new(
             "clear",
             "agent-boundary-crash",
             next_config.clone(),
@@ -775,7 +783,7 @@ mod tests {
             ..original.clone()
         };
         set_state(home.path(), &original);
-        let journal = ReplacementJournalGuard::begin(PendingAgentReplacement::new(
+        let journal = begin_with_barrier(PendingAgentReplacement::new(
             "clear",
             "agent-cas",
             original.clone(),

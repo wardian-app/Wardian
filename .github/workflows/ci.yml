@@ -236,6 +236,35 @@ jobs:
         run: npm ci
       - name: Setup native E2E drivers
         run: npm run setup:e2e:native
+      - name: Build roster barrier holder utility
+        shell: pwsh
+        run: |
+          $holderBuildOutput = npm run rust:cache -- cargo test -p wardian-core --test replacement_roster_barrier_holder --no-run --message-format=json 2>&1
+          $holderBuildExitCode = $LASTEXITCODE
+          $holderBuildOutput | ForEach-Object { Write-Host $_ }
+          if ($holderBuildExitCode -ne 0) {
+            throw "Roster barrier holder build failed with exit code $holderBuildExitCode"
+          }
+          $holderRecords = @(
+            foreach ($line in $holderBuildOutput) {
+              if ($line -is [string] -and $line.TrimStart().StartsWith("{")) {
+                try { $line | ConvertFrom-Json -AsHashtable -ErrorAction Stop } catch {}
+              }
+            }
+          )
+          $holderArtifacts = @(
+            $holderRecords | Where-Object {
+              $_.reason -eq "compiler-artifact" -and $_.target.name -eq "replacement_roster_barrier_holder" -and $_.executable
+            }
+          )
+          if ($holderArtifacts.Count -ne 1) {
+            throw "Expected one compiler-artifact executable for the roster barrier holder; found $($holderArtifacts.Count)"
+          }
+          $holderExecutable = [string]$holderArtifacts[0].executable
+          if (-not (Test-Path -LiteralPath $holderExecutable -PathType Leaf)) {
+            throw "Compiler-reported roster barrier holder is missing: $holderExecutable"
+          }
+          "WARDIAN_NATIVE_ROSTER_BARRIER_HOLDER=$holderExecutable" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build native debug app
         run: npm run tauri -- build --debug --no-bundle
         env:

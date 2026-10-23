@@ -381,7 +381,9 @@ fn roster_barrier_waiter_does_not_starve_a_single_blocking_worker() {
         });
         let waiter = tokio::spawn(crate::manager::roster_io::ROSTER_BARRIER_ATTEMPT.scope(
             std::cell::RefCell::new(Some(attempt_tx)),
-            crate::manager::roster_io::acquire_roster_barrier(),
+            crate::manager::roster_io::acquire_roster_barrier_with_timeout(
+                std::time::Duration::from_secs(3),
+            ),
         ));
         let attempt = tokio::time::timeout(std::time::Duration::from_secs(3), attempt_rx).await;
         let progress = tokio::task::spawn_blocking(move || {
@@ -400,6 +402,44 @@ fn roster_barrier_waiter_does_not_starve_a_single_blocking_worker() {
             "barrier waiter starved the physical writer's blocking worker"
         );
     });
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn roster_barrier_admission_times_out_without_creating_replacement_journal() {
+    let _guard = crate::utils::wardian_test_env_lock_async().await;
+    let temp = tempfile::tempdir().expect("temp home");
+    unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+    let _home = WardianHomeGuard;
+    let barrier = wardian_core::agent_replacement::acquire_agent_roster_barrier(true)
+        .expect("barrier")
+        .expect("held barrier");
+
+    let error = match crate::manager::roster_io::acquire_roster_barrier_with_timeout(
+        std::time::Duration::from_millis(40),
+    )
+    .await
+    {
+        Ok(barrier) => {
+            drop(barrier);
+            panic!("admission must honor its total deadline");
+        }
+        Err(error) => error,
+    };
+    assert!(error.contains("Timed out waiting for the agent roster barrier"));
+    assert!(
+        !temp
+            .path()
+            .join("settings")
+            .join("agent-replacements")
+            .exists(),
+        "no replacement journal is created before roster admission"
+    );
+    drop(barrier);
+    assert!(
+        wardian_core::agent_replacement::acquire_agent_roster_barrier(false)
+            .expect("released barrier")
+            .is_some()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -1,29 +1,62 @@
 use crate::state::AppState;
 use wardian_core::{agent_replacement::AgentRosterBarrier, models::AgentConfig};
 
+const ROSTER_BARRIER_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// Poll durable exclusion without occupying a blocking worker while an async
 /// owner may need that same pool to finish its physical write.
 pub(crate) async fn acquire_roster_barrier() -> Result<AgentRosterBarrier, String> {
+    acquire_roster_barrier_before(None).await
+}
+
+pub(crate) async fn acquire_roster_barrier_with_timeout(
+    timeout: std::time::Duration,
+) -> Result<AgentRosterBarrier, String> {
+    acquire_roster_barrier_before(Some(tokio::time::Instant::now() + timeout)).await
+}
+
+async fn acquire_roster_barrier_before(
+    deadline: Option<tokio::time::Instant>,
+) -> Result<AgentRosterBarrier, String> {
     #[cfg(test)]
     let mut attempt = ROSTER_BARRIER_ATTEMPT
         .try_with(|signal| signal.borrow_mut().take())
         .ok()
         .flatten();
     loop {
-        let barrier = tokio::task::spawn_blocking(|| {
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            return Err("Timed out waiting for the agent roster barrier".to_string());
+        }
+        let acquire = tokio::task::spawn_blocking(|| {
             wardian_core::agent_replacement::acquire_agent_roster_barrier(false)
-        })
-        .await
+        });
+        let acquired = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, acquire)
+                .await
+                .map_err(|_| "Timed out waiting for the agent roster barrier".to_string())?,
+            None => acquire.await,
+        }
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
-        if let Some(barrier) = barrier {
+        if let Some(barrier) = acquired {
+            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                drop(barrier);
+                return Err("Timed out waiting for the agent roster barrier".to_string());
+            }
             return Ok(barrier);
         }
         #[cfg(test)]
         if let Some(signal) = attempt.take() {
             let _ = signal.send(());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        match deadline {
+            Some(deadline) => {
+                tokio::time::timeout_at(deadline, tokio::time::sleep(ROSTER_BARRIER_RETRY_DELAY))
+                    .await
+                    .map_err(|_| "Timed out waiting for the agent roster barrier".to_string())?;
+            }
+            None => tokio::time::sleep(ROSTER_BARRIER_RETRY_DELAY).await,
+        }
     }
 }
 

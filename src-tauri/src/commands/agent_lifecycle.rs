@@ -34,7 +34,7 @@ pub(super) fn hold_previous_provider_before_rotation(
 
 #[cfg(test)]
 #[path = "agent/lifecycle_tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 #[cfg(test)]
 #[path = "agent/rename_tests.rs"]
@@ -360,6 +360,38 @@ pub(super) struct PendingRuntime {
     registration: Option<crate::manager::codex_stop::StopRegistration>,
 }
 
+/// Inputs retained across roster admission and replacement commit.
+pub(super) struct PendingRuntimeAdmissionContext<'a> {
+    pub(super) state: &'a AppState,
+    pub(super) app: &'a tauri::AppHandle,
+    pub(super) session_id: &'a str,
+    pub(super) heartbeat: &'a super::LifecycleLeaseHeartbeat,
+    pub(super) unpublished_failure: &'a std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(super) operation: &'a str,
+}
+
+impl<'a> PendingRuntimeAdmissionContext<'a> {
+    pub(super) fn new(
+        request: (&'a AppState, &'a tauri::AppHandle, &'a str),
+        lifecycle: (
+            &'a super::LifecycleLeaseHeartbeat,
+            &'a std::sync::Arc<std::sync::atomic::AtomicBool>,
+        ),
+        operation: &'a str,
+    ) -> Self {
+        let (state, app, session_id) = request;
+        let (heartbeat, unpublished_failure) = lifecycle;
+        Self {
+            state,
+            app,
+            session_id,
+            heartbeat,
+            unpublished_failure,
+            operation,
+        }
+    }
+}
+
 impl PendingRuntime {
     /// Validate cleanup before spawn; the token itself does not block startup.
     pub(super) fn prepare(
@@ -421,6 +453,57 @@ impl PendingRuntime {
 
     pub(super) async fn stop_after_failure(self, error: String) -> String {
         self.begin_stop().failure(error).await
+    }
+
+    /// Admit and commit one replacement while retaining its cleanup registration.
+    /// The durable roster barrier is acquired before either shared roster mutex.
+    pub(super) async fn commit_after_roster_admission<T>(
+        mut self,
+        context: PendingRuntimeAdmissionContext<'_>,
+        commit: impl FnOnce(
+            &mut Self,
+            &mut std::collections::HashMap<String, crate::state::ActiveAgent>,
+            &Vec<String>,
+            wardian_core::agent_replacement::AgentRosterBarrier,
+        ) -> Result<T, String>,
+    ) -> Result<(Self, T), String> {
+        let result = async {
+            let barrier = crate::manager::roster_io::acquire_roster_barrier_with_timeout(
+                std::time::Duration::from_secs(30),
+            )
+            .await?;
+            context.heartbeat.ensure_active(context.operation)?;
+            let mut agents = context.state.agents.lock().await;
+            let order = context.state.agent_order.lock().await;
+            context.heartbeat.ensure_active(context.operation)?;
+            commit(&mut self, &mut agents, &order, barrier)
+        }
+        .await;
+
+        match result {
+            Ok(result) => {
+                debug_assert!(
+                    self.runtime.is_none(),
+                    "successful replacement commit must transfer the pending runtime"
+                );
+                Ok((self, result))
+            }
+            Err(error) => {
+                let error = self.stop_after_failure(error).await;
+                let error = super::retain_uncertain_replacement_until_expiry(
+                    context.unpublished_failure,
+                    error,
+                );
+                super::restore_agent_status_after_failed_runtime_start(
+                    context.state,
+                    context.app,
+                    context.session_id,
+                    "Error",
+                )
+                .await;
+                Err(error)
+            }
+        }
     }
 }
 

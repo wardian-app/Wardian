@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[[test]]
+name = "replacement_roster_barrier_holder"
+path = "tests/fixtures/replacement_roster_barrier_holder.rs"
+harness = false
+
 [dependencies]
 async-trait = "0.1"
 chrono = { workspace = true }
