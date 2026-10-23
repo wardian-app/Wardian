@@ -35,7 +35,7 @@ chrono = { workspace = true }
 p256 = { workspace = true }
 rand = { workspace = true }
 raw-window-handle = "0.6"
-tauri = { version = "=2.11.2", features = ["devtools"] }
+tauri = { version = "=2.12.5", features = ["devtools"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -89,7 +89,10 @@ winreg = "0.52"
 libc = { workspace = true }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
-tauri-plugin-updater = "2.10.1"
+# The latest published updater still requires zip 4 on Windows. This official
+# revision moves that dependency to patched zip 9; return to a registry release
+# once one includes zip 9 and its Tauri requirement fits this pin.
+tauri-plugin-updater = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "ba98bfadc4c868c9a7e1a226c83af528e1f11b89", package = "tauri-plugin-updater" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWindow"] }
@@ -97,7 +100,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWi
 [dev-dependencies]
 anyhow = "1"
 tokio = { version = "1.49.0", features = ["test-util"] }
-tauri = { version = "=2.11.2", features = ["test"] }
+tauri = { version = "=2.12.5", features = ["test"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 uds_windows = "1.2.1"
