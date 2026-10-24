@@ -115,7 +115,7 @@ pub(super) fn publish_completion(app: Option<&AppHandle>, replied: &store::Repli
     if let Some(app) = app {
         let _ = app.emit("pair-activity-changed", ());
         for recipient in &replied.record.target_session_ids {
-            spawn_information(app, recipient);
+            super::super::spawn_reply_continuation(app, recipient, &replied.record.id);
         }
     }
 }

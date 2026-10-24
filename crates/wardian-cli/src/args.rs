@@ -1178,14 +1178,10 @@ pub struct MessageCommandArgs {
 pub enum MessageCommand {
     /// List agents visible to the authenticated sender.
     List,
-    /// Admit information without waking or interrupting the receiver.
+    /// Admit information and wake an idle receiver when its conversation is available.
     Send(MessageArgs),
     /// Admit one task; return its canonical request ID and allow receiver wake.
     Followup(MessageArgs),
-    /// Receive a bounded page; acknowledge only previously consumed pages.
-    Receive(ReceiveMessagesArgs),
-    /// Wait for mailbox activity without reading or acknowledging messages.
-    Wait(WaitAgentArgs),
     /// Reply as the authorized task recipient using its exact canonical ID.
     Reply(ReplyArgs),
     /// Explicitly interrupt one receiver's current turn.
@@ -1205,27 +1201,6 @@ pub struct MessageArgs {
     /// Stable canonical admission key; does not authorize automatic replay.
     #[arg(long)]
     pub idempotency_key: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub struct ReceiveMessagesArgs {
-    /// Opaque next_cursor from the previous page; keep it after a timeout.
-    #[arg(long)]
-    pub cursor: Option<String>,
-    /// Acknowledge only a page already consumed by this recipient.
-    #[arg(long)]
-    pub ack_cursor: Option<String>,
-    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=100))]
-    pub limit: u32,
-    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u64).range(0..=60000))]
-    pub timeout_ms: u64,
-}
-
-#[derive(Debug, Args)]
-pub struct WaitAgentArgs {
-    /// Maximum wait duration. The wait does not read or acknowledge the inbox.
-    #[arg(long, default_value_t = 60_000, value_parser = clap::value_parser!(u64).range(0..=60000))]
-    pub timeout_ms: u64,
 }
 
 // ---------------------------------------------------------------------------

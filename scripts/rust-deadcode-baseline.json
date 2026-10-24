@@ -90,7 +90,6 @@
         "src-tauri/src/state/file_resources/runtime.rs::FileResourceRuntime.read_ticket_range",
         "src-tauri/src/state/file_resources/runtime.rs::FileResourceRuntime.snapshot",
         "src-tauri/src/state/file_resources/runtime.rs::FileResourceRuntime.subscribe_events",
-        "src-tauri/src/state/interactions/agent_messaging.rs::InteractionState.agent_message_provider_revision",
         "src-tauri/src/state/terminal_session/actor.rs::TerminalRuntimeHandles.new",
         "src-tauri/src/state/terminal_session/actor.rs::TerminalRuntimeInput.Legacy",
         "src-tauri/src/state/terminal_session/actor.rs::TerminalSessionBroker.consumer_acknowledgements",

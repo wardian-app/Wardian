@@ -1767,6 +1767,7 @@ async fn deliver_message_to_target_with_delivery_options(
                         queue_policy,
                         approval_action: approval_action.cloned(),
                         origin: origin.cloned(),
+                        write_fence: None,
                         runtime_state: "live_pty_available",
                         mark_prompt_started: true,
                         require_provider_turn_receipt: true,
@@ -2336,7 +2337,7 @@ where
     tx.send_bytes(bytes).await.map_err(|error| {
         crate::utils::delivery_transaction::TerminalDeliveryError::terminal_state_unknown(
             "approval_send_failed",
-            format!("Failed to send approval action: {error}"),
+            format!("Failed to send approval action: {}", error.message),
         )
     })?;
     Ok(
@@ -3873,7 +3874,7 @@ pub(crate) fn spawn_agent_messaging_if_idle(app: &AppHandle, session_id: &str, s
 }
 
 pub(crate) fn spawn_agent_messaging_after_restore(app: &AppHandle, session_id: &str) {
-    agent_messaging::spawn_pending_tasks_when_ready(app, session_id, None);
+    agent_messaging::spawn_after_restore(app, session_id);
 }
 
 pub(crate) async fn dispatch_agent_messaging_from_status_observation(
@@ -3881,8 +3882,7 @@ pub(crate) async fn dispatch_agent_messaging_from_status_observation(
     state: &AppState,
     session_id: &str,
 ) {
-    let _ = agent_messaging::push_native_information(state, session_id).await;
-    let _ = agent_messaging::dispatch_pending_queue(app, state, session_id).await;
+    agent_messaging::dispatch_from_status_observation(app, state, session_id).await;
 }
 
 async fn agent_config_to_identity(

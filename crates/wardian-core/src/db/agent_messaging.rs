@@ -14,8 +14,10 @@ type Result<T> = std::result::Result<T, Error>;
 mod provider_claims;
 mod task_turns;
 pub use provider_claims::{
-    claim_information, information_highwater, message_context, next_pending_task_id, owns_claim,
-    pending_information, release_before_write,
+    claim_information, claim_reply_continuation, claim_wakeable_information, information_highwater,
+    message_context, next_pending_task_id, owns_claim, pending_information,
+    pending_reply_continuations, pending_wakeable_information, release_before_write,
+    reply_continuation_is_pending, set_reply_continuation_state, stale_wakeable_information,
 };
 pub use task_turns::{
     abandon_task_turn_observations, bind_task_turn, mark_task_turn_uncertain,
@@ -30,6 +32,10 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         interaction_id TEXT PRIMARY KEY, sender TEXT NOT NULL, recipient TEXT NOT NULL,
         operation TEXT NOT NULL, idempotency_key TEXT, fingerprint TEXT NOT NULL,
         owner TEXT NOT NULL, generation INTEGER NOT NULL, claim_token TEXT,
+        requester_provider TEXT, requester_conversation_id TEXT,
+        requester_generation INTEGER, continuation_state TEXT,
+        wake_on_admission INTEGER, recipient_provider TEXT,
+        recipient_conversation_id TEXT, recipient_generation INTEGER,
         UNIQUE(sender, operation, idempotency_key));
         CREATE TABLE IF NOT EXISTS agent_message_availability (
         sequence INTEGER PRIMARY KEY AUTOINCREMENT, recipient TEXT NOT NULL,
@@ -44,7 +50,47 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS agent_message_ack (
         recipient TEXT PRIMARY KEY, sequence INTEGER NOT NULL DEFAULT 0);",
     )?;
+    ensure_delivery_column(conn, "requester_provider", "TEXT")?;
+    ensure_delivery_column(conn, "requester_conversation_id", "TEXT")?;
+    ensure_delivery_column(conn, "requester_generation", "INTEGER")?;
+    ensure_delivery_column(conn, "continuation_state", "TEXT")?;
+    ensure_delivery_column(conn, "wake_on_admission", "INTEGER")?;
+    ensure_delivery_column(conn, "recipient_provider", "TEXT")?;
+    ensure_delivery_column(conn, "recipient_conversation_id", "TEXT")?;
+    ensure_delivery_column(conn, "recipient_generation", "INTEGER")?;
+    conn.execute(
+        "UPDATE agent_message_delivery
+         SET continuation_state='blocked_legacy_uncertain'
+         WHERE operation='reply'
+           AND (requester_provider IS NULL OR trim(requester_provider)=''
+                OR requester_conversation_id IS NULL OR trim(requester_conversation_id)=''
+                OR requester_generation IS NULL OR requester_generation<=0)
+           AND (continuation_state IS NULL OR continuation_state IN
+                ('pending','waiting_busy','waiting_paused','waiting_identity'))",
+        [],
+    )?;
     task_turns::migrate(conn)
+}
+
+fn ensure_delivery_column(
+    conn: &Connection,
+    column: &str,
+    declaration: &str,
+) -> rusqlite::Result<()> {
+    let columns = {
+        let mut statement = conn.prepare("PRAGMA table_info(agent_message_delivery)")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+        let columns = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        columns
+    };
+    if !columns.iter().any(|existing| existing == column) {
+        // Both identifiers are fixed by this module; values never enter SQL text.
+        conn.execute_batch(&format!(
+            "ALTER TABLE agent_message_delivery ADD COLUMN {column} {declaration}"
+        ))?;
+    }
+    Ok(())
 }
 
 /// Run against Wardian's existing serialized database connection.
@@ -61,6 +107,113 @@ pub struct Admission<'a> {
     pub idempotency_key: Option<&'a str>,
     pub task: bool,
     pub generation: u64,
+}
+
+/// Durable provider identity for the managed requester at followup admission.
+/// Runtime generation is retained as an observation, while conversation identity
+/// is the recovery fence across ordinary process restores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequesterOrigin {
+    pub provider: String,
+    pub conversation_id: String,
+    pub generation: u64,
+}
+
+/// Durable provider conversation binding for an automatically delivered
+/// informational message. Runtime generation is retained as evidence; the
+/// conversation ID is the restart-safe lifecycle fence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecipientOrigin {
+    pub provider: String,
+    pub conversation_id: String,
+    pub generation: u64,
+}
+
+fn validate_requester_origin(origin: &RequesterOrigin) -> Result<()> {
+    if origin.provider.trim().is_empty()
+        || origin.conversation_id.trim().is_empty()
+        || origin.generation == 0
+        || i64::try_from(origin.generation).is_err()
+    {
+        return Err(Error::new(
+            "invalid_requester_origin",
+            "Requester origin requires a provider, durable conversation ID, and positive generation.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_recipient_origin(origin: &RecipientOrigin) -> Result<()> {
+    if origin.provider.trim().is_empty()
+        || origin.conversation_id.trim().is_empty()
+        || origin.generation == 0
+        || i64::try_from(origin.generation).is_err()
+    {
+        return Err(Error::new(
+            "invalid_recipient_origin",
+            "Recipient origin requires a provider, durable conversation ID, and positive generation.",
+        ));
+    }
+    Ok(())
+}
+
+/// Load an exact durable requester binding. Partial rows fail closed as corrupt
+/// legacy state rather than being guessed into a conversation.
+pub fn requester_origin(conn: &Connection, id: &str) -> Result<Option<RequesterOrigin>> {
+    let (provider, conversation_id, generation): (Option<String>, Option<String>, Option<i64>) =
+        conn.query_row(
+            "SELECT requester_provider,requester_conversation_id,requester_generation
+             FROM agent_message_delivery WHERE interaction_id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+    match (provider, conversation_id, generation) {
+        (None, None, None) => Ok(None),
+        (Some(provider), Some(conversation_id), Some(generation))
+            if !provider.trim().is_empty()
+                && !conversation_id.trim().is_empty()
+                && generation > 0 =>
+        {
+            Ok(Some(RequesterOrigin {
+                provider,
+                conversation_id,
+                generation: generation as u64,
+            }))
+        }
+        _ => Err(Error::new(
+            "invalid_requester_origin",
+            "Stored requester origin is incomplete or invalid.",
+        )),
+    }
+}
+
+/// Load an exact durable recipient binding. Partial rows fail closed.
+pub fn recipient_origin(conn: &Connection, id: &str) -> Result<Option<RecipientOrigin>> {
+    let (provider, conversation_id, generation): (Option<String>, Option<String>, Option<i64>) =
+        conn.query_row(
+            "SELECT recipient_provider,recipient_conversation_id,recipient_generation
+             FROM agent_message_delivery WHERE interaction_id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+    match (provider, conversation_id, generation) {
+        (None, None, None) => Ok(None),
+        (Some(provider), Some(conversation_id), Some(generation))
+            if !provider.trim().is_empty()
+                && !conversation_id.trim().is_empty()
+                && generation > 0 =>
+        {
+            Ok(Some(RecipientOrigin {
+                provider,
+                conversation_id,
+                generation: generation as u64,
+            }))
+        }
+        _ => Err(Error::new(
+            "invalid_recipient_origin",
+            "Stored recipient origin is incomplete or invalid.",
+        )),
+    }
 }
 
 pub struct Admitted {
@@ -81,7 +234,45 @@ pub fn validate_message(message: &str) -> Result<()> {
 }
 
 pub fn admit(conn: &Connection, request: Admission<'_>) -> Result<Admitted> {
-    admit_with_host(conn, request, None)
+    admit_with_host_and_origin(conn, request, None, None)
+}
+
+/// Admit a managed informational message with server-owned wake eligibility
+/// and recipient conversation identity in the canonical transaction.
+pub fn admit_with_wake_on_admission(
+    conn: &Connection,
+    request: Admission<'_>,
+    recipient_origin: Option<&RecipientOrigin>,
+) -> Result<Admitted> {
+    if request.task {
+        return Err(Error::new(
+            "invalid_wake_policy",
+            "Only informational messages can carry wake-on-admission eligibility.",
+        ));
+    }
+    if let Some(origin) = recipient_origin {
+        validate_recipient_origin(origin)?;
+    }
+    admit_with_metadata(conn, request, None, None, recipient_origin, true)
+}
+
+/// Admit a managed followup while atomically binding the requester's durable
+/// provider conversation to the canonical task record.
+pub fn admit_with_requester_origin(
+    conn: &Connection,
+    request: Admission<'_>,
+    origin: Option<&RequesterOrigin>,
+) -> Result<Admitted> {
+    if !request.task && origin.is_some() {
+        return Err(Error::new(
+            "invalid_requester_origin",
+            "Requester origin can only bind a followup task.",
+        ));
+    }
+    if let Some(origin) = origin {
+        validate_requester_origin(origin)?;
+    }
+    admit_with_host_and_origin(conn, request, None, origin)
 }
 
 /// Trusted application-only automation admission; never exposed by the wire request.
@@ -101,7 +292,7 @@ pub fn admit_host_automation_task(
         ));
     }
     let host = format!("host:automation:{run_id}");
-    admit_with_host(
+    admit_with_host_and_origin(
         conn,
         Admission {
             sender: &host,
@@ -112,6 +303,7 @@ pub fn admit_host_automation_task(
             generation,
         },
         Some((run_id, node)),
+        None,
     )
 }
 
@@ -139,7 +331,7 @@ pub fn admit_host_automation_message(
     }
     let host = format!("host:automation:{run_id}");
     let key = host_automation_message_key(node);
-    let result = admit_with_host(
+    let result = admit_with_host_and_origin(
         conn,
         Admission {
             sender: &host,
@@ -150,6 +342,7 @@ pub fn admit_host_automation_message(
             generation,
         },
         Some((run_id, node)),
+        None,
     );
     match result {
         Ok(admitted) => Ok(admitted),
@@ -232,10 +425,22 @@ pub fn host_automation_provenance(
         .optional()?)
 }
 
-fn admit_with_host(
+fn admit_with_host_and_origin(
     conn: &Connection,
     request: Admission<'_>,
     host: Option<(&str, &str)>,
+    requester_origin: Option<&RequesterOrigin>,
+) -> Result<Admitted> {
+    admit_with_metadata(conn, request, host, requester_origin, None, false)
+}
+
+fn admit_with_metadata(
+    conn: &Connection,
+    request: Admission<'_>,
+    host: Option<(&str, &str)>,
+    requester_origin: Option<&RequesterOrigin>,
+    recipient_origin: Option<&RecipientOrigin>,
+    wake_on_admission: bool,
 ) -> Result<Admitted> {
     validate_message(request.message)?;
     if request
@@ -245,6 +450,30 @@ fn admit_with_host(
         return Err(Error::new(
             "invalid_idempotency_key",
             "Key must contain 1 to 256 bytes.",
+        ));
+    }
+    if requester_origin.is_some() && (!request.task || host.is_some()) {
+        return Err(Error::new(
+            "invalid_requester_origin",
+            "Only managed followup tasks can carry requester origin.",
+        ));
+    }
+    if let Some(origin) = requester_origin {
+        validate_requester_origin(origin)?;
+    }
+    if let Some(origin) = recipient_origin {
+        validate_recipient_origin(origin)?;
+    }
+    if wake_on_admission && (request.task || host.is_some()) {
+        return Err(Error::new(
+            "invalid_wake_policy",
+            "Wake-on-admission is limited to managed informational messages.",
+        ));
+    }
+    if recipient_origin.is_some() && !wake_on_admission {
+        return Err(Error::new(
+            "invalid_recipient_origin",
+            "Recipient origin requires wake-on-admission eligibility.",
         ));
     }
     let operation = if request.task {
@@ -310,8 +539,46 @@ fn admit_with_host(
         completed_at: None,
     };
     super::upsert_interaction_record_with_conn(&tx, &record)?;
-    tx.execute("INSERT INTO agent_message_delivery(interaction_id,sender,recipient,operation,idempotency_key,fingerprint,owner,generation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-        params![record.id,request.sender,request.recipient,operation,request.idempotency_key,fingerprint,owner,request.generation])?;
+    tx.execute(
+        "INSERT INTO agent_message_delivery(
+            interaction_id,sender,recipient,operation,idempotency_key,fingerprint,owner,generation,
+            requester_provider,requester_conversation_id,requester_generation,continuation_state,
+            wake_on_admission,recipient_provider,recipient_conversation_id,recipient_generation
+         ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,NULL,?12,?13,?14,?15)",
+        params![
+            record.id,
+            request.sender,
+            request.recipient,
+            operation,
+            request.idempotency_key,
+            fingerprint,
+            owner,
+            request.generation,
+            requester_origin.map(|origin| origin.provider.as_str()),
+            requester_origin.map(|origin| origin.conversation_id.as_str()),
+            requester_origin
+                .map(|origin| i64::try_from(origin.generation))
+                .transpose()
+                .map_err(|_| {
+                    Error::new(
+                        "invalid_requester_origin",
+                        "Requester generation exceeds SQLite's integer range.",
+                    )
+                })?,
+            wake_on_admission.then_some(1_i64),
+            recipient_origin.map(|origin| origin.provider.as_str()),
+            recipient_origin.map(|origin| origin.conversation_id.as_str()),
+            recipient_origin
+                .map(|origin| i64::try_from(origin.generation))
+                .transpose()
+                .map_err(|_| {
+                    Error::new(
+                        "invalid_recipient_origin",
+                        "Recipient generation exceeds SQLite's integer range.",
+                    )
+                })?,
+        ],
+    )?;
     if let Some((run_id, node)) = host {
         tx.execute(
             "INSERT INTO agent_message_host_tasks(interaction_id,run_id,node) VALUES(?1,?2,?3)",
@@ -491,7 +758,29 @@ fn reply_in_transaction(
     super::upsert_interaction_record_with_conn(tx, &record)?;
     super::upsert_structured_reply_with_conn(tx, &reply)?;
     if let Some(recipient) = recipient {
-        tx.execute("INSERT INTO agent_message_delivery(interaction_id,sender,recipient,operation,fingerprint,owner,generation) VALUES(?1,?2,?3,'reply','','stored',0)", params![record.id, sender, recipient])?;
+        let inserted = tx.execute(
+            "INSERT INTO agent_message_delivery(
+                interaction_id,sender,recipient,operation,fingerprint,owner,generation,
+                requester_provider,requester_conversation_id,requester_generation,continuation_state
+             ) SELECT ?1,?2,?3,'reply','','stored',0,
+                      requester_provider,requester_conversation_id,requester_generation,
+                      CASE WHEN requester_provider IS NOT NULL
+                                AND trim(requester_provider)!=''
+                                AND requester_conversation_id IS NOT NULL
+                                AND trim(requester_conversation_id)!=''
+                                AND requester_generation IS NOT NULL
+                                AND requester_generation > 0
+                           THEN 'pending' ELSE 'blocked_legacy_uncertain' END
+               FROM agent_message_delivery
+               WHERE interaction_id=?4 AND operation='followup_task'",
+            params![record.id, sender, recipient, request_id],
+        )?;
+        if inserted != 1 {
+            return Err(Error::new(
+                "invalid_task",
+                "Followup delivery origin could not be copied to its reply.",
+            ));
+        }
         make_available(tx, &recipient, &record.id)?;
     }
     if let Some(claim) = claim {
@@ -615,24 +904,6 @@ fn issue_cursor(conn: &Connection, recipient: &str, sequence: i64) -> Result<Str
         params![token, recipient, sequence],
     )?;
     Ok(token)
-}
-
-/// Check whether the recipient has available records beyond its acknowledged
-/// frontier without claiming an item or issuing a cursor.
-pub fn has_unacknowledged_messages(conn: &Connection, recipient: &str) -> Result<bool> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(
-            SELECT 1 FROM agent_message_availability a
-            LEFT JOIN agent_message_delivery d ON d.interaction_id=a.interaction_id
-            WHERE a.recipient=?1
-            AND a.sequence > COALESCE(
-                (SELECT sequence FROM agent_message_ack WHERE recipient=?1),0
-            )
-            AND (d.owner IS NULL OR d.owner IN ('stored','pending','receiver_available'))
-        )",
-        [recipient],
-        |row| row.get(0),
-    )?)
 }
 
 /// Read/claim a bounded page transactionally. Replaying its input cursor returns
@@ -804,7 +1075,12 @@ pub fn finish_claim(conn: &Connection, claim: &TaskClaim, state: &str) -> Result
     ) {
         return Err(Error::new("invalid_state", "Invalid scheduler result."));
     }
-    let changed = conn.execute("UPDATE agent_message_delivery SET owner=?4 WHERE interaction_id=?1 AND claim_token=?2 AND generation=?3 AND owner='dispatching'",params![claim.record.id,claim.token,claim.generation,state])?;
+    let continuation_state = match state {
+        "provider_accepted" | "provider_visible" | "provider_completed" => "delivered",
+        "uncertain" => "uncertain",
+        _ => "dispatching",
+    };
+    let changed = conn.execute("UPDATE agent_message_delivery SET owner=?4,continuation_state=CASE WHEN operation='reply' AND ?5!='dispatching' THEN ?5 ELSE continuation_state END WHERE interaction_id=?1 AND claim_token=?2 AND generation=?3 AND owner='dispatching'",params![claim.record.id,claim.token,claim.generation,state,continuation_state])?;
     if changed != 1 {
         return Err(Error::new(
             "stale_claim",

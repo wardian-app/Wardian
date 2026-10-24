@@ -1785,6 +1785,7 @@ async fn send_remote_prompt_with_idempotency(
                 queue_policy: wardian_core::control::QueuePolicy::LiveOnly,
                 approval_action: None,
                 origin: None,
+                write_fence: None,
                 runtime_state: "live_pty_available",
                 mark_prompt_started: true,
                 require_provider_turn_receipt: true,

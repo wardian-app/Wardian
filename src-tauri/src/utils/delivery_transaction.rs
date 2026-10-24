@@ -10,7 +10,43 @@ pub trait TerminalInputSink: Send + Sync {
     fn send_bytes(
         &self,
         bytes: Vec<u8>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = Result<(), TerminalInputError>> + Send + '_>>;
+}
+
+/// Keep provider receipt observers from bypassing the fenced automatic writer.
+pub(crate) fn select_delivery_input_sink<'a>(
+    input: &'a dyn TerminalInputSink,
+    receipt_sink: Option<&'a dyn TerminalInputSink>,
+    write_fenced: bool,
+) -> &'a dyn TerminalInputSink {
+    if write_fenced {
+        input
+    } else {
+        receipt_sink.unwrap_or(input)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalInputError {
+    pub message: String,
+    /// True only when the sink can prove the provider received zero bytes.
+    pub retry_safe: bool,
+}
+
+impl TerminalInputError {
+    fn before_write(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retry_safe: true,
+        }
+    }
+
+    fn state_unknown(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retry_safe: false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -18,11 +54,11 @@ impl TerminalInputSink for Sender<Vec<u8>> {
     fn send_bytes(
         &self,
         bytes: Vec<u8>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<(), TerminalInputError>> + Send + '_>> {
         Box::pin(async move {
-            self.send(bytes)
-                .await
-                .map_err(|error| format!("input channel closed: {error}"))
+            self.send(bytes).await.map_err(|error| {
+                TerminalInputError::state_unknown(format!("input channel closed: {error}"))
+            })
         })
     }
 }
@@ -70,7 +106,7 @@ impl TerminalInputSink for BrokerTerminalInputSink {
     fn send_bytes(
         &self,
         bytes: Vec<u8>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<(), TerminalInputError>> + Send + '_>> {
         Box::pin(async move {
             let result = match self.mode {
                 BrokerTerminalInputMode::Privileged => {
@@ -84,8 +120,148 @@ impl TerminalInputSink for BrokerTerminalInputSink {
                         .await
                 }
             };
-            result.map_err(|error| error.to_string())
+            result.map_err(|error| TerminalInputError::state_unknown(error.to_string()))
         })
+    }
+}
+
+/// Expected automatic-input owner. Provider-input and terminal generations
+/// fence different lifecycles and must remain independent.
+#[derive(Clone)]
+pub struct AutomatedInputWriteFence {
+    pub provider: String,
+    pub provider_conversation_id: String,
+    pub provider_input_generation: u64,
+    pub terminal_runtime_generation: u64,
+    pub agent_config_identity: Arc<std::sync::Mutex<wardian_core::models::AgentConfig>>,
+}
+
+impl fmt::Debug for AutomatedInputWriteFence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AutomatedInputWriteFence")
+            .field("provider", &self.provider)
+            .field("provider_conversation_id", &self.provider_conversation_id)
+            .field("provider_input_generation", &self.provider_input_generation)
+            .field(
+                "terminal_runtime_generation",
+                &self.terminal_runtime_generation,
+            )
+            .field("agent_config_identity", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Revalidate the automatic recipient and carry admission guards into its actor.
+pub struct AutomatedTerminalInputSink<'a> {
+    state: &'a crate::state::AppState,
+    session_id: String,
+    fence: AutomatedInputWriteFence,
+}
+
+impl<'a> AutomatedTerminalInputSink<'a> {
+    /// Bind writes to the owner selected by canonical message dispatch.
+    pub fn new(
+        state: &'a crate::state::AppState,
+        session_id: impl Into<String>,
+        fence: AutomatedInputWriteFence,
+    ) -> Self {
+        Self {
+            state,
+            session_id: session_id.into(),
+            fence,
+        }
+    }
+
+    async fn send_fenced_bytes(&self, bytes: Vec<u8>) -> Result<(), TerminalInputError> {
+        let lifecycle = self.state.lock_agent_lifecycle(&self.session_id).await;
+        let config_identity = {
+            let agents = self.state.agents.lock().await;
+            agents
+                .get(&self.session_id)
+                .map(|agent| agent.config.clone())
+                .ok_or_else(|| {
+                    TerminalInputError::before_write("automated input target was deleted")
+                })?
+        };
+        if !Arc::ptr_eq(&config_identity, &self.fence.agent_config_identity) {
+            return Err(TerminalInputError::before_write(
+                "automated input target incarnation changed before write",
+            ));
+        }
+        let config = config_identity
+            .lock()
+            .map_err(|_| TerminalInputError::before_write("agent configuration lock poisoned"))?
+            .clone();
+        if config.is_off
+            || !config
+                .provider
+                .trim()
+                .eq_ignore_ascii_case(&self.fence.provider)
+            || config.resume_session.as_deref().map(str::trim)
+                != Some(self.fence.provider_conversation_id.as_str())
+        {
+            return Err(TerminalInputError::before_write(
+                "automated input provider conversation changed or is paused",
+            ));
+        }
+
+        let provider_input_generation = self
+            .state
+            .interactions
+            .fence_provider_input_generation(&self.session_id, self.fence.provider_input_generation)
+            .await
+            .ok_or_else(|| {
+                TerminalInputError::before_write(
+                    "automated input provider generation changed before write",
+                )
+            })?;
+        let lease_admission =
+            crate::state::terminal_session::AutomatedConversationLeaseAdmission::new(
+                self.session_id.clone(),
+                self.fence.provider.clone(),
+                self.fence.provider_conversation_id.clone(),
+            );
+        let admission = crate::state::terminal_session::AutomatedInputAdmissionFence::new(
+            lifecycle,
+            provider_input_generation,
+            lease_admission,
+        );
+        self.state
+            .terminal_sessions
+            .send_automated_input(
+                &self.session_id,
+                self.fence.terminal_runtime_generation,
+                bytes,
+                admission,
+            )
+            .await
+            .map_err(|error| {
+                let retry_safe = matches!(
+                    &error,
+                    crate::state::terminal_session::TerminalBrokerError::SessionNotFound
+                        | crate::state::terminal_session::TerminalBrokerError::RuntimeUnavailable
+                        | crate::state::terminal_session::TerminalBrokerError::StaleRuntimeGeneration {
+                            ..
+                        }
+                        | crate::state::terminal_session::TerminalBrokerError::ConversationLeaseConflict
+                        | crate::state::terminal_session::TerminalBrokerError::ConversationLeaseAdmission(_)
+                );
+                if retry_safe {
+                    TerminalInputError::before_write(error.to_string())
+                } else {
+                    TerminalInputError::state_unknown(error.to_string())
+                }
+            })
+    }
+}
+
+impl TerminalInputSink for AutomatedTerminalInputSink<'_> {
+    fn send_bytes(
+        &self,
+        bytes: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), TerminalInputError>> + Send + '_>> {
+        Box::pin(self.send_fenced_bytes(bytes))
     }
 }
 
@@ -235,14 +411,29 @@ where
         });
     }
 
-    tx.send_bytes(plan.payload_bytes).await.map_err(|e| {
+    tx.send_bytes(plan.payload_bytes).await.map_err(|error| {
+        if error.retry_safe {
+            return TerminalDeliveryError {
+                phase: "input_admission_blocked",
+                message: format!(
+                    "Automated input was rejected before any bytes were written: {}",
+                    error.message
+                ),
+                retry_safe: true,
+                observed_state: Some("no_bytes_written".to_string()),
+                reason: Some(
+                    "The delivery boundary changed before the native writer accepted input"
+                        .to_string(),
+                ),
+            };
+        }
         // Once a broker accepts an input request, a timeout or native writer
         // error cannot prove that zero payload bytes reached the compositor.
         // Treat that state as ambiguous so mailbox recovery never injects the
         // prompt a second time.
         TerminalDeliveryError::terminal_state_unknown(
             "payload_send_failed",
-            format!("Failed to send prompt payload: {e}"),
+            format!("Failed to send prompt payload: {}", error.message),
         )
     })?;
     on_payload_sent().await?;
@@ -250,10 +441,13 @@ where
     tokio::time::sleep(std::time::Duration::from_millis(plan.submit_delay_ms)).await;
     on_before_submit().await?;
 
-    tx.send_bytes(plan.submit_key).await.map_err(|e| {
+    tx.send_bytes(plan.submit_key).await.map_err(|error| {
         TerminalDeliveryError::terminal_state_unknown(
             "payload_sent_submit_failed",
-            format!("Failed to send prompt submit key after payload send: {e}"),
+            format!(
+                "Failed to send prompt submit key after payload send: {}",
+                error.message
+            ),
         )
     })?;
 
@@ -614,7 +808,7 @@ mod tests {
         fn send_bytes(
             &self,
             bytes: Vec<u8>,
-        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = Result<(), TerminalInputError>> + Send + '_>> {
             Box::pin(async move {
                 let event = if bytes == b"\r" {
                     "submit_key"

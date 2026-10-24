@@ -62,7 +62,7 @@ fn call(id: Value, name: &str, args: Value) -> Value {
 }
 
 #[test]
-fn seven_tools_dispatch_typed_requests_and_literal_content() {
+fn five_tools_dispatch_typed_requests_and_literal_content() {
     let literal = "  中文 λ😀\r\nsecond\n\"quoted\" C:\\folder\\file\t\0\u{1b}  ";
     let mut session = ready();
     let mut backend = Fake::default();
@@ -75,11 +75,6 @@ fn seven_tools_dispatch_typed_requests_and_literal_content() {
             "followup_task",
             json!({"target":"peer-uuid","message":literal}),
         ),
-        (
-            "receive_messages",
-            json!({"cursor":"cursor-1","ack_cursor":"ack-1","limit":100,"timeout_ms":60000}),
-        ),
-        ("wait_agent", json!({})),
         (
             "reply",
             json!({"request_id":"task-1","status":"blocked","message":literal}),
@@ -94,10 +89,6 @@ fn seven_tools_dispatch_typed_requests_and_literal_content() {
             "followup_task" => {
                 json!({"operation":name,"request_id":"task-1","delivery_owner":"unclaimed","delivery_state":"pending","duplicate":false})
             }
-            "receive_messages" => {
-                json!({"operation":name,"messages":[],"next_cursor":"c2","ack_cursor":"a2","has_more":false,"timed_out":true})
-            }
-            "wait_agent" => json!({"operation":name,"timed_out":false}),
             "reply" => {
                 json!({"operation":name,"request_id":"task-1","interaction_id":"reply-1","delivery_state":"pending","duplicate":false})
             }
@@ -118,8 +109,8 @@ fn seven_tools_dispatch_typed_requests_and_literal_content() {
             backend.response
         );
     }
-    assert_eq!(backend.calls.len(), 7);
-    for index in [0, 1, 4] {
+    assert_eq!(backend.calls.len(), 5);
+    for index in [0, 1, 2] {
         assert_eq!(
             serde_json::to_value(&backend.calls[index]).unwrap()["message"],
             literal
@@ -134,13 +125,7 @@ fn seven_tools_dispatch_typed_requests_and_literal_content() {
         "peer-uuid"
     );
     assert!(matches!(
-        &backend.calls[3],
-        AgentMessagingRequest::WaitAgent {
-            timeout_ms: Some(60_000)
-        }
-    ));
-    assert!(matches!(
-        backend.calls[6],
+        backend.calls[4],
         AgentMessagingRequest::ListAgents
     ));
 }
@@ -162,17 +147,6 @@ fn invalid_arguments_and_missing_sender_never_reach_control() {
         ),
         ("followup_task", json!({"target":"Peer","message":false})),
         ("followup_task", json!({"target":"Peer","message":" \r\n"})),
-        ("receive_messages", json!({"limit":101})),
-        ("receive_messages", json!({"limit":0})),
-        ("receive_messages", json!({"timeout_ms":60001})),
-        ("receive_messages", json!({"timeout_ms":-1})),
-        ("receive_messages", json!({"cursor":25})),
-        ("receive_messages", json!({"cursor":""})),
-        ("receive_messages", json!({"cursor":null})),
-        ("receive_messages", json!({"target":"foreign"})),
-        ("wait_agent", json!({"timeout_ms":60001})),
-        ("wait_agent", json!({"timeout_ms":-1})),
-        ("wait_agent", json!({"target":"foreign"})),
         (
             "reply",
             json!({"request_id":"x","status":"completed","message":"x"}),
@@ -230,6 +204,19 @@ fn invalid_arguments_and_missing_sender_never_reach_control() {
             "missing_managed_sender"
         );
         assert!(backend.calls.is_empty());
+    }
+}
+
+#[test]
+fn retired_receive_tools_are_unknown_and_never_reach_control() {
+    for name in ["receive_messages", "wait_agent"] {
+        let mut backend = Fake::default();
+        let result = messaging::call(name, json!({}), "key", &mut backend);
+        assert_eq!(
+            result["structuredContent"]["error"]["code"],
+            "invalid_arguments"
+        );
+        assert!(backend.calls.is_empty(), "{name} reached the backend");
     }
 }
 
@@ -335,7 +322,7 @@ fn admission_key_limit_includes_namespace_and_json_id_encoding() {
 }
 
 #[test]
-fn lifecycle_lists_exactly_seven_tools_with_honest_annotations() {
+fn lifecycle_lists_exactly_five_tools_with_honest_annotations() {
     for version in [VERSION, "2025-06-18", "unknown"] {
         let mut session = Session::default();
         let mut backend = Fake::default();
@@ -359,28 +346,18 @@ fn lifecycle_lists_exactly_seven_tools_with_honest_annotations() {
         );
         let listed = session.handle(list, &mut backend).unwrap();
         let tools = listed["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 5);
         for (tool, name) in tools.iter().zip(definitions::NAMES) {
             assert_eq!(tool["name"], name);
             assert_eq!(tool["inputSchema"]["additionalProperties"], false);
             assert_eq!(tool["annotations"]["readOnlyHint"], name == "list_agents");
         }
-        let wait_agent = tools
-            .iter()
-            .find(|tool| tool["name"] == "wait_agent")
-            .unwrap();
-        assert_eq!(
-            wait_agent["inputSchema"]["properties"]["timeout_ms"]["default"],
-            60_000
-        );
-        assert_eq!(
-            wait_agent["inputSchema"]["properties"]["timeout_ms"]["maximum"],
-            60_000
-        );
-        assert!(wait_agent["description"]
-            .as_str()
-            .unwrap()
-            .contains("does not read, claim, or acknowledge"));
+        assert!(!tools.iter().any(|tool| {
+            matches!(
+                tool["name"].as_str(),
+                Some("receive_messages" | "wait_agent")
+            )
+        }));
         assert!(session
             .handle(initialize(version), &mut backend)
             .unwrap()

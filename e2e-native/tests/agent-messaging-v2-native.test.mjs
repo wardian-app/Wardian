@@ -10,7 +10,7 @@ import { startStdioRpc } from "../lib/stdio-json-rpc.mjs";
 import { createNativeHarness, ensureNativeAppBuilt, prepareIsolatedHome, startNativeSession, waitForAppShell, invokeTauri } from "../lib/harness.mjs";
 
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
-const TOOLS = ["followup_task", "interrupt_agent", "list_agents", "receive_messages", "reply", "send_message", "wait_agent"];
+const TOOLS = ["followup_task", "interrupt_agent", "list_agents", "reply", "send_message"];
 
 function receipt(result) {
   const item = result?.content?.find((entry) => entry.type === "text");
@@ -41,7 +41,7 @@ function watch(cli, home, cwd, target) {
     { cwd, env, encoding: "utf8", timeout: 10_000, windowsHide: true }));
 }
 
-test("v2 information has consistent sender and receiver semantics without starting a turn", { timeout: 180_000 }, async (t) => {
+test("off-agent information preserves session identity and legacy receive is rejected", { timeout: 180_000 }, async (t) => {
   const harness = await createNativeHarness();
   harness.watchMode = false;
   if (process.env.WARDIAN_NATIVE_SKIP_BUILD !== "1") await ensureNativeAppBuilt(harness);
@@ -87,8 +87,6 @@ test("v2 information has consistent sender and receiver semantics without starti
       } }));
     }
     const [sender, receiver] = agents;
-    const senderClient = await connect(cli, harness.isolatedHome, harness.repoRoot, sender.session_id);
-    clients.push(senderClient);
     const receiverClient = await connect(cli, harness.isolatedHome, harness.repoRoot, receiver.session_id);
     clients.push(receiverClient);
     const before = watch(cli, harness.isolatedHome, harness.repoRoot, receiver.session_id);
@@ -99,31 +97,12 @@ test("v2 information has consistent sender and receiver semantics without starti
     const initialConfig = (await invokeTauri(session.driver, "list_agents")).find((agent) => agent.session_id === receiver.session_id);
     assert.ok(initialConfig);
     const initialProviderSession = initialConfig.resume_session ?? null;
-    const initial = await receiverClient.call("receive_messages", { timeout_ms: 0 });
-    assert.deepEqual(initial.messages, []);
     const literal = "Information only. Do not start work.\ncafé ✓; `x`; $(literal).\n";
     const sent = await messageCli(cli, harness.isolatedHome, harness.repoRoot, sender.session_id, ["send", receiver.session_id, literal]);
     assert.equal(sent.operation, "send_message");
     assert.equal(typeof sent.interaction_id, "string");
-    const page = await receiverClient.call("receive_messages", { cursor: initial.next_cursor, timeout_ms: 0, limit: 1 });
-    assert.equal(page.messages.length, 1);
-    assert.equal(page.messages[0].interaction_id, sent.interaction_id);
-    assert.equal(page.messages[0].kind, "message");
-    assert.equal(page.messages[0].sender, sender.session_id);
-    assert.equal(page.messages[0].message, literal);
-    const replay = await receiverClient.call("receive_messages", { cursor: initial.next_cursor, timeout_ms: 0, limit: 1 });
-    assert.deepEqual(replay.messages, page.messages, "Cursor replay must preserve identities and literal content");
-    const foreign = await senderClient.raw("receive_messages", { cursor: page.next_cursor, timeout_ms: 0 });
-    assert.equal(foreign.isError, true, "Another agent's cursor must fail closed");
-    const acknowledged = await receiverClient.call("receive_messages", { ack_cursor: page.ack_cursor, timeout_ms: 0 });
-    assert.deepEqual(acknowledged.messages, []);
-    const lateBody = "Later information remains available after a bounded empty wait.";
-    const empty = await receiverClient.call("receive_messages", { timeout_ms: 100 });
-    assert.equal(empty.timed_out, true);
-    const lateSent = await messageCli(cli, harness.isolatedHome, harness.repoRoot, sender.session_id, ["send", receiver.session_id, lateBody]);
-    const late = await receiverClient.call("receive_messages", { cursor: empty.next_cursor, timeout_ms: 0 });
-    assert.equal(late.messages[0].interaction_id, lateSent.interaction_id);
-    assert.equal(late.messages[0].message, lateBody);
+    const retired = await receiverClient.raw("receive_messages", {});
+    assert.equal(retired.isError, true, "retired polling tool must be rejected locally");
     const after = watch(cli, harness.isolatedHome, harness.repoRoot, receiver.session_id);
     assert.equal(after.agent.status.toLowerCase(), "off");
     assert.equal(after.agent.provider, before.agent.provider, "Information must preserve the mock provider");
@@ -135,8 +114,8 @@ test("v2 information has consistent sender and receiver semantics without starti
     assert.ok(finalConfig);
     assert.equal(finalConfig.resume_session ?? null, initialProviderSession,
       "Information must not replace or create provider identity after off-agent preparation");
-    report.cases.paired_information = { status: "pass", sent, page, replay, acknowledged, empty_wait: empty,
-      late, before, after, native_before: nativeBefore, native_after: nativeAfter };
+    report.cases.paired_information = { status: "pass", sent, retired_receive_rejection: retired,
+      before, after, native_before: nativeBefore, native_after: nativeAfter };
     report.status = "pass";
   } catch (error) {
     report.status = "fail";

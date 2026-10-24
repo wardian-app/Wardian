@@ -9,7 +9,7 @@
 // <checkout>/.tmp/e2e-native/messaging-v2-real/ for explicit compact-home evidence.
 // On Windows the runner assigns the suspended test root to a kill-on-close Job
 // Object before forks. Direct node --test is only for the non-provider contracts.
-// Optional WARDIAN_E2E_MESSAGING_V2_APPROVE_TOOLS=1 approves ONLY the six named
+// Optional WARDIAN_E2E_MESSAGING_V2_APPROVE_TOOLS=1 approves ONLY the five named
 // tools in the two already auto-registered private agent homes, before any turn.
 // WARDIAN_E2E_MESSAGING_V2_LIFECYCLE=1 additionally tests idle information and
 // one active-turn interrupt in attached_tui mode, with one extra provider task.
@@ -26,7 +26,7 @@
 // WARDIAN_E2E_MESSAGING_V2_SCREENSHOTS=1 captures one private startup image per
 // agent for parent review. The harness never uploads screenshots.
 import test from "node:test";
-import { messageCli, correlatedReply, assertDetachedTerminal, assertNativeSession, assertBusyTaskDeferred } from "../lib/canonical-messaging.mjs";
+import { messageCli, assertDetachedTerminal, assertNativeSession, assertBusyTaskDeferred } from "../lib/canonical-messaging.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { createReadStream } from "node:fs";
@@ -44,7 +44,7 @@ const MODEL = "gpt-5.6-luna";
 const EFFORT = "low";
 const BASELINE_VERSION = "0.153.4";
 const TESTED_ALPHA_VERSION = "0.154.0-alpha.6";
-const TOOLS = ["send_message", "followup_task", "receive_messages", "reply", "interrupt_agent", "list_agents"];
+const TOOLS = ["send_message", "followup_task", "reply", "interrupt_agent", "list_agents"];
 const execute = promisify(execFile);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const SOURCES = [
@@ -419,8 +419,8 @@ function canonicalFrame(frame) {
   return frame;
 }
 
-// Installed host item shape; current broker has two deliberately distinct
-// operations. No assumption that every output has a wrapper/message_id field.
+// Installed host item shape. Canonical replies resume through their distinct
+// continuation marker; no model tool-call ID or polling receipt is inferred.
 export function decodeHostDelivery(payload) {
   assert.equal(payload.type, "function_call_output");
   assert.equal(payload.namespace, "wardian");
@@ -446,6 +446,11 @@ export function decodeHostDelivery(payload) {
       messageId = output.message_id;
       frameType = "native_initial_envelope";
     }
+  } else if (payload.name === "wardian_reply_continuation") {
+    context = canonicalFrame(output);
+    assert.equal(context.kind, "reply");
+    messageId = context.interaction_id;
+    frameType = "canonical_reply_continuation";
   } else {
     assert.equal(payload.name, "wardian_inbox_delivery");
     context = canonicalFrame(output);
@@ -514,7 +519,7 @@ async function ownedMetadata(codexHome, threadId, workspace, expectedVersion) {
       contexts.set(p.turn_id, { turn_id: p.turn_id, model: p.model, effort,
         effort_evidence: effort === null ? "not_reported_by_provider" : "owned_turn_context", cwd: p.cwd });
     } else if (row.type === "response_item" && row.payload?.type === "function_call_output" &&
-      row.payload.namespace === "wardian" && ["wardian_task_delivery", "wardian_inbox_delivery"].includes(row.payload.name)) {
+      row.payload.namespace === "wardian" && ["wardian_task_delivery", "wardian_inbox_delivery", "wardian_reply_continuation"].includes(row.payload.name)) {
       hostDeliveries.push({ ...decodeHostDelivery(row.payload), turn_id: currentTurn, observed_at: row.timestamp });
     }
     const p = row.payload;
@@ -878,18 +883,30 @@ async function resumeAttached(driver, cli, home, cwd, agent, runId, save,
   }
 }
 
-/** Read-only optional-case proof for coordinator-owned explicit idle information.
- * Caller captures same-thread traces around one send, after observing idle.
- * This helper neither sends nor polls and proves only that observed interval.
+/** Prove one newly admitted peer FYI wakes exactly one same-thread provider turn.
+ * Caller captures traces around one send after observing idle. Message context
+ * carries no task or reply obligation; this helper neither sends nor polls.
  */
 export function proveIdleInformation(before, after, receipt, senderId, receiverId, body) {
   assert.equal(before.provider_thread_id, after.provider_thread_id);
   assert.equal(before.generation, after.generation);
   assert.ok(before.turns.every((turn) => ["completed", "interrupted", "failed"].includes(turn.status)));
-  assert.deepEqual(after.turns, before.turns, "Information started or changed a provider turn");
+  const beforeIds = new Set(before.turns.map((turn) => turn.turn_id));
+  const started = after.turns.filter((turn) => !beforeIds.has(turn.turn_id));
+  const afterById = new Map(after.turns.map((turn) => [turn.turn_id, turn]));
+  assert.equal(after.turns.length, before.turns.length + 1, "Peer information must start exactly one provider turn");
+  assert.equal(started.length, 1, "Peer information must start exactly one provider turn");
+  assert.ok(before.turns.every((turn) => afterById.get(turn.turn_id)?.status === turn.status),
+    "Peer information changed a prior provider turn");
+  const wakeTurn = started[0];
+  assert.ok(["inProgress", "completed"].includes(wakeTurn.status),
+    "Peer information must be visible in a started provider turn");
+  assert.equal(receipt.operation, "send_message");
+  assert.equal(receipt.duplicate, false);
   assert.ok(!before.host_deliveries.some((row) => row.message_id === receipt.interaction_id));
   const delivered = after.host_deliveries.filter((row) => row.message_id === receipt.interaction_id && row.name === "wardian_inbox_delivery");
   assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].turn_id, wakeTurn.turn_id, "The admitted FYI must be attached to its waking turn");
   const frame = hostContext(delivered[0]);
   assert.equal(frame.schema_version, 1);
   assert.equal(frame.interaction_id, receipt.interaction_id);
@@ -898,7 +915,14 @@ export function proveIdleInformation(before, after, receipt, senderId, receiverI
   assert.equal(frame.recipient, receiverId);
   assert.equal(frame.body, body);
   assert.equal(frame.request_id, null);
-  return { status: "pass", interaction_id: receipt.interaction_id, provider_session_id: after.provider_thread_id, scope: "observed_interval" };
+  return { status: "pass", interaction_id: receipt.interaction_id, provider_session_id: after.provider_thread_id,
+    provider_turn_id: wakeTurn.turn_id, delivery_policy: "new_admission_wakes_idle", scope: "observed_interval" };
+}
+
+function hasNewInformationTurn(before, after, interactionId) {
+  const delivery = after.host_deliveries.find((row) => row.message_id === interactionId && row.name === "wardian_inbox_delivery");
+  return Boolean(delivery?.turn_id && !before.turns.some((turn) => turn.turn_id === delivery.turn_id)
+    && after.turns.some((turn) => turn.turn_id === delivery.turn_id));
 }
 
 /** Exact active-turn interruption proof, never a natural-completion race.
@@ -935,7 +959,6 @@ async function busyTaskWithoutPty(DatabaseSync, session, cli, home, cwd, receive
   };
   await session.driver.wait(async () => (await trace()).turns.every((turn) => ["completed", "failed", "interrupted"].includes(turn.status)),
     15_000, "Receiver was not idle before the idle-task case", 200);
-  let cursor = (await messageCli(cli, home, cwd, origin, ["receive", "--timeout-ms", "0"])).next_cursor;
   const idleMarker = `IDLE_${randomUUID()}`;
   const busyMarker = `BUSY_${randomUUID()}`;
   evidence.attempts = 1;
@@ -964,10 +987,10 @@ async function busyTaskWithoutPty(DatabaseSync, session, cli, home, cwd, receive
   await session.driver.wait(async () => {
     latest = await trace();
     const queuedTurn = assertBusyTaskDeferred(latest, activeTurn, evidence.busy_task.request_id);
-    const page = await messageCli(cli, home, cwd, origin, ["receive", "--cursor", cursor, "--timeout-ms", "0"]);
-    cursor = page.next_cursor;
-    evidence.idle_reply ??= correlatedReply(page, evidence.idle_task.request_id, receiver.session_id, idleMarker);
-    evidence.busy_reply ??= correlatedReply(page, evidence.busy_task.request_id, receiver.session_id, busyMarker);
+    const idleProof = canonicalProof(DatabaseSync, home, origin, receiver.session_id, evidence.idle_task.request_id, 3);
+    const busyProof = canonicalProof(DatabaseSync, home, origin, receiver.session_id, evidence.busy_task.request_id, 3);
+    evidence.idle_reply ??= idleProof.reply_id && { interaction_id: idleProof.reply_id, message: idleProof.reply_body };
+    evidence.busy_reply ??= busyProof.reply_id && { interaction_id: busyProof.reply_id, message: busyProof.reply_body };
     if (!evidence.idle_reply || !evidence.busy_reply || !queuedTurn) return false;
     assert.notEqual(queuedTurn, activeTurn);
     for (const [task, reply, marker, turnId] of [[evidence.idle_task, evidence.idle_reply, idleMarker, activeTurn],
@@ -1006,23 +1029,24 @@ async function lifecycleCases(DatabaseSync, session, cli, home, cwd, sender, rec
       if (idle) break;
       await delay(200);
     } while (Date.now() < idleDeadline);
-    assert.ok(idle, "Receiver must be observed idle before the non-waking information case");
+    assert.ok(idle, "Receiver must be observed idle before the information delivery case");
     const beforeInfo = await trace();
     const body = `Information only. Preserve this literal text; do not start work.\n${randomBytes(12).toString("hex")} ✓\n`;
-    report.optional_cases.idle_information = { status: "running", submission_attempts: 1 };
+    report.optional_cases.idle_information_wake = { status: "running", submission_attempts: 1,
+      delivery_policy: "new_admission_wakes_idle" };
     await save();
     const sent = await call("send_message", { target: receiver.session_id, message: body });
     let afterInfo;
     const infoDeadline = Date.now() + 15_000;
     do {
       afterInfo = await trace();
-      if (afterInfo.host_deliveries.some((item) => item.message_id === sent.interaction_id)) break;
+      if (hasNewInformationTurn(beforeInfo, afterInfo, sent.interaction_id)) break;
       await delay(200);
     } while (Date.now() < infoDeadline);
     // Extend the observed interval after persisted delivery, without more input.
     await delay(1000);
     afterInfo = await trace();
-    report.optional_cases.idle_information = { ...proveIdleInformation(beforeInfo, afterInfo, sent,
+    report.optional_cases.idle_information_wake = { ...proveIdleInformation(beforeInfo, afterInfo, sent,
       sender.session_id, receiver.session_id, body), receipt: sent, before: beforeInfo, after: afterInfo };
     await save();
 
@@ -1133,9 +1157,7 @@ export function proveExchange(senderTrace, receiverTrace, proof, marker, senderI
   const providerReceivedTask = receiverTrace.host_deliveries.some((delivery) => delivery.frame_type === "canonical_task" &&
     delivery.message_id === proof.request_id && hostBody(delivery.context) === proof.task_body &&
     hostContext(delivery).sender === senderId && hostContext(delivery).recipient === receiverId &&
-    hostContext(delivery).kind === "task" && hostContext(delivery).request_id === proof.request_id) ||
-    receiverTrace.items.some((item) => item.tool === "receive_messages" && item.receipt?.messages?.some((message) => message.kind === "task" &&
-      message.interaction_id === proof.request_id && message.sender === senderId && message.message === proof.task_body));
+    hostContext(delivery).kind === "task" && hostContext(delivery).request_id === proof.request_id);
   assert.ok(providerReceivedTask, "Receiver trace must contain the actual owned task, not just a matching final marker");
   assert.equal(proof.reply_body, marker);
   assert.equal(proof.task_state, "completed");
@@ -1148,33 +1170,21 @@ export function proveExchange(senderTrace, receiverTrace, proof, marker, senderI
   assert.equal(reply.arguments.status, "done");
   assert.equal(reply.arguments.message, marker);
   assert.equal(reply.receipt.interaction_id, proof.reply_id);
-  const received = senderTrace.items.filter((item) => item.tool === "receive_messages" && item.receipt)
-    .flatMap((item) => item.receipt.messages ?? []).filter((message) => message.interaction_id === proof.reply_id);
-  // Native push is an alternative receiver boundary, but only actual typed
-  // provider history qualifies. An RPC acceptance receipt alone never does.
-  for (const delivery of senderTrace.host_deliveries) {
-    if (delivery.name !== "wardian_inbox_delivery" || delivery.message_id !== proof.reply_id) continue;
-    let context = delivery.context;
-    if (typeof context === "string") {
-      try { context = JSON.parse(context); } catch { continue; }
-    }
-    if (context.interaction_id === proof.reply_id) {
-      assert.equal(context.schema_version, 1);
-      assert.equal(context.recipient, senderId);
-      assert.equal(context.request_id, proof.request_id);
-      received.push(context);
-    }
-  }
-  if (!received.length) return false;
-  for (const message of received) {
-    assert.equal(message.kind, "reply");
-    assert.equal(message.sender, receiverId);
-    assert.equal(message.parent_interaction_id, proof.request_id);
-    assert.equal(message.reply_status, "done");
-    assert.equal(hostBody(message), marker);
-  }
+  const continuations = senderTrace.host_deliveries.filter((delivery) =>
+    delivery.frame_type === "canonical_reply_continuation" && delivery.message_id === proof.reply_id);
+  if (continuations.length !== 1) return false;
+  const continuation = continuations[0];
+  const delivered = hostContext(continuation);
+  assert.equal(delivered.schema_version, 1);
+  assert.equal(delivered.kind, "reply");
+  assert.equal(delivered.sender, receiverId);
+  assert.equal(delivered.recipient, senderId);
+  assert.equal(delivered.parent_interaction_id, proof.request_id);
+  assert.equal(delivered.request_id, proof.request_id);
+  assert.equal(delivered.reply_status, "done");
+  assert.equal(hostBody(delivered), marker);
   assert.notEqual(senderId, receiverId);
-  for (const [trace, requiredTurn] of [[senderTrace, task.turn_id], [receiverTrace, reply.turn_id]]) {
+  for (const [trace, requiredTurn] of [[senderTrace, task.turn_id], [senderTrace, continuation.turn_id], [receiverTrace, reply.turn_id]]) {
     const context = trace.contexts.find((entry) => entry.turn_id === requiredTurn);
     assert.ok(context, "Actual model/effort turn context is required");
     assert.equal(context.model, MODEL, "No substituted or migration-selected model is accepted");
@@ -1185,8 +1195,58 @@ export function proveExchange(senderTrace, receiverTrace, proof, marker, senderI
     assert.equal(path.toNamespacedPath(path.resolve(context.cwd)), path.toNamespacedPath(path.resolve(trace.meta.cwd)));
     if (!trace.turns.some((turn) => turn.turn_id === requiredTurn && turn.status === "completed")) return false;
   }
-  return senderTrace.items.some((item) => item.type === "agentMessage" && item.turn_id === task.turn_id && item.text?.includes(marker));
+  return senderTrace.items.some((item) => item.type === "agentMessage" &&
+    item.turn_id === continuation.turn_id && item.text?.includes(marker));
 }
+
+test("real exchange producer requires a correlated provider-visible reply continuation", () => {
+  const marker = "reply-marker";
+  const senderId = "sender";
+  const receiverId = "receiver";
+  const cwd = process.cwd();
+  const proof = { request_id: "task-1", reply_id: "reply-1", task_body: "return the marker", reply_body: marker,
+    task_state: "completed" };
+  const senderTrace = {
+    meta: { cwd },
+    items: [
+      { tool: "followup_task", turn_id: "sender-task-turn", arguments: { message: proof.task_body },
+        receipt: { request_id: proof.request_id } },
+      { type: "agentMessage", turn_id: "sender-reply-turn", text: marker },
+    ],
+    host_deliveries: [{ frame_type: "canonical_reply_continuation", message_id: proof.reply_id,
+      turn_id: "sender-reply-turn", context: { schema_version: 1, kind: "reply", sender: receiverId,
+        recipient: senderId, interaction_id: proof.reply_id, parent_interaction_id: proof.request_id,
+        request_id: proof.request_id, reply_status: "done", body: marker } }],
+    contexts: ["sender-task-turn", "sender-reply-turn"].map((turn_id) => ({ turn_id, model: MODEL, effort: EFFORT, cwd })),
+    turns: ["sender-task-turn", "sender-reply-turn"].map((turn_id) => ({ turn_id, status: "completed" })),
+  };
+  const receiverTrace = {
+    meta: { cwd },
+    items: [{ tool: "reply", turn_id: "receiver-turn", arguments: { request_id: proof.request_id,
+      status: "done", message: marker }, receipt: { interaction_id: proof.reply_id } }],
+    host_deliveries: [{ frame_type: "canonical_task", message_id: proof.request_id,
+      context: { schema_version: 1, kind: "task", sender: senderId, recipient: receiverId,
+        interaction_id: proof.request_id, request_id: proof.request_id, body: proof.task_body } }],
+    contexts: [{ turn_id: "receiver-turn", model: MODEL, effort: EFFORT, cwd }],
+    turns: [{ turn_id: "receiver-turn", status: "completed" }],
+  };
+  const traces = () => structuredClone({ senderTrace, receiverTrace });
+
+  assert.equal(proveExchange(senderTrace, receiverTrace, proof, marker, senderId, receiverId), true);
+
+  const inbox = traces();
+  inbox.senderTrace.host_deliveries[0].frame_type = "canonical_inbox";
+  assert.equal(proveExchange(inbox.senderTrace, inbox.receiverTrace, proof, marker, senderId, receiverId), false);
+
+  const incomplete = traces();
+  incomplete.senderTrace.turns[1].status = "inProgress";
+  assert.equal(proveExchange(incomplete.senderTrace, incomplete.receiverTrace, proof, marker, senderId, receiverId), false);
+
+  const unowned = traces();
+  unowned.senderTrace.contexts = unowned.senderTrace.contexts.filter((context) => context.turn_id !== "sender-reply-turn");
+  assert.throws(() => proveExchange(unowned.senderTrace, unowned.receiverTrace, proof, marker, senderId, receiverId),
+    /Actual model\/effort turn context is required/);
+});
 
 test("baseline launchers remain eligible while upgraded evidence requires a native Codex file", () => {
   const nativeHeader = Buffer.from("4d5a9000", "hex");
@@ -1238,8 +1298,9 @@ test(`owned Codex ${version} rollout remains authoritative when the history proj
     { type: "session_meta", payload: { id: "owned-thread", cwd: root, originator: "codex_cli_rs", cli_version: version } },
     { type: "turn_context", payload: { turn_id: "owned-turn", model: MODEL, effort: EFFORT, cwd: root } },
     { type: "event_msg", payload: { type: "task_started", turn_id: "owned-turn" } },
-    { type: "response_item", payload: { type: "function_call", namespace: "mcp__wardian", name: "receive_messages", call_id: "owned-call", arguments: "{}" } },
-    { type: "response_item", payload: { type: "function_call_output", call_id: "owned-call", output: JSON.stringify({ operation: "receive_messages", messages: [{ interaction_id: "owned-reply", message: "exact\n  reply " }] }) } },
+    { type: "response_item", payload: { type: "function_call_output", namespace: "wardian", name: "wardian_reply_continuation", call_id: null,
+      output: JSON.stringify({ schema_version: 1, sender: "receiver", recipient: "sender", kind: "reply", interaction_id: "owned-reply",
+        parent_interaction_id: "owned-task", request_id: "owned-task", body: "exact\n  reply ", reply_status: "done" }) } },
     { type: "response_item", payload: { type: "message", role: "assistant", channel: "final", content: [{ type: "output_text", text: "exact\n  reply " }] } },
     { type: "event_msg", payload: { type: "task_complete", turn_id: "owned-turn" } },
   ];
@@ -1251,9 +1312,9 @@ test(`owned Codex ${version} rollout remains authoritative when the history proj
   const binding = { provider_session_id: "owned-thread", generation: 3, capabilities: { protocol_version: version } };
   const trace = await visibleTrace(DatabaseSync, root, binding, root, version);
   assert.equal(trace.evidence_source, "owned_provider_rollout");
-  assert.equal(trace.items[0].id, "owned-call");
-  assert.equal(trace.items[0].receipt.messages[0].interaction_id, "owned-reply");
-  assert.equal(trace.items[1].text, "exact\n  reply ");
+  assert.equal(trace.host_deliveries[0].message_id, "owned-reply");
+  assert.equal(trace.host_deliveries[0].frame_type, "canonical_reply_continuation");
+  assert.equal(trace.items[0].text, "exact\n  reply ");
   assert.deepEqual(trace.turns, [{ turn_id: "owned-turn", status: "completed" }]);
   await assert.rejects(visibleTrace(DatabaseSync, root, binding, path.join(root, "foreign-workspace"), version));
   await assert.rejects(visibleTrace(DatabaseSync, root, { ...binding, provider_session_id: "foreign-thread" }, root, version));
@@ -1720,7 +1781,7 @@ test("real messaging setup accepts only the runner's fresh matching home lock", 
   assert.equal(await fs.readFile(path.join(home, "retained-evidence.json"), "utf8"), "retained");
 });
 
-test("real Codex sender assigns one task, receiver replies, and sender receives the correlated reply", { timeout: 1_020_000 }, async (t) => {
+test("real Codex sender assigns one task and Wardian resumes its original conversation with the correlated reply", { timeout: 1_020_000 }, async (t) => {
   if (process.env.WARDIAN_E2E_REAL_MESSAGING_V2 !== "1") {
     return t.skip("Real case NOT RUN: requires WARDIAN_E2E_REAL_MESSAGING_V2=1 and coordinator runner/artifact authorization");
   }
@@ -1774,7 +1835,7 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
     expected_codex_version: expectedVersion, requested_codex_executable: process.env.WARDIAN_E2E_CODEX_EXECUTABLE ?? null,
     cases: { correlated_real_exchange: { status: "running" } }, sources: {}, artifacts: {}, agents: [],
     attached_tui: mode === "attached_tui" ? "pending" : "not_run_in_background_mode",
-    optional_cases: { idle_information: "not_run", active_interrupt: "not_run" }, cleanup: [] };
+    optional_cases: { idle_information_wake: "not_run", active_interrupt: "not_run" }, cleanup: [] };
   const reportPath = path.join(home, "real-messaging-v2-report.json");
   const save = () => fs.writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`);
   const previousEnv = new Map();
@@ -1806,7 +1867,7 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
     await fs.copyFile(path.join(authSource, "auth.json"), path.join(fixtureCodex, "auth.json"));
     assert.equal(await sha256(path.join(fixtureCodex, "auth.json")), fixtureAuthHash);
     report.fixture_config = fixtureConfig;
-    report.permissions = process.env.WARDIAN_E2E_MESSAGING_V2_APPROVE_TOOLS === "1" ? "six_named_tools_in_private_agent_homes" : "provider_policy_unchanged";
+    report.permissions = process.env.WARDIAN_E2E_MESSAGING_V2_APPROVE_TOOLS === "1" ? "five_named_tools_in_private_agent_homes" : "provider_policy_unchanged";
     const overrides = fixtureEnvironmentOverrides(profile, fixtureCodex);
     for (const [key, value] of Object.entries(overrides)) {
       previousEnv.set(key, process.env[key]);
@@ -1852,7 +1913,7 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
       assert.equal(config.model, MODEL);
       assert.equal(config.provider_config.reasoning_effort, EFFORT);
       agent.persisted_provider_config = config.provider_config;
-      agent.registration = await registration(home, config, report.artifacts.cli.sha256, report.permissions === "six_named_tools_in_private_agent_homes");
+      agent.registration = await registration(home, config, report.artifacts.cli.sha256, report.permissions === "five_named_tools_in_private_agent_homes");
       const doctor = await command(cli, home, harness.repoRoot, ["agent", "doctor", agent.session_id], 60_000);
       agent.launch_trust = assertFixtureLaunchTrust(doctor, home, agent, trustFixtures);
       agent.project_trust_before = fixtureProjectTrust(await fs.readFile(path.join(agent.registration.codex_home, "config.toml"), "utf8"), home, workspace);
@@ -1869,7 +1930,7 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
         agent.compact_home = await compactHomeEvidence(home, agent.session_id);
         agent.registration_after_resume = await registration(home, { ...agent, session_id: agent.session_id }, report.artifacts.cli.sha256, false, agent.compact_home);
         agent.project_trust_after = assertFixtureTrustRestored(await fs.readFile(path.join(agent.registration.codex_home, "config.toml"), "utf8"), home, agent);
-        if (report.permissions === "six_named_tools_in_private_agent_homes") {
+        if (report.permissions === "five_named_tools_in_private_agent_homes") {
           const resumedConfig = await fs.readFile(path.join(agent.registration.codex_home, "config.toml"), "utf8");
           for (const tool of TOOLS) assert.equal(generatedString(section(resumedConfig, `mcp_servers.wardian.tools.${tool}`), "approval_mode"), "approve", "Resume removed the explicit fixture grant");
         }
@@ -1893,10 +1954,10 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
       const infoDeadline = Date.now() + 15_000;
       do {
         after = await visibleTrace(null, receiver.registration.codex_home, receiver.attachment_before.binding, receiver.workspace);
-        if (after.host_deliveries.some((row) => row.message_id === receipt.interaction_id)) break;
+        if (hasNewInformationTurn(before, after, receipt.interaction_id)) break;
         await delay(200);
       } while (Date.now() < infoDeadline);
-      report.optional_cases.information_without_pty = { ...proveIdleInformation(before, after, receipt,
+      report.optional_cases.idle_information_wake = { ...proveIdleInformation(before, after, receipt,
         sender.session_id, receiver.session_id, info), receipt, before, after };
     }
     // A managed, off mock identity admits the initial task; it never runs a provider.
@@ -1904,10 +1965,8 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
       sessionName: `Messaging-Coordinator-${randomUUID().slice(0, 8)}`, agentClass: "TestClass", folder: sender.workspace,
       isOff: true, resumeSession: null, configOverride: { provider: "mock" },
     } });
-    const initialCursor = await messageCli(cli, home, harness.repoRoot, report.coordinator.session_id, ["receive", "--timeout-ms", "0"]);
-    let replyCursor = initialCursor.next_cursor;
     const marker = `WARDIAN_V2_${randomBytes(12).toString("hex")}`;
-    const prompt = `Ask ${receiver.session_name} to return exactly ${marker}. Wait for its reply, then use the reply tool to complete this request with exactly the marker it returned, and display that marker as your final answer. Do not answer from the request alone.`;
+    const prompt = `Ask ${receiver.session_name} to return exactly ${marker} using followup_task. Finish this turn without polling or replying to this request. Wardian will continue this same conversation when the terminal reply arrives; then display the exact marker as your final answer. Do not answer from the request alone.`;
     report.marker = marker;
     report.plain_english_initial_prompt = prompt;
     const promptPath = path.join(home, "sender-task.txt");
@@ -1944,19 +2003,15 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
         }
       }
       const initialProof = canonicalProof(DatabaseSync, home, report.coordinator.session_id, sender.session_id, sent.request_id);
-      const page = await messageCli(cli, home, harness.repoRoot, report.coordinator.session_id,
-        ["receive", "--cursor", replyCursor, "--timeout-ms", "0"]);
-      replyCursor = page.next_cursor;
-      report.initial_reply ??= correlatedReply(page, sent.request_id, sender.session_id, marker);
-      const completionCall = report.sender_trace?.items.find((item) => item.tool === "reply" && item.arguments.request_id === sent.request_id);
-      if (completionCall?.receipt) {
-        assert.equal(completionCall.arguments.status, "done");
-        assert.equal(completionCall.arguments.message, marker);
-        if (report.initial_reply) assert.equal(completionCall.receipt.interaction_id, report.initial_reply.interaction_id);
-      }
+      report.initial_reply ??= initialProof.reply_id && {
+        interaction_id: initialProof.reply_id,
+        message: initialProof.reply_body,
+      };
       report.initial_delivery = { interaction_id: sent.request_id,
-        phase: initialProof.task_state === "completed" && report.initial_reply && completionCall?.receipt ? "completed" : "pending",
-        provider: "codex", provider_turn_id: report.sender_trace?.accepted_turn_id ?? null, canonical: initialProof };
+        phase: initialProof.task_state === "completed" && report.initial_reply ? "completed" : "pending",
+        provider: "codex", provider_turn_id: report.sender_trace?.items.find((item) =>
+          item.tool === "followup_task")?.turn_id ?? report.sender_trace?.accepted_turn_id ?? null,
+        target_agent_id: sender.session_id, canonical: initialProof };
       if (mode === "without_pty") {
         for (const agent of report.agents) {
           assertNativeSession(await command(cli, home, harness.repoRoot, ["delivery", "capabilities", agent.session_id]),
@@ -1989,9 +2044,8 @@ test("real Codex sender assigns one task, receiver replies, and sender receives 
           await delay(500); // Renderer projection may follow provider completion.
         } while (Date.now() < renderDeadline);
         assert.ok(agent.attachment_after.sequence_barrier > agent.attachment_before.sequence_barrier, "Original terminal did not render activity from the shared exchange");
-        // The requester was asked to display the answer. The receiver may
-        // correctly finish with a short acknowledgement after its MCP reply;
-        // its exact reply content is proved in the owned provider trace above.
+      // The original requester conversation must render the automatically
+      // delivered terminal reply in its resumed provider turn.
         if (agent.role === "sender") assert.ok(agent.attachment_after.marker_visible,
           "The requester's final answer must also reach its original attached TUI");
       }

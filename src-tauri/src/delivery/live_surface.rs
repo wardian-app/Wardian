@@ -207,6 +207,7 @@ pub struct LiveSurfacePromptRequest {
     pub queue_policy: QueuePolicy,
     pub approval_action: Option<ApprovalAction>,
     pub origin: Option<MessageOrigin>,
+    pub write_fence: Option<crate::utils::delivery_transaction::AutomatedInputWriteFence>,
     pub runtime_state: &'static str,
     pub mark_prompt_started: bool,
     /// Automated delivery waits for provider-confirmed turn start so it can
@@ -247,6 +248,7 @@ impl LiveSurfacePromptRequest {
             queue_policy: QueuePolicy::LiveOnly,
             approval_action: None,
             origin: None,
+            write_fence: None,
             runtime_state: "live_pty_available",
             mark_prompt_started: true,
             require_provider_turn_receipt: false,
@@ -428,19 +430,32 @@ pub async fn submit_live_surface_prompt(
             .await);
         }
     };
-    let input = if request.origin.is_none()
-        && matches!(
-            request.input_mode,
-            MessageInputMode::Message | MessageInputMode::Command
-        ) {
-        BrokerTerminalInputSink::new_for_composer(
-            state.terminal_sessions.clone(),
-            request.session_id.clone(),
-            broker_state.runtime_generation,
-        )
-    } else {
-        BrokerTerminalInputSink::new(state.terminal_sessions.clone(), request.session_id.clone())
-    };
+    let input: Box<dyn crate::utils::delivery_transaction::TerminalInputSink> =
+        if let Some(fence) = request.write_fence.clone() {
+            Box::new(
+                crate::utils::delivery_transaction::AutomatedTerminalInputSink::new(
+                    state,
+                    request.session_id.clone(),
+                    fence,
+                ),
+            )
+        } else if request.origin.is_none()
+            && matches!(
+                request.input_mode,
+                MessageInputMode::Message | MessageInputMode::Command
+            )
+        {
+            Box::new(BrokerTerminalInputSink::new_for_composer(
+                state.terminal_sessions.clone(),
+                request.session_id.clone(),
+                broker_state.runtime_generation,
+            ))
+        } else {
+            Box::new(BrokerTerminalInputSink::new(
+                state.terminal_sessions.clone(),
+                request.session_id.clone(),
+            ))
+        };
     // This event is emitted after the payload has been acknowledged by the
     // native PTY writer but before the submit key. It gives send-and-watch an
     // ordering boundary that precedes every provider response for this exact
@@ -466,8 +481,12 @@ pub async fn submit_live_surface_prompt(
     let outcome = if let (MessageInputMode::ApprovalAction, Some(action)) =
         (request.input_mode, request.approval_action.as_ref())
     {
-        match crate::control::submit_approval_action_for_delivery_service(&input, &provider, action)
-            .await
+        match crate::control::submit_approval_action_for_delivery_service(
+            input.as_ref(),
+            &provider,
+            action,
+        )
+        .await
         {
             Ok(outcome) => outcome,
             Err(message) => {
@@ -701,10 +720,25 @@ pub async fn submit_live_surface_prompt(
         } else {
             None
         };
-        let sender: &dyn crate::utils::delivery_transaction::TerminalInputSink = pi_ticket
+        let receipt_sender = pi_ticket
             .as_ref()
-            .map(|ticket| ticket as &dyn crate::utils::delivery_transaction::TerminalInputSink)
-            .unwrap_or(&input);
+            .map(|ticket| ticket as &dyn crate::utils::delivery_transaction::TerminalInputSink);
+        let sender = crate::utils::delivery_transaction::select_delivery_input_sink(
+            input.as_ref(),
+            receipt_sender,
+            request.write_fence.is_some(),
+        );
+        let ticket_guarded_sender = if request.write_fence.is_some() {
+            pi_ticket
+                .as_ref()
+                .map(|ticket| ticket.guard_input_sink(sender))
+        } else {
+            None
+        };
+        let sender = ticket_guarded_sender
+            .as_ref()
+            .map(|guarded| guarded as &dyn crate::utils::delivery_transaction::TerminalInputSink)
+            .unwrap_or(sender);
         match crate::utils::terminal_input::submit_prompt_via_sender(
             sender,
             &provider,
