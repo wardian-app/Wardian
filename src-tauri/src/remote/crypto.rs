@@ -84,4 +84,83 @@ mod tests {
         )
         .is_err());
     }
+
+    // RFC 6979 Appendix A.2.5, P-256/SHA-256, message "sample".
+    const RFC6979_P256_SAMPLE_SPKI_DER_BASE64: &str =
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEYP7UuiVanTHJYet0xjVtaMBJuJI7Yfps5mliLmDyn7Z5A/4QCLi8maQa6elWKLxk8vGyDC1+n1F3o8KU1EYimQ==";
+    const RFC6979_P256_SAMPLE_SIGNATURE_DER_BASE64: &str =
+        "MEYCIQDv1IsqrLao/RFA3ZzUXoHWnSyHe1aq+ZHDTQ6oTq83FgIhAPfLHJQtZXxB1DbHobbin2Xz6QDbua/0Bk3Eqy+EOs2o";
+    const RFC6979_P256_SAMPLE_SIGNATURE_RAW_BASE64: &str =
+        "79SLKqy2qP0RQN2c1F6B1p0sh3tWqvmRw00OqE6vNxb3yxyULWV8QdQ2x6G24p9l8+kA27mv9AZNxKsvhDrNqA==";
+
+    // NIST P-384 generator SPKI from FIPS 186-4 Appendix D.1.2.4.
+    const P384_GENERATOR_SPKI_DER_BASE64: &str =
+        "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEqofKIr6LBTeOscce8yCtdG4dO2KLp5uYWfdB4IJUKjhVAvJdv1UpbDpUXjhydgq3NhfeSpYmLG9dnpi/kpLcKfj0Hb0omhR86doxE7XwuMAKYLHOHX6BnXpDHXyQ6g5f";
+
+    fn decode_static_base64_fixture(value: &str) -> Vec<u8> {
+        use base64::Engine as _;
+
+        base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .expect("valid static test fixture")
+    }
+
+    #[test]
+    fn p256_signature_verifies_rfc6979_sha256_sample_vector() {
+        let public_key_der = decode_static_base64_fixture(RFC6979_P256_SAMPLE_SPKI_DER_BASE64);
+        let signature_der = decode_static_base64_fixture(RFC6979_P256_SAMPLE_SIGNATURE_DER_BASE64);
+
+        assert!(verify_p256_sha256_signature(&public_key_der, b"sample", &signature_der).is_ok());
+    }
+
+    #[test]
+    fn p256_signature_rejects_malformed_truncated_and_raw_signature_encodings() {
+        let public_key_der = decode_static_base64_fixture(RFC6979_P256_SAMPLE_SPKI_DER_BASE64);
+        let signature_der = decode_static_base64_fixture(RFC6979_P256_SAMPLE_SIGNATURE_DER_BASE64);
+        let raw_signature = decode_static_base64_fixture(RFC6979_P256_SAMPLE_SIGNATURE_RAW_BASE64);
+        let truncated_signature = &signature_der[..signature_der.len() - 1];
+        let malformed_der = [0x30, 0x00];
+
+        for invalid_signature in [
+            malformed_der.as_slice(),
+            truncated_signature,
+            raw_signature.as_slice(),
+        ] {
+            assert!(
+                verify_p256_sha256_signature(&public_key_der, b"sample", invalid_signature)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn p256_signature_rejects_signature_and_payload_tampering() {
+        let public_key_der = decode_static_base64_fixture(RFC6979_P256_SAMPLE_SPKI_DER_BASE64);
+        let signature_der = decode_static_base64_fixture(RFC6979_P256_SAMPLE_SIGNATURE_DER_BASE64);
+        let mut tampered_signature_der = signature_der.clone();
+        *tampered_signature_der
+            .last_mut()
+            .expect("nonempty RFC signature DER") ^= 0x01;
+
+        assert!(
+            verify_p256_sha256_signature(&public_key_der, b"sample", &tampered_signature_der)
+                .is_err()
+        );
+        assert!(verify_p256_sha256_signature(&public_key_der, b"samplf", &signature_der).is_err());
+    }
+
+    #[test]
+    fn p256_signature_rejects_invalid_points_and_other_curve_spki() {
+        let public_key_der = decode_static_base64_fixture(RFC6979_P256_SAMPLE_SPKI_DER_BASE64);
+        let signature_der = decode_static_base64_fixture(RFC6979_P256_SAMPLE_SIGNATURE_DER_BASE64);
+        let mut invalid_point_spki = public_key_der.clone();
+        // In this fixed P-256 SPKI, byte 26 starts the uncompressed SEC1 point.
+        invalid_point_spki[27..].fill(0);
+        assert!(
+            verify_p256_sha256_signature(&invalid_point_spki, b"sample", &signature_der).is_err()
+        );
+
+        let p384_spki = decode_static_base64_fixture(P384_GENERATOR_SPKI_DER_BASE64);
+        assert!(verify_p256_sha256_signature(&p384_spki, b"sample", &signature_der).is_err());
+    }
 }
