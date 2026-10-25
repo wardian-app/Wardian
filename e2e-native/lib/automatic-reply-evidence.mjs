@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -110,29 +111,568 @@ async function writeHandleUtf8(handle, text) {
   await handle.sync();
 }
 
-/** Resolve only the real system PowerShell location for Windows Codex shell calls. */
+function windowsEnvironmentValue(env, name) {
+  const matches = Object.entries(env ?? {}).filter(([key]) => key.toLowerCase() === name.toLowerCase());
+  assert.ok(matches.length <= 1, "The child environment has ambiguous " + name + " keys");
+  return matches[0]?.[1];
+}
+
+function normalizedWindowsPathSegment(value) {
+  return value.trim().replace(/^"+|"+$/gu, "").replaceAll("/", "\\").replace(/\\+$/u, "").toLowerCase();
+}
+
+function windowsChildPath(wardianHome, inheritedPath) {
+  const bin = path.win32.join(wardianHome, "bin");
+  const normalizedBin = normalizedWindowsPathSegment(bin);
+  const inherited = (inheritedPath ?? "").split(";")
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+    .filter((segment) => normalizedWindowsPathSegment(segment) !== normalizedBin);
+  const segments = [bin, ...inherited];
+  for (const segment of segments) {
+    assert.ok(!segment.includes('"'), "The effective Windows child PATH contains a quoted segment");
+    assert.ok(path.win32.isAbsolute(segment), "The effective Windows child PATH contains a relative segment");
+  }
+  return { value: segments.join(";"), segments };
+}
+
+function windowsPathExtensions(value) {
+  assert.ok(typeof value === "string" && value.trim(), "The child PATHEXT is required for Windows qualification");
+  const extensions = value.split(";").map((extension) => extension.trim().toLowerCase()).filter(Boolean);
+  assert.ok(extensions.length > 0 && extensions.every((extension) => /^\.[a-z0-9]+$/u.test(extension)),
+    "The child PATHEXT contains an unsupported extension");
+  assert.equal(new Set(extensions).size, extensions.length, "The child PATHEXT contains duplicate extensions");
+  return extensions;
+}
+
+async function hashStableRegularFile(filePath, label, { allowParentLinks = false } = {}) {
+  const before = await fs.lstat(filePath);
+  assertPlainPath(before, "file", label);
+  const realPath = await fs.realpath(filePath);
+  if (!allowParentLinks) {
+    assert.ok(samePath(realPath, filePath, "win32"), label + " does not resolve to its exact path");
+  }
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(realPath)) hash.update(chunk);
+  const after = await fs.lstat(filePath);
+  assertSameFileIdentity(before, after, label);
+  assert.equal(after.size, before.size, label + " size changed during qualification");
+  assert.equal(after.mtimeMs, before.mtimeMs, label + " changed during qualification");
+  return { path: filePath, realpath: realPath, sha256: hash.digest("hex") };
+}
+
+async function firstWindowsCommand(pathEntries, command, extensions) {
+  for (const directory of pathEntries) {
+    for (const suffix of ["", ...extensions]) {
+      const candidate = path.win32.join(directory, command + suffix);
+      try {
+        const stat = await fs.lstat(candidate);
+        assertPlainPath(stat, "file", "Resolved " + command + " command");
+        const realPath = await fs.realpath(candidate);
+        return realPath;
+      } catch (error) {
+        if (error.code === "ENOENT" || error.code === "ENOTDIR") continue;
+        throw error;
+      }
+    }
+  }
+  return null;
+}
+
+async function assertNoWorkspaceCommandShadow(workspace, command, extensions) {
+  for (const suffix of ["", ...extensions]) {
+    const candidate = path.win32.join(workspace, command + suffix);
+    try {
+      const stat = await fs.lstat(candidate);
+      assertPlainPath(stat, "file", "Workspace " + command + " command candidate");
+      assert.fail("The worker workspace contains a " + command + " command shadow");
+    } catch (error) {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") continue;
+      throw error;
+    }
+  }
+}
+
+/**
+ * Qualify the effective Windows Codex child PATH without changing it or exposing its entries.
+ * Non-Windows fixtures keep their existing portable execution path.
+ */
+export async function qualifyAutomaticReplyExecEnvironment({
+  platform = process.platform,
+  wardianHome,
+  workerWorkspace,
+  env = process.env,
+  nodeExecutable = process.execPath,
+} = {}) {
+  if (platform !== "win32") return null;
+
+  assert.ok(typeof wardianHome === "string" && path.win32.isAbsolute(wardianHome),
+    "The isolated Wardian home must be absolute on Windows");
+  assert.ok(typeof workerWorkspace === "string" && path.win32.isAbsolute(workerWorkspace),
+    "The worker workspace must be absolute on Windows");
+  const configuredHome = windowsEnvironmentValue(env, "WARDIAN_HOME");
+  assert.ok(typeof configuredHome === "string" && samePath(configuredHome, wardianHome, "win32"),
+    "The child WARDIAN_HOME must match the isolated fixture home");
+  const systemRoot = windowsEnvironmentValue(env, "SystemRoot");
+  assert.ok(typeof systemRoot === "string" && path.win32.isAbsolute(systemRoot),
+    "The child SystemRoot must be absolute");
+  assert.ok(typeof nodeExecutable === "string" && path.win32.isAbsolute(nodeExecutable),
+    "The exact Node executable path must be absolute");
+
+  const effectivePath = windowsChildPath(wardianHome, windowsEnvironmentValue(env, "Path"));
+  const pathext = windowsEnvironmentValue(env, "PATHEXT");
+  const extensions = windowsPathExtensions(pathext);
+  const systemRootStat = await fs.lstat(systemRoot);
+  assertPlainPath(systemRootStat, "directory", "SystemRoot");
+  const systemRootReal = await fs.realpath(systemRoot);
+  assert.ok(samePath(systemRootReal, systemRoot, "win32"), "SystemRoot must resolve to its configured directory");
+  const workspaceStat = await fs.lstat(workerWorkspace);
+  assertPlainPath(workspaceStat, "directory", "Worker workspace");
+  const workspaceReal = await fs.realpath(workerWorkspace);
+  assert.ok(samePath(workspaceReal, workerWorkspace, "win32"), "The worker workspace must be canonical");
+  const shellPath = path.win32.join(systemRoot, "System32", "cmd.exe");
+  const [shell, node] = await Promise.all([
+    hashStableRegularFile(shellPath, "System32 cmd.exe"),
+    hashStableRegularFile(nodeExecutable, "Node executable", { allowParentLinks: true }),
+  ]);
+  await Promise.all([
+    assertNoWorkspaceCommandShadow(workspaceReal, "cmd", extensions),
+    assertNoWorkspaceCommandShadow(workspaceReal, "node", extensions),
+  ]);
+  const [resolvedCmd, resolvedNode] = await Promise.all([
+    firstWindowsCommand(effectivePath.segments, "cmd", extensions),
+    firstWindowsCommand(effectivePath.segments, "node", extensions),
+  ]);
+  assert.ok(samePath(shell.realpath, shell.path, "win32")
+    && resolvedCmd && samePath(resolvedCmd, shell.realpath, "win32"),
+    "The effective child PATH resolves cmd to the exact System32 executable");
+  assert.ok(resolvedNode && samePath(resolvedNode, node.realpath, "win32"),
+    "The effective child PATH resolves Node to the exact fixture executable");
+
+  return {
+    shell: shell.path,
+    node: node.path,
+    node_realpath: node.realpath,
+    shell_sha256: shell.sha256,
+    node_sha256: node.sha256,
+    child_path: {
+      sha256: createHash("sha256").update(effectivePath.value, "utf8").digest("hex"),
+      pathext_sha256: createHash("sha256").update(pathext, "utf8").digest("hex"),
+      entry_count: effectivePath.segments.length,
+      cmd_resolution: "system32",
+      node_resolution: "exact",
+      workspace_command_shadows: 0,
+      wardian_bin_precedence: true,
+    },
+  };
+}
+
+/** Resolve only the real System32 Cmd location for Windows Codex shell calls. */
 export function automaticReplyExecShell(platform = process.platform, systemRoot = process.env.SystemRoot) {
   if (platform !== "win32") return null;
   assert.ok(typeof systemRoot === "string" && path.win32.isAbsolute(systemRoot),
     "Windows SystemRoot must be absolute before selecting the fixture shell");
-  const shell = path.win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const shell = path.win32.join(systemRoot, "System32", "cmd.exe");
   assert.ok(!/\\WindowsApps(?:\\|$)/iu.test(shell), "The fixture shell must not resolve through WindowsApps");
   return shell;
 }
 
-/** Keep the Windows shell choice explicit in the sole initial worker task. */
-export function automaticReplyTaskInstructions(gateCommand, shell = null) {
+/** Generate the only JavaScript wrapper accepted for the reply gate. */
+export function automaticReplyExecScript(gateCommand, shell) {
   assert.ok(typeof gateCommand === "string" && gateCommand.trim(), "The worker gate command is required");
   if (shell !== null) {
     assert.ok(typeof shell === "string" && path.win32.isAbsolute(shell)
-      && path.win32.basename(shell).toLowerCase() === "powershell.exe"
-      && !/\\WindowsApps(?:\\|$)/iu.test(shell), "Only the verified absolute Windows PowerShell shell is supported");
+      && /\\System32\\cmd\.exe$/iu.test(shell), "Only an absolute System32 Cmd shell is supported");
+    assert.ok(!/\\WindowsApps(?:\\|$)/iu.test(shell), "The fixture shell must not resolve through WindowsApps");
   }
-  const execution = shell === null
-    ? `Run ${gateCommand} in your assigned workspace.`
-    : `Use exactly one exec_command request with cmd ${JSON.stringify(gateCommand)} and shell ${JSON.stringify(shell)}. Do not omit or replace the shell field.`;
+  const shellArgument = shell === null ? "" : `,shell:${JSON.stringify(shell)}`;
+  return `let result=await tools.exec_command({cmd:${JSON.stringify(gateCommand)}${shellArgument},yield_time_ms:1000});` +
+    "text(JSON.stringify(result));while(result.session_id){" +
+    "result=await tools.write_stdin({session_id:result.session_id,chars:'',yield_time_ms:1000});" +
+    "text(JSON.stringify(result));}";
+}
+
+/** Keep the qualified shell and literal gate wrapper explicit in the sole initial worker task. */
+export function automaticReplyTaskInstructions(gateCommand, shell = null, systemRoot = process.env.SystemRoot) {
+  assert.ok(typeof gateCommand === "string" && gateCommand.trim(), "The worker gate command is required");
+  if (shell !== null) {
+    const expectedShell = automaticReplyExecShell("win32", systemRoot);
+    assert.ok(typeof shell === "string" && samePath(shell, expectedShell, "win32"),
+      "Only the verified absolute System32 Cmd shell is supported");
+  }
+  const execution = `Use exactly one functions.exec request with this exact JavaScript input (outer whitespace only may vary):\n` +
+    automaticReplyExecScript(gateCommand, shell) + "\nDo not alter or replace it.";
   return `${execution} Wait for it to print one WORKER_ONLY_ UUID after the external test gate opens. ` +
     "Then call the Wardian reply tool once with status done and exactly that printed token. Do no other work.";
+}
+
+/** Build the one gate command with Cmd-safe quoting for an exact absolute Node executable. */
+export function automaticReplyGateCommand(deadlineAt, {
+  nodeExecutable = process.execPath,
+  platform = process.platform,
+} = {}) {
+  assert.ok(Number.isSafeInteger(deadlineAt), "The worker gate deadline must be an absolute millisecond timestamp");
+  const deadlineDate = new Date(deadlineAt);
+  assert.ok(Number.isFinite(deadlineDate.getTime()), "The worker gate deadline is outside the supported date range");
+  const deadline = deadlineDate.toISOString();
+  const script = ".wardian-e2e-gate/reply-gate.mjs";
+  if (platform !== "win32") {
+    return "node " + script + " --deadline " + JSON.stringify(deadline);
+  }
+  assert.ok(typeof nodeExecutable === "string" && path.win32.isAbsolute(nodeExecutable),
+    "The exact Windows Node executable path must be absolute");
+  assert.ok(!/[%!^&|<>()"\r\n]/u.test(nodeExecutable),
+    "The Windows Node executable path contains a Cmd metacharacter");
+  return "\"" + nodeExecutable + "\" " + script + " --deadline " + deadline;
+}
+
+/** Assert the exact gate request from its native event representation without evaluating code. */
+export function assertAutomaticReplyGateInvocation(attempt, { gateCommand, shell } = {}) {
+  assert.ok(attempt && typeof attempt === "object", "A captured native exec attempt is required");
+  if (attempt.type === "custom_tool_call" && attempt.name === "exec") {
+    assert.equal(typeof attempt.raw_input, "string", "The functions.exec input must be preserved as raw text");
+    assert.equal(attempt.raw_input.trim(), automaticReplyExecScript(gateCommand, shell),
+      "The captured functions.exec script differs from the exact reply gate wrapper");
+    return true;
+  }
+  assert.equal(attempt.type, "function_call", "The captured tool call type is unsupported");
+  assert.equal(attempt.name, "exec_command", "The captured tool is not exec_command");
+  assert.equal(typeof attempt.raw_input, "string", "The exec_command arguments must be preserved as raw JSON");
+  let args;
+  try {
+    args = JSON.parse(attempt.raw_input);
+  } catch {
+    assert.fail("The captured exec_command arguments are not valid JSON");
+  }
+  assert.ok(args && typeof args === "object" && !Array.isArray(args),
+    "The captured exec_command arguments must be a JSON object");
+  assert.equal(args.cmd, gateCommand, "The captured exec_command command differs from the reply gate");
+  if (shell === null) {
+    assert.equal(Object.hasOwn(args, "shell"), false, "The portable exec_command must omit the shell override");
+  } else {
+    assert.equal(args.shell, shell, "The captured exec_command shell differs from the qualified shell");
+  }
+  assert.equal(Object.hasOwn(args, "workdir"), false, "The captured exec_command must not override its workspace");
+  assert.equal(Object.hasOwn(args, "cwd"), false, "The captured exec_command must not override its workspace");
+  return true;
+}
+
+const NATIVE_TOOL_CALLS = new Map([
+  ["function_call", { inputKey: "arguments", outputType: "function_call_output" }],
+  ["custom_tool_call", { inputKey: "input", outputType: "custom_tool_call_output" }],
+]);
+const NATIVE_TOOL_OUTPUT_TYPES = new Set(["function_call_output", "custom_tool_call_output"]);
+
+function waitCellId(rawInput) {
+  if (typeof rawInput !== "string") return null;
+  let args;
+  try {
+    args = JSON.parse(rawInput);
+  } catch {
+    return null;
+  }
+  if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+  const value = args.cell_id;
+  if (typeof value === "string" && value.trim() === value && /^[A-Za-z0-9_-]{1,128}$/u.test(value)) return value;
+  if (Number.isSafeInteger(value) && value >= 0) return String(value);
+  return null;
+}
+
+function nativeTextOutput(value) {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return null;
+  const flattened = [];
+  for (const block of value) {
+    if (!block || typeof block !== "object" || Array.isArray(block)
+      || !["text", "input_text"].includes(block.type) || typeof block.text !== "string") return null;
+    flattened.push(block.text);
+  }
+  return flattened.join("\n");
+}
+
+function observedCellId(output) {
+  const text = nativeTextOutput(output);
+  if (text === null) return null;
+  const markers = [...text.matchAll(/Script running with cell ID\b/gu)];
+  assert.ok(markers.length <= 1, "An exec attempt reported duplicate functions.exec cell markers");
+  if (markers.length === 0) return null;
+  const suffix = text.slice(markers[0].index + markers[0][0].length);
+  const id = suffix.match(/^[ \t]+([^\s\r\n]+)/u)?.[1];
+  assert.ok(id && /^[A-Za-z0-9_-]{1,128}$/u.test(id), "The functions.exec cell ID is malformed");
+  return id;
+}
+
+function nativeOutput(row, payload, rowOrdinal) {
+  return {
+    row_ordinal: rowOrdinal,
+    timestamp: row.timestamp ?? null,
+    raw: Object.hasOwn(payload, "output") ? payload.output : payload,
+  };
+}
+
+function correlateNativeToolOutput(call, outputsById, label) {
+  const matching = outputsById.get(call.call_id) ?? [];
+  assert.ok(matching.length <= 1, `Duplicate ${label} outputs are ambiguous`);
+  if (matching.length === 0) return null;
+  const [entry] = matching;
+  assert.equal(entry.payload.type, call.output_type, `${label} output type does not match its call`);
+  assert.ok(entry.rowOrdinal > call.row_ordinal, `${label} output precedes its native call`);
+  return nativeOutput(entry.row, entry.payload, entry.rowOrdinal);
+}
+
+function knownFunctionsExecBody(text, expectedCellId) {
+  const lines = text.split(/\r?\n/u);
+  const first = lines[0] ?? "";
+  const running = first.match(/^Script running with cell ID ([A-Za-z0-9_-]{1,128})$/u);
+  if (running) {
+    const cellId = running[1];
+    if (expectedCellId !== null) assert.equal(cellId, expectedCellId, "functions.wait returned a foreign cell");
+    return { pending: true, body: functionsExecEnvelopeBody(lines) };
+  }
+
+  const completed = first === "Script completed";
+  const failed = first === "Script failed";
+  if (completed || failed) {
+    assert.equal(failed, false, "The outer functions.exec wrapper failed");
+    return { pending: false, body: functionsExecEnvelopeBody(lines) };
+  }
+  if (/^Script (?:running|completed|failed|error)\b/u.test(first)) {
+    assert.fail("The functions.exec output contains an unsupported script envelope");
+  }
+  return { pending: false, body: text };
+}
+
+function functionsExecEnvelopeBody(lines) {
+  const wallTime = lines[1] ?? "";
+  assert.match(wallTime, /^Wall time \d+(?:\.\d+)? seconds$/u, "The functions.exec envelope is malformed");
+  assert.equal(lines[2], "Output:", "The functions.exec envelope is missing Output");
+  return lines.slice(3).join("\n");
+}
+
+function parseFunctionsExecResults(text) {
+  const results = [];
+  for (const line of text.split(/\r?\n/u)) {
+    if (!line.trim()) continue;
+    let result;
+    try {
+      result = JSON.parse(line);
+    } catch {
+      assert.fail("The functions.exec output contains a non-JSON result line");
+    }
+    assert.ok(result && typeof result === "object" && !Array.isArray(result),
+      "A functions.exec result line must be a JSON object");
+    assert.ok(typeof result.output === "string", "A functions.exec result must contain a text output chunk");
+    const knownKeys = new Set([
+      "output", "exit_code", "session_id", "wall_time_seconds", "original_token_count", "chunk_id", "error",
+    ]);
+    assert.ok(Object.keys(result).every((key) => knownKeys.has(key)),
+      "A functions.exec result contains an unknown field");
+    if (Object.hasOwn(result, "exit_code") && result.exit_code !== null) {
+      assert.ok(Number.isInteger(result.exit_code), "A functions.exec exit code must be an integer");
+    }
+    if (Object.hasOwn(result, "session_id") && result.session_id !== null) {
+      assert.ok(typeof result.session_id === "string" || Number.isSafeInteger(result.session_id),
+        "A functions.exec session id must be a string or integer");
+    }
+    if (Object.hasOwn(result, "error") && result.error !== null) {
+      assert.ok(typeof result.error === "string", "A functions.exec error must be text");
+    }
+    results.push(result);
+  }
+  return results;
+}
+
+function functionsExecOutputPending(output, cellId) {
+  const text = nativeTextOutput(output.raw);
+  assert.notEqual(text, null, "The captured functions.wait output has an unsupported text representation");
+  const envelope = knownFunctionsExecBody(text, cellId);
+  if (envelope.pending) return true;
+  const results = envelope.body.trim() ? parseFunctionsExecResults(envelope.body) : [];
+  return !results.some((result) => result.exit_code !== null && result.exit_code !== undefined)
+    && results.some((result) => result.session_id !== null && result.session_id !== undefined);
+}
+
+/**
+ * Preserve native exec input and correlate its output and ordered waits for an observed functions.exec cell.
+ * Wait arguments are parsed only for cell_id; per-kind ordinals and row_ordinal retain event order.
+ */
+export function collectAutomaticReplyExecAttempts(rows) {
+  assert.ok(Array.isArray(rows), "Native response rows must be an array");
+  const attempts = [];
+  const waitCalls = [];
+  const callsById = new Map();
+  const foreignCallIds = new Set();
+  const replyCallIds = new Set();
+  const outputsById = new Map();
+
+  for (let rowOrdinal = 0; rowOrdinal < rows.length; rowOrdinal += 1) {
+    const row = rows[rowOrdinal];
+    if (row?.type !== "response_item" || !row.payload || typeof row.payload !== "object") continue;
+    const payload = row.payload;
+    if (NATIVE_TOOL_OUTPUT_TYPES.has(payload.type)) {
+      if (typeof payload.call_id !== "string" || !payload.call_id) continue;
+      const outputRows = outputsById.get(payload.call_id) ?? [];
+      outputRows.push({ row, payload, rowOrdinal });
+      outputsById.set(payload.call_id, outputRows);
+      continue;
+    }
+
+    const spec = NATIVE_TOOL_CALLS.get(payload.type);
+    const isExec = (payload.type === "function_call" && payload.name === "exec_command")
+      || (payload.type === "custom_tool_call" && payload.name === "exec");
+    const isWait = spec && payload.name === "wait";
+    if (!spec || (!isExec && !isWait)) {
+      if (spec && payload.name === "reply" && typeof payload.call_id === "string" && payload.call_id.trim()) {
+        assert.ok(!callsById.has(payload.call_id) && !foreignCallIds.has(payload.call_id),
+          "A reply tool call_id makes an exec attempt ambiguous");
+        foreignCallIds.add(payload.call_id);
+        replyCallIds.add(payload.call_id);
+      } else if (spec && typeof payload.call_id === "string" && payload.call_id.trim()) {
+        assert.ok(!callsById.has(payload.call_id), "A foreign tool call_id makes an exec attempt ambiguous");
+        foreignCallIds.add(payload.call_id);
+      }
+      continue;
+    }
+    assert.ok(typeof payload.call_id === "string" && payload.call_id.trim(),
+      "A captured exec or wait call must have its native call_id");
+    assert.ok(!callsById.has(payload.call_id), isExec
+      ? "Duplicate exec attempt call_id is ambiguous"
+      : "Duplicate functions.wait call_id is ambiguous");
+    assert.ok(!foreignCallIds.has(payload.call_id), "A foreign tool call_id makes an exec attempt ambiguous");
+    const call = {
+      call_id: payload.call_id,
+      row_ordinal: rowOrdinal,
+      timestamp: row.timestamp ?? null,
+      type: payload.type,
+      namespace: payload.namespace ?? null,
+      name: payload.name,
+      raw_input: payload[spec.inputKey] ?? null,
+      output_type: spec.outputType,
+    };
+    callsById.set(payload.call_id, call);
+    if (isExec) {
+      assert.ok(typeof call.raw_input === "string", "An exec attempt must preserve its raw input string");
+      const attempt = {
+        ...call,
+        ordinal: attempts.length + 1,
+        output: null,
+        cell_id: null,
+        continuations: [],
+      };
+      attempts.push(attempt);
+      call.attempt = attempt;
+    } else {
+      call.ordinal = waitCalls.length + 1;
+      call.cell_id = waitCellId(call.raw_input);
+      waitCalls.push(call);
+    }
+  }
+
+  for (const call of callsById.values()) {
+    call.output = correlateNativeToolOutput(call, outputsById, call.attempt ? "exec attempt" : "functions.wait");
+    if (call.attempt) call.attempt.output = call.output;
+  }
+
+  const attemptsByCell = new Map();
+  for (const attempt of attempts) {
+    attempt.cell_id = observedCellId(attempt.output?.raw);
+    if (attempt.cell_id === null) continue;
+    assert.ok(!attemptsByCell.has(attempt.cell_id), "Duplicate functions.exec cell IDs are ambiguous");
+    attemptsByCell.set(attempt.cell_id, attempt);
+  }
+
+  const waitsByCell = new Map();
+  for (const call of waitCalls) {
+    if (call.cell_id === null) continue;
+    const matching = waitsByCell.get(call.cell_id) ?? [];
+    matching.push(call);
+    waitsByCell.set(call.cell_id, matching);
+  }
+  for (const [cellId, attempt] of attemptsByCell) {
+    const matching = waitsByCell.get(cellId) ?? [];
+    if (matching.length === 0) continue;
+    matching.sort((left, right) => left.row_ordinal - right.row_ordinal);
+    let previousOutput = attempt.output;
+    for (let index = 0; index < matching.length; index += 1) {
+      const wait = matching[index];
+      assert.ok(previousOutput && wait.row_ordinal > previousOutput.row_ordinal,
+        "functions.wait must follow the previous output for its cell");
+      if (index > 0) {
+        assert.equal(functionsExecOutputPending(previousOutput, cellId), true,
+          "A repeated functions.wait requires the same cell to remain pending");
+      }
+      attempt.continuations.push({
+        exec_call_id: attempt.call_id,
+        cell_id: cellId,
+        call_id: wait.call_id,
+        ordinal: wait.ordinal,
+        row_ordinal: wait.row_ordinal,
+        timestamp: wait.timestamp,
+        type: wait.type,
+        namespace: wait.namespace,
+        name: wait.name,
+        raw_input: wait.raw_input,
+        output: wait.output,
+      });
+      previousOutput = wait.output;
+    }
+  }
+  const tokenSourceCallIds = [];
+  for (const attempt of attempts) {
+    const initialText = nativeTextOutput(attempt.output?.raw);
+    const continuedText = attempt.continuations
+      .map(({ output }) => nativeTextOutput(output?.raw) ?? "").join("\n");
+    if (initialText?.includes("WORKER_ONLY_") || continuedText.includes("WORKER_ONLY_")) {
+      tokenSourceCallIds.push(attempt.call_id);
+    }
+  }
+  assert.ok(tokenSourceCallIds.length <= 1, "Multiple native exec outputs contained worker tokens");
+  for (const wait of waitCalls) {
+    if (wait.cell_id !== null && attemptsByCell.has(wait.cell_id)) continue;
+    const text = nativeTextOutput(wait.output?.raw);
+    assert.ok(!text?.includes("WORKER_ONLY_"),
+      "A foreign functions.wait output contained an uncorrelated worker token");
+  }
+  for (const [callId, outputs] of outputsById) {
+    if (callsById.has(callId)) continue;
+    if (replyCallIds.has(callId)) continue;
+    assert.ok(!outputs.some(({ payload }) => nativeTextOutput(payload.output)?.includes("WORKER_ONLY_")),
+      "A foreign native tool output contained an uncorrelated worker token");
+  }
+  return attempts;
+}
+
+/** Return one worker token only after correlated result chunks report terminal exit code zero. */
+export function automaticReplyGateToken(attempt) {
+  assert.ok(attempt && typeof attempt === "object", "A captured native exec attempt is required");
+  const hasCell = attempt.cell_id !== null && attempt.cell_id !== undefined;
+  const outputs = hasCell
+    ? [attempt.output, ...(attempt.continuations ?? []).map(({ output }) => output)]
+    : [attempt.output];
+  if (outputs.some((output) => output === null || output === undefined)) return null;
+
+  const parsedOutputs = outputs.map((output) => {
+    const text = nativeTextOutput(output.raw);
+    assert.notEqual(text, null, "The captured gate output has an unsupported text representation");
+    const envelope = knownFunctionsExecBody(text, hasCell ? attempt.cell_id : null);
+    return { ...envelope, results: envelope.body.trim() ? parseFunctionsExecResults(envelope.body) : [] };
+  });
+  if (parsedOutputs.at(-1).pending) return null;
+  const results = parsedOutputs.flatMap(({ results: parsed }) => parsed);
+  const terminal = results.filter((result) => Object.hasOwn(result, "exit_code") && result.exit_code !== null);
+  if (terminal.length === 0) {
+    if (parsedOutputs.at(-1).pending || results.some((result) => result.session_id !== null
+      && result.session_id !== undefined)) return null;
+    assert.fail("The completed functions.exec output is missing a terminal result");
+  }
+  assert.equal(terminal.length, 1, "The functions.exec output contains multiple terminal results");
+  assert.equal(results.at(-1), terminal[0], "The terminal functions.exec result must be last");
+  assert.equal(terminal[0].exit_code, 0, "The reply gate command did not exit successfully");
+  const stdout = results.map((result) => result.output).join("").trim();
+  assert.match(stdout,
+    /^WORKER_ONLY_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+    "The successful gate stdout must be exactly one strict worker UUID");
+  return stdout;
 }
 
 /**

@@ -7,8 +7,11 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   activeConversationLeaseConflicts, appendOwnedReplyToolApproval, assertPromptDeliveryAccepted,
-  assertRequesterOriginMatchesProviderInput, automaticReplyDeadlines, completedAssistantRows,
-  automaticReplyExecShell, automaticReplyTaskInstructions,
+  assertAutomaticReplyGateInvocation, assertRequesterOriginMatchesProviderInput,
+  automaticReplyDeadlines, automaticReplyExecScript, automaticReplyExecShell,
+  automaticReplyGateCommand, automaticReplyGateToken, automaticReplyTaskInstructions,
+  collectAutomaticReplyExecAttempts,
+  completedAssistantRows, qualifyAutomaticReplyExecEnvironment,
   exactCurrentCascade, persistAutomaticReplyFailure, providerInputIsReady,
   readCanonicalTaskReply, readConversationLeaseSnapshot, readProviderInputState,
   recordConversationLeaseObservation, writeOwnedReplyReport,
@@ -171,20 +174,611 @@ test("fixture reply-tool grant refuses a linked managed Codex profile", async (t
 test("automatic reply uses an explicit System32 shell on Windows and the portable path elsewhere", () => {
   const gateCommand = "node .wardian-e2e-gate/reply-gate.mjs --deadline \"2030-01-01T00:00:00.000Z\"";
   const windowsShell = automaticReplyExecShell("win32", "C:\\Windows");
-  assert.equal(windowsShell, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
-  const windowsInstructions = automaticReplyTaskInstructions(gateCommand, windowsShell);
-  assert.match(windowsInstructions, /exec_command/u);
+  assert.equal(windowsShell, "C:\\Windows\\System32\\cmd.exe");
+  const windowsInstructions = automaticReplyTaskInstructions(gateCommand, windowsShell, "C:\\Windows");
+  const execScript = automaticReplyExecScript(gateCommand, windowsShell);
+  assert.equal(execScript,
+    `let result=await tools.exec_command({cmd:${JSON.stringify(gateCommand)},shell:${JSON.stringify(windowsShell)},yield_time_ms:1000});` +
+    "text(JSON.stringify(result));while(result.session_id){" +
+    "result=await tools.write_stdin({session_id:result.session_id,chars:'',yield_time_ms:1000});" +
+    "text(JSON.stringify(result));}");
+  assert.match(windowsInstructions, /functions\.exec/u);
   assert.match(windowsInstructions, /shell/u);
-  assert.ok(windowsInstructions.includes(JSON.stringify(windowsShell)));
+  assert.ok(windowsInstructions.includes(execScript));
+  assert.ok(execScript.includes(`cmd:${JSON.stringify(gateCommand)}`));
+  assert.ok(execScript.includes(`shell:${JSON.stringify(windowsShell)}`));
+  assert.ok(execScript.includes("yield_time_ms:1000"));
+  assert.ok(execScript.includes("tools.write_stdin({session_id:result.session_id,chars:'',yield_time_ms:1000})"));
   assert.ok(!/WindowsApps/iu.test(windowsInstructions));
+  assert.throws(() => automaticReplyTaskInstructions(
+    gateCommand, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "C:\\Windows",
+  ), /System32 Cmd/u);
+  assert.throws(() => automaticReplyTaskInstructions(gateCommand, "cmd.exe", "C:\\Windows"), /System32 Cmd/u);
 
   assert.equal(automaticReplyExecShell("linux", "/usr"), null);
   assert.equal(automaticReplyExecShell("darwin", "/Applications"), null);
   const portableInstructions = automaticReplyTaskInstructions(gateCommand);
-  assert.match(portableInstructions, /^Run node /u);
-  assert.ok(!portableInstructions.includes("exec_command"));
+  const portableScript = automaticReplyExecScript(gateCommand, null);
+  assert.match(portableInstructions, /functions\.exec/u);
+  assert.ok(portableInstructions.includes(portableScript));
+  assert.ok(portableScript.includes(`cmd:${JSON.stringify(gateCommand)},yield_time_ms:1000`));
+  assert.ok(!portableScript.includes("shell:"), "Portable execution must leave shell selection to the host");
   assert.throws(() => automaticReplyExecShell("win32", null), /SystemRoot must be absolute/u);
   assert.throws(() => automaticReplyExecShell("win32", "C:\\WindowsApps"), /must not resolve/u);
+});
+
+test("gate invocation assertion accepts only the exact wrapper or exact native exec arguments", () => {
+  const gateCommand = '"C:\\Program Files\\Node\\node.exe" .wardian-e2e-gate/reply-gate.mjs --deadline 2030-01-01T00:00:00.000Z';
+  const shell = "C:\\Windows\\System32\\cmd.exe";
+  const script = automaticReplyExecScript(gateCommand, shell);
+  const wrapped = { type: "custom_tool_call", name: "exec", raw_input: ` \n${script}\n ` };
+  assert.equal(assertAutomaticReplyGateInvocation(wrapped, { gateCommand, shell }), true);
+  assert.throws(() => assertAutomaticReplyGateInvocation({ ...wrapped, raw_input: script + "text('extra');" }, {
+    gateCommand, shell,
+  }), /exact reply gate wrapper/u);
+  assert.throws(() => assertAutomaticReplyGateInvocation({ ...wrapped, name: "read_file" }, {
+    gateCommand, shell,
+  }), /captured tool call type is unsupported/u);
+
+  const direct = {
+    type: "function_call", name: "exec_command",
+    raw_input: JSON.stringify({ cmd: gateCommand, shell, yield_time_ms: 1000 }),
+  };
+  assert.equal(assertAutomaticReplyGateInvocation(direct, { gateCommand, shell }), true);
+  for (const args of [
+    { cmd: gateCommand + " ", shell },
+    { cmd: gateCommand, shell: "C:\\WindowsApps\\pwsh.exe" },
+    { cmd: gateCommand },
+  ]) {
+    assert.throws(() => assertAutomaticReplyGateInvocation({ ...direct, raw_input: JSON.stringify(args) }, {
+      gateCommand, shell,
+    }), assert.AssertionError);
+  }
+  assert.throws(() => assertAutomaticReplyGateInvocation({ ...direct, raw_input: "not JSON" }, {
+    gateCommand, shell,
+  }), /valid JSON/u);
+  for (const override of [{ workdir: "C:\\foreign" }, { cwd: "C:\\foreign" }]) {
+    assert.throws(() => assertAutomaticReplyGateInvocation({
+      ...direct, raw_input: JSON.stringify({ cmd: gateCommand, shell, ...override }),
+    }, { gateCommand, shell }), /workspace/u);
+  }
+  const portableDirect = {
+    type: "function_call", name: "exec_command",
+    raw_input: JSON.stringify({ cmd: gateCommand }),
+  };
+  assert.equal(assertAutomaticReplyGateInvocation(portableDirect, { gateCommand, shell: null }), true);
+  assert.throws(() => assertAutomaticReplyGateInvocation({
+    ...portableDirect, raw_input: JSON.stringify({ cmd: gateCommand, shell: null }),
+  }, { gateCommand, shell: null }), /omit the shell override/u);
+});
+
+test("Windows gate command quotes the exact Node path once and keeps the ISO deadline bare", () => {
+  const deadlineAt = Date.parse("2030-01-01T00:00:00.000Z");
+  const nodeExecutable = "C:\\Program Files\\Node\\node.exe";
+  const command = automaticReplyGateCommand(deadlineAt, { nodeExecutable, platform: "win32" });
+  assert.equal(command,
+    "\"C:\\Program Files\\Node\\node.exe\" .wardian-e2e-gate/reply-gate.mjs --deadline 2030-01-01T00:00:00.000Z");
+  assert.equal((command.match(/"/gu) ?? []).length, 2);
+  assert.ok(command.includes("\\Program Files\\"));
+  assert.ok(!command.includes("\\\\Program"));
+  for (const unsafePath of [
+    "C:\\Node%HOME%\\node.exe", "C:\\Node!\\node.exe", "C:\\Node^\\node.exe",
+    "C:\\Node&tools\\node.exe", "C:\\Node|tools\\node.exe", "C:\\Node<tools\\node.exe",
+    "C:\\Node>tools\\node.exe", "C:\\Node\\(tools)\\node.exe", "C:\\Node\\node.exe\r\n",
+    "C:\\Node\\\"quoted\\node.exe",
+  ]) {
+    assert.throws(() => automaticReplyGateCommand(deadlineAt, {
+      nodeExecutable: unsafePath, platform: "win32",
+    }), /Cmd metacharacter/u);
+  }
+  assert.equal(automaticReplyGateCommand(deadlineAt, { platform: "linux" }),
+    "node .wardian-e2e-gate/reply-gate.mjs --deadline \"2030-01-01T00:00:00.000Z\"");
+  assert.throws(() => automaticReplyGateCommand(Number.MAX_SAFE_INTEGER, { platform: "win32" }),
+    /supported date range/u);
+});
+
+test("exec attempt collector preserves raw native inputs and matches both output event forms by call_id", () => {
+  const wrappedInput =
+    "const x = await tools.exec_command({cmd:'node reply-gate.mjs',shell:'C:\\\\WINDOWS\\\\System32\\\\cmd.exe'});text(JSON.stringify(x));";
+  const rows = [
+    { type: "response_item", timestamp: "2030-01-01T00:00:01.000Z", payload: {
+      type: "function_call", namespace: "functions", name: "exec_command",
+      call_id: "native-call-1", arguments: "{\"cmd\":\"node reply-gate.mjs\"}",
+    } },
+    { type: "response_item", timestamp: "2030-01-01T00:00:02.000Z", payload: {
+      type: "function_call", namespace: "functions", name: "reply",
+      call_id: "wardian-reply", arguments: "{\"status\":\"done\"}",
+    } },
+    { type: "response_item", timestamp: "2030-01-01T00:00:03.000Z", payload: {
+      type: "custom_tool_call", namespace: "functions", name: "exec",
+      call_id: "native-call-2", input: wrappedInput,
+    } },
+    { type: "response_item", timestamp: "2030-01-01T00:00:04.000Z", payload: {
+      type: "custom_tool_call_output", call_id: "native-call-2", output: "custom exec completed",
+    } },
+    { type: "response_item", timestamp: "2030-01-01T00:00:05.000Z", payload: {
+      type: "function_call_output", call_id: "native-call-1",
+      output: "Script running with cell ID 9\nWall time 1.0 seconds\nOutput:\n",
+    } },
+  ];
+  const attempts = collectAutomaticReplyExecAttempts(rows);
+  assert.equal(attempts.length, 2, "Wardian reply calls are not shell attempts");
+  assert.deepEqual(attempts.map(({ call_id, ordinal, row_ordinal, timestamp }) =>
+    ({ call_id, ordinal, row_ordinal, timestamp })), [
+    { call_id: "native-call-1", ordinal: 1, row_ordinal: 0, timestamp: "2030-01-01T00:00:01.000Z" },
+    { call_id: "native-call-2", ordinal: 2, row_ordinal: 2, timestamp: "2030-01-01T00:00:03.000Z" },
+  ]);
+  assert.equal(attempts[0].raw_input, "{\"cmd\":\"node reply-gate.mjs\"}");
+  assert.equal(attempts[0].namespace, "functions");
+  assert.deepEqual(attempts[0].output, {
+    row_ordinal: 4, timestamp: "2030-01-01T00:00:05.000Z",
+    raw: "Script running with cell ID 9\nWall time 1.0 seconds\nOutput:\n",
+  });
+  assert.equal(attempts[1].raw_input, wrappedInput);
+  assert.deepEqual(attempts[1].output, {
+    row_ordinal: 3, timestamp: "2030-01-01T00:00:04.000Z", raw: "custom exec completed",
+  });
+});
+
+test("exec attempt collector leaves pending calls visible and rejects ambiguous call/output identities", () => {
+  const pending = collectAutomaticReplyExecAttempts([
+    { type: "response_item", timestamp: "2030-01-01T00:00:01Z", payload: {
+      type: "custom_tool_call", name: "exec", call_id: "pending-1", input: "const value = 'opaque';",
+    } },
+    { type: "response_item", timestamp: "2030-01-01T00:00:02Z", payload: {
+      type: "function_call", name: "exec_command", call_id: "pending-2", arguments: "not-json { raw input",
+    } },
+    { type: "response_item", payload: {
+      type: "function_call", name: "unrelated_tool", call_id: "ignored", arguments: "{}",
+    } },
+  ]);
+  assert.equal(pending.length, 2);
+  assert.equal(pending[0].call_id, "pending-1");
+  assert.equal(pending[0].output, null);
+  assert.equal(pending[0].raw_input, "const value = 'opaque';");
+  assert.equal(pending[1].call_id, "pending-2");
+  assert.equal(pending[1].namespace, null, "The collector accepts function calls without a namespace field");
+  assert.equal(pending[1].raw_input, "not-json { raw input");
+
+  const duplicateCalls = [
+    { type: "response_item", payload: {
+      type: "function_call", name: "exec_command", call_id: "same-id", arguments: "first",
+    } },
+    { type: "response_item", payload: {
+      type: "custom_tool_call", name: "exec", call_id: "same-id", input: "second",
+    } },
+  ];
+  assert.throws(() => collectAutomaticReplyExecAttempts(duplicateCalls), /Duplicate exec attempt call_id/u);
+
+  const foreignCollision = [
+    { type: "response_item", payload: {
+      type: "function_call", name: "exec_command", call_id: "foreign-id", arguments: "opaque",
+    } },
+    { type: "response_item", payload: {
+      type: "custom_tool_call", name: "read_file", call_id: "foreign-id", input: "other tool",
+    } },
+  ];
+  assert.throws(() => collectAutomaticReplyExecAttempts(foreignCollision), /foreign tool call_id/u);
+
+  const duplicateOutputs = [
+    { type: "response_item", payload: {
+      type: "function_call", name: "exec_command", call_id: "output-id", arguments: "opaque",
+    } },
+    { type: "response_item", payload: {
+      type: "function_call_output", call_id: "output-id", output: "first",
+    } },
+    { type: "response_item", payload: {
+      type: "function_call_output", call_id: "output-id", output: "second",
+    } },
+  ];
+  assert.throws(() => collectAutomaticReplyExecAttempts(duplicateOutputs), /Duplicate exec attempt outputs/u);
+  const wrongOutput = [
+    duplicateOutputs[0],
+    { type: "response_item", payload: {
+      type: "custom_tool_call_output", call_id: "output-id", output: "foreign output",
+    } },
+  ];
+  assert.throws(() => collectAutomaticReplyExecAttempts(wrongOutput), /output type does not match/u);
+});
+
+test("gate token comes only from the matching completed functions.wait cell output", () => {
+  const token = "WORKER_ONLY_123e4567-e89b-42d3-a456-426614174000";
+  const firstResult = JSON.stringify({ output: "", exit_code: null, session_id: 17 });
+  const firstWaitResult = JSON.stringify({
+    output: "WORKER_ONLY_123e4567-e89b-42d3-", exit_code: null, session_id: 17,
+  });
+  const terminalWaitResult = JSON.stringify({ output: "a456-426614174000\n", exit_code: 0, session_id: null });
+  const completedWaitText = "Script completed\nWall time 1.0 seconds\nOutput:\n" +
+    firstWaitResult + "\n" + terminalWaitResult;
+  const rows = [
+    { type: "response_item", timestamp: "2030-01-01T00:00:01Z", payload: {
+      type: "custom_tool_call", namespace: "functions", name: "exec", call_id: "outer-exec",
+      input: "exact wrapper source",
+    } },
+    { type: "response_item", timestamp: "2030-01-01T00:00:02Z", payload: {
+      type: "custom_tool_call_output", call_id: "outer-exec",
+      output: `Script running with cell ID 17\nWall time 1.0 seconds\nOutput:\n${firstResult}`,
+    } },
+    { type: "response_item", timestamp: "2030-01-01T00:00:03Z", payload: {
+      type: "function_call", namespace: "functions", name: "wait", call_id: "outer-wait",
+      arguments: JSON.stringify({ cell_id: "17" }),
+    } },
+    { type: "response_item", timestamp: "2030-01-01T00:00:04Z", payload: {
+      type: "function_call_output", call_id: "outer-wait", output: [
+        { type: "input_text", text: completedWaitText },
+      ],
+    } },
+  ];
+  const [attempt] = collectAutomaticReplyExecAttempts(rows);
+  assert.equal(attempt.cell_id, "17");
+  assert.deepEqual(attempt.continuations, [{
+    exec_call_id: "outer-exec", cell_id: "17", call_id: "outer-wait", ordinal: 1, row_ordinal: 2,
+    timestamp: "2030-01-01T00:00:03Z", type: "function_call", namespace: "functions", name: "wait",
+    raw_input: JSON.stringify({ cell_id: "17" }),
+    output: { row_ordinal: 3, timestamp: "2030-01-01T00:00:04Z", raw: [
+      { type: "input_text", text: completedWaitText },
+    ] },
+  }]);
+  assert.equal(automaticReplyGateToken(attempt), token);
+  assert.equal(automaticReplyGateToken(attempt), "WORKER_ONLY_123e4567-e89b-42d3-a456-426614174000");
+  assert.throws(() => assert.equal(automaticReplyGateToken(attempt),
+    "WORKER_ONLY_123e4567-e89b-42d3-a456-426614174001"), assert.AssertionError,
+  "A canonical reply with a different token must fail exact matching");
+
+  const customWaitRows = rows.map((row, index) => {
+    if (index === 2) return { ...row, payload: {
+      type: "custom_tool_call", namespace: "functions", name: "wait", call_id: "outer-wait",
+      input: JSON.stringify({ cell_id: "17", yield_time_ms: 30_000, max_tokens: 1_000 }),
+    } };
+    if (index === 3) return { ...row, payload: {
+      type: "custom_tool_call_output", call_id: "outer-wait", output: [
+        { type: "text", text: completedWaitText },
+      ],
+    } };
+    return row;
+  });
+  const [customWaitAttempt] = collectAutomaticReplyExecAttempts(customWaitRows);
+  assert.equal(automaticReplyGateToken(customWaitAttempt), token);
+
+  const afterReplyRows = [
+    ...rows,
+    { type: "response_item", timestamp: "2030-01-01T00:00:04.500Z", payload: {
+      type: "function_call", namespace: "functions", name: "reply", call_id: "canonical-reply",
+      arguments: JSON.stringify({ status: "done", token }),
+    } },
+    { type: "response_item", timestamp: "2030-01-01T00:00:04.750Z", payload: {
+      type: "function_call_output", call_id: "canonical-reply", output: `accepted ${token}`,
+    } },
+    { type: "response_item", timestamp: "2030-01-01T00:00:05Z", payload: {
+      type: "custom_tool_call", namespace: "functions", name: "exec", call_id: "reply-only-exec",
+      input: "reply-only wrapper source",
+    } },
+    { type: "response_item", timestamp: "2030-01-01T00:00:06Z", payload: {
+      type: "custom_tool_call_output", call_id: "reply-only-exec", output: "reply accepted",
+    } },
+  ];
+  const attemptsAfterReply = collectAutomaticReplyExecAttempts(afterReplyRows);
+  assert.equal(attemptsAfterReply.length, 2, "Later reply-only exec wrappers remain visible without becoming gate evidence");
+  assert.equal(automaticReplyGateToken(attemptsAfterReply[0]), token);
+  assert.equal(attemptsAfterReply[1].call_id, "reply-only-exec");
+  assert.ok(!JSON.stringify(attemptsAfterReply[1].output.raw).includes("WORKER_ONLY_"));
+});
+
+test("repeated waits merge pending-cell stdout through the terminal result", () => {
+  const token = "WORKER_ONLY_123e4567-e89b-42d3-a456-426614174000";
+  const rows = [
+    { type: "response_item", payload: {
+      type: "custom_tool_call", namespace: "functions", name: "exec", call_id: "exec-repeated",
+      input: "exact wrapper source",
+    } },
+    { type: "response_item", payload: {
+      type: "custom_tool_call_output", call_id: "exec-repeated",
+      output: "Script running with cell ID 41\nWall time 31.0 seconds\nOutput:\n" +
+        JSON.stringify({ output: "WORKER_ONLY_123e4567-e89b-42d3-", exit_code: null, session_id: 41 }),
+    } },
+    { type: "response_item", payload: {
+      type: "function_call", namespace: "functions", name: "wait", call_id: "wait-repeated-1",
+      arguments: JSON.stringify({ cell_id: "41", yield_time_ms: 30_000, max_tokens: 1_000 }),
+    } },
+    { type: "response_item", payload: {
+      type: "function_call_output", call_id: "wait-repeated-1", output: [
+        { type: "input_text", text: "Script running with cell ID 41\nWall time 14.8 seconds\nOutput:\n" +
+          JSON.stringify({ output: "a456-426614174000", exit_code: null, session_id: 41 }) },
+      ],
+    } },
+    { type: "response_item", payload: {
+      type: "custom_tool_call", namespace: "functions", name: "wait", call_id: "wait-repeated-2",
+      input: JSON.stringify({ cell_id: "41", yield_time_ms: 30_000, max_tokens: 1_000 }),
+    } },
+    { type: "response_item", payload: {
+      type: "custom_tool_call_output", call_id: "wait-repeated-2", output: [
+        { type: "input_text", text: "Script completed\nWall time 0.4 seconds\nOutput:\n" +
+          JSON.stringify({ output: "\n", exit_code: 0, session_id: null }) },
+      ],
+    } },
+  ];
+  const [attempt] = collectAutomaticReplyExecAttempts(rows);
+  assert.equal(attempt.continuations.length, 2);
+  assert.deepEqual(attempt.continuations.map(({ call_id, cell_id }) => ({ call_id, cell_id })), [
+    { call_id: "wait-repeated-1", cell_id: "41" },
+    { call_id: "wait-repeated-2", cell_id: "41" },
+  ]);
+  assert.equal(automaticReplyGateToken(attempt), token,
+    "Initial and repeated-wait result.output chunks combine only after exit_code 0");
+
+  const finishedBeforeSecondWait = rows.map((row, index) => index === 3 ? {
+    ...row,
+    payload: { ...row.payload, output: [
+      { type: "input_text", text: "Script completed\nWall time 0.4 seconds\nOutput:\n" +
+        JSON.stringify({ output: "", exit_code: 0, session_id: null }) },
+    ] },
+  } : row);
+  assert.throws(() => collectAutomaticReplyExecAttempts(finishedBeforeSecondWait),
+    /same cell to remain pending/u);
+
+  const waitBeforePriorOutput = [...rows];
+  const secondWaitCall = waitBeforePriorOutput.splice(4, 1)[0];
+  waitBeforePriorOutput.splice(3, 0, secondWaitCall);
+  assert.throws(() => collectAutomaticReplyExecAttempts(waitBeforePriorOutput),
+    /follow the previous output/u);
+
+  const foreignCellWait = rows.map((row, index) => index === 3 ? {
+    ...row,
+    payload: { ...row.payload, output: [
+      { type: "input_text", text: "Script running with cell ID 42\nWall time 14.8 seconds\nOutput:\n" +
+        JSON.stringify({ output: "a456-426614174000", exit_code: null, session_id: 42 }) },
+    ] },
+  } : row);
+  assert.throws(() => collectAutomaticReplyExecAttempts(foreignCellWait), /foreign cell/u);
+});
+
+test("direct exec_command gate token is bound to its own output call_id", () => {
+  const token = "WORKER_ONLY_123e4567-e89b-42d3-a456-426614174000";
+  const args = JSON.stringify({
+    cmd: '"C:\\Program Files\\Node\\node.exe" gate.mjs --deadline 2030-01-01T00:00:00.000Z',
+    shell: "C:\\Windows\\System32\\cmd.exe",
+  });
+  const rows = [
+    { type: "response_item", timestamp: "2030-01-01T00:00:01Z", payload: {
+      type: "function_call", namespace: "functions", name: "exec_command", call_id: "direct-exec",
+      arguments: args,
+    } },
+    { type: "response_item", timestamp: "2030-01-01T00:00:03Z", payload: {
+      type: "function_call_output", call_id: "direct-exec",
+      output: JSON.stringify({ output: `${token}\n`, exit_code: 0 }),
+    } },
+    { type: "response_item", payload: {
+      type: "function_call", namespace: "functions", name: "reply", call_id: "canonical-reply",
+      arguments: JSON.stringify({ token }),
+    } },
+  ];
+  const [attempt] = collectAutomaticReplyExecAttempts(rows);
+  assert.equal(attempt.raw_input, args, "The exact native JSON arguments remain available for validation");
+  assert.equal(automaticReplyGateToken(attempt), token);
+  assert.notEqual(automaticReplyGateToken(attempt), "WORKER_ONLY_123e4567-e89b-42d3-a456-426614174001",
+    "A mismatched canonical reply token cannot equal the observed gate token");
+  assert.throws(() => collectAutomaticReplyExecAttempts([
+    rows[0],
+    { type: "response_item", payload: {
+      type: "function_call_output", call_id: "foreign-output", output: token,
+    } },
+  ]), /foreign native tool output/u);
+});
+
+test("gate token remains pending without the observed cell output and rejects foreign token output", () => {
+  const token = "WORKER_ONLY_123e4567-e89b-42d3-a456-426614174000";
+  const execCall = { type: "response_item", payload: {
+    type: "custom_tool_call", name: "exec", call_id: "exec-cell", input: "wrapper",
+  } };
+  const execOutput = { type: "response_item", payload: {
+    type: "custom_tool_call_output", call_id: "exec-cell",
+    output: "Script running with cell ID 22\nWall time 1.0 seconds\nOutput:\n",
+  } };
+  const foreignWait = [
+    { type: "response_item", payload: {
+      type: "custom_tool_call", name: "wait", call_id: "wait-foreign", input: JSON.stringify({ cell_id: "23" }),
+    } },
+    { type: "response_item", payload: {
+      type: "custom_tool_call_output", call_id: "wait-foreign", output: token,
+    } },
+  ];
+  const [pending] = collectAutomaticReplyExecAttempts([execCall, execOutput]);
+  assert.equal(automaticReplyGateToken(pending), null);
+  assert.throws(() => collectAutomaticReplyExecAttempts([execCall, execOutput, ...foreignWait]),
+    /foreign functions\.wait output/u);
+
+  const matchingWaitPending = [
+    ...[execCall, execOutput],
+    { type: "response_item", payload: {
+      type: "function_call", name: "wait", call_id: "wait-pending", arguments: JSON.stringify({ cell_id: 22 }),
+    } },
+  ];
+  const [stillPending] = collectAutomaticReplyExecAttempts(matchingWaitPending);
+  assert.equal(stillPending.continuations[0].output, null);
+  assert.equal(automaticReplyGateToken(stillPending), null);
+});
+
+test("gate token collector rejects duplicate cells, duplicate wait outputs, and malformed markers", () => {
+  const execRow = (callId, cellId) => [
+    { type: "response_item", payload: {
+      type: "function_call", name: "exec_command", call_id: callId, arguments: "{}",
+    } },
+    { type: "response_item", payload: {
+      type: "function_call_output", call_id: callId,
+      output: `Script running with cell ID ${cellId}\nWall time 1.0 seconds\nOutput:\n`,
+    } },
+  ];
+  assert.throws(() => collectAutomaticReplyExecAttempts([
+    ...execRow("exec-a", "same-cell"), ...execRow("exec-b", "same-cell"),
+  ]), /Duplicate functions\.exec cell IDs/u);
+
+  const base = [
+    ...execRow("exec-one", "31"),
+    { type: "response_item", payload: {
+      type: "function_call", name: "wait", call_id: "wait-one", arguments: JSON.stringify({ cell_id: "31" }),
+    } },
+    { type: "response_item", payload: {
+      type: "function_call_output", call_id: "wait-one", output: "first",
+    } },
+  ];
+  assert.throws(() => collectAutomaticReplyExecAttempts([
+    ...base,
+    { type: "response_item", payload: {
+      type: "function_call_output", call_id: "wait-one", output: "duplicate",
+    } },
+  ]), /Duplicate functions\.wait outputs/u);
+  assert.throws(() => collectAutomaticReplyExecAttempts([
+    ...base,
+    { type: "response_item", payload: {
+      type: "custom_tool_call", name: "wait", call_id: "wait-one", input: JSON.stringify({ cell_id: "31" }),
+    } },
+  ]), /Duplicate functions\.wait call_id/u);
+
+  const attempt = { cell_id: null, output: { raw: JSON.stringify({ output: "WORKER_ONLY_not-a-uuid", exit_code: 0 }) } };
+  assert.throws(() => automaticReplyGateToken(attempt), /exactly one strict worker UUID/u);
+  assert.throws(() => automaticReplyGateToken({
+    cell_id: null, output: { raw: JSON.stringify({
+      output: "WORKER_ONLY_123e4567-e89b-42d3-a456-426614174000\nWORKER_ONLY_123e4567-e89b-42d3-a456-426614174001",
+      exit_code: 0,
+    }) },
+  }), /exactly one strict worker UUID/u);
+  assert.throws(() => automaticReplyGateToken({
+    cell_id: null, output: { raw: [
+      JSON.stringify({ output: "WORKER_ONLY_123e4567-e89b-42d3-a456-426614174000", exit_code: 0 }),
+      JSON.stringify({ output: "", exit_code: 0 }),
+    ].join("\n") },
+  }), /multiple terminal results/u);
+  assert.throws(() => automaticReplyGateToken({
+    cell_id: null, raw_input: "WORKER_ONLY_123e4567-e89b-42d3-a456-426614174000",
+    output: { raw: JSON.stringify({ output: "", error: "WORKER_ONLY_123e4567-e89b-42d3-a456-426614174000", exit_code: 0 }) },
+  }), /exactly one strict worker UUID/u, "A UUID in raw input or an error is not stdout evidence");
+  assert.throws(() => automaticReplyGateToken({
+    cell_id: null, output: { raw: "not JSON\nWORKER_ONLY_123e4567-e89b-42d3-a456-426614174000" },
+  }), /non-JSON result line/u);
+  assert.throws(() => automaticReplyGateToken({
+    cell_id: null,
+    output: { raw: JSON.stringify({ output: "WORKER_ONLY_123e4567-e89b-42d3-a456-426614174000" }) },
+  }), /missing a terminal result/u);
+  assert.equal(automaticReplyGateToken({
+    cell_id: null,
+    output: { raw: JSON.stringify({ output: "partial", exit_code: null, session_id: 4 }) },
+  }), null, "A process with a live session remains pending without a terminal result");
+  assert.throws(() => automaticReplyGateToken({
+    cell_id: null, output: { raw: JSON.stringify({
+      output: "WORKER_ONLY_123e4567-e89b-42d3-a456-426614174000", exit_code: 1,
+    }) },
+  }), /did not exit successfully/u);
+  assert.throws(() => automaticReplyGateToken({
+    cell_id: "41",
+    output: { raw: "Script running with cell ID 41\nWall time 31.0 seconds\nOutput:\n" },
+    continuations: [{ output: { raw: [
+      { type: "input_text", text: "Script failed\nWall time 14.8 seconds\nOutput:\n" },
+      { type: "input_text", text: "Script error: command failed" },
+    ] } }],
+  }), /outer functions\.exec wrapper failed/u);
+  assert.throws(() => automaticReplyGateToken({
+    cell_id: null, output: { raw: [{ type: "unsupported_text", text: "WORKER_ONLY_123e4567-e89b-42d3-a456-426614174000" }] },
+  }), /unsupported text representation/u);
+});
+
+test("non-Windows exec environment qualification keeps the portable path", async () => {
+  assert.equal(await qualifyAutomaticReplyExecEnvironment({ platform: "linux" }), null);
+  assert.equal(await qualifyAutomaticReplyExecEnvironment({ platform: "darwin" }), null);
+});
+
+const windowsOnly = process.platform === "win32" ? test : test.skip;
+windowsOnly("Windows exec environment qualification hashes exact binaries and rejects command shadows", async (t) => {
+  const wardianHome = await fixture(t);
+  const workerWorkspace = path.join(wardianHome, "workspace");
+  const wardianBin = path.join(wardianHome, "bin");
+  const systemRoot = process.env.SystemRoot;
+  const system32 = path.win32.join(systemRoot, "System32");
+  const nodeDirectory = path.win32.dirname(process.execPath);
+  await fs.mkdir(workerWorkspace);
+  await fs.mkdir(wardianBin);
+  const inheritedPath = [wardianBin + "\\", nodeDirectory, system32].join(";");
+  const env = {
+    WARDIAN_HOME: wardianHome,
+    SystemRoot: systemRoot,
+    Path: inheritedPath,
+    PATHEXT: process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD",
+  };
+  const qualify = (pathValue = inheritedPath) => qualifyAutomaticReplyExecEnvironment({
+    platform: "win32",
+    wardianHome,
+    workerWorkspace,
+    env: { ...env, Path: pathValue },
+    nodeExecutable: process.execPath,
+  });
+  const receipt = await qualify();
+  assert.equal(receipt.shell, path.win32.join(systemRoot, "System32", "cmd.exe"));
+  assert.equal(receipt.node, process.execPath);
+  assert.equal(receipt.node_realpath, await fs.realpath(process.execPath));
+  assert.match(receipt.shell_sha256, /^[0-9a-f]{64}$/u);
+  assert.match(receipt.node_sha256, /^[0-9a-f]{64}$/u);
+  assert.match(receipt.child_path.sha256, /^[0-9a-f]{64}$/u);
+  assert.equal(receipt.child_path.entry_count, 3, "The duplicate Wardian bin entry is removed");
+  assert.equal(receipt.child_path.cmd_resolution, "system32");
+  assert.equal(receipt.child_path.node_resolution, "exact");
+  assert.equal(receipt.child_path.workspace_command_shadows, 0);
+  assert.equal(Object.hasOwn(receipt.child_path, "value"), false, "The receipt must not expose PATH contents");
+
+  const shadowDirectory = path.join(wardianHome, "shadow");
+  await fs.mkdir(shadowDirectory);
+  await fs.writeFile(path.join(shadowDirectory, "cmd.exe"), "shadow");
+  await assert.rejects(qualify(shadowDirectory + ";" + inheritedPath), /resolves cmd/u);
+  await fs.rm(shadowDirectory, { recursive: true });
+
+  await fs.writeFile(path.join(wardianBin, "node.exe"), "shadow");
+  await assert.rejects(qualify(), /resolves Node/u);
+  await fs.rm(path.join(wardianBin, "node.exe"));
+
+  await fs.writeFile(path.join(workerWorkspace, "cmd.exe"), "shadow");
+  await assert.rejects(qualify(), /workspace contains a cmd command shadow/u);
+});
+
+windowsOnly("Node qualification accepts its existing parent junction and rejects a foreign PATH shadow", async (t) => {
+  const wardianHome = await fixture(t);
+  const workerWorkspace = path.join(wardianHome, "workspace");
+  const wardianBin = path.join(wardianHome, "bin");
+  const aliasDirectory = path.join(wardianHome, "node-alias");
+  const nodeDirectory = path.win32.dirname(process.execPath);
+  const linkedNode = path.win32.join(aliasDirectory, path.win32.basename(process.execPath));
+  const systemRoot = process.env.SystemRoot;
+  const system32 = path.win32.join(systemRoot, "System32");
+  await fs.mkdir(workerWorkspace);
+  await fs.mkdir(wardianBin);
+  try {
+    await fs.symlink(nodeDirectory, aliasDirectory, "junction");
+  } catch (error) {
+    if (["EPERM", "EACCES", "ENOTSUP"].includes(error.code)) {
+      t.skip("This host does not permit creating a directory junction for the Node path test");
+      return;
+    }
+    throw error;
+  }
+  const env = {
+    WARDIAN_HOME: wardianHome,
+    SystemRoot: systemRoot,
+    Path: [wardianBin, aliasDirectory, system32].join(";"),
+    PATHEXT: process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD",
+  };
+  const qualify = (pathValue = env.Path) => qualifyAutomaticReplyExecEnvironment({
+    platform: "win32",
+    wardianHome,
+    workerWorkspace,
+    env: { ...env, Path: pathValue },
+    nodeExecutable: linkedNode,
+  });
+  const receipt = await qualify();
+  assert.equal(receipt.node, linkedNode);
+  assert.equal(receipt.node_realpath, await fs.realpath(process.execPath));
+
+  const foreignDirectory = path.join(wardianHome, "foreign-node");
+  await fs.mkdir(foreignDirectory);
+  await fs.writeFile(path.join(foreignDirectory, "node.exe"), "foreign executable");
+  await assert.rejects(qualify([wardianBin, foreignDirectory, aliasDirectory, system32].join(";")),
+    /resolves Node/u);
 });
 
 function database(home, configure = () => {}) {

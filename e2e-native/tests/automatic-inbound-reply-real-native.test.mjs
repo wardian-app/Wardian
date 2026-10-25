@@ -17,7 +17,13 @@ import { messageCli } from "../lib/canonical-messaging.mjs";
 import {
   appendOwnedReplyToolApproval,
   automaticReplyExecShell,
+  automaticReplyGateCommand,
+  automaticReplyExecScript,
   automaticReplyTaskInstructions,
+  assertAutomaticReplyGateInvocation,
+  automaticReplyGateToken,
+  collectAutomaticReplyExecAttempts,
+  qualifyAutomaticReplyExecEnvironment,
   assertRequesterOriginMatchesProviderInput,
   automaticReplyDeadlines,
   assertPromptDeliveryAccepted,
@@ -79,15 +85,62 @@ async function sha256(file) {
   return createHash("sha256").update(await fs.readFile(file)).digest("hex");
 }
 
-async function verifySystemPowerShell(shell) {
-  const metadata = await fs.lstat(shell);
-  assert.equal(metadata.isFile(), true, "The explicit Windows shell must be a regular executable file");
-  assert.equal(metadata.isSymbolicLink(), false, "The explicit Windows shell must not be a link");
-  const realPath = await fs.realpath(shell);
-  assert.equal(path.win32.resolve(realPath).toLowerCase(), path.win32.resolve(shell).toLowerCase(),
-    "The explicit Windows shell must resolve to the selected System32 path");
-  assert.ok(!/\\WindowsApps(?:\\|$)/iu.test(realPath), "The fixture must not select the WindowsApps alias");
-  return sha256(realPath);
+/** Read only the fresh worker's bound rollout, retaining tool inputs without evaluating them. */
+async function readWorkerExecEvidence(home, worker, workspace, nativeSession) {
+  assert.match(nativeSession, /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu,
+    "The worker must expose a canonical native session before reading its tool attempts");
+  const profile = path.join(home, "agents", worker.session_id, "habitat", ".codex");
+  const owner = JSON.parse(await fs.readFile(path.join(profile, ".wardian-messaging.json"), "utf8"));
+  assert.equal(owner.version, 1);
+  assert.equal(owner.agent_id, worker.session_id, "The rollout profile belongs to a foreign agent");
+  assert.equal(path.resolve(owner.wardian_home).toLowerCase(), path.resolve(home).toLowerCase(),
+    "The rollout profile belongs to a foreign native home");
+  const root = path.join(profile, "sessions");
+  const candidates = [];
+  const visit = async (directory, depth = 0) => {
+    assert.ok(depth <= 5, "The fresh worker rollout exceeds the known session directory layout");
+    const metadata = await fs.lstat(directory);
+    assert.ok(metadata.isDirectory() && !metadata.isSymbolicLink(),
+      "The worker session tree must not redirect to another history");
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      const file = path.join(directory, entry.name);
+      if (entry.isDirectory()) await visit(file, depth + 1);
+      else if (entry.isFile() && entry.name.endsWith("-" + nativeSession + ".jsonl")) candidates.push(file);
+    }
+  };
+  try { await visit(root); }
+  catch (error) { if (error.code === "ENOENT") return null; throw error; }
+  assert.ok(candidates.length <= 1, "The worker native session has duplicate rollout sources");
+  if (!candidates.length) return null;
+  const file = candidates[0];
+  const metadata = await fs.lstat(file);
+  assert.ok(metadata.isFile() && !metadata.isSymbolicLink() && metadata.size < 64 * 1024 * 1024,
+    "The fresh worker rollout must be a bounded regular file");
+  const bytes = await fs.readFile(file);
+  const text = bytes.toString("utf8");
+  const lines = text.split(/\r?\n/u);
+  // A live app-server can be appending the final line while this observation is read.
+  const partialTail = !text.endsWith("\n");
+  if (partialTail) lines.pop();
+  const rows = lines.filter(Boolean).map((line) => JSON.parse(line));
+  if (!rows.length) return null;
+  assert.equal(rows[0].type, "session_meta", "The worker rollout must start with native session metadata");
+  const expectedWorkspace = (await fs.realpath(workspace)).toLowerCase();
+  for (const row of rows.filter((entry) => entry.type === "session_meta")) {
+    assert.equal(row.payload?.id, nativeSession, "The rollout contains a foreign native session");
+    assert.equal((await fs.realpath(row.payload.cwd)).toLowerCase(), expectedWorkspace,
+      "The rollout contains a foreign worker workspace");
+  }
+  return {
+    native_session: nativeSession,
+    source: "owned_worker_rollout",
+    source_file: file,
+    source_sha256: createHash("sha256").update(bytes).digest("hex"),
+    source_bytes: bytes.length,
+    partial_tail: partialTail,
+    attempts: collectAutomaticReplyExecAttempts(rows),
+    tool_environment_mode: "not_observed",
+  };
 }
 
 async function assertWorkerRemainsOff(driver, worker) {
@@ -147,11 +200,22 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
   let session;
   let requester;
   let worker;
+  let workerNativeSession;
   let initialOwner;
   let coreFailure;
   let startupAttempted = false;
   let requesterSpawnAttempted = false;
   let workerSpawnAttempted = false;
+
+  const observeWorkerExec = async () => {
+    if (!worker) return;
+    const agents = await invokeTauri(session.driver, "list_agents");
+    const current = agents.find((entry) => entry.session_id === worker.session_id);
+    assert.equal(current?.provider, "codex", "Worker execution evidence requires the original Codex agent");
+    if (!current.resume_session) return;
+    workerNativeSession = current.resume_session;
+    report.worker_exec_evidence = await readWorkerExecEvidence(home, worker, workerWorkspace, workerNativeSession);
+  };
 
   try {
     prepareIsolatedHome(harness);
@@ -161,6 +225,18 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
     await fs.mkdir(workerWorkspace, { recursive: true });
     await fs.mkdir(requesterWorkspace, { recursive: true });
     await fs.mkdir(controlDirectory, { recursive: true });
+    const execEnvironment = await qualifyAutomaticReplyExecEnvironment({
+      platform: process.platform, wardianHome: home, workerWorkspace,
+      env: { ...process.env, WARDIAN_HOME: home }, nodeExecutable: process.execPath,
+    });
+    report.worker_exec_environment = execEnvironment === null ? null : {
+      ...execEnvironment,
+      path_basis: "nativeSessionEnvironment inheritance plus child_path_with_cli_bin",
+      owner_launch: "local_app_server_subprocess",
+      tool_environment_mode: "not_observed",
+      remote_tui_is_not_tool_environment_evidence: true,
+    };
+    await save();
     const packagedCli = path.join(path.dirname(harness.appPath), "resources", "bin", path.basename(harness.cliPath));
     const [frozenCliHash, packagedCliHash] = await Promise.all([
       sha256(harness.cliPath), sha256(packagedCli),
@@ -226,7 +302,12 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
     await assertWorkerRemainsOff(session.driver, worker);
     const execShell = automaticReplyExecShell();
     if (execShell !== null) {
-      report.artifacts.windows_exec_shell_sha256 = await verifySystemPowerShell(execShell);
+      assert.equal(execEnvironment.shell.toLowerCase(), execShell.toLowerCase());
+      assert.deepEqual(await qualifyAutomaticReplyExecEnvironment({
+        platform: process.platform, wardianHome: home, workerWorkspace,
+        env: { ...process.env, WARDIAN_HOME: home }, nodeExecutable: process.execPath,
+      }), execEnvironment, "The installed native CLI directory must preserve the preflighted command resolution");
+      report.artifacts.windows_exec_shell_sha256 = execEnvironment.shell_sha256;
     }
     const registeredMcpCommand = path.join(home, "bin",
       process.platform === "win32" ? "wardian-mcp.exe" : "wardian-cli");
@@ -265,8 +346,10 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
           assert.equal(await exists(releasePath), false, "The release file must start absent");
 
           initialMarker = "AGY_INITIAL_DONE_" + randomUUID();
-          const gateCommand = "node .wardian-e2e-gate/reply-gate.mjs --deadline " +
-            JSON.stringify(new Date(workDeadline()).toISOString());
+          const gateCommand = automaticReplyGateCommand(workDeadline(), {
+            platform: process.platform, nodeExecutable: execEnvironment?.node ?? process.execPath,
+          });
+          const gateScript = automaticReplyExecScript(gateCommand, execShell);
           const taskInstructions = automaticReplyTaskInstructions(
             gateCommand, execShell,
           );
@@ -361,6 +444,8 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
           const held = await pollUntil(async () => {
             const proof = await readCanonicalTaskReply(home, requester.session_id, worker.session_id);
             if (!proof) return null;
+            await observeWorkerExec();
+            await save();
             assertRequesterOriginMatchesProviderInput(
               proof, "antigravity", initialOwner.provider_session,
             );
@@ -377,14 +462,22 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
             const initialFinals = completedAssistantRows(cascade.records).filter((row) => row.text.trim() === initialMarker);
             assert.ok(initialFinals.length <= 1, "The initial assistant completion must be unique");
             const gateReady = await exists(readyPath);
+            const execAttempts = report.worker_exec_evidence?.attempts ?? [];
+            assert.ok(execAttempts.length <= 1,
+              "The worker gate does not accept fallback or repeated native exec attempts");
+            if (execAttempts.length === 1) {
+              assertAutomaticReplyGateInvocation(execAttempts[0], { gateCommand, shell: execShell });
+              assert.equal(automaticReplyGateToken(execAttempts[0]), null,
+                "The worker gate must not disclose its output token before external release");
+            }
             if (userPrompts.length === 1 && initialFinals.length === 1 &&
-              metric.current_status?.toLowerCase() === "idle" && gateReady) {
+              metric.current_status?.toLowerCase() === "idle" && gateReady && execAttempts.length === 1) {
               assert.ok(initialFinals[0].ordinal > userPrompts[0].ordinal,
                 "The native assistant completion must follow the exact initial requester prompt");
               assert.equal(config.resume_session, initialOwner.provider_session);
-              assert.ok(proof.task_body.includes(gateCommand), "The admitted task must carry the worker gate instruction");
+              assert.ok(proof.task_body.includes(gateScript), "The admitted task must carry the exact worker gate script");
               preReleaseRecords = cascade.records;
-              return { proof, cascade, initialFinal: initialFinals[0] };
+              return { proof, cascade, initialFinal: initialFinals[0], execCallId: execAttempts[0].call_id };
             }
             return null;
           }, workDeadline(),
@@ -401,6 +494,7 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
             task_body: coreProof.task_body,
             requester_initial_turn_id: held.initialFinal.id,
             requester_cascade_id: held.cascade.id,
+            worker_exec_call_id: held.execCallId,
             release_attempts: 1,
           };
           await save();
@@ -409,6 +503,7 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
           const completed = await pollUntil(async () => {
             const proof = await readCanonicalTaskReply(home, requester.session_id, worker.session_id, coreProof.request_id);
             if (!proof?.reply) return null;
+            await observeWorkerExec();
             if (proof.task_status !== "completed" || proof.reply.status !== "done") return null;
             assert.equal(proof.task_status, "completed");
             assert.equal(proof.reply.status, "done");
@@ -420,6 +515,13 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
             assert.equal(proof.requester_reply_count, 0);
             assert.equal(proof.reply_to_reply_count, 0);
             assert.match(proof.reply.body, /^WORKER_ONLY_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu);
+            const gateAttempt = report.worker_exec_evidence?.attempts.find((entry) => entry.call_id === held.execCallId);
+            if (!gateAttempt) return null;
+            assertAutomaticReplyGateInvocation(gateAttempt, { gateCommand, shell: execShell });
+            const observedGateToken = automaticReplyGateToken(gateAttempt);
+            if (observedGateToken === null) return null;
+            assert.equal(proof.reply.body, observedGateToken,
+              "The canonical reply must equal the original gate's actual captured output token");
             assert.ok(!initialPrompt.includes(proof.reply.body), "The unpredictable worker token must be absent from the requester prompt");
             assert.ok(!proof.task_body.includes(proof.reply.body), "The requester-created task must not contain the worker token");
             assert.ok(!preReleaseRecords.some((row) => row.text?.includes(proof.reply.body)),
@@ -456,6 +558,8 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
             requester_initial_turn_id: held.initialFinal.id,
             continuation_turn_id: completed.continuation.id,
             continuation_text: completed.continuation.text,
+            worker_exec_call_id: held.execCallId,
+            gate_output_matched_reply: true,
             submission_attempts: 1,
             release_attempts: 1,
             reply_count: completed.proof.reply_count,
@@ -543,6 +647,13 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
     report.error = error.message;
     throw error;
   } finally {
+    if (workerNativeSession) {
+      try { await observeWorkerExec(); }
+      catch (error) {
+        report.status = "fail";
+        report.worker_exec_observation_error = error.message;
+      }
+    }
     await cleanupConformanceSession({
       harness, session, startupAttempted,
       pause: async () => {
