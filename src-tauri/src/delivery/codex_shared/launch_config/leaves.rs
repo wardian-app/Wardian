@@ -79,9 +79,13 @@ pub(super) fn validate(path: &[String], leaf: &Leaf) -> Result<(), CodexSharedEr
             _ => false,
         },
         [table, key] => {
-            table == "sandbox_workspace_write"
+            (table == "sandbox_workspace_write"
                 && key == "writable_roots"
-                && matches!(leaf, Leaf::Strings(_))
+                && matches!(leaf, Leaf::Strings(_)))
+                || (table == "windows"
+                    && key == "sandbox"
+                    && matches!(leaf, Leaf::String(value) if matches!(value.as_str(), "elevated" | "mxc" | "unelevated")))
+                || (table == "features" && key == "prefer_mxc" && matches!(leaf, Leaf::Boolean(_)))
         }
         [table, project, key] => {
             table == "projects"

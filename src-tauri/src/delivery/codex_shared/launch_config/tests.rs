@@ -193,6 +193,119 @@ fn tui_update_check_overlay_removes_key_when_initially_absent() {
 }
 
 #[test]
+fn windows_sandbox_overlay_restores_a_missing_backend_leaf() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("config.toml");
+    fs::write(&path, "model = 'configured-model'\n").unwrap();
+
+    let mut guard = prepare_tui_launch_config(
+        home.path(),
+        &args(&[
+            r#"windows.sandbox="unelevated""#,
+            "features.prefer_mxc=false",
+        ]),
+    )
+    .unwrap();
+    assert_eq!(
+        read(home.path())["windows"]["sandbox"].as_str(),
+        Some("unelevated")
+    );
+    assert_eq!(
+        read(home.path())["features"]["prefer_mxc"].as_bool(),
+        Some(false)
+    );
+
+    guard.restore().unwrap();
+    let restored = read(home.path());
+    assert!(restored["windows"].get("sandbox").is_none());
+    assert!(restored["features"].get("prefer_mxc").is_none());
+    assert_eq!(restored["model"].as_str(), Some("configured-model"));
+    assert!(!home.path().join(journal::FILE).exists());
+}
+
+#[test]
+fn windows_sandbox_overlay_keeps_the_effective_existing_choice() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("config.toml");
+    fs::write(
+        &path,
+        "[windows]\nsandbox = 'elevated'\n[features]\nprefer_mxc = true\n",
+    )
+    .unwrap();
+
+    let mut guard = prepare_tui_launch_config(
+        home.path(),
+        &args(&[r#"windows.sandbox="elevated""#, "features.prefer_mxc=false"]),
+    )
+    .unwrap();
+    assert_eq!(
+        read(home.path())["windows"]["sandbox"].as_str(),
+        Some("elevated")
+    );
+    assert_eq!(
+        read(home.path())["features"]["prefer_mxc"].as_bool(),
+        Some(false)
+    );
+
+    guard.restore().unwrap();
+    let restored = read(home.path());
+    assert_eq!(restored["windows"]["sandbox"].as_str(), Some("elevated"));
+    assert_eq!(restored["features"]["prefer_mxc"].as_bool(), Some(true));
+}
+
+#[test]
+fn windows_sandbox_overlay_preserves_a_foreign_backend_update() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("config.toml");
+    fs::write(&path, "[windows]\nsandbox = 'mxc'\n").unwrap();
+
+    let mut guard = prepare_tui_launch_config(
+        home.path(),
+        &args(&[
+            r#"windows.sandbox="unelevated""#,
+            "features.prefer_mxc=false",
+        ]),
+    )
+    .unwrap();
+    let mut foreign_update = read(home.path());
+    foreign_update["windows"]["sandbox"] = toml_edit::value("elevated");
+    foreign_update["features"]["prefer_mxc"] = toml_edit::value(true);
+    fs::write(&path, foreign_update.to_string()).unwrap();
+
+    guard.restore().unwrap();
+    let restored = read(home.path());
+    assert_eq!(restored["windows"]["sandbox"].as_str(), Some("elevated"));
+    assert_eq!(restored["features"]["prefer_mxc"].as_bool(), Some(true));
+}
+
+#[test]
+fn windows_sandbox_journal_leaf_accepts_only_supported_backend_values() {
+    let path = ["windows".to_string(), "sandbox".to_string()];
+    for value in ["elevated", "mxc", "unelevated"] {
+        assert!(leaves::validate(&path, &leaves::Leaf::String(value.into())).is_ok());
+    }
+    for leaf in [
+        leaves::Leaf::String("disabled".into()),
+        leaves::Leaf::String("ELEVATED".into()),
+        leaves::Leaf::Boolean(true),
+    ] {
+        assert!(leaves::validate(&path, &leaf).is_err());
+    }
+
+    let preference_path = ["features".to_string(), "prefer_mxc".to_string()];
+    for leaf in [leaves::Leaf::Boolean(false), leaves::Leaf::Boolean(true)] {
+        assert!(leaves::validate(&preference_path, &leaf).is_ok());
+    }
+    for leaf in [
+        leaves::Leaf::String("false".into()),
+        leaves::Leaf::Integer(0),
+        leaves::Leaf::Strings(vec!["false".into()]),
+    ] {
+        assert!(leaves::validate(&preference_path, &leaf).is_err());
+    }
+}
+
+#[test]
 fn boolean_launch_leaf_is_scoped_to_the_startup_update_setting() {
     let update_path = vec!["check_for_update_on_startup".to_string()];
     assert!(leaves::validate(&update_path, &leaves::Leaf::Boolean(false)).is_ok());

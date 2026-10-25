@@ -6,8 +6,11 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
-  automaticReplyDeadlines, completedAssistantRows, exactCurrentCascade, readCanonicalTaskReply,
-  writeOwnedReplyReport,
+  activeConversationLeaseConflicts, assertPromptDeliveryAccepted,
+  assertRequesterOriginMatchesProviderInput, automaticReplyDeadlines, completedAssistantRows,
+  exactCurrentCascade, persistAutomaticReplyFailure, providerInputIsReady,
+  readCanonicalTaskReply, readConversationLeaseSnapshot, readProviderInputState,
+  recordConversationLeaseObservation, writeOwnedReplyReport,
 } from "../lib/automatic-reply-evidence.mjs";
 import { acquireHomeLock, readHomeLock, releaseHomeLock } from "../lib/sessionHome.mjs";
 import { waitForReplyRelease } from "./fixtures/automatic-reply-gate.mjs";
@@ -32,6 +35,11 @@ function database(home, configure = () => {}) {
         parent_interaction_id TEXT, body_ref TEXT, status TEXT
       );
       CREATE TABLE structured_replies (request_id TEXT, status TEXT);
+      CREATE TABLE agent_message_delivery (
+        interaction_id TEXT, operation TEXT, requester_provider TEXT,
+        requester_conversation_id TEXT, requester_generation INTEGER
+      );
+      CREATE TABLE provider_input_state (session_id TEXT PRIMARY KEY, state TEXT, generation INTEGER);
     `);
     configure(db);
   } finally { db.close(); }
@@ -63,11 +71,51 @@ function row(db, { id = "task-1", kind = "task", sender = "requester", targets =
   );
 }
 
+function task(db, { id = "task-1", sender = "requester", targets = ["worker"],
+  provider = "antigravity", conversationId = "conversation-1", requesterGeneration = 7,
+  providerInputGeneration = requesterGeneration } = {}) {
+  row(db, { id, sender, targets });
+  db.prepare("INSERT INTO agent_message_delivery VALUES (?,?,?,?,?)").run(
+    id, "followup_task", provider, conversationId, requesterGeneration,
+  );
+  if (providerInputGeneration !== null) {
+    db.prepare("INSERT INTO provider_input_state (session_id,state,generation) VALUES (?,?,?) " +
+      "ON CONFLICT(session_id) DO UPDATE SET state=excluded.state,generation=excluded.generation")
+      .run(sender, "ready", providerInputGeneration);
+  }
+}
+
 function reply(db, overrides = {}) {
   row(db, { id: "reply-1", kind: "reply", sender: "worker", targets: ["requester"],
     parent: "task-1", body: "WORKER_ONLY_unpredictable", status: "completed", ...overrides });
   db.prepare("INSERT INTO structured_replies VALUES (?,?)").run("task-1", "done");
 }
+
+function lease(overrides = {}) {
+  return {
+    agent_id: "agent-1",
+    provider: "antigravity",
+    resume_session: "resume-1",
+    owner_kind: "agent_lifecycle",
+    owner_id: "lifecycle-1",
+    acquisition_id: "opaque-acquisition-token",
+    mode: "lifecycle_transition",
+    started_at: "2026-10-24T19:00:00Z",
+    heartbeat_at: "2026-10-24T19:00:01Z",
+    expires_at: "2026-10-24T20:00:00Z",
+    ...overrides,
+  };
+}
+
+async function writeLeaseFile(home, document) {
+  const runtime = path.join(home, "runtime");
+  await fs.mkdir(runtime, { recursive: true });
+  const leasePath = path.join(runtime, "conversation-leases.json");
+  await fs.writeFile(leasePath, typeof document === "string" ? document : JSON.stringify(document));
+  return leasePath;
+}
+
+const LEASE_CHECK_TIME = Date.parse("2026-10-24T19:30:00Z");
 
 test("observer waits for missing database or unadmitted task without creating state", async (t) => {
   const home = await fixture(t);
@@ -77,12 +125,190 @@ test("observer waits for missing database or unadmitted task without creating st
   assert.equal(await readCanonicalTaskReply(home, "requester", "worker"), null);
 });
 
+test("provider readiness observer distinguishes Booting, Ready, and missing state", async (t) => {
+  const home = await fixture(t);
+  database(home);
+  assert.equal(await readProviderInputState(home, "requester"), null);
+  assert.equal(providerInputIsReady(null, "requester"), false);
+
+  const db = new DatabaseSync(path.join(home, "state.db"));
+  try {
+    db.prepare("INSERT INTO provider_input_state VALUES (?,?,?)").run("requester", "booting", 1);
+  } finally { db.close(); }
+  const beforeBootingRead = await fs.readFile(path.join(home, "state.db"));
+  const booting = await readProviderInputState(home, "requester");
+  assert.deepEqual({ ...booting }, { session_id: "requester", state: "booting", generation: 1 });
+  assert.equal(providerInputIsReady(booting, "requester"), false);
+  assert.deepEqual(await fs.readFile(path.join(home, "state.db")), beforeBootingRead);
+
+  const readyDb = new DatabaseSync(path.join(home, "state.db"));
+  try {
+    readyDb.prepare("UPDATE provider_input_state SET state='ready' WHERE session_id='requester'").run();
+  } finally { readyDb.close(); }
+  const beforeReadyRead = await fs.readFile(path.join(home, "state.db"));
+  const ready = await readProviderInputState(home, "requester");
+  assert.equal(providerInputIsReady(ready, "requester"), true);
+  assert.equal(providerInputIsReady({ ...ready, generation: 0 }, "requester"), false);
+  assert.equal(providerInputIsReady(ready, "another-requester"), false);
+  assert.deepEqual(await fs.readFile(path.join(home, "state.db")), beforeReadyRead);
+});
+
+test("lease predicate matches exact requester identity, optional session, and ordinary expiry", () => {
+  assert.equal(activeConversationLeaseConflicts(
+    [lease({ agent_id: "requester", resume_session: "" })], "requester", "", LEASE_CHECK_TIME,
+  ).length, 1, "The same native agent conflicts even when it has no resume id");
+  assert.equal(activeConversationLeaseConflicts(
+    [lease({ agent_id: "another-agent", resume_session: "another-session" })],
+    "requester", "", LEASE_CHECK_TIME,
+  ).length, 0, "An unrelated agent and absent session do not collide");
+  assert.equal(activeConversationLeaseConflicts(
+    [lease({ agent_id: "another-agent", resume_session: "requester-session" })],
+    "requester", "requester-session", LEASE_CHECK_TIME,
+  ).length, 1, "A nonempty exact resume id conflicts across agent ids");
+  assert.equal(activeConversationLeaseConflicts(
+    [lease({ agent_id: "requester", expires_at: "2026-10-24T19:29:59Z" })],
+    "requester", "", LEASE_CHECK_TIME,
+  ).length, 0, "Expired ordinary rows do not block");
+  assert.equal(activeConversationLeaseConflicts(
+    [lease({ agent_id: "another-agent", resume_session: "requester-session",
+      expires_at: "2026-10-24T19:29:59Z" })],
+    "requester", "requester-session", LEASE_CHECK_TIME,
+  ).length, 0, "Expired ordinary rows do not block by session either");
+  assert.throws(() => activeConversationLeaseConflicts([], "", "", LEASE_CHECK_TIME), /nonempty requester id/u);
+});
+
+test("uncertain previous-provider holds are indefinite only for an exact nonempty session", () => {
+  const hold = lease({
+    agent_id: "another-agent",
+    resume_session: "held-session",
+    owner_kind: "prior_provider_hold",
+    owner_id: "hold-1",
+    mode: "uncertain_previous_provider",
+    expires_at: "2020-01-01T00:00:00Z",
+  });
+  assert.equal(activeConversationLeaseConflicts([hold], "requester", "held-session", LEASE_CHECK_TIME).length, 1);
+  assert.equal(activeConversationLeaseConflicts([hold], "requester", "different-session", LEASE_CHECK_TIME).length, 0);
+  assert.equal(activeConversationLeaseConflicts([hold], "another-agent", "", LEASE_CHECK_TIME).length, 0,
+    "An uncertain hold is not an agent-wide TTL lease");
+});
+
+test("lease snapshot reads are missing-as-empty, read-only, hashed, and owner-bounded", async (t) => {
+  const home = await fixture(t);
+  await assert.rejects(readConversationLeaseSnapshot(home, "", "", LEASE_CHECK_TIME), /nonempty requester id/u);
+  const missing = await readConversationLeaseSnapshot(home, "requester", "", LEASE_CHECK_TIME);
+  assert.equal(missing.exists, false);
+  assert.equal(missing.has_active_conflict, false);
+  assert.equal(missing.lease_count, 0);
+  assert.equal(missing.snapshot_sha256,
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  assert.deepEqual(await fs.readdir(home), [], "A missing lease file remains missing after observation");
+
+  const leasePath = await writeLeaseFile(home, { schema: 1, leases: [lease({
+    agent_id: "requester", resume_session: "", owner_id: "startup-owner",
+  })] });
+  const before = await fs.readFile(leasePath);
+  const snapshot = await readConversationLeaseSnapshot(home, "requester", "", LEASE_CHECK_TIME);
+  assert.equal(snapshot.has_active_conflict, true);
+  assert.equal(snapshot.active_conflict_count, 1);
+  assert.equal(snapshot.active_conflicts[0].owner_kind, "agent_lifecycle");
+  assert.equal(snapshot.active_conflicts[0].owner_id, "startup-owner");
+  assert.equal(snapshot.active_conflicts[0].mode, "lifecycle_transition");
+  assert.equal(snapshot.active_conflicts[0].agent_id, "requester");
+  assert.equal(snapshot.active_conflicts[0].provider, "antigravity");
+  assert.equal(snapshot.active_conflicts[0].resume_session, "");
+  assert.equal(snapshot.active_conflicts[0].expires_at, "2026-10-24T20:00:00Z");
+  assert.equal("acquisition_id" in snapshot.active_conflicts[0], false);
+  assert.equal(snapshot.snapshot_sha256.length, 64);
+  assert.deepEqual(await fs.readFile(leasePath), before, "Observation must not alter the authoritative file");
+
+  const evidence = { first_blocking: null, last_blocking: null, final_snapshot: null };
+  recordConversationLeaseObservation(evidence, snapshot);
+  const clear = await readConversationLeaseSnapshot(home, "other-agent", "", LEASE_CHECK_TIME);
+  recordConversationLeaseObservation(evidence, clear);
+  await writeLeaseFile(home, { schema: 1, leases: [lease({
+    agent_id: "requester", resume_session: "", owner_id: "later-startup-owner",
+  })] });
+  const laterBlocking = await readConversationLeaseSnapshot(
+    home, "requester", "", LEASE_CHECK_TIME + 1_000,
+  );
+  recordConversationLeaseObservation(evidence, laterBlocking);
+  assert.equal(evidence.first_blocking.observed_at, snapshot.observed_at);
+  assert.equal(evidence.last_blocking.snapshot_sha256, laterBlocking.snapshot_sha256);
+  assert.equal(evidence.last_blocking.active_conflicts[0].owner_id, "later-startup-owner");
+  assert.equal(evidence.final_snapshot.has_active_conflict, true);
+  assert.equal("poll_history" in evidence, false);
+
+  await writeLeaseFile(home, { schema: 1, leases: Array.from({ length: 6 }, (_, index) => lease({
+    agent_id: "requester", resume_session: "", owner_id: `owner-${index}`,
+  })) });
+  const capped = await readConversationLeaseSnapshot(home, "requester", "", LEASE_CHECK_TIME);
+  assert.equal(capped.active_conflict_count, 6);
+  assert.equal(capped.active_conflicts.length, 4);
+  assert.equal(capped.omitted_active_conflicts, 2);
+});
+
+test("lease observer fails closed on malformed JSON, unknown schema, and invalid lease dates", async (t) => {
+  const cases = [
+    "{ malformed",
+    { schema: 2, leases: [] },
+    { schema: 1, leases: [lease({ expires_at: "not-a-date" })] },
+    { schema: 1, leases: [lease({ started_at: "2026-02-30T00:00:00Z" })] },
+  ];
+  for (const input of cases) {
+    const home = await fixture(t);
+    const leasePath = await writeLeaseFile(home, input);
+    const before = await fs.readFile(leasePath);
+    await assert.rejects(readConversationLeaseSnapshot(home, "requester", "", LEASE_CHECK_TIME), (error) => {
+      assert.ok(error.lease_snapshot);
+      assert.equal(error.lease_snapshot.valid, false);
+      assert.equal(error.lease_snapshot.snapshot_sha256.length, 64);
+      return true;
+    });
+    assert.deepEqual(await fs.readFile(leasePath), before, "Fail-closed parsing must remain read-only");
+  }
+});
+
+test("core failure reporting preserves the first error and does not mask it with report I/O", async () => {
+  const firstError = new Error("conversation_leased");
+  const report = { cases: { delayed_reply: { status: "running", initial_prompt_attempts: 1 } } };
+  const returnedError = await persistAutomaticReplyFailure(report, "delayed_reply", firstError, async () => {
+    throw new Error("report disk unavailable");
+  });
+  assert.equal(returnedError, firstError);
+  assert.equal(report.cases.delayed_reply.status, "fail");
+  assert.equal(report.cases.delayed_reply.error, "conversation_leased");
+  assert.equal(report.error, "conversation_leased");
+  assert.equal(report.report_persistence_error, "report disk unavailable");
+});
+
+test("initial prompt delivery accepts only an accepted receipt for the exact requester", () => {
+  assert.doesNotThrow(() => assertPromptDeliveryAccepted(
+    { uuid: "requester", provider: "antigravity", delivery_state: "provider_accepted" },
+    "requester", "antigravity",
+  ));
+  assert.doesNotThrow(() => assertPromptDeliveryAccepted(
+    { uuid: "requester", provider: "antigravity", delivery_state: "queued" },
+    "requester", "antigravity",
+  ));
+  for (const receipt of [
+    { uuid: "requester", provider: "antigravity", delivery_state: "provider_input_not_ready" },
+    { uuid: "requester", provider: "antigravity", delivery_state: "failed", error: { code: "provider_input_not_ready" } },
+    { uuid: "other", provider: "antigravity", delivery_state: "provider_accepted" },
+    { uuid: "requester", provider: "codex", delivery_state: "provider_accepted" },
+  ]) assert.throws(() => assertPromptDeliveryAccepted(receipt, "requester", "antigravity"), assert.AssertionError);
+});
+
 test("observer binds pending and completed replies to one exact request without writing", async (t) => {
   const home = await fixture(t);
-  database(home, (db) => row(db));
+  database(home, (db) => task(db));
   const pending = await readCanonicalTaskReply(home, "requester", "worker", "task-1");
   assert.equal(pending.reply_count, 0);
   assert.equal(pending.task_status, "pending");
+  assertRequesterOriginMatchesProviderInput(pending, "antigravity", "conversation-1");
+  assert.throws(() => assertRequesterOriginMatchesProviderInput(pending, "codex", "conversation-1"),
+    /provider changed/u);
+  assert.throws(() => assertRequesterOriginMatchesProviderInput(pending, "antigravity", "other-conversation"),
+    /captured provider conversation/u);
   const db = new DatabaseSync(path.join(home, "state.db"));
   try {
     db.exec("UPDATE interactions SET status='completed' WHERE id='task-1'");
@@ -103,12 +329,12 @@ test("observer binds pending and completed replies to one exact request without 
 
 test("observer rejects wrong recipients, extra tasks, duplicate replies, and spoofed reply origin", async (t) => {
   const cases = [
-    (db) => row(db, { targets: ["foreign-worker"] }),
-    (db) => { row(db); row(db, { id: "task-2" }); },
-    (db) => { row(db); reply(db); reply(db, { id: "reply-2" }); },
-    (db) => { row(db); reply(db, { sender: "foreign-worker" }); },
-    (db) => { row(db); reply(db, { targets: ["foreign-requester"] }); },
-    (db) => { row(db); reply(db); db.exec("DELETE FROM structured_replies"); },
+    (db) => task(db, { targets: ["foreign-worker"] }),
+    (db) => { task(db); task(db, { id: "task-2" }); },
+    (db) => { task(db); reply(db); reply(db, { id: "reply-2" }); },
+    (db) => { task(db); reply(db, { sender: "foreign-worker" }); },
+    (db) => { task(db); reply(db, { targets: ["foreign-requester"] }); },
+    (db) => { task(db); reply(db); db.exec("DELETE FROM structured_replies"); },
   ];
   for (const configure of cases) {
     const home = await fixture(t);
@@ -120,12 +346,38 @@ test("observer rejects wrong recipients, extra tasks, duplicate replies, and spo
 test("observer exposes requester obligations and reply-to-reply loops to the acceptance oracle", async (t) => {
   const home = await fixture(t);
   database(home, (db) => {
-    row(db); reply(db);
+    task(db); reply(db);
     row(db, { id: "loop", kind: "reply", sender: "requester", targets: ["worker"], parent: "reply-1" });
   });
   const proof = await readCanonicalTaskReply(home, "requester", "worker");
   assert.equal(proof.requester_reply_count, 1);
   assert.equal(proof.reply_to_reply_count, 1);
+});
+
+test("observer fails closed for missing requester origin and checks provider-input generation", async (t) => {
+  const missingHome = await fixture(t);
+  database(missingHome, (db) => row(db));
+  await assert.rejects(readCanonicalTaskReply(missingHome, "requester", "worker"), /requester-origin row/u);
+
+  const readyBeforePrompt = { session_id: "requester", state: "ready", generation: 7 };
+  assert.equal(providerInputIsReady(readyBeforePrompt, "requester"), true);
+  const advancedHome = await fixture(t);
+  database(advancedHome, (db) => task(db, { requesterGeneration: 8, providerInputGeneration: 8 }));
+  const advanced = await readCanonicalTaskReply(advancedHome, "requester", "worker");
+  assertRequesterOriginMatchesProviderInput(advanced, "antigravity", "conversation-1");
+
+  const staleHome = await fixture(t);
+  database(staleHome, (db) => task(db, { requesterGeneration: 6, providerInputGeneration: 7 }));
+  const stale = await readCanonicalTaskReply(staleHome, "requester", "worker");
+  assert.throws(() => assertRequesterOriginMatchesProviderInput(stale, "antigravity", "conversation-1"),
+    /match the current persisted provider-input generation/u);
+
+  const missingGenerationHome = await fixture(t);
+  database(missingGenerationHome, (db) => task(db, { providerInputGeneration: null }));
+  const missingGeneration = await readCanonicalTaskReply(missingGenerationHome, "requester", "worker");
+  assert.throws(() => assertRequesterOriginMatchesProviderInput(
+    missingGeneration, "antigravity", "conversation-1",
+  ), /current provider-input generation/u);
 });
 
 test("deadlines preserve the original absolute limit and require a positive cleanup reserve", () => {

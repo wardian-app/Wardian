@@ -15,10 +15,17 @@ import {
 import { createHeadlessEvidenceReader } from "../lib/provider-headless-evidence.mjs";
 import { messageCli } from "../lib/canonical-messaging.mjs";
 import {
+  assertRequesterOriginMatchesProviderInput,
   automaticReplyDeadlines,
+  assertPromptDeliveryAccepted,
   completedAssistantRows,
   exactCurrentCascade,
+  providerInputIsReady,
+  readConversationLeaseSnapshot,
+  readProviderInputState,
   readCanonicalTaskReply,
+  recordConversationLeaseObservation,
+  persistAutomaticReplyFailure,
   writeOwnedReplyReport,
 } from "../lib/automatic-reply-evidence.mjs";
 import { cleanupConformanceSession, pauseConformanceWork } from "../lib/conformance-cleanup.mjs";
@@ -115,7 +122,8 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
   let session;
   let requester;
   let worker;
-  let corePassed = false;
+  let initialOwner;
+  let coreFailure;
   let startupAttempted = false;
   let requesterSpawnAttempted = false;
   let workerSpawnAttempted = false;
@@ -197,166 +205,239 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
       workspace: requesterWorkspace,
       env: process.env,
     });
-    const initialOwner = await pollUntil(async () => {
-      const { config, metric } = await requesterConfigAndStatus(session.driver, requester.session_id);
-      if (!config.resume_session || metric.current_status?.toLowerCase() !== "idle") return null;
-      const snapshot = await reader.snapshot({
-        agentId: requester.session_id,
-        originalSession: config.resume_session,
-        mode: "current",
-      });
-      return { provider_session: config.resume_session, cascade: exactCurrentCascade(snapshot, config.resume_session) };
-    }, workDeadline(),
-    "Antigravity requester did not expose one directly workspace-owned idle cascade");
-    report.antigravity_evidence_store = nativeStore;
-    report.requester_provider_session = initialOwner.provider_session;
-    report.initial_cascade = {
-      id: initialOwner.cascade.id,
-      ownership_basis: initialOwner.cascade.ownership_basis,
-      source: initialOwner.cascade.source,
-      source_locator_sha256: initialOwner.cascade.source_locator_sha256,
-    };
-    await save();
-
-    const gateDirectory = path.join(workerWorkspace, ".wardian-e2e-gate");
-    const gatePath = path.join(gateDirectory, "reply-gate.mjs");
-    const readyPath = path.join(gateDirectory, "ready");
-    const releasePath = path.join(controlDirectory, "reply-release");
-    assert.equal(path.relative(workerWorkspace, releasePath).startsWith(".."), true,
-      "The Codex workspace sandbox must not own the operator release file");
-    const gateFixture = fileURLToPath(new URL("./fixtures/automatic-reply-gate.mjs", import.meta.url));
-    await fs.mkdir(gateDirectory, { recursive: true });
-    await fs.copyFile(gateFixture, gatePath);
-    assert.equal(await exists(releasePath), false, "The release file must start absent");
-
     let coreProof;
     let preReleaseRecords;
     let initialPrompt;
     let initialMarker;
-    await t.test("delayed reply resumes the original Antigravity cascade", async () => {
-      initialMarker = "AGY_INITIAL_DONE_" + randomUUID();
-      const gateCommand = "node .wardian-e2e-gate/reply-gate.mjs --deadline " +
-        JSON.stringify(new Date(workDeadline()).toISOString());
-      const taskInstructions = "Run " + gateCommand +
-        " in your assigned workspace. Wait for it to print one WORKER_ONLY_ UUID after the external test gate opens. " +
-        "Then call the Wardian reply tool once with status done and exactly that printed token. Do no other work.";
-      initialPrompt = [
-        "Use followup_task exactly once for Codex agent " + worker.session_id + " with this task:",
-        taskInstructions,
-        "After admitting it, finish this initial turn now with exactly " + initialMarker + ". Do not receive, poll, wait for, or answer the task.",
-        "When the canonical peer reply automatically continues this same conversation later, finish with exactly the returned WORKER_ONLY_ token.",
-      ].join("\n");
-      assert.ok(!initialOwner.cascade.records.some((row) => row.text?.includes(initialMarker)),
-        "The unique initial-final marker must be absent from the pre-prompt cascade");
+    let leaseEvidence;
+    try {
+      await t.test("delayed reply resumes the original Antigravity cascade", async () => {
+        try {
+          const gateDirectory = path.join(workerWorkspace, ".wardian-e2e-gate");
+          const gatePath = path.join(gateDirectory, "reply-gate.mjs");
+          const readyPath = path.join(gateDirectory, "ready");
+          const releasePath = path.join(controlDirectory, "reply-release");
+          assert.equal(path.relative(workerWorkspace, releasePath).startsWith(".."), true,
+            "The Codex workspace sandbox must not own the operator release file");
+          const gateFixture = fileURLToPath(new URL("./fixtures/automatic-reply-gate.mjs", import.meta.url));
+          await fs.mkdir(gateDirectory, { recursive: true });
+          await fs.copyFile(gateFixture, gatePath);
+          assert.equal(await exists(releasePath), false, "The release file must start absent");
 
-      report.cases.delayed_reply = { status: "running", initial_prompt_attempts: 1 };
-      await save();
-      await invokeTauri(session.driver, "submit_prompt_to_agent", {
-        sessionId: requester.session_id,
-        prompt: initialPrompt,
-        inputMode: "message",
+          initialMarker = "AGY_INITIAL_DONE_" + randomUUID();
+          const gateCommand = "node .wardian-e2e-gate/reply-gate.mjs --deadline " +
+            JSON.stringify(new Date(workDeadline()).toISOString());
+          const taskInstructions = "Run " + gateCommand +
+            " in your assigned workspace. Wait for it to print one WORKER_ONLY_ UUID after the external test gate opens. " +
+            "Then call the Wardian reply tool once with status done and exactly that printed token. Do no other work.";
+          initialPrompt = [
+            "Use followup_task exactly once for Codex agent " + worker.session_id + " with this task:",
+            taskInstructions,
+            "After admitting it, finish this initial turn now with exactly " + initialMarker + ". Do not receive, poll, wait for, or answer the task.",
+            "When the canonical peer reply automatically continues this same conversation later, finish with exactly the returned WORKER_ONLY_ token.",
+          ].join("\n");
+          leaseEvidence = {
+            first_blocking: null,
+            last_blocking: null,
+            pre_admission: null,
+            on_rejection: null,
+            final_snapshot: null,
+          };
+          report.cases.delayed_reply = {
+            status: "running", initial_prompt_attempts: 0, lease_evidence: leaseEvidence,
+          };
+          await save();
+
+          const admissionPreflight = await pollUntil(async () => {
+            const state = await readProviderInputState(home, requester.session_id);
+            const { config } = await requesterConfigAndStatus(session.driver, requester.session_id);
+            const resumeSession = config.resume_session ?? "";
+            assert.equal(typeof resumeSession, "string", "The current requester resume session must be a string when present");
+            let leaseSnapshot;
+            try {
+              leaseSnapshot = await readConversationLeaseSnapshot(
+                home, requester.session_id, resumeSession,
+              );
+            } catch (error) {
+              if (error.lease_snapshot) recordConversationLeaseObservation(leaseEvidence, error.lease_snapshot);
+              throw error;
+            }
+            const blocked = recordConversationLeaseObservation(leaseEvidence, leaseSnapshot);
+            if (!providerInputIsReady(state, requester.session_id) || blocked) return null;
+            leaseEvidence.pre_admission = leaseSnapshot;
+            return { resumeSession };
+          }, workDeadline(),
+          "Antigravity requester did not reach positive provider-input Ready with no active conflicting lease before the sole initial prompt");
+
+          report.cases.delayed_reply.initial_prompt_attempts = 1;
+          let initialDelivery;
+          try {
+            workDeadline();
+            initialDelivery = await invokeTauri(session.driver, "submit_prompt_to_agent", {
+              sessionId: requester.session_id,
+              prompt: initialPrompt,
+              inputMode: "message",
+            });
+            assertPromptDeliveryAccepted(initialDelivery, requester.session_id, "antigravity");
+          } catch (error) {
+            try {
+              const rejectedSnapshot = await readConversationLeaseSnapshot(
+                home, requester.session_id, admissionPreflight.resumeSession,
+              );
+              recordConversationLeaseObservation(leaseEvidence, rejectedSnapshot);
+              leaseEvidence.on_rejection = rejectedSnapshot;
+            } catch (observationError) {
+              if (observationError.lease_snapshot) {
+                recordConversationLeaseObservation(leaseEvidence, observationError.lease_snapshot);
+                leaseEvidence.on_rejection = observationError.lease_snapshot;
+              }
+              leaseEvidence.rejection_observation_error = observationError instanceof Error
+                ? observationError.message : String(observationError);
+            }
+            throw error;
+          }
+
+          initialOwner = await pollUntil(async () => {
+            const { config, metric } = await requesterConfigAndStatus(session.driver, requester.session_id);
+            if (!config.resume_session || metric.current_status?.toLowerCase() !== "idle") return null;
+            const snapshot = await reader.snapshot({
+              agentId: requester.session_id,
+              originalSession: config.resume_session,
+              mode: "current",
+            });
+            return { provider_session: config.resume_session, cascade: exactCurrentCascade(snapshot, config.resume_session) };
+          }, workDeadline(),
+          "Antigravity requester did not expose one directly workspace-owned idle cascade after its initial prompt");
+          report.antigravity_evidence_store = nativeStore;
+          report.requester_provider_session = initialOwner.provider_session;
+          report.initial_cascade = {
+            id: initialOwner.cascade.id,
+            ownership_basis: initialOwner.cascade.ownership_basis,
+            source: initialOwner.cascade.source,
+            source_locator_sha256: initialOwner.cascade.source_locator_sha256,
+          };
+          await save();
+
+          const held = await pollUntil(async () => {
+            const proof = await readCanonicalTaskReply(home, requester.session_id, worker.session_id);
+            if (!proof) return null;
+            assertRequesterOriginMatchesProviderInput(
+              proof, "antigravity", initialOwner.provider_session,
+            );
+            assert.equal(proof.reply_count, 0, "The worker reply arrived before the explicit release");
+            const { config, metric } = await requesterConfigAndStatus(session.driver, requester.session_id, initialOwner.provider_session);
+            const snapshot = await reader.snapshot({
+              agentId: requester.session_id,
+              originalSession: initialOwner.provider_session,
+              mode: "current",
+            });
+            const cascade = exactCurrentCascade(snapshot, initialOwner.cascade.id);
+            const userPrompts = cascade.records.filter((row) => row.role === "user" && row.text === initialPrompt);
+            assert.ok(userPrompts.length <= 1, "The original requester prompt must not be duplicated");
+            const initialFinals = completedAssistantRows(cascade.records).filter((row) => row.text.trim() === initialMarker);
+            assert.ok(initialFinals.length <= 1, "The initial assistant completion must be unique");
+            const gateReady = await exists(readyPath);
+            if (userPrompts.length === 1 && initialFinals.length === 1 &&
+              metric.current_status?.toLowerCase() === "idle" && gateReady) {
+              assert.ok(initialFinals[0].ordinal > userPrompts[0].ordinal,
+                "The native assistant completion must follow the exact initial requester prompt");
+              assert.equal(config.resume_session, initialOwner.provider_session);
+              assert.ok(proof.task_body.includes(gateCommand), "The admitted task must carry the worker gate instruction");
+              preReleaseRecords = cascade.records;
+              return { proof, cascade, initialFinal: initialFinals[0] };
+            }
+            return null;
+          }, workDeadline(),
+          "No single admitted task reached the worker gate before the requester turn ended");
+
+          assert.equal(await exists(releasePath), false, "The operator gate must remain closed until requester completion and Idle");
+          coreProof = held.proof;
+          report.cases.delayed_reply = {
+            status: "running",
+            initial_prompt_attempts: 1,
+            lease_evidence: leaseEvidence,
+            request_id: coreProof.request_id,
+            task_status_before_release: coreProof.task_status,
+            task_body: coreProof.task_body,
+            requester_initial_turn_id: held.initialFinal.id,
+            requester_cascade_id: held.cascade.id,
+            release_attempts: 1,
+          };
+          await save();
+          await fs.writeFile(releasePath, "release\n", { flag: "wx" });
+
+          const completed = await pollUntil(async () => {
+            const proof = await readCanonicalTaskReply(home, requester.session_id, worker.session_id, coreProof.request_id);
+            if (!proof?.reply) return null;
+            if (proof.task_status !== "completed" || proof.reply.status !== "done") return null;
+            assert.equal(proof.task_status, "completed");
+            assert.equal(proof.reply.status, "done");
+            assert.equal(proof.reply.request_id, proof.request_id);
+            assert.equal(proof.reply.parent_interaction_id, proof.request_id);
+            assert.equal(proof.reply.sender, worker.session_id);
+            assert.deepEqual(proof.reply.recipients, [requester.session_id]);
+            assert.equal(proof.reply_count, 1);
+            assert.equal(proof.requester_reply_count, 0);
+            assert.equal(proof.reply_to_reply_count, 0);
+            assert.match(proof.reply.body, /^WORKER_ONLY_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu);
+            assert.ok(!initialPrompt.includes(proof.reply.body), "The unpredictable worker token must be absent from the requester prompt");
+            assert.ok(!proof.task_body.includes(proof.reply.body), "The requester-created task must not contain the worker token");
+            assert.ok(!preReleaseRecords.some((row) => row.text?.includes(proof.reply.body)),
+              "The worker token must be absent from all requester-native records before release");
+
+            const { config, metric } = await requesterConfigAndStatus(session.driver, requester.session_id, initialOwner.provider_session);
+            const snapshot = await reader.snapshot({
+              agentId: requester.session_id,
+              originalSession: initialOwner.provider_session,
+              mode: "current",
+            });
+            const cascade = exactCurrentCascade(snapshot, initialOwner.cascade.id);
+            const continuations = completedAssistantRows(cascade.records).filter((row) =>
+              row.ordinal > held.initialFinal.ordinal && row.text.trim() === proof.reply.body);
+            if (continuations.length > 1) assert.equal(continuations.length, 1, "Duplicate automatic assistant continuations");
+            if (continuations.length === 1 && metric.current_status?.toLowerCase() === "idle" &&
+              config.resume_session === initialOwner.provider_session) {
+              return { proof, cascade, continuation: continuations[0] };
+            }
+            return null;
+          }, workDeadline(),
+          "The original Antigravity cascade did not complete an assistant-authored reply continuation");
+
+          coreProof = completed.proof;
+          report.cases.delayed_reply = {
+            status: "pass",
+            initial_prompt_attempts: 1,
+            lease_evidence: leaseEvidence,
+            request_id: completed.proof.request_id,
+            task_status: completed.proof.task_status,
+            task_body: completed.proof.task_body,
+            reply: completed.proof.reply,
+            requester_cascade_id: completed.cascade.id,
+            requester_initial_turn_id: held.initialFinal.id,
+            continuation_turn_id: completed.continuation.id,
+            continuation_text: completed.continuation.text,
+            submission_attempts: 1,
+            release_attempts: 1,
+            reply_count: completed.proof.reply_count,
+            reply_to_reply_count: completed.proof.reply_to_reply_count,
+          };
+          await save();
+        } catch (error) {
+          coreFailure = error;
+          throw error;
+        }
       });
-
-      const held = await pollUntil(async () => {
-        const proof = await readCanonicalTaskReply(home, requester.session_id, worker.session_id);
-        if (!proof) return null;
-        assert.equal(proof.reply_count, 0, "The worker reply arrived before the explicit release");
-        const { config, metric } = await requesterConfigAndStatus(session.driver, requester.session_id, initialOwner.provider_session);
-        const snapshot = await reader.snapshot({
-          agentId: requester.session_id,
-          originalSession: initialOwner.provider_session,
-          mode: "current",
-        });
-        const cascade = exactCurrentCascade(snapshot, initialOwner.provider_session);
-        const userPrompts = cascade.records.filter((row) => row.role === "user" && row.text === initialPrompt);
-        assert.ok(userPrompts.length <= 1, "The original requester prompt must not be duplicated");
-        const initialFinals = completedAssistantRows(cascade.records).filter((row) => row.text.trim() === initialMarker);
-        assert.ok(initialFinals.length <= 1, "The initial assistant completion must be unique");
-        const gateReady = await exists(readyPath);
-        if (userPrompts.length === 1 && initialFinals.length === 1 &&
-          metric.current_status?.toLowerCase() === "idle" && gateReady) {
-          assert.ok(initialFinals[0].ordinal > userPrompts[0].ordinal,
-            "The native assistant completion must follow the exact initial requester prompt");
-          assert.equal(config.resume_session, initialOwner.provider_session);
-          assert.ok(proof.task_body.includes(gateCommand), "The admitted task must carry the worker gate instruction");
-          preReleaseRecords = cascade.records;
-          return { proof, cascade, initialFinal: initialFinals[0] };
-        }
-        return null;
-      }, workDeadline(),
-      "No single admitted task reached the worker gate before the requester turn ended");
-
-      assert.equal(await exists(releasePath), false, "The operator gate must remain closed until requester completion and Idle");
-      coreProof = held.proof;
-      report.cases.delayed_reply = {
-        status: "running",
-        request_id: coreProof.request_id,
-        task_status_before_release: coreProof.task_status,
-        task_body: coreProof.task_body,
-        requester_initial_turn_id: held.initialFinal.id,
-        requester_cascade_id: held.cascade.id,
-        release_attempts: 1,
+    } catch (error) {
+      coreFailure ??= error;
+    }
+    if (coreFailure) {
+      report.cases.new_peer_fyi = {
+        status: "not_run", reason: "Delayed-reply acceptance failed before the FYI case began",
       };
-      await save();
-      await fs.writeFile(releasePath, "release\n", { flag: "wx" });
-
-      const completed = await pollUntil(async () => {
-        const proof = await readCanonicalTaskReply(home, requester.session_id, worker.session_id, coreProof.request_id);
-        if (!proof?.reply) return null;
-        if (proof.task_status !== "completed" || proof.reply.status !== "done") return null;
-        assert.equal(proof.task_status, "completed");
-        assert.equal(proof.reply.status, "done");
-        assert.equal(proof.reply.request_id, proof.request_id);
-        assert.equal(proof.reply.parent_interaction_id, proof.request_id);
-        assert.equal(proof.reply.sender, worker.session_id);
-        assert.deepEqual(proof.reply.recipients, [requester.session_id]);
-        assert.equal(proof.reply_count, 1);
-        assert.equal(proof.requester_reply_count, 0);
-        assert.equal(proof.reply_to_reply_count, 0);
-        assert.match(proof.reply.body, /^WORKER_ONLY_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu);
-        assert.ok(!initialPrompt.includes(proof.reply.body), "The unpredictable worker token must be absent from the requester prompt");
-        assert.ok(!proof.task_body.includes(proof.reply.body), "The requester-created task must not contain the worker token");
-        assert.ok(!preReleaseRecords.some((row) => row.text?.includes(proof.reply.body)),
-          "The worker token must be absent from all requester-native records before release");
-
-        const { config, metric } = await requesterConfigAndStatus(session.driver, requester.session_id, initialOwner.provider_session);
-        const snapshot = await reader.snapshot({
-          agentId: requester.session_id,
-          originalSession: initialOwner.provider_session,
-          mode: "current",
-        });
-        const cascade = exactCurrentCascade(snapshot, initialOwner.provider_session);
-        const continuations = completedAssistantRows(cascade.records).filter((row) =>
-          row.ordinal > held.initialFinal.ordinal && row.text.trim() === proof.reply.body);
-        if (continuations.length > 1) assert.equal(continuations.length, 1, "Duplicate automatic assistant continuations");
-        if (continuations.length === 1 && metric.current_status?.toLowerCase() === "idle" &&
-          config.resume_session === initialOwner.provider_session) {
-          return { proof, cascade, continuation: continuations[0] };
-        }
-        return null;
-      }, workDeadline(),
-      "The original Antigravity cascade did not complete an assistant-authored reply continuation");
-
-      coreProof = completed.proof;
-      report.cases.delayed_reply = {
-        status: "pass",
-        request_id: completed.proof.request_id,
-        task_status: completed.proof.task_status,
-        task_body: completed.proof.task_body,
-        reply: completed.proof.reply,
-        requester_cascade_id: completed.cascade.id,
-        requester_initial_turn_id: held.initialFinal.id,
-        continuation_turn_id: completed.continuation.id,
-        continuation_text: completed.continuation.text,
-        submission_attempts: 1,
-        release_attempts: 1,
-        reply_count: completed.proof.reply_count,
-        reply_to_reply_count: completed.proof.reply_to_reply_count,
-      };
-      await save();
-      corePassed = true;
-    });
-    assert.equal(corePassed, true, "The FYI case must not run unless delayed-reply acceptance settled");
+      report.status = "fail";
+      await persistAutomaticReplyFailure(report, "delayed_reply", coreFailure, save);
+      return;
+    }
 
     await t.test("new peer FYI wakes idle Antigravity without creating reply work", async () => {
       const beforeSnapshot = await reader.snapshot({
@@ -364,11 +445,12 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
         originalSession: initialOwner.provider_session,
         mode: "current",
       });
-      const beforeCascade = exactCurrentCascade(beforeSnapshot, initialOwner.provider_session);
+      const beforeCascade = exactCurrentCascade(beforeSnapshot, initialOwner.cascade.id);
       const beforeIds = new Set(beforeCascade.records.map((row) => row.id));
       const fyiBody = "Reference only. No task or response is required. FYI_" + randomUUID();
       report.cases.new_peer_fyi = { status: "running", submission_attempts: 1 };
       await save();
+      workDeadline();
       const receipt = await messageCli(harness.cliPath, home, harness.repoRoot, worker.session_id,
         ["send", requester.session_id, fyiBody]);
       assert.equal(receipt.operation, "send_message");
@@ -380,7 +462,7 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
           originalSession: initialOwner.provider_session,
           mode: "current",
         });
-        const cascade = exactCurrentCascade(snapshot, initialOwner.provider_session);
+        const cascade = exactCurrentCascade(snapshot, initialOwner.cascade.id);
         const fyiInputs = cascade.records.filter((row) => row.role === "user" &&
           !beforeIds.has(row.id) && row.text.includes(fyiBody));
         const assistantTurns = completedAssistantRows(cascade.records).filter((row) =>

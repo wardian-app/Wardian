@@ -20,15 +20,17 @@ pub(super) async fn resolve_launch_model(
     configured_effort: Option<&str>,
     resume_id: Option<&str>,
     cwd: &Path,
+    config_read: Option<&Value>,
 ) -> Result<Option<String>, CodexSharedError> {
     // One deadline covers the entire lookup, including catalog pagination.
     tokio::time::timeout(
         STARTUP_TIMEOUT,
-        resolve_with_request(
+        resolve_with_config(
             configured_model,
             configured_effort,
             resume_id,
             cwd,
+            config_read,
             |method, params| client.request_with_timeout(method, params, STARTUP_TIMEOUT),
         ),
     )
@@ -36,11 +38,61 @@ pub(super) async fn resolve_launch_model(
     .map_err(|_| CodexSharedError::unsupported("Codex launch model lookup timed out"))?
 }
 
+/// Read effective config once, before any thread is loaded, within the caller's
+/// existing startup deadline. Windows backend selection and model fallback
+/// share this response.
+pub(super) async fn read_effective_config(
+    client: &CodexSharedClient,
+    cwd: &Path,
+    deadline: tokio::time::Instant,
+) -> Result<Value, CodexSharedError> {
+    let cwd = cwd.to_str().ok_or_else(|| {
+        CodexSharedError::unsupported("Codex config/read working directory is not valid UTF-8")
+    })?;
+    let timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if timeout.is_zero() {
+        return Err(CodexSharedError::unsupported(
+            "Codex config/read exceeded the owner startup deadline",
+        ));
+    }
+    client
+        .request_with_timeout(
+            "config/read",
+            json!({"cwd":cwd,"includeLayers":false}),
+            timeout,
+        )
+        .await
+}
+
+#[cfg(test)]
 async fn resolve_with_request<F, Fut>(
     configured_model: Option<&str>,
     configured_effort: Option<&str>,
     resume_id: Option<&str>,
     cwd: &Path,
+    request: F,
+) -> Result<Option<String>, CodexSharedError>
+where
+    F: FnMut(&'static str, Value) -> Fut,
+    Fut: Future<Output = Result<Value, CodexSharedError>>,
+{
+    resolve_with_config(
+        configured_model,
+        configured_effort,
+        resume_id,
+        cwd,
+        None,
+        request,
+    )
+    .await
+}
+
+async fn resolve_with_config<F, Fut>(
+    configured_model: Option<&str>,
+    configured_effort: Option<&str>,
+    resume_id: Option<&str>,
+    cwd: &Path,
+    config_read: Option<&Value>,
     mut request: F,
 ) -> Result<Option<String>, CodexSharedError>
 where
@@ -71,15 +123,16 @@ where
         }
     }
 
-    let cwd = cwd
-        .to_str()
-        .ok_or_else(|| invalid("config/read working directory"))?;
-    let response = request("config/read", json!({"cwd":cwd,"includeLayers":false})).await?;
-    let config = response
-        .get("config")
-        .filter(|value| value.is_object())
-        .ok_or_else(|| invalid("config/read config"))?;
-    if let Some(model) = optional_model(config.get("model"), "config/read model")? {
+    let model = if let Some(response) = config_read {
+        model_from_config_response(response)?
+    } else {
+        let cwd = cwd
+            .to_str()
+            .ok_or_else(|| invalid("config/read working directory"))?;
+        let response = request("config/read", json!({"cwd":cwd,"includeLayers":false})).await?;
+        model_from_config_response(&response)?
+    };
+    if let Some(model) = model {
         return Ok(Some(model));
     }
 
@@ -129,6 +182,14 @@ where
     Err(invalid("model/list page limit"))
 }
 
+fn model_from_config_response(response: &Value) -> Result<Option<String>, CodexSharedError> {
+    let config = response
+        .get("config")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| invalid("config/read config"))?;
+    optional_model(config.get("model"), "config/read model")
+}
+
 fn optional_model(value: Option<&Value>, field: &str) -> Result<Option<String>, CodexSharedError> {
     match value {
         None | Some(Value::Null) => Ok(None),
@@ -145,6 +206,9 @@ fn invalid(field: &str) -> CodexSharedError {
 mod tests {
     use std::collections::VecDeque;
     use std::future::ready;
+
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
 
     use super::*;
 
@@ -212,6 +276,78 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn fixed_model_still_uses_the_single_pre_thread_config_read() {
+        let cwd = std::env::temp_dir().join("launch-model-config-é");
+        let expected_cwd = cwd.to_str().unwrap().to_owned();
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let mut socket = tokio_tungstenite::accept_async(server_io).await.unwrap();
+            let request: Value =
+                serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap())
+                    .unwrap();
+            assert_eq!(request["method"], "config/read");
+            assert_eq!(
+                request["params"],
+                json!({"cwd":expected_cwd,"includeLayers":false})
+            );
+            socket
+                .send(Message::Text(
+                    json!({"id":request["id"],"result":{"config":{"model":"effective-model"},"origins":{}}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let (socket, _) = tokio_tungstenite::client_async("ws://localhost", client_io)
+            .await
+            .unwrap();
+        let client = CodexSharedClient::from_connected("test-agent".into(), 7, socket, None);
+        let effective_config =
+            read_effective_config(&client, &cwd, tokio::time::Instant::now() + STARTUP_TIMEOUT)
+                .await
+                .unwrap();
+        assert_eq!(
+            resolve_with_config(
+                Some("fixed-model"),
+                Some("low"),
+                None,
+                &cwd,
+                Some(&effective_config),
+                |_, _| ready(Err(CodexSharedError::unsupported("unexpected model RPC"))),
+            )
+            .await
+            .unwrap(),
+            Some("fixed-model".into())
+        );
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cached_effective_config_replaces_the_model_fallback_read() {
+        let response = json!({"config":{"model":"effective-model"},"origins":{}});
+        let mut calls = 0;
+        let resolved = resolve_with_config(
+            None,
+            Some("low"),
+            None,
+            Path::new("workspace"),
+            Some(&response),
+            |_, _| {
+                calls += 1;
+                ready(Err(CodexSharedError::unsupported(
+                    "unexpected config reread",
+                )))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved.as_deref(), Some("effective-model"));
+        assert_eq!(calls, 0);
     }
 
     #[tokio::test]

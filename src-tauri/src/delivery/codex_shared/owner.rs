@@ -461,9 +461,10 @@ impl CodexSharedOwner {
         #[cfg(windows)]
         let job = crate::utils::process::create_kill_on_close_job("Codex shared owner")
             .map_err(CodexSharedError::unsupported)?;
-        // Only an ordinary interactive TUI needs the temporary file overlay.
-        // The daemon always retains its explicit policy arguments.
-        let mut launch_config = if spec.config.is_off {
+        // On Windows the effective backend comes from the initialized server's
+        // cwd-aware config read, so its TUI overlay is prepared in that same
+        // pre-thread initialization window. Other platforms retain early setup.
+        let mut launch_config = if spec.config.is_off || cfg!(windows) {
             None
         } else {
             Some(phase(&mut timings.launch_config, || {
@@ -553,10 +554,36 @@ impl CodexSharedOwner {
                 owned_socket = Some(attachment::OwnedSocket::capture(&socket)?);
                 // No unrelated live thread may share this private startup owner.
                 attachment::require_empty(&client).await?;
+                let effective_config = if cfg!(windows) {
+                    Some(
+                        super::launch_model::read_effective_config(
+                            &client,
+                            &spec.workspace,
+                            initialization_deadline,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+                if let Some(config_read) = effective_config.as_ref() {
+                    policy.resolve_windows_sandbox(config_read, cfg!(windows))?;
+                    if !spec.config.is_off {
+                        let mut overlay_args = generated_args.clone();
+                        policy.append_windows_sandbox_arg(&mut overlay_args);
+                        launch_config = Some(phase(&mut timings.launch_config, || {
+                            super::launch_config::prepare_tui_launch_config(
+                                &codex_home,
+                                &overlay_args,
+                            )
+                        })?);
+                    }
+                }
                 let launch_model_at = std::time::Instant::now();
                 model_override = super::launch_model::resolve_launch_model(
                     &client, spec.config.model.as_deref(), configured_effort.as_deref(),
                     spec.config.resume_session.as_deref(), &spec.workspace,
+                    effective_config.as_ref(),
                 ).await?;
                 timings.launch_model = launch_model_at.elapsed();
                 policy.expect_launch_model(model_override.as_deref())?;
