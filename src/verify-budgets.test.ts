@@ -110,6 +110,64 @@ describe('base-relative debt budget comparison', () => {
     const recoveryBase = recoveryManifest('^4.1.8', '^4.1.8', '3.4.13');
     const recoveryHead = recoveryManifest('^4.1.11', '^4.1.11', '3.4.16');
 
+    const currentSecurityManifest = (
+      vitest: unknown,
+      coverage: unknown,
+      undici: unknown,
+      eslint = '^10.9.1',
+    ) => JSON.stringify({
+      devDependencies: {
+        eslint,
+        'typescript-eslint': '^8.68.0',
+        vitest,
+        '@vitest/coverage-v8': coverage,
+      },
+      overrides: { undici },
+    });
+    const currentSecurityBase = currentSecurityManifest('^4.1.11', '^4.1.11', '7.29.1');
+    const currentSecurityHead = currentSecurityManifest('^4.1.12', '^4.1.12', '7.30.1');
+
+    it('allows the exact current audited Vitest, coverage, and undici transitions together', () => {
+      expect(changedLintPolicyFiles(['package.json'], {
+        base: currentSecurityBase,
+        head: currentSecurityHead,
+      })).toEqual([]);
+      expect(() => assertLintPolicyUnchanged(['package.json'], {
+        base: currentSecurityBase,
+        head: currentSecurityHead,
+      })).not.toThrow();
+      expect(() => assertDependencyParity(currentSecurityBase, currentSecurityHead)).not.toThrow();
+    });
+
+    it('rejects adjacent security pins and unrelated contract or lint policy changes', () => {
+      const adjacentSecurityPin = currentSecurityManifest('^4.1.13', '^4.1.12', '7.30.1');
+      expect(changedLintPolicyFiles(['package.json'], {
+        base: currentSecurityBase,
+        head: adjacentSecurityPin,
+      })).toEqual(['package.json']);
+      expect(() => assertLintPolicyUnchanged(['package.json'], {
+        base: currentSecurityBase,
+        head: adjacentSecurityPin,
+      })).toThrow('changes lint policy or dependencies');
+      expect(() => assertDependencyParity(currentSecurityBase, adjacentSecurityPin))
+        .toThrow('Debt budget gate cannot resolve base dependencies');
+
+      const unrelatedContractChange = currentSecurityManifest(
+        '^4.1.12', '^4.1.12', '7.30.1', '^10.9.2',
+      );
+      expect(changedLintPolicyFiles(['package.json'], {
+        base: currentSecurityBase,
+        head: unrelatedContractChange,
+      })).toEqual(['package.json']);
+      expect(() => assertLintPolicyUnchanged(['package.json'], {
+        base: currentSecurityBase,
+        head: unrelatedContractChange,
+      })).toThrow('changes lint policy or dependencies');
+      expect(() => assertDependencyParity(currentSecurityBase, unrelatedContractChange))
+        .toThrow('Debt budget gate cannot resolve base dependencies');
+      expect(changedLintPolicyFiles(['eslint.config.js'])).toEqual(['eslint.config.js']);
+    });
+
     for (const [description, head] of [
       ['Vitest and coverage', recoveryManifest('^4.1.11', '^4.1.11', '3.4.13')],
       ['DOMPurify', recoveryManifest('^4.1.8', '^4.1.8', '3.4.16')],
