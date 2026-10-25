@@ -199,6 +199,17 @@ async function assertNoWorkspaceCommandShadow(workspace, command, extensions) {
   }
 }
 
+/** Resolve the exact System32 Windows PowerShell executable used inside the pinned Cmd shell. */
+export function automaticReplyExecPowerShell(platform = process.platform, systemRoot = process.env.SystemRoot) {
+  if (platform !== "win32") return null;
+  assert.ok(typeof systemRoot === "string" && path.win32.isAbsolute(systemRoot),
+    "Windows SystemRoot must be absolute before selecting PowerShell");
+  const executable = path.win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  assert.ok(!/[\s%!^&|<>()"]/u.test(executable),
+    "The System32 PowerShell path must be unquoted and free of Cmd metacharacters");
+  return executable;
+}
+
 /**
  * Qualify the effective Windows Codex child PATH without changing it or exposing its entries.
  * Non-Windows fixtures keep their existing portable execution path.
@@ -237,8 +248,10 @@ export async function qualifyAutomaticReplyExecEnvironment({
   const workspaceReal = await fs.realpath(workerWorkspace);
   assert.ok(samePath(workspaceReal, workerWorkspace, "win32"), "The worker workspace must be canonical");
   const shellPath = path.win32.join(systemRoot, "System32", "cmd.exe");
-  const [shell, node] = await Promise.all([
+  const powershellPath = automaticReplyExecPowerShell("win32", systemRoot);
+  const [shell, powershell, node] = await Promise.all([
     hashStableRegularFile(shellPath, "System32 cmd.exe"),
+    hashStableRegularFile(powershellPath, "System32 Windows PowerShell"),
     hashStableRegularFile(nodeExecutable, "Node executable", { allowParentLinks: true }),
   ]);
   await Promise.all([
@@ -257,9 +270,11 @@ export async function qualifyAutomaticReplyExecEnvironment({
 
   return {
     shell: shell.path,
+    powershell: powershell.path,
     node: node.path,
     node_realpath: node.realpath,
     shell_sha256: shell.sha256,
+    powershell_sha256: powershell.sha256,
     node_sha256: node.sha256,
     child_path: {
       sha256: createHash("sha256").update(effectivePath.value, "utf8").digest("hex"),
@@ -312,24 +327,49 @@ export function automaticReplyTaskInstructions(gateCommand, shell = null, system
     "Then call the Wardian reply tool once with status done and exactly that printed token. Do no other work.";
 }
 
-/** Build the one gate command with Cmd-safe quoting for an exact absolute Node executable. */
-export function automaticReplyGateCommand(deadlineAt, {
-  nodeExecutable = process.execPath,
-  platform = process.platform,
-} = {}) {
+/** Build an encoded PowerShell launcher so Cmd never parses the qualified Node path. */
+export function automaticReplyGateCommand(deadlineAt, options = {}) {
+  const {
+    nodeExecutable = process.execPath,
+    platform = process.platform,
+    systemRoot = process.env.SystemRoot,
+  } = options;
   assert.ok(Number.isSafeInteger(deadlineAt), "The worker gate deadline must be an absolute millisecond timestamp");
   const deadlineDate = new Date(deadlineAt);
   assert.ok(Number.isFinite(deadlineDate.getTime()), "The worker gate deadline is outside the supported date range");
   const deadline = deadlineDate.toISOString();
-  const script = ".wardian-e2e-gate/reply-gate.mjs";
   if (platform !== "win32") {
+    const script = ".wardian-e2e-gate/reply-gate.mjs";
     return "node " + script + " --deadline " + JSON.stringify(deadline);
   }
   assert.ok(typeof nodeExecutable === "string" && path.win32.isAbsolute(nodeExecutable),
     "The exact Windows Node executable path must be absolute");
   assert.ok(!/[%!^&|<>()"\r\n]/u.test(nodeExecutable),
     "The Windows Node executable path contains a Cmd metacharacter");
-  return "\"" + nodeExecutable + "\" " + script + " --deadline " + deadline;
+  assert.equal(path.win32.basename(nodeExecutable).toLowerCase(), "node.exe",
+    "The qualified Windows executable must be node.exe");
+  const powershellExecutable = options.powershellExecutable;
+  const expectedPowerShell = automaticReplyExecPowerShell(platform, systemRoot);
+  assert.ok(typeof powershellExecutable === "string" && path.win32.isAbsolute(powershellExecutable)
+    && samePath(powershellExecutable, expectedPowerShell, "win32"),
+    "The exact System32 Windows PowerShell executable must be qualified");
+  assert.ok(!/[\s%!^&|<>()"]/u.test(powershellExecutable),
+    "The System32 PowerShell path must be unquoted and free of Cmd metacharacters");
+
+  const scriptPath = ".\\.wardian-e2e-gate\\reply-gate.mjs";
+  const quotePowerShell = (value) => "'" + value.replaceAll("'", "''") + "'";
+  const powershellScript = [
+    "$ErrorActionPreference = 'Stop'",
+    "$utf8 = [System.Text.UTF8Encoding]::new($false)",
+    "[Console]::OutputEncoding = $utf8",
+    "$OutputEncoding = $utf8",
+    "$node = " + quotePowerShell(nodeExecutable),
+    "$gateArgs = @(" + [scriptPath, "--deadline", deadline].map(quotePowerShell).join(",") + ")",
+    "& $node @gateArgs",
+    "exit $LASTEXITCODE",
+  ].join(";");
+  const encodedScript = Buffer.from(powershellScript, "utf16le").toString("base64");
+  return powershellExecutable + " -NoProfile -NonInteractive -EncodedCommand " + encodedScript;
 }
 
 /** Assert the exact gate request from its native event representation without evaluating code. */

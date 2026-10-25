@@ -1,6 +1,7 @@
 // @tier nightly — Read-only observer, owned gate, and deadline checks; no app or providers.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -9,7 +10,8 @@ import { DatabaseSync } from "node:sqlite";
 import {
   activeConversationLeaseConflicts, appendOwnedReplyToolApproval, assertPromptDeliveryAccepted,
   assertAutomaticReplyGateInvocation, assertRequesterOriginMatchesProviderInput,
-  automaticReplyDeadlines, automaticReplyExecScript, automaticReplyExecShell,
+  automaticReplyDeadlines, automaticReplyExecPowerShell, automaticReplyExecScript,
+  automaticReplyExecShell,
   automaticReplyGateCommand, automaticReplyGateToken, automaticReplyTaskInstructions,
   collectAutomaticReplyExecAttempts,
   completedAssistantRows, qualifyAutomaticReplyExecEnvironment,
@@ -176,6 +178,8 @@ test("automatic reply uses an explicit System32 shell on Windows and the portabl
   const gateCommand = "node .wardian-e2e-gate/reply-gate.mjs --deadline \"2030-01-01T00:00:00.000Z\"";
   const windowsShell = automaticReplyExecShell("win32", "C:\\Windows");
   assert.equal(windowsShell, "C:\\Windows\\System32\\cmd.exe");
+  const windowsPowerShell = automaticReplyExecPowerShell("win32", "C:\\Windows");
+  assert.equal(windowsPowerShell, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
   const windowsInstructions = automaticReplyTaskInstructions(gateCommand, windowsShell, "C:\\Windows");
   const execScript = automaticReplyExecScript(gateCommand, windowsShell);
   assert.equal(execScript,
@@ -198,6 +202,7 @@ test("automatic reply uses an explicit System32 shell on Windows and the portabl
 
   assert.equal(automaticReplyExecShell("linux", "/usr"), null);
   assert.equal(automaticReplyExecShell("darwin", "/Applications"), null);
+  assert.equal(automaticReplyExecPowerShell("linux", "/usr"), null);
   const portableInstructions = automaticReplyTaskInstructions(gateCommand);
   const portableScript = automaticReplyExecScript(gateCommand, null);
   assert.match(portableInstructions, /functions\.exec/u);
@@ -206,6 +211,9 @@ test("automatic reply uses an explicit System32 shell on Windows and the portabl
   assert.ok(!portableScript.includes("shell:"), "Portable execution must leave shell selection to the host");
   assert.throws(() => automaticReplyExecShell("win32", null), /SystemRoot must be absolute/u);
   assert.throws(() => automaticReplyExecShell("win32", "C:\\WindowsApps"), /must not resolve/u);
+  assert.throws(() => automaticReplyExecPowerShell("win32", "C:\\Windows Root"), /free of Cmd metacharacters/u);
+  assert.throws(() => automaticReplyExecPowerShell("win32", "C:\\Win&dows"), /free of Cmd metacharacters/u);
+  assert.throws(() => automaticReplyExecPowerShell("win32", 'C:\\Win"dows'), /free of Cmd metacharacters/u);
 });
 
 test("gate invocation assertion accepts only the exact wrapper or exact native exec arguments", () => {
@@ -253,15 +261,24 @@ test("gate invocation assertion accepts only the exact wrapper or exact native e
   }, { gateCommand, shell: null }), /omit the shell override/u);
 });
 
-test("Windows gate command quotes the exact Node path once and keeps the ISO deadline bare", () => {
+test("Windows gate command pins PowerShell and encodes the exact Node path and deadline", () => {
   const deadlineAt = Date.parse("2030-01-01T00:00:00.000Z");
-  const nodeExecutable = "C:\\Program Files\\Node\\node.exe";
-  const command = automaticReplyGateCommand(deadlineAt, { nodeExecutable, platform: "win32" });
-  assert.equal(command,
-    "\"C:\\Program Files\\Node\\node.exe\" .wardian-e2e-gate/reply-gate.mjs --deadline 2030-01-01T00:00:00.000Z");
-  assert.equal((command.match(/"/gu) ?? []).length, 2);
-  assert.ok(command.includes("\\Program Files\\"));
-  assert.ok(!command.includes("\\\\Program"));
+  const nodeExecutable = "C:\\Program Files\\Node Ω's\\node.exe";
+  const systemRoot = "C:\\Windows";
+  const powershellExecutable = automaticReplyExecPowerShell("win32", systemRoot);
+  const command = automaticReplyGateCommand(deadlineAt, {
+    nodeExecutable, powershellExecutable, platform: "win32", systemRoot,
+  });
+  const encodedPrefix = powershellExecutable + " -NoProfile -NonInteractive -EncodedCommand ";
+  assert.ok(command.startsWith(encodedPrefix));
+  assert.equal((command.match(/"/gu) ?? []).length, 0);
+  const encodedScript = command.slice(encodedPrefix.length);
+  assert.match(encodedScript, /^[A-Za-z0-9+/]+=*$/u);
+  const decodedScript = Buffer.from(encodedScript, "base64").toString("utf16le");
+  assert.ok(decodedScript.includes("$node = 'C:\\Program Files\\Node Ω''s\\node.exe'"));
+  assert.ok(decodedScript.includes(
+    "@('.\\.wardian-e2e-gate\\reply-gate.mjs','--deadline','2030-01-01T00:00:00.000Z')"));
+  assert.ok(decodedScript.includes("[Console]::OutputEncoding = $utf8"));
   for (const unsafePath of [
     "C:\\Node%HOME%\\node.exe", "C:\\Node!\\node.exe", "C:\\Node^\\node.exe",
     "C:\\Node&tools\\node.exe", "C:\\Node|tools\\node.exe", "C:\\Node<tools\\node.exe",
@@ -269,14 +286,59 @@ test("Windows gate command quotes the exact Node path once and keeps the ISO dea
     "C:\\Node\\\"quoted\\node.exe",
   ]) {
     assert.throws(() => automaticReplyGateCommand(deadlineAt, {
-      nodeExecutable: unsafePath, platform: "win32",
+      nodeExecutable: unsafePath, powershellExecutable, platform: "win32", systemRoot,
     }), /Cmd metacharacter/u);
   }
+  assert.throws(() => automaticReplyGateCommand(deadlineAt, {
+    nodeExecutable,
+    powershellExecutable: "C:\\Windows Root\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    platform: "win32", systemRoot,
+  }), /exact System32 Windows PowerShell/u);
   assert.equal(automaticReplyGateCommand(deadlineAt, { platform: "linux" }),
     "node .wardian-e2e-gate/reply-gate.mjs --deadline \"2030-01-01T00:00:00.000Z\"");
   assert.throws(() => automaticReplyGateCommand(Number.MAX_SAFE_INTEGER, { platform: "win32" }),
     /supported date range/u);
 });
+
+if (process.platform === "win32") {
+  test("Cmd /c launches the qualified Node executable through encoded System32 PowerShell", async (t) => {
+    const root = await fixture(t);
+    const nodeDirectory = path.join(root, "Node runtime Ω's with spaces");
+    await fs.symlink(await fs.realpath(path.dirname(process.execPath)), nodeDirectory, "junction");
+
+    const qualifiedNode = path.join(nodeDirectory, path.basename(process.execPath));
+    assert.equal(await fs.realpath(qualifiedNode), await fs.realpath(process.execPath));
+
+    const gateDirectory = path.join(root, ".wardian-e2e-gate");
+    await fs.mkdir(gateDirectory);
+    await fs.writeFile(path.join(gateDirectory, "reply-gate.mjs"),
+      "process.stdout.write(JSON.stringify({execPath:process.execPath,argv:process.argv.slice(2),marker:\"Ω雪\"}));\n");
+
+    const shell = automaticReplyExecShell();
+    const systemRoot = process.env.SystemRoot;
+    const powershellExecutable = automaticReplyExecPowerShell("win32", systemRoot);
+    const expectedDeadline = "2030-01-01T00:00:00.000Z";
+    const command = automaticReplyGateCommand(Date.parse(expectedDeadline), {
+      nodeExecutable: qualifiedNode,
+      powershellExecutable,
+      platform: "win32",
+      systemRoot,
+    });
+    assert.ok(!command.includes(qualifiedNode), "Cmd must see only the encoded Node path");
+    const result = spawnSync(shell, ["/c", command], {
+      cwd: root,
+      encoding: "utf8",
+      timeout: 10_000,
+      windowsHide: true,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    const child = JSON.parse(result.stdout);
+    assert.equal(await fs.realpath(child.execPath), await fs.realpath(qualifiedNode));
+    assert.deepEqual(child.argv, ["--deadline", expectedDeadline]);
+    assert.equal(child.marker, "Ω雪", "PowerShell must preserve Node UTF-8 stdout");
+  });
+}
 
 test("exec attempt collector preserves raw native inputs and matches both output event forms by call_id", () => {
   const wrappedInput =
@@ -713,9 +775,11 @@ windowsOnly("Windows exec environment qualification hashes exact binaries and re
   });
   const receipt = await qualify();
   assert.equal(receipt.shell, path.win32.join(systemRoot, "System32", "cmd.exe"));
+  assert.equal(receipt.powershell, automaticReplyExecPowerShell("win32", systemRoot));
   assert.equal(receipt.node, process.execPath);
   assert.equal(receipt.node_realpath, await fs.realpath(process.execPath));
   assert.match(receipt.shell_sha256, /^[0-9a-f]{64}$/u);
+  assert.match(receipt.powershell_sha256, /^[0-9a-f]{64}$/u);
   assert.match(receipt.node_sha256, /^[0-9a-f]{64}$/u);
   assert.match(receipt.child_path.sha256, /^[0-9a-f]{64}$/u);
   assert.equal(receipt.child_path.entry_count, 3, "The duplicate Wardian bin entry is removed");

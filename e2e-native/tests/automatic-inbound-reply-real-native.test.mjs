@@ -266,6 +266,7 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
         env: { ...process.env, WARDIAN_HOME: home }, nodeExecutable: process.execPath,
       }), execEnvironment, "The installed native CLI directory must preserve the preflighted command resolution");
       report.artifacts.windows_exec_shell_sha256 = execEnvironment.shell_sha256;
+      report.artifacts.windows_exec_powershell_sha256 = execEnvironment.powershell_sha256;
     }
     const registeredMcpCommand = path.join(home, "bin",
       process.platform === "win32" ? "wardian-mcp.exe" : "wardian-cli");
@@ -306,6 +307,7 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
           initialMarker = "AGY_INITIAL_DONE_" + randomUUID();
           const gateCommand = automaticReplyGateCommand(workDeadline(), {
             platform: process.platform, nodeExecutable: execEnvironment?.node ?? process.execPath,
+            powershellExecutable: execEnvironment?.powershell,
           });
           const gateScript = automaticReplyExecScript(gateCommand, execShell);
           const taskInstructions = automaticReplyTaskInstructions(
