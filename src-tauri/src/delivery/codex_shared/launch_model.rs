@@ -64,29 +64,6 @@ pub(super) async fn read_effective_config(
         .await
 }
 
-#[cfg(test)]
-async fn resolve_with_request<F, Fut>(
-    configured_model: Option<&str>,
-    configured_effort: Option<&str>,
-    resume_id: Option<&str>,
-    cwd: &Path,
-    request: F,
-) -> Result<Option<String>, CodexSharedError>
-where
-    F: FnMut(&'static str, Value) -> Fut,
-    Fut: Future<Output = Result<Value, CodexSharedError>>,
-{
-    resolve_with_config(
-        configured_model,
-        configured_effort,
-        resume_id,
-        cwd,
-        None,
-        request,
-    )
-    .await
-}
-
 async fn resolve_with_config<F, Fut>(
     configured_model: Option<&str>,
     configured_effort: Option<&str>,
@@ -213,6 +190,28 @@ mod tests {
     use super::*;
 
     type Reply = Result<Value, CodexSharedError>;
+
+    async fn resolve_with_request<F, Fut>(
+        configured_model: Option<&str>,
+        configured_effort: Option<&str>,
+        resume_id: Option<&str>,
+        cwd: &Path,
+        request: F,
+    ) -> Result<Option<String>, CodexSharedError>
+    where
+        F: FnMut(&'static str, Value) -> Fut,
+        Fut: Future<Output = Result<Value, CodexSharedError>>,
+    {
+        resolve_with_config(
+            configured_model,
+            configured_effort,
+            resume_id,
+            cwd,
+            None,
+            request,
+        )
+        .await
+    }
 
     struct Script(VecDeque<(&'static str, Value, Reply)>);
 
