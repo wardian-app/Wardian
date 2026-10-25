@@ -22,7 +22,6 @@ import {
   automaticReplyTaskInstructions,
   assertAutomaticReplyGateInvocation,
   automaticReplyGateToken,
-  collectAutomaticReplyExecAttempts,
   qualifyAutomaticReplyExecEnvironment,
   assertRequesterOriginMatchesProviderInput,
   automaticReplyDeadlines,
@@ -33,6 +32,7 @@ import {
   readConversationLeaseSnapshot,
   readProviderInputState,
   readCanonicalTaskReply,
+  readAutomaticReplyProviderLogEvidence,
   recordConversationLeaseObservation,
   persistAutomaticReplyFailure,
   writeOwnedReplyReport,
@@ -83,64 +83,6 @@ async function requesterConfigAndStatus(driver, agentId, expectedSession = null)
 
 async function sha256(file) {
   return createHash("sha256").update(await fs.readFile(file)).digest("hex");
-}
-
-/** Read only the fresh worker's bound rollout, retaining tool inputs without evaluating them. */
-async function readWorkerExecEvidence(home, worker, workspace, nativeSession) {
-  assert.match(nativeSession, /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu,
-    "The worker must expose a canonical native session before reading its tool attempts");
-  const profile = path.join(home, "agents", worker.session_id, "habitat", ".codex");
-  const owner = JSON.parse(await fs.readFile(path.join(profile, ".wardian-messaging.json"), "utf8"));
-  assert.equal(owner.version, 1);
-  assert.equal(owner.agent_id, worker.session_id, "The rollout profile belongs to a foreign agent");
-  assert.equal(path.resolve(owner.wardian_home).toLowerCase(), path.resolve(home).toLowerCase(),
-    "The rollout profile belongs to a foreign native home");
-  const root = path.join(profile, "sessions");
-  const candidates = [];
-  const visit = async (directory, depth = 0) => {
-    assert.ok(depth <= 5, "The fresh worker rollout exceeds the known session directory layout");
-    const metadata = await fs.lstat(directory);
-    assert.ok(metadata.isDirectory() && !metadata.isSymbolicLink(),
-      "The worker session tree must not redirect to another history");
-    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
-      const file = path.join(directory, entry.name);
-      if (entry.isDirectory()) await visit(file, depth + 1);
-      else if (entry.isFile() && entry.name.endsWith("-" + nativeSession + ".jsonl")) candidates.push(file);
-    }
-  };
-  try { await visit(root); }
-  catch (error) { if (error.code === "ENOENT") return null; throw error; }
-  assert.ok(candidates.length <= 1, "The worker native session has duplicate rollout sources");
-  if (!candidates.length) return null;
-  const file = candidates[0];
-  const metadata = await fs.lstat(file);
-  assert.ok(metadata.isFile() && !metadata.isSymbolicLink() && metadata.size < 64 * 1024 * 1024,
-    "The fresh worker rollout must be a bounded regular file");
-  const bytes = await fs.readFile(file);
-  const text = bytes.toString("utf8");
-  const lines = text.split(/\r?\n/u);
-  // A live app-server can be appending the final line while this observation is read.
-  const partialTail = !text.endsWith("\n");
-  if (partialTail) lines.pop();
-  const rows = lines.filter(Boolean).map((line) => JSON.parse(line));
-  if (!rows.length) return null;
-  assert.equal(rows[0].type, "session_meta", "The worker rollout must start with native session metadata");
-  const expectedWorkspace = (await fs.realpath(workspace)).toLowerCase();
-  for (const row of rows.filter((entry) => entry.type === "session_meta")) {
-    assert.equal(row.payload?.id, nativeSession, "The rollout contains a foreign native session");
-    assert.equal((await fs.realpath(row.payload.cwd)).toLowerCase(), expectedWorkspace,
-      "The rollout contains a foreign worker workspace");
-  }
-  return {
-    native_session: nativeSession,
-    source: "owned_worker_rollout",
-    source_file: file,
-    source_sha256: createHash("sha256").update(bytes).digest("hex"),
-    source_bytes: bytes.length,
-    partial_tail: partialTail,
-    attempts: collectAutomaticReplyExecAttempts(rows),
-    tool_environment_mode: "not_observed",
-  };
 }
 
 async function assertWorkerRemainsOff(driver, worker) {
@@ -201,6 +143,7 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
   let requester;
   let worker;
   let workerNativeSession;
+  let workerExecSourceBinding = null;
   let initialOwner;
   let coreFailure;
   let startupAttempted = false;
@@ -212,9 +155,24 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
     const agents = await invokeTauri(session.driver, "list_agents");
     const current = agents.find((entry) => entry.session_id === worker.session_id);
     assert.equal(current?.provider, "codex", "Worker execution evidence requires the original Codex agent");
-    if (!current.resume_session) return;
+    if (!current.resume_session) {
+      assert.equal(workerNativeSession, undefined,
+        "The worker's observed Codex conversation disappeared during evidence collection");
+      return;
+    }
+    assert.equal(workerNativeSession ?? current.resume_session, current.resume_session,
+      "The worker changed Codex conversations during evidence collection");
     workerNativeSession = current.resume_session;
-    report.worker_exec_evidence = await readWorkerExecEvidence(home, worker, workerWorkspace, workerNativeSession);
+    const observation = await readAutomaticReplyProviderLogEvidence({
+      wardianHome: home,
+      agentId: worker.session_id,
+      workspace: workerWorkspace,
+      codexHome: process.env.CODEX_HOME,
+      nativeSession: workerNativeSession,
+      previousBinding: workerExecSourceBinding,
+    });
+    workerExecSourceBinding = observation.binding;
+    report.worker_exec_evidence = observation.evidence;
   };
 
   try {

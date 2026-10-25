@@ -1,13 +1,19 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { constants as fsConstants, createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { compactHomeEvidence } from "./codex-compact-home-evidence.mjs";
 
 const CONVERSATION_LEASE_MODES = new Set([
   "background_resume", "background_fresh", "lifecycle_transition", "uncertain_previous_provider",
 ]);
 const MAX_REPORTED_LEASE_CONFLICTS = 4;
+const MAX_PROVIDER_CAPTURE_BYTES = 4 * 1024 * 1024;
+const MAX_PROVIDER_ROLLOUT_BYTES = 64 * 1024 * 1024;
+const PROVIDER_LOG_ANCHOR_BYTES = 4 * 1024;
+const MAX_U64 = 0xffffffffffffffffn;
+const NATIVE_SESSION_UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu;
 
 function samePath(left, right, platform = process.platform) {
   if (platform === "win32") {
@@ -673,6 +679,324 @@ export function automaticReplyGateToken(attempt) {
     /^WORKER_ONLY_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
     "The successful gate stdout must be exactly one strict worker UUID");
   return stdout;
+}
+
+function exactU64(value, label) {
+  let integer;
+  if (typeof value === "bigint") integer = value;
+  else {
+    assert.ok(typeof value === "number" && Number.isSafeInteger(value), label + " must be an exact unsigned integer");
+    integer = BigInt(value);
+  }
+  assert.ok(integer >= 0n && integer <= MAX_U64, label + " must fit an unsigned 64-bit integer");
+  return integer;
+}
+
+function parseCaptureState(bytes) {
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  const state = JSON.parse(text, (_key, value, context) => {
+    if (typeof value !== "number" || Number.isSafeInteger(value)) return value;
+    const source = context?.source ?? "";
+    assert.match(source, /^(0|[1-9][0-9]*)$/u, "Lossless provider-log u64 decoding is required");
+    const integer = BigInt(source);
+    assert.ok(integer <= MAX_U64, "Provider-log locator integer exceeds u64");
+    return integer;
+  });
+  assert.ok(state && typeof state === "object" && !Array.isArray(state),
+    "Conversation capture state must be an object");
+  if (!Object.hasOwn(state, "provider_log_sources")) state.provider_log_sources = [];
+  else assert.ok(Array.isArray(state.provider_log_sources),
+    "Conversation capture provider-log source list is malformed");
+  return state;
+}
+
+async function readBoundedRegularFile(filePath, maximum, label, {
+  allowAppend = false,
+  allowAtomicReplace = false,
+} = {}) {
+  const before = await fs.lstat(filePath, { bigint: true });
+  assertPlainPath(before, "file", label);
+  assert.ok(before.size <= BigInt(maximum), label + " exceeds its read bound");
+  const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+  const handle = await fs.open(filePath, flags);
+  try {
+    const opened = await handle.stat({ bigint: true });
+    if (!allowAtomicReplace) assertSameFileIdentity(before, opened, label);
+    assert.ok(opened.isFile(), label + " is not a regular file");
+    assert.ok(opened.size <= BigInt(maximum), label + " exceeds its read bound");
+    assert.ok(allowAppend ? opened.size >= before.size : allowAtomicReplace || opened.size === before.size,
+      label + " changed before it was opened");
+    const bytes = Buffer.alloc(Number(opened.size));
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+      assert.ok(bytesRead > 0, label + " ended while it was being read");
+      offset += bytesRead;
+    }
+    const after = await handle.stat({ bigint: true });
+    const pathAfter = await fs.lstat(filePath, { bigint: true });
+    assertSameFileIdentity(opened, after, label);
+    assert.ok(after.size <= BigInt(maximum), label + " exceeded its read bound while being observed");
+    assertPlainPath(pathAfter, "file", label);
+    if (!allowAtomicReplace) assertSameFileIdentity(opened, pathAfter, label);
+    assert.ok(allowAppend ? after.size >= opened.size : after.size === opened.size,
+      label + (allowAppend ? " was truncated while it was read" : " changed while it was read"));
+    if (!allowAppend) assert.equal(after.mtimeNs, opened.mtimeNs, label + " changed while it was read");
+    return { bytes, stat: after };
+  } finally {
+    await handle.close();
+  }
+}
+
+function normalizeFilesystemPath(value) {
+  if (process.platform !== "win32") return path.resolve(value);
+  let candidate = value;
+  if (candidate.startsWith("\\\\?\\UNC\\")) candidate = "\\\\" + candidate.slice(8);
+  else if (candidate.startsWith("\\\\?\\")) candidate = candidate.slice(4);
+  return path.win32.resolve(candidate);
+}
+
+function relativePathWithin(root, file) {
+  const flavor = process.platform === "win32" ? path.win32 : path;
+  const normalizedRoot = normalizeFilesystemPath(root);
+  const normalizedFile = normalizeFilesystemPath(file);
+  const relative = flavor.relative(normalizedRoot, normalizedFile);
+  const parentPrefix = ".." + flavor.sep;
+  if (relative === "" || relative === ".." || relative.startsWith(parentPrefix) || flavor.isAbsolute(relative)) {
+    return null;
+  }
+  return relative;
+}
+
+async function assertNoNestedRedirects(root, file) {
+  const relative = relativePathWithin(root, file);
+  assert.ok(relative !== null, "Provider rollout is outside the qualified sessions root");
+  const components = relative.split(/[\\/]/u).filter(Boolean);
+  assert.ok(components.length > 0, "Provider rollout path has no file component");
+  let current = root;
+  for (let index = 0; index < components.length; index += 1) {
+    current = path.join(current, components[index]);
+    const stat = await fs.lstat(current, { bigint: true });
+    assert.equal(stat.isSymbolicLink(), false, "Provider rollout path contains a nested redirect");
+    assert.equal(index === components.length - 1 ? stat.isFile() : stat.isDirectory(), true,
+      "Provider rollout path has an unexpected component type");
+  }
+}
+
+function parseProviderSource(source) {
+  assert.ok(source && typeof source === "object" && !Array.isArray(source),
+    "Provider-log locator entry must be an object");
+  assert.ok(typeof source.path === "string" && path.isAbsolute(source.path),
+    "Provider-log locator path must be absolute");
+  assert.ok(source.native_identity && typeof source.native_identity === "object",
+    "Provider-log locator has no native file identity");
+  const identity = {
+    platform: source.native_identity.platform,
+    primary: exactU64(source.native_identity.primary, "Provider-log native identity primary"),
+    secondary: exactU64(source.native_identity.secondary, "Provider-log native identity secondary"),
+  };
+  assert.equal(identity.platform, process.platform === "win32" ? "windows" : "unix",
+    "Provider-log native identity platform does not match this host");
+  assert.ok(source.continuity_anchor && typeof source.continuity_anchor === "object",
+    "Provider-log locator has no continuity anchor");
+  const anchor = {
+    start: exactU64(source.continuity_anchor.start, "Provider-log anchor start"),
+    len: exactU64(source.continuity_anchor.len, "Provider-log anchor length"),
+    sha256: source.continuity_anchor.sha256,
+  };
+  const committedOffset = exactU64(source.committed_offset, "Provider-log committed offset");
+  assert.ok(anchor.len <= BigInt(PROVIDER_LOG_ANCHOR_BYTES), "Provider-log anchor exceeds its source bound");
+  assert.equal(anchor.start + anchor.len, committedOffset,
+    "Provider-log continuity anchor does not end at the committed cursor");
+  assert.match(anchor.sha256 ?? "", /^[0-9a-f]{64}$/u, "Provider-log continuity anchor hash is malformed");
+  assert.ok(["pending", "complete", "incomplete"].includes(source.status),
+    "Provider-log locator status is unknown");
+  return { path: source.path, identity, anchor, committedOffset, status: source.status };
+}
+
+function verifyProviderAnchor(bytes, anchor, label) {
+  const start = exactU64(anchor.start, label + " start");
+  const len = exactU64(anchor.len, label + " length");
+  const end = start + len;
+  assert.ok(end <= BigInt(bytes.length), label + " extends beyond the observed rollout bytes");
+  const actual = bytes.subarray(Number(start), Number(end));
+  assert.equal(BigInt(actual.length), len, label + " is incomplete");
+  assert.equal(createHash("sha256").update(actual).digest("hex"), anchor.sha256,
+    label + " does not match the provider-log continuity anchor");
+}
+
+async function validateManagedCodexOwner(wardianHome, agentId) {
+  const home = path.resolve(wardianHome);
+  const agents = path.join(home, "agents");
+  const agentRoot = path.join(agents, agentId);
+  const habitat = path.join(agentRoot, "habitat");
+  for (const directory of [home, agents, agentRoot, habitat]) {
+    await lstatPlain(directory, "directory", "Owned Codex habitat parent");
+  }
+  const profile = path.join(habitat, ".codex");
+  const profileStat = await fs.lstat(profile, { bigint: true });
+  assert.ok(profileStat.isDirectory() || profileStat.isSymbolicLink(),
+    "Managed Codex profile is not a directory");
+  const profileReal = await fs.realpath(profile);
+  if (profileStat.isSymbolicLink()) {
+    const compact = await compactHomeEvidence(home, agentId);
+    assert.ok(samePath(compact.source, profile), "Compact Codex evidence belongs to a different profile");
+    assert.ok(samePath(compact.physical_home, profileReal),
+      "Compact Codex evidence does not match the profile's current target");
+  } else {
+    assert.ok(samePath(profileReal, profile), "Managed Codex profile resolves through an unowned link");
+  }
+  const ownerPath = path.join(profile, ".wardian-messaging.json");
+  const ownerBytes = (await readBoundedRegularFile(ownerPath, 64 * 1024, "Managed Codex owner record")).bytes;
+  const owner = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(ownerBytes));
+  assert.equal(owner.version, 1, "Managed Codex owner record has an unsupported version");
+  assert.equal(owner.agent_id, agentId, "Managed Codex profile belongs to a foreign agent");
+  assert.ok(typeof owner.wardian_home === "string" && samePath(owner.wardian_home, home),
+    "Managed Codex profile belongs to a foreign Wardian home");
+  return { home, agentRoot, profile };
+}
+
+/**
+ * Observe only the app-persisted source for the worker's current Codex session.
+ * A missing or stale locator stays pending; once bound, its path and file identity
+ * cannot move, while the capture cursor anchor may advance on the same append-only file.
+ */
+export async function readAutomaticReplyProviderLogEvidence({
+  wardianHome,
+  agentId,
+  workspace,
+  codexHome,
+  nativeSession,
+  previousBinding = null,
+} = {}) {
+  assert.match(agentId ?? "", NATIVE_SESSION_UUID, "A canonical worker agent UUID is required");
+  assert.match(nativeSession ?? "", NATIVE_SESSION_UUID,
+    "The worker must expose a canonical native session before reading provider evidence");
+  const owned = await validateManagedCodexOwner(wardianHome, agentId);
+  const capturePath = path.join(owned.agentRoot, "conversation-capture.json");
+  let capture;
+  try {
+    const bytes = (await readBoundedRegularFile(
+      capturePath, MAX_PROVIDER_CAPTURE_BYTES, "Conversation capture state", { allowAtomicReplace: true },
+    )).bytes;
+    capture = parseCaptureState(bytes);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      assert.equal(previousBinding, null, "The bound Codex provider-log locator disappeared");
+      return { status: "pending", binding: null, evidence: null };
+    }
+    throw error;
+  }
+
+  const providerSourceKey = "codex:session:" + nativeSession;
+  const matches = capture.provider_log_sources.filter((source) =>
+    source && source.provider_source_key === providerSourceKey);
+  assert.ok(matches.length <= 1, "Conversation capture has duplicate entries for the current Codex source");
+  if (!matches.length) {
+    assert.equal(previousBinding, null, "The bound Codex provider-log locator disappeared");
+    return { status: "pending", binding: null, evidence: null };
+  }
+  const source = parseProviderSource(matches[0]);
+  assert.notEqual(source.status, "incomplete", "Wardian marked the current Codex provider log incomplete");
+
+  assert.ok(typeof codexHome === "string" && path.isAbsolute(codexHome),
+    "The explicitly qualified CODEX_HOME must be absolute");
+  const codexHomeReal = await fs.realpath(codexHome);
+  assert.ok(samePath(codexHomeReal, codexHome),
+    "The explicitly qualified CODEX_HOME must not resolve through an unowned link");
+  const explicitSessionsPath = path.join(codexHome, "sessions");
+  const explicitSessionsStat = await fs.lstat(explicitSessionsPath, { bigint: true });
+  assertPlainPath(explicitSessionsStat, "directory", "Explicit CODEX_HOME sessions root");
+  const explicitSessionsReal = await fs.realpath(explicitSessionsPath);
+  assert.ok(samePath(explicitSessionsReal, explicitSessionsPath),
+    "Explicit CODEX_HOME sessions root must not resolve through a link");
+  const projectedSessions = path.join(owned.profile, "sessions");
+  assert.ok(samePath(await fs.realpath(projectedSessions), explicitSessionsReal),
+    "Managed Codex sessions projection does not target the exact qualified CODEX_HOME root");
+
+  const sourceReal = await fs.realpath(source.path);
+  assert.ok(samePath(source.path, sourceReal), "Provider-log locator path is not canonical");
+  assert.ok(sourceReal.toLowerCase().endsWith("-" + nativeSession.toLowerCase() + ".jsonl"),
+    "Provider-log locator filename does not identify the current Codex session");
+  await assertNoNestedRedirects(explicitSessionsReal, sourceReal);
+
+  const fileRead = await readBoundedRegularFile(
+    sourceReal, MAX_PROVIDER_ROLLOUT_BYTES, "Current Codex provider log", { allowAppend: true },
+  );
+  const stat = fileRead.stat;
+  const actualIdentity = {
+    platform: process.platform === "win32" ? "windows" : "unix",
+    primary: stat.dev,
+    secondary: stat.ino,
+  };
+  assert.equal(source.identity.platform, actualIdentity.platform,
+    "Provider-log native identity platform changed");
+  assert.equal(source.identity.primary, actualIdentity.primary,
+    "Provider-log native volume/device identity changed");
+  assert.equal(source.identity.secondary, actualIdentity.secondary,
+    "Provider-log native file identity changed");
+  assert.ok(source.committedOffset <= stat.size, "Provider-log cursor is beyond the current file");
+  verifyProviderAnchor(fileRead.bytes, source.anchor, "Current provider-log anchor");
+
+  if (previousBinding) {
+    assert.equal(previousBinding.provider_source_key, providerSourceKey,
+      "The bound Codex source key changed");
+    assert.equal(previousBinding.native_session, nativeSession,
+      "The worker's native session changed after its provider log was bound");
+    assert.ok(samePath(previousBinding.path, sourceReal),
+      "The bound Codex provider-log path changed");
+    assert.equal(previousBinding.native_identity.platform, actualIdentity.platform);
+    assert.equal(previousBinding.native_identity.primary, actualIdentity.primary,
+      "The bound Codex provider-log volume/device identity changed");
+    assert.equal(previousBinding.native_identity.secondary, actualIdentity.secondary,
+      "The bound Codex provider-log file identity changed");
+    const previousCursor = previousBinding.last_anchor.start + previousBinding.last_anchor.len;
+    assert.ok(source.committedOffset >= previousCursor,
+      "The provider-log capture cursor moved backwards after binding");
+    verifyProviderAnchor(fileRead.bytes, previousBinding.last_anchor, "Previously bound provider-log anchor");
+  }
+
+  const binding = {
+    provider_source_key: providerSourceKey,
+    native_session: nativeSession,
+    path: sourceReal,
+    native_identity: actualIdentity,
+    last_anchor: source.anchor,
+  };
+  if (source.status === "pending") return { status: "pending", binding, evidence: null };
+
+  const committedBytes = fileRead.bytes.subarray(0, Number(source.committedOffset));
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(committedBytes);
+  const partialTail = !text.endsWith("\n");
+  const lines = text.split(/\r?\n/u);
+  if (partialTail) lines.pop();
+  const rows = lines.filter(Boolean).map((line) => JSON.parse(line));
+  if (!rows.length) return { status: "pending", binding, evidence: null };
+  assert.equal(rows[0].type, "session_meta", "The bound Codex rollout must start with native session metadata");
+  const workspaceReal = await fs.realpath(workspace);
+  for (const row of rows.filter((entry) => entry.type === "session_meta")) {
+    assert.equal(row.payload?.id, nativeSession, "The bound Codex rollout contains a foreign native session");
+    assert.ok(typeof row.payload?.cwd === "string" && path.isAbsolute(row.payload.cwd),
+      "The bound Codex rollout has no absolute workspace header");
+    assert.ok(samePath(await fs.realpath(row.payload.cwd), workspaceReal),
+      "The bound Codex rollout contains a foreign worker workspace");
+  }
+  return {
+    status: "ready",
+    binding,
+    evidence: {
+      native_session: nativeSession,
+      source: "conversation_capture_provider_log",
+      provider_source_key: providerSourceKey,
+      source_file: sourceReal,
+      source_sha256: createHash("sha256").update(committedBytes).digest("hex"),
+      source_bytes: committedBytes.length,
+      observed_file_bytes: fileRead.bytes.length,
+      partial_tail: partialTail,
+      attempts: collectAutomaticReplyExecAttempts(rows),
+      tool_environment_mode: "not_observed",
+    },
+  };
 }
 
 /**

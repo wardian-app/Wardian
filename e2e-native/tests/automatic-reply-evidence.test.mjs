@@ -1,6 +1,7 @@
 // @tier nightly — Read-only observer, owned gate, and deadline checks; no app or providers.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -14,7 +15,7 @@ import {
   completedAssistantRows, qualifyAutomaticReplyExecEnvironment,
   exactCurrentCascade, persistAutomaticReplyFailure, providerInputIsReady,
   readCanonicalTaskReply, readConversationLeaseSnapshot, readProviderInputState,
-  recordConversationLeaseObservation, writeOwnedReplyReport,
+  readAutomaticReplyProviderLogEvidence, recordConversationLeaseObservation, writeOwnedReplyReport,
 } from "../lib/automatic-reply-evidence.mjs";
 import { acquireHomeLock, readHomeLock, releaseHomeLock } from "../lib/sessionHome.mjs";
 import { waitForReplyRelease } from "./fixtures/automatic-reply-gate.mjs";
@@ -1191,4 +1192,240 @@ test("worker gate fails at the original deadline without release or token", asyn
   await assert.rejects(waitForReplyRelease({ readyPath, releasePath, deadlineAt: Date.now() + 30, pollMs: 5 }), /deadline expired/u);
   await assert.rejects(fs.access(readyPath + ".consumed"), /ENOENT/u);
   await assert.rejects(waitForReplyRelease({ readyPath, releasePath, deadlineAt: Date.now() - 1 }), /deadline expired/u);
+});
+
+async function providerLogFixture(t, { sessionsProjection = "plain" } = {}) {
+  const owned = await ownedCodexFixture(t);
+  const workspace = path.join(owned.wardianHome, "workspaces", "worker");
+  await fs.mkdir(workspace, { recursive: true });
+  const nativeSession = "c3a45678-e89b-42d3-a456-426614174001";
+  const projectedSessions = path.join(owned.codexHome, "sessions");
+  let codexHome = owned.codexHome;
+  if (sessionsProjection === "matching" || sessionsProjection === "foreign") {
+    codexHome = path.join(owned.wardianHome, "qualified-codex-home");
+    const explicitSessions = path.join(codexHome, "sessions");
+    const target = sessionsProjection === "matching"
+      ? explicitSessions
+      : path.join(owned.wardianHome, "foreign-codex-home", "sessions");
+    await fs.mkdir(explicitSessions, { recursive: true });
+    if (sessionsProjection === "foreign") await fs.mkdir(target, { recursive: true });
+    try {
+      await fs.symlink(target, projectedSessions, process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      if (["EPERM", "EACCES", "ENOTSUP"].includes(error.code)) {
+        t.skip("This host does not permit the managed sessions projection fixture");
+        return null;
+      }
+      throw error;
+    }
+  } else {
+    await fs.mkdir(projectedSessions, { recursive: true });
+  }
+  const sessionsRoot = path.join(codexHome, "sessions");
+  const rolloutDirectory = path.join(sessionsRoot, "2026", "10", "25");
+  await fs.mkdir(rolloutDirectory, { recursive: true });
+  const rolloutPath = path.join(rolloutDirectory, `rollout-${nativeSession}.jsonl`);
+  const workspaceHeader = { type: "session_meta", payload: { id: nativeSession, cwd: workspace } };
+  const initialBytes = Buffer.from(JSON.stringify(workspaceHeader) + "\n", "utf8");
+  await fs.writeFile(rolloutPath, initialBytes, { flag: "wx" });
+  return {
+    ...owned, managedProfile: owned.codexHome, workspace, nativeSession, codexHome,
+    sessionsRoot, rolloutPath, initialBytes,
+  };
+}
+
+async function providerLogSource(fixtureValue, {
+  file = fixtureValue.rolloutPath,
+  bytes = fixtureValue.initialBytes,
+  status = "complete",
+  identity = null,
+  anchorHash = null,
+} = {}) {
+  const stat = await fs.stat(file, { bigint: true });
+  const committedOffset = BigInt(bytes.length);
+  const start = committedOffset > 4096n ? committedOffset - 4096n : 0n;
+  const anchorBytes = bytes.subarray(Number(start), Number(committedOffset));
+  return {
+    provider_source_key: `codex:session:${fixtureValue.nativeSession}`,
+    path: file,
+    native_identity: identity ?? {
+      platform: process.platform === "win32" ? "windows" : "unix",
+      primary: stat.dev.toString(),
+      secondary: stat.ino.toString(),
+    },
+    committed_offset: committedOffset.toString(),
+    continuity_anchor: {
+      start: start.toString(),
+      len: BigInt(anchorBytes.length).toString(),
+      sha256: anchorHash ?? createHashForTest(anchorBytes),
+    },
+    normalizer: {},
+    status,
+  };
+}
+
+function createHashForTest(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+async function writeProviderCaptureDocument(fixtureValue, document) {
+  const capturePath = path.join(
+    fixtureValue.wardianHome, "agents", fixtureValue.agentId, "conversation-capture.json",
+  );
+  const nextPath = capturePath + ".next";
+  const serialized = JSON.stringify(document, null, 2)
+    .replace(/("(?:primary|secondary|committed_offset|start|len)": )"([0-9]+)"/gu, "$1$2");
+  await fs.writeFile(nextPath, serialized + "\n", { flag: "wx" });
+  await fs.rename(nextPath, capturePath);
+  return capturePath;
+}
+
+async function writeProviderCapture(fixtureValue, sources) {
+  return writeProviderCaptureDocument(fixtureValue, { provider_log_sources: sources });
+}
+
+async function readProviderEvidence(fixtureValue, previousBinding = null) {
+  return readAutomaticReplyProviderLogEvidence({
+    wardianHome: fixtureValue.wardianHome,
+    agentId: fixtureValue.agentId,
+    workspace: fixtureValue.workspace,
+    codexHome: fixtureValue.codexHome,
+    nativeSession: fixtureValue.nativeSession,
+    previousBinding,
+  });
+}
+
+test("provider evidence waits for the app locator and never discovers rollout files by scanning", async (t) => {
+  const owned = await providerLogFixture(t);
+  if (!owned) return;
+  assert.deepEqual(await readProviderEvidence(owned), { status: "pending", binding: null, evidence: null });
+  await writeProviderCaptureDocument(owned, {});
+  assert.deepEqual(await readProviderEvidence(owned), { status: "pending", binding: null, evidence: null },
+    "Rust may omit the default-empty provider_log_sources field before the first locator");
+  await writeProviderCaptureDocument(owned, { provider_log_sources: {} });
+  await assert.rejects(readProviderEvidence(owned), /provider-log source list is malformed/u);
+
+  const staleSource = await providerLogSource(owned);
+  staleSource.provider_source_key = "codex:session:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  await writeProviderCapture(owned, [staleSource]);
+  assert.deepEqual(await readProviderEvidence(owned), { status: "pending", binding: null, evidence: null });
+
+  const currentSource = await providerLogSource(owned);
+  await writeProviderCapture(owned, [currentSource, currentSource]);
+  await assert.rejects(readProviderEvidence(owned), /duplicate entries for the current Codex source/u);
+  await writeProviderCapture(owned, [currentSource]);
+  const result = await readProviderEvidence(owned);
+  assert.equal(result.status, "ready");
+  assert.equal(result.binding.provider_source_key, `codex:session:${owned.nativeSession}`);
+  assert.equal(result.evidence.source, "conversation_capture_provider_log");
+  assert.equal(result.evidence.source_file, await fs.realpath(owned.rolloutPath));
+  assert.equal(result.evidence.attempts.length, 0);
+});
+
+test("provider evidence accepts only the exact qualified sessions projection, including a namespaced rollout path", async (t) => {
+  const matching = await providerLogFixture(t, { sessionsProjection: "matching" });
+  if (!matching) return;
+  const namespacedFile = process.platform === "win32"
+    ? path.win32.toNamespacedPath(matching.rolloutPath)
+    : matching.rolloutPath;
+  await writeProviderCapture(matching, [await providerLogSource(matching, { file: namespacedFile })]);
+  const accepted = await readProviderEvidence(matching);
+  assert.equal(accepted.status, "ready");
+
+  const replacementRoot = path.join(matching.wardianHome, "retargeted-codex-home", "sessions");
+  await fs.mkdir(replacementRoot, { recursive: true });
+  await fs.rm(path.join(matching.managedProfile, "sessions"), { recursive: true });
+  await fs.symlink(replacementRoot,
+    path.join(matching.managedProfile, "sessions"),
+    process.platform === "win32" ? "junction" : "dir");
+  await assert.rejects(readProviderEvidence(matching, accepted.binding), /exact qualified CODEX_HOME root/u);
+
+  const foreign = await providerLogFixture(t, { sessionsProjection: "foreign" });
+  if (!foreign) return;
+  await writeProviderCapture(foreign, [await providerLogSource(foreign)]);
+  await assert.rejects(readProviderEvidence(foreign), /exact qualified CODEX_HOME root/u);
+});
+
+test("provider evidence pins one rollout identity and permits only same-file committed-anchor advance", async (t) => {
+  const owned = await providerLogFixture(t);
+  if (!owned) return;
+  const pendingSource = await providerLogSource(owned, { status: "pending" });
+  await writeProviderCapture(owned, [pendingSource]);
+  const first = await readProviderEvidence(owned);
+  assert.equal(first.status, "pending");
+  assert.ok(first.binding);
+  const capturePath = path.join(owned.wardianHome, "agents", owned.agentId, "conversation-capture.json");
+  await writeProviderCaptureDocument(owned, {});
+  await assert.rejects(readProviderEvidence(owned, first.binding), /bound Codex provider-log locator disappeared/u);
+  await fs.unlink(capturePath);
+  await assert.rejects(readProviderEvidence(owned, first.binding), /bound Codex provider-log locator disappeared/u);
+  await writeProviderCapture(owned, [pendingSource]);
+  const rebound = await readProviderEvidence(owned, first.binding);
+  assert.equal(rebound.status, "pending");
+  assert.deepEqual(rebound.binding, first.binding,
+    "The same app locator may resume without changing the pinned source identity");
+
+  const committedRow = Buffer.from(JSON.stringify({
+    type: "response_item",
+    timestamp: "2026-10-25T00:00:00.000Z",
+    payload: { type: "function_call", name: "exec_command", call_id: "committed-call", arguments: "{}" },
+  }) + "\n", "utf8");
+  const uncommittedRow = Buffer.from(JSON.stringify({
+    type: "response_item",
+    timestamp: "2026-10-25T00:00:01.000Z",
+    payload: { type: "function_call", name: "exec_command", call_id: "uncommitted-call", arguments: "{}" },
+  }) + "\n", "utf8");
+  await fs.appendFile(owned.rolloutPath, Buffer.concat([committedRow, uncommittedRow]));
+  const committedBytes = Buffer.concat([owned.initialBytes, committedRow]);
+  await writeProviderCapture(owned, [await providerLogSource(owned, { bytes: committedBytes })]);
+  const advanced = await readProviderEvidence(owned, rebound.binding);
+  assert.equal(advanced.status, "ready");
+  assert.equal(advanced.evidence.attempts.length, 1,
+    "Rows beyond Wardian's committed cursor must not become execution evidence");
+  assert.equal(advanced.evidence.attempts[0].call_id, "committed-call");
+  assert.equal(advanced.evidence.source_bytes, committedBytes.length);
+  assert.equal(advanced.evidence.observed_file_bytes,
+    owned.initialBytes.length + committedRow.length + uncommittedRow.length);
+
+  const replacementDirectory = path.join(owned.sessionsRoot, "2026", "10", "26");
+  await fs.mkdir(replacementDirectory, { recursive: true });
+  const replacementPath = path.join(replacementDirectory, path.basename(owned.rolloutPath));
+  await fs.copyFile(owned.rolloutPath, replacementPath);
+  const replacement = await providerLogSource(owned, { file: replacementPath, bytes: committedBytes });
+  await writeProviderCapture(owned, [replacement]);
+  await assert.rejects(readProviderEvidence(owned, advanced.binding), /bound Codex provider-log path changed/u);
+});
+
+test("provider evidence rejects unsafe native identity numbers and broken continuity anchors", async (t) => {
+  const owned = await providerLogFixture(t);
+  if (!owned) return;
+  const source = await providerLogSource(owned);
+  source.native_identity.secondary = "18446744073709551615";
+  await writeProviderCapture(owned, [source]);
+  await assert.rejects(readProviderEvidence(owned), /native file identity changed/u);
+
+  const badAnchor = await providerLogSource(owned);
+  badAnchor.continuity_anchor.sha256 = "0".repeat(64);
+  await writeProviderCapture(owned, [badAnchor]);
+  await assert.rejects(readProviderEvidence(owned), /continuity anchor/u);
+});
+
+test("provider evidence binds rollout session metadata to the current session and worker workspace", async (t) => {
+  const owned = await providerLogFixture(t);
+  if (!owned) return;
+  const foreignSession = Buffer.from(JSON.stringify({
+    type: "session_meta", payload: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", cwd: owned.workspace },
+  }) + "\n", "utf8");
+  await fs.writeFile(owned.rolloutPath, foreignSession);
+  await writeProviderCapture(owned, [await providerLogSource(owned, { bytes: foreignSession })]);
+  await assert.rejects(readProviderEvidence(owned), /foreign native session/u);
+
+  const foreignWorkspace = path.join(owned.wardianHome, "workspaces", "foreign");
+  await fs.mkdir(foreignWorkspace, { recursive: true });
+  const foreignCwd = Buffer.from(JSON.stringify({
+    type: "session_meta", payload: { id: owned.nativeSession, cwd: foreignWorkspace },
+  }) + "\n", "utf8");
+  await fs.writeFile(owned.rolloutPath, foreignCwd);
+  await writeProviderCapture(owned, [await providerLogSource(owned, { bytes: foreignCwd })]);
+  await assert.rejects(readProviderEvidence(owned), /foreign worker workspace/u);
 });
