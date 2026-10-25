@@ -8,6 +8,230 @@ const CONVERSATION_LEASE_MODES = new Set([
 ]);
 const MAX_REPORTED_LEASE_CONFLICTS = 4;
 
+function samePath(left, right, platform = process.platform) {
+  if (platform === "win32") {
+    const normalizedLeft = path.win32.toNamespacedPath(path.win32.resolve(left)).toLowerCase();
+    const normalizedRight = path.win32.toNamespacedPath(path.win32.resolve(right)).toLowerCase();
+    return normalizedLeft === normalizedRight;
+  }
+  return path.resolve(left) === path.resolve(right);
+}
+
+function generatedTomlSection(config, name) {
+  const lines = config.split(/\r?\n/u);
+  const header = new RegExp(`^\\s*\\[${name.replaceAll(".", "\\.")}\\]\\s*(?:#.*)?$`, "u");
+  const matches = lines.flatMap((line, index) => header.test(line) ? [index] : []);
+  assert.equal(matches.length, 1, `Expected exactly one generated TOML section ${name}`);
+  const [start] = matches;
+  let end = lines.findIndex((line, index) => index > start && /^\s*\[/u.test(line));
+  if (end === -1) end = lines.length;
+  return lines.slice(start + 1, end).join("\n");
+}
+
+function generatedTomlValue(section, key) {
+  const matches = section.split("\n").filter((entry) =>
+    new RegExp(`^\\s*${key}\\s*=`, "u").test(entry));
+  assert.equal(matches.length, 1, `Expected exactly one generated TOML field ${key}`);
+  const [line] = matches;
+  const value = line.slice(line.indexOf("=") + 1).trim();
+  if (/^'[^'\r\n]*'$/u.test(value)) return value.slice(1, -1);
+  return JSON.parse(value);
+}
+
+function hasReplyToolPolicy(config) {
+  let section = "";
+  for (const line of config.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    if (trimmed.startsWith("[")) {
+      const header = trimmed.split("#", 1)[0].trim()
+        .replace(/^\[+|\]+$/gu, "").replace(/[\s"']/gu, "");
+      section = header;
+      if (header === "mcp_servers.wardian.tools" ||
+        header.startsWith("mcp_servers.wardian.tools.reply") ||
+        (header.startsWith("mcp_servers.wardian.tools.") && header.slice("mcp_servers.wardian.tools.".length).includes("."))) {
+        return true;
+      }
+      continue;
+    }
+
+    const normalized = trimmed.replace(/[\s"']/gu, "");
+    const assignment = normalized.split("=", 1)[0];
+    if ((section === "mcp_servers.wardian" && assignment.startsWith("tools")) ||
+      normalized.startsWith("mcp_servers.wardian.tools.reply") ||
+      normalized.startsWith("mcp_servers.wardian.tools=") ||
+      (section === "mcp_servers" && assignment.startsWith("wardian.tools"))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function assertPlainPath(stat, kind, label) {
+  assert.equal(stat.isSymbolicLink(), false, `${label} must not be a link`);
+  assert.equal(kind === "directory" ? stat.isDirectory() : stat.isFile(), true,
+    `${label} must be a regular ${kind}`);
+}
+
+async function lstatPlain(pathname, kind, label) {
+  const stat = await fs.lstat(pathname);
+  assertPlainPath(stat, kind, label);
+  assert.ok(samePath(await fs.realpath(pathname), pathname), `${label} resolved through a link`);
+  return stat;
+}
+
+function assertSameFileIdentity(expected, actual, label) {
+  assert.equal(actual.isSymbolicLink(), false, `${label} became a link`);
+  assert.equal(actual.dev, expected.dev, `${label} device changed during fixture preparation`);
+  assert.equal(actual.ino, expected.ino, `${label} identity changed during fixture preparation`);
+}
+
+async function readHandleUtf8(handle) {
+  const { size } = await handle.stat();
+  const bytes = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < bytes.length) {
+    const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+    assert.ok(bytesRead > 0, "Managed Codex config changed while it was being read");
+    offset += bytesRead;
+  }
+  return bytes.toString("utf8");
+}
+
+async function writeHandleUtf8(handle, text) {
+  const bytes = Buffer.from(text, "utf8");
+  let offset = 0;
+  while (offset < bytes.length) {
+    const { bytesWritten } = await handle.write(bytes, offset, bytes.length - offset, offset);
+    assert.ok(bytesWritten > 0, "Managed Codex config write made no progress");
+    offset += bytesWritten;
+  }
+  await handle.truncate(bytes.length);
+  await handle.sync();
+}
+
+/** Resolve only the real system PowerShell location for Windows Codex shell calls. */
+export function automaticReplyExecShell(platform = process.platform, systemRoot = process.env.SystemRoot) {
+  if (platform !== "win32") return null;
+  assert.ok(typeof systemRoot === "string" && path.win32.isAbsolute(systemRoot),
+    "Windows SystemRoot must be absolute before selecting the fixture shell");
+  const shell = path.win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  assert.ok(!/\\WindowsApps(?:\\|$)/iu.test(shell), "The fixture shell must not resolve through WindowsApps");
+  return shell;
+}
+
+/** Keep the Windows shell choice explicit in the sole initial worker task. */
+export function automaticReplyTaskInstructions(gateCommand, shell = null) {
+  assert.ok(typeof gateCommand === "string" && gateCommand.trim(), "The worker gate command is required");
+  if (shell !== null) {
+    assert.ok(typeof shell === "string" && path.win32.isAbsolute(shell)
+      && path.win32.basename(shell).toLowerCase() === "powershell.exe"
+      && !/\\WindowsApps(?:\\|$)/iu.test(shell), "Only the verified absolute Windows PowerShell shell is supported");
+  }
+  const execution = shell === null
+    ? `Run ${gateCommand} in your assigned workspace.`
+    : `Use exactly one exec_command request with cmd ${JSON.stringify(gateCommand)} and shell ${JSON.stringify(shell)}. Do not omit or replace the shell field.`;
+  return `${execution} Wait for it to print one WORKER_ONLY_ UUID after the external test gate opens. ` +
+    "Then call the Wardian reply tool once with status done and exactly that printed token. Do no other work.";
+}
+
+/**
+ * Append the one fixture-owned reply-tool grant only to the exact, prepared
+ * agent Codex home whose registration record and config still match Wardian.
+ */
+export async function appendOwnedReplyToolApproval({ wardianHome, agentId, expectedCommand }) {
+  assert.ok(path.isAbsolute(wardianHome), "The isolated Wardian home must be absolute");
+  assert.match(agentId ?? "", /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu,
+    "A canonical UUID agent ID is required");
+  assert.ok(path.isAbsolute(expectedCommand), "The registered MCP command must be absolute");
+
+  const home = path.resolve(wardianHome);
+  const agentRoot = path.join(home, "agents", agentId);
+  const codexHome = path.join(agentRoot, "habitat", ".codex");
+  const configPath = path.join(codexHome, "config.toml");
+  const ownerPath = path.join(codexHome, ".wardian-messaging.json");
+  const commandPath = path.resolve(expectedCommand);
+  const directories = [home, path.join(home, "agents"), agentRoot,
+    path.join(agentRoot, "habitat"), codexHome, path.dirname(commandPath)];
+  const directoryStats = new Map();
+  for (const directory of directories) {
+    directoryStats.set(directory, await lstatPlain(directory, "directory", "Owned fixture directory"));
+  }
+  const homeReal = await fs.realpath(home);
+  assert.ok(samePath(homeReal, home), "The isolated Wardian home must not be redirected");
+  const codexReal = await fs.realpath(codexHome);
+  assert.ok(samePath(codexReal, path.join(homeReal, "agents", agentId, "habitat", ".codex")),
+    "The worker Codex profile must remain in its exact managed habitat");
+  const commandReal = await fs.realpath(commandPath);
+  const relativeCommand = path.relative(homeReal, commandReal);
+  assert.ok(relativeCommand && !relativeCommand.startsWith("..") && !path.isAbsolute(relativeCommand),
+    "The managed MCP command must remain inside the isolated Wardian home");
+  const commandStat = await lstatPlain(commandReal, "file", "Managed MCP command");
+
+  const ownerStat = await lstatPlain(ownerPath, "file", "Managed messaging ownership record");
+  const configStat = await lstatPlain(configPath, "file", "Managed Codex config");
+  const [ownerBytes, original] = await Promise.all([
+    fs.readFile(ownerPath), fs.readFile(configPath, "utf8"),
+  ]);
+  const owner = JSON.parse(ownerBytes.toString("utf8"));
+  assert.deepEqual(Object.keys(owner).sort(), ["agent_id", "command", "version", "wardian_home"],
+    "The ownership record must retain Wardian's exact schema");
+  assert.equal(owner.version, 1);
+  assert.equal(owner.agent_id, agentId, "The messaging record belongs to a different agent");
+  assert.ok(samePath(owner.wardian_home, home), "The messaging record belongs to a different Wardian home");
+  assert.ok(samePath(owner.command, commandReal), "The messaging record names a different executable");
+
+  const server = generatedTomlSection(original, "mcp_servers.wardian");
+  const env = generatedTomlSection(original, "mcp_servers.wardian.env");
+  assert.equal(generatedTomlValue(server, "command"), owner.command,
+    "The Codex server command differs from its ownership record");
+  assert.deepEqual(generatedTomlValue(server, "args"), ["mcp", "serve"],
+    "The Codex server args differ from Wardian's managed registration");
+  assert.ok(samePath(generatedTomlValue(env, "WARDIAN_HOME"), owner.wardian_home),
+    "The Codex server environment names a different Wardian home");
+  assert.equal(generatedTomlValue(env, "WARDIAN_SESSION_ID"), agentId,
+    "The Codex server environment names a different agent");
+  assert.equal(hasReplyToolPolicy(original), false,
+    "A preexisting or ambiguous Wardian reply-tool policy must be reviewed, never overwritten");
+  const newline = original.includes("\r\n") ? "\r\n" : "\n";
+  const updated = original + (original.endsWith("\n") ? "" : newline)
+    + newline + "[mcp_servers.wardian.tools.reply]" + newline + "approval_mode = \"approve\"" + newline;
+
+  const handle = await fs.open(configPath, "r+");
+  try {
+    const openedStat = await handle.stat();
+    assertSameFileIdentity(configStat, openedStat, "Managed Codex config");
+    assert.equal(await readHandleUtf8(handle), original,
+      "Managed Codex config changed between validation and open");
+    for (const [directory, before] of directoryStats) {
+      assertSameFileIdentity(before, await fs.lstat(directory), "Owned fixture directory");
+    }
+    assertSameFileIdentity(ownerStat, await fs.lstat(ownerPath), "Managed messaging ownership record");
+    assert.deepEqual(await fs.readFile(ownerPath), ownerBytes,
+      "Managed messaging ownership changed during fixture preparation");
+    assertSameFileIdentity(commandStat, await fs.lstat(commandReal), "Managed MCP command");
+    assertSameFileIdentity(openedStat, await fs.lstat(configPath), "Managed Codex config");
+    assert.equal(await readHandleUtf8(handle), original,
+      "Managed Codex config changed before the fixture grant was written");
+    await writeHandleUtf8(handle, updated);
+    assertSameFileIdentity(openedStat, await fs.lstat(configPath), "Managed Codex config");
+    for (const [directory, before] of directoryStats) {
+      assertSameFileIdentity(before, await fs.lstat(directory), "Owned fixture directory");
+    }
+    assert.equal(await readHandleUtf8(handle), updated, "The exact fixture grant was not persisted");
+  } finally {
+    await handle.close();
+  }
+
+  return {
+    agent_id: agentId,
+    config_before_sha256: createHash("sha256").update(original).digest("hex"),
+    config_after_sha256: createHash("sha256").update(updated).digest("hex"),
+    fixture_permission_delta: "[mcp_servers.wardian.tools.reply] approval_mode=approve",
+    command_file: path.basename(commandReal),
+  };
+}
+
 /** Persist evidence only after this run acquired its isolated home. */
 export async function writeOwnedReplyReport(harness, report) {
   if (typeof harness.runId !== "string" || !harness.runId ||

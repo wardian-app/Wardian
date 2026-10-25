@@ -6,8 +6,9 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
-  activeConversationLeaseConflicts, assertPromptDeliveryAccepted,
+  activeConversationLeaseConflicts, appendOwnedReplyToolApproval, assertPromptDeliveryAccepted,
   assertRequesterOriginMatchesProviderInput, automaticReplyDeadlines, completedAssistantRows,
+  automaticReplyExecShell, automaticReplyTaskInstructions,
   exactCurrentCascade, persistAutomaticReplyFailure, providerInputIsReady,
   readCanonicalTaskReply, readConversationLeaseSnapshot, readProviderInputState,
   recordConversationLeaseObservation, writeOwnedReplyReport,
@@ -25,6 +26,166 @@ async function fixture(t) {
   });
   return home;
 }
+
+async function ownedCodexFixture(t, configSuffix = "") {
+  const wardianHome = await fixture(t);
+  const agentId = "123e4567-e89b-42d3-a456-426614174000";
+  const codexHome = path.join(wardianHome, "agents", agentId, "habitat", ".codex");
+  const bin = path.join(wardianHome, "bin");
+  await fs.mkdir(codexHome, { recursive: true });
+  await fs.mkdir(bin, { recursive: true });
+  const commandPath = path.join(bin, process.platform === "win32" ? "wardian-mcp.exe" : "wardian-cli");
+  await fs.writeFile(commandPath, "fixture executable\n");
+  const command = await fs.realpath(commandPath);
+  const owner = { version: 1, agent_id: agentId, command, wardian_home: wardianHome };
+  const config = `model = "gpt-6-luna"\napproval_policy = "never"\nsandbox_mode = "workspace-write"\n` +
+    `[mcp_servers.other]\nlabel = "preserved"\n` +
+    `[mcp_servers.wardian]\ncommand = ${JSON.stringify(command)}\nargs = ["mcp", "serve"]\n` +
+    `tool_timeout_sec = 70\n` +
+    `[mcp_servers.wardian.env]\nWARDIAN_HOME = ${JSON.stringify(wardianHome)}\n` +
+    `WARDIAN_SESSION_ID = "${agentId}"\n` + configSuffix;
+  await fs.writeFile(path.join(codexHome, ".wardian-messaging.json"), JSON.stringify(owner));
+  await fs.writeFile(path.join(codexHome, "config.toml"), config);
+  return { wardianHome, agentId, codexHome, commandPath, command, owner, config };
+}
+
+test("fixture reply-tool grant is scoped to the exact managed registration and preserves config", async (t) => {
+  const owned = await ownedCodexFixture(t,
+    "\n[mcp_servers.wardian.tools.review]\napproval_mode = \"prompt\"\n");
+  const result = await appendOwnedReplyToolApproval({
+    wardianHome: owned.wardianHome,
+    agentId: owned.agentId,
+    expectedCommand: owned.commandPath,
+  });
+  const after = await fs.readFile(path.join(owned.codexHome, "config.toml"), "utf8");
+  assert.equal(after.slice(0, owned.config.length), owned.config,
+    "The fixture must preserve every existing managed and unrelated config key");
+  assert.equal(after.slice(owned.config.length),
+    "\n[mcp_servers.wardian.tools.reply]\napproval_mode = \"approve\"\n");
+  assert.equal(result.agent_id, owned.agentId);
+  assert.equal(result.fixture_permission_delta,
+    "[mcp_servers.wardian.tools.reply] approval_mode=approve");
+  assert.equal(result.command_file, path.basename(owned.commandPath));
+});
+
+test("fixture reply-tool grant rejects conflicting or mismatched ownership before writing", async (t) => {
+  for (const policy of [
+    "\n[mcp_servers.wardian.tools.reply]\napproval_mode = \"deny\"\n",
+    "\n[mcp_servers.wardian.tools]\nreply = { approval_mode = \"prompt\" }\n",
+    "\n[mcp_servers.wardian.tools] # policy\nreply = { approval_mode = \"prompt\" }\n",
+    "\n[\"mcp_servers\".\"wardian\".\"tools\"] # policy\nreply = { approval_mode = \"prompt\" }\n",
+    "\n[mcp_servers.wardian.tools.\"reply\"]\napproval_mode = \"prompt\"\n",
+  ]) {
+    const conflict = await ownedCodexFixture(t, policy);
+    const conflictPath = path.join(conflict.codexHome, "config.toml");
+    const conflictBefore = await fs.readFile(conflictPath, "utf8");
+    await assert.rejects(appendOwnedReplyToolApproval({
+      wardianHome: conflict.wardianHome,
+      agentId: conflict.agentId,
+      expectedCommand: conflict.commandPath,
+    }), /reply-tool policy must be reviewed/u);
+    assert.equal(await fs.readFile(conflictPath, "utf8"), conflictBefore);
+  }
+
+  const invalidIds = await ownedCodexFixture(t);
+  for (const agentId of [".", "..", "../other", "fixture-worker-1"]) {
+    await assert.rejects(appendOwnedReplyToolApproval({
+      wardianHome: invalidIds.wardianHome,
+      agentId,
+      expectedCommand: invalidIds.commandPath,
+    }), /canonical UUID/u);
+  }
+  assert.equal(await fs.readFile(path.join(invalidIds.codexHome, "config.toml"), "utf8"), invalidIds.config);
+
+  const wrongAgent = await ownedCodexFixture(t);
+  const wrongOwner = { ...wrongAgent.owner, agent_id: "foreign-agent" };
+  await fs.writeFile(path.join(wrongAgent.codexHome, ".wardian-messaging.json"), JSON.stringify(wrongOwner));
+  const wrongAgentPath = path.join(wrongAgent.codexHome, "config.toml");
+  const wrongAgentBefore = await fs.readFile(wrongAgentPath, "utf8");
+  await assert.rejects(appendOwnedReplyToolApproval({
+    wardianHome: wrongAgent.wardianHome,
+    agentId: wrongAgent.agentId,
+    expectedCommand: wrongAgent.commandPath,
+  }), /different agent/u);
+  assert.equal(await fs.readFile(wrongAgentPath, "utf8"), wrongAgentBefore);
+
+  const wrongCommand = await ownedCodexFixture(t);
+  const otherCommand = path.join(wrongCommand.wardianHome, "bin", "other-mcp");
+  await fs.writeFile(otherCommand, "foreign executable\n");
+  const wrongCommandPath = path.join(wrongCommand.codexHome, "config.toml");
+  const wrongCommandBefore = await fs.readFile(wrongCommandPath, "utf8");
+  await assert.rejects(appendOwnedReplyToolApproval({
+    wardianHome: wrongCommand.wardianHome,
+    agentId: wrongCommand.agentId,
+    expectedCommand: otherCommand,
+  }), /different executable/u);
+  assert.equal(await fs.readFile(wrongCommandPath, "utf8"), wrongCommandBefore);
+
+  const wrongArgs = await ownedCodexFixture(t);
+  const wrongArgsPath = path.join(wrongArgs.codexHome, "config.toml");
+  const wrongArgsBefore = wrongArgs.config.replace('args = ["mcp", "serve"]', 'args = ["mcp", "receive"]');
+  await fs.writeFile(wrongArgsPath, wrongArgsBefore);
+  await assert.rejects(appendOwnedReplyToolApproval({
+    wardianHome: wrongArgs.wardianHome,
+    agentId: wrongArgs.agentId,
+    expectedCommand: wrongArgs.commandPath,
+  }), /args differ/u);
+  assert.equal(await fs.readFile(wrongArgsPath, "utf8"), wrongArgsBefore);
+
+  const wrongEnvironment = await ownedCodexFixture(t);
+  const wrongEnvironmentPath = path.join(wrongEnvironment.codexHome, "config.toml");
+  const wrongEnvironmentBefore = wrongEnvironment.config.replace(
+    `WARDIAN_HOME = ${JSON.stringify(wrongEnvironment.wardianHome)}`,
+    'WARDIAN_HOME = "C:/foreign-home"',
+  );
+  await fs.writeFile(wrongEnvironmentPath, wrongEnvironmentBefore);
+  await assert.rejects(appendOwnedReplyToolApproval({
+    wardianHome: wrongEnvironment.wardianHome,
+    agentId: wrongEnvironment.agentId,
+    expectedCommand: wrongEnvironment.commandPath,
+  }), /different Wardian home/u);
+  assert.equal(await fs.readFile(wrongEnvironmentPath, "utf8"), wrongEnvironmentBefore);
+});
+
+test("fixture reply-tool grant refuses a linked managed Codex profile", async (t) => {
+  const owned = await ownedCodexFixture(t);
+  const movedProfile = owned.codexHome + "-owned-target";
+  await fs.rename(owned.codexHome, movedProfile);
+  try {
+    await fs.symlink(movedProfile, owned.codexHome, process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    await fs.rename(movedProfile, owned.codexHome);
+    if (["EPERM", "EACCES", "ENOTSUP"].includes(error.code)) {
+      t.skip("This host does not permit creating a directory link for the ownership guard test");
+      return;
+    }
+    throw error;
+  }
+  await assert.rejects(appendOwnedReplyToolApproval({
+    wardianHome: owned.wardianHome,
+    agentId: owned.agentId,
+    expectedCommand: owned.commandPath,
+  }), /must not be a link/u);
+});
+
+test("automatic reply uses an explicit System32 shell on Windows and the portable path elsewhere", () => {
+  const gateCommand = "node .wardian-e2e-gate/reply-gate.mjs --deadline \"2030-01-01T00:00:00.000Z\"";
+  const windowsShell = automaticReplyExecShell("win32", "C:\\Windows");
+  assert.equal(windowsShell, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+  const windowsInstructions = automaticReplyTaskInstructions(gateCommand, windowsShell);
+  assert.match(windowsInstructions, /exec_command/u);
+  assert.match(windowsInstructions, /shell/u);
+  assert.ok(windowsInstructions.includes(JSON.stringify(windowsShell)));
+  assert.ok(!/WindowsApps/iu.test(windowsInstructions));
+
+  assert.equal(automaticReplyExecShell("linux", "/usr"), null);
+  assert.equal(automaticReplyExecShell("darwin", "/Applications"), null);
+  const portableInstructions = automaticReplyTaskInstructions(gateCommand);
+  assert.match(portableInstructions, /^Run node /u);
+  assert.ok(!portableInstructions.includes("exec_command"));
+  assert.throws(() => automaticReplyExecShell("win32", null), /SystemRoot must be absolute/u);
+  assert.throws(() => automaticReplyExecShell("win32", "C:\\WindowsApps"), /must not resolve/u);
+});
 
 function database(home, configure = () => {}) {
   const db = new DatabaseSync(path.join(home, "state.db"));

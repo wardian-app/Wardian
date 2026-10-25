@@ -15,6 +15,9 @@ import {
 import { createHeadlessEvidenceReader } from "../lib/provider-headless-evidence.mjs";
 import { messageCli } from "../lib/canonical-messaging.mjs";
 import {
+  appendOwnedReplyToolApproval,
+  automaticReplyExecShell,
+  automaticReplyTaskInstructions,
   assertRequesterOriginMatchesProviderInput,
   automaticReplyDeadlines,
   assertPromptDeliveryAccepted,
@@ -74,6 +77,28 @@ async function requesterConfigAndStatus(driver, agentId, expectedSession = null)
 
 async function sha256(file) {
   return createHash("sha256").update(await fs.readFile(file)).digest("hex");
+}
+
+async function verifySystemPowerShell(shell) {
+  const metadata = await fs.lstat(shell);
+  assert.equal(metadata.isFile(), true, "The explicit Windows shell must be a regular executable file");
+  assert.equal(metadata.isSymbolicLink(), false, "The explicit Windows shell must not be a link");
+  const realPath = await fs.realpath(shell);
+  assert.equal(path.win32.resolve(realPath).toLowerCase(), path.win32.resolve(shell).toLowerCase(),
+    "The explicit Windows shell must resolve to the selected System32 path");
+  assert.ok(!/\\WindowsApps(?:\\|$)/iu.test(realPath), "The fixture must not select the WindowsApps alias");
+  return sha256(realPath);
+}
+
+async function assertWorkerRemainsOff(driver, worker) {
+  assert.equal(worker.is_off, true, "The newly bootstrapped Codex fixture worker must remain Off");
+  const agents = await invokeTauri(driver, "list_agents");
+  const current = agents.find((entry) => entry.session_id === worker.session_id);
+  assert.ok(current, "The fixture worker must remain registered under its original identity");
+  assert.equal(current.provider, "codex");
+  assert.equal(current.is_off, true, "Fixture preparation must not wake the Codex worker");
+  assert.equal(current.provider_config.sandbox_mode, "workspace-write");
+  assert.equal(current.provider_config.approval_policy, "never");
 }
 
 test("real Antigravity requester receives one delayed Codex reply in its original conversation", {
@@ -196,6 +221,21 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
     assert.equal(worker.provider, "codex");
     assert.equal(worker.model, WORKER_MODEL);
     assert.equal(worker.provider_config.reasoning_effort, WORKER_EFFORT);
+    assert.equal(worker.provider_config.sandbox_mode, "workspace-write");
+    assert.equal(worker.provider_config.approval_policy, "never");
+    await assertWorkerRemainsOff(session.driver, worker);
+    const execShell = automaticReplyExecShell();
+    if (execShell !== null) {
+      report.artifacts.windows_exec_shell_sha256 = await verifySystemPowerShell(execShell);
+    }
+    const registeredMcpCommand = path.join(home, "bin",
+      process.platform === "win32" ? "wardian-mcp.exe" : "wardian-cli");
+    report.worker_messaging_fixture = await appendOwnedReplyToolApproval({
+      wardianHome: home,
+      agentId: worker.session_id,
+      expectedCommand: registeredMcpCommand,
+    });
+    await assertWorkerRemainsOff(session.driver, worker);
     await save();
 
     const nativeStore = process.env.WARDIAN_E2E_CONTEXT_ANTIGRAVITY_HOME;
@@ -227,9 +267,9 @@ test("real Antigravity requester receives one delayed Codex reply in its origina
           initialMarker = "AGY_INITIAL_DONE_" + randomUUID();
           const gateCommand = "node .wardian-e2e-gate/reply-gate.mjs --deadline " +
             JSON.stringify(new Date(workDeadline()).toISOString());
-          const taskInstructions = "Run " + gateCommand +
-            " in your assigned workspace. Wait for it to print one WORKER_ONLY_ UUID after the external test gate opens. " +
-            "Then call the Wardian reply tool once with status done and exactly that printed token. Do no other work.";
+          const taskInstructions = automaticReplyTaskInstructions(
+            gateCommand, execShell,
+          );
           initialPrompt = [
             "Use followup_task exactly once for Codex agent " + worker.session_id + " with this task:",
             taskInstructions,
