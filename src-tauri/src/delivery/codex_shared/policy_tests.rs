@@ -412,6 +412,140 @@ fn workspace_write_rejects_legacy_disabled_windows_sandbox_before_load() {
 }
 
 #[test]
+fn windows_sandbox_service_is_validated_without_selecting_backend() {
+    let managed_origin = json!({
+        "name":{
+            "type":"enterpriseManaged",
+            "id":"managed",
+            "name":"policy"
+        },
+        "version":"1"
+    });
+    for service_enabled in [false, true] {
+        for origin in [None, Some(managed_origin.clone())] {
+            let has_origin = origin.is_some();
+            let mut origins = serde_json::Map::new();
+            if let Some(metadata) = origin {
+                origins.insert("features.windows_sandbox_service".into(), metadata);
+            }
+            let config_read = json!({
+                "config":{"features":{"windows_sandbox_service":service_enabled}},
+                "origins":origins,
+                "requirements":null
+            });
+            let mut policy = ExpectedPolicy::from_server_args(&configured_args(
+                "workspace-write",
+                "on-request",
+                false,
+            ))
+            .unwrap();
+            policy.resolve_windows_sandbox(&config_read, true).unwrap();
+            assert_eq!(
+                policy.windows_sandbox,
+                Some(WindowsSandboxMode::Unelevated),
+                "service_enabled={service_enabled}, has_origin={has_origin}"
+            );
+            assert_eq!(
+                config_read["config"]["features"]["windows_sandbox_service"],
+                json!(service_enabled)
+            );
+        }
+    }
+
+    for service_enabled in [false, true] {
+        for (mut config, expected) in [
+            (
+                json!({"windows":{"sandbox":"elevated"}}),
+                WindowsSandboxMode::Elevated,
+            ),
+            (
+                json!({"features":{"experimental_windows_sandbox":true}}),
+                WindowsSandboxMode::Unelevated,
+            ),
+            (
+                json!({"features":{"elevated_windows_sandbox":true}}),
+                WindowsSandboxMode::Elevated,
+            ),
+        ] {
+            let config_object = config.as_object_mut().unwrap();
+            let features = config_object
+                .entry("features".to_owned())
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .unwrap();
+            features.insert("windows_sandbox_service".into(), json!(service_enabled));
+            let mut policy = ExpectedPolicy::from_server_args(&configured_args(
+                "workspace-write",
+                "on-request",
+                false,
+            ))
+            .unwrap();
+            policy
+                .resolve_windows_sandbox(&json!({"config":config,"origins":{}}), true)
+                .unwrap();
+            assert_eq!(policy.windows_sandbox, Some(expected));
+        }
+    }
+
+    for (config_read, expected_error) in [
+        (
+            json!({
+                "config":{"features":{"windows_sandbox_service":"false"}},
+                "origins":{}
+            }),
+            "Windows sandbox feature value is malformed",
+        ),
+        (
+            json!({
+                "config":{"features":{"windows_sandbox_service":false}},
+                "origins":{"features.windows_sandbox_service":"malformed"}
+            }),
+            "malformed source origin metadata",
+        ),
+        (
+            json!({
+                "config":{"features":{}},
+                "origins":{
+                    "features.windows_sandbox_service":managed_origin.clone()
+                }
+            }),
+            "feature origin has no effective value",
+        ),
+    ] {
+        let mut policy = ExpectedPolicy::from_server_args(&configured_args(
+            "workspace-write",
+            "on-request",
+            false,
+        ))
+        .unwrap();
+        let error = policy
+            .resolve_windows_sandbox(&config_read, true)
+            .unwrap_err();
+        assert!(
+            error.message.contains(expected_error),
+            "unexpected error for config/read: {config_read}: {}",
+            error.message
+        );
+    }
+
+    let managed_disabled_backend = json!({
+        "config":{"features":{"experimental_windows_sandbox":false}},
+        "origins":{
+            "features.experimental_windows_sandbox":managed_origin
+        }
+    });
+    let mut policy =
+        ExpectedPolicy::from_server_args(&configured_args("workspace-write", "on-request", false))
+            .unwrap();
+    let error = policy
+        .resolve_windows_sandbox(&managed_disabled_backend, true)
+        .unwrap_err();
+    assert!(error
+        .message
+        .contains("legacy Windows sandbox selection disables"));
+}
+
+#[test]
 fn every_selected_windows_backend_pins_prefer_mxc_false_in_both_outputs() {
     for (config, expected) in [
         (json!({}), WindowsSandboxMode::Unelevated),

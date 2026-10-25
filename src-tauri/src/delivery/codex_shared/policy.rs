@@ -154,7 +154,10 @@ fn resolve_windows_sandbox(
                 ));
             }
         };
-        legacy_choice_present |= origin || value.is_some();
+        // Service provisioning is gated after the Windows sandbox backend is selected.
+        if *feature != "windows_sandbox_service" {
+            legacy_choice_present |= origin || value.is_some();
+        }
         match *feature {
             "experimental_windows_sandbox" | "enable_experimental_windows_sandbox" => {
                 experimental |= enabled;
