@@ -1,10 +1,8 @@
 use serde_json::{json, Value};
 
-pub(super) const NAMES: [&str; 7] = [
+pub(super) const NAMES: [&str; 5] = [
     "send_message",
     "followup_task",
-    "receive_messages",
-    "wait_agent",
     "reply",
     "interrupt_agent",
     "list_agents",
@@ -20,32 +18,19 @@ fn definition(name: &str) -> Value {
     let message = json!({"type":"string", "minLength":1, "description":"Literal message text."});
     let (description, properties, required) = match name {
         "send_message" => (
-            "Send information to one Wardian agent's durable inbox without starting or interrupting a turn. The receipt reports admission, not provider visibility.",
+            "Admit an informational message to one Wardian agent. Wardian automatically delivers it and wakes an idle recipient when its original conversation is available. It creates no task or reply obligation; the receipt reports admission, not provider visibility.",
             json!({"target":target,"message":message}), vec!["target", "message"],
         ),
         "followup_task" => (
-            "Assign a task to one Wardian agent and return its request receipt without waiting for a reply. Exact native Codex task turns automatically return their final result unless an explicit reply already completed the task; other delivery paths require explicit reply. Starting an inactive receiver can take time. If your assignment requires its result, use wait_agent for mailbox activity, then receive_messages to inspect the correlated reply. A timeout does not mean the task failed.",
+            "Assign a task to one Wardian agent and return its request receipt. Wardian resumes the requester's original provider conversation with the terminal reply when that provider route is available; the reply keeps its task correlation and creates no followup obligation. The receipt reports admission, not completion. Do not poll or replay when no result is immediately visible.",
             json!({"target":target,"message":message}), vec!["target", "message"],
         ),
-        "receive_messages" => (
-            "Read a bounded batch of information, tasks and replies addressed to this managed Wardian agent. Reuse the returned cursor; ack_cursor acknowledges a previously returned batch. A nonzero timeout waits for mailbox activity and then returns the page. Use wait_agent when you need a wake without reading, claiming, or acknowledging inbox records.",
-            json!({
-                "cursor":{"type":"string","minLength":1},
-                "ack_cursor":{"type":"string","minLength":1},
-                "limit":{"type":"integer","minimum":1,"maximum":100,"default":100},
-                "timeout_ms":{"type":"integer","minimum":0,"maximum":60000,"default":0}
-            }), vec![],
-        ),
-        "wait_agent" => (
-            "Wait for mailbox activity addressed to this managed Wardian agent, including information and task-completion replies. This returns no message bodies and does not read, claim, or acknowledge inbox records; call receive_messages to inspect and acknowledge them. It returns immediately when unacknowledged inbox activity already exists. Waiting never starts or interrupts an idle agent. timeout_ms is bounded to 60000; a timeout does not mean a task failed.",
-            json!({"timeout_ms":{"type":"integer","minimum":0,"maximum":60000,"default":60000}}), vec![],
-        ),
         "reply" => (
-            "Reply to a Wardian task request as its authorized recipient. The request determines the destination. A committed explicit reply suppresses automatic native Codex final-result fallback; manual receive and unsupported provider delivery require this tool. Ordinary messages do not complete a request.",
+            "Reply to a Wardian task request as its authorized recipient. Wardian automatically resumes the original requester conversation with this terminal reply when a safe provider route is available. The request determines the destination. Ordinary messages do not complete a request.",
             json!({"request_id":{"type":"string","minLength":1},"status":{"type":"string","enum":["done","blocked","failed"]},"message":message}), vec!["request_id","status","message"],
         ),
         "interrupt_agent" => (
-            "Request interruption of an agent's current turn while retaining its session. Use only when stopping its work is intended, never to poll, wake or speed up an agent after an empty receive wait. The result distinguishes capabilities and observed outcomes; it does not imply shutdown or confirmed interruption.",
+            "Request interruption of an agent's current turn while retaining its session. Use only when stopping its work is intended, never to poll or speed up an agent after task admission. The result distinguishes capabilities and observed outcomes; it does not imply shutdown or confirmed interruption.",
             json!({"target":target}), vec!["target"],
         ),
         "list_agents" => (

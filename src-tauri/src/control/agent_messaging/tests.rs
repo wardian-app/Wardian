@@ -148,7 +148,7 @@ async fn automation_bound_uuid_survives_real_catalog_name_reassignment() {
     assert!(receive(&state, b).await.messages.is_empty());
 }
 
-fn origin(id: &str) -> MessageOrigin {
+pub(super) fn origin(id: &str) -> MessageOrigin {
     MessageOrigin::WardianAgent {
         session_id: id.into(),
     }
@@ -170,23 +170,121 @@ async fn task(state: &AppState) -> store::Admitted {
 }
 
 async fn receive(state: &AppState, recipient: &str) -> AgentMessagePage {
-    let response = handle_in_state(
-        None,
-        state,
-        Request::ReceiveMessages {
-            cursor: None,
-            ack_cursor: None,
-            limit: None,
-            timeout_ms: None,
-        },
-        origin(recipient),
-    )
-    .await
-    .unwrap();
-    let Response::ReceiveMessages { page } = response else {
-        panic!("receive page")
+    state
+        .interactions
+        .receive_agent_messages(recipient, None, None, 100)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn requester_origin_uses_persisted_provider_identity_when_archive_logging_is_disabled() {
+    let _home = TestWardianHome::new_async().await;
+    let state = AppState::new();
+    agent(&state, "sender", "Sender").await;
+    let config = {
+        let agents = state.agents.lock().await;
+        agents.get("sender").unwrap().config.clone()
     };
-    page
+    {
+        let mut config = config.lock().unwrap();
+        config.provider = "Antigravity".into();
+        config.resume_session = Some("conversation-original".into());
+        config.conversation_logging =
+            wardian_core::conversations::AgentConversationLoggingSetting::Disabled;
+    }
+    let generation = state
+        .interactions
+        .start_provider_input_generation("sender", ProviderInputReadiness::Ready, None)
+        .await
+        .generation;
+
+    let origin = requester_origin_for_admission(&state, "sender")
+        .await
+        .expect("persisted resume identity is sufficient without archive logging");
+
+    assert_eq!(origin.provider, "antigravity");
+    assert_eq!(origin.conversation_id, "conversation-original");
+    assert_eq!(origin.generation, generation);
+}
+
+#[tokio::test]
+async fn followup_admission_waits_for_requester_lifecycle_identity_fence() {
+    let _home = TestWardianHome::new_async().await;
+    let state = AppState::new();
+    agent(&state, "sender", "Sender").await;
+    agent(&state, "receiver", "Receiver").await;
+    let config = {
+        let agents = state.agents.lock().await;
+        agents.get("sender").unwrap().config.clone()
+    };
+    {
+        let mut config = config.lock().unwrap();
+        config.provider = "antigravity".into();
+        config.resume_session = Some("old-conversation".into());
+        config.conversation_logging =
+            wardian_core::conversations::AgentConversationLoggingSetting::Disabled;
+    }
+    state
+        .interactions
+        .start_provider_input_generation("sender", ProviderInputReadiness::Ready, None)
+        .await;
+
+    let lifecycle = state.lock_agent_lifecycle("sender").await;
+    let admission = handle_in_state(
+        None,
+        &state,
+        Request::FollowupTask {
+            target: "receiver".into(),
+            message: "work".into(),
+            idempotency_key: None,
+        },
+        origin("sender"),
+    );
+    tokio::pin!(admission);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), &mut admission)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store::with_db(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM agent_message_delivery WHERE operation='followup_task'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?)
+        })
+        .unwrap(),
+        0,
+        "request origin and canonical admission must share the sender lifecycle fence"
+    );
+
+    config.lock().unwrap().resume_session = Some("new-conversation".into());
+    let next_generation = state
+        .interactions
+        .start_provider_input_generation("sender", ProviderInputReadiness::Ready, None)
+        .await
+        .generation;
+    drop(lifecycle);
+
+    let Response::FollowupTask { request_id, .. } =
+        tokio::time::timeout(std::time::Duration::from_secs(1), admission)
+            .await
+            .expect("admission resumes after lifecycle transition")
+            .unwrap()
+    else {
+        panic!("followup receipt")
+    };
+    let captured = store::with_db(|conn| store::requester_origin(conn, &request_id)).unwrap();
+    assert_eq!(
+        captured,
+        Some(store::RequesterOrigin {
+            provider: "antigravity".into(),
+            conversation_id: "new-conversation".into(),
+            generation: next_generation,
+        })
+    );
 }
 
 fn owner(id: &str) -> String {
@@ -1372,13 +1470,13 @@ async fn off_info_stays_off_task_receipt_is_async_and_receiver_reply_is_correlat
 }
 
 #[tokio::test]
-async fn receive_timeout_does_not_complete_or_cancel_task() {
+async fn retired_receive_rejects_before_claim_ack_or_task_mutation() {
     let _home = TestWardianHome::new_async().await;
     let state = AppState::new();
     agent(&state, "sender", "Sender").await;
     agent(&state, "receiver", "Receiver").await;
     let task = task(&state).await;
-    let response = handle_in_state(
+    let error = handle_in_state(
         None,
         &state,
         Request::ReceiveMessages {
@@ -1390,10 +1488,8 @@ async fn receive_timeout_does_not_complete_or_cancel_task() {
         origin("sender"),
     )
     .await
-    .unwrap();
-    assert!(
-        matches!(response, Response::ReceiveMessages { page } if page.timed_out && page.messages.is_empty() && page.wake_reason.is_none())
-    );
+    .unwrap_err();
+    assert_eq!(error.code, "automatic_delivery");
     assert_eq!(stored_status(&task.record.id), "awaiting_reply");
     assert_eq!(owner(&task.record.id), "pending");
     assert!(state
@@ -1401,6 +1497,17 @@ async fn receive_timeout_does_not_complete_or_cancel_task() {
         .structured_reply(&task.record.id)
         .await
         .is_none());
+    assert_eq!(
+        store::with_db(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM agent_message_ack WHERE recipient='sender'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?)
+        })
+        .unwrap(),
+        0
+    );
     let late = state
         .interactions
         .reply_agent_message(
@@ -1844,7 +1951,7 @@ async fn deleted_receiver_cannot_recreate_cursor_metadata_after_authentication()
         .await
         .unwrap_err()
         .code,
-        "unauthorized"
+        "automatic_delivery"
     );
     assert!(state
         .interactions
@@ -2222,16 +2329,25 @@ async fn context_failure_releases_claim_before_any_provider_boundary() {
     let state = AppState::new();
     agent(&state, "sender", "Sender").await;
     agent(&state, "receiver", "Receiver").await;
+    // Bind the requester so malformed context is tested after a valid claim.
+    let requester_origin = store::RequesterOrigin {
+        provider: "codex".into(),
+        conversation_id: "sender-thread".into(),
+        generation: 1,
+    };
     let task = state
         .interactions
-        .admit_agent_message(store::Admission {
-            sender: "sender",
-            recipient: "receiver",
-            message: "work",
-            idempotency_key: None,
-            task: true,
-            generation: 0,
-        })
+        .admit_agent_message_with_requester_origin(
+            store::Admission {
+                sender: "sender",
+                recipient: "receiver",
+                message: "work",
+                idempotency_key: None,
+                task: true,
+                generation: 0,
+            },
+            Some(&requester_origin),
+        )
         .await
         .unwrap();
     let replied = state
@@ -2241,7 +2357,7 @@ async fn context_failure_releases_claim_before_any_provider_boundary() {
         .unwrap();
     let claim = state
         .interactions
-        .claim_agent_information("sender", &replied.record.id, 0)
+        .claim_agent_reply_continuation("sender", &replied.record.id, 0)
         .await
         .unwrap()
         .unwrap();

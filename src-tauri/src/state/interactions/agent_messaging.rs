@@ -4,15 +4,6 @@ use wardian_core::agent_messaging::AgentMessagingError;
 use wardian_core::db::agent_messaging as store;
 
 impl InteractionState {
-    /// Snapshot provider deliveries for a single pending receive call. Revisions
-    /// are process-local wake signals, not durable acknowledgement cursors.
-    pub async fn agent_message_provider_revision(&self, recipient: &str) -> u64 {
-        self.subscribe_agent_mailbox(recipient)
-            .await
-            .borrow()
-            .provider_revision
-    }
-
     /// Revalidate a previously claimed task after asynchronous owner startup.
     pub async fn validate_agent_message_claim(
         &self,
@@ -61,6 +52,75 @@ impl InteractionState {
         store::with_db(|conn| store::claim_information(conn, recipient, id, generation))
     }
 
+    /// Claim an automatically wakeable new informational message. The store
+    /// rechecks the admission marker atomically, so historical rows cannot be
+    /// promoted by a racing startup or status wake.
+    pub async fn claim_agent_wakeable_information(
+        &self,
+        recipient: &str,
+        id: &str,
+        generation: u64,
+    ) -> Result<Option<store::TaskClaim>, AgentMessagingError> {
+        let _mutation = self.mutation_lock.lock().await;
+        if self.deleted_sessions.lock().await.contains(recipient)
+            || self
+                .current_provider_input_generation(recipient)
+                .await
+                .unwrap_or(0)
+                != generation
+        {
+            return Err(AgentMessagingError::new(
+                "stale_claim",
+                "Runtime generation changed before informational wake delivery.",
+            ));
+        }
+        store::with_db(|conn| store::claim_wakeable_information(conn, recipient, id, generation))
+    }
+
+    /// Permanently fence a wakeable informational message whose durable
+    /// recipient conversation no longer matches the live provider session.
+    pub async fn stale_agent_wakeable_information(
+        &self,
+        id: &str,
+    ) -> Result<bool, AgentMessagingError> {
+        let _mutation = self.mutation_lock.lock().await;
+        store::with_db(|conn| store::stale_wakeable_information(conn, id))
+    }
+
+    /// Claim one durable task reply for continuation into its original requester
+    /// conversation. This is independent of the FYI push claim path.
+    pub async fn claim_agent_reply_continuation(
+        &self,
+        recipient: &str,
+        id: &str,
+        generation: u64,
+    ) -> Result<Option<store::TaskClaim>, AgentMessagingError> {
+        let _mutation = self.mutation_lock.lock().await;
+        if self.deleted_sessions.lock().await.contains(recipient)
+            || self
+                .current_provider_input_generation(recipient)
+                .await
+                .unwrap_or(0)
+                != generation
+        {
+            return Err(AgentMessagingError::new(
+                "stale_claim",
+                "Runtime generation changed before reply continuation.",
+            ));
+        }
+        store::with_db(|conn| store::claim_reply_continuation(conn, recipient, id, generation))
+    }
+
+    /// Persist queued or blocked reply disposition on the existing delivery row.
+    pub async fn set_agent_reply_continuation_state(
+        &self,
+        id: &str,
+        disposition: &str,
+    ) -> Result<bool, AgentMessagingError> {
+        let _mutation = self.mutation_lock.lock().await;
+        store::with_db(|conn| store::set_reply_continuation_state(conn, id, disposition))
+    }
+
     /// Release only on an explicit prewrite transport outcome, never uncertainty.
     pub async fn release_agent_message_before_write(
         &self,
@@ -72,40 +132,6 @@ impl InteractionState {
             self.notify_agent_mailbox(recipient, false).await;
         }
         Ok(())
-    }
-
-    /// Serialize receiver claims with agent deletion so a stale authenticated
-    /// request cannot recreate cursor metadata after canonical deletion commits.
-    pub async fn receive_agent_messages(
-        &self,
-        recipient: &str,
-        cursor: Option<&str>,
-        ack_cursor: Option<&str>,
-        limit: u32,
-    ) -> Result<wardian_core::agent_messaging::AgentMessagePage, AgentMessagingError> {
-        let _mutation = self.mutation_lock.lock().await;
-        if self.deleted_sessions.lock().await.contains(recipient) {
-            return Err(AgentMessagingError::new(
-                "unauthorized",
-                "Receiver was deleted.",
-            ));
-        }
-        store::with_db(|conn| store::receive(conn, recipient, cursor, ack_cursor, limit))
-    }
-
-    /// Check for mailbox activity without claiming messages or advancing cursors.
-    pub async fn has_unacknowledged_agent_messages(
-        &self,
-        recipient: &str,
-    ) -> Result<bool, AgentMessagingError> {
-        let _mutation = self.mutation_lock.lock().await;
-        if self.deleted_sessions.lock().await.contains(recipient) {
-            return Err(AgentMessagingError::new(
-                "unauthorized",
-                "Receiver was deleted.",
-            ));
-        }
-        store::with_db(|conn| store::has_unacknowledged_messages(conn, recipient))
     }
 
     /// Claim while the caller owns the runtime lifecycle boundary. Generation
@@ -166,10 +192,12 @@ impl InteractionState {
         Ok(())
     }
 
-    /// Admit one typed message/task without provider I/O or legacy mailbox insertion.
-    pub async fn admit_agent_message(
+    /// Admit a followup and its requester's durable conversation binding in the
+    /// same canonical transaction, under the caller's lifecycle fence.
+    pub async fn admit_agent_message_with_requester_origin(
         &self,
         admission: store::Admission<'_>,
+        requester_origin: Option<&store::RequesterOrigin>,
     ) -> Result<store::Admitted, AgentMessagingError> {
         let _mutation = self.mutation_lock.lock().await;
         let deleted = self.deleted_sessions.lock().await;
@@ -181,7 +209,39 @@ impl InteractionState {
         }
         drop(deleted);
         let recipient = admission.recipient;
-        let admitted = store::with_db(|conn| store::admit(conn, admission))?;
+        let admitted = store::with_db(|conn| {
+            store::admit_with_requester_origin(conn, admission, requester_origin)
+        })?;
+        self.records
+            .lock()
+            .await
+            .insert(admitted.record.id.clone(), admitted.record.clone());
+        if !admitted.duplicate {
+            self.notify_agent_mailbox(recipient, false).await;
+        }
+        Ok(admitted)
+    }
+
+    /// Atomically admit a managed informational message and its server-owned
+    /// wake marker/recipient binding on the existing canonical delivery row.
+    pub async fn admit_agent_message_with_wake_on_admission(
+        &self,
+        admission: store::Admission<'_>,
+        recipient_origin: Option<&store::RecipientOrigin>,
+    ) -> Result<store::Admitted, AgentMessagingError> {
+        let _mutation = self.mutation_lock.lock().await;
+        let deleted = self.deleted_sessions.lock().await;
+        if deleted.contains(admission.sender) || deleted.contains(admission.recipient) {
+            return Err(AgentMessagingError::new(
+                "not_found",
+                "Sender or recipient was deleted.",
+            ));
+        }
+        drop(deleted);
+        let recipient = admission.recipient;
+        let admitted = store::with_db(|conn| {
+            store::admit_with_wake_on_admission(conn, admission, recipient_origin)
+        })?;
         self.records
             .lock()
             .await
@@ -346,6 +406,70 @@ impl InteractionState {
             for recipient in &replied.record.target_session_ids {
                 self.notify_agent_mailbox(recipient, false).await;
             }
+        }
+    }
+}
+
+/// Test-only compatibility helpers for durable mailbox regression fixtures.
+#[cfg(test)]
+mod test_support {
+    use super::*;
+
+    impl InteractionState {
+        /// Serialize receiver claims with deletion for legacy regression fixtures.
+        pub(crate) async fn receive_agent_messages(
+            &self,
+            recipient: &str,
+            cursor: Option<&str>,
+            ack_cursor: Option<&str>,
+            limit: u32,
+        ) -> Result<wardian_core::agent_messaging::AgentMessagePage, AgentMessagingError> {
+            let _mutation = self.mutation_lock.lock().await;
+            if self.deleted_sessions.lock().await.contains(recipient) {
+                return Err(AgentMessagingError::new(
+                    "unauthorized",
+                    "Receiver was deleted.",
+                ));
+            }
+            store::with_db(|conn| store::receive(conn, recipient, cursor, ack_cursor, limit))
+        }
+
+        /// Read mailbox activity without claiming messages in legacy fixtures.
+        pub(crate) async fn has_unacknowledged_agent_messages(
+            &self,
+            recipient: &str,
+        ) -> Result<bool, AgentMessagingError> {
+            let _mutation = self.mutation_lock.lock().await;
+            if self.deleted_sessions.lock().await.contains(recipient) {
+                return Err(AgentMessagingError::new(
+                    "unauthorized",
+                    "Receiver was deleted.",
+                ));
+            }
+            store::with_db(|conn| {
+                Ok(conn.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM agent_message_availability a
+                        LEFT JOIN agent_message_delivery d ON d.interaction_id=a.interaction_id
+                        WHERE a.recipient=?1
+                        AND a.sequence > COALESCE(
+                            (SELECT sequence FROM agent_message_ack WHERE recipient=?1),0
+                        )
+                        AND (d.owner IS NULL OR d.owner IN ('stored','pending','receiver_available'))
+                    )",
+                    [recipient],
+                    |row| row.get(0),
+                )?)
+            })
+        }
+
+        /// Preserve test admission fixtures without exposing the originless API.
+        pub(crate) async fn admit_agent_message(
+            &self,
+            admission: store::Admission<'_>,
+        ) -> Result<store::Admitted, AgentMessagingError> {
+            self.admit_agent_message_with_requester_origin(admission, None)
+                .await
         }
     }
 }

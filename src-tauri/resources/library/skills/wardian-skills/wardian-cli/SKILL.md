@@ -34,9 +34,11 @@ Request `status_source` to distinguish live from persisted agent state.
 - Live control requires the desktop app for the same `WARDIAN_HOME`; Library,
   memory, team/watchlist and schedule writes can work offline. Inspection may
   initialize or migrate stores; see runtime debugging for strict read-only work.
-- Use `message send` for non-waking information, `message followup` for tasks,
-  `message receive` for correlated results, and `message reply` with the exact
-  canonical request ID. Managed identity is required; never replay uncertainty.
+- Use `message send` for information; new sends wake an idle recipient without
+  creating a task or reply obligation. Use `message followup` for tasks, and
+  `message reply` with the exact canonical request ID. Wardian delivers
+  actionable replies automatically; agents do not poll or receive mailbox
+  pages. Managed identity is required; never replay uncertainty.
 - Keep provider defaults unless complexity warrants a catalogue-listed override.
   Apply configuration through `agent update`; honor `restart_required`.
 - Suggest automations for recurring work, but require user opt-in before

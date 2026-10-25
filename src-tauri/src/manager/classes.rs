@@ -399,7 +399,7 @@ mod tests {
                 "human provider controls remain separate",
             ),
             (
-                &["receive timeout", "never resubmits", "uncertainty"][..],
+                &["admission timeout", "never resubmits", "uncertainty"][..],
                 "no automatic replay after timeout",
             ),
         ] {

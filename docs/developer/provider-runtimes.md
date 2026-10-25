@@ -506,6 +506,10 @@ Codex commentary events like `agent_message` should not be used as hard status t
 The shared app-server event reader observes turns started through either the
 TUI or Wardian. A named Wardian inbox output without an originating model
 call is non-waking context; it must not mark an idle agent as processing.
+New managed peer send_message admissions have a separate wake path: for an
+eligible idle recipient with its original conversation available, Wardian
+starts a native turn and includes the information as inbox context. It creates
+no task or reply obligation. Host-automation inbox output remains context-only.
 V2 peer information, follow-up work, and interruption use native WebSocket
 operations through a private local socket and the configured Codex executable's
 `app-server proxy` tunnel. MCP exposes the model-facing

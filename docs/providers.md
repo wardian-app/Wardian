@@ -208,6 +208,16 @@ the effort is selected, Wardian keeps the conversation's recorded model when
 available, then falls back to the effective provider configuration and catalogue.
 This launch-time selection does not replace an unspecified model in agent settings.
 
+On Windows, a `workspace-write` session with no selected backend defaults to
+`unelevated`. Wardian captures the effective backend through the owned
+app-server's `config/read` and pins it in each background-thread request and the
+temporary TUI config overlay. Supported explicit backend and legacy selections
+are honored; a legacy-disabled selection that cannot be represented for
+`workspace-write` is rejected before thread loading. For `workspace-write`, if
+`prefer_mxc` leaves the backend conditional on runtime eligibility, startup is
+rejected before work; select an explicit backend or compatible policy. Wardian
+does not probe MXC availability.
+
 Codex currently limits the length of its local control-socket path. When a
 managed home is too deep, Wardian uses a private compact location and keeps
 `habitat/.codex` linked to it. The provider executable and the user's shell

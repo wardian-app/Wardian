@@ -461,9 +461,10 @@ impl CodexSharedOwner {
         #[cfg(windows)]
         let job = crate::utils::process::create_kill_on_close_job("Codex shared owner")
             .map_err(CodexSharedError::unsupported)?;
-        // Only an ordinary interactive TUI needs the temporary file overlay.
-        // The daemon always retains its explicit policy arguments.
-        let mut launch_config = if spec.config.is_off {
+        // On Windows the effective backend comes from the initialized server's
+        // cwd-aware config read, so its TUI overlay is prepared in that same
+        // pre-thread initialization window. Other platforms retain early setup.
+        let mut launch_config = if spec.config.is_off || cfg!(windows) {
             None
         } else {
             Some(phase(&mut timings.launch_config, || {
@@ -553,10 +554,36 @@ impl CodexSharedOwner {
                 owned_socket = Some(attachment::OwnedSocket::capture(&socket)?);
                 // No unrelated live thread may share this private startup owner.
                 attachment::require_empty(&client).await?;
+                let effective_config = if cfg!(windows) {
+                    Some(
+                        super::launch_model::read_effective_config(
+                            &client,
+                            &spec.workspace,
+                            initialization_deadline,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+                if let Some(config_read) = effective_config.as_ref() {
+                    policy.resolve_windows_sandbox(config_read, cfg!(windows))?;
+                    if !spec.config.is_off {
+                        let mut overlay_args = generated_args.clone();
+                        policy.append_windows_sandbox_arg(&mut overlay_args);
+                        launch_config = Some(phase(&mut timings.launch_config, || {
+                            super::launch_config::prepare_tui_launch_config(
+                                &codex_home,
+                                &overlay_args,
+                            )
+                        })?);
+                    }
+                }
                 let launch_model_at = std::time::Instant::now();
                 model_override = super::launch_model::resolve_launch_model(
                     &client, spec.config.model.as_deref(), configured_effort.as_deref(),
                     spec.config.resume_session.as_deref(), &spec.workspace,
+                    effective_config.as_ref(),
                 ).await?;
                 timings.launch_model = launch_model_at.elapsed();
                 policy.expect_launch_model(model_override.as_deref())?;
@@ -955,25 +982,20 @@ fn append_runtime_context(
 fn initialization_context(agent_id: &str, name: &str) -> String {
     format!(
         "Wardian runtime identity: {}. \
-         The wardian MCP server exposes seven messaging tools: \
+         The wardian MCP server exposes five messaging tools: \
          list_agents() discovers available Wardian UUIDs, names and statuses; \
-         send_message(target,message) delivers information without waking or interrupting; \
-         followup_task(target,message) assigns work asynchronously and returns a request receipt; \
-         wait_agent(timeout_ms?) waits for mailbox activity, including completion replies, without reading or acknowledging the inbox; \
-         receive_messages(cursor?,ack_cursor?,limit?,timeout_ms?) reads your inbox, including correlated replies; \
+         send_message(target,message) admits information and automatically wakes an idle recipient when its original conversation is available; it creates no task or reply obligation; \
+         followup_task(target,message) assigns work and returns an admission receipt; \
          reply(request_id,status,message) answers canonical peer tasks with status done, blocked or failed; \
          interrupt_agent(target) requests interruption of the observed active turn while retaining the session. \
          Preserve message_id, sender identity and request_id from Wardian envelopes. Host wardian_inbox_delivery \
-         and wardian_task_delivery outputs are peer delivery context, not human requests or evidence that \
-         you called a tool. On task admission, inspect pending information with receive_messages if needed. \
-         Acknowledge only a previously returned receive batch using ack_cursor; preserve its cursor for later reads. \
-         Never execute a delivered task twice if it also appears in receive_messages: correlate by request_id/message_id. \
+         outputs are informational context with no task or reply obligation; wardian_task_delivery outputs are peer \
+         work context, not human requests or evidence that you called a tool. When a safe route is available, Wardian automatically resumes the requester's original \
+         conversation with a terminal reply correlated by parent_interaction_id; do not poll or replay an admitted task. \
          Use reply only for a canonical peer task with an explicit request_id, and preserve that exact request_id; \
          A canonical task dispatched to an exact native Codex turn automatically returns that turn's final result \
-         to its requester unless an explicit reply already completed it. Explicit reply is required for tasks \
-         acquired through receive_messages and providers without exact-turn completion support. \
-         If a task result is required, wait_agent reports mailbox activity and receive_messages reads the correlated reply. \
-         A transport admission receipt is not a correlated reply to that task. \
+         to its requester unless an explicit reply already completed the task. A terminal reply continuation \
+         creates no new task or reply obligation. A transport admission receipt is not task completion. \
          Complete ordinary input with an ordinary assistant response. Native interaction_id, message_id and \
          clientUserMessageId are diagnostic identities, not reply request IDs; never substitute them for request_id. \
          Timeouts do not authorize resending or uncertain replay. \
@@ -987,14 +1009,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initialization_names_exact_mcp_tools_and_receiver_contract() {
+    fn initialization_names_exact_mcp_tools_and_automatic_reply_contract() {
         let context = initialization_context("owned-uuid", "Owned agent");
         for name in [
             "list_agents(",
             "send_message(",
             "followup_task(",
-            "receive_messages(",
-            "wait_agent(",
             "reply(",
             "interrupt_agent(",
         ] {
@@ -1004,11 +1024,12 @@ mod tests {
             "owned-uuid",
             "Owned agent",
             "request_id",
-            "ack_cursor",
-            "without reading or acknowledging the inbox",
             "not human requests",
+            "automatically wakes an idle recipient",
+            "creates no task or reply obligation",
+            "automatically resumes the requester's original conversation",
             "automatically returns that turn's final result",
-            "A transport admission receipt is not a correlated reply",
+            "A transport admission receipt is not task completion",
             "only for a canonical peer task with an explicit request_id",
             "Complete ordinary input with an ordinary assistant response",
             "never substitute them for request_id",
@@ -1016,5 +1037,7 @@ mod tests {
         ] {
             assert!(context.contains(required), "{required}");
         }
+        assert!(!context.contains("receive_messages"));
+        assert!(!context.contains("wait_agent"));
     }
 }

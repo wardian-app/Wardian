@@ -393,6 +393,50 @@ impl Ticket {
         }
     }
 }
+
+impl Ticket {
+    /// Check Pi lifecycle before each write while routing bytes through the
+    /// canonical origin and lease fence.
+    pub(crate) fn guard_input_sink<'a>(
+        &'a self,
+        delegate: &'a dyn TerminalInputSink,
+    ) -> ReceiptCheckedInputSink<'a> {
+        ReceiptCheckedInputSink {
+            ticket: self,
+            delegate,
+        }
+    }
+}
+
+pub(crate) struct ReceiptCheckedInputSink<'a> {
+    ticket: &'a Ticket,
+    delegate: &'a dyn TerminalInputSink,
+}
+
+impl TerminalInputSink for ReceiptCheckedInputSink<'_> {
+    fn send_bytes(
+        &self,
+        bytes: Vec<u8>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<(), crate::utils::delivery_transaction::TerminalInputError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            if self.ticket.receipt.stopped() {
+                return Err(crate::utils::delivery_transaction::TerminalInputError {
+                    message: "Pi receipt runtime stopped".into(),
+                    retry_safe: false,
+                });
+            }
+            self.delegate.send_bytes(bytes).await
+        })
+    }
+}
+
 impl Drop for Ticket {
     fn drop(&mut self) {
         let mut state = self.receipt.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -409,10 +453,20 @@ impl TerminalInputSink for Ticket {
     fn send_bytes(
         &self,
         bytes: Vec<u8>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<(), crate::utils::delivery_transaction::TerminalInputError>,
+                > + Send
+                + '_,
+        >,
+    > {
         Box::pin(async move {
             if self.receipt.stopped() {
-                return Err("Pi receipt runtime stopped".into());
+                return Err(crate::utils::delivery_transaction::TerminalInputError {
+                    message: "Pi receipt runtime stopped".into(),
+                    retry_safe: false,
+                });
             }
             let broker = self.broker.clone();
             let agent = self.receipt.agent_id.clone();
@@ -421,8 +475,18 @@ impl TerminalInputSink for Ticket {
                 broker.send_privileged_input_blocking(&agent, generation, bytes)
             })
             .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())
+            .map_err(
+                |error| crate::utils::delivery_transaction::TerminalInputError {
+                    message: error.to_string(),
+                    retry_safe: false,
+                },
+            )?
+            .map_err(
+                |error| crate::utils::delivery_transaction::TerminalInputError {
+                    message: error.to_string(),
+                    retry_safe: false,
+                },
+            )
         })
     }
 }
