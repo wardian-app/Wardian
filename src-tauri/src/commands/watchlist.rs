@@ -737,7 +737,10 @@ pub async fn load_queue_items(state: State<'_, AppState>) -> Result<serde_json::
     let items = crate::utils::queue::load_items()
         .into_iter()
         .filter(|item| {
-            item["type"] != "agent_completed" || item["dismissed"].as_bool() != Some(true)
+            !matches!(
+                item["type"].as_str(),
+                Some("agent_completed" | "agent_turn_ended")
+            ) || item["dismissed"].as_bool() != Some(true)
         })
         .collect::<Vec<_>>();
     *state.queue_loaded_snapshot.lock().await = Some(items.clone());
@@ -754,7 +757,10 @@ pub async fn dismiss_agent_completions(
     let mut changed = false;
     for item in &mut items {
         if ids.iter().any(|id| item["id"] == *id)
-            && item["type"] == "agent_completed"
+            && matches!(
+                item["type"].as_str(),
+                Some("agent_completed" | "agent_turn_ended")
+            )
             && item["dismissed"].as_bool() != Some(true)
         {
             item["dismissed"] = serde_json::Value::Bool(true);

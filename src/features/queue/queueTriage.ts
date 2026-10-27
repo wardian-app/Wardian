@@ -12,5 +12,10 @@ export function isClearableLegacyCompletion(item: QueueItem) {
   return !item.inbox_notification_id
     && !item.automation_approval
     && !providerChoiceAcknowledgementUnresolved(item)
-    && (item.type === "agent_completed" || item.type === "automation_completed");
+    && (isProviderTurnNotice(item) || item.type === "automation_completed");
+}
+
+/** Backend-owned turn notices retain their identity through read/dismiss/replay. */
+export function isProviderTurnNotice(item: QueueItem): boolean {
+  return item.type === "agent_completed" || item.type === "agent_turn_ended";
 }
