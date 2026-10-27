@@ -1166,6 +1166,7 @@ pub fn run() {
             commands::agent::delete_agent_worktree,
             commands::agent::disable_agent_worktree,
             commands::chat::load_agent_chat_transcript,
+            commands::chat::load_agent_chat_page,
             commands::memory::memory_list,
             commands::memory::memory_get,
             commands::memory::memory_history,

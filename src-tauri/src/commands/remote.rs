@@ -25,6 +25,7 @@ pub async fn submit_inbox_provider_choice(
         },
     )
     .await
+    .map(|_| ())
 }
 
 fn canonicalized_remote_gateway_config(

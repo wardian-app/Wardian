@@ -6,8 +6,9 @@ import { stringMetadata, toolNameFromEvent } from "./chatPresentation";
  *
  * Claude's `Edit`, `MultiEdit`, and `Write` tools emit no patch text at all —
  * the change lives in the tool call's structured input, which the backend
- * preserves verbatim under `metadata.tool_input`
- * (see `providers/chat_transcript.rs`). The transcript previously read only
+ * preserves verbatim under `metadata.tool_input` (see `providers/chat_transcript.rs`).
+ * Normal Chat headers carry a bounded preview and original counts; full inputs
+ * remain available through lazy details. The transcript previously read only
  * `file_path` from that object and discarded the before/after strings, so an
  * edit rendered as a bare path chip while the actual change was already in
  * hand. This module turns that input back into a reviewable change.
@@ -103,6 +104,11 @@ function toolIdentity(event: AgentChatEvent): string {
 export function structuredEditFromEvent(event: AgentChatEvent): StructuredEdit | null {
   const input = asRecord(event.metadata.tool_input);
   if (!input) return null;
+  const summary = asRecord(event.metadata.chat_edit_summary);
+  const summaryKind = summary?.kind === "edit" || summary?.kind === "write" ? summary.kind : null;
+  const summaryAdded = typeof summary?.added === "number" && Number.isSafeInteger(summary.added) && summary.added >= 0 ? summary.added : null;
+  const summaryRemoved = typeof summary?.removed === "number" && Number.isSafeInteger(summary.removed) && summary.removed >= 0 ? summary.removed : null;
+  const hasSummary = summaryKind !== null && summaryAdded !== null && summaryRemoved !== null;
 
   const hunks: StructuredEditHunk[] = [];
   let kind: StructuredEdit["kind"] = "edit";
@@ -124,15 +130,16 @@ export function structuredEditFromEvent(event: AgentChatEvent): StructuredEdit |
     // `Write` supplies whole-file content with no prior state to diff against.
     const content = asString(input.content) ?? asString(input.contents) ?? asString(input.CodeContent);
     const writesWholeFile = /^(write|create_file|createfile|write_file|write_to_file)$/i.test(toolIdentity(event));
-    if (content === null || !writesWholeFile) return null;
-    kind = "write";
-    hunks.push({ removed: [], added: toLines(content) });
+    if (content !== null && writesWholeFile) {
+      kind = "write";
+      hunks.push({ removed: [], added: toLines(content) });
+    } else if (!hasSummary) return null;
   }
 
   let added = 0;
   let removed = 0;
   let budget = STRUCTURED_EDIT_LINE_LIMIT;
-  let truncated = false;
+  let truncated = event.metadata.chat_tool_input_truncated === true;
   const bounded: StructuredEditHunk[] = [];
 
   hunks.forEach((hunk) => {
@@ -150,7 +157,10 @@ export function structuredEditFromEvent(event: AgentChatEvent): StructuredEdit |
     bounded.push({ removed: removedSlice, added: addedSlice });
   });
 
-  return { file_path: editPath(event, input), kind, hunks: bounded, added, removed, truncated };
+  // Preview clipping can omit the changed suffix or whole later hunks. Counts
+  // published by the writer describe the original input, not the clipped strings.
+  return { file_path: editPath(event, input), kind: hasSummary ? summaryKind! : kind, hunks: bounded,
+    added: hasSummary ? summaryAdded! : added, removed: hasSummary ? summaryRemoved! : removed, truncated };
 }
 
 /**
@@ -163,5 +173,5 @@ export function structuredEditDiffText(edit: StructuredEdit): string {
     [...hunk.removed.map((line) => `-${line}`), ...hunk.added.map((line) => `+${line}`)].join("\n"),
   );
   const body = blocks.filter(Boolean).join("\n\n");
-  return edit.truncated ? `${body}\n\nChange truncated; open the file to review all lines.` : body;
+  return edit.truncated ? `${body}\n\nChange preview truncated; show full details to review the input.` : body;
 }

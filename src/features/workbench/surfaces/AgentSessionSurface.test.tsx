@@ -1,8 +1,12 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   AgentConfig,
+  AgentChatEvent,
+  AgentChatPage,
   TerminalBrokerState,
   TerminalPresentationState,
 } from "../../../types";
@@ -79,9 +83,140 @@ function surfaceProps(overrides: Partial<AgentSessionSurfaceProps> = {}): AgentS
 
 afterEach(() => {
   terminalSpy.mockClear();
+  vi.mocked(invoke).mockReset();
+  vi.mocked(listen).mockReset();
 });
 
 describe("AgentSessionSurface", () => {
+  function historyPage(sessionId: string, older = false): AgentChatPage {
+    const message: AgentChatEvent = {
+      id: `${sessionId}-${older ? "older" : "recent"}`, session_id: sessionId,
+      provider: "codex", kind: "message", role: "assistant",
+      text: `${sessionId} ${older ? "older" : "recent"} history`, title: null,
+      status: null, turn_id: null, source: null, command: null, exit_code: null,
+      path: null, language: null, created_at: null, sequence: older ? 1 : 2, metadata: {},
+    };
+    return {
+      session_id: sessionId, conversation_id: `${sessionId}-conversation`,
+      generation: "generation", source_epoch: null, revision: "revision",
+      events: [message], next_before: older ? null : "older-cursor",
+      unchanged: false, reset: false, progress: "ready", aliases: [], removed_ids: [],
+      detail: null, bytes_read: 256, records_decoded: 1,
+    };
+  }
+
+  function mockHistory() {
+    vi.mocked(listen).mockResolvedValue(() => {});
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "load_agent_chat_page") {
+        const request = args as { sessionId: string; cursor?: string };
+        return historyPage(request.sessionId, Boolean(request.cursor));
+      }
+      if (command === "list_provider_model_catalog") {
+        return { provider: "codex", models: [], refresh_error: null };
+      }
+      throw new Error(`Unexpected history side effect: ${command}`);
+    });
+  }
+
+  it("opens Off history and older pages without mounting or starting a terminal", async () => {
+    mockHistory();
+    render(<AgentSessionSurface {...surfaceProps({ agent: { ...agent, is_off: true } })} />);
+
+    expect(await screen.findByText("agent-1 recent history")).toBeInTheDocument();
+    expect(terminalSpy).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("agent-session-presentation-mode")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Load older transcript" }));
+    expect(await screen.findByText("agent-1 older history")).toBeInTheDocument();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("load_agent_chat_page", {
+      sessionId: "agent-1", cursor: "older-cursor", revision: undefined, detailRef: undefined,
+    });
+    expect(vi.mocked(invoke).mock.calls.every(([command]) => command === "load_agent_chat_page")).toBe(true);
+    expect(screen.getByRole("textbox", { name: "Message agent" })).toBeEnabled();
+  });
+
+  it("retains the initial Chat view when an Off agent becomes live", async () => {
+    mockHistory();
+    const view = render(<AgentSessionSurface {...surfaceProps({ agent: { ...agent, is_off: true } })} />);
+    await screen.findByText("agent-1 recent history");
+    view.rerender(<AgentSessionSurface {...surfaceProps()} />);
+    expect(screen.getByRole("button", { name: /Switch to Terminal/ })).toBeInTheDocument();
+    expect(terminalSpy).not.toHaveBeenCalled();
+  });
+
+  it("keeps drafts with their resource across toggles and rebinds", async () => {
+    mockHistory();
+    const view = render(<AgentSessionSurface {...surfaceProps()} />);
+    expect(screen.getByTestId("agent-terminal")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Switch to Chat/ }));
+    await screen.findByText("agent-1 recent history");
+    fireEvent.change(screen.getByRole("textbox", { name: "Message agent" }), { target: { value: "Mendel draft" } });
+    fireEvent.click(screen.getByRole("button", { name: /Switch to Terminal/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Switch to Chat/ }));
+    expect(screen.getByRole("textbox", { name: "Message agent" })).toHaveValue("Mendel draft");
+
+    view.rerender(<AgentSessionSurface {...surfaceProps({
+      resource_key: "agent-2", agent: { ...replacementAgent, is_off: true },
+    })} />);
+    expect(await screen.findByText("agent-2 recent history")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message agent" })).toHaveValue("");
+    expect(screen.queryByText("agent-1 recent history")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message agent" }), { target: { value: "Curie draft" } });
+    view.rerender(<AgentSessionSurface {...surfaceProps()} />);
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Message agent" })).toHaveValue("Mendel draft"));
+  });
+
+  it("keeps Chat read only on an explicitly read-only surface", async () => {
+    mockHistory();
+    render(<AgentSessionSurface {...surfaceProps({
+      agent: { ...agent, is_off: true }, requested_interaction: "read_only",
+    })} />);
+    expect(await screen.findByText("agent-1 recent history")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message agent" })).toBeDisabled();
+    expect(terminalSpy).not.toHaveBeenCalled();
+  });
+
+  it("suspends Chat polling in hidden presentations and restores the unsent draft", async () => {
+    mockHistory();
+    const view = render(<AgentSessionSurface {...surfaceProps({ agent: { ...agent, is_off: true } })} />);
+    await screen.findByText("agent-1 recent history");
+    fireEvent.change(screen.getByRole("textbox", { name: "Message agent" }), { target: { value: "Retained draft" } });
+    const clearTimer = vi.spyOn(globalThis, "clearTimeout");
+    view.rerender(<AgentSessionSurface {...surfaceProps({
+      agent: { ...agent, is_off: true }, visibility: "hidden", render_state: "suspended",
+    })} />);
+    expect(clearTimer).toHaveBeenCalled();
+    clearTimer.mockRestore();
+    expect(screen.queryByRole("textbox", { name: "Message agent" })).not.toBeInTheDocument();
+    expect(terminalSpy).not.toHaveBeenCalled();
+    view.rerender(<AgentSessionSurface {...surfaceProps({ agent: { ...agent, is_off: true } })} />);
+    expect(await screen.findByText("agent-1 recent history")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message agent" })).toHaveValue("Retained draft");
+  });
+
+  it("allows explicit Off prompts in Chat without inheriting a PTY mirror's read-only lease", async () => {
+    mockHistory();
+    const historyInvoke = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "submit_prompt_to_agent") return {
+        session_id: "agent-1", conversation_id: "agent-1-conversation",
+        submitted_input_id: "input-1", status: "accepted",
+      };
+      return historyInvoke?.(command, args);
+    });
+    render(<AgentSessionSurface {...surfaceProps({
+      agent: { ...agent, is_off: true },
+      broker_state: brokerState({ owner_presentation_id: "another-presentation" }),
+    })} />);
+    await screen.findByText("agent-1 recent history");
+    fireEvent.change(screen.getByRole("textbox", { name: "Message agent" }), { target: { value: "Explicit Off prompt" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(vi.mocked(invoke)).toHaveBeenCalledWith("submit_prompt_to_agent", {
+      sessionId: "agent-1", prompt: "Explicit Off prompt",
+    }));
+    expect(terminalSpy).not.toHaveBeenCalled();
+  });
+
   it("derives a stable renderer identity and forwards explicit presentation lifecycle", () => {
     const onTitleChange = vi.fn();
     const onTerminalFocus = vi.fn();

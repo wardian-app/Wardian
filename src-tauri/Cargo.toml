@@ -23,6 +23,7 @@ name = "Wardian"
 path = "src/main.rs"
 
 [features]
+retained-codex-replay = []
 terminal-trace = []
 
 [build-dependencies]

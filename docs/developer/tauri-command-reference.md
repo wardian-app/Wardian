@@ -62,6 +62,29 @@ evidence or queue the interaction.
 
 `read_agent_pty` drains buffered terminal output after `agent-pty-output-ready`. It is display data and compatibility evidence only. Structured ask/reply completion, Inbox evidence, and provider status transitions must not depend on replaying this text.
 
+## Chat (`commands/chat.rs`)
+
+- `load_agent_chat_page`
+
+Ordinary reads use the existing `sessionId`, optional `cursor`, `revision`, and
+`detailRef` arguments. Source renewal uses that same command with a required
+`revision` and `revalidateIds`; omit `cursor` and `detailRef` for renewal. The
+array contains one to eight backend-issued source observation IDs, each no
+longer than 512 UTF-8 bytes. The backend validates the raw list before
+deduplication and source I/O.
+
+Renewal returns the existing `AgentChatPage` metadata envelope. A successful
+response includes `revalidated_ids` for the complete requested set. Missing or
+partial acknowledgement, an incomplete source index, or a changed head does
+not authorize a partial window update. Renewal does not fetch neighboring
+history or expand detail bodies; ordinary cursor and detail reads retain their
+existing behavior. See [IPC event and DTO contracts](./ipc-events.md#chat-row-revalidation)existing behavior. Canonical pages with a null source epoch use ordinary
+paging when their canonical identity matches and no loaded native evidence is
+present. An incomplete first-page projection can admit its first complete page
+only before committed rows or an older frontier exist. See [IPC event and DTO
+contracts](./ipc-events.md#ordinary-canonical-reads-and-first-page-bootstrap)
+and the [internal revalidation contract](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-10-26-chat-row-revalidation.md).
+
 ## Classes (`commands/class.rs`)
 
 - `list_agent_classes`

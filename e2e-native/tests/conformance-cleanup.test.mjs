@@ -194,6 +194,24 @@ test("one agent pause failure still attempts the other agents and retains the lo
   assert.equal(readHomeLock(harness.isolatedHome).runId, harness.runId);
 });
 
+test("nested pause rejection stores only its safe error category", async (t) => {
+  const { options, harness } = fixture(t);
+  const rejection = Object.assign(new Error("private path and provider detail"), {
+    code: "provider_input_not_ready",
+  });
+  let saved;
+  options.pause = () => pauseConformanceAgents(async (command) => {
+    if (command === "list_agents") return [{ session_id: "owned" }];
+    throw rejection;
+  });
+  options.save = async (cleanup) => { saved = cleanup; };
+
+  await assert.rejects(cleanupConformanceSession(options), (error) => error.cleanupConfirmed === false);
+  assert.deepEqual(saved.cleanup_error_categories, ["provider_input_not_ready"]);
+  assert.equal(JSON.stringify(saved).includes("private path"), false);
+  assert.equal(readHomeLock(harness.isolatedHome).runId, harness.runId);
+});
+
 test("unavailable or malformed owned roster cannot authorize lock release", async (t) => {
   const { options, harness } = fixture(t);
   for (const roster of [null, {}, [{ session_id: "" }], [{}], { ok: false }]) {

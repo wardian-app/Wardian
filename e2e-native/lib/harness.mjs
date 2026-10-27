@@ -774,12 +774,14 @@ export async function invokeTauriResult(driver, command, args = {}) {
   }, command, args);
 }
 
-/** Invoke a Tauri command through the native WebView and fail on rejection. */
+/** Invoke a Tauri command, preserving string backend codes on rejection. */
 export async function invokeTauri(driver, command, args = {}) {
   const result = await invokeTauriResult(driver, command, args);
   if (!result?.ok) {
     const detail = result?.error?.message ?? JSON.stringify(result?.error ?? null);
-    throw new Error(`${command} failed: ${detail}`);
+    const error = new Error(`${command} failed: ${detail}`);
+    if (typeof result?.error?.code === "string") error.code = result.error.code;
+    throw error;
   }
   return result.value;
 }

@@ -45,6 +45,29 @@ observed in a fixture or test does not establish the cause of a failure in a
 live session. Existing authentication and authorization failures retain their
 own status and error codes.
 
+## Chat row revalidation
+
+`GET /remote/api/agents/{session_id}/chat` accepts the optional
+`revalidate_ids` value as one URL-encoded JSON array, for example
+`revalidate_ids=%5B%22source-id%22%5D`. Renewal requests include the current
+opaque `revision` and omit `before` and `detail`. The array has one to eight raw
+IDs, each at most 512 UTF-8 bytes; repeated query keys and comma-separated
+values are not alternate encodings.
+
+The response uses the ordinary metadata page and acknowledges a complete
+batch in `revalidated_ids`. The backend validates ownership and current source
+scope before returning selected rows; it does not read neighboring history or
+expand bodies. Incomplete indexing, a changed head, or an invalid request does
+not produce a successful partial acknowledgement. Authentication and gateway
+authorization remain those of the existing chat endpoint. See the [IPC and DTO
+contract](./ipc-events.md#chat-row-revalidation)authorization remain those of the existing chat endpoint. Canonical pages
+with a null source epoch continue through ordinary paging when their session,
+conversation, and generation match and no native source evidence is loaded.
+Incomplete native scope retains the existing window and older cursor for retry.
+The guarded empty first-page bootstrap applies only before committed rows or an
+older frontier exist. See the [IPC and DTO
+contract](./ipc-events.md#ordinary-canonical-reads-and-first-page-bootstrap) and [internal specification](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-10-26-chat-row-revalidation.md).
+
 ## Remote Inbox availability
 
 `GET /remote/api/queue` and `POST /remote/api/queue/action` return HTTP 503 with

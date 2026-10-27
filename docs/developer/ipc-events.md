@@ -241,11 +241,65 @@ classify provenance before emitting chat events:
 Some providers, including Claude, encode all three cases in native `user`
 records. Consumers must use the normalized role and provenance metadata rather
 than the raw provider role or text to identify prompts and turn boundaries.
-Desktop and remote chat both use the shared backend transcript loader and
-archive replay path, so provider provenance must be corrected there once. The
+Desktop and remote Chat use the shared bounded `load_agent_chat_page` reader;
+full archive replay remains an explicit inspection operation. Provider
+provenance is corrected by the backend owner before display publication. The
 replay boundary also canonicalizes legacy archived roles from their persisted
 `input_origin` metadata; historical archive files do not need a destructive
 rewrite to display the corrected classification.
+
+### Chat row revalidation
+
+`load_agent_chat_page` also supports bounded source-row renewal through its
+existing IPC and HTTP surfaces. The request selects only backend-issued source
+observation IDs already present in the loaded window. It carries the current
+opaque revision and omits cursor and detail arguments. A successful page
+explicitly acknowledges the complete request in `revalidated_ids`; a missing
+acknowledgement leaves the existing window and older frontier unconfirmed.acknowledgement leaves the existing window and older frontier unconfirmed.
+
+#### Ordinary canonical reads and first-page bootstrap
+
+Canonical archive pages may have `source_epoch: null`. Keep them on the
+ordinary paging and refresh path only when session, conversation, and generation
+identity matches and neither the incoming page nor loaded rows contain native
+source IDs, admission evidence, aliases, removals, or renewal acknowledgements.
+No native renewal is inferred from a canonical page.
+
+The first complete page has a separate initialization path. It may replace an
+empty `indexing` or `projection_pending` state only when the previous page and
+actual loaded window have no committed or source-backed rows and no older
+cursor/frontier. The first page must have complete canonical identity or a
+complete native scope. Canonical generated archive rows may coexist when their
+generated ID matches the page conversation and they carry no native source
+evidence. Each native row still needs matching source IDs, admission, epoch, and
+session. This cannot discard a loaded native cohort or older position. If
+native evidence exists but its incoming scope is incomplete, preserve the
+current coherent window and frontier and use the existing Retry path.
+
+The frontend stages every required loaded member under one coherent scope and
+head before committing a compatible reset or revision change. Renewal pages
+are metadata-only and do not advance pagination. A pair retraction restores
+each physical observation with its own source reference and body binding while
+keeping the loaded public display slot. See the [command reference](./tauri-command-reference.md),
+the [remote gateway contract](./remote-gateway.md#chat-row-revalidation), and
+the [internal design specification](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-10-26-chat-row-revalidation.md).
+
+Normal Chat publications and cold archive checkpoints stage intermediate AVL
+nodes in a bounded, private checkpoint buffer. Only nodes reachable from the
+final schema-defined roots
+are persisted; user text and metadata never determine object reachability.
+Every final node completes the existing write, sync, and rename sequence before
+the head pointer is published. Rows and body payloads retain immediate durable
+writes. Cold selection checkpoints flush their seen tree before publishing a
+selection pointer, and queued body jobs retain explicit chunk-root dependencies.
+A failed flush or pointer write preserves the previous published and in-memory
+heads so the
+owner can retry the unpublished work.
+
+Page headers retain bounded semantic tool inputs and write evidence. Large
+arguments, patches and artifact output are published through scoped lazy detail
+references, with each detail response limited to 16 KiB. Structured edit totals
+describe the original input; clipped patch totals remain explicitly partial.
 
 Archive replay retains canonical IDs and can enrich provenance from a current,
 source-bound native observation. Capture-enabled repair persists verified

@@ -205,6 +205,8 @@ export const ConfigureAgentPanel: React.FC<Props> = ({
             )}
           </div>
           <ProviderModelSelector
+            key={config.session_id}
+            deferDiscovery={config.is_off}
             idPrefix="configure-agent"
             provider={config.provider}
             selection={{

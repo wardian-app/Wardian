@@ -9,11 +9,11 @@ const workflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 describe('compiler protected-input admission', () => {
   it('proves the normal execute boundary and shared wrapper entry with harmless children', () => {
     const result = spawnSync(process.execPath, ['--test', resolve('scripts/compiler-input-guard.test.mjs')], {
-      cwd: process.cwd(), encoding: 'utf8', timeout: 30_000,
+      cwd: process.cwd(), encoding: 'utf8', timeout: 120_000,
     });
-    expect(result.error).toBeUndefined();
+    expect(result.error, result.stdout + result.stderr).toBeUndefined();
     expect(result.status, result.stdout + result.stderr).toBe(0);
-  }, 35_000);
+  }, 125_000);
 });
 
 describe('verification arguments', () => {

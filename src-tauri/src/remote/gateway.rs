@@ -28,8 +28,6 @@ const REMOTE_STATUS_STREAM_NAME: &str = "agent_status";
 const WEBSOCKET_FIRST_TICKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const REMOTE_TERMINAL_DEFAULT_TAIL_BYTES: usize = 64 * 1024;
 const REMOTE_TERMINAL_MAX_TAIL_BYTES: usize = 128 * 1024;
-const REMOTE_CHAT_DEFAULT_PAGE_EVENTS: usize = 40;
-const REMOTE_CHAT_MAX_PAGE_EVENTS: usize = 100;
 
 pub fn validate_gateway_bind_config(config: &RemoteGatewayConfig) -> Result<(), String> {
     crate::remote::policy::CanonicalOrigin::parse(&config.canonical_origin)?;
@@ -834,59 +832,138 @@ fn parse_remote_automation_monitor_query(
 
 #[derive(Debug, serde::Deserialize)]
 struct RemoteChatQuery {
-    before: Option<usize>,
+    before: Option<String>,
     limit: Option<usize>,
+    revision: Option<String>,
+    detail: Option<String>,
+    // Keep this a single canonical JSON-list value; Axum's `Query<Vec<_>>`
+    // does not define repeated-key list extraction.
+    #[serde(default)]
+    revalidate_ids: Option<String>,
+}
+
+const REMOTE_CHAT_REVALIDATION_JSON_MAX_BYTES: usize =
+    crate::state::conversation_archive::chat_read::MAX_REVALIDATED_SOURCE_IDS
+        * (crate::state::conversation_archive::chat_read::MAX_REVALIDATED_SOURCE_ID_BYTES + 2)
+        + crate::state::conversation_archive::chat_read::MAX_REVALIDATED_SOURCE_IDS
+        - 1
+        + 2;
+const REMOTE_CHAT_QUERY_MAX_BYTES: usize = REMOTE_CHAT_REVALIDATION_JSON_MAX_BYTES * 3
+    + crate::state::conversation_archive::chat_read::MAX_REVALIDATED_SOURCE_ID_BYTES * 3 * 3
+    + 128;
+
+fn encode_remote_chat_query_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len() * 3);
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    encoded
+}
+
+fn has_canonical_remote_chat_revalidation_value(
+    raw_query: Option<&str>,
+    decoded_value: &str,
+) -> bool {
+    let Some(raw_query) = raw_query else {
+        return false;
+    };
+    let mut values = raw_query
+        .split('&')
+        .filter(|part| part.split('=').next() == Some("revalidate_ids"));
+    let expected = encode_remote_chat_query_component(decoded_value);
+    let Some(value) = values
+        .next()
+        .and_then(|part| part.strip_prefix("revalidate_ids="))
+    else {
+        return false;
+    };
+    value == expected && values.next().is_none()
+}
+
+fn decode_remote_chat_revalidation_ids(
+    value: Option<&str>,
+) -> Result<Option<Vec<String>>, &'static str> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.len() > REMOTE_CHAT_REVALIDATION_JSON_MAX_BYTES {
+        return Err("invalid chat revalidation query");
+    }
+    let ids: Vec<String> =
+        serde_json::from_str(value).map_err(|_| "invalid chat revalidation query")?;
+    let canonical = serde_json::to_string(&ids).map_err(|_| "invalid chat revalidation query")?;
+    if canonical != value {
+        return Err("invalid chat revalidation query");
+    }
+    Ok(Some(ids))
+}
+
+fn parse_remote_chat_query(raw_query: Option<&str>) -> Result<RemoteChatQuery, ()> {
+    if raw_query.is_some_and(|query| query.len() > REMOTE_CHAT_QUERY_MAX_BYTES) {
+        return Err(());
+    }
+    let uri: axum::http::Uri = format!("/?{}", raw_query.unwrap_or_default())
+        .parse()
+        .map_err(|_| ())?;
+    let Query(query) = Query::<RemoteChatQuery>::try_from_uri(&uri).map_err(|_| ())?;
+    if query
+        .revalidate_ids
+        .as_deref()
+        .is_some_and(|value| !has_canonical_remote_chat_revalidation_value(raw_query, value))
+    {
+        return Err(());
+    }
+    Ok(query)
 }
 
 async fn load_remote_agent_chat<R: Runtime>(
     State(ctx): State<RemoteGatewayContext<R>>,
     headers: HeaderMap,
     AxumPath(session_id): AxumPath<String>,
-    Query(query): Query<RemoteChatQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<serde_json::Value>, RemoteGatewayError> {
+    let query = parse_remote_chat_query(raw_query.as_deref())
+        .map_err(|_| RemoteGatewayError::bad_request("agent_chat_projection_unavailable"))?;
+    let requested_ids = decode_remote_chat_revalidation_ids(query.revalidate_ids.as_deref())
+        .map_err(|_| RemoteGatewayError::bad_request("agent_chat_projection_unavailable"))?;
+    let revalidate_ids =
+        crate::state::conversation_archive::chat_read::validate_revalidation_request(
+            &session_id,
+            query.before.as_deref(),
+            query.revision.as_deref(),
+            query.detail.as_deref(),
+            requested_ids,
+        )
+        .map_err(|_| RemoteGatewayError::bad_request("agent_chat_projection_unavailable"))?;
     let origin = require_audited_request_boundary(&ctx.config, &headers, false, "load_agent_chat")?;
     let session =
         require_audited_remote_session(&ctx, &headers, &origin, "chat_read", "load_agent_chat")
             .await?;
     let state = ctx.app.state::<crate::state::AppState>();
-    let limit = query
-        .limit
-        .unwrap_or(REMOTE_CHAT_DEFAULT_PAGE_EVENTS)
-        .clamp(1, REMOTE_CHAT_MAX_PAGE_EVENTS);
-    let page =
-        crate::remote::operations::remote_agent_chat_page(&state, &session_id, query.before, limit)
-            .await
-            .map_err(|stage| {
-                RemoteGatewayError::bad_request(remote_agent_chat_failure_code(stage))
-            })?;
+    let _limit = query.limit;
+    let page = crate::remote::operations::remote_agent_chat_page_with_revalidation(
+        &state,
+        &session_id,
+        query.before,
+        query.revision,
+        query.detail,
+        revalidate_ids,
+    )
+    .await
+    .map_err(|_| RemoteGatewayError::bad_request("agent_chat_projection_unavailable"))?;
     audit_gateway_event(
         &session,
         &origin,
         GatewayAuditEvent::accepted("chat_read", "load_agent_chat").target("agent", &session_id),
     );
     Ok(Json(serde_json::json!(page)))
-}
-
-fn remote_agent_chat_failure_code(
-    stage: crate::commands::chat::ChatTranscriptFailureStage,
-) -> &'static str {
-    match stage {
-        crate::commands::chat::ChatTranscriptFailureStage::AgentSnapshot => {
-            "agent_chat_snapshot_failed"
-        }
-        crate::commands::chat::ChatTranscriptFailureStage::ProviderLogCapture => {
-            "agent_chat_provider_capture_failed"
-        }
-        crate::commands::chat::ChatTranscriptFailureStage::ArchiveWrite => {
-            "agent_chat_archive_write_failed"
-        }
-        crate::commands::chat::ChatTranscriptFailureStage::ProviderProjection => {
-            "agent_chat_projection_failed"
-        }
-        crate::commands::chat::ChatTranscriptFailureStage::Provenance => {
-            "agent_chat_provenance_failed"
-        }
-    }
 }
 
 async fn load_remote_agent_terminal(
@@ -951,25 +1028,33 @@ async fn run_agent_action(
         );
         return Err(error);
     }
-    if let Err(error) =
-        crate::remote::operations::run_remote_agent_action(&ctx.app, request.clone()).await
-    {
-        let code = "agent_action_failed";
-        audit_gateway_event(
-            &session,
-            &origin,
-            GatewayAuditEvent::rejected("agent_action", &request.action, code)
-                .target("agent", &request.target),
-        );
-        return Err(RemoteGatewayError::bad_request_with_detail(code, error));
-    }
+    let receipt =
+        match crate::remote::operations::run_remote_agent_action(&ctx.app, request.clone()).await {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                let code = "agent_action_failed";
+                audit_gateway_event(
+                    &session,
+                    &origin,
+                    GatewayAuditEvent::rejected("agent_action", &request.action, code)
+                        .target("agent", &request.target),
+                );
+                return Err(RemoteGatewayError::bad_request_with_detail(code, error));
+            }
+        };
     audit_gateway_event(
         &session,
         &origin,
         GatewayAuditEvent::accepted("agent_action", &request.action)
             .target("agent", &request.target),
     );
-    Ok(Json(serde_json::json!({ "ok": true })))
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "chat_event_id": receipt.as_ref().map(|receipt| &receipt.chat_event_id),
+        "chat_agent_id": receipt.as_ref().map(|receipt| &receipt.chat_agent_id),
+        "chat_conversation_id": receipt.as_ref().map(|receipt| &receipt.chat_conversation_id),
+        "chat_source_epoch": receipt.as_ref().and_then(|receipt| receipt.chat_source_epoch.as_ref()),
+    })))
 }
 
 fn execute_remote_inbox_action(
@@ -1796,6 +1881,165 @@ mod tests {
         }
     }
 
+    fn source_observation_id(offset: u64) -> String {
+        format!(
+            "source:agent-1:{}:{offset}:{}:0",
+            "a".repeat(64),
+            "b".repeat(64)
+        )
+    }
+
+    fn encode_query_component(value: &str) -> String {
+        super::encode_remote_chat_query_component(value)
+    }
+
+    #[test]
+    fn remote_chat_query_decodes_one_json_array_and_rejects_repeated_keys() {
+        let first = source_observation_id(10);
+        let second = source_observation_id(20);
+        let wire_ids = vec![first.clone(), first.clone(), second.clone()];
+        let wire_value = serde_json::to_string(&wire_ids).unwrap();
+        let uri: axum::http::Uri = format!(
+            "/remote/api/agents/agent-1/chat?revalidate_ids={}",
+            encode_query_component(&wire_value)
+        )
+        .parse()
+        .unwrap();
+        let query = parse_remote_chat_query(uri.query())
+            .expect("the existing Axum GET query accepts the JSON-list encoding");
+        let decoded = decode_remote_chat_revalidation_ids(query.revalidate_ids.as_deref())
+            .expect("canonical JSON list decodes");
+        let validated =
+            crate::state::conversation_archive::chat_read::validate_revalidation_request(
+                "agent-1",
+                query.before.as_deref(),
+                Some("current-revision"),
+                query.detail.as_deref(),
+                decoded,
+            )
+            .expect("the shared validator accepts and deduplicates backend-shaped IDs");
+        assert_eq!(validated, Some(vec![first, second]));
+
+        let noncanonical_value: axum::http::Uri =
+            "/remote/api/agents/agent-1/chat?revalidate_ids=%5b%5d"
+                .parse()
+                .unwrap();
+        assert!(parse_remote_chat_query(noncanonical_value.query()).is_err());
+        let encoded_key: axum::http::Uri =
+            "/remote/api/agents/agent-1/chat?%72evalidate_ids=%5B%5D"
+                .parse()
+                .unwrap();
+        assert!(parse_remote_chat_query(encoded_key.query()).is_err());
+
+        let eight_raw_duplicates =
+            serde_json::to_string(&vec![source_observation_id(10); 8]).unwrap();
+        let eight_uri: axum::http::Uri = format!(
+            "/remote/api/agents/agent-1/chat?revalidate_ids={}",
+            encode_query_component(&eight_raw_duplicates)
+        )
+        .parse()
+        .unwrap();
+        let query = parse_remote_chat_query(eight_uri.query()).unwrap();
+        let decoded = decode_remote_chat_revalidation_ids(query.revalidate_ids.as_deref()).unwrap();
+        assert_eq!(
+            crate::state::conversation_archive::chat_read::validate_revalidation_request(
+                "agent-1",
+                None,
+                Some("current-revision"),
+                None,
+                decoded,
+            )
+            .unwrap(),
+            Some(vec![source_observation_id(10)])
+        );
+
+        let nine_raw_duplicates =
+            serde_json::to_string(&vec![source_observation_id(10); 9]).unwrap();
+        let nine_uri: axum::http::Uri = format!(
+            "/remote/api/agents/agent-1/chat?revalidate_ids={}",
+            encode_query_component(&nine_raw_duplicates)
+        )
+        .parse()
+        .unwrap();
+        let query = parse_remote_chat_query(nine_uri.query()).unwrap();
+        let decoded = decode_remote_chat_revalidation_ids(query.revalidate_ids.as_deref()).unwrap();
+        assert!(
+            crate::state::conversation_archive::chat_read::validate_revalidation_request(
+                "agent-1",
+                None,
+                Some("current-revision"),
+                None,
+                decoded,
+            )
+            .is_err()
+        );
+
+        let invalid_id = serde_json::to_string(&["not-a-source-id"]).unwrap();
+        let invalid_id_uri: axum::http::Uri = format!(
+            "/remote/api/agents/agent-1/chat?revalidate_ids={}",
+            encode_query_component(&invalid_id)
+        )
+        .parse()
+        .unwrap();
+        let query = parse_remote_chat_query(invalid_id_uri.query()).unwrap();
+        let decoded = decode_remote_chat_revalidation_ids(query.revalidate_ids.as_deref()).unwrap();
+        assert!(
+            crate::state::conversation_archive::chat_read::validate_revalidation_request(
+                "agent-1",
+                None,
+                Some("current-revision"),
+                None,
+                decoded,
+            )
+            .is_err()
+        );
+
+        let oversized_id = format!("{}{}", source_observation_id(10), "x".repeat(512));
+        let oversized_json = serde_json::to_string(&[oversized_id]).unwrap();
+        let oversized_uri: axum::http::Uri = format!(
+            "/remote/api/agents/agent-1/chat?revalidate_ids={}",
+            encode_query_component(&oversized_json)
+        )
+        .parse()
+        .unwrap();
+        let query = parse_remote_chat_query(oversized_uri.query()).unwrap();
+        let decoded = decode_remote_chat_revalidation_ids(query.revalidate_ids.as_deref()).unwrap();
+        assert!(
+            crate::state::conversation_archive::chat_read::validate_revalidation_request(
+                "agent-1",
+                None,
+                Some("current-revision"),
+                None,
+                decoded,
+            )
+            .is_err()
+        );
+        let over_limit_json = format!(
+            "\"{}\"",
+            "x".repeat(REMOTE_CHAT_REVALIDATION_JSON_MAX_BYTES + 1)
+        );
+        assert!(decode_remote_chat_revalidation_ids(Some(&over_limit_json)).is_err());
+
+        let repeated_key: axum::http::Uri =
+            "/remote/api/agents/agent-1/chat?revalidate_ids=%5B%5D&revalidate_ids=%5B%5D"
+                .parse()
+                .unwrap();
+        assert!(parse_remote_chat_query(repeated_key.query()).is_err());
+
+        let oversized_query = format!(
+            "revalidate_ids={}",
+            "x".repeat(REMOTE_CHAT_QUERY_MAX_BYTES + 1)
+        );
+        assert!(parse_remote_chat_query(Some(&oversized_query)).is_err());
+
+        let malformed_json: axum::http::Uri =
+            "/remote/api/agents/agent-1/chat?revalidate_ids=not-json"
+                .parse()
+                .unwrap();
+        let query = parse_remote_chat_query(malformed_json.query()).unwrap();
+        assert!(decode_remote_chat_revalidation_ids(query.revalidate_ids.as_deref()).is_err());
+    }
+
     #[test]
     fn gateway_refuses_non_loopback_bind_host() {
         let mut cfg = config();
@@ -1869,24 +2113,6 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body");
 
         assert!(payload.get("detail").is_none());
-    }
-
-    #[test]
-    fn remote_chat_failure_codes_identify_only_the_processing_stage() {
-        use crate::commands::chat::ChatTranscriptFailureStage as Stage;
-
-        for (stage, code) in [
-            (Stage::AgentSnapshot, "agent_chat_snapshot_failed"),
-            (
-                Stage::ProviderLogCapture,
-                "agent_chat_provider_capture_failed",
-            ),
-            (Stage::ArchiveWrite, "agent_chat_archive_write_failed"),
-            (Stage::ProviderProjection, "agent_chat_projection_failed"),
-            (Stage::Provenance, "agent_chat_provenance_failed"),
-        ] {
-            assert_eq!(remote_agent_chat_failure_code(stage), code);
-        }
     }
 
     #[test]
@@ -2203,7 +2429,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_chat_snapshot_failure_returns_a_sanitized_stage_code() {
+    async fn remote_chat_snapshot_failure_returns_a_sanitized_projection_code() {
         let _guard = crate::utils::wardian_test_env_lock_async().await;
         let temp = tempfile::tempdir().expect("temp home");
         unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
@@ -2230,13 +2456,10 @@ mod tests {
             State(ctx),
             action_headers(&session),
             AxumPath("sanitized-codex-agent".to_string()),
-            Query(RemoteChatQuery {
-                before: None,
-                limit: None,
-            }),
+            RawQuery(None),
         )
         .await
-        .expect_err("missing fixture agent should fail during capture");
+        .expect_err("missing fixture agent should fail before display read");
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -2244,7 +2467,7 @@ mod tests {
             .expect("response body");
         let body_text = String::from_utf8(body.to_vec()).expect("utf-8 response");
         let payload: serde_json::Value = serde_json::from_str(&body_text).expect("json response");
-        assert_eq!(payload["code"], "agent_chat_snapshot_failed");
+        assert_eq!(payload["code"], "agent_chat_projection_unavailable");
         assert!(payload.get("detail").is_none());
         assert!(!body_text.contains("sanitized-codex-agent"));
 
@@ -2297,8 +2520,15 @@ mod tests {
             ]
         };
         let first_lines = turn_lines("provider-turn-old", "native-message-old");
-        std::fs::write(&log_path, format!("{}\n", first_lines.join("\n")))
-            .expect("write first synthetic turn");
+        std::fs::write(
+            &log_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({"type":"session_meta","payload":{"id":"codex-session-one"}}),
+                first_lines.join("\n")
+            ),
+        )
+        .expect("write first synthetic turn");
 
         let app = tauri::test::mock_app();
         app.manage(AppState::new());
@@ -2419,16 +2649,18 @@ mod tests {
             app: app.handle().clone(),
             config: config(),
         };
-        let response = load_remote_agent_chat(
-            State(ctx),
-            action_headers(&session),
-            AxumPath("synthetic-codex-agent".to_string()),
-            Query(RemoteChatQuery {
-                before: None,
-                limit: Some(100),
-            }),
+        let _capture_guard = state.conversation_capture_policy_lock.lock().await;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            load_remote_agent_chat(
+                State(ctx),
+                action_headers(&session),
+                AxumPath("synthetic-codex-agent".to_string()),
+                RawQuery(Some("limit=100".to_string())),
+            ),
         )
         .await
+        .expect("normal Chat read must not join the capture gate")
         .expect("authenticated gateway chat read")
         .into_response();
 
@@ -2443,15 +2675,26 @@ mod tests {
             .iter()
             .filter(|event| event["role"] == "user" && event["text"] == prompt)
             .collect::<Vec<_>>();
-        assert_eq!(repeated_users.len(), 2);
-        let provider_turn_ids = repeated_users
-            .iter()
-            .filter_map(|event| event["metadata"]["provider_turn_id"].as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            provider_turn_ids,
-            vec!["provider-turn-old", "provider-turn-new"]
+        assert!(
+            repeated_users.len() >= 2,
+            "both available identical turns remain visible"
         );
+        assert!(repeated_users
+            .iter()
+            .any(|event| event["metadata"]["chat_provisional"] == true));
+        let ids = repeated_users
+            .iter()
+            .filter_map(|event| event["id"].as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(ids.len(), repeated_users.len());
+        assert_eq!(
+            state
+                .conversation_archive
+                .provider_log_capture_state("synthetic-codex-agent", source_key)
+                .unwrap(),
+            Some(first.next)
+        );
+        assert!(payload["bytes_read"].as_u64().unwrap() <= 2 * 1024 * 1024);
         assert!(repeated_users
             .iter()
             .all(|event| event["id"].as_str().is_some()));
