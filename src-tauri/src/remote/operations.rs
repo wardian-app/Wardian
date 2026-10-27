@@ -1241,12 +1241,16 @@ fn is_clearable_legacy_completion(item: &serde_json::Value) -> bool {
         && !provider_choice_acknowledgement_unresolved(item)
         && matches!(
             item.get("type").and_then(serde_json::Value::as_str),
-            Some("agent_completed" | "automation_completed")
+            Some("agent_completed" | "agent_turn_ended" | "automation_completed")
         )
 }
 
 fn dismissed_agent_completion(item: &serde_json::Value) -> Option<serde_json::Value> {
-    (item.get("type").and_then(serde_json::Value::as_str) == Some("agent_completed")).then(|| {
+    matches!(
+        item.get("type").and_then(serde_json::Value::as_str),
+        Some("agent_completed" | "agent_turn_ended")
+    )
+    .then(|| {
         let mut tombstone = item.clone();
         tombstone["read"] = serde_json::Value::Bool(true);
         tombstone["dismissed"] = serde_json::Value::Bool(true);

@@ -354,7 +354,7 @@ export interface ProviderQuestion {
 
 export interface QueueItem {
     id: string;
-    type: "action_needed" | "agent_completed" | "automation_completed" | "agent_update" | "approval_request";
+    type: "action_needed" | "agent_completed" | "agent_turn_ended" | "automation_completed" | "agent_update" | "approval_request";
     timestamp: number;
     read: boolean;
     /** Internal durable marker used to keep cleared automation runs out of Inbox. */
@@ -374,6 +374,11 @@ export interface QueueItem {
     summary?: string;
     /** Full provider-authored final response for durable completion records. */
     response_text?: string;
+    /** Native turn-end evidence does not assert successful task completion. */
+    turn_outcome?: "unknown" | "aborted";
+    provider_reason?: string | null;
+    provider_session_id?: string;
+    provider_turn_id?: string;
     /**
      * Where a completion's timestamp came from: Claude's settled-Stop-hooks
      * telemetry event, the legacy Claude Stop-hook outbox file, the provider
@@ -381,6 +386,7 @@ export interface QueueItem {
      * event.
      */
     timestamp_source?:
+      | "claude_mod_turn_complete"
       | "claude_stop_hooks_settled_event"
       | "hook_outbox_mtime"
       | "processing_time_fallback"

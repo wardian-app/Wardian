@@ -53,6 +53,7 @@ type ListenerPayloads = {
     agent_name?: string;
     inbox_item?: QueueItem;
   };
+  "agent-turn-ended": { session_id: string; inbox_item: QueueItem };
 };
 
 let agents: AgentConfig[];
@@ -169,12 +170,13 @@ describe("useAgentResourceController", () => {
       "app-metrics",
       "agent-status-updated",
       "agent-turn-completed",
+      "agent-turn-ended",
     ]);
     expect(result.current.off_agent_ids).toEqual(new Set(["agent-2"]));
 
     const replacement_callback = vi.fn();
     rerender({ callback: replacement_callback });
-    expect(mockListen).toHaveBeenCalledTimes(6);
+    expect(mockListen).toHaveBeenCalledTimes(7);
     act(() => emit("agent-json-event", {
       session_id: "agent-1",
       data: { type: "progress", content: "Updated callback" },
@@ -421,6 +423,23 @@ describe("useAgentResourceController", () => {
       agent: expect.objectContaining({ session_name: "Alpha" }),
       inbox_item,
     });
+  });
+
+  it("native turn-ended events project only a persisted notice, never a bare completion", async () => {
+    const on_agent_turn_completed = vi.fn();
+    const { result } = renderHook(() => useAgentResourceController({ on_agent_turn_completed }));
+    await waitFor(() => expect(result.current.agents).toHaveLength(2));
+    const inbox_item: QueueItem = {
+      id: "agent-turn-ended:agent-1:launch:provider:turn-A",
+      type: "agent_turn_ended", timestamp: 1, read: false,
+      agent_session_id: "agent-1", turn_outcome: "unknown", response_text: "Exact answer",
+    };
+    act(() => emit("agent-turn-ended", { session_id: "agent-1", inbox_item }));
+    expect(on_agent_turn_completed).toHaveBeenCalledExactlyOnceWith({
+      session_id: "agent-1", agent: expect.objectContaining({ session_name: "Alpha" }), inbox_item,
+    });
+    act(() => emit("agent-turn-ended", { session_id: "agent-1", inbox_item: { ...inbox_item, type: "agent_completed" } }));
+    expect(on_agent_turn_completed).toHaveBeenCalledOnce();
   });
 
   it("preserves metric transition and transcript-hydration interaction semantics", async () => {

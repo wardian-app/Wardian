@@ -280,6 +280,22 @@ Valid states are `unknown`, `booting`, `ready`, `busy`, `action_required`, and `
 
 ### Inbox Evidence
 
+`agent-turn-ended` is a separate native Claude observation. Its payload always
+contains a backend-persisted `agent_turn_ended` Inbox item and never a bare
+successful-completion boundary. The item carries `turn_outcome` (`unknown` or
+`aborted`), the exact captured `response_text`, provider session/turn identity,
+and `timestamp_source: claude_mod_turn_complete`. Desktop and remote clients
+present **Claude turn ended** with neutral or interruption styling. It does not
+advance completion watches, change snapshots, or successful automation triggers.
+
+The session-scoped passive mod observes Claude's documented `turn.complete`
+event after a uniquely matched composer/bridge submission and main-loop
+`turn.start`. It does not infer success from `reason=answer`, Stop hooks,
+`turn_duration`, or missing errors. A per-launch handshake reports bridge
+availability; unsupported or disabled mods remain unavailable. Only receipts
+durably admitted by the current backend runtime can replay after restart.
+See [native Claude turn observations](https://github.com/wardian-app/Wardian/blob/main/docs/specs/claude-native-turn-ended-inbox.md).
+
 Inbox items project canonical live evidence instead of replayed terminal text. The backend owns every agent completion card: it writes the card to the queue before any client sees it, so a card does not depend on a mounted desktop window. `agent-turn-completed` has two forms:
 
 - Without `inbox_item`, it marks a provider turn boundary. The frontend refreshes turn-scoped views such as change review and never builds a card from it.
@@ -295,7 +311,7 @@ A card is keyed by provider evidence for its turn, `agent-completed:<agent-sessi
 
 Two observers of the same turn converge on one card, and a dismissed card stays dismissed. A turn without non-empty final answer text produces no card: interrupted and failed turns, Claude `StopFailure`, provider control commands such as `/login`, and turns whose transcript does not end in an assistant answer to a user request. Rollout records written before the current runtime launched are history and are ignored. A failed queue write is retried while the same agent runtime remains current. Antigravity's transcript marks intermediate planner and script steps as `DONE`, so Wardian reports its turn boundary only when that provider returns to its visible ready prompt, once per active turn.
 
-Interactive Claude turns create no completion card. Claude Code's Stop hook and its `hook_execution_complete` telemetry both precede the turn-end decision, and no supported event reports that decision, so the outcome is unknown ([Claude Inbox Turn Completions](https://github.com/wardian-app/Wardian/blob/main/docs/specs/claude-inbox-turn-completions.md)). Committed prompts are recorded per launch, so startup replay is idempotent. Dismissal marks a durable tombstone; whole-queue snapshots cannot delete or revive backend-owned completion records.
+Interactive Claude turns create no successful-completion card. Claude Code's Stop hook and its `hook_execution_complete` telemetry both precede the turn-end decision. Native mod observations use the separate turn-ended notice described above and retain an unknown or interrupted outcome ([Claude Inbox Turn Completions](https://github.com/wardian-app/Wardian/blob/main/docs/specs/claude-inbox-turn-completions.md)). Committed prompts are recorded per launch, so startup replay is idempotent. Dismissal marks a durable tombstone; whole-queue snapshots cannot delete or revive backend-owned completion records.
 
 Other queue records, such as action-needed cards, have this shape:
 
