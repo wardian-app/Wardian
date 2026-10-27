@@ -26,6 +26,17 @@ In the searchable list, select a surface name to open it in the captured pane, o
 
 The **Agent Session** choice needs one selected agent in the right roster. For a faster agent-specific path, use the roster actions described in [Watchlists](./watchlists.md).
 
+Agent Session tabs have a **Terminal** / **Chat** switch. Live agents open in
+Terminal; Off agents open in Chat so you can read saved history without starting
+their provider. Reading, scrolling, and expanding history use the bounded Chat
+page API. Sending a message is an explicit action and retains the usual delivery
+behavior, including headless delivery for Off agents. Unsent text stays with its
+agent when you switch views or rebind the tab. Read-only presentations allow
+history browsing and disable message, approval, interrupt, and model changes.
+The history model picker and an Off agent's configuration show the saved model
+or provider default until you choose **Choose model**. That explicit action
+discovers available models; opening history or selecting an Off agent does not.
+
 ## Work with Tabs and Panes
 
 Each pane has its own tab strip and active surface. Every tab includes a compact type icon shared with the surface chooser, so different tools and agent sessions remain recognizable when titles are truncated. Top-edge strips form the window chrome; strips in downward splits remain local. The **+** sits immediately after the tabs, while **…** remains at the far edge.
@@ -174,6 +185,46 @@ recovery notices, and safe-mode notices remain visible when action is needed.
 If Wardian cannot safely load the layout, it enters **Workbench safe mode**. Safe mode renders a conservative single-pane projection while preserving the durable document so it can be recovered, exported, replaced, or reset deliberately.
 
 ## Agent Sessions and Terminal Ownership
+
+### Chat history
+
+Desktop and Remote Chat open a recent window of up to 80 message and activity
+headers. Scroll toward the beginning or use the older-history control to load
+another page. History can continue updating in the background while recent
+messages remain visible.
+
+Explicit full-history inspection still returns the complete recorded
+conversation. Background turn-completion evidence also continues to use full
+transcripts while Chat opens and pages through its recent window.
+
+Older pages replace the newer end once the loaded window reaches its limit.
+Updates preserve the older rows you are reading. **Jump to latest** returns to
+recent messages; submitting a prompt also returns there.
+
+Long messages and tool output start with a compact preview. **Show full
+details** opens the first chunk; **Read more** continues through the body.
+Opened details retain a bounded text window, so reading a large payload does
+not keep its entire contents in the browser.
+
+If a saved detail file is missing, Chat shows **Saved details are unavailable.**
+The event preview and older history remain available. Detail chunks already
+saved before the file disappeared remain readable.
+
+Tool edits retain compact patch or before/after previews and file-change
+summaries. A truncated input is labelled as a preview; **Show full details**
+opens the original tool arguments. Clear empties the desktop Chat view and
+rejects earlier reads and submission acknowledgements.
+
+Chat is a view of the backend-owned archive and admitted provider source.
+Loading and updating this view does not resend prompts or require an archive
+repair command. A submitted prompt remains visible until its exact committed
+archive row is confirmed. Identical text alone cannot confirm it.
+
+When an owned provider source is reconciled, older captured messages retain
+their original entries. If source ownership cannot be verified, history can
+remain updating while recent admitted messages stay visible.
+
+### Terminal ownership
 
 An agent session surface is a presentation of a live agent runtime. Closing its tab detaches that presentation; it does **not** pause, clear, delete, or kill the agent. Use the roster or agent lifecycle controls when you intend to change the runtime itself.
 

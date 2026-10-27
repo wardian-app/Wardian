@@ -1,5 +1,6 @@
 import type { AgentChatEvent } from "../../types";
 import { isLowSignalActivityTitle, toActivityBlock, type ActivityBlockModel } from "./activityBlocks";
+import { chatEventDisplayKey } from "../chat/chatEventIdentity";
 
 /**
  * Consecutive work events collapse into one group at this count.
@@ -30,27 +31,38 @@ export interface PresentedWorkEntry {
   changed_paths: string[];
 }
 
-export function derivePresentedChatRows(events: AgentChatEvent[]): PresentedChatRow[] {
+export interface ChatPresentationBoundary {
+  kind: "event" | "work_group";
+  id: string;
+}
+
+/** Retain visible full rows and group cohorts while older neighbors arrive. */
+export function derivePresentedChatRows(
+  events: AgentChatEvent[],
+  boundaries?: ReadonlyMap<string, ChatPresentationBoundary>,
+): PresentedChatRow[] {
   const rows: PresentedChatRow[] = [];
   let pendingWorkEntries: PresentedWorkEntry[] = [];
+  let pendingBoundary: ChatPresentationBoundary | undefined;
   let lastUnpairedCall: PresentedWorkEntry | null = null;
   const pendingCallsByLink = new Map<string, PresentedWorkEntry>();
 
   const flushWork = () => {
     if (pendingWorkEntries.length === 0) return;
 
-    if (pendingWorkEntries.length < WORK_GROUP_MIN_ENTRIES) {
+    if (pendingWorkEntries.length < WORK_GROUP_MIN_ENTRIES && pendingBoundary?.kind !== "work_group") {
       pendingWorkEntries.forEach((entry) => rows.push({ kind: "event", event: entry.primary_event, entry }));
     } else {
       rows.push({
         kind: "work_group",
-        id: `work-group-${pendingWorkEntries[0].id}-${pendingWorkEntries[pendingWorkEntries.length - 1].id}`,
+        id: pendingBoundary?.id ?? `work-group-${pendingWorkEntries[0].id}-${pendingWorkEntries[pendingWorkEntries.length - 1].id}`,
         entries: pendingWorkEntries,
         changedPaths: uniquePaths(pendingWorkEntries.flatMap((entry) => entry.changed_paths)),
       });
     }
 
     pendingWorkEntries = [];
+    pendingBoundary = undefined;
   };
 
   const rememberPendingCall = (entry: PresentedWorkEntry) => {
@@ -86,7 +98,8 @@ export function derivePresentedChatRows(events: AgentChatEvent[]): PresentedChat
       return;
     }
 
-    if (event.kind === "tool_result" && isSuppressibleToolResult(event)) {
+    const boundary = boundaries?.get(chatEventDisplayKey(event));
+    if (event.kind === "tool_result" && isSuppressibleToolResult(event) && boundary?.kind !== "event") {
       const linkedEntry = findLinkedPendingCall(event);
       if (linkedEntry) {
         mergeResultIntoEntry(linkedEntry, event);
@@ -102,7 +115,14 @@ export function derivePresentedChatRows(events: AgentChatEvent[]): PresentedChat
     }
 
     const entry = createWorkEntry(event);
-    pendingWorkEntries.push(entry);
+    if (boundary?.kind === "event") {
+      flushWork();
+      rows.push({ kind: "event", event, entry });
+    } else {
+      if (pendingBoundary?.kind !== boundary?.kind || pendingBoundary?.id !== boundary?.id) flushWork();
+      pendingBoundary = boundary;
+      pendingWorkEntries.push(entry);
+    }
     if (event.kind === "tool_call") {
       lastUnpairedCall = entry;
       rememberPendingCall(entry);
@@ -187,7 +207,7 @@ function createWorkEntry(event: AgentChatEvent): PresentedWorkEntry {
   const block = toActivityBlock(event);
   const title = presentedTitle(event, block);
   return {
-    id: event.id,
+    id: chatEventDisplayKey(event),
     primary_event: event,
     block,
     merged_result_events: [],

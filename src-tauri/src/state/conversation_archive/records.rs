@@ -121,6 +121,11 @@ pub(super) fn matching_delivered_input_record_index(
     records: &[ConversationNarrativeRecord],
     event: &AgentChatEvent,
 ) -> io::Result<Option<usize>> {
+    // A physical native observation does not prove correspondence with an
+    // accepted generated input. Keep these identities independent.
+    if event.metadata["chat_source_ref"].is_string() {
+        return Ok(None);
+    }
     if event.kind != AgentChatEventKind::Message
         || event.role.as_ref() != Some(&AgentChatRole::User)
     {

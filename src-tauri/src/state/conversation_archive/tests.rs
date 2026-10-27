@@ -1,7 +1,8 @@
 use super::{
-    derive_turn_records, effective_conversation_logging, lifecycle_record,
-    narrative_from_chat_event, narrative_from_delivered_input, new_conversation_id,
-    ActiveConversationHandle, ConversationArchiveContext, ConversationArchiveState,
+    derive_turn_records, effective_conversation_logging, index_records_by_sequence,
+    lifecycle_record, narrative_from_chat_event, narrative_from_delivered_input,
+    new_conversation_id, record_was_present, ActiveConversationHandle, ConversationArchiveContext,
+    ConversationArchiveState,
 };
 use crate::providers::chat_transcript::normalize_chat_lines;
 use wardian_core::conversations::{
@@ -55,6 +56,66 @@ fn terminal_output_is_not_primary_narrative() {
     );
 
     assert!(narrative_from_chat_event(&event, 1).is_none());
+}
+
+#[test]
+fn refreshed_record_membership_preserves_full_equality_with_duplicate_sequences() {
+    let first = narrative_from_chat_event(
+        &chat_event(
+            "first",
+            AgentChatEventKind::Message,
+            Some(AgentChatRole::User),
+            Some("same"),
+        ),
+        7,
+    )
+    .unwrap();
+    let second = narrative_from_chat_event(
+        &chat_event(
+            "second",
+            AgentChatEventKind::Message,
+            Some(AgentChatRole::User),
+            Some("same"),
+        ),
+        7,
+    )
+    .unwrap();
+    let previous = vec![first.clone(), second.clone()];
+    let indexed = index_records_by_sequence(&previous);
+    assert!(record_was_present(&first, &indexed));
+    assert!(record_was_present(&second, &indexed));
+
+    let mut changed = first.clone();
+    changed.text = Some("updated payload".into());
+    assert!(!record_was_present(&changed, &indexed));
+    changed = first.clone();
+    changed.request_root_id = Some("different verified root".into());
+    assert!(!record_was_present(&changed, &indexed));
+    changed = first;
+    changed.seq = 8;
+    assert!(!record_was_present(&changed, &indexed));
+}
+
+#[test]
+fn refreshed_record_membership_is_independent_of_record_order() {
+    let previous = (1..=128)
+        .map(|seq| {
+            narrative_from_chat_event(
+                &chat_event(
+                    &format!("record-{seq}"),
+                    AgentChatEventKind::Message,
+                    Some(AgentChatRole::User),
+                    Some("same"),
+                ),
+                seq,
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let indexed = index_records_by_sequence(&previous);
+    for record in previous.iter().rev() {
+        assert!(record_was_present(record, &indexed));
+    }
 }
 
 #[test]
@@ -3031,9 +3092,12 @@ fn disabled_capture_state_skips_a_post_upgrade_claude_alias() {
     assert!(
         capture_state.should_skip_event(&upgraded_event, context.provider_source_key.as_deref())
     );
-    archive
-        .append_chat_events_with_context(context, &[upgraded_event])
-        .expect("append post-upgrade event");
+    assert_eq!(
+        archive
+            .append_chat_events_with_context(context, &[upgraded_event])
+            .expect("append post-upgrade event"),
+        0
+    );
 
     let conversation_id = archive
         .active_conversation_id_for_test("agent-1")
@@ -3044,6 +3108,7 @@ fn disabled_capture_state_skips_a_post_upgrade_claude_alias() {
         read_jsonl_records(&conversation_path.join("conversation.jsonl"))
             .expect("read narrative records");
     assert!(records.is_empty());
+    assert!(!conversation_path.join("events.jsonl").exists());
 }
 
 #[test]
@@ -3795,7 +3860,7 @@ fn buffered_jsonl_acquire_archive_prefix_metrics() {
     );
 }
 
-fn isolated_home() -> (tokio::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
+pub(super) fn isolated_home() -> (tokio::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
     let guard = crate::utils::wardian_test_env_lock();
     let temp = tempfile::tempdir().expect("temp dir");
     std::env::set_var("WARDIAN_HOME", temp.path());

@@ -11,36 +11,50 @@ use sha2::{Digest, Sha256};
 /// assistant message. Preserve that established cross-source normalization while
 /// keeping two identified native messages (including equal answers) distinct.
 pub(super) fn is_codex_stream_completion_pair(a: &AgentChatEvent, b: &AgentChatEvent) -> bool {
-    use wardian_core::models::chat::AgentChatRole;
-    if a.provider != "codex"
-        || b.provider != "codex"
-        || a.session_id != b.session_id
-        || a.role != Some(AgentChatRole::Assistant)
-        || b.role != Some(AgentChatRole::Assistant)
+    a.role == Some(wardian_core::models::chat::AgentChatRole::Assistant)
+        && crate::providers::chat_transcript::codex_display_pair(a, b)
+}
+
+/// Preserve the published pre-coordinate ID algorithm as private evidence.
+/// The caller still assigns the physical coordinate ID and removes arbitrary
+/// legacy aliases. Sequence qualification belongs to the acquisition owner.
+pub(crate) fn capture_legacy_identity(event: &mut AgentChatEvent, path: &Path, raw: Option<&str>) {
+    if !matches!(event.provider.as_str(), "codex" | "pi")
+        || event.kind != AgentChatEventKind::Message
     {
-        return false;
+        return;
     }
-    let (stream, completed) = match (a.source.as_deref(), b.source.as_deref()) {
-        (Some("event_msg"), Some("response_item" | "item.completed")) => (a, b),
-        (Some("response_item" | "item.completed"), Some("event_msg")) => (b, a),
-        _ => return false,
-    };
-    if stream.turn_id.is_some() || completed.turn_id.as_deref().is_none_or(str::is_empty) {
-        return false;
-    }
-    for key in [
-        "request_root_id",
-        "source_path",
-        "log_path",
-        "conversation_archive_id",
-    ] {
-        if let (Some(left), Some(right)) = (a.metadata.get(key), b.metadata.get(key)) {
-            if left != right {
-                return false;
-            }
+    let mut original = event.clone();
+    if event.provider == "pi" {
+        let Some(row) = raw.and_then(|raw| serde_json::from_str::<Value>(raw).ok()) else {
+            return;
+        };
+        if row["type"] != "message" || row["id"].as_str().is_none_or(str::is_empty) {
+            return;
         }
+        original.turn_id = crate::providers::chat_transcript::pi_original_legacy_turn_id(&row);
     }
-    true
+    event.metadata["chat_compatibility_legacy_id"] =
+        serde_json::json!(stable_provider_log_event_id(&original, path));
+    if let Some(sequence) = event.sequence {
+        event.metadata["chat_compatibility_source_sequence"] = serde_json::json!(sequence);
+    }
+}
+
+/// Observe the native session header without loading its transcript.
+pub(crate) fn native_log_session(path: &Path, provider: &str) -> Option<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(4096).read_to_end(&mut bytes).ok()?;
+    let end = bytes.iter().position(|byte| *byte == b'\n')?;
+    let header: Value = serde_json::from_slice(&bytes[..end]).ok()?;
+    let id = match provider {
+        "codex" if header["type"] == "session_meta" => header["payload"]["id"].as_str(),
+        "pi" if header["type"] == "session" => header["id"].as_str(),
+        _ => None,
+    }?;
+    (!id.is_empty()).then(|| id.to_owned())
 }
 
 /// Pi's pre-envelope-ID projection omitted the native entry ID. Recompute its

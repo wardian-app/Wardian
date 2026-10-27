@@ -53,6 +53,27 @@ pub(crate) fn same_observation(old: &AgentChatEvent, current: &AgentChatEvent) -
     if !paths_match && !sessions_match {
         return false;
     }
+    // A framed native observation owns its physical source coordinate. Legacy
+    // aliases, repeated text and a shared turn cannot transfer that ownership.
+    // In particular, historical enrichment of G is not evidence linking G to N.
+    match (
+        string(old, "chat_source_ref"),
+        string(current, "chat_source_ref"),
+    ) {
+        (None, None) => {}
+        (Some(a), Some(b)) if a == b => {
+            if old.metadata["generated"] == true || current.metadata["generated"] == true {
+                return false;
+            }
+            if matches!(
+                (string(old, "chat_source_epoch"), string(current, "chat_source_epoch")),
+                (Some(a), Some(b)) if a != b
+            ) {
+                return false;
+            }
+        }
+        _ => return false,
+    }
     let current_ids = event_identity_ids(current);
     let shares_identity = event_identity_ids(old)
         .iter()
@@ -261,6 +282,10 @@ fn enrich(old: &mut AgentChatEvent, current: &AgentChatEvent) -> io::Result<()> 
         "step_index",
         "raw_type",
         "provider_step_source",
+        "chat_source_ref",
+        "chat_source_start",
+        "chat_source_end",
+        "chat_source_epoch",
     ] {
         if let Some(value) = current.metadata.get(key).filter(|value| !value.is_null()) {
             old.metadata[key] = value.clone();
@@ -884,8 +909,28 @@ pub(super) fn bind_delivered_inputs(
     events: &mut Vec<AgentChatEvent>,
     records: &[ConversationNarrativeRecord],
 ) -> io::Result<bool> {
+    let generated_ids = events
+        .iter()
+        .filter(|event| {
+            event.metadata["generated"] == true && event.kind == AgentChatEventKind::Message
+        })
+        .map(|event| event.id.clone())
+        .collect::<HashSet<_>>();
+    if generated_ids.is_empty() {
+        return Ok(false);
+    }
     let before = events.clone();
     for record in records {
+        // Binding only enriches an existing generated message or removes a
+        // native observation. It never creates a new generated ID, so this
+        // initial set is a conservative filter even after an earlier removal.
+        if !record
+            .event_refs
+            .iter()
+            .any(|event_ref| generated_ids.contains(event_ref))
+        {
+            continue;
+        }
         let generated = events.iter().position(|event| {
             event.metadata["generated"] == true
                 && event.kind == AgentChatEventKind::Message
@@ -899,6 +944,7 @@ pub(super) fn bind_delivered_inputs(
             .enumerate()
             .filter_map(|(index, event)| {
                 (index != generated
+                    && !event.metadata["chat_source_ref"].is_string()
                     && record.event_refs.contains(&event.id)
                     && event.session_id == events[generated].session_id
                     && event.provider == events[generated].provider

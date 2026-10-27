@@ -10,6 +10,15 @@ import {
   type WorkbenchAgentFixture,
 } from "../fixtures/workbenchIpcMock";
 
+function publishedChatPage(events: unknown[]) {
+  return {
+    session_id: "agent-alpha", conversation_id: "conversation", generation: "generation",
+    source_epoch: null, revision: "revision", events, next_before: null,
+    unchanged: false, reset: false, progress: "ready", aliases: [], removed_ids: [],
+    detail: null, bytes_read: 0, records_decoded: 0,
+  };
+}
+
 const agents: WorkbenchAgentFixture[] = [
   {
     session_id: "agent-alpha",
@@ -219,7 +228,7 @@ test("renders chat attachment chips while hiding the provider launch screen", as
       durable_token: "chat-attachment-evidence-token-3",
     },
     responses: {
-      load_agent_chat_transcript: [
+      load_agent_chat_page: publishedChatPage([
         {
           id: "codex-launch",
           session_id: "agent-alpha",
@@ -258,7 +267,7 @@ test("renders chat attachment chips while hiding the provider launch screen", as
           sequence: 2,
           metadata: {},
         },
-      ],
+      ]),
       "plugin:dialog|open": ["C:/evidence/dashboard.png", "C:/evidence/notes.txt"],
       list_provider_model_catalog: {
         provider: "codex",
@@ -324,7 +333,7 @@ test("shows the actual command for a lifecycle-labelled tool call", async ({ pag
       durable_token: "chat-tool-call-one-line-token-7",
     },
     responses: {
-      load_agent_chat_transcript: [{
+      load_agent_chat_page: publishedChatPage([{
         id: "exec-call-1",
         session_id: "agent-alpha",
         provider: "codex",
@@ -342,7 +351,7 @@ test("shows the actual command for a lifecycle-labelled tool call", async ({ pag
         created_at: "2026-08-24T06:00:00.000Z",
         sequence: 1,
         metadata: { raw_type: "exec_command_begin" },
-      }],
+      }]),
       list_provider_model_catalog: {
         provider: "codex",
         version: "codex-cli 0.149.1",
@@ -620,7 +629,7 @@ test("keeps assistant and user message geometry stable while copying", async ({ 
       durable_token: "copy-feedback-evidence-token-4",
     },
     responses: {
-      load_agent_chat_transcript: [{
+      load_agent_chat_page: publishedChatPage([{
         id: "copy-feedback-user-message",
         session_id: "agent-alpha",
         provider: "mock",
@@ -656,7 +665,7 @@ test("keeps assistant and user message geometry stable while copying", async ({ 
         created_at: null,
         sequence: 2,
         metadata: {},
-      }],
+      }]),
       "plugin:clipboard-manager|write_text": null,
       list_provider_model_catalog: {
         provider: "codex",

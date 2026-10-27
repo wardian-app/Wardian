@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import type {
   AgentConfig,
+  AgentTelemetry,
   TerminalBrokerState,
   TerminalPresentationState,
   TerminalRenderState,
@@ -9,6 +10,8 @@ import type {
   TerminalVisibility,
 } from "../../../types";
 import { AgentTerminal } from "../../terminal/AgentTerminal";
+import { AgentChatView } from "../../grid/AgentChatView";
+import { formatAgentStatusLabel } from "../../../utils/statusUtils";
 
 export interface AgentSessionSurfaceProps {
   /** Stable workbench presentation identity. Closing it must not affect the agent runtime. */
@@ -18,6 +21,10 @@ export interface AgentSessionSurfaceProps {
   /** The shared agent resource matching `resource_key`, when it still exists. */
   agent?: AgentConfig;
   theme: "dark" | "light" | "system";
+  /** Canonical agent status and telemetry from the shared App projections. */
+  status?: string | null;
+  telemetry?: AgentTelemetry | null;
+  on_agent_config_updated?: (agent: AgentConfig) => void;
   visibility?: TerminalVisibility;
   render_state?: TerminalRenderState;
   requested_interaction?: TerminalRequestedInteraction;
@@ -62,6 +69,9 @@ export function AgentSessionSurface({
   resource_key,
   agent,
   theme,
+  status,
+  telemetry,
+  on_agent_config_updated,
   visibility = "visible",
   render_state = "mounted",
   requested_interaction = "interactive",
@@ -79,6 +89,18 @@ export function AgentSessionSurface({
 }: AgentSessionSurfaceProps) {
   const presentationId = agentSessionPresentationId(surface_id, resource_key);
   const resolvedAgent = agent?.session_id === resource_key ? agent : undefined;
+  // Presentation choices and unsent text belong to the resource, including
+  // when this surface is temporarily retargeted or its renderer is suspended.
+  const [viewModes, setViewModes] = useState<Record<string, "terminal" | "chat">>({});
+  const [chatDrafts, setChatDrafts] = useState<Record<string, string>>({});
+  const viewMode = viewModes[resource_key] ?? (resolvedAgent?.is_off ? "chat" : "terminal");
+  const chatIsMounted = visibility === "visible" && render_state === "mounted";
+  useEffect(() => {
+    if (!resolvedAgent) return;
+    setViewModes((current) => Object.prototype.hasOwnProperty.call(current, resource_key)
+      ? current
+      : { ...current, [resource_key]: resolvedAgent.is_off ? "chat" : "terminal" });
+  }, [resolvedAgent, resource_key]);
   const [observedBrokerState, setObservedBrokerState] = useState(broker_state ?? null);
   const [observedPresentationState, setObservedPresentationState] = useState(
     presentation_state ?? null,
@@ -209,14 +231,26 @@ export function AgentSessionSurface({
             {resolvedAgent.agent_class}{resolvedAgent.provider ? ` · ${resolvedAgent.provider}` : ""}
           </p>
         </div>
-        <div aria-label="Terminal presentation status" className="ml-auto flex shrink-0 items-center gap-1.5">
-          <span
+        <div className="ml-auto flex shrink-0 items-center gap-1.5">
+          <button
+            aria-label={`${resolvedAgent.session_name} mode: ${viewMode === "chat" ? "Chat" : "Terminal"}. Switch to ${viewMode === "chat" ? "Terminal" : "Chat"}.`}
+            className="inline-flex h-6 items-center rounded border border-wardian-light bg-[var(--color-wardian-card-bg-muted)] px-2 text-[10px] font-semibold leading-none text-muted-neutral transition-colors hover:text-primary focus:outline-none focus:ring-1 focus:ring-[var(--color-wardian-accent)]"
+            onClick={() => setViewModes((current) => ({ ...current, [resource_key]: viewMode === "chat" ? "terminal" : "chat" }))}
+            title={`Switch to ${viewMode === "chat" ? "Terminal" : "Chat"}`}
+            type="button"
+          >
+            {viewMode === "chat" ? "Chat" : "Terminal"}
+          </button>
+          {viewMode === "terminal" ? <span
+            aria-label="Terminal presentation status"
             className="rounded-full border border-wardian-border bg-[var(--color-wardian-card)] px-2 py-0.5 text-[10px] font-medium text-muted-neutral"
             data-testid="agent-session-presentation-mode"
           >
             {mode === "owner" ? "Owner" : mode === "mirror" ? "Mirror" : "Connecting"}
-          </span>
-          {isReadOnly ? (
+          </span> : status ? (
+            <span className="text-[10px] text-muted-neutral">{formatAgentStatusLabel(status)}</span>
+          ) : null}
+          {(viewMode === "terminal" ? isReadOnly : requested_interaction === "read_only") ? (
             <span
               className="rounded-full border border-wardian-border bg-[var(--color-wardian-card)] px-2 py-0.5 text-[10px] font-medium text-muted-neutral"
               data-testid="agent-session-read-only"
@@ -227,7 +261,25 @@ export function AgentSessionSurface({
         </div>
       </header>
       <div className="min-h-0 min-w-0 flex-1 overflow-hidden p-2">
-        <AgentTerminal
+        {viewMode === "chat" ? (chatIsMounted ? (
+          <AgentChatView
+            key={resource_key}
+            sessionId={resource_key}
+            agent={resolvedAgent}
+            status={status}
+            telemetry={telemetry}
+            theme={theme}
+            isMaximized={is_maximized}
+            readOnly={requested_interaction === "read_only"}
+            deferModelDiscovery
+            draft={chatDrafts[resource_key] ?? ""}
+            onDraftChange={(value) => setChatDrafts((current) => ({ ...current, [resource_key]: value }))}
+            onAgentConfigUpdated={on_agent_config_updated}
+            workspacePath={resolvedAgent.git_worktree && resolvedAgent.git_worktree_folder?.trim()
+              ? resolvedAgent.git_worktree_folder
+              : resolvedAgent.folder}
+          />
+        ) : null) : <AgentTerminal
           sessionId={resource_key}
           presentationId={presentationId}
           visibility={visibility}
@@ -244,7 +296,7 @@ export function AgentSessionSurface({
           onTerminalFocus={handleTerminalFocus}
           autoFocus={auto_focus_terminal}
           onPresentationStateChange={handlePresentationStateChange}
-        />
+        />}
       </div>
     </section>
   );

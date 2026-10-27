@@ -309,7 +309,8 @@ pub(crate) fn acquire_provider_log_batch_for_identity(
     }
 
     let mut next_normalizer = state.normalizer.clone();
-    let events = match normalize_chat_lines_with_state(
+    let first_sequence = next_normalizer.next_sequence();
+    let mut events = match normalize_chat_lines_with_state(
         session_id,
         provider,
         complete.lines(),
@@ -330,6 +331,58 @@ pub(crate) fn acquire_provider_log_batch_for_identity(
             });
         }
     };
+    let mut positions = std::collections::HashMap::new();
+    let mut offset = state.committed_offset;
+    for (index, line) in complete.split_inclusive('\n').enumerate() {
+        positions.insert(
+            first_sequence + index as u64,
+            (
+                offset,
+                line.trim_end_matches(['\r', '\n']),
+                offset + line.len() as u64,
+            ),
+        );
+        offset += line.len() as u64;
+    }
+    let mut ordinals = std::collections::HashMap::<u64, usize>::new();
+    let mut annotate = |event: &mut AgentChatEvent| {
+        let Some(sequence) = event.sequence else {
+            return;
+        };
+        let Some((offset, raw, end)) = positions.get(&sequence) else {
+            return;
+        };
+        let ordinal = ordinals.entry(sequence).or_default();
+        event.metadata["chat_source_ref"] =
+            serde_json::json!(super::chat_recent_seed::source_reference(
+                session_id,
+                &state.native_identity,
+                *offset,
+                raw,
+                *ordinal
+            ));
+        event.metadata["chat_source_start"] = serde_json::json!(offset);
+        event.metadata["chat_source_end"] = serde_json::json!(end);
+        event.metadata["chat_source_epoch"] = serde_json::json!(super::chat_recent_seed::hash(
+            &serde_json::to_vec(&state.native_identity).unwrap_or_default()
+        ));
+        *ordinal += 1;
+    };
+    for event in &mut events {
+        annotate(event);
+    }
+    next_normalizer.visit_pending_events(&mut annotate);
+    if let Err(error) = next_normalizer.validate_serialized_size() {
+        state.status = "incomplete".into();
+        state.reason = Some(format!("provider_log_normalization_state_limit: {error}"));
+        return Ok(ProviderLogBatch {
+            events: Vec::new(),
+            previous,
+            next: state,
+            consumed_bytes: 0,
+            continue_immediately: false,
+        });
+    }
     let consumed_bytes = complete_len as u64;
     state.committed_offset = state.committed_offset.saturating_add(consumed_bytes);
     state.continuity_anchor = read_anchor(&mut file, state.committed_offset)?;
@@ -635,6 +688,24 @@ fn anchor_matches(
     Ok(bytes.len() as u64 == expected.len && hex_sha256(&bytes) == expected.sha256)
 }
 
+/// Normal Chat checks the owner's small continuity proof without loading the
+/// private cursor/normalizer state or trusting client-provided byte ranges.
+pub(crate) fn published_anchor_matches(
+    file: &mut std::fs::File,
+    expected: &ProviderLogContinuityAnchor,
+) -> io::Result<bool> {
+    if expected.len > PROVIDER_LOG_ANCHOR_BYTES
+        || expected.sha256.len() != 64
+        || expected
+            .start
+            .checked_add(expected.len)
+            .is_none_or(|end| end > file.metadata().map(|metadata| metadata.len()).unwrap_or(0))
+    {
+        return Ok(false);
+    }
+    anchor_matches(file, expected)
+}
+
 fn hex_sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -642,7 +713,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn native_file_identity(file: &std::fs::File) -> io::Result<ProviderLogNativeIdentity> {
+pub(crate) fn native_file_identity(file: &std::fs::File) -> io::Result<ProviderLogNativeIdentity> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -1555,6 +1626,228 @@ mod tests {
             .as_deref()
             .is_some_and(|text| text.starts_with("Partial")));
         assert_eq!(recovered.next.status, "complete");
+    }
+
+    #[test]
+    fn codex_large_pending_context_advances_and_releases_with_original_source_coordinates() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.jsonl");
+        let initial = "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"turn-a\"}}\n";
+        std::fs::write(&path, initial).expect("write initial turn");
+        let initial_batch =
+            acquire_provider_log_batch("agent-1", "codex", &path, "codex:session:one", None, true)
+                .expect("commit initial turn");
+        let original_offset = initial_batch.next.committed_offset;
+        assert_eq!(original_offset, initial.len() as u64);
+
+        let text = "x".repeat(600 * 1024);
+        let context = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message", "id": "context-a", "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "turn-a", "content_item_kinds": ["agents_md.instructions"]
+                }
+            }
+        });
+        let context_line = format!("{context}\n");
+        assert!((context_line.len() as u64) < PROVIDER_LOG_MAX_RECORD_BYTES);
+        let mut semantic_state = TranscriptNormalizationState::default();
+        let semantic_events = normalize_chat_lines_with_state(
+            "agent-1",
+            "codex",
+            [initial.trim_end(), context_line.trim_end()],
+            &mut semantic_state,
+            false,
+            false,
+        )
+        .expect("classify the same context without duplicate raw metadata");
+        assert!(semantic_events.is_empty());
+        assert!(semantic_state.has_pending_events());
+        semantic_state.visit_pending_events(&mut |event| {
+            assert_eq!(event.role, Some(AgentChatRole::User));
+            assert_eq!(event.metadata["input_origin"], "context_injection");
+            assert_eq!(event.metadata["provider_turn_id"], "turn-a");
+            assert!(event.metadata.get("request_root_id").is_none());
+            assert!(event.text.as_deref() == Some(text.as_str()));
+        });
+        assert!(
+            serde_json::to_vec(&semantic_state)
+                .expect("measure semantic state")
+                .len()
+                < 1024 * 1024
+        );
+
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open context log")
+            .write_all(context_line.as_bytes())
+            .expect("append context");
+        let pending = acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            "codex:session:one",
+            Some(initial_batch.next),
+            true,
+        )
+        .expect("capture supported large context");
+        assert_eq!(
+            pending.next.status,
+            "pending",
+            "supported context stalled: consumed={} offset={} previous={} reason={:?}",
+            pending.consumed_bytes,
+            pending.next.committed_offset,
+            original_offset,
+            pending.next.reason
+        );
+        assert_eq!(pending.consumed_bytes, context_line.len() as u64);
+        assert_eq!(
+            pending.next.committed_offset,
+            original_offset + context_line.len() as u64
+        );
+        assert!(pending.events.is_empty());
+        assert!(pending.next.normalizer_has_pending_events());
+        let mut original_source_ref = None;
+        pending
+            .next
+            .normalizer
+            .clone()
+            .visit_pending_events(&mut |event| {
+                assert!(event.text.as_deref() == Some(text.as_str()));
+                assert_eq!(
+                    event.metadata["chat_source_start"],
+                    serde_json::json!(original_offset)
+                );
+                assert_eq!(
+                    event.metadata["chat_source_end"],
+                    serde_json::json!(original_offset + context_line.len() as u64)
+                );
+                assert!(event
+                    .metadata
+                    .get(crate::providers::chat_transcript::PROVIDER_RAW_LINE_METADATA_KEY)
+                    .is_none());
+                original_source_ref = event.metadata["chat_source_ref"]
+                    .as_str()
+                    .map(str::to_owned);
+            });
+        let original_source_ref = original_source_ref.expect("physical source reference");
+        let persisted = serde_json::to_string(&pending.next).expect("persist pending state");
+        let restored: ProviderLogCaptureState =
+            serde_json::from_str(&persisted).expect("restore pending state");
+        let next_turn = concat!(
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"turn-b\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",",
+            "\"id\":\"request-b\",\"role\":\"user\",",
+            "\"content\":[{\"type\":\"input_text\",\"text\":\"Turn B request\"}],",
+            "\"internal_chat_message_metadata_passthrough\":",
+            "{\"turn_id\":\"turn-b\",\"content_item_kinds\":[\"user.text\"]}}}\n"
+        );
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open boundary log")
+            .write_all(next_turn.as_bytes())
+            .expect("append boundary");
+        let released = acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            "codex:session:one",
+            Some(restored.clone()),
+            true,
+        )
+        .expect("release context after restart");
+        let retry = acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            "codex:session:one",
+            Some(restored),
+            true,
+        )
+        .expect("retry identical committed state");
+        assert_eq!(released.events, retry.events);
+        assert_eq!(released.next, retry.next);
+        assert_eq!(released.events.len(), 2);
+        assert!(released.events[0].text.as_deref() == Some(text.as_str()));
+        assert_eq!(released.events[0].role, Some(AgentChatRole::System));
+        assert_eq!(
+            released.events[0].metadata["chat_source_ref"],
+            original_source_ref
+        );
+        assert_eq!(
+            released.events[0].metadata["chat_source_start"],
+            serde_json::json!(original_offset)
+        );
+        assert!(released.events[0].metadata.get("request_root_id").is_none());
+        assert_eq!(released.events[1].text.as_deref(), Some("Turn B request"));
+        assert!(!released.next.normalizer_has_pending_events());
+        assert_eq!(released.next.status, "complete");
+    }
+
+    #[test]
+    fn codex_turn_boundary_after_restart_preserves_pending_source_coordinates() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.jsonl");
+        let first_lines = [
+            r#"{"type":"turn_context","payload":{"turn_id":"turn-a"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","id":"context-a","role":"user","content":[{"type":"input_text","text":"Turn A context"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-a","content_item_kinds":["agents_md.instructions"]}}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","id":"assistant-a","role":"assistant","content":[{"type":"output_text","text":"Turn A answer"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-a"}}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","id":"context-b","role":"user","content":[{"type":"input_text","text":"Turn B context"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-b","content_item_kinds":["agents_md.instructions"]}}}"#,
+        ];
+        let first_content = format!("{}\n", first_lines.join("\n"));
+        std::fs::write(&path, &first_content).expect("write pending native turns");
+        let mut first =
+            acquire_provider_log_batch("agent-1", "codex", &path, "codex:session:one", None, true)
+                .expect("capture pending turns");
+        assert!(first.events.is_empty());
+        let mut original_coordinates = std::collections::HashMap::new();
+        first.next.normalizer.visit_pending_events(&mut |event| {
+            original_coordinates.insert(
+                event.text.clone().expect("pending row text"),
+                (
+                    event.metadata["chat_source_start"].clone(),
+                    event.metadata["chat_source_end"].clone(),
+                    event.metadata["chat_source_ref"].clone(),
+                ),
+            );
+        });
+        assert_eq!(original_coordinates.len(), 3);
+        assert_eq!(
+            original_coordinates["Turn A context"].0,
+            serde_json::json!(first_lines[0].len() + 1)
+        );
+        let persisted = serde_json::to_string(&first.next).expect("persist pending capture state");
+        let restored = serde_json::from_str(&persisted).expect("restore pending capture state");
+        let boundary = r#"{"type":"turn_context","payload":{"turn_id":"turn-b"}}"#;
+        let request = r#"{"type":"response_item","payload":{"type":"message","id":"request-b","role":"user","content":[{"type":"input_text","text":"Turn B request"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-b","content_item_kinds":["user.text"]}}}"#;
+        std::fs::write(&path, format!("{first_content}{boundary}\n{request}\n"))
+            .expect("append the next native turn and request");
+        let second = acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            "codex:session:one",
+            Some(restored),
+            true,
+        )
+        .expect("release prior turn and bind the next turn");
+        assert_eq!(second.events.len(), 4);
+        for event in &second.events[..3] {
+            let expected = &original_coordinates[event.text.as_deref().expect("released text")];
+            assert_eq!(event.metadata["chat_source_start"], expected.0);
+            assert_eq!(event.metadata["chat_source_end"], expected.1);
+            assert_eq!(event.metadata["chat_source_ref"], expected.2);
+            assert!(!expected.2.is_null());
+        }
+        assert!(second.events[0].metadata.get("request_root_id").is_none());
+        assert_eq!(second.events[2].metadata["request_root_id"], "request-b");
+        assert_eq!(second.events[3].metadata["request_root_id"], "request-b");
+        assert!(!second.next.normalizer_has_pending_events());
     }
 
     #[test]
