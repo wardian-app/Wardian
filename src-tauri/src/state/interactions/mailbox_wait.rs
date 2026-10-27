@@ -15,30 +15,6 @@ pub struct AgentMailboxSignal {
 }
 
 impl InteractionState {
-    /// Subscribe before reading the durable mailbox to avoid a read/wait race.
-    ///
-    /// In each receive loop, copy `*receiver.borrow_and_update()` BEFORE the DB
-    /// read, releasing that borrow immediately. If the read finds no work and
-    /// the snapshot is not deleted, await `receiver.changed()` with no database,
-    /// mutation, or lifecycle locks held. A signal during the read remains unseen
-    /// and makes that wait return immediately. Re-read the DB after every wake:
-    /// watch coalesces activity rather than buffering individual events.
-    ///
-    /// Signals before subscription are included in the initial snapshot and are
-    /// already seen by the new receiver. Inspect `deleted` before waiting, even
-    /// on the first iteration. Each subscriber has its own independent seen state.
-    pub async fn subscribe_agent_mailbox(
-        &self,
-        recipient: &str,
-    ) -> watch::Receiver<AgentMailboxSignal> {
-        self.agent_mailboxes
-            .lock()
-            .await
-            .entry(recipient.to_owned())
-            .or_insert_with(|| watch::channel(AgentMailboxSignal::default()).0)
-            .subscribe()
-    }
-
     /// Publish a wake AFTER the coordinator's durable transaction commits.
     ///
     /// `provider_context` advances the separate provider revision as well as the
@@ -112,6 +88,28 @@ mod tests {
     use std::time::Duration;
     use tokio::time::timeout;
 
+    impl InteractionState {
+        /// Subscribe before reading the durable mailbox in legacy wait fixtures.
+        pub(crate) async fn subscribe_agent_mailbox(
+            &self,
+            recipient: &str,
+        ) -> watch::Receiver<AgentMailboxSignal> {
+            self.agent_mailboxes
+                .lock()
+                .await
+                .entry(recipient.to_owned())
+                .or_insert_with(|| watch::channel(AgentMailboxSignal::default()).0)
+                .subscribe()
+        }
+
+        /// Read the provider revision through the test-only mailbox subscription.
+        pub(crate) async fn agent_message_provider_revision(&self, recipient: &str) -> u64 {
+            self.subscribe_agent_mailbox(recipient)
+                .await
+                .borrow()
+                .provider_revision
+        }
+    }
     async fn changed(receiver: &mut watch::Receiver<AgentMailboxSignal>) -> AgentMailboxSignal {
         timeout(Duration::from_secs(1), receiver.changed())
             .await

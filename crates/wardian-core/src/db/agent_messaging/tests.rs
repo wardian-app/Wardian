@@ -1,5 +1,33 @@
 use super::*;
 
+fn has_unacknowledged_messages(conn: &Connection, recipient: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM agent_message_availability a
+            LEFT JOIN agent_message_delivery d ON d.interaction_id=a.interaction_id
+            WHERE a.recipient=?1
+            AND a.sequence > COALESCE(
+                (SELECT sequence FROM agent_message_ack WHERE recipient=?1),0
+            )
+            AND (d.owner IS NULL OR d.owner IN ('stored','pending','receiver_available'))
+        )",
+        [recipient],
+        |row| row.get(0),
+    )?)
+}
+
+fn reply_continuation_state(conn: &Connection, id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT continuation_state FROM agent_message_delivery
+             WHERE interaction_id=?1 AND operation='reply'",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten())
+}
+
 fn database() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
     super::super::run_migrations(&conn).unwrap();
@@ -368,6 +396,72 @@ fn idempotency_is_sender_operation_scoped_and_conflicts_fail() {
 }
 
 #[test]
+fn migration_keeps_old_stored_fyi_non_waking_and_new_admission_wakeable() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE agent_message_delivery (
+            interaction_id TEXT PRIMARY KEY, sender TEXT NOT NULL, recipient TEXT NOT NULL,
+            operation TEXT NOT NULL, idempotency_key TEXT, fingerprint TEXT NOT NULL,
+            owner TEXT NOT NULL, generation INTEGER NOT NULL, claim_token TEXT,
+            UNIQUE(sender, operation, idempotency_key));
+         INSERT INTO agent_message_delivery
+            (interaction_id,sender,recipient,operation,fingerprint,owner,generation)
+            VALUES('old-fyi','sender','receiver','send_message','fingerprint','stored',2);",
+    )
+    .unwrap();
+    super::super::run_migrations(&conn).unwrap();
+    conn.execute(
+        "INSERT INTO agent_message_availability(recipient,interaction_id)
+         VALUES('receiver','old-fyi')",
+        [],
+    )
+    .unwrap();
+
+    assert!(pending_wakeable_information(&conn, "receiver")
+        .unwrap()
+        .is_empty());
+    assert_eq!(recipient_origin(&conn, "old-fyi").unwrap(), None);
+
+    let origin = RecipientOrigin {
+        provider: "antigravity".into(),
+        conversation_id: "conversation-current".into(),
+        generation: 4,
+    };
+    let new =
+        admit_with_wake_on_admission(&conn, admission("new FYI", false), Some(&origin)).unwrap();
+    assert_eq!(
+        pending_wakeable_information(&conn, "receiver").unwrap(),
+        vec![new.record.id.clone()]
+    );
+    assert_eq!(
+        recipient_origin(&conn, &new.record.id).unwrap(),
+        Some(origin)
+    );
+}
+
+#[test]
+fn duplicate_legacy_message_cannot_be_promoted_into_a_wake() {
+    let conn = database();
+    let mut legacy = admission("same body", false);
+    legacy.idempotency_key = Some("same-key");
+    let old = admit(&conn, legacy).unwrap();
+    let origin = RecipientOrigin {
+        provider: "codex".into(),
+        conversation_id: "thread".into(),
+        generation: 8,
+    };
+    let mut replay = admission("same body", false);
+    replay.idempotency_key = Some("same-key");
+    let duplicate = admit_with_wake_on_admission(&conn, replay, Some(&origin)).unwrap();
+    assert!(duplicate.duplicate);
+    assert_eq!(old.record.id, duplicate.record.id);
+    assert!(pending_wakeable_information(&conn, "receiver")
+        .unwrap()
+        .is_empty());
+    assert_eq!(recipient_origin(&conn, &old.record.id).unwrap(), None);
+}
+
+#[test]
 fn receive_replay_ack_bound_and_no_legacy_backfill() {
     let conn = database();
     let initial = receive(&conn, "receiver", None, None, 1).unwrap();
@@ -525,6 +619,175 @@ fn reply_is_authorized_atomic_correlated_and_idempotent() {
 }
 
 #[test]
+fn reply_delivery_inherits_requester_origin_from_followup_task() {
+    let conn = database();
+    let task = admit(&conn, admission("task", true)).unwrap();
+    conn.execute(
+        "UPDATE agent_message_delivery
+         SET requester_provider='antigravity',
+             requester_conversation_id='conversation-original',
+             requester_generation=17
+         WHERE interaction_id=?1",
+        [&task.record.id],
+    )
+    .unwrap();
+
+    let reply = reply(
+        &conn,
+        "receiver",
+        &task.record.id,
+        ReplyStatus::Done,
+        "result",
+    )
+    .unwrap();
+    let origin: (Option<String>, Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT requester_provider, requester_conversation_id, requester_generation
+             FROM agent_message_delivery WHERE interaction_id=?1",
+            [&reply.record.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+
+    assert_eq!(
+        origin,
+        (
+            Some("antigravity".into()),
+            Some("conversation-original".into()),
+            Some(17),
+        )
+    );
+    assert_eq!(
+        reply.record.parent_interaction_id.as_deref(),
+        Some(task.record.id.as_str())
+    );
+}
+
+#[test]
+fn followup_admission_persists_requester_origin_and_replay_keeps_first_binding() {
+    let conn = database();
+    let first_origin = RequesterOrigin {
+        provider: "antigravity".into(),
+        conversation_id: "conversation-1".into(),
+        generation: 12,
+    };
+    let mut request = admission("task", true);
+    request.idempotency_key = Some("same-request");
+    let first = admit_with_requester_origin(&conn, request, Some(&first_origin)).unwrap();
+    assert_eq!(
+        requester_origin(&conn, &first.record.id).unwrap(),
+        Some(first_origin.clone())
+    );
+
+    let replacement_origin = RequesterOrigin {
+        provider: "antigravity".into(),
+        conversation_id: "conversation-2".into(),
+        generation: 13,
+    };
+    let mut replay = admission("task", true);
+    replay.idempotency_key = Some("same-request");
+    let duplicate = admit_with_requester_origin(&conn, replay, Some(&replacement_origin)).unwrap();
+    assert!(duplicate.duplicate);
+    assert_eq!(duplicate.record.id, first.record.id);
+    assert_eq!(
+        requester_origin(&conn, &first.record.id).unwrap(),
+        Some(first_origin)
+    );
+}
+
+#[test]
+fn unbound_reply_is_durably_blocked_without_automatic_claim() {
+    let conn = database();
+    let task = admit(&conn, admission("legacy task", true)).unwrap();
+    let reply = reply(
+        &conn,
+        "receiver",
+        &task.record.id,
+        ReplyStatus::Done,
+        "result",
+    )
+    .unwrap();
+
+    assert_eq!(
+        reply_continuation_state(&conn, &reply.record.id)
+            .unwrap()
+            .as_deref(),
+        Some("blocked_legacy_uncertain")
+    );
+    assert_eq!(
+        pending_reply_continuations(&conn, "sender").unwrap(),
+        Vec::<String>::new()
+    );
+    assert!(
+        claim_reply_continuation(&conn, "sender", &reply.record.id, 1)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn migration_marks_preexisting_unbound_replies_legacy_uncertain() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE agent_message_delivery (
+            interaction_id TEXT PRIMARY KEY, sender TEXT NOT NULL, recipient TEXT NOT NULL,
+            operation TEXT NOT NULL, idempotency_key TEXT, fingerprint TEXT NOT NULL,
+            owner TEXT NOT NULL, generation INTEGER NOT NULL, claim_token TEXT,
+            UNIQUE(sender, operation, idempotency_key));
+         INSERT INTO agent_message_delivery
+            (interaction_id,sender,recipient,operation,fingerprint,owner,generation)
+            VALUES('old-reply','worker','requester','reply','','stored',0);",
+    )
+    .unwrap();
+
+    migrate(&conn).unwrap();
+
+    assert_eq!(
+        reply_continuation_state(&conn, "old-reply")
+            .unwrap()
+            .as_deref(),
+        Some("blocked_legacy_uncertain")
+    );
+    assert_eq!(requester_origin(&conn, "old-reply").unwrap(), None);
+}
+
+#[test]
+fn migration_blocks_partial_pending_reply_origins_without_rewriting_terminal_states() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE agent_message_delivery (
+            interaction_id TEXT PRIMARY KEY, sender TEXT NOT NULL, recipient TEXT NOT NULL,
+            operation TEXT NOT NULL, idempotency_key TEXT, fingerprint TEXT NOT NULL,
+            owner TEXT NOT NULL, generation INTEGER NOT NULL, claim_token TEXT,
+            requester_provider TEXT, requester_conversation_id TEXT,
+            requester_generation INTEGER, continuation_state TEXT,
+            UNIQUE(sender, operation, idempotency_key));
+         INSERT INTO agent_message_delivery
+            (interaction_id,sender,recipient,operation,fingerprint,owner,generation,
+             requester_provider,requester_conversation_id,requester_generation,continuation_state)
+            VALUES
+            ('partial','worker','requester','reply','','stored',0,'codex',NULL,3,'pending'),
+            ('delivered','worker','requester','reply','','delivered',3,NULL,NULL,NULL,'delivered');",
+    )
+    .unwrap();
+
+    migrate(&conn).unwrap();
+
+    assert_eq!(
+        reply_continuation_state(&conn, "partial")
+            .unwrap()
+            .as_deref(),
+        Some("blocked_legacy_uncertain")
+    );
+    assert_eq!(
+        reply_continuation_state(&conn, "delivered")
+            .unwrap()
+            .as_deref(),
+        Some("delivered")
+    );
+}
+
+#[test]
 fn admission_failure_rolls_back_canonical_record_and_key() {
     let conn = database();
     conn.execute_batch("CREATE TRIGGER fail_availability BEFORE INSERT ON agent_message_availability BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
@@ -650,7 +913,13 @@ fn information_and_reply_provider_claims_share_receiver_ownership_and_exact_cont
     let conn = database();
     let literal = "  λ😀\r\n\"quote\"\\path\0  ";
     let info = admit(&conn, admission(literal, false)).unwrap();
-    let task = admit(&conn, admission("work", true)).unwrap();
+    let requester = RequesterOrigin {
+        provider: "codex".into(),
+        conversation_id: "sender-thread".into(),
+        generation: 1,
+    };
+    let task =
+        admit_with_requester_origin(&conn, admission("work", true), Some(&requester)).unwrap();
     assert!(claim_information(&conn, "receiver", &task.record.id, 1)
         .unwrap()
         .is_none());
@@ -683,7 +952,7 @@ fn information_and_reply_provider_claims_share_receiver_ownership_and_exact_cont
         literal,
     )
     .unwrap();
-    let claim = claim_information(&conn, "sender", &reply.record.id, 1)
+    let claim = claim_reply_continuation(&conn, "sender", &reply.record.id, 1)
         .unwrap()
         .unwrap();
     let context = message_context(&conn, &claim.record).unwrap();
@@ -700,19 +969,63 @@ fn information_and_reply_provider_claims_share_receiver_ownership_and_exact_cont
         receive(&conn, "sender", None, None, 100).unwrap().messages[0].interaction_id,
         reply.record.id
     );
-    assert!(claim_information(&conn, "sender", &reply.record.id, 1)
-        .unwrap()
-        .is_none());
+    assert!(
+        claim_reply_continuation(&conn, "sender", &reply.record.id, 1)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
-fn startup_information_snapshot_includes_replies_excludes_tasks_and_later_arrivals() {
+fn delivered_or_uncertain_reply_continuations_cannot_be_claimed_or_reopened() {
+    let conn = database();
+    let requester = RequesterOrigin {
+        provider: "antigravity".into(),
+        conversation_id: "conversation-original".into(),
+        generation: 17,
+    };
+    let task =
+        admit_with_requester_origin(&conn, admission("work", true), Some(&requester)).unwrap();
+    let reply = reply(
+        &conn,
+        "receiver",
+        &task.record.id,
+        ReplyStatus::Done,
+        "result",
+    )
+    .unwrap();
+    let claim = claim_reply_continuation(&conn, "sender", &reply.record.id, 18)
+        .unwrap()
+        .unwrap();
+    finish_claim(&conn, &claim, "provider_visible").unwrap();
+
+    assert!(!reply_continuation_is_pending(&conn, "sender", &reply.record.id).unwrap());
+    assert!(
+        claim_reply_continuation(&conn, "sender", &reply.record.id, 19)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        reply_continuation_state(&conn, &reply.record.id)
+            .unwrap()
+            .as_deref(),
+        Some("delivered")
+    );
+}
+
+#[test]
+fn startup_information_and_reply_snapshots_are_separate_and_bounded() {
     let conn = database();
     let info = admit(&conn, admission("info", false)).unwrap();
     let mut reverse = admission("earlier request", true);
     reverse.sender = "receiver";
     reverse.recipient = "sender";
-    let task = admit(&conn, reverse).unwrap();
+    let requester = RequesterOrigin {
+        provider: "antigravity".into(),
+        conversation_id: "receiver-conversation".into(),
+        generation: 4,
+    };
+    let task = admit_with_requester_origin(&conn, reverse, Some(&requester)).unwrap();
     let replied = reply(
         &conn,
         "sender",
@@ -725,16 +1038,29 @@ fn startup_information_snapshot_includes_replies_excludes_tasks_and_later_arriva
     let highwater = information_highwater(&conn, "receiver").unwrap();
     let later = admit(&conn, admission("later", false)).unwrap();
     assert_eq!(
-        pending_information(&conn, "receiver", highwater).unwrap(),
-        [info.record.id.clone(), replied.record.id.clone()]
-    );
-    for id in [info.record.id, replied.record.id] {
-        let claim = claim_information(&conn, "receiver", &id, 1)
+        pending_information(&conn, "receiver", highwater)
             .unwrap()
-            .unwrap();
-        finish_claim(&conn, &claim, "provider_accepted").unwrap();
-    }
+            .as_slice(),
+        std::slice::from_ref(&info.record.id)
+    );
+    assert_eq!(
+        pending_reply_continuations(&conn, "receiver")
+            .unwrap()
+            .as_slice(),
+        std::slice::from_ref(&replied.record.id)
+    );
+    let claim = claim_information(&conn, "receiver", &info.record.id, 1)
+        .unwrap()
+        .unwrap();
+    finish_claim(&conn, &claim, "provider_accepted").unwrap();
+    let reply_claim = claim_reply_continuation(&conn, "receiver", &replied.record.id, 9)
+        .unwrap()
+        .unwrap();
+    finish_claim(&conn, &reply_claim, "provider_accepted").unwrap();
     assert!(pending_information(&conn, "receiver", highwater)
+        .unwrap()
+        .is_empty());
+    assert!(pending_reply_continuations(&conn, "receiver")
         .unwrap()
         .is_empty());
     let claim = claim_next_task(&conn, "receiver", 1).unwrap().unwrap();

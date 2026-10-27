@@ -438,6 +438,21 @@ npm run test:e2e:native:fast -- e2e-native/tests/antigravity-native.test.mjs
 
 The harness uses an isolated `WARDIAN_HOME` by default, so native E2E runs should not modify production `<wardian-home>` state.
 
+### Automatic inbound reply acceptance
+
+`automatic-inbound-reply-real-native.test.mjs` requires an explicit real-provider
+grant and paired frozen artifacts. On Windows, its existing Node gate requests
+the Cmd shell family. Before provider startup, the fixture checks Cmd resolution
+against the app-server child PATH construction and verifies the exact Node
+executable. It does not change PATH, sandbox policy, or provider defaults.
+
+An absolute shell request selects a shell family in Codex; it does not pin the
+selected executable. The private report retains the worker's native tool calls
+and outputs. A remote execution environment that rejects Cmd fails the case
+without a fallback or replay. A remotely attached TUI alone does not establish
+that tool-execution mode. Only the real delayed reply and subsequent FYI wake
+establish messaging acceptance.
+
 ### Claude Inbox Stop-hook acceptance
 
 This one-turn probe verifies that an interactive Claude `Stop` event produces

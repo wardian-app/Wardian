@@ -42,32 +42,6 @@ struct ReplyArgs {
     message: String,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReceiveArgs {
-    cursor: Option<String>,
-    ack_cursor: Option<String>,
-    #[serde(default = "default_limit")]
-    limit: u32,
-    #[serde(default)]
-    timeout_ms: u64,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WaitArgs {
-    #[serde(default = "default_wait_timeout")]
-    timeout_ms: u64,
-}
-
-fn default_limit() -> u32 {
-    100
-}
-
-fn default_wait_timeout() -> u64 {
-    wardian_core::agent_messaging::MAX_WAIT_AGENT_TIMEOUT_MS
-}
-
 pub(super) fn call(
     name: &str,
     arguments: Value,
@@ -161,30 +135,6 @@ fn parse(name: &str, arguments: Value, key: &str) -> Result<AgentMessagingReques
                     message: args.message,
                     idempotency_key: Some(key.into()),
                 }
-            }
-        }
-        "receive_messages" => {
-            let args: ReceiveArgs = decode(arguments)?;
-            if !(1..=100).contains(&args.limit) || args.timeout_ms > 60_000 {
-                return Err("Receive limit must be 1..100 and timeout_ms 0..60000.".into());
-            }
-            for cursor in [&args.cursor, &args.ack_cursor].into_iter().flatten() {
-                nonempty(cursor)?;
-            }
-            AgentMessagingRequest::ReceiveMessages {
-                cursor: args.cursor,
-                ack_cursor: args.ack_cursor,
-                limit: Some(args.limit),
-                timeout_ms: Some(args.timeout_ms),
-            }
-        }
-        "wait_agent" => {
-            let args: WaitArgs = decode(arguments)?;
-            if args.timeout_ms > wardian_core::agent_messaging::MAX_WAIT_AGENT_TIMEOUT_MS {
-                return Err("timeout_ms must be 0..60000.".into());
-            }
-            AgentMessagingRequest::WaitAgent {
-                timeout_ms: Some(args.timeout_ms),
             }
         }
         "reply" => {

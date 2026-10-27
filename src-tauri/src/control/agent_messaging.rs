@@ -1,92 +1,39 @@
-//! Receiver-first messaging admission and dispatch. Provider integrations must
-//! acquire the same durable delivery claim before exposing canonical task text.
+//! Canonical messaging admission and automatic dispatch. Provider integrations
+//! acquire the durable delivery claim before exposing canonical interaction text.
 use super::*;
 use crate::delivery::native_broker::{
     log_opencode_dispatch_diagnostic, OpenCodeDispatchDiagnosticReason,
     OpenCodeDispatchDiagnosticStage,
 };
-use tokio::sync::watch;
 use wardian_core::agent_messaging::{
     AgentMessagingError, AgentMessagingRequest as Request, AgentMessagingResponse as Response,
-    MAX_RECEIVE_ITEMS, MAX_RECEIVE_TIMEOUT_MS, MAX_WAIT_AGENT_TIMEOUT_MS,
 };
 use wardian_core::db::agent_messaging as store;
 mod native;
+
+/// Restore both canonical work and original-conversation continuations.
+pub(super) fn spawn_after_restore(app: &AppHandle, session_id: &str) {
+    spawn_pending_tasks_when_ready(app, session_id, None);
+    spawn_pending_reply_continuations(app, session_id);
+}
+
+/// Keep status-driven recovery ordering beside canonical delivery policy.
+pub(super) async fn dispatch_from_status_observation(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    session_id: &str,
+) {
+    let _ = dispatch_pending_wakeable_information(app, state, session_id).await;
+    let _ = push_native_information(state, session_id).await;
+    let _ = dispatch_pending_reply_continuations(app, state, session_id, None).await;
+    let _ = dispatch_pending_queue(app, state, session_id).await;
+}
 
 pub(super) async fn push_native_information(
     state: &AppState,
     recipient: &str,
 ) -> Result<(), ControlError> {
     native::push_pending_information(state, recipient).await
-}
-
-async fn wait_agent_after_subscribe(
-    app: Option<&AppHandle>,
-    state: &AppState,
-    sender: &str,
-    timeout_ms: u64,
-    mut mailbox: watch::Receiver<crate::state::interactions::AgentMailboxSignal>,
-) -> Result<Response, ControlError> {
-    // Keep notifications since subscription unseen until the durable query
-    // finishes. A competing receiver may acknowledge an item first.
-    let observed = *mailbox.borrow();
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-    loop {
-        authenticate(state, sender).await?;
-        let recovered = state
-            .interactions
-            .recover_agent_task_results()
-            .await
-            .map_err(control_error)?;
-        if let Some(app) = app {
-            for reply in recovered {
-                for recipient in &reply.record.target_session_ids {
-                    native::spawn_information(app, recipient);
-                }
-            }
-        }
-        let unread = state
-            .interactions
-            .has_unacknowledged_agent_messages(sender)
-            .await
-            .map_err(control_error)?;
-        let current = *mailbox.borrow();
-        if current.deleted {
-            return Err(ControlError::coded("unauthorized", "Receiver was deleted."));
-        }
-        let changed = mailbox
-            .has_changed()
-            .map_err(|_| ControlError::coded("mailbox_unavailable", "Mailbox wait ended."))?;
-        if unread || current.revision != observed.revision || changed {
-            authenticate(state, sender).await?;
-            return Ok(Response::WaitAgent { timed_out: false });
-        }
-        if timeout_ms == 0 || tokio::time::Instant::now() >= deadline {
-            return Ok(Response::WaitAgent { timed_out: true });
-        }
-        // The durable query and revision check above happen with no database or
-        // lifecycle lock held while changed() is awaited.
-        match tokio::time::timeout_at(deadline, mailbox.changed()).await {
-            Ok(Ok(())) => {
-                if mailbox.borrow().deleted {
-                    return Err(ControlError::coded("unauthorized", "Receiver was deleted."));
-                }
-                authenticate(state, sender).await?;
-                return Ok(Response::WaitAgent { timed_out: false });
-            }
-            Ok(Err(_)) => {
-                return Err(ControlError::coded(
-                    "mailbox_unavailable",
-                    "Mailbox wait ended.",
-                ));
-            }
-            Err(_) => {
-                // Recheck durable and unseen watch state after deadline races
-                // before reporting a timeout.
-                continue;
-            }
-        }
-    }
 }
 
 pub(super) async fn handle(
@@ -175,7 +122,7 @@ async fn handle_in_state(
             if let Some(app) = app {
                 let _ = app.emit("pair-activity-changed", ());
                 if let Some(recipient) = replied.record.target_session_ids.first() {
-                    native::spawn_information(app, recipient);
+                    spawn_reply_continuation(app, recipient, &replied.record.id);
                 }
             }
             Ok(Response::Reply {
@@ -185,85 +132,10 @@ async fn handle_in_state(
                 duplicate: replied.duplicate,
             })
         }
-        Request::ReceiveMessages {
-            cursor,
-            ack_cursor,
-            limit,
-            timeout_ms,
-        } => {
-            let limit = limit.unwrap_or(MAX_RECEIVE_ITEMS);
-            let timeout = timeout_ms.unwrap_or(0);
-            if limit == 0 || limit > MAX_RECEIVE_ITEMS || timeout > MAX_RECEIVE_TIMEOUT_MS {
-                return Err(ControlError::coded(
-                    "invalid_receive_bounds",
-                    "Limit must be 1..100 and timeout_ms 0..60000.",
-                ));
-            }
-            // Snapshot before the first read, so a native claim already in flight
-            // cannot settle between an empty read and registration unnoticed.
-            let mut mailbox = state.interactions.subscribe_agent_mailbox(&sender).await;
-            let provider_revision = mailbox.borrow().provider_revision;
-            let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout);
-            loop {
-                // Mark the snapshot seen before reading. A commit during the
-                // read remains unseen, so changed() cannot miss its wake.
-                mailbox.borrow_and_update();
-                authenticate(state, &sender).await?;
-                let recovered = state
-                    .interactions
-                    .recover_agent_task_results()
-                    .await
-                    .map_err(control_error)?;
-                if let Some(app) = app {
-                    for reply in recovered {
-                        for recipient in &reply.record.target_session_ids {
-                            native::spawn_information(app, recipient);
-                        }
-                    }
-                }
-                let mut page = state
-                    .interactions
-                    .receive_agent_messages(
-                        &sender,
-                        cursor.as_deref(),
-                        ack_cursor.as_deref(),
-                        limit,
-                    )
-                    .await
-                    .map_err(control_error)?;
-                if timeout > 0 && mailbox.borrow().provider_revision != provider_revision {
-                    page.wake_reason = Some("provider_context_available".into());
-                }
-                if !page.messages.is_empty() || page.wake_reason.is_some() || timeout == 0 {
-                    return Ok(Response::ReceiveMessages { page });
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    page.timed_out = true;
-                    return Ok(Response::ReceiveMessages { page });
-                }
-                // Wait owns no roster, lifecycle or database lock. Timeout affects
-                // this receive call only, never a task or delivery claim.
-                if tokio::time::timeout_at(deadline, mailbox.changed())
-                    .await
-                    .is_err()
-                {
-                    // Re-read once at the deadline so a concurrent durable
-                    // commit takes precedence over an empty timeout response.
-                    continue;
-                }
-            }
-        }
-        Request::WaitAgent { timeout_ms } => {
-            let timeout = timeout_ms.unwrap_or(MAX_WAIT_AGENT_TIMEOUT_MS);
-            if timeout > MAX_WAIT_AGENT_TIMEOUT_MS {
-                return Err(ControlError::coded(
-                    "invalid_wait_bounds",
-                    "timeout_ms must be 0..60000.",
-                ));
-            }
-            let mailbox = state.interactions.subscribe_agent_mailbox(&sender).await;
-            wait_agent_after_subscribe(app, state, &sender, timeout, mailbox).await
-        }
+        Request::ReceiveMessages { .. } | Request::WaitAgent { .. } => Err(ControlError::coded(
+            "automatic_delivery",
+            "Agent-facing mailbox receive and wait are retired; Wardian delivers actionable replies automatically.",
+        )),
     }
 }
 
@@ -402,6 +274,729 @@ pub(crate) fn notify_information_admitted(
     }
 }
 
+pub(super) fn spawn_reply_continuation(app: &AppHandle, recipient: &str, reply_id: &str) {
+    let app = app.clone();
+    let recipient = recipient.to_owned();
+    let reply_id = reply_id.to_owned();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        if let Err(error) =
+            dispatch_pending_reply_continuations(Some(&app), &state, &recipient, Some(&reply_id))
+                .await
+        {
+            manager::log_debug(&format!("[WARDIAN] reply continuation: {error}"));
+        }
+    });
+}
+
+pub(super) fn spawn_pending_reply_continuations(app: &AppHandle, recipient: &str) {
+    let app = app.clone();
+    let recipient = recipient.to_owned();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        if let Err(error) =
+            dispatch_pending_reply_continuations(Some(&app), &state, &recipient, None).await
+        {
+            manager::log_debug(&format!("[WARDIAN] reply continuation recovery: {error}"));
+        }
+    });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DurableOriginMatch {
+    Current,
+    WaitingForIdentity,
+    Stale,
+}
+
+fn durable_origin_matches(
+    origin: &store::RequesterOrigin,
+    current_provider: &str,
+    current_conversation_id: Option<&str>,
+) -> DurableOriginMatch {
+    durable_conversation_matches(
+        &origin.provider,
+        &origin.conversation_id,
+        current_provider,
+        current_conversation_id,
+    )
+}
+
+fn durable_conversation_matches(
+    origin_provider: &str,
+    origin_conversation_id: &str,
+    current_provider: &str,
+    current_conversation_id: Option<&str>,
+) -> DurableOriginMatch {
+    if !origin_provider.eq_ignore_ascii_case(current_provider) {
+        return DurableOriginMatch::Stale;
+    }
+    match current_conversation_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(current) if current == origin_conversation_id => DurableOriginMatch::Current,
+        Some(_) => DurableOriginMatch::Stale,
+        None => DurableOriginMatch::WaitingForIdentity,
+    }
+}
+
+fn surface_has_dedicated_turn_receipt(provider: &str) -> bool {
+    matches!(provider, "pi" | "opencode")
+}
+
+/// Recover only messages explicitly marked wakeable when they were admitted.
+/// Historical informational rows stay context-only, and a replaced provider
+/// conversation permanently fences the original message from the new session.
+pub(super) async fn dispatch_pending_wakeable_information(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    recipient: &str,
+) -> Result<(), ControlError> {
+    let ids = store::with_db(|conn| store::pending_wakeable_information(conn, recipient))
+        .map_err(control_error)?;
+    for id in ids {
+        let origin = store::with_db(|conn| store::recipient_origin(conn, &id));
+        let origin = match origin {
+            Ok(Some(origin)) => origin,
+            Ok(None) | Err(_) => {
+                state
+                    .interactions
+                    .stale_agent_wakeable_information(&id)
+                    .await
+                    .map_err(control_error)?;
+                continue;
+            }
+        };
+        let Some(lifecycle) = state.try_lock_agent_lifecycle(recipient).await else {
+            continue;
+        };
+        let info = match delivery_target_info(state, recipient).await {
+            Ok(info) => info,
+            Err(_) => continue,
+        };
+        match durable_conversation_matches(
+            &origin.provider,
+            &origin.conversation_id,
+            &info.provider,
+            info.resume_session.as_deref(),
+        ) {
+            DurableOriginMatch::Current => {}
+            DurableOriginMatch::WaitingForIdentity => continue,
+            DurableOriginMatch::Stale => {
+                state
+                    .interactions
+                    .stale_agent_wakeable_information(&id)
+                    .await
+                    .map_err(control_error)?;
+                continue;
+            }
+        }
+        if info.config.is_off || info.status == "off" {
+            continue;
+        }
+        if active_conversation_lease_for_delivery(&info) {
+            continue;
+        }
+
+        let generation = state
+            .interactions
+            .current_provider_input_generation(recipient)
+            .await
+            .filter(|generation| *generation > 0);
+        let Some(generation) = generation else {
+            continue;
+        };
+        let idle = wardian_core::identity::normalize_status(&info.status) == "idle";
+        let active_codex = info.provider == "codex"
+            && wardian_core::identity::normalize_status(&info.status) == "processing";
+        if !idle && !active_codex {
+            continue;
+        }
+
+        let mut native_route = false;
+        if info.provider == "codex" {
+            if native::codex_input_is_ready(state, recipient, generation).await
+                && state
+                    .native_delivery
+                    .codex_owner_selected(recipient, generation)
+                    .await
+            {
+                match state
+                    .native_delivery
+                    .codex_binding(recipient, generation)
+                    .await
+                {
+                    Ok(binding) if binding.provider_session_id == origin.conversation_id => {
+                        native_route = true;
+                    }
+                    Ok(_) => {
+                        state
+                            .interactions
+                            .stale_agent_wakeable_information(&id)
+                            .await
+                            .map_err(control_error)?;
+                        continue;
+                    }
+                    Err(_) => continue,
+                }
+            }
+        } else if idle {
+            match info.provider.as_str() {
+                "pi" if state
+                    .native_delivery
+                    .pi_bridge_prepared(recipient, generation)
+                    .await =>
+                {
+                    match state
+                        .native_delivery
+                        .pi_binding(recipient, generation)
+                        .await
+                    {
+                        Ok(binding)
+                            if binding.provider_session_id.as_deref()
+                                == Some(origin.conversation_id.as_str()) =>
+                        {
+                            native_route = true;
+                        }
+                        Ok(_) => {
+                            state
+                                .interactions
+                                .stale_agent_wakeable_information(&id)
+                                .await
+                                .map_err(control_error)?;
+                            continue;
+                        }
+                        Err(_) => continue,
+                    }
+                }
+                "opencode" => {
+                    match state
+                        .native_delivery
+                        .opencode_http_eligibility(recipient, generation)
+                        .await
+                    {
+                        crate::delivery::native_broker::OpenCodeHttpEligibility::Ready => {
+                            if state
+                                .native_delivery
+                                .opencode_http_admission(
+                                    recipient,
+                                    generation,
+                                    &info.config,
+                                    &info.cwd,
+                                )
+                                .await
+                                .is_ok()
+                            {
+                                native_route = true;
+                            } else {
+                                continue;
+                            }
+                        }
+                        crate::delivery::native_broker::OpenCodeHttpEligibility::Pending
+                        | crate::delivery::native_broker::OpenCodeHttpEligibility::Failed => {
+                            continue;
+                        }
+                        crate::delivery::native_broker::OpenCodeHttpEligibility::Unsupported => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if active_codex && !native_route {
+            continue;
+        }
+
+        let surface_runtime_generation = if !active_codex && !native_route {
+            if provider_input_blocks_task_dispatch(state, recipient).await || app.is_none() {
+                continue;
+            }
+            let Ok(broker_state) = state.terminal_sessions.broker_state(recipient).await else {
+                continue;
+            };
+            if !surface_has_dedicated_turn_receipt(&info.provider)
+                && !state
+                    .terminal_sessions
+                    .native_write_receipts_enabled(recipient)
+                    .await
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            Some(broker_state.runtime_generation)
+        } else {
+            None
+        };
+
+        let Some(claim) = state
+            .interactions
+            .claim_agent_wakeable_information(recipient, &id, generation)
+            .await
+            .map_err(control_error)?
+        else {
+            continue;
+        };
+        let context = prepare_claim_context(state, &claim).await?;
+        if active_codex {
+            drop(lifecycle);
+            let result = state
+                .native_delivery
+                .codex_push(recipient, generation, &id, &context)
+                .await;
+            let settlement = result
+                .as_ref()
+                .map(|receipt| receipt.delivery_state.as_str())
+                .map_err(|error| error.provider_boundary_crossed);
+            native::settle(state, &claim, settlement).await?;
+            if let Err(error) = result {
+                manager::log_debug(&format!(
+                    "[WARDIAN] informational context {}: {}",
+                    id, error.message
+                ));
+            }
+        } else if native_route {
+            drop(lifecycle);
+            let result =
+                native::dispatch_attached_information(state, &info, &claim, &context).await;
+            let settlement = match &result {
+                Ok(state) if state == "failed_before_submit" => Err(false),
+                Ok(state) => Ok(state.as_str()),
+                Err(error) => Err(error.provider_boundary_crossed),
+            };
+            native::settle(state, &claim, settlement).await?;
+            if let Err(error) = result {
+                manager::log_debug(&format!(
+                    "[WARDIAN] informational wake {}: {}",
+                    id, error.message
+                ));
+            }
+        } else {
+            drop(lifecycle);
+            let frame: wardian_core::agent_messaging::AgentMessageContext =
+                serde_json::from_str(&context).map_err(|error| {
+                    ControlError::request_failed(format!(
+                        "informational message context was invalid: {error}"
+                    ))
+                })?;
+            let prompt = wardian_core::agent_messaging::information_delivery_prompt(&frame);
+            let result = crate::delivery::submit_live_surface_prompt(
+                app,
+                state,
+                crate::delivery::LiveSurfacePromptRequest {
+                    session_id: recipient.to_owned(),
+                    prompt,
+                    interaction_id: Some(claim.record.id.clone()),
+                    input_mode: MessageInputMode::Message,
+                    queue_policy: QueuePolicy::LiveOnly,
+                    approval_action: None,
+                    origin: claim
+                        .record
+                        .sender_session_id
+                        .clone()
+                        .map(|session_id| MessageOrigin::WardianAgent { session_id }),
+                    write_fence: Some(
+                        crate::utils::delivery_transaction::AutomatedInputWriteFence {
+                            provider: info.provider.clone(),
+                            provider_conversation_id: origin.conversation_id.clone(),
+                            provider_input_generation: generation,
+                            terminal_runtime_generation: surface_runtime_generation
+                                .expect("surface route captured its terminal generation"),
+                            agent_config_identity: info.config_identity.clone(),
+                        },
+                    ),
+                    runtime_state: "agent_messaging_information_wake",
+                    mark_prompt_started: true,
+                    require_provider_turn_receipt: true,
+                    payload_sent_detail: None,
+                    delivery_message_id: Some(claim.record.id.clone()),
+                },
+            )
+            .await;
+            let settlement = match &result {
+                Ok(_) => Ok("provider_visible"),
+                Err(error) if error.retry_safe => Err(false),
+                Err(_) => Err(true),
+            };
+            native::settle(state, &claim, settlement).await?;
+            if let Err(error) = result {
+                manager::log_debug(&format!(
+                    "[WARDIAN] informational wake {}: {}",
+                    id, error.message
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Recover canonical replies against their durable requester conversation.
+/// The admission generation is evidence only: normal provider restoration
+/// advances the runtime generation while preserving the conversation identity.
+pub(super) async fn dispatch_pending_reply_continuations(
+    app: Option<&AppHandle>,
+    state: &AppState,
+    recipient: &str,
+    only_id: Option<&str>,
+) -> Result<(), ControlError> {
+    let ids = if let Some(id) = only_id {
+        if store::with_db(|conn| store::reply_continuation_is_pending(conn, recipient, id))
+            .map_err(control_error)?
+        {
+            vec![id.to_owned()]
+        } else {
+            Vec::new()
+        }
+    } else {
+        store::with_db(|conn| store::pending_reply_continuations(conn, recipient))
+            .map_err(control_error)?
+    };
+    for id in ids {
+        let origin = store::with_db(|conn| store::requester_origin(conn, &id));
+        let origin = match origin {
+            Ok(Some(origin)) => origin,
+            Ok(None) | Err(_) => {
+                state
+                    .interactions
+                    .set_agent_reply_continuation_state(&id, "blocked_legacy_uncertain")
+                    .await
+                    .map_err(control_error)?;
+                continue;
+            }
+        };
+
+        let Some(lifecycle) = state.try_lock_agent_lifecycle(recipient).await else {
+            state
+                .interactions
+                .set_agent_reply_continuation_state(&id, "waiting_busy")
+                .await
+                .map_err(control_error)?;
+            continue;
+        };
+        let info = match delivery_target_info(state, recipient).await {
+            Ok(info) => info,
+            Err(_) => {
+                state
+                    .interactions
+                    .set_agent_reply_continuation_state(&id, "waiting_identity")
+                    .await
+                    .map_err(control_error)?;
+                continue;
+            }
+        };
+        match durable_origin_matches(&origin, &info.provider, info.resume_session.as_deref()) {
+            DurableOriginMatch::Current => {}
+            DurableOriginMatch::WaitingForIdentity => {
+                state
+                    .interactions
+                    .set_agent_reply_continuation_state(&id, "waiting_identity")
+                    .await
+                    .map_err(control_error)?;
+                continue;
+            }
+            DurableOriginMatch::Stale => {
+                state
+                    .interactions
+                    .set_agent_reply_continuation_state(&id, "blocked_stale_origin")
+                    .await
+                    .map_err(control_error)?;
+                continue;
+            }
+        }
+        if info.config.is_off || info.status == "off" {
+            state
+                .interactions
+                .set_agent_reply_continuation_state(&id, "waiting_paused")
+                .await
+                .map_err(control_error)?;
+            continue;
+        }
+        if active_conversation_lease_for_delivery(&info) {
+            state
+                .interactions
+                .set_agent_reply_continuation_state(&id, "waiting_busy")
+                .await
+                .map_err(control_error)?;
+            continue;
+        }
+        let Some(generation) = state
+            .interactions
+            .current_provider_input_generation(recipient)
+            .await
+            .filter(|generation| *generation > 0)
+        else {
+            state
+                .interactions
+                .set_agent_reply_continuation_state(&id, "waiting_identity")
+                .await
+                .map_err(control_error)?;
+            continue;
+        };
+
+        let idle = wardian_core::identity::normalize_status(&info.status) == "idle";
+        let native_route = match info.provider.as_str() {
+            "codex" => {
+                let selected = state
+                    .native_delivery
+                    .codex_owner_selected(recipient, generation)
+                    .await;
+                if selected {
+                    match state
+                        .native_delivery
+                        .codex_binding(recipient, generation)
+                        .await
+                    {
+                        Ok(binding) if binding.provider_session_id == origin.conversation_id => {
+                            true
+                        }
+                        Ok(_) => {
+                            state
+                                .interactions
+                                .set_agent_reply_continuation_state(&id, "blocked_stale_origin")
+                                .await
+                                .map_err(control_error)?;
+                            continue;
+                        }
+                        Err(_) => {
+                            state
+                                .interactions
+                                .set_agent_reply_continuation_state(&id, "waiting_identity")
+                                .await
+                                .map_err(control_error)?;
+                            continue;
+                        }
+                    }
+                } else {
+                    false
+                }
+            }
+            "pi" if idle => {
+                let prepared = state
+                    .native_delivery
+                    .pi_bridge_prepared(recipient, generation)
+                    .await;
+                if prepared {
+                    match state
+                        .native_delivery
+                        .pi_binding(recipient, generation)
+                        .await
+                    {
+                        Ok(binding)
+                            if binding.provider_session_id.as_deref()
+                                == Some(origin.conversation_id.as_str()) =>
+                        {
+                            true
+                        }
+                        Ok(_) => {
+                            state
+                                .interactions
+                                .set_agent_reply_continuation_state(&id, "blocked_stale_origin")
+                                .await
+                                .map_err(control_error)?;
+                            continue;
+                        }
+                        Err(_) => {
+                            state
+                                .interactions
+                                .set_agent_reply_continuation_state(&id, "waiting_busy")
+                                .await
+                                .map_err(control_error)?;
+                            continue;
+                        }
+                    }
+                } else {
+                    false
+                }
+            }
+            "opencode" if idle => {
+                match state
+                    .native_delivery
+                    .opencode_http_eligibility(recipient, generation)
+                    .await
+                {
+                    crate::delivery::native_broker::OpenCodeHttpEligibility::Unsupported => false,
+                    crate::delivery::native_broker::OpenCodeHttpEligibility::Pending
+                    | crate::delivery::native_broker::OpenCodeHttpEligibility::Failed => {
+                        state
+                            .interactions
+                            .set_agent_reply_continuation_state(&id, "waiting_busy")
+                            .await
+                            .map_err(control_error)?;
+                        continue;
+                    }
+                    crate::delivery::native_broker::OpenCodeHttpEligibility::Ready => {
+                        if state
+                            .native_delivery
+                            .opencode_http_admission(recipient, generation, &info.config, &info.cwd)
+                            .await
+                            .is_ok()
+                        {
+                            true
+                        } else {
+                            state
+                                .interactions
+                                .set_agent_reply_continuation_state(&id, "waiting_busy")
+                                .await
+                                .map_err(control_error)?;
+                            continue;
+                        }
+                    }
+                }
+            }
+            _ => false,
+        };
+        if !idle && !(info.provider == "codex" && native_route) {
+            state
+                .interactions
+                .set_agent_reply_continuation_state(&id, "waiting_busy")
+                .await
+                .map_err(control_error)?;
+            continue;
+        }
+        if !native_route && provider_input_blocks_task_dispatch(state, recipient).await {
+            state
+                .interactions
+                .set_agent_reply_continuation_state(&id, "waiting_busy")
+                .await
+                .map_err(control_error)?;
+            continue;
+        }
+        let surface_runtime_generation = if !native_route {
+            match state.terminal_sessions.broker_state(recipient).await {
+                Ok(broker_state) => Some(broker_state.runtime_generation),
+                Err(_) => {
+                    state
+                        .interactions
+                        .set_agent_reply_continuation_state(&id, "waiting_identity")
+                        .await
+                        .map_err(control_error)?;
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        if !native_route
+            && !surface_has_dedicated_turn_receipt(&info.provider)
+            && !state
+                .terminal_sessions
+                .native_write_receipts_enabled(recipient)
+                .await
+                .unwrap_or(false)
+        {
+            state
+                .interactions
+                .set_agent_reply_continuation_state(&id, "waiting_identity")
+                .await
+                .map_err(control_error)?;
+            continue;
+        }
+        state
+            .interactions
+            .set_agent_reply_continuation_state(&id, "pending")
+            .await
+            .map_err(control_error)?;
+        let Some(claim) = state
+            .interactions
+            .claim_agent_reply_continuation(recipient, &id, generation)
+            .await
+            .map_err(control_error)?
+        else {
+            continue;
+        };
+        if info.provider == "codex" {
+            // Codex has an existing context-only injection route. Drain it
+            // before steering or starting the actionable reply turn.
+            if let Err(error) = native::push_pending_information(state, recipient).await {
+                manager::log_debug(&format!(
+                    "[WARDIAN] pre-reply information delivery: {error}"
+                ));
+            }
+        }
+        let (context, information_claims) = prepare_claim_context_with_information(
+            state,
+            &claim,
+            recipient,
+            generation,
+            &info.provider,
+        )
+        .await?;
+        if native_route {
+            drop(lifecycle);
+            let result = native::dispatch_attached_reply(state, &info, &claim, &context).await;
+            let outcome = match &result {
+                Ok(state) if state == "failed_before_submit" => Err(false),
+                Ok(state) => Ok(state.as_str()),
+                Err(error) => Err(error.provider_boundary_crossed),
+            };
+            let delivery = native::settle(state, &claim, outcome).await;
+            let information = settle_information_claims(state, information_claims, outcome).await;
+            delivery.and(information)?;
+            if let Err(error) = result {
+                manager::log_debug(&format!(
+                    "[WARDIAN] reply {} continuation: {}",
+                    claim.record.id, error.message
+                ));
+            }
+        } else {
+            drop(lifecycle);
+            let frame: wardian_core::agent_messaging::AgentMessageContext =
+                serde_json::from_str(&context).map_err(|error| {
+                    ControlError::request_failed(format!("reply context was invalid: {error}"))
+                })?;
+            let prompt = wardian_core::agent_messaging::reply_continuation_prompt(&frame);
+            let result = crate::delivery::submit_live_surface_prompt(
+                app,
+                state,
+                crate::delivery::LiveSurfacePromptRequest {
+                    session_id: recipient.to_owned(),
+                    prompt,
+                    interaction_id: Some(claim.record.id.clone()),
+                    input_mode: MessageInputMode::Message,
+                    queue_policy: QueuePolicy::LiveOnly,
+                    approval_action: None,
+                    origin: claim
+                        .record
+                        .sender_session_id
+                        .clone()
+                        .map(|session_id| MessageOrigin::WardianAgent { session_id }),
+                    write_fence: Some(
+                        crate::utils::delivery_transaction::AutomatedInputWriteFence {
+                            provider: info.provider.clone(),
+                            provider_conversation_id: origin.conversation_id.clone(),
+                            provider_input_generation: generation,
+                            terminal_runtime_generation: surface_runtime_generation
+                                .expect("surface route captured its terminal generation"),
+                            agent_config_identity: info.config_identity.clone(),
+                        },
+                    ),
+                    runtime_state: "agent_messaging_reply_continuation",
+                    mark_prompt_started: true,
+                    require_provider_turn_receipt: true,
+                    payload_sent_detail: None,
+                    delivery_message_id: Some(claim.record.id.clone()),
+                },
+            )
+            .await;
+            let outcome = match &result {
+                Ok(_) => Ok("provider_visible"),
+                Err(error) if error.retry_safe => Err(false),
+                Err(_) => Err(true),
+            };
+            let delivery = native::settle(state, &claim, outcome).await;
+            let information = settle_information_claims(state, information_claims, outcome).await;
+            delivery.and(information)?;
+            if let Err(error) = result {
+                manager::log_debug(&format!(
+                    "[WARDIAN] reply {} surface continuation: {}",
+                    claim.record.id, error.message
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn admit_automation_information(
     state: &AppState,
     run_id: &str,
@@ -430,6 +1025,65 @@ struct AdmissionInput<'a> {
     task: bool,
 }
 
+/// Capture the live managed configuration's persisted provider conversation ID.
+/// This deliberately avoids archive hydration, so logging-disabled agents can
+/// still bind replies to the conversation their provider process is resuming.
+async fn requester_origin_for_admission(
+    state: &AppState,
+    sender: &str,
+) -> Option<store::RequesterOrigin> {
+    let config_handle = {
+        let agents = state.agents.lock().await;
+        agents.get(sender).map(|agent| agent.config.clone())?
+    };
+    let config = config_handle.lock().ok()?.clone();
+    let provider = config.provider.trim().to_ascii_lowercase();
+    let conversation_id = config
+        .resume_session
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let generation = state
+        .interactions
+        .current_provider_input_generation(sender)
+        .await?;
+    (generation > 0 && !provider.is_empty()).then_some(store::RequesterOrigin {
+        provider,
+        conversation_id,
+        generation,
+    })
+}
+
+/// Capture the recipient's persisted provider conversation under its lifecycle
+/// gate. No archive hydration or logging configuration is involved.
+async fn recipient_origin_for_admission(
+    state: &AppState,
+    recipient: &str,
+) -> Option<store::RecipientOrigin> {
+    let config_handle = {
+        let agents = state.agents.lock().await;
+        agents.get(recipient).map(|agent| agent.config.clone())?
+    };
+    let config = config_handle.lock().ok()?.clone();
+    let provider = config.provider.trim().to_ascii_lowercase();
+    let conversation_id = config
+        .resume_session
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let generation = state
+        .interactions
+        .current_provider_input_generation(recipient)
+        .await?;
+    (generation > 0 && !provider.is_empty()).then_some(store::RecipientOrigin {
+        provider,
+        conversation_id,
+        generation,
+    })
+}
+
 async fn admit(
     app: Option<&AppHandle>,
     state: &AppState,
@@ -445,23 +1099,55 @@ async fn admit(
     store::validate_message(message).map_err(control_error)?;
     let resolved = resolve_exact(state, target).await?;
     let recipient = resolved.id;
+    // New Session/clear operations use this same per-agent lifecycle gate.
+    // Hold it from the durable identity snapshot through canonical admission.
+    let sender_lifecycle = if task {
+        Some(state.lock_agent_lifecycle(sender).await)
+    } else {
+        None
+    };
+    let recipient_lifecycle = if task {
+        None
+    } else {
+        Some(state.lock_agent_lifecycle(&recipient).await)
+    };
+    let requester_origin = if task {
+        requester_origin_for_admission(state, sender).await
+    } else {
+        None
+    };
+    let recipient_origin = if task {
+        None
+    } else {
+        recipient_origin_for_admission(state, &recipient).await
+    };
     let generation = state
         .interactions
         .current_provider_input_generation(&recipient)
         .await
         .unwrap_or(0);
-    let admitted = state
-        .interactions
-        .admit_agent_message(store::Admission {
-            sender,
-            recipient: &recipient,
-            message,
-            idempotency_key: key,
-            task,
-            generation,
-        })
-        .await
-        .map_err(control_error)?;
+    let admission = store::Admission {
+        sender,
+        recipient: &recipient,
+        message,
+        idempotency_key: key,
+        task,
+        generation,
+    };
+    let admitted = if task {
+        state
+            .interactions
+            .admit_agent_message_with_requester_origin(admission, requester_origin.as_ref())
+            .await
+    } else {
+        state
+            .interactions
+            .admit_agent_message_with_wake_on_admission(admission, recipient_origin.as_ref())
+            .await
+    }
+    .map_err(control_error)?;
+    drop(recipient_lifecycle);
+    drop(sender_lifecycle);
     if let Some(app) = app {
         if task {
             let _ = app.emit("pair-activity-changed", ());
@@ -986,10 +1672,25 @@ async fn dispatch_one_with_request(
             OpenCodeDispatchDiagnosticReason::ClaimAcquired,
         );
     }
-    let prompt = message_with_structured_reply_instruction(
-        &prepare_claim_context(state, &claim).await?,
-        &claim.record.id,
-    );
+    let (context, information_claims) = prepare_claim_context_with_information(
+        state,
+        &claim,
+        recipient,
+        generation,
+        &info.provider,
+    )
+    .await?;
+    let frame: wardian_core::agent_messaging::AgentMessageContext = serde_json::from_str(&context)
+        .map_err(|error| ControlError::request_failed(error.to_string()))?;
+    let information = wardian_core::agent_messaging::pending_information_prompt(&frame);
+    let prompt = if information.is_empty() {
+        message_with_structured_reply_instruction(&context, &claim.record.id)
+    } else {
+        format!(
+            "{information}\n\n{}",
+            message_with_structured_reply_instruction(&context, &claim.record.id)
+        )
+    };
     let result = crate::delivery::submit_live_surface_prompt(
         app,
         state,
@@ -1005,6 +1706,7 @@ async fn dispatch_one_with_request(
                 .sender_session_id
                 .clone()
                 .map(|session_id| MessageOrigin::WardianAgent { session_id }),
+            write_fence: None,
             runtime_state: "agent_messaging_task",
             mark_prompt_started: true,
             require_provider_turn_receipt: true,
@@ -1026,11 +1728,22 @@ async fn dispatch_one_with_request(
         Err(error) if error.retry_safe => "failed_before_submit",
         Err(_) => "uncertain",
     };
-    state
+    let delivery = state
         .interactions
         .finish_agent_task(&claim, outcome)
         .await
-        .map_err(control_error)?;
+        .map_err(control_error);
+    let information = settle_information_claims(
+        state,
+        information_claims,
+        match &result {
+            Ok(_) => Ok("provider_visible"),
+            Err(error) if error.retry_safe => Err(false),
+            Err(_) => Err(true),
+        },
+    )
+    .await;
+    delivery.and(information)?;
     Ok(())
 }
 
@@ -1125,10 +1838,25 @@ async fn dispatch_background_task(
     else {
         return Ok(());
     };
-    let prompt = message_with_structured_reply_instruction(
-        &prepare_claim_context(state, &claim).await?,
-        &claim.record.id,
-    );
+    let (context, information_claims) = prepare_claim_context_with_information(
+        state,
+        &claim,
+        &info.uuid,
+        generation,
+        &current.provider,
+    )
+    .await?;
+    let frame: wardian_core::agent_messaging::AgentMessageContext = serde_json::from_str(&context)
+        .map_err(|error| ControlError::request_failed(error.to_string()))?;
+    let information = wardian_core::agent_messaging::pending_information_prompt(&frame);
+    let prompt = if information.is_empty() {
+        message_with_structured_reply_instruction(&context, &claim.record.id)
+    } else {
+        format!(
+            "{information}\n\n{}",
+            message_with_structured_reply_instruction(&context, &claim.record.id)
+        )
+    };
     record_headless_status_observation(app, state, &current).await;
     drop(lifecycle);
     if current.provider == "codex" {
@@ -1159,11 +1887,22 @@ async fn dispatch_background_task(
     } else {
         "uncertain"
     };
-    state
+    let delivery = state
         .interactions
         .finish_agent_task(&claim, outcome)
         .await
-        .map_err(control_error)?;
+        .map_err(control_error);
+    let information = settle_information_claims(
+        state,
+        information_claims,
+        if result.is_ok() {
+            Ok("provider_visible")
+        } else {
+            Err(true)
+        },
+    )
+    .await;
+    delivery.and(information)?;
     if let Ok(result) = result {
         record_headless_message_response(state, &current, &claim.record.id, &result.response).await;
         let origin = claim
@@ -1205,6 +1944,130 @@ async fn prepare_claim_context(
             Err(error)
         }
     }
+}
+
+#[derive(Default)]
+struct PendingInformationClaims {
+    claims: Vec<store::TaskClaim>,
+    frames: Vec<wardian_core::agent_messaging::AgentMessageContext>,
+}
+
+/// Claim the bounded FYI prefix for the next managed non-Codex turn. Codex
+/// retains its existing context-only push, which never starts a turn.
+async fn prepare_claim_context_with_information(
+    state: &AppState,
+    claim: &store::TaskClaim,
+    recipient: &str,
+    generation: u64,
+    provider: &str,
+) -> Result<(String, PendingInformationClaims), ControlError> {
+    let context = prepare_claim_context(state, claim).await?;
+    let mut frame: wardian_core::agent_messaging::AgentMessageContext =
+        match serde_json::from_str(&context) {
+            Ok(frame) => frame,
+            Err(error) => {
+                state
+                    .interactions
+                    .release_agent_message_before_write(claim)
+                    .await
+                    .map_err(control_error)?;
+                return Err(ControlError::request_failed(error.to_string()));
+            }
+        };
+    let mut pending = PendingInformationClaims::default();
+    let prepare_information = async {
+        if !provider.eq_ignore_ascii_case("codex") {
+            let highwater = store::with_db(|conn| store::information_highwater(conn, recipient))
+                .map_err(control_error)?;
+            let ids = store::with_db(|conn| store::pending_information(conn, recipient, highwater))
+                .map_err(control_error)?;
+            for id in ids {
+                let information = match state
+                    .interactions
+                    .claim_agent_information(recipient, &id, generation)
+                    .await
+                {
+                    Ok(Some(information)) => information,
+                    Ok(None) => continue,
+                    Err(error) => return Err(control_error(error)),
+                };
+                let information_frame =
+                    store::with_db(|conn| store::message_context(conn, &information.record));
+                match information_frame {
+                    Ok(information_frame) => {
+                        pending.claims.push(information);
+                        pending.frames.push(information_frame);
+                    }
+                    Err(error) => {
+                        state
+                            .interactions
+                            .release_agent_message_before_write(&information)
+                            .await
+                            .map_err(control_error)?;
+                        return Err(control_error(error));
+                    }
+                }
+            }
+        }
+        Ok::<(), ControlError>(())
+    }
+    .await;
+    if let Err(error) = prepare_information {
+        let information = settle_information_claims(state, pending, Err(false)).await;
+        let delivery = state
+            .interactions
+            .release_agent_message_before_write(claim)
+            .await
+            .map_err(control_error);
+        delivery.and(information)?;
+        return Err(error);
+    }
+    frame.pending_information = pending.frames.clone();
+    let context = match serde_json::to_string(&frame) {
+        Ok(context) => context,
+        Err(error) => {
+            let information = settle_information_claims(state, pending, Err(false)).await;
+            let delivery = state
+                .interactions
+                .release_agent_message_before_write(claim)
+                .await
+                .map_err(control_error);
+            delivery.and(information)?;
+            return Err(ControlError::request_failed(error.to_string()));
+        }
+    };
+    Ok((context, pending))
+}
+
+async fn settle_information_claims(
+    state: &AppState,
+    claims: PendingInformationClaims,
+    outcome: Result<&str, bool>,
+) -> Result<(), ControlError> {
+    let mut first_error = None;
+    for claim in claims.claims {
+        let result = match outcome {
+            Ok(delivery_state) => state
+                .interactions
+                .finish_agent_task(&claim, delivery_state)
+                .await
+                .map_err(control_error),
+            Err(false) => state
+                .interactions
+                .release_agent_message_before_write(&claim)
+                .await
+                .map_err(control_error),
+            Err(true) => state
+                .interactions
+                .finish_agent_task(&claim, "uncertain")
+                .await
+                .map_err(control_error),
+        };
+        if first_error.is_none() {
+            first_error = result.err();
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 fn context_frame(claim: &store::TaskClaim) -> Result<String, ControlError> {

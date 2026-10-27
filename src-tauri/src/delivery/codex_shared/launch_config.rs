@@ -1,5 +1,5 @@
 //! Short-lived file overlay for ordinary Codex TUI startup only.
-//! The daemon retains authoritative -c arguments; background launches need no overlay.
+//! Background launches need no file overlay; their captured config travels in thread params.
 
 mod journal;
 mod leaves;

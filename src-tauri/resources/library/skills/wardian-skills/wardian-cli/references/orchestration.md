@@ -77,12 +77,10 @@ use the existing peer's queue or report its availability.
 
 ```bash
 wardian message followup review-cli-surface --file review-request.md
-wardian message receive --timeout-ms 60000
 ```
 
-Save the exact canonical `request_id`. Receive until a reply's
-`parent_interaction_id` matches it, then inspect its `reply_status` and body.
-Continue from each returned `next_cursor` within the caller's deadline; empty
-pages and timeouts do not complete the task or authorize resubmission. The
-followup receipt proves admission, not the peer's result. Use
-[messaging](messaging.md) for acknowledgement and reply semantics.
+Save the exact canonical `request_id`. Wardian resumes the requester's original
+conversation when a reply with matching `parent_interaction_id` commits and a
+safe provider route is available. The
+followup receipt proves admission, not the peer's result; do not poll or
+resubmit an admitted task. Use [messaging](messaging.md) for reply semantics.

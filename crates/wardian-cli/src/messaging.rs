@@ -1,9 +1,6 @@
 //! Canonical v2 CLI entrypoints. One request, one receipt, no legacy fallback.
 use crate::{
-    args::{
-        MessageArgs, MessageCommand, MessageCommandArgs, ReceiveMessagesArgs, ReplyArgs,
-        ReplyStatusArg, WaitAgentArgs,
-    },
+    args::{MessageArgs, MessageCommand, MessageCommandArgs, ReplyArgs, ReplyStatusArg},
     errors::{CliError, ExitCode},
     live, read_message_input,
 };
@@ -77,24 +74,6 @@ fn send(args: &MessageArgs, task: bool) -> Result<String, CliError> {
     )?)
 }
 
-fn receive(args: &ReceiveMessagesArgs) -> Result<String, CliError> {
-    for cursor in [&args.cursor, &args.ack_cursor].into_iter().flatten() {
-        nonempty(cursor)?;
-    }
-    invoke(AgentMessagingRequest::ReceiveMessages {
-        cursor: args.cursor.clone(),
-        ack_cursor: args.ack_cursor.clone(),
-        limit: Some(args.limit),
-        timeout_ms: Some(args.timeout_ms),
-    })
-}
-
-fn wait(args: &WaitAgentArgs) -> Result<String, CliError> {
-    invoke(AgentMessagingRequest::WaitAgent {
-        timeout_ms: Some(args.timeout_ms),
-    })
-}
-
 fn reply(args: &ReplyArgs) -> Result<String, CliError> {
     nonempty(&args.request_id)?;
     let message = body(args.message.as_deref(), args.stdin, args.file.as_deref())?;
@@ -136,8 +115,6 @@ pub(crate) fn handle(args: &MessageCommandArgs) -> Result<String, CliError> {
         MessageCommand::List => invoke(AgentMessagingRequest::ListAgents),
         MessageCommand::Send(args) => send(args, false),
         MessageCommand::Followup(args) => send(args, true),
-        MessageCommand::Receive(args) => receive(args),
-        MessageCommand::Wait(args) => wait(args),
         MessageCommand::Reply(args) => reply(args),
         MessageCommand::Interrupt { target } => {
             // Reuse exact-recipient validation, without admitting a message.

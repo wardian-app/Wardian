@@ -23,12 +23,18 @@ pub struct InteractionState {
     // contention without adding another production synchronization path.
     pub(crate) records: Mutex<HashMap<String, InteractionRecord>>,
     replies: Mutex<HashMap<String, StructuredReply>>,
-    provider_generations: Mutex<HashMap<String, u64>>,
+    provider_generations: Mutex<HashMap<String, Arc<Mutex<Option<u64>>>>>,
     provider_status_observations: Mutex<HashMap<String, u64>>,
     provider_inputs: Mutex<HashMap<String, ProviderInputState>>,
     // Retain senders (including deletion tombstones) so late subscribers see
     // the current baseline even when no receiver existed during publication.
     agent_mailboxes: Mutex<HashMap<String, watch::Sender<AgentMailboxSignal>>>,
+}
+
+/// Prevents a provider-input generation transition until an admitted terminal
+/// write has crossed its actor boundary.
+pub(crate) struct ProviderInputGenerationFence {
+    _guard: tokio::sync::OwnedMutexGuard<Option<u64>>,
 }
 
 impl InteractionState {
@@ -468,24 +474,34 @@ impl InteractionState {
         state: ProviderInputReadiness,
         ready_evidence: Option<ProviderReadyEvidence>,
     ) -> (ProviderInputState, bool) {
-        let _mutation = self.mutation_lock.lock().await;
+        let (_mutation, _generation_cell, mut current_generation) = self
+            .lock_mutation_and_provider_generation(session_id, true)
+            .await;
         if self.deleted_sessions.lock().await.contains(session_id) {
             return (
                 provider_input_state_record(session_id, generation, state, ready_evidence),
                 false,
             );
         }
-        let _observations = self.provider_status_observations.lock().await;
-        self.record_provider_input_state_inner(session_id, generation, state, ready_evidence)
-            .await
+        self.record_provider_input_state_with_generation(
+            session_id,
+            generation,
+            state,
+            ready_evidence,
+            current_generation
+                .as_mut()
+                .expect("created provider generation cell has a guard"),
+        )
+        .await
     }
 
-    async fn record_provider_input_state_inner(
+    async fn record_provider_input_state_with_generation(
         &self,
         session_id: &str,
         generation: u64,
         state: ProviderInputReadiness,
         ready_evidence: Option<ProviderReadyEvidence>,
+        current_generation: &mut Option<u64>,
     ) -> (ProviderInputState, bool) {
         if self.deleted_sessions.lock().await.contains(session_id) {
             return (
@@ -493,16 +509,12 @@ impl InteractionState {
                 false,
             );
         }
+        if current_generation
+            .as_ref()
+            .is_none_or(|current| generation > *current)
         {
-            let mut generations = self.provider_generations.lock().await;
-            let current = generations
-                .entry(session_id.to_string())
-                .or_insert(generation);
-            if generation > *current {
-                *current = generation;
-            }
+            *current_generation = Some(generation);
         }
-
         let mut inputs = self.provider_inputs.lock().await;
         if let Some(existing) = inputs.get(session_id) {
             if keep_existing_provider_input_state(existing, generation, state, ready_evidence) {
@@ -552,7 +564,9 @@ impl InteractionState {
         state: ProviderInputReadiness,
         ready_evidence: Option<ProviderReadyEvidence>,
     ) -> (ProviderInputState, bool) {
-        let _mutation = self.mutation_lock.lock().await;
+        let (_mutation, _generation_cell, mut current_generation) = self
+            .lock_mutation_and_provider_generation(session_id, true)
+            .await;
         if self.deleted_sessions.lock().await.contains(session_id) {
             return (
                 provider_input_state_record(session_id, generation, state, ready_evidence),
@@ -575,8 +589,17 @@ impl InteractionState {
             observations.insert(session_id.to_string(), status_sequence);
         }
 
-        self.record_provider_input_state_inner(session_id, generation, state, ready_evidence)
-            .await
+        drop(observations);
+        self.record_provider_input_state_with_generation(
+            session_id,
+            generation,
+            state,
+            ready_evidence,
+            current_generation
+                .as_mut()
+                .expect("created provider generation cell has a guard"),
+        )
+        .await
     }
 
     pub async fn provider_input_state(&self, session_id: &str) -> Option<ProviderInputState> {
@@ -589,37 +612,106 @@ impl InteractionState {
         state: ProviderInputReadiness,
         ready_evidence: Option<ProviderReadyEvidence>,
     ) -> ProviderInputState {
-        let _mutation = self.mutation_lock.lock().await;
+        let (_mutation, _generation_cell, mut current_generation) = self
+            .lock_mutation_and_provider_generation(session_id, true)
+            .await;
         if self.deleted_sessions.lock().await.contains(session_id) {
             return provider_input_state_record(session_id, 0, state, ready_evidence);
         }
-        let _observations = self.provider_status_observations.lock().await;
-        let generation = {
-            let mut generations = self.provider_generations.lock().await;
-            let generation = generations.get(session_id).copied().unwrap_or(0) + 1;
-            generations.insert(session_id.to_string(), generation);
-            generation
-        };
-        self.record_provider_input_state_inner(session_id, generation, state, ready_evidence)
-            .await
-            .0
+        let generation_guard = current_generation
+            .as_mut()
+            .expect("created provider generation cell has a guard");
+        let generation = (**generation_guard).unwrap_or(0) + 1;
+        **generation_guard = Some(generation);
+        self.record_provider_input_state_with_generation(
+            session_id,
+            generation,
+            state,
+            ready_evidence,
+            generation_guard,
+        )
+        .await
+        .0
     }
 
     pub async fn current_provider_input_generation(&self, session_id: &str) -> Option<u64> {
-        self.provider_generations
-            .lock()
-            .await
-            .get(session_id)
-            .copied()
+        let generation_cell = self.provider_generation_cell(session_id, false).await?;
+        let generation = *generation_cell.lock().await;
+        generation
+    }
+
+    pub(crate) async fn fence_provider_input_generation(
+        self: &Arc<Self>,
+        session_id: &str,
+        expected_generation: u64,
+    ) -> Option<ProviderInputGenerationFence> {
+        let generation_cell = self.provider_generation_cell(session_id, false).await?;
+        let guard = generation_cell.lock_owned().await;
+        let is_deleted = self.deleted_sessions.lock().await.contains(session_id);
+        (!is_deleted && *guard == Some(expected_generation))
+            .then_some(ProviderInputGenerationFence { _guard: guard })
     }
 
     pub async fn clear_provider_input_state_in_memory(&self, session_id: &str) {
+        let (_mutation, _generation_cell, mut current_generation) = self
+            .lock_mutation_and_provider_generation(session_id, false)
+            .await;
         self.provider_status_observations
             .lock()
             .await
             .remove(session_id);
-        self.provider_generations.lock().await.remove(session_id);
+        if let Some(current_generation) = current_generation.as_mut() {
+            **current_generation = None;
+            self.provider_generations.lock().await.remove(session_id);
+        }
         self.provider_inputs.lock().await.remove(session_id);
+    }
+
+    async fn provider_generation_cell(
+        &self,
+        session_id: &str,
+        create: bool,
+    ) -> Option<Arc<Mutex<Option<u64>>>> {
+        let mut generations = self.provider_generations.lock().await;
+        if create {
+            Some(
+                generations
+                    .entry(session_id.to_string())
+                    .or_insert_with(|| Arc::new(Mutex::new(None)))
+                    .clone(),
+            )
+        } else {
+            generations.get(session_id).cloned()
+        }
+    }
+
+    async fn lock_mutation_and_provider_generation(
+        &self,
+        session_id: &str,
+        create: bool,
+    ) -> (
+        tokio::sync::OwnedMutexGuard<()>,
+        Option<Arc<Mutex<Option<u64>>>>,
+        Option<tokio::sync::OwnedMutexGuard<Option<u64>>>,
+    ) {
+        loop {
+            let mutation = Arc::clone(&self.mutation_lock).lock_owned().await;
+            let generation_cell = self.provider_generation_cell(session_id, create).await;
+            let Some(generation_cell) = generation_cell else {
+                return (mutation, None, None);
+            };
+            match Arc::clone(&generation_cell).try_lock_owned() {
+                Ok(generation_guard) => {
+                    return (mutation, Some(generation_cell), Some(generation_guard));
+                }
+                Err(_) => {
+                    // Never park the global mutation gate behind a write for
+                    // one agent; release it before waiting on that agent cell.
+                    drop(mutation);
+                    drop(generation_cell.lock_owned().await);
+                }
+            }
+        }
     }
 
     pub async fn clear_deleted_session(&self, session_id: &str) {
@@ -652,11 +744,26 @@ impl InteractionState {
             }
         }
         if let Ok(inputs) = wardian_core::db::list_provider_input_states() {
-            let mut generations = self.provider_generations.lock().await;
-            let mut current = self.provider_inputs.lock().await;
             for input in inputs {
-                generations.insert(input.session_id.clone(), input.generation);
-                current.insert(input.session_id.clone(), input);
+                let (_mutation, _generation_cell, mut current_generation) = self
+                    .lock_mutation_and_provider_generation(&input.session_id, true)
+                    .await;
+                if self
+                    .deleted_sessions
+                    .lock()
+                    .await
+                    .contains(&input.session_id)
+                {
+                    continue;
+                }
+                **current_generation
+                    .as_mut()
+                    .expect("created provider generation cell has a guard") =
+                    Some(input.generation);
+                self.provider_inputs
+                    .lock()
+                    .await
+                    .insert(input.session_id.clone(), input);
             }
         }
     }
@@ -688,9 +795,16 @@ impl InteractionState {
             .ok()
             .flatten();
         tokio::spawn(async move {
-            let _mutation = mutation;
+            owner
+                .deleted_sessions
+                .lock()
+                .await
+                .insert(session_id.clone());
+            drop(mutation);
+            owner.wait_for_provider_generation_fences(&session_id).await;
+            let _mutation = Arc::clone(&owner.mutation_lock).lock_owned().await;
             let database_session_id = session_id.clone();
-            tokio::task::spawn_blocking(move || {
+            let delete_result = tokio::task::spawn_blocking(move || {
                 #[cfg(test)]
                 if let Some(probe) = probe {
                     let _ = probe.started.send(());
@@ -701,7 +815,11 @@ impl InteractionState {
                     .map_err(|error| format!("Failed to delete agent state: {error}"))
             })
             .await
-            .map_err(|error| format!("Agent state deletion I/O task failed: {error}"))??;
+            .map_err(|error| format!("Agent state deletion I/O task failed: {error}"));
+            if let Err(error) = delete_result.and_then(|result| result) {
+                owner.deleted_sessions.lock().await.remove(&session_id);
+                return Err(error);
+            }
             owner.delete_agent_cached_state(&session_id).await;
             Ok(())
         })
@@ -710,11 +828,6 @@ impl InteractionState {
     }
 
     async fn delete_agent_cached_state(&self, session_id: &str) {
-        self.deleted_sessions
-            .lock()
-            .await
-            .insert(session_id.to_string());
-
         let mut records = self.records.lock().await;
         let mut removed_ids = records
             .iter()
@@ -766,6 +879,12 @@ impl InteractionState {
         self.provider_generations.lock().await.remove(session_id);
         self.provider_inputs.lock().await.remove(session_id);
         self.mark_agent_mailbox_deleted(session_id).await;
+    }
+
+    async fn wait_for_provider_generation_fences(&self, session_id: &str) {
+        if let Some(generation_cell) = self.provider_generation_cell(session_id, false).await {
+            drop(generation_cell.lock().await);
+        }
     }
 }
 

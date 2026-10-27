@@ -8,23 +8,12 @@ server's `WARDIAN_HOME` and a managed caller identified by `WARDIAN_SESSION_ID`.
 
 ## Tool contract
 
-Use wait_agent when you need to suspend for mailbox activity without reading
-or acknowledging records. It returns immediately if unacknowledged activity
-already exists; otherwise it subscribes before checking durable state and
-waits for the next mailbox signal. The wake response contains no message body.
-Call receive_messages afterward to inspect and acknowledge records. The
-default and maximum timeout is 60 seconds; timeout_ms: 0 checks immediately.
-Waiting never starts or interrupts an idle agent. The CLI equivalent is
-wardian message wait --timeout-ms 60000.
-
-The tool surface follows Codex v2's distinction between information and work:
+The agent-facing surface follows the distinction between information and work:
 
 | Tool | Meaning |
 | --- | --- |
-| wait_agent | Wait for mailbox activity without reading, claiming, or acknowledging records. |
-| `send_message` | Send information without starting or interrupting a turn. |
-| `followup_task` | Assign work and return a request receipt without waiting for its reply. |
-| `receive_messages` | Read a bounded batch of information, tasks, and replies addressed to the caller. |
+| `send_message` | Admit an informational message; automatically deliver it and wake an idle recipient when its original conversation is available. |
+| `followup_task` | Assign work and return an admission receipt. Wardian resumes the original requester conversation with the terminal reply when a safe route is available. |
 | `reply` | Complete the specified request as its authorized recipient. |
 | `interrupt_agent` | Request interruption of the current turn while retaining the session, when supported. |
 | `list_agents` | Discover Wardian peer names, UUIDs, providers, and status. |
@@ -33,30 +22,27 @@ Send and follow-up arguments are `target` and `message`. Targets are exact
 agent names or UUIDs; ambiguous names and broadcasts fail. Message text retains
 Unicode, line breaks, and punctuation. Receipts carry Wardian interaction or
 request IDs and the actual delivery state. Admission, provider visibility,
-task completion, and reply are different facts.
-
-Receive returns typed records and recipient-bound cursors. Pass `cursor` to
-continue reading and `ack_cursor` to acknowledge a previously returned batch.
-Replaying a cursor preserves record identities and does not execute work.
-`limit` is bounded to 100 records and `timeout_ms` to 60 seconds. An empty wait
-does not cancel tasks; later messages and replies remain available.
-
-If native context arrives during a wait, receive can return promptly with
-`wake_reason: "provider_context_available"`. That context is already on the
-provider delivery path, so the tool does not return a duplicate body or
-acknowledge its consumption. The timeout flag remains false.
+task completion, and reply are different facts. Agents do not poll or receive
+mailbox pages. The retired `message receive`, `message wait`, `receive_messages`,
+and `wait_agent` interfaces fail before changing claims or acknowledgements;
+the backend mailbox remains available for read-only diagnostics.
 
 Reply takes `request_id`, `status` (`done`, `blocked`, or `failed`), and
 `message`. The request determines the destination. A committed explicit reply
-suppresses automatic final-result publication. Canonical tasks dispatched to
-an exact native Codex turn return that turn's final result to their requester
-automatically. Manual receive, composer delivery, and providers without an
-exact native completion boundary still require explicit `reply`.
+suppresses automatic final-result publication. Exact native task turns may
+publish their terminal result automatically. Every canonical terminal reply
+inherits the requester's durable provider conversation binding and is resumed
+through that same conversation when a safe continuation route is available.
 
 Only an assigned task with an explicit `request_id` may use MCP `reply`.
 An ordinary human chat message completes through the agent's assistant
 response. Its delivery interaction ID is not a task request ID. Informational
-peer messages do not create an obligation to start a turn or reply.
+peer messages automatically wake an idle recipient through the same durable
+delivery service, but create no task or reply obligation and do not trigger an
+automatic reply or task result. Messages admitted before wake eligibility was
+recorded remain context-only; migration never turns old stored FYIs into a
+startup wake backlog. Off, pause, session replacement, and provider changes
+remain authoritative fences.
 
 An MCP tool error is returned with `isError: true`. A failed or lost send
 response can leave delivery uncertain; neither the server nor the caller
@@ -65,25 +51,34 @@ out at the client does not cancel an admitted message or task.
 
 The app owns sender attribution, target identity, queue policy, and delivery
 records. The tool does not accept an arbitrary sender argument. Informational
-records never enter the runnable prompt queue. Follow-up work uses the
+records never enter the task queue. Follow-up work uses the
 receiver's supported delivery boundary. Interruption is separate from sending
 a correction, pausing the agent, or destroying its provider process.
 
-Native delivery must reach the same running provider conversation. Provider
-adapters may retain composer delivery for specific configurations where native
-attachment is unavailable; those exceptions require a documented capability
-limit. An uncertain native submission must not be retried through the composer.
-For automatic task routing, a selected native owner for the current generation
-takes precedence over an observed `Off` status; an explicit user `off` setting
-and an active conversation lease remain authoritative.
+Native delivery must reach the same running provider conversation. An idle
+surface route is available only when no native owner is selected and the
+runtime can confirm a provider turn receipt. An uncertain native submission is
+not retried through another transport.
+An explicit user `off` setting, a busy conversation lease, or an unavailable
+provider identity leaves a continuation pending for a later readiness
+opportunity.
 
 ## Automatic task delivery
 
-`followup_task` first persists the task and returns its request ID. Manual
-receive and automatic dispatch share a durable claim: only one may expose that
-task as new work. Startup and readiness observations give pending tasks another
-dispatch opportunity after the agent roster and startup lifecycle become ready.
-They do not replay a task whose delivery is uncertain.
+`followup_task` first persists the task and returns its request ID. A durable
+claim selects one delivery owner. Startup and readiness observations recover
+pending tasks and replies after the agent roster and provider lifecycle become
+ready. They do not replay a task or continuation whose delivery is uncertain.
+
+At follow-up admission, Wardian captures the managed sender's persisted
+provider and `resume_session` identity together with the observed input
+generation in the canonical task row. The reply transaction copies that origin
+into the canonical reply row before any wake is scheduled. Conversation logging
+and archive hydration are not required. A normal process restore may advance
+runtime generation; recovery matches the exact provider conversation. A new
+session, clear, or provider change is stale and blocked. A missing identity
+waits for readiness; an old reply without a durable origin remains blocked as
+`blocked_legacy_uncertain` rather than being guessed or replayed.
 
 For an attached Codex session, Wardian validates its native owner and runtime
 generation. An observed idle owner receives `turn/start` with a structured
@@ -110,34 +105,39 @@ read for another dispatch opportunity, so an idle callback consumed while the
 claim was held cannot strand the task. Other provider errors or lost
 acknowledgements retain uncertainty and cannot trigger that recovery.
 
-Terminal evidence is persisted before reply publication. Startup and receive
-recover already captured outcomes after a failed reply write without rerunning
-provider work. Startup marks bindings with lost observation continuity uncertain;
-historical or manually received tasks are never inferred from transcripts.
+Terminal evidence is persisted before reply publication. Startup recovers
+already captured outcomes after a failed reply write without rerunning provider
+work. Lost observation continuity remains uncertain; transcripts are never
+used to infer or replay a task.
 
-Receive with a nonzero timeout waits on recipient mailbox signals and returns
-the resulting page; it retains its cursor acknowledgement rules. wait_agent is
-the separate wake-only operation and does not claim or acknowledge records.
-Completion wakes an active mailbox wait, but does not start a finished
-requester's turn.
+Replies resume through the existing provider boundary: the selected Codex
+owner can start or steer the original thread; Pi and OpenCode use their
+generation-bound bridges; other attached supported surfaces receive an idle
+prompt only after a positive provider-turn receipt. Active, paused, deleted, or
+identity-mismatched conversations remain fenced until a legitimate readiness
+opportunity. The continuation keeps the canonical reply kind and parent task
+correlation and creates no new task or reply obligation.
 
-Information and replies use the same canonical interaction store. A capable
-Codex session can receive them through `thread/inject_items` as
-`wardian_inbox_delivery`, without starting a turn. Explicit receive remains
-available when native push is unavailable.
+Older informational messages use Codex context-only injection or bounded
+carry-forward into the next Wardian-managed task or reply turn. That carry path
+does not wrap direct TUI user-started input. Newly admitted messages wake an
+idle supported conversation when an exact provider receipt route is available;
+active non-Codex turns retain the message for the next idle opportunity.
 
 ## Legacy delivery retirement
 
-The legacy send/ask control operations and live-surface mailbox scheduler are
-removed. Old client requests cannot reactivate terminal delivery. Historical
-mailbox records remain evidence; startup, restore, and idle observations do not
-dispatch them or convert them into canonical tasks. An uncertain old submission
-must not be automatically replayed.
+The agent-facing receive and mailbox-wait adapters are retired from the CLI and
+MCP tool list. Old control requests are rejected before claim or acknowledgement.
+Canonical mailbox records and read-only diagnostics remain in the backend.
+Previously admitted replies without captured requester origin are observable
+but never replayed into a guessed conversation.
 
-Human terminal input remains available. Codex peer messaging requires its
-native connection and never falls back to the composer. The updated behavior
-requires the updated runtime; source changes do not alter an already running
-older instance.
+Human terminal input remains available. Codex peer messaging prefers the
+negotiated native owner. An idle surface fallback is allowed only when no native
+owner is selected and the runtime can confirm a provider turn receipt; an
+uncertain native submission never falls back to the composer. The updated
+behavior requires the updated runtime; source changes do not alter an already
+running older instance.
 
 ## Codex configuration
 
@@ -242,8 +242,9 @@ This behavior does not establish a startup performance target.
 A definite background failure before task submission produces a correlated
 `failed` reply explicitly attributed to Wardian. The task and failure notice
 commit together. An accepted or uncertain submission cannot take this path.
-An empty receive wait neither cancels the task nor justifies interrupting its
-recipient; continue waiting within the caller's deadline.
+An admitted task does not justify interrupting its recipient because the reply
+has not appeared yet. Wardian resumes the original conversation when the
+terminal reply is available.
 
 ## Behavioral experiment
 
@@ -262,17 +263,17 @@ general claim about model training or preferred language.
 
 The initial experiment disabled built-in subagents, so it did not compare
 preference between competing delegation systems. V2 acceptance instead checks
-non-waking information, task admission, receiving, correlated replies, and
-interruption through the native harness. Compressed spelling is not a success
+informational delivery, task admission, correlated automatic reply continuation,
+and interruption through the native harness. Compressed spelling is not a success
 criterion.
 
 ## Native acceptance
 
 The real suite uses two fresh managed Codex agents and a plain-English request.
-The sender must actually assign work, the receiver must reply to that request,
-and the sender must consume the correlated reply before answering. A matching
-final string alone is insufficient. The suite binds the canonical interaction
-records to each agent's exact native rollout, model, turn IDs and tool receipts.
+The sender must assign work, the receiver must reply to that request, and
+Wardian must resume the sender's original conversation with the correlated
+reply. A matching final string alone is insufficient. The suite binds canonical
+records to each agent's exact native rollout, model, turn IDs and provider receipts.
 An existing empty Codex history database does not supersede the native rollout.
 When Codex omits reasoning effort from a turn, the report records it as
 unverified rather than inferring it from the requested configuration.
@@ -305,7 +306,7 @@ Windows alpha6 installation with code mode enabled, the separately published
 `codex-code-mode-host.exe` must sit beside `codex.exe`; the main release ZIP
 alone does not contain it. These are unmodified upstream release components.
 If the fixture requires explicit
-tool grants, `WARDIAN_E2E_MESSAGING_V2_APPROVE_TOOLS=1` grants only the six named
+tool grants, `WARDIAN_E2E_MESSAGING_V2_APPROVE_TOOLS=1` grants only the five named
 tools in the two private, normally registered agent homes.
 
 Each fixture workspace has its own empty Git repository so Codex cannot inherit

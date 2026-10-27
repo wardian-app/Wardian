@@ -447,7 +447,6 @@ wardian message list
 wardian message followup reviewer-a1 --stdin
 wardian message reply req_0123456789abcdef --status done --stdin
 wardian message send coder-a1 "The review evidence is available"
-wardian message receive --limit 20 --timeout-ms 60000
 wardian notify update "The migration is ready for review" --title "Inbox refactor"
 wardian notify approval "Production deployment is prepared" --title "Deploy production" --action "Run the production deployment" --risk "This changes live traffic" --choice "Deploy" --choice "Do not deploy" --wait
 ```
@@ -490,28 +489,31 @@ explicitly terminates that provider first. Rename is live and does not restart
 the provider. Agent-owned Wardian history is cascaded with deletion; project
 workspace files are never removed.
 
-`wardian message send <target> <message>` admits information without waking or
-interrupting the recipient. `wardian message followup <target> <message>`
-admits a task and returns its canonical request ID without waiting for a reply;
-use `--idempotency-key` to preserve one logical admission across a caller
-retry. `wardian message receive` reads bounded inbox pages, `message reply`
-settles a request by its exact request ID, and `message interrupt` requests
-interruption only where the provider bridge supports it.
+`wardian message send <target> <message>` admits and automatically delivers an
+informational message, waking an idle recipient when its original provider
+conversation is available. It does not create a task or reply obligation.
+Messages admitted before wake eligibility was recorded remain context-only and
+are not replayed as startup wakeups. `wardian message followup <target> <message>`
+admits a task and returns its canonical request ID without waiting
+for completion; use `--idempotency-key` to preserve one logical admission across
+a caller retry. When the recipient replies, Wardian resumes the requester's
+original provider conversation when a safe route is available. `message reply`
+completes a request by its exact request ID, and
+`message interrupt` requests interruption only where the provider bridge
+supports it. Agent-facing `message receive` and `message wait` commands are
+retired; backend mailbox records remain available for diagnostics.
 
 For tasks dispatched through Wardian's native Codex owner, the bound provider
-turn's final answer automatically completes the request and returns to its
-requester. An explicit `message reply` that completed the request takes
-precedence. Multiple tasks admitted into the same turn receive that turn's
-shared final answer. Manual inbox delivery, composer delivery, and other
-providers still require an explicit reply.
-
-`message wait --timeout-ms 60000` waits for mailbox activity, including
-completion results, without returning or acknowledging inbox records. Follow it
-with `message receive` to inspect the page. `message receive --timeout-ms 60000`
-also waits for activity and returns the resulting page. Completion wakes an
-active wait; information and completion notifications do not start an idle
-agent's turn. Active task steering requires stable Codex 0.159.2 or newer.
-Older supported versions retain idle task delivery and information delivery.
+turn's final answer automatically completes the request. An explicit `message
+reply` that completed the request takes precedence. Multiple tasks admitted
+into the same turn receive that turn's shared final answer. The resulting
+canonical reply resumes the requester's original provider conversation when a
+safe route is available; an uncertain submission is never replayed. New
+informational messages wake an idle recipient when a safe provider route is
+available, while remaining distinct from task work and reply obligations.
+Active task steering requires stable Codex 0.159.2 or
+newer. Older supported versions retain idle task delivery and information
+delivery.
 
 When a task is queued because the target is busy or an eligible native owner is
 still handshaking, Wardian retains the canonical task for a later authoritative
@@ -542,13 +544,9 @@ Admit a bounded review task to a peer and retain the returned request ID:
 wardian message followup reviewer-a1 --file review-prompt.md
 ```
 
-Read replies from the managed sender's inbox. Match the reply's
-`parent_interaction_id` to the original request ID. An empty wait does not
-cancel the task or authorize resending it:
-
-```bash
-wardian message receive --limit 20 --timeout-ms 60000
-```
+The original requester conversation resumes automatically when a correlated
+reply commits. Use the returned request ID for diagnostics and explicit replies;
+do not poll or replay an admitted task when its result is not immediately visible.
 
 Answer a task from inside its authorized recipient session:
 
@@ -558,7 +556,7 @@ Reviewed the patch. No blocking findings.
 EOF
 ```
 
-Send information without starting or interrupting a turn:
+Send an informational message:
 
 ```bash
 wardian message send coder-a1 --file status-note.md
@@ -768,26 +766,24 @@ Add `--until` to block until `status:<status>`, `output:<substring>`, `event:<ki
 a managed sender and the matching running application; it does not let a caller
 impersonate another agent. Targets are one exact agent name or UUID.
 
-- `message send` admits information without waking or interrupting the recipient.
+- `message send` admits information and wakes an idle recipient when its original conversation is available; it creates no task or reply obligation.
 - `message followup` admits a task and returns its canonical `request_id` without
   waiting for completion. Use `--idempotency-key` to identify one logical admission.
-- `message receive` reads a bounded inbox page. Reuse `next_cursor` to continue;
-  pass `ack_cursor` only for a page already consumed. An empty wait does not cancel
-  a task, consume a reply, or authorize a resend.
 - `message reply <request-id> --status done|blocked|failed` completes that request
   as its authorized recipient. Native Codex task turns also publish their bound
-  final result automatically. Other delivery paths require an explicit reply;
-  echoed IDs and Idle status alone never complete a request.
+  final result automatically; Wardian resumes the requester's original provider
+  conversation when a safe route is available.
 - `message interrupt <target>` explicitly requests interruption when supported.
 
 Send, follow-up and reply bodies accept literal text, `--stdin`, or `--file`.
-`receive` accepts `--limit` from 1 to 100 and `--timeout-ms` from 0 to 60000.
-Replies are information records whose `parent_interaction_id` identifies the task.
+Replies retain their canonical `parent_interaction_id` task correlation.
 
-Automatic dispatch and manual receive use the same durable task claim. Codex
-delivery uses the negotiated native connection; it never pastes a peer message
-into the terminal composer. Information push does not start a turn. Provider
-acceptance and task completion remain separate recorded outcomes.
+Automatic dispatch uses durable task claims. Codex delivery prefers the
+negotiated native connection. An idle surface fallback is used only when no
+native owner is selected and the runtime can confirm a provider turn receipt;
+an uncertain native submission never falls back to the terminal composer.
+Information context delivery and task completion remain separate recorded
+outcomes.
 
 The old top-level send/ask/reply commands, terminal queue policies, broadcast
 selectors, output-marker asks and messaging slash-command injection are removed.

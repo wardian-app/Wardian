@@ -17,7 +17,7 @@ function trace(thread, generation, turn, status = "completed") {
     turns: [{ turn_id: turn, status }], items: [], host_deliveries: [] };
 }
 function host(id, kind, turn, literal = marker) {
-  return { name: kind === "task" ? "wardian_task_delivery" : "wardian_inbox_delivery",
+  return { name: kind === "task" ? "wardian_task_delivery" : kind === "reply" ? "wardian_reply_continuation" : "wardian_inbox_delivery",
     message_id: id, turn_id: turn, context: { schema_version: 1, kind, sender: "sender", recipient: "receiver",
       interaction_id: id, request_id: kind === "task" ? id : null, body: literal } };
 }
@@ -31,7 +31,7 @@ function reply(id, receiptId, turn) {
 function binding(agent) {
   return { provider: "codex", target_agent_id: agent, provider_session_id: `${agent}-thread`, generation: 2 };
 }
-function fixture(mode = "background") {
+function fixture(mode = "background", informationPolicy = "wake") {
   const source = Object.fromEntries([MESSAGING_HARNESS, "src-tauri/src/control/agent_messaging.rs",
     "src-tauri/src/delivery/codex_shared.rs", "src-tauri/src/delivery/codex_shared/owner.rs",
     "src-tauri/src/delivery/native_broker/codex.rs"].map(key => [key, digest]));
@@ -53,10 +53,15 @@ function fixture(mode = "background") {
     optional_cases: {}, attached_tui: "pass_same_owner_thread_and_original_terminals" };
   report.sender_trace.items = [
     { tool: "followup_task", turn_id: "sender-turn", arguments: { target: "receiver" }, receipt: { request_id: "task-1", duplicate: false } },
-    { tool: "receive_messages", receipt: { messages: [{ interaction_id: "reply-1", kind: "reply", sender: "receiver",
-      parent_interaction_id: "task-1", reply_status: "done", message: marker }] } },
-    { type: "agentMessage", turn_id: "sender-turn", text: marker },
+    { type: "agentMessage", turn_id: "sender-continuation", text: marker },
   ];
+  report.sender_trace.contexts.push({ turn_id: "sender-continuation", model, effort: "low",
+    effort_evidence: "owned_turn_context", cwd: "<fixture-workspace>" });
+  report.sender_trace.turns.push({ turn_id: "sender-continuation", status: "completed" });
+  report.sender_trace.host_deliveries = [{ name: "wardian_reply_continuation", message_id: "reply-1",
+    turn_id: "sender-continuation", context: { schema_version: 1, kind: "reply", sender: "receiver",
+      recipient: "sender", interaction_id: "reply-1", parent_interaction_id: "task-1", request_id: "task-1",
+      body: marker, reply_status: "done" } }];
   report.receiver_trace.items = [reply("task-1", "reply-1", "receiver-turn")];
   report.receiver_trace.host_deliveries = [host("task-1", "task", "receiver-turn")];
   if (mode === "background") {
@@ -77,9 +82,19 @@ function fixture(mode = "background") {
     }
     const before = structuredClone(report.receiver_trace);
     const after = structuredClone(before);
-    after.host_deliveries.push(host("info-1", "message", "receiver-turn", "Information only."));
-    report.optional_cases.idle_information = { status: "pass", scope: "observed_interval", interaction_id: "info-1",
-      receipt: { operation: "send_message", interaction_id: "info-1", duplicate: false }, before, after };
+    if (informationPolicy === "legacy") {
+      after.host_deliveries.push(host("info-1", "message", "receiver-turn", "Information only."));
+      report.optional_cases.idle_information = { status: "pass", scope: "observed_interval", interaction_id: "info-1",
+        receipt: { operation: "send_message", interaction_id: "info-1", duplicate: false }, before, after };
+    } else {
+      const turnId = "information-turn";
+      after.turns.push({ turn_id: turnId, status: "completed" });
+      after.contexts.push({ turn_id: turnId, model, effort: "low", effort_evidence: "owned_turn_context", cwd: "<fixture-workspace>" });
+      after.host_deliveries.push(host("info-1", "message", turnId, "Information only."));
+      report.optional_cases.idle_information_wake = { status: "pass", scope: "observed_interval",
+        delivery_policy: "new_admission_wakes_idle", interaction_id: "info-1",
+        receipt: { operation: "send_message", interaction_id: "info-1", duplicate: false }, before, after };
+    }
     const active = trace("receiver-thread", 2, "interrupt-turn", "inProgress");
     active.host_deliveries = [host("interrupt-task", "task", "interrupt-turn")];
     const stopped = structuredClone(active);
@@ -142,19 +157,35 @@ test("a final marker alone, receipt alone, wrong correlation or duplicate reply 
     x => { x.report.sender_trace.turns[0].status = "inProgress"; },
     x => { x.report.initial_submission_attempts = 2; },
     x => { x.report.initial_delivery.provider_turn_id = "wrong"; },
+    x => { x.report.initial_delivery.provider_turn_id = "sender-continuation"; },
   ]) { const x = fixture(); mutate(x); assert.throws(() => read(x), /codex_messaging_evidence:/); }
 });
 
-test("native push consumption requires exact sender recipient identity", () => {
+test("native reply continuation consumption requires exact sender recipient identity", () => {
   const x = fixture();
-  x.report.sender_trace.items.splice(1, 1);
-  const delivery = host("reply-1", "reply", "sender-turn");
+  const delivery = host("reply-1", "reply", "sender-continuation");
   Object.assign(delivery.context, { sender: "receiver", recipient: "sender", request_id: "task-1",
     parent_interaction_id: "task-1", reply_status: "done" });
   x.report.sender_trace.host_deliveries = [delivery];
   assert.equal(read(x).length, 2);
   delivery.context.recipient = "foreign";
-  assert.throws(() => read(x), /push_recipient/);
+  assert.throws(() => read(x), /automatic_reply_continuation/);
+
+  const legacyInbox = fixture();
+  legacyInbox.report.sender_trace.host_deliveries[0].name = "wardian_inbox_delivery";
+  assert.throws(() => read(legacyInbox), /missing_or_duplicate_evidence/);
+});
+
+test("reply continuation answer must belong to its actual completed provider turn", () => {
+  for (const mutate of [
+    x => { x.report.sender_trace.turns.find(turn => turn.turn_id === "sender-continuation").status = "inProgress"; },
+    x => { x.report.sender_trace.contexts = x.report.sender_trace.contexts.filter(context => context.turn_id !== "sender-continuation"); },
+    x => { x.report.sender_trace.contexts.find(context => context.turn_id === "sender-continuation").model = "other"; },
+  ]) {
+    const x = fixture();
+    mutate(x);
+    assert.throws(() => read(x), /codex_messaging_evidence:/);
+  }
 });
 
 test("background continuity needs distinct admission, newer generation and omitted marker recall", () => {
@@ -173,13 +204,27 @@ test("attached exchange cannot pass on a replaced terminal or thread", () => {
   ]) { const x = fixture("attached_tui"); mutate(x.report.agents[0]); assert.throws(() => read(x), /attachment_/); }
 });
 
-test("idle information rejects new turns, duplicate append and wrong recipient", () => {
+test("new idle peer information requires one correlated same-thread provider turn", () => {
   for (const mutate of [
-    c => { c.after.turns.push({ turn_id: "new", status: "completed" }); },
+    c => { c.after.turns.pop(); },
+    c => { c.after.turns.push({ turn_id: "extra", status: "completed" }); },
     c => { c.after.host_deliveries.push(c.after.host_deliveries.at(-1)); },
     c => { c.after.host_deliveries.at(-1).context.recipient = "other"; },
     c => { c.before.generation++; },
-  ]) { const x = fixture("attached_tui"); mutate(x.report.optional_cases.idle_information); assert.throws(() => read(x), /codex_messaging_evidence:/); }
+    c => { c.after.host_deliveries.at(-1).turn_id = "receiver-turn"; },
+    c => { c.delivery_policy = "legacy_notify_only"; },
+  ]) { const x = fixture("attached_tui"); mutate(x.report.optional_cases.idle_information_wake); assert.throws(() => read(x), /codex_messaging_evidence:/); }
+});
+
+test("historical notification-only information remains a separate non-waking observation", () => {
+  const x = fixture("attached_tui", "legacy");
+  const rows = read(x);
+  assert.ok(rows.some(row => row.function === "messaging_non_waking_info"));
+  assert.ok(!rows.some(row => row.function === "messaging_idle_information_wake"));
+
+  const woke = fixture("attached_tui", "legacy");
+  woke.report.optional_cases.idle_information.after.turns.push({ turn_id: "unexpected", status: "completed" });
+  assert.throws(() => read(woke), /legacy_information_woke_turn/);
 });
 
 test("interruption requires the exact previously active turn, not natural completion or admission", () => {

@@ -161,7 +161,7 @@ fn send_and_followup_preserve_admission_keys_and_return_canonical_ids() {
 }
 
 #[test]
-fn reply_uses_exact_canonical_request_and_receive_preserves_cursors() {
+fn reply_uses_exact_canonical_request() {
     let home = TempDir::new().unwrap();
     let server = spawn_endpoint(
         home.path(),
@@ -186,54 +186,16 @@ fn reply_uses_exact_canonical_request_and_receive_preserves_cursors() {
         wire["request"],
         json!({"operation":"reply","request_id":"canonical-task","status":"done","message":"result"})
     );
-    let home = TempDir::new().unwrap();
-    let server = spawn_endpoint(
-        home.path(),
-        Some(
-            r#"{"operation":"receive_messages","messages":[],"next_cursor":"next:2","ack_cursor":"ack:2","has_more":false,"timed_out":true}"#,
-        ),
-    );
-    let output = run_cli(
-        home.path(),
-        &[
-            "message",
-            "receive",
-            "--cursor",
-            "next:1",
-            "--ack-cursor",
-            "ack:1",
-            "--limit",
-            "7",
-            "--timeout-ms",
-            "25",
-        ],
-    );
-    assert!(output.status.success());
-    let wire = server.join().unwrap();
-    assert_eq!(
-        wire["request"],
-        json!({"operation":"receive_messages","cursor":"next:1","ack_cursor":"ack:1","limit":7,"timeout_ms":25})
-    );
-    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["next_cursor"], "next:2");
-    assert_eq!(result["timed_out"], true);
+}
 
+#[test]
+fn retired_receive_and_wait_commands_fail_before_control_io() {
     let home = TempDir::new().unwrap();
-    let server = spawn_endpoint(
-        home.path(),
-        Some(r#"{"operation":"wait_agent","timed_out":false}"#),
-    );
-    let output = run_cli(home.path(), &["message", "wait", "--timeout-ms", "25"]);
-    assert!(output.status.success());
-    let wire = server.join().unwrap();
-    assert_eq!(
-        wire["request"],
-        json!({"operation":"wait_agent","timeout_ms":25})
-    );
-    assert_eq!(
-        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-        json!({"operation":"wait_agent","timed_out":false})
-    );
+    for args in [vec!["message", "receive"], vec!["message", "wait"]] {
+        let output = run_cli(home.path(), &args);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(args[1]));
+    }
 }
 
 #[test]

@@ -10,9 +10,20 @@ fn frame() -> String {
     json!({
         "schema_version":1, "sender":"peer-sender", "recipient":"wardian-id",
         "kind":"task", "interaction_id":"task-id", "request_id":"task-id",
-        "parent_interaction_id":"parent-id", "reply_status":null,
+        "parent_interaction_id":null, "reply_status":null,
         "host_automation":{"run_id":"run-id","node":"node-id"},
         "body":"  literal peer body\nλ中 \"quotes\"\\\t  "
+    })
+    .to_string()
+}
+
+fn informational_frame(id: &str) -> String {
+    json!({
+        "schema_version":1, "sender":"peer-sender", "recipient":"wardian-id",
+        "kind":"message", "interaction_id":id, "request_id":null,
+        "parent_interaction_id":null, "reply_status":null,
+        "host_automation":null, "body":"FYI: the review is ready",
+        "pending_information":[]
     })
     .to_string()
 }
@@ -75,7 +86,7 @@ async fn exact_active_steer_preserves_body_and_host_only_routing() {
     active(&client);
     let context = frame();
     let expected: Value = serde_json::from_str(&context).unwrap();
-    let admitted = client.followup("message-id", &context);
+    let admitted = client.followup("task-id", &context);
     let provider = async {
         let request = receive(&mut socket).await;
         assert_eq!(request["method"], "turn/steer");
@@ -131,7 +142,7 @@ async fn exact_active_steer_preserves_body_and_host_only_routing() {
     let receipt = receipt.unwrap();
     assert_eq!(receipt.admission_mode.as_deref(), Some("steer"));
     assert_eq!(receipt.provider_turn_id.as_deref(), Some("active"));
-    assert_eq!(receipt.message_id.as_deref(), Some("message-id"));
+    assert_eq!(receipt.message_id.as_deref(), Some("task-id"));
     assert_eq!(
         client
             .wait_for_final_result("active", Duration::from_secs(1))
@@ -180,7 +191,7 @@ async fn idle_start_keeps_tool_output_for_older_versions_and_cached_terminal_sta
             )
             .await;
         };
-        let (receipt, ()) = tokio::join!(client.followup("message-id", &context), provider);
+        let (receipt, ()) = tokio::join!(client.followup("task-id", &context), provider);
         assert_eq!(receipt.unwrap().admission_mode.as_deref(), Some("start"));
         assert_eq!(
             client
@@ -191,6 +202,36 @@ async fn idle_start_keeps_tool_output_for_older_versions_and_cached_terminal_sta
         );
         client.close().await;
     }
+}
+
+#[tokio::test]
+async fn idle_information_wake_starts_one_turn_as_inbox_context_without_task_reply() {
+    let (client, mut socket) = connected("0.159.2", json!({"type":"idle"})).await;
+    let context = informational_frame("message-id");
+    let provider = async {
+        let request = receive(&mut socket).await;
+        assert_eq!(request["method"], "turn/start");
+        assert_eq!(request["params"]["input"], json!([]));
+        assert_eq!(
+            request["params"]["toolOutput"]["name"],
+            "wardian_inbox_delivery"
+        );
+        assert_eq!(request["params"]["toolOutput"]["output"], context);
+        send(
+            &mut socket,
+            json!({"id":request["id"],"result":{"turn":{"id":"information-turn"}}}),
+        )
+        .await;
+    };
+    let (receipt, ()) = tokio::join!(client.followup("message-id", &context), provider);
+    let receipt = receipt.unwrap();
+    assert_eq!(
+        receipt.provider_turn_id.as_deref(),
+        Some("information-turn")
+    );
+    assert_eq!(receipt.message_id.as_deref(), Some("message-id"));
+    assert_no_write(&mut socket).await;
+    client.close().await;
 }
 
 #[tokio::test]
@@ -397,6 +438,31 @@ async fn information_and_replies_inject_without_waking_old_or_pending_owners() {
         }
         client.close().await;
     }
+}
+
+#[tokio::test]
+async fn invalid_task_correlation_returns_early_error_without_a_provider_write() {
+    let (client, mut socket) = connected("0.159.2", json!({"type":"active"})).await;
+    active(&client);
+    for (message_id, parent) in [("task-id", json!("parent-id")), ("message-id", Value::Null)] {
+        let mut context: Value = serde_json::from_str(&frame()).unwrap();
+        context["parent_interaction_id"] = parent;
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.followup(message_id, &context.to_string()),
+        )
+        .await
+        .expect("invalid correlation returns before waiting for provider input")
+        .unwrap_err();
+        assert_eq!(error.code, "unsupported");
+        assert_eq!(
+            error.message,
+            "native followup requires an exactly correlated canonical task or reply frame"
+        );
+        assert!(!error.provider_boundary_crossed);
+        assert_no_write(&mut socket).await;
+    }
+    client.close().await;
 }
 
 #[tokio::test]

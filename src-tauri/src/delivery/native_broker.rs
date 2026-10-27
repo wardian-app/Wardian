@@ -1274,19 +1274,47 @@ impl NativeDeliveryBroker {
                 false,
             )
         })?;
-        if context["kind"].as_str() != Some("task") {
+        let kind = context["kind"].as_str();
+        let reply_continuation = kind == Some("reply");
+        let informational_message = kind == Some("message");
+        if !matches!(kind, Some("task" | "reply" | "message")) {
             return Err(error(
                 NativeDeliveryErrorCode::UnsupportedOperation,
-                "OpenCode HTTP accepts task context only; information remains manual",
+                "OpenCode HTTP accepts canonical task, reply, or informational message context only",
                 false,
             ));
         }
+        let message_frame = serde_json::from_value::<
+            wardian_core::agent_messaging::AgentMessageContext,
+        >(context.clone())
+        .map_err(|_| {
+            error(
+                NativeDeliveryErrorCode::UnsupportedOperation,
+                "OpenCode message context was not a canonical message frame",
+                false,
+            )
+        })?;
         let recipient = context["recipient"].as_str().unwrap_or_default();
         let interaction_id = context["interaction_id"].as_str().unwrap_or_default();
+        let correlated = if reply_continuation {
+            context["parent_interaction_id"]
+                .as_str()
+                .is_some_and(|parent| {
+                    context["request_id"].as_str() == Some(parent)
+                        && context["reply_status"].as_str().is_some()
+                })
+        } else if informational_message {
+            context["request_id"].is_null()
+                && context["parent_interaction_id"].is_null()
+                && context["reply_status"].is_null()
+        } else {
+            context["request_id"].as_str() == Some(message_id)
+        };
         if recipient != target_agent_id
             || interaction_id.is_empty()
             || message_id.is_empty()
-            || context["request_id"].as_str() != Some(message_id)
+            || interaction_id != message_id
+            || !correlated
         {
             return Err(error(
                 NativeDeliveryErrorCode::UnsupportedOperation,
@@ -1294,6 +1322,7 @@ impl NativeDeliveryBroker {
                 false,
             ));
         }
+        let reply_frame = reply_continuation.then_some(&message_frame);
         let provenance = if let Some(sender) = context["sender"]
             .as_str()
             .map(str::trim)
@@ -1326,11 +1355,26 @@ impl NativeDeliveryBroker {
                 false,
             ));
         };
-        let prompt_text = format!(
-            "Wardian canonical task provenance: {}\n\n{}",
-            serde_json::to_string(&provenance).unwrap_or_else(|_| "{}".to_string()),
-            crate::control::message_with_structured_reply_instruction(body, message_id,)
-        );
+        let prompt_text = if reply_continuation {
+            wardian_core::agent_messaging::reply_continuation_prompt(
+                reply_frame.as_ref().expect("reply frame was validated"),
+            )
+        } else if informational_message {
+            wardian_core::agent_messaging::information_delivery_prompt(&message_frame)
+        } else {
+            let information =
+                wardian_core::agent_messaging::pending_information_prompt(&message_frame);
+            let information = if information.is_empty() {
+                String::new()
+            } else {
+                format!("{information}\n\n")
+            };
+            format!(
+                "{information}Wardian canonical task provenance: {}\n\n{}",
+                serde_json::to_string(&provenance).unwrap_or_else(|_| "{}".to_string()),
+                crate::control::message_with_structured_reply_instruction(body, message_id,)
+            )
+        };
         if let Err(error) = self
             .opencode_http_admission(target_agent_id, generation, config, workspace)
             .await
@@ -1581,13 +1625,24 @@ impl NativeDeliveryBroker {
                 false,
             )
         })?;
-        if context["kind"].as_str() != Some("task") {
+        let kind = context["kind"].as_str();
+        let reply_continuation = kind == Some("reply");
+        let informational_message = kind == Some("message");
+        if !matches!(kind, Some("task" | "reply" | "message")) {
             return Err(error(
                 NativeDeliveryErrorCode::UnsupportedOperation,
-                "Pi bridge accepts task context only; information remains manual",
+                "Pi bridge accepts canonical task, reply, or informational message context only",
                 false,
             ));
         }
+        let frame: wardian_core::agent_messaging::AgentMessageContext =
+            serde_json::from_value(context.clone()).map_err(|_| {
+                error(
+                    NativeDeliveryErrorCode::UnsupportedOperation,
+                    "Pi bridge message context was not a canonical message frame",
+                    false,
+                )
+            })?;
         let sender = pi_sender_id(&context).ok_or_else(|| {
             error(
                 NativeDeliveryErrorCode::UnsupportedOperation,
@@ -1597,7 +1652,26 @@ impl NativeDeliveryBroker {
         })?;
         let recipient = context["recipient"].as_str().unwrap_or_default();
         let interaction_id = context["interaction_id"].as_str().unwrap_or_default();
-        if recipient != target_agent_id || interaction_id.is_empty() || message_id.is_empty() {
+        let correlated = if reply_continuation {
+            context["parent_interaction_id"]
+                .as_str()
+                .is_some_and(|parent| {
+                    context["request_id"].as_str() == Some(parent)
+                        && context["reply_status"].as_str().is_some()
+                })
+        } else if informational_message {
+            context["request_id"].is_null()
+                && context["parent_interaction_id"].is_null()
+                && context["reply_status"].is_null()
+        } else {
+            context["request_id"].as_str() == Some(message_id)
+        };
+        if recipient != target_agent_id
+            || interaction_id != message_id
+            || interaction_id.is_empty()
+            || message_id.is_empty()
+            || !correlated
+        {
             return Err(error(
                 NativeDeliveryErrorCode::UnsupportedOperation,
                 "Pi bridge context does not match the claimed target",
@@ -1612,6 +1686,18 @@ impl NativeDeliveryBroker {
                 false,
             ));
         };
+        let body = if reply_continuation {
+            wardian_core::agent_messaging::reply_continuation_prompt(&frame)
+        } else if informational_message {
+            wardian_core::agent_messaging::information_delivery_prompt(&frame)
+        } else {
+            let information = wardian_core::agent_messaging::pending_information_prompt(&frame);
+            if information.is_empty() {
+                body.to_string()
+            } else {
+                format!("{information}\n\nWardian task:\n{body}")
+            }
+        };
         let envelope = NativeMessageEnvelope {
             interaction_id: interaction_id.to_string(),
             message_id: message_id.to_string(),
@@ -1624,7 +1710,9 @@ impl NativeDeliveryBroker {
             generation,
             operation: NativeMessageOperation::StartTurn,
             deadline_at: None,
-            body: body.to_string(),
+            // The bridge envelope carries canonical reply correlation out of
+            // band. Keep the provider-visible literal unchanged and bounded.
+            body,
         };
         registration
             .owner

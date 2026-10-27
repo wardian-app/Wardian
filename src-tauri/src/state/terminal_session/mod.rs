@@ -9,6 +9,7 @@ mod resize_tests;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use actor::{AutomatedConversationLeaseAdmission, AutomatedInputAdmissionFence};
 pub use actor::{
     NativeTerminalWriteRequest, TerminalBrokerError, TerminalClientIdentity,
     TerminalRuntimeHandles, TerminalSessionBroker, TerminalSessionHandle, TerminalTimer,
