@@ -286,9 +286,11 @@ The default remote roster does not include transcript or output text. Remote
 automation runs also reject arbitrary phone-provided payloads until Wardian has
 automation-specific input schemas.
 
-Revoke a lost or untrusted phone immediately from Settings. Revocation ends the
-device's active remote sessions and prevents future gateway calls from that
-device.
+Revoke a lost or untrusted phone immediately from Settings. Once the revocation
+is saved, later gateway requests from that device are rejected even if another
+Wardian process still has a cached session. Existing status and terminal sockets
+close at their next session check. If the persistent device record is missing,
+revoked, or cannot be read, the gateway fails closed.
 
 ## Mobile Surface
 

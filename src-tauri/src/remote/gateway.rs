@@ -577,12 +577,21 @@ async fn create_auth_session(
         return Err(RemoteGatewayError::unauthorized("invalid_auth_signature"));
     }
 
-    let session = {
-        let state = ctx.app.state::<crate::state::AppState>();
-        let mut runtime = state.remote_runtime.lock().await;
-        crate::remote::auth::create_session(&mut runtime, &device.device_id, now_ms)
-    };
-    update_device_last_used(&device.device_id, &millis_to_rfc3339(now_ms))?;
+    let state = ctx.app.state::<crate::state::AppState>();
+    let session = crate::remote::auth::issue_session_for_active_device(
+        state.remote_device_store_lock.clone(),
+        &state.remote_runtime,
+        device.device_id.clone(),
+        millis_to_rfc3339(now_ms),
+        now_ms,
+    )
+    .await
+    .map_err(|error| match error.message.as_str() {
+        "remote_device_revoked" | "remote_device_not_found" => {
+            RemoteGatewayError::not_found("device_not_found")
+        }
+        _ => RemoteGatewayError::bad_request("device_store_failed"),
+    })?;
     audit_gateway_event(
         &session,
         &origin,
@@ -1143,11 +1152,7 @@ async fn handle_status_socket(ctx: RemoteGatewayContext, mut socket: WebSocket) 
     }
 
     'stream: loop {
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        let session_active = {
-            let runtime = state.remote_runtime.lock().await;
-            status_stream_session_is_active(&runtime, &ticket_record.session_id, now_ms)
-        };
+        let session_active = remote_session_is_active(&state, &ticket_record.session_id).await;
         if !session_active {
             send_status_socket_error(&mut socket, "session_expired").await;
             break;
@@ -1218,6 +1223,7 @@ fn parse_status_socket_ticket_message(message: Message) -> Result<String, &'stat
     Ok(ticket.to_string())
 }
 
+#[cfg(test)]
 fn status_stream_session_is_active(
     runtime: &crate::remote::models::RemoteRuntimeState,
     session_id: &str,
@@ -1229,11 +1235,22 @@ fn status_stream_session_is_active(
         .is_some_and(|session| crate::remote::auth::session_is_active(session, now_ms))
 }
 
-#[cfg(test)]
 async fn remote_session_is_active(state: &crate::state::AppState, session_id: &str) -> bool {
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let runtime = state.remote_runtime.lock().await;
-    status_stream_session_is_active(&runtime, session_id, now_ms)
+    let session = {
+        let runtime = state.remote_runtime.lock().await;
+        runtime
+            .sessions
+            .get(session_id)
+            .filter(|session| crate::remote::auth::session_is_active(session, now_ms))
+            .cloned()
+    };
+    let Some(session) = session else {
+        return false;
+    };
+    remote_device_authority_active(session.device_id)
+        .await
+        .is_ok()
 }
 
 async fn send_status_socket_error(socket: &mut WebSocket, code: &'static str) {
@@ -1343,15 +1360,27 @@ async fn require_remote_session<R: Runtime>(
     let session_id = remote_session_cookie_value(headers)?;
     let now_ms = chrono::Utc::now().timestamp_millis();
     let state = ctx.app.state::<crate::state::AppState>();
-    let mut runtime = state.remote_runtime.lock().await;
-    let session = runtime
-        .sessions
-        .get_mut(&session_id)
-        .ok_or_else(|| RemoteGatewayError::unauthorized("session_not_found"))?;
-    if crate::remote::auth::refresh_session_activity(session, now_ms).is_err() {
-        return Err(RemoteGatewayError::unauthorized("session_expired"));
+    let session = {
+        let mut runtime = state.remote_runtime.lock().await;
+        let session = runtime
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| RemoteGatewayError::unauthorized("session_not_found"))?;
+        if crate::remote::auth::refresh_session_activity(session, now_ms).is_err() {
+            return Err(RemoteGatewayError::unauthorized("session_expired"));
+        }
+        session.clone()
+    };
+
+    match remote_device_authority_active(session.device_id.clone()).await {
+        Ok(()) => Ok(session),
+        Err("device_not_found") => {
+            let mut runtime = state.remote_runtime.lock().await;
+            crate::remote::auth::revoke_sessions_for_device(&mut runtime, &session.device_id);
+            Err(RemoteGatewayError::unauthorized("session_expired"))
+        }
+        Err(_) => Err(RemoteGatewayError::bad_request("device_store_failed")),
     }
-    Ok(session.clone())
 }
 
 async fn require_mutation_rate_limit<R: Runtime>(
@@ -1431,7 +1460,7 @@ fn pairing_response_from_pending_record(
     request: &PendingPairingRequestRecord,
 ) -> PairingSubmitResponse {
     let status = match request.decision {
-        PendingPairingDecision::Pending => "pending",
+        PendingPairingDecision::Pending | PendingPairingDecision::Approving => "pending",
         PendingPairingDecision::Approved => "approved",
         PendingPairingDecision::Rejected => "rejected",
     };
@@ -1514,20 +1543,16 @@ fn active_remote_device(device_id: &str) -> Result<DeviceRecord, RemoteGatewayEr
         .ok_or_else(|| RemoteGatewayError::not_found("device_not_found"))
 }
 
-fn update_device_last_used(device_id: &str, last_used_at: &str) -> Result<(), RemoteGatewayError> {
-    let mut store = crate::remote::storage::load_device_store()
-        .map_err(|_| RemoteGatewayError::bad_request("device_store_failed"))?;
-    let Some(device) = store
-        .devices
-        .iter_mut()
-        .find(|device| device.device_id == device_id)
-    else {
-        return Err(RemoteGatewayError::bad_request("device_not_found"));
-    };
-    device.last_used_at = Some(last_used_at.to_string());
-    crate::remote::storage::save_device_store(&store)
-        .map_err(|_| RemoteGatewayError::bad_request("device_store_failed"))?;
-    Ok(())
+/// Checks the persisted device authority off the async executor and outside the
+/// runtime lock, so other processes' revocations govern later authorizations.
+pub(super) async fn remote_device_authority_active(device_id: String) -> Result<(), &'static str> {
+    tokio::task::spawn_blocking(move || {
+        active_remote_device(&device_id)
+            .map(|_| ())
+            .map_err(|error| error.code)
+    })
+    .await
+    .map_err(|_| "device_store_failed")?
 }
 
 fn check_runtime_rate_limit(
@@ -1752,7 +1777,7 @@ impl IntoResponse for RemoteGatewayError {
 mod tests {
     use super::*;
     use crate::remote::models::{
-        RemoteGatewayConfig, RemoteSessionRecord, REMOTE_AUDIT_SCHEMA_VERSION,
+        DeviceRecord, RemoteGatewayConfig, RemoteSessionRecord, REMOTE_AUDIT_SCHEMA_VERSION,
         REMOTE_SETTINGS_SCHEMA_VERSION,
     };
     use crate::state::AppState;
@@ -1794,6 +1819,24 @@ mod tests {
             gateway_identity_public_key: "pub".to_string(),
             gateway_identity_fingerprint: "fp".to_string(),
         }
+    }
+
+    fn seed_active_remote_devices(home: &std::path::Path, device_ids: &[&str]) {
+        crate::remote::storage::update_device_store_at(home, |store| {
+            for device_id in device_ids {
+                store.devices.push(DeviceRecord {
+                    device_id: (*device_id).to_string(),
+                    label: format!("Test device {device_id}"),
+                    public_key_spki_der_base64: format!("key-{device_id}"),
+                    public_key_fingerprint: format!("fingerprint-{device_id}"),
+                    created_at: "2026-10-29T00:00:00Z".to_string(),
+                    last_used_at: None,
+                    revoked_at: None,
+                });
+            }
+            Ok(())
+        })
+        .expect("seed active remote devices");
     }
 
     #[test]
@@ -2068,35 +2111,167 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_session_is_active_reflects_runtime_revocation() {
-        let state = crate::state::AppState::new();
-        let session_id = {
-            let mut runtime = state.remote_runtime.lock().await;
-            crate::remote::auth::create_session(
+    async fn persistent_revocation_blocks_cached_request_and_socket_authority() {
+        let temp = tempfile::tempdir().expect("temp home");
+        let _home = WardianHomeEnvGuard::set_async(temp.path()).await;
+        seed_active_remote_devices(temp.path(), &["device-1", "device-2"]);
+
+        let revoker = AppState::new();
+        let serving_app = tauri::test::mock_app();
+        serving_app.manage(AppState::new());
+        let serving = serving_app.state::<AppState>();
+        assert!(!std::sync::Arc::ptr_eq(
+            &revoker.remote_device_store_lock,
+            &serving.remote_device_store_lock,
+        ));
+        let (revoked_device_session, unaffected_device_session) = {
+            let mut runtime = serving.remote_runtime.lock().await;
+            let revoked = crate::remote::auth::create_session(
                 &mut runtime,
-                "dev-1",
+                "device-1",
                 chrono::Utc::now().timestamp_millis(),
-            )
-            .session_id
+            );
+            let unaffected = crate::remote::auth::create_session(
+                &mut runtime,
+                "device-2",
+                chrono::Utc::now().timestamp_millis(),
+            );
+            (revoked, unaffected)
+        };
+        let ctx = RemoteGatewayContext {
+            app: serving_app.handle().clone(),
+            config: config(),
         };
 
-        assert!(remote_session_is_active(&state, &session_id).await);
+        assert!(
+            require_remote_session(&ctx, &action_headers(&revoked_device_session))
+                .await
+                .is_ok()
+        );
+        assert!(
+            crate::remote::terminal_stream::ticket_session_is_active(
+                &serving,
+                &revoked_device_session.session_id,
+                "device-1",
+            )
+            .await
+        );
+        assert!(
+            crate::remote::terminal_stream::ticket_session_is_active(
+                &serving,
+                &unaffected_device_session.session_id,
+                "device-2",
+            )
+            .await
+        );
 
-        {
-            let mut runtime = state.remote_runtime.lock().await;
-            crate::remote::auth::revoke_sessions_for_device(&mut runtime, "dev-1");
-        }
+        crate::remote::auth::revoke_device_and_sessions(
+            revoker.remote_device_store_lock.clone(),
+            &revoker.remote_runtime,
+            "device-1".to_string(),
+            "2026-10-29T00:01:00Z".to_string(),
+        )
+        .await
+        .expect("revoke from independent runtime state");
 
-        assert!(!remote_session_is_active(&state, &session_id).await);
+        let issuance_error = crate::remote::auth::issue_session_for_active_device(
+            serving.remote_device_store_lock.clone(),
+            &serving.remote_runtime,
+            "device-1".to_string(),
+            "2026-10-29T00:02:00Z".to_string(),
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+        .expect_err("a second runtime cannot issue against revoked persistent authority");
+        assert_eq!(issuance_error.message, "remote_device_revoked");
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let runtime = serving.remote_runtime.lock().await;
+        assert!(status_stream_session_is_active(
+            &runtime,
+            &revoked_device_session.session_id,
+            now_ms,
+        ));
+        drop(runtime);
+
+        assert!(
+            !crate::remote::terminal_stream::ticket_session_is_active(
+                &serving,
+                &revoked_device_session.session_id,
+                "device-1",
+            )
+            .await
+        );
+        assert!(!remote_session_is_active(&serving, &revoked_device_session.session_id).await);
+        assert!(
+            crate::remote::terminal_stream::ticket_session_is_active(
+                &serving,
+                &unaffected_device_session.session_id,
+                "device-2",
+            )
+            .await
+        );
+        assert!(remote_session_is_active(&serving, &unaffected_device_session.session_id).await);
+        assert!(
+            require_remote_session(&ctx, &action_headers(&unaffected_device_session))
+                .await
+                .is_ok()
+        );
+
+        let error = require_remote_session(&ctx, &action_headers(&revoked_device_session))
+            .await
+            .expect_err("a cached session cannot authorize after persistent revocation");
+        assert_eq!(error.code, "session_expired");
+
+        let device_store_path = crate::remote::storage::remote_devices_path(temp.path());
+        let valid_store = std::fs::read(&device_store_path).expect("read valid device store");
+        std::fs::write(&device_store_path, b"not valid json").expect("corrupt device store");
+        assert_eq!(
+            remote_device_authority_active("device-2".to_string()).await,
+            Err("device_store_failed")
+        );
+        assert!(
+            !crate::remote::terminal_stream::ticket_session_is_active(
+                &serving,
+                &unaffected_device_session.session_id,
+                "device-2",
+            )
+            .await
+        );
+        assert!(!remote_session_is_active(&serving, &unaffected_device_session.session_id).await);
+        let error = require_remote_session(&ctx, &action_headers(&unaffected_device_session))
+            .await
+            .expect_err("an unreadable authority store must fail closed");
+        assert_eq!(error.code, "device_store_failed");
+
+        std::fs::write(&device_store_path, valid_store).expect("restore valid device store");
+        std::fs::remove_file(&device_store_path).expect("remove device store");
+        assert_eq!(
+            remote_device_authority_active("device-2".to_string()).await,
+            Err("device_not_found")
+        );
+        assert!(
+            !crate::remote::terminal_stream::ticket_session_is_active(
+                &serving,
+                &unaffected_device_session.session_id,
+                "device-2",
+            )
+            .await
+        );
+        assert!(!remote_session_is_active(&serving, &unaffected_device_session.session_id).await);
+        let error = require_remote_session(&ctx, &action_headers(&unaffected_device_session))
+            .await
+            .expect_err("a missing device store must fail closed");
+        assert_eq!(error.code, "session_expired");
     }
 
     #[tokio::test]
     async fn inbox_action_authorization_enforces_origin_session_and_csrf_boundary() {
-        let _guard = crate::utils::wardian_test_env_lock_async().await;
         let temp = tempfile::tempdir().expect("temp home");
-        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        let _home = WardianHomeEnvGuard::set_async(temp.path()).await;
         crate::remote::storage::save_remote_config_at(temp.path(), &config())
             .expect("remote config");
+        seed_active_remote_devices(temp.path(), &["device-1"]);
 
         let app = tauri::test::mock_app();
         app.manage(AppState::new());
@@ -2142,7 +2317,6 @@ mod tests {
             .await
             .expect_err("missing csrf rejected");
         assert_eq!(error.code, "csrf_failed");
-        unsafe { std::env::remove_var("WARDIAN_HOME") };
     }
 
     #[tokio::test]
@@ -2151,6 +2325,7 @@ mod tests {
         let _home = WardianHomeEnvGuard::set_async(temp.path()).await;
         crate::remote::storage::save_remote_config_at(temp.path(), &config())
             .expect("remote config");
+        seed_active_remote_devices(temp.path(), &["device-1"]);
         let app = tauri::test::mock_app();
         app.manage(AppState::new());
         let state = app.state::<AppState>();
@@ -2204,11 +2379,11 @@ mod tests {
 
     #[tokio::test]
     async fn remote_chat_snapshot_failure_returns_a_sanitized_stage_code() {
-        let _guard = crate::utils::wardian_test_env_lock_async().await;
         let temp = tempfile::tempdir().expect("temp home");
-        unsafe { std::env::set_var("WARDIAN_HOME", temp.path()) };
+        let _home = WardianHomeEnvGuard::set_async(temp.path()).await;
         crate::remote::storage::save_remote_config_at(temp.path(), &config())
             .expect("remote config");
+        seed_active_remote_devices(temp.path(), &["device-1"]);
 
         let app = tauri::test::mock_app();
         app.manage(AppState::new());
@@ -2247,8 +2422,6 @@ mod tests {
         assert_eq!(payload["code"], "agent_chat_snapshot_failed");
         assert!(payload.get("detail").is_none());
         assert!(!body_text.contains("sanitized-codex-agent"));
-
-        unsafe { std::env::remove_var("WARDIAN_HOME") };
     }
 
     #[tokio::test]
@@ -2259,6 +2432,7 @@ mod tests {
         let _home = WardianHomeEnvGuard::set_async(temp.path()).await;
         crate::remote::storage::save_remote_config_at(temp.path(), &config())
             .expect("remote config");
+        seed_active_remote_devices(temp.path(), &["synthetic-device"]);
         crate::utils::save_shell_settings(&crate::utils::ShellSettings {
             conversation_logging: wardian_core::conversations::ConversationLoggingSetting::Enabled,
             ..Default::default()

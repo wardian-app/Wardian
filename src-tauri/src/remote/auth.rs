@@ -1,11 +1,12 @@
 use crate::remote::crypto::random_url_token;
 use crate::remote::models::{
     AuthChallengeRecord, PairingOfferRecord, PairingQrPayload, PendingPairingDecision,
-    PendingPairingRequestRecord, RateLimitBucket, RemoteRuntimeState, RemoteSessionRecord,
-    WebSocketTicketRecord,
+    PendingPairingRequestRecord, RateLimitBucket, RemoteDeviceStore, RemoteRuntimeState,
+    RemoteSessionRecord, WebSocketTicketRecord,
 };
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 use subtle::ConstantTimeEq;
+use tokio::sync::Mutex;
 
 const PAIRING_OFFER_TTL_MS: i64 = 120_000;
 const AUTH_CHALLENGE_TTL_MS: i64 = 60_000;
@@ -100,10 +101,9 @@ pub fn pending_pairing_request_is_active(
     request.decision == PendingPairingDecision::Pending && now_ms <= request.expires_at_ms
 }
 
-pub fn mark_pending_pairing_approved(
+pub(crate) fn begin_pending_pairing_approval(
     runtime: &mut RemoteRuntimeState,
     request_id: &str,
-    paired_at: &str,
     now_ms: i64,
 ) -> Result<PendingPairingRequestRecord, String> {
     prune_expired_runtime_state(runtime, now_ms);
@@ -114,9 +114,46 @@ pub fn mark_pending_pairing_approved(
     if !pending_pairing_request_is_active(request, now_ms) {
         return Err("pending_pairing_not_active".to_string());
     }
+    request.decision = PendingPairingDecision::Approving;
+    Ok(request.clone())
+}
+
+pub(crate) fn mark_pending_pairing_approved(
+    runtime: &mut RemoteRuntimeState,
+    request_id: &str,
+    paired_at: &str,
+) -> Result<PendingPairingRequestRecord, String> {
+    let request = runtime
+        .pending_pairing_requests
+        .get_mut(request_id)
+        .ok_or_else(|| "pending_pairing_not_found".to_string())?;
+    if request.decision != PendingPairingDecision::Approving {
+        return Err("pending_pairing_approval_not_started".to_string());
+    }
     request.decision = PendingPairingDecision::Approved;
     request.paired_at = Some(paired_at.to_string());
     Ok(request.clone())
+}
+
+pub(crate) fn mark_pending_pairing_approval_failed(
+    runtime: &mut RemoteRuntimeState,
+    request_id: &str,
+    now_ms: i64,
+) {
+    let should_remove = match runtime.pending_pairing_requests.get_mut(request_id) {
+        Some(request) if request.decision == PendingPairingDecision::Approving => {
+            if now_ms <= request.expires_at_ms {
+                request.decision = PendingPairingDecision::Pending;
+                false
+            } else {
+                true
+            }
+        }
+        _ => false,
+    };
+    if should_remove {
+        runtime.pending_pairing_requests.remove(request_id);
+    }
 }
 
 pub fn mark_pending_pairing_rejected(
@@ -163,6 +200,61 @@ pub fn create_session(
         .sessions
         .insert(session.session_id.clone(), session.clone());
     session
+}
+
+/// Rechecks persistent authority and creates the session under the shared
+/// device-transition gate so revocation cannot finish between those steps.
+pub(crate) async fn issue_session_for_active_device(
+    device_store_lock: Arc<Mutex<()>>,
+    runtime: &Mutex<RemoteRuntimeState>,
+    device_id: String,
+    last_used_at: String,
+    now_ms: i64,
+) -> Result<RemoteSessionRecord, crate::remote::storage::DeviceStoreUpdateError> {
+    let _device_store_guard = device_store_lock.lock_owned().await;
+    crate::remote::storage::update_device_last_used(device_id.clone(), last_used_at).await?;
+    let mut runtime = runtime.lock().await;
+    Ok(create_session(&mut runtime, &device_id, now_ms))
+}
+
+/// Publishes revocation before invalidating sessions while holding the same
+/// transition gate used by final session issuance.
+pub(crate) async fn revoke_device_and_sessions(
+    device_store_lock: Arc<Mutex<()>>,
+    runtime: &Mutex<RemoteRuntimeState>,
+    device_id: String,
+    revoked_at: String,
+) -> Result<RemoteDeviceStore, crate::remote::storage::DeviceStoreUpdateError> {
+    let _device_store_guard = device_store_lock.lock_owned().await;
+    let target_device_id = device_id.clone();
+    let update = crate::remote::storage::update_device_store(move |store| {
+        let device = store
+            .devices
+            .iter_mut()
+            .find(|device| device.device_id == target_device_id)
+            .ok_or_else(|| "remote_device_not_found".to_string())?;
+        if device.revoked_at.is_none() {
+            device.revoked_at = Some(revoked_at);
+        }
+        Ok(())
+    })
+    .await;
+
+    match update {
+        Ok((store, ())) => {
+            let mut runtime = runtime.lock().await;
+            revoke_sessions_for_device(&mut runtime, &device_id);
+            Ok(store)
+        }
+        Err(error) => {
+            if error.publish_state != crate::remote::storage::DeviceStorePublishState::NotPublished
+            {
+                let mut runtime = runtime.lock().await;
+                revoke_sessions_for_device(&mut runtime, &device_id);
+            }
+            Err(error)
+        }
+    }
 }
 
 pub fn session_is_active(session: &RemoteSessionRecord, now_ms: i64) -> bool {
@@ -296,7 +388,9 @@ pub fn prune_expired_runtime_state(runtime: &mut RemoteRuntimeState, now_ms: i64
         .pairing_offers
         .retain(|_, offer| !offer.used && now_ms <= offer.expires_at_ms);
     runtime.pending_pairing_requests.retain(|_, request| {
-        now_ms <= request.expires_at_ms && request.decision != PendingPairingDecision::Rejected
+        request.decision == PendingPairingDecision::Approving
+            || (now_ms <= request.expires_at_ms
+                && request.decision != PendingPairingDecision::Rejected)
     });
     runtime
         .auth_challenges
@@ -455,7 +549,35 @@ fn millis_to_rfc3339(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::remote::models::RemoteRuntimeState;
+    use crate::remote::models::{DeviceRecord, RemoteRuntimeState};
+    use std::{ffi::OsString, future::Future, path::Path, sync::Arc, task::Poll};
+    use tokio::sync::Mutex;
+
+    struct WardianHomeEnvGuard {
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+        previous_home: Option<OsString>,
+    }
+
+    impl WardianHomeEnvGuard {
+        async fn set(home: &Path) -> Self {
+            let lock = crate::utils::wardian_test_env_lock_async().await;
+            let previous_home = std::env::var_os("WARDIAN_HOME");
+            std::env::set_var("WARDIAN_HOME", home);
+            Self {
+                _lock: lock,
+                previous_home,
+            }
+        }
+    }
+
+    impl Drop for WardianHomeEnvGuard {
+        fn drop(&mut self) {
+            match self.previous_home.take() {
+                Some(value) => std::env::set_var("WARDIAN_HOME", value),
+                None => std::env::remove_var("WARDIAN_HOME"),
+            }
+        }
+    }
 
     #[test]
     fn pairing_offer_is_single_use_and_expires() {
@@ -507,6 +629,88 @@ mod tests {
         let stored = runtime.sessions.get(&session.session_id).expect("session");
         assert!(!session_is_active(stored, 1_001_000));
         assert!(!csrf_nonce_matches(stored, &session.csrf_nonce));
+    }
+
+    #[tokio::test]
+    async fn device_revocation_serializes_with_session_issuance() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let _home = WardianHomeEnvGuard::set(temp.path()).await;
+        crate::remote::storage::update_device_store_at(temp.path(), |store| {
+            store.devices.push(DeviceRecord {
+                device_id: "dev-1".to_string(),
+                label: "Phone".to_string(),
+                public_key_spki_der_base64: "key".to_string(),
+                public_key_fingerprint: "fp".to_string(),
+                created_at: "2026-05-21T00:00:00Z".to_string(),
+                last_used_at: None,
+                revoked_at: None,
+            });
+            Ok(())
+        })
+        .expect("seed active device");
+
+        let device_store_lock = Arc::new(Mutex::new(()));
+        let runtime = Mutex::new(RemoteRuntimeState::default());
+        let held = device_store_lock.clone().lock_owned().await;
+
+        let mut issue = Box::pin(issue_session_for_active_device(
+            device_store_lock.clone(),
+            &runtime,
+            "dev-1".to_string(),
+            "2026-05-21T00:01:00Z".to_string(),
+            1_000_000,
+        ));
+        assert!(
+            std::future::poll_fn(|context| {
+                Poll::Ready(issue.as_mut().poll(context).is_pending())
+            })
+            .await,
+            "session issuance waits behind the held device transition gate"
+        );
+
+        let mut revoke = Box::pin(revoke_device_and_sessions(
+            device_store_lock.clone(),
+            &runtime,
+            "dev-1".to_string(),
+            "2026-05-21T00:02:00Z".to_string(),
+        ));
+        assert!(
+            std::future::poll_fn(|context| {
+                Poll::Ready(revoke.as_mut().poll(context).is_pending())
+            })
+            .await,
+            "revocation queues behind session issuance"
+        );
+
+        drop(held);
+        let session = issue.await.expect("session issued before revocation");
+        let revoked_store = revoke.await.expect("device revoked after issuance");
+
+        assert_eq!(
+            revoked_store.devices[0].revoked_at.as_deref(),
+            Some("2026-05-21T00:02:00Z")
+        );
+        let runtime_guard = runtime.lock().await;
+        assert!(
+            runtime_guard
+                .sessions
+                .get(&session.session_id)
+                .expect("issued session retained for observation")
+                .revoked
+        );
+        drop(runtime_guard);
+
+        let error = issue_session_for_active_device(
+            device_store_lock,
+            &runtime,
+            "dev-1".to_string(),
+            "2026-05-21T00:03:00Z".to_string(),
+            1_001_000,
+        )
+        .await
+        .expect_err("a revoked credential cannot issue a later session");
+        assert_eq!(error.message, "remote_device_revoked");
+        assert_eq!(runtime.lock().await.sessions.len(), 1);
     }
 
     #[test]
@@ -711,11 +915,18 @@ mod tests {
             PendingPairingDecision::Pending
         );
 
+        let approving = begin_pending_pairing_approval(&mut runtime, &request.request_id, now + 3)
+            .expect("approval started");
+        assert_eq!(approving.decision, PendingPairingDecision::Approving);
+        prune_expired_runtime_state(&mut runtime, now + 121_000);
+        assert!(runtime
+            .pending_pairing_requests
+            .contains_key(&request.request_id));
+
         let approved = mark_pending_pairing_approved(
             &mut runtime,
             &request.request_id,
             "2026-05-21T00:00:00.000Z",
-            now + 3,
         )
         .expect("approved");
         assert_eq!(approved.decision, PendingPairingDecision::Approved);
@@ -723,6 +934,52 @@ mod tests {
             approved.paired_at.as_deref(),
             Some("2026-05-21T00:00:00.000Z")
         );
+    }
+
+    #[test]
+    fn failed_pairing_approval_releases_or_expires_its_reservation() {
+        let mut runtime = RemoteRuntimeState::default();
+        let now = 1_000_000;
+        let offer = create_pairing_offer(
+            &mut runtime,
+            "https://wardian.tailnet.ts.net",
+            "server-fp",
+            now,
+        )
+        .expect("offer");
+        let offer_record =
+            consume_pairing_offer(&mut runtime, &offer.pairing_offer_id, now + 1).expect("offer");
+        let request = create_pending_pairing_request(
+            &mut runtime,
+            &offer_record,
+            "dev-1",
+            "Phone",
+            "spki",
+            "fp:phone",
+            now + 2,
+        );
+
+        begin_pending_pairing_approval(&mut runtime, &request.request_id, now + 3)
+            .expect("approval started");
+        mark_pending_pairing_approval_failed(&mut runtime, &request.request_id, now + 4);
+        assert!(pending_pairing_request_is_active(
+            runtime
+                .pending_pairing_requests
+                .get(&request.request_id)
+                .expect("approval returned to pending"),
+            now + 4
+        ));
+
+        begin_pending_pairing_approval(&mut runtime, &request.request_id, now + 5)
+            .expect("approval restarted");
+        mark_pending_pairing_approval_failed(
+            &mut runtime,
+            &request.request_id,
+            request.expires_at_ms + 1,
+        );
+        assert!(!runtime
+            .pending_pairing_requests
+            .contains_key(&request.request_id));
     }
 
     #[test]

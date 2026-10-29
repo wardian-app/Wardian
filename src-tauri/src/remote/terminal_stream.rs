@@ -1477,20 +1477,26 @@ fn clamp_remote_geometry(cols: u16, rows: u16) -> TerminalGeometry {
     }
 }
 
-async fn ticket_session_is_active(
+pub(super) async fn ticket_session_is_active(
     state: &crate::state::AppState,
     remote_session_id: &str,
     device_id: &str,
 ) -> bool {
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let runtime = state.remote_runtime.lock().await;
-    runtime
-        .sessions
-        .get(remote_session_id)
-        .is_some_and(|session| {
-            session.device_id == device_id
-                && crate::remote::auth::session_is_active(session, now_ms)
-        })
+    let session_is_active = {
+        let runtime = state.remote_runtime.lock().await;
+        runtime
+            .sessions
+            .get(remote_session_id)
+            .is_some_and(|session| {
+                session.device_id == device_id
+                    && crate::remote::auth::session_is_active(session, now_ms)
+            })
+    };
+    session_is_active
+        && super::gateway::remote_device_authority_active(device_id.to_string())
+            .await
+            .is_ok()
 }
 
 #[cfg(test)]
