@@ -247,46 +247,30 @@ fn validate_device_store_transition(
     Ok(())
 }
 
-#[cfg(test)]
-fn update_device_last_used_at(
-    home: &Path,
+fn record_device_last_used(
+    store: &mut RemoteDeviceStore,
     device_id: &str,
     last_used_at: &str,
-) -> Result<RemoteDeviceStore, DeviceStoreUpdateError> {
-    let device_id = device_id.to_string();
-    let last_used_at = last_used_at.to_string();
-    let (store, ()) = update_device_store_at(home, move |store| {
-        let device = store
-            .devices
-            .iter_mut()
-            .find(|device| device.device_id == device_id)
-            .ok_or_else(|| "remote_device_not_found".to_string())?;
-        if device.revoked_at.is_some() {
-            return Err("remote_device_revoked".to_string());
-        }
-        device.last_used_at = Some(last_used_at);
-        Ok(())
-    })?;
-    Ok(store)
+) -> Result<(), String> {
+    let device = store
+        .devices
+        .iter_mut()
+        .find(|device| device.device_id == device_id)
+        .ok_or_else(|| "remote_device_not_found".to_string())?;
+    if device.revoked_at.is_some() {
+        return Err("remote_device_revoked".to_string());
+    }
+    device.last_used_at = Some(last_used_at.to_string());
+    Ok(())
 }
 
 pub(crate) async fn update_device_last_used(
     device_id: String,
     last_used_at: String,
 ) -> Result<RemoteDeviceStore, DeviceStoreUpdateError> {
-    let (store, ()) = update_device_store(move |store| {
-        let device = store
-            .devices
-            .iter_mut()
-            .find(|device| device.device_id == device_id)
-            .ok_or_else(|| "remote_device_not_found".to_string())?;
-        if device.revoked_at.is_some() {
-            return Err("remote_device_revoked".to_string());
-        }
-        device.last_used_at = Some(last_used_at);
-        Ok(())
-    })
-    .await?;
+    let (store, ()) =
+        update_device_store(move |store| record_device_last_used(store, &device_id, &last_used_at))
+            .await?;
     Ok(store)
 }
 
@@ -406,11 +390,13 @@ mod tests {
         })
         .expect("revoke after stale authorization read");
 
-        let delayed_write = update_device_last_used_at(
-            temp.path(),
-            &stale_authorization.device_id,
-            "2026-05-21T00:06:00Z",
-        )
+        let delayed_write = update_device_store_at(temp.path(), |store| {
+            record_device_last_used(
+                store,
+                &stale_authorization.device_id,
+                "2026-05-21T00:06:00Z",
+            )
+        })
         .expect_err("late auth completion must recheck current authority");
         assert_eq!(delayed_write.message, "remote_device_revoked");
         assert_eq!(
