@@ -117,6 +117,9 @@ pub struct AppState {
     pub change_snapshots: ChangeSnapshotRuntime,
     // Live-only remote-control authentication and ticket records.
     pub remote_runtime: Mutex<crate::remote::models::RemoteRuntimeState>,
+    // Serializes remote-device store publication with auth-session issuance
+    // and revocation's in-memory session invalidation.
+    pub remote_device_store_lock: Arc<Mutex<()>>,
     pub remote_listener: crate::remote::listener::RemoteListener,
     /// Orders persisted settings and startup so an older startup snapshot
     /// cannot reopen a listener after remote access was disabled.
@@ -539,6 +542,7 @@ impl Default for AppState {
             clears_in_flight: Default::default(),
             change_snapshots: ChangeSnapshotRuntime::new(),
             remote_runtime: Mutex::new(crate::remote::models::RemoteRuntimeState::default()),
+            remote_device_store_lock: Arc::new(Mutex::new(())),
             remote_listener: crate::remote::listener::RemoteListener::default(),
             remote_gateway_config_lock: Mutex::new(()),
             remote_agent_roster_cache: RwLock::new(None),

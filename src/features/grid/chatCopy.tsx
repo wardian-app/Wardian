@@ -109,6 +109,7 @@ export function ChatRowActions({
   const [menuOpen, setMenuOpen] = useState(false);
   const menuId = useId();
   const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -117,7 +118,9 @@ export function ChatRowActions({
       if (!containerRef.current?.contains(event.target as Node)) setMenuOpen(false);
     };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMenuOpen(false);
+      if (event.key !== "Escape") return;
+      setMenuOpen(false);
+      if (containerRef.current?.contains(document.activeElement)) triggerRef.current?.focus();
     };
 
     document.addEventListener("mousedown", handlePointerDown);
@@ -141,6 +144,7 @@ export function ChatRowActions({
       </div>
       <button
         type="button"
+        ref={triggerRef}
         className="chat-row-actions-menu-trigger inline-flex items-center justify-center rounded text-muted-neutral hover:bg-[var(--color-wardian-card-bg-muted)] hover:text-primary"
         aria-label={label}
         aria-controls={menuId}
