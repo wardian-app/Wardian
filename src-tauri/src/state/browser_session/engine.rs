@@ -257,9 +257,11 @@ pub async fn launch_engine(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let mut child = command.spawn().map_err(|error| EngineError::Spawn {
-        path: binary.path.clone(),
-        source: error.to_string(),
+    let mut child = crate::utils::process::spawn_owned_command(&mut command).map_err(|error| {
+        EngineError::Spawn {
+            path: binary.path.clone(),
+            source: error.to_string(),
+        }
     })?;
 
     let deadline = Instant::now() + ENDPOINT_TIMEOUT;
