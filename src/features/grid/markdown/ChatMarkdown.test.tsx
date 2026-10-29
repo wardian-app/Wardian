@@ -1,6 +1,6 @@
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { safeMarkdownUrl } from "./markdownSafety";
@@ -205,7 +205,7 @@ describe("ChatMarkdown", () => {
     expect(screen.getByRole("link", { name: "https://example.test/diagram.png" })).toHaveAttribute("href", "https://example.test/diagram.png");
   });
 
-  it("keeps remote file images inert and does not browser-fallback a rejected file opener", () => {
+  it("keeps remote file images inert", () => {
     const openUrlMock = vi.fn().mockRejectedValue(new Error("browser-only opener rejected file URL"));
     const openWindow = vi.spyOn(window, "open").mockReturnValue({} as Window);
 
@@ -222,6 +222,53 @@ describe("ChatMarkdown", () => {
     expect(openWindow).not.toHaveBeenCalled();
 
     openWindow.mockRestore();
+  });
+
+  it.each([
+    { href: "file:///C:/host/document.md", browserFallback: false },
+    { href: "src/App.tsx:12", browserFallback: false },
+    { href: "http://example.test/docs", browserFallback: true },
+    { href: "https://example.test/docs", browserFallback: true },
+  ])("handles rejected remote opener activation for $href", async ({ href, browserFallback }) => {
+    let rejectOpen!: (error: Error) => void;
+    const pendingOpen = new Promise<void>((_resolve, reject) => {
+      rejectOpen = reject;
+    });
+    const openUrlMock = vi.fn(() => pendingOpen);
+    const openWindow = vi.spyOn(window, "open").mockReturnValue(null);
+
+    try {
+      render(
+        <ChatMarkdown
+          linkHandling={{ allowFileLinks: false, openUrl: openUrlMock }}
+          source="Read the [docs](https://example.test/docs)."
+        />,
+      );
+
+      const link = screen.getByRole("link", { name: "docs" });
+      // Remote rendering keeps file targets inert. Mutate an allowed anchor to
+      // exercise the activation-time rejection guard without changing that policy.
+      link.setAttribute("href", href);
+      const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+      fireEvent(link, click);
+
+      expect(click.defaultPrevented).toBe(true);
+      expect(openUrlMock).toHaveBeenCalledExactlyOnceWith(href);
+      expect(openWindow).not.toHaveBeenCalled();
+
+      // Flush the rejection handler before asserting absence of a fallback.
+      await act(async () => {
+        rejectOpen(new Error("remote opener unavailable"));
+      });
+
+      if (browserFallback) {
+        expect(openWindow).toHaveBeenCalledExactlyOnceWith(href, "_blank", "noopener,noreferrer");
+      } else {
+        expect(openWindow).not.toHaveBeenCalled();
+      }
+    } finally {
+      openWindow.mockRestore();
+    }
   });
 
   it("keeps code block copy and highlighting behavior", async () => {
