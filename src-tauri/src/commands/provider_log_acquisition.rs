@@ -1611,6 +1611,74 @@ mod tests {
     }
 
     #[test]
+    fn codex_distinct_turn_boundary_flushes_persisted_context_and_retries_stably() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("provider.jsonl");
+        let first_lines = concat!(
+            r#"{"type":"turn_context","payload":{"turn_id":"turn-a"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"message","id":"context-a","role":"user","content":[{"type":"input_text","text":"Turn A context"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-a","content_item_kinds":["agents_md.instructions"]}}}"#,
+            "\n"
+        );
+        std::fs::write(&path, first_lines).expect("write first Codex batch");
+        let first =
+            acquire_provider_log_batch("agent-1", "codex", &path, "codex:session:one", None, true)
+                .expect("acquire first Codex batch");
+        assert!(first.events.is_empty());
+        assert!(first.next.normalizer_has_pending_events());
+
+        let persisted = serde_json::to_string(&first.next).expect("persist first capture state");
+        let restored: ProviderLogCaptureState =
+            serde_json::from_str(&persisted).expect("restore first capture state");
+        let second_lines = concat!(
+            r#"{"type":"turn_context","payload":{"turn_id":"turn-b"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"message","id":"request-b","role":"user","content":[{"type":"input_text","text":"Turn B request"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-b","content_item_kinds":["user.text"]}}}"#,
+            "\n"
+        );
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| {
+                use std::io::Write as _;
+                file.write_all(second_lines.as_bytes())
+            })
+            .expect("append next Codex batch");
+
+        let second = acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            "codex:session:one",
+            Some(restored.clone()),
+            true,
+        )
+        .expect("acquire second Codex batch");
+        let retry = acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            "codex:session:one",
+            Some(restored),
+            true,
+        )
+        .expect("retry second Codex batch from the same persisted state");
+
+        assert_eq!(second.previous.as_ref(), Some(&first.next));
+        assert!(second.next.committed_offset > first.next.committed_offset);
+        assert_eq!(retry.events, second.events);
+        assert_eq!(retry.next, second.next);
+        assert_eq!(second.events.len(), 2);
+        assert_eq!(second.events[0].text.as_deref(), Some("Turn A context"));
+        assert_eq!(second.events[0].role, Some(AgentChatRole::System));
+        assert_eq!(second.events[0].metadata["provider_turn_id"], "turn-a");
+        assert!(second.events[0].metadata.get("request_root_id").is_none());
+        assert_eq!(second.events[1].text.as_deref(), Some("Turn B request"));
+        assert_eq!(second.events[1].metadata["request_root_id"], "request-b");
+        assert!(!second.next.normalizer_has_pending_events());
+    }
+
+    #[test]
     fn serialized_restart_state_keeps_explicit_tool_identity() {
         let temp = tempfile::tempdir().expect("temp dir");
         let path = temp.path().join("provider.jsonl");
