@@ -88,6 +88,8 @@ pub struct PairingOfferRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingPairingDecision {
     Pending,
+    /// Reserved while device-store publication runs without the runtime lock.
+    Approving,
     Approved,
     Rejected,
 }
