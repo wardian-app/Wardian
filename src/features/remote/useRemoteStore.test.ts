@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_WATCHLIST_PREFS } from "../../layout/watchlist/types";
 import type { AgentChatEvent, QueueItem } from "../../types";
-import { type RemoteAgentChatPage, RemoteRequestError, remoteClient } from "./remoteClient";
+import { type RemoteAgentChatPage, RemoteChatTimeoutError, RemoteRequestError, remoteClient } from "./remoteClient";
 import { useRemoteStore } from "./useRemoteStore";
 
 type StatusStreamHandlers = Parameters<typeof remoteClient.openStatusStream>[0];
@@ -459,12 +459,13 @@ describe("useRemoteStore watchlists", () => {
 
     await useRemoteStore.getState().openAgent("agent-1");
 
-    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledWith("agent-1");
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledWith("agent-1", undefined, expect.any(AbortSignal));
     expect(useRemoteStore.getState().activeAgentViewMode).toBe("chat");
     expect(useRemoteStore.getState().chatEvents).toHaveLength(1);
   });
 
-  it("ignores stale remote chat refresh responses that resolve after a newer transcript", async () => {
+  it("settles the first read before one coalesced foreground/background refresh", async () => {
+    vi.useFakeTimers();
     const firstLoad = deferred<RemoteAgentChatPage>();
     const secondLoad = deferred<RemoteAgentChatPage>();
     vi.mocked(remoteClient.loadAgentChatPage)
@@ -484,26 +485,134 @@ describe("useRemoteStore watchlists", () => {
       ],
       activeAgentId: "agent-1",
       activeAgentViewMode: "chat",
+      status: "ready",
       chatEvents: [],
       chatLoading: false,
       chatError: "",
     });
 
     const firstRefresh = useRemoteStore.getState().refreshActiveAgentChat();
-    const secondRefresh = useRemoteStore.getState().refreshActiveAgentChat();
-
-    secondLoad.resolve({ events: [chatMessage("newer-message", "Newer transcript", 2)], has_older: false, next_before: null });
-    await secondRefresh;
-    expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["Newer transcript"]);
-
+    const secondRefresh = useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    const thirdRefresh = useRemoteStore.getState().refreshActiveAgentChat();
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(1);
     firstLoad.resolve({
-      events: [chatMessage("older-message-1", "Older duplicate", 1), chatMessage("older-message-2", "Older duplicate", 2)],
+      events: [chatMessage("first-message", "First usable transcript", 1)],
       has_older: false,
       next_before: null,
     });
-    await firstRefresh;
+    await Promise.all([firstRefresh, secondRefresh, thirdRefresh]);
+    expect(useRemoteStore.getState().chatLoading).toBe(false);
+    expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["First usable transcript"]);
+    await vi.advanceTimersByTimeAsync(750);
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(2);
+    secondLoad.resolve({ events: [chatMessage("newer-message", "Newer transcript", 2)], has_older: false, next_before: null });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["First usable transcript", "Newer transcript"]);
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(2);
+  });
 
-    expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["Newer transcript"]);
+  it("settles an older page before a queued newest-page failure", async () => {
+    vi.useFakeTimers();
+    const older = deferred<RemoteAgentChatPage>();
+    vi.mocked(remoteClient.loadAgentChatPage)
+      .mockReturnValueOnce(older.promise)
+      .mockRejectedValueOnce(new RemoteRequestError("Remote request failed: 400", 400));
+    useRemoteStore.setState({
+      status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      chatNextBefore: 20, chatHasOlder: true, chatEvents: [chatMessage("latest", "Latest reply", 21)],
+    });
+    const olderRead = useRemoteStore.getState().loadOlderActiveAgentChat();
+    const latestRead = useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(1);
+    older.resolve({ events: [chatMessage("older", "Earlier reply", 1)], has_older: false, next_before: null });
+    await Promise.all([olderRead, latestRead]);
+    await vi.advanceTimersByTimeAsync(750);
+    expect(useRemoteStore.getState().chatLoadingOlder).toBe(false);
+    expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["Earlier reply", "Latest reply"]);
+    expect(useRemoteStore.getState().chatError).toBe("Remote request failed: 400");
+    expect(useRemoteStore.getState().status).toBe("ready");
+  });
+
+  it("coalesces repeated status frames while the initial Chat read is pending", async () => {
+    vi.useFakeTimers();
+    const handlers: StatusStreamHandlers[] = [];
+    vi.mocked(remoteClient.openStatusStream).mockImplementation(async (nextHandlers) => {
+      handlers.push(nextHandlers);
+      return { close: vi.fn() } as unknown as WebSocket;
+    });
+    await useRemoteStore.getState().load();
+    await Promise.resolve();
+    const initial = deferred<RemoteAgentChatPage>();
+    vi.mocked(remoteClient.loadAgentChatPage).mockReturnValueOnce(initial.promise);
+    useRemoteStore.setState({ activeAgentViewModesById: { "agent-1": "chat" } });
+    const open = useRemoteStore.getState().openAgent("agent-1");
+    for (let i = 0; i < 3; i += 1) {
+      handlers[0]?.onAgents([{
+        session_id: "agent-1", session_name: "Alpha", agent_class: "Coder", provider: "codex",
+        workspace: "<absolute-workspace-path>", status: "Processing", latest_text: null,
+      }]);
+      await vi.advanceTimersByTimeAsync(750);
+    }
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(1);
+    initial.resolve({ events: [chatMessage("first", "First reply", 1)], has_older: false, next_before: null });
+    await open;
+    expect(useRemoteStore.getState().chatLoading).toBe(false);
+    expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["First reply"]);
+    await vi.advanceTimersByTimeAsync(750);
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores roster callbacks from a stream invalidated by a Chat auth failure", async () => {
+    const handlers: StatusStreamHandlers[] = [];
+    const close = vi.fn();
+    vi.mocked(remoteClient.openStatusStream).mockImplementation(async (nextHandlers) => {
+      handlers.push(nextHandlers);
+      return { close } as unknown as WebSocket;
+    });
+    await useRemoteStore.getState().load();
+    await Promise.resolve();
+    useRemoteStore.setState({ activeAgentId: "agent-1", activeAgentViewMode: "chat" });
+    vi.mocked(remoteClient.loadAgentChatPage).mockRejectedValueOnce(new RemoteRequestError("expired", 401));
+    await useRemoteStore.getState().refreshActiveAgentChat();
+    expect(close).toHaveBeenCalled();
+    handlers[0]?.onAgents([]);
+    expect(useRemoteStore.getState().status).toBe("session_expired");
+  });
+
+  it("expires Chat authentication when a received 401 body stalls through timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const handlers: StatusStreamHandlers[] = [];
+      const close = vi.fn();
+      vi.mocked(remoteClient.openStatusStream).mockImplementation(async (nextHandlers) => {
+        handlers.push(nextHandlers);
+        return { close } as unknown as WebSocket;
+      });
+      await useRemoteStore.getState().load();
+      await Promise.resolve();
+      useRemoteStore.setState({ activeAgentId: "agent-1", activeAgentViewMode: "chat" });
+      const actual = await vi.importActual<typeof import("./remoteClient")>("./remoteClient");
+      vi.mocked(remoteClient.loadAgentChatPage).mockImplementationOnce(actual.remoteClient.loadAgentChatPage);
+      let signal: AbortSignal | null | undefined;
+      const response = new Response(null, { status: 401 });
+      vi.spyOn(response, "json").mockImplementation(() => new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+      }));
+      vi.stubGlobal("fetch", vi.fn((_path: string, init?: RequestInit) => {
+        signal = init?.signal;
+        return Promise.resolve(response);
+      }));
+      const read = useRemoteStore.getState().refreshActiveAgentChat();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await read;
+      expect(useRemoteStore.getState().status).toBe("session_expired");
+      expect(close).toHaveBeenCalled();
+      handlers[0]?.onAgents([]);
+      expect(useRemoteStore.getState().status).toBe("session_expired");
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
   });
 
   it("keeps a connected desktop visible when Codex chat returns an application error", async () => {
@@ -536,14 +645,118 @@ describe("useRemoteStore watchlists", () => {
     expect(useRemoteStore.getState().status).toBe("unreachable");
 
     useRemoteStore.setState({ status: "ready" });
-    vi.mocked(remoteClient.loadAgentChatPage).mockRejectedValueOnce(new RemoteRequestError("Request timeout", 408));
-    await useRemoteStore.getState().refreshActiveAgentChat();
-    expect(useRemoteStore.getState().status).toBe("unreachable");
-
-    useRemoteStore.setState({ status: "ready" });
     vi.mocked(remoteClient.loadAgentChatPage).mockRejectedValueOnce(new RemoteRequestError("expired", 401));
     await useRemoteStore.getState().refreshActiveAgentChat();
     expect(useRemoteStore.getState().status).toBe("session_expired");
+  });
+
+  it("retains connected Chat and retries after a received successful body is interrupted", async () => {
+    const actual = await vi.importActual<typeof import("./remoteClient")>("./remoteClient");
+    vi.mocked(remoteClient.loadAgentChatPage).mockImplementationOnce(actual.remoteClient.loadAgentChatPage);
+    const response = new Response(null, { status: 200 });
+    vi.spyOn(response, "json").mockRejectedValue(new TypeError("Private transport detail"));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+    useRemoteStore.setState({
+      status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      chatEvents: [chatMessage("earlier", "Earlier reply", 1)],
+    });
+    try {
+      await useRemoteStore.getState().refreshActiveAgentChat();
+      expect(useRemoteStore.getState().status).toBe("ready");
+      expect(useRemoteStore.getState().chatLoading).toBe(false);
+      expect(useRemoteStore.getState().chatError).toBe("Chat could not be loaded. Retry when the desktop is available.");
+      expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["Earlier reply"]);
+
+      vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValueOnce({
+        events: [chatMessage("recovered", "Recovered reply", 2)], has_older: false, next_before: null,
+      });
+      await useRemoteStore.getState().refreshActiveAgentChat();
+      expect(useRemoteStore.getState().chatError).toBe("");
+      expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["Earlier reply", "Recovered reply"]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps Chat deadlines local, retains rows and allows a manual retry", async () => {
+    useRemoteStore.setState({
+      status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      chatEvents: [chatMessage("earlier", "Earlier reply", 1)],
+    });
+    for (const error of [new RemoteChatTimeoutError(), new RemoteRequestError("Request timeout", 408)]) {
+      vi.mocked(remoteClient.loadAgentChatPage).mockRejectedValueOnce(error);
+      await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+      expect(useRemoteStore.getState().status).toBe("ready");
+      expect(useRemoteStore.getState().chatError).not.toBe("");
+      expect(useRemoteStore.getState().chatLoading).toBe(false);
+      expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["Earlier reply"]);
+    }
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValueOnce({
+      events: [chatMessage("new", "Recovered reply", 2)], has_older: false, next_before: null,
+    });
+    await useRemoteStore.getState().refreshActiveAgentChat();
+    expect(useRemoteStore.getState().chatError).toBe("");
+    expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["Earlier reply", "Recovered reply"]);
+  });
+
+  it("shows only safe failure stages and preserves revocation", async () => {
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat" });
+    vi.mocked(remoteClient.loadAgentChatPage).mockRejectedValueOnce(new RemoteRequestError(
+      "Private diagnostic path", 400, "agent_chat_provenance_failed", "Private diagnostic path",
+    ));
+    await useRemoteStore.getState().refreshActiveAgentChat();
+    expect(useRemoteStore.getState().chatError).toContain("agent_chat_provenance_failed");
+    expect(useRemoteStore.getState().chatError).not.toContain("Private diagnostic path");
+    vi.mocked(remoteClient.loadAgentChatPage).mockRejectedValueOnce(new RemoteRequestError("revoked", 403, "device_revoked"));
+    await useRemoteStore.getState().refreshActiveAgentChat();
+    expect(useRemoteStore.getState().status).toBe("device_revoked");
+  });
+
+  it("cancels a closed view and ignores its success after the same agent reopens", async () => {
+    vi.useFakeTimers();
+    const first = deferred<RemoteAgentChatPage>();
+    const reopened = deferred<RemoteAgentChatPage>();
+    vi.mocked(remoteClient.loadAgentChatPage).mockReturnValueOnce(first.promise).mockReturnValueOnce(reopened.promise);
+    useRemoteStore.setState({
+      status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      activeAgentViewModesById: { "agent-1": "chat" },
+    });
+    const oldRead = useRemoteStore.getState().refreshActiveAgentChat();
+    const oldSignal = vi.mocked(remoteClient.loadAgentChatPage).mock.calls[0]?.[2];
+    void useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    useRemoteStore.getState().closeAgent({ syncHistory: false });
+    expect(oldSignal?.aborted).toBe(true);
+    const newRead = useRemoteStore.getState().openAgent("agent-1");
+    first.resolve({ events: [chatMessage("stale", "Stale reply", 1)], has_older: false, next_before: null });
+    await oldRead;
+    expect(useRemoteStore.getState().chatEvents).toEqual([]);
+    expect(useRemoteStore.getState().chatLoading).toBe(true);
+    reopened.resolve({ events: [chatMessage("fresh", "Fresh reply", 2)], has_older: false, next_before: null });
+    await newRead;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(2);
+    expect(useRemoteStore.getState().chatLoading).toBe(false);
+    expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["Fresh reply"]);
+  });
+
+  it("waits for a latest-page read before loading older history", async () => {
+    const latest = deferred<RemoteAgentChatPage>();
+    const older = deferred<RemoteAgentChatPage>();
+    vi.mocked(remoteClient.loadAgentChatPage).mockReturnValueOnce(latest.promise).mockReturnValueOnce(older.promise);
+    useRemoteStore.setState({
+      status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat", chatNextBefore: 20, chatHasOlder: true,
+    });
+    const first = useRemoteStore.getState().refreshActiveAgentChat();
+    const next = useRemoteStore.getState().loadOlderActiveAgentChat();
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(1);
+    latest.resolve({ events: [chatMessage("latest", "Latest reply", 21)], has_older: true, next_before: 20 });
+    await first;
+    expect(useRemoteStore.getState().chatLoadingOlder).toBe(true);
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(2);
+    older.resolve({ events: [chatMessage("older", "Earlier reply", 1)], has_older: false, next_before: null });
+    await next;
+    expect(useRemoteStore.getState().chatLoadingOlder).toBe(false);
+    expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["Earlier reply", "Latest reply"]);
   });
 
   it("keeps older-chat HTTP failures local and ignores errors from a previous agent", async () => {
@@ -605,18 +818,18 @@ describe("useRemoteStore watchlists", () => {
 
     expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["Newest transcript"]);
     expect(useRemoteStore.getState().chatHasOlder).toBe(true);
-    expect(remoteClient.loadAgentChatPage).toHaveBeenLastCalledWith("agent-1");
+    expect(remoteClient.loadAgentChatPage).toHaveBeenLastCalledWith("agent-1", undefined, expect.any(AbortSignal));
 
     await useRemoteStore.getState().loadOlderActiveAgentChat();
 
-    expect(remoteClient.loadAgentChatPage).toHaveBeenLastCalledWith("agent-1", 45);
+    expect(remoteClient.loadAgentChatPage).toHaveBeenLastCalledWith("agent-1", 45, expect.any(AbortSignal));
     expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["Older transcript", "Newest transcript"]);
     expect(useRemoteStore.getState().chatHasOlder).toBe(false);
 
     await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
 
     expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["Older transcript", "Newest transcript"]);
-    expect(useRemoteStore.getState().chatHasOlder).toBe(true);
+    expect(useRemoteStore.getState().chatHasOlder).toBe(false);
   });
 
   it("falls back to all agents when the remote watchlist endpoint is unavailable", async () => {
