@@ -91,8 +91,10 @@ pub(crate) fn active_completion(
         .iter()
         .find(|item| item.get("id").and_then(serde_json::Value::as_str) == Some(item_id))
         .filter(|item| {
-            item.get("type").and_then(serde_json::Value::as_str) == Some("agent_completed")
-                && item.get("dismissed").and_then(serde_json::Value::as_bool) != Some(true)
+            matches!(
+                item.get("type").and_then(serde_json::Value::as_str),
+                Some("agent_completed" | "agent_turn_ended")
+            ) && item.get("dismissed").and_then(serde_json::Value::as_bool) != Some(true)
         })
         .cloned()
 }
@@ -120,7 +122,30 @@ pub(crate) async fn persist_turn_completion(
     runtime_generation: Option<u64>,
     completion: &TurnCompletion,
 ) -> PersistedCompletion {
-    let item_id = completion_item_id(session_id, &completion.evidence_id);
+    persist_turn_notice(
+        state,
+        session_id,
+        provider,
+        runtime_generation,
+        completion_inbox_item(session_id, "", completion),
+    )
+    .await
+}
+
+/// Persists a backend-owned turn notice without assigning success semantics.
+/// The caller supplies immutable evidence; this function fences the runtime and
+/// preserves any existing record, including its read/dismissed tombstone.
+pub(crate) async fn persist_turn_notice(
+    state: &AppState,
+    session_id: &str,
+    provider: &str,
+    runtime_generation: Option<u64>,
+    mut item: serde_json::Value,
+) -> PersistedCompletion {
+    let item_id = item["id"]
+        .as_str()
+        .expect("backend turn notice identity")
+        .to_string();
     let mut persistence_failures = 0u64;
     loop {
         // Per-agent lifecycle is always acquired before the global queue
@@ -144,12 +169,10 @@ pub(crate) async fn persist_turn_completion(
         let Some(agent_name) = agent_name else {
             return PersistedCompletion::Stale;
         };
+        item["agent_name"] = serde_json::Value::String(agent_name.clone());
         let mut items = crate::utils::queue::load_items();
         if !items.iter().any(|item| item["id"] == item_id) {
-            items.insert(
-                0,
-                completion_inbox_item(session_id, &agent_name, completion),
-            );
+            items.insert(0, item.clone());
             if let Err(error) = crate::utils::queue::save_items(&items) {
                 persistence_failures += 1;
                 if persistence_failures == 1 || persistence_failures.is_multiple_of(60) {
@@ -187,8 +210,13 @@ pub(crate) async fn emit_active_completion<R: tauri::Runtime>(
             .and_then(serde_json::Value::as_str)
             .unwrap_or(agent_name)
             .to_string();
+        let event_name = if item["type"] == "agent_turn_ended" {
+            "agent-turn-ended"
+        } else {
+            "agent-turn-completed"
+        };
         let _ = app.emit(
-            "agent-turn-completed",
+            event_name,
             serde_json::json!({
                 "session_id": session_id,
                 "agent_name": agent_name,

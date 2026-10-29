@@ -41,7 +41,7 @@ export type AgentResourceControllerOptions = {
   on_agent_json_event?: (session_id: string, data: Record<string, unknown>, agent_name?: string) => void;
   /** Receives status transitions so queue policy can remain outside this resource owner. */
   on_agent_status_transition?: (transition: AgentStatusTransition) => void;
-  /** Receives explicit provider turn completions, separate from ordinary idle status changes. */
+  /** Receives provider completion boundaries or already persisted turn notices; never inferred from Idle. */
   on_agent_turn_completed?: (completion: AgentTurnCompletion) => void;
   /** Receives one coalesced interaction update per telemetry payload. */
   on_agent_interactions?: (updates: Readonly<Record<string, string>>) => void;
@@ -462,6 +462,17 @@ export function useAgentResourceController(
           session_id,
           agent: agents_ref.current.find((agent) => agent.session_id === session_id),
           ...(event.payload.inbox_item !== undefined && { inbox_item: event.payload.inbox_item }),
+        });
+      }),
+      listen<{ session_id: string; inbox_item: QueueItem }>("agent-turn-ended", (event) => {
+        if (event.payload.inbox_item?.type !== "agent_turn_ended") return;
+        const { session_id, inbox_item } = event.payload;
+        // Only project the already durable notice. Never dispatch a bare
+        // completion boundary or advance successful-completion behavior.
+        options_ref.current.on_agent_turn_completed?.({
+          session_id,
+          agent: agents_ref.current.find((agent) => agent.session_id === session_id),
+          inbox_item,
         });
       }),
     ];

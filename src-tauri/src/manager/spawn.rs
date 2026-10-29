@@ -2507,6 +2507,23 @@ async fn spawn_agent_inner(
     // A Claude launch records Stop rounds only when Claude supplies a
     // supported turn verdict and Wardian may own its telemetry export. Claude
     // Code currently supplies none, so the launch only prunes old records.
+    let claude_turn_ended = if config.provider == "claude" {
+        match super::claude_turn_ended::TurnEndedLaunch::prepare(&config) {
+            Ok(launch) => {
+                provider_args.push("--plugin-dir".to_string());
+                provider_args.push(launch.plugin_dir().to_string_lossy().to_string());
+                Some(launch)
+            }
+            Err(error) => {
+                log_debug(&format!(
+                    "[Wardian] Native Claude turn-ended observation unavailable: {error}"
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
     let mut claude_verdict_launch = if config.provider == "claude" {
         Some(super::claude_verdict::launch::VerdictLaunch::prepare(
             &config.session_id,
@@ -4951,6 +4968,9 @@ async fn spawn_agent_inner(
         if let Some(guard) = codex_attach_guard.as_mut() {
             guard.attached();
         }
+    }
+    if let Some(launch) = claude_turn_ended {
+        launch.observe(app.clone(), runtime_generation, current_status.clone());
     }
     let active = ActiveAgent {
         config: config_lock.clone(),

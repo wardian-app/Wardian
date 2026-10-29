@@ -21,6 +21,7 @@ const filterOptions: readonly { value: RemoteInboxFilter; label: string }[] = [
   { value: "all", label: "All events" },
   { value: "action_needed", label: "Action needed" },
   { value: "agent_completed", label: "Agent completions" },
+  { value: "agent_turn_ended", label: "Claude turns ended" },
   { value: "agent_update", label: "Agent updates" },
   { value: "approval_request", label: "Approvals" },
   { value: "automation_completed", label: "Automation completions" },

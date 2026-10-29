@@ -1,5 +1,6 @@
 pub(crate) mod classes;
 pub(crate) mod claude;
+pub(crate) mod claude_turn_ended;
 pub(crate) mod claude_verdict;
 pub(crate) mod codex;
 pub(crate) mod codex_onboarding;
@@ -856,6 +857,7 @@ pub(crate) async fn replay_settled_claude_completions<R: tauri::Runtime>(
         if config.provider != "claude" {
             continue;
         }
+        claude_turn_ended::replay(app, &config);
         let accepted_sessions = claude::claude_accepted_sessions(&config);
         for launch_dir in claude_verdict::launch::launch_dirs(&config.session_id) {
             let mut tracker = claude_verdict::launch::VerdictTracker::open(

@@ -1,7 +1,7 @@
 import type { QueueItem } from "../../types";
 
 /** Semantic outcome of an Inbox event, shared by desktop and remote surfaces. */
-export type QueueItemTone = "processing" | "warning" | "success" | "error";
+export type QueueItemTone = "processing" | "warning" | "success" | "error" | "neutral";
 
 export interface QueueToneClasses {
   accent: string;
@@ -10,6 +10,11 @@ export interface QueueToneClasses {
 }
 
 export const QUEUE_TONE_CLASSES: Record<QueueItemTone, QueueToneClasses> = {
+  neutral: {
+    accent: "bg-wardian-off",
+    badge: "bg-wardian-off/15 text-muted",
+    icon: "bg-wardian-off/10 text-muted",
+  },
   processing: {
     accent: "bg-wardian-processing",
     badge: "bg-wardian-processing/15 text-wardian-processing",
@@ -36,6 +41,7 @@ export const QUEUE_TONE_CLASSES: Record<QueueItemTone, QueueToneClasses> = {
 export function queueItemLabel(item: QueueItem): string {
   if (item.type === "action_needed") return "Action required";
   if (item.type === "agent_completed") return "Agent task completed";
+  if (item.type === "agent_turn_ended") return "Claude turn ended";
   if (item.type === "agent_update") return "Important update";
   if (item.type === "approval_request") {
     return item.notification_status === "expired" ? "Approval expired" : "Approval requested";
@@ -48,11 +54,12 @@ export function queueItemTone(item: QueueItem): QueueItemTone {
   if (item.type === "action_needed" || item.type === "approval_request") return "warning";
   if (item.type === "automation_completed" && item.status === "failed") return "error";
   if (item.type === "agent_update") return "processing";
+  if (item.type === "agent_turn_ended") return item.turn_outcome === "aborted" ? "warning" : "neutral";
   return "success";
 }
 
 export function queueItemIsAgentEvent(item: QueueItem): boolean {
-  return item.type === "agent_completed" || item.type === "action_needed" || item.type === "agent_update" || item.type === "approval_request";
+  return item.type === "agent_completed" || item.type === "agent_turn_ended" || item.type === "action_needed" || item.type === "agent_update" || item.type === "approval_request";
 }
 
 /**
@@ -63,7 +70,10 @@ export function queueCardBodyText(item: QueueItem, bodyText: string | undefined)
   expandedText: string | undefined;
   isExpandable: boolean;
 } {
-  const fullAnswer = bodyText && item.type === "agent_completed" ? item.response_text?.trim() : undefined;
+  const answer = bodyText && (item.type === "agent_completed" || item.type === "agent_turn_ended") ? item.response_text?.trim() : undefined;
+  const fullAnswer = answer && item.type === "agent_turn_ended"
+    ? `${item.turn_outcome === "aborted" ? "Turn interrupted" : "Outcome unverified"}\n${answer}`
+    : answer;
   const expandedText = fullAnswer || bodyText;
   const isExpandable = Boolean(bodyText && (
     bodyText.length > 220

@@ -3040,21 +3040,24 @@ describe("AgentChatView", () => {
   });
 
   it("keeps chat input editable while the agent is processing and still allows action required responses", async () => {
+    const actionRequiredPage = deferred<AgentChatEvent[]>();
+    const actionRequiredEvents = [
+      event({
+        id: "approval-required",
+        session_id: "agent-2",
+        kind: "approval",
+        role: null,
+        title: "Approval required",
+        text: "Do you want to proceed?",
+        status: "action_required",
+        sequence: 1,
+      }),
+    ];
     invokeMock
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
-      .mockResolvedValue([
-        event({
-          id: "approval-required",
-          session_id: "agent-2",
-          kind: "approval",
-          role: null,
-          title: "Approval required",
-          text: "Do you want to proceed?",
-          status: "action_required",
-          sequence: 1,
-        }),
-      ]);
+      .mockReturnValueOnce(actionRequiredPage.promise)
+      .mockResolvedValue(actionRequiredEvents);
 
     const { rerender } = render(<AgentChatView sessionId="agent-1" status="Processing" />);
 
@@ -3069,7 +3072,13 @@ describe("AgentChatView", () => {
     rerender(<AgentChatView sessionId="agent-2" status="Action Required" />);
 
     expect(await screen.findByLabelText("Message agent")).not.toBeDisabled();
-    expect(screen.getByPlaceholderText("Respond to action required...")).toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("load_agent_chat_page", expect.objectContaining({ sessionId: "agent-2" }));
+
+    await act(async () => {
+      actionRequiredPage.resolve(actionRequiredEvents);
+    });
+
+    expect(await screen.findByPlaceholderText("Respond to action required...")).toBeInTheDocument();
   });
 
   it("turns the composer action into an interrupt control while the agent is executing", async () => {
@@ -3229,4 +3238,115 @@ describe("AgentChatView", () => {
       vi.useRealTimers();
     }
   });
+  it("keeps the same transcript row and older pin through a later same-source reset", async () => {
+    // SYNTHETIC_TRANSPORT_FRONTEND_UNIT_ONLY: actual view/hook/validator with mock IPC page transport.
+    vi.useFakeTimers();
+    const sourceRow = (label: string, provisional = false, sequence = 1) => event({
+      id: "header-" + label,
+      kind: "message",
+      role: "user",
+      text: label === "A" ? "Row A" : "Row " + label,
+      sequence,
+      metadata: {
+        chat_source_ref: "source:" + label,
+        chat_source_epoch: "fixture-source-epoch",
+        chat_source_admission: "synthetic-admission",
+        ...(provisional ? { chat_provisional: true } : {}),
+      },
+    });
+    const withoutAdmission = (row: AgentChatEvent): AgentChatEvent => {
+      const metadata = { ...row.metadata };
+      delete metadata.chat_provisional;
+      delete metadata.chat_source_admission;
+      return { ...row, metadata };
+    };
+    const makePage = (overrides: Partial<AgentChatPage>) => olderReadPage({
+      progress: "ready",
+      ...overrides,
+    });
+    const provisional = ["A", "B", "C"].map((label, index) => sourceRow(label, true, index + 1));
+    const recent = Array.from({ length: 80 }, (_, index) =>
+      sourceRow("recent-" + String(index + 1).padStart(3, "0"), true, index + 4));
+    const cohort = [...provisional, ...recent];
+    const initial = makePage({
+      revision: "dom-initial", progress: "provisional", events: provisional, next_before: "dom-older-cursor",
+    });
+    const recentPage = makePage({
+      revision: "dom-recent", progress: "provisional", events: recent, next_before: "dom-older-cursor",
+    });
+    const olderReset = makePage({
+      revision: "dom-older-reset", reset: true, progress: "provisional",
+      events: recent, next_before: "dom-reset-cursor",
+    });
+    const laterReset = makePage({
+      revision: "dom-later-reset", reset: true, progress: "ready",
+      events: recent.map(withoutAdmission), next_before: "dom-later-cursor",
+    });
+    const bySource = new Map(cohort.map((row) => [row.metadata.chat_source_ref as string, row]));
+    const renewalBatches = new Map<string, string[][]>();
+    let laterPolls = 0;
+    const isRequestRecord = (value: unknown): value is Record<string, unknown> =>
+      typeof value === "object" && value !== null && !Array.isArray(value) && !(value instanceof ArrayBuffer);
+    invokeMock.mockImplementation((command, args) => {
+      if (command !== "load_agent_chat_page") return Promise.resolve(undefined);
+      const request = isRequestRecord(args) ? args : undefined;
+      const rawIds = request?.revalidateIds;
+      if (Array.isArray(rawIds)) {
+        const ids = rawIds.filter((id): id is string => typeof id === "string");
+        const rows = ids.map((id) => {
+          const row = bySource.get(id);
+          if (!row) throw new Error("Synthetic IPC transport has no row for requested source ID: " + id);
+          return row;
+        });
+        const revision = typeof request?.revision === "string" ? request.revision : "";
+        renewalBatches.set(revision, [...(renewalBatches.get(revision) ?? []), ids]);
+        return Promise.resolve(makePage({
+          revision, progress: "ready", events: rows, revalidated_ids: ids,
+          bytes_read: rows.length * 64, records_decoded: rows.length,
+        }));
+      }
+      if (request?.cursor === "dom-older-cursor") return Promise.resolve(olderReset);
+      if (request?.revision === undefined) return Promise.resolve(initial);
+      if (request?.revision === initial.revision) return Promise.resolve(recentPage);
+      if (request?.revision === recentPage.revision) return Promise.resolve(recentPage);
+      if (request?.revision === olderReset.revision) {
+        laterPolls += 1;
+        return Promise.resolve(laterReset);
+      }
+      if (request?.revision === laterReset.revision) return Promise.resolve({ ...laterReset, reset: false });
+      throw new Error("Unexpected synthetic IPC page request");
+    });
+    const view = render(
+      <AgentChatView sessionId="agent-1" refreshIntervalMs={60_000} readOnly deferModelDiscovery />,
+    );
+
+    try {
+      await act(async () => {});
+      expect(screen.getByText("Row A")).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(screen.getByText("Row recent-001")).toBeInTheDocument();
+      const rowA = screen.getByText("Row A").closest<HTMLElement>("[data-chat-row-key]");
+      expect(rowA).not.toBeNull();
+      if (!rowA) throw new Error("Row A transcript element was not rendered");
+
+      const olderButton = screen.getByRole("button", { name: "Load older transcript" });
+      await act(async () => {
+        fireEvent.click(olderButton);
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(renewalBatches.get(olderReset.revision)).toHaveLength(11);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(laterPolls).toBe(1);
+      expect(renewalBatches.get(laterReset.revision)).toHaveLength(11);
+      const retainedRowA = screen.getByText("Row A").closest<HTMLElement>("[data-chat-row-key]");
+      expect(retainedRowA).toBe(rowA);
+      expect(screen.getByRole("button", { name: "Jump to latest" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Load older transcript" })).toBeEnabled();
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
 });

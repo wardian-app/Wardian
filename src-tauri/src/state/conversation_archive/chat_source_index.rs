@@ -1131,6 +1131,9 @@ fn drain_replay_rows(
     let Some(root) = checkpoint.pending_root.clone() else {
         return Ok(0);
     };
+    if store.checkpoint_due() {
+        return Ok(0);
+    }
     let entries = store.page(
         &Some(root),
         checkpoint.pending_before.as_deref(),
@@ -1145,8 +1148,16 @@ fn drain_replay_rows(
     let has_more = entries.len() > PAGE_ROWS;
     let selected = entries.into_iter().take(PAGE_ROWS).collect::<Vec<_>>();
     let mut admitted = 0usize;
+    let mut processed = 0usize;
+    let mut last_processed = None;
+    // Yield only at row boundaries so the cursor cannot skip selected work.
     for (queue_key, reference) in &selected {
+        if store.checkpoint_due() {
+            break;
+        }
         let pending: ReplayPendingRow = store.read(reference)?;
+        processed += 1;
+        last_processed = Some(queue_key.clone());
         if replay_pending_key(&pending.key)? != *queue_key {
             head.counts_gapped = true;
             continue;
@@ -1205,13 +1216,13 @@ fn drain_replay_rows(
         admitted += 1;
         head.replay_rows_admitted = head.replay_rows_admitted.saturating_add(1);
     }
-    checkpoint.pending_count = checkpoint.pending_count.saturating_sub(selected.len());
-    if has_more {
-        checkpoint.pending_before = selected.last().map(|(key, _)| key.clone());
-    } else {
+    checkpoint.pending_count = checkpoint.pending_count.saturating_sub(processed);
+    if processed == selected.len() && !has_more {
         checkpoint.pending_root = None;
         checkpoint.pending_before = None;
         checkpoint.pending_count = 0;
+    } else if let Some(last_processed) = last_processed {
+        checkpoint.pending_before = Some(last_processed);
     }
     Ok(admitted)
 }

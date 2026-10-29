@@ -25,6 +25,18 @@ const actionPreferences: QueuePreferences = {
 };
 
 describe("dispatchQueueNotification", () => {
+  it("native turn-ended desktop notification does not announce task completion", async () => {
+    const sendDesktopNotification = vi.fn(async () => true);
+    await dispatchQueueNotification({
+      id: "ended", type: "agent_turn_ended", timestamp: 1, read: false,
+      agent_name: "Example", turn_outcome: "unknown", summary: "Outcome unverified\nExact answer",
+    }, { ...actionPreferences, desktop_notifications: {
+      ...actionPreferences.desktop_notifications, agent_completed: true,
+    } }, { sendDesktopNotification });
+    expect(sendDesktopNotification).toHaveBeenCalledExactlyOnceWith("Claude turn ended: Example", {
+      body: "Outcome unverified\nExact answer",
+    });
+  });
   beforeEach(() => {
     vi.restoreAllMocks();
   });

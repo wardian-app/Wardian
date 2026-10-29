@@ -5,7 +5,7 @@ import { extractQueueContent, extractTerminalQueueContent } from "../utils/statu
 import { AutomationTelemetryEvent } from "../types/automation";
 import { DEFAULT_QUEUE_PREFERENCES, normalizeQueuePreferences, normalizeQueueSoundVolume } from "../features/queue/queueFilters";
 import { dispatchQueueNotification } from "../features/queue/queueNotifications";
-import { isClearableLegacyCompletion, providerChoiceAcknowledgementUnresolved } from "../features/queue/queueTriage";
+import { isClearableLegacyCompletion, isProviderTurnNotice, providerChoiceAcknowledgementUnresolved } from "../features/queue/queueTriage";
 import { parseProviderQuestionEvents } from "../features/queue/providerQuestions";
 
 export const QUEUE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days - future settings hook-in point
@@ -333,7 +333,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
         const raw = await invoke<QueueItem[]>("load_queue_items");
         const cutoff = Date.now() - QUEUE_MAX_AGE_MS;
         const persistedItems = (Array.isArray(raw) ? raw : []).filter((i) =>
-          i.timestamp > cutoff && !(i.type === "agent_completed" && i.dismissed),
+          i.timestamp > cutoff && !(isProviderTurnNotice(i) && i.dismissed),
         );
         const readNotificationIds = new Set(
           persistedItems
@@ -495,17 +495,18 @@ export const useQueueStore = create<QueueState>((set, get) => ({
 
   applyPersistedAgentCompletion(item) {
     const sessionId = item.agent_session_id;
-    if (item.type !== "agent_completed" || item.dismissed || !sessionId) return;
+    if (!isProviderTurnNotice(item) || item.dismissed || !sessionId) return;
     if (get().items.some((current) => current.id === item.id)) {
-      set((state) => ({
-        _agentBuffers: { ...state._agentBuffers, [sessionId]: "" },
-      }));
+      if (item.type === "agent_completed") {
+        set((state) => ({ _agentBuffers: { ...state._agentBuffers, [sessionId]: "" } }));
+      }
       return;
     }
     queueMutationRevision += 1;
     set((state) => ({
       items: [item, ...state.items],
-      _agentBuffers: { ...state._agentBuffers, [sessionId]: "" },
+      _agentBuffers: item.type === "agent_completed"
+        ? { ...state._agentBuffers, [sessionId]: "" } : state._agentBuffers,
     }));
     notifyForItem(item, get().preferences);
   },
@@ -603,7 +604,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
     set((s) => {
       const item = s.items.find((candidate) => candidate.id === id);
       if (item && readProtected(item)) return {};
-      if (item?.type === "agent_completed") {
+      if (item && isProviderTurnNotice(item)) {
         void persistDismissedAgentCompletions([id]).then((persisted) => {
           if (persisted) return;
           queueMutationRevision += 1;
@@ -669,7 +670,7 @@ export const useQueueStore = create<QueueState>((set, get) => ({
       const removedAgentCompletions: QueueItem[] = [];
       const next = s.items.filter((item) => {
         if (!(item.read && isClearableLegacyCompletion(item))) return true;
-        if (item.type === "agent_completed") removedAgentCompletions.push(item);
+        if (isProviderTurnNotice(item)) removedAgentCompletions.push(item);
         const automationKey = automationRunKey(item);
         if (automationKey) dismissedAutomationRuns.add(automationKey);
         return false;

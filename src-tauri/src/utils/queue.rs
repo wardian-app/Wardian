@@ -115,7 +115,10 @@ pub fn merge_desktop_snapshot(
         // be removed through the explicit dismissal command. A desktop full
         // snapshot that omits one is stale or belongs to a client that has not
         // observed it yet.
-        if latest_item.get("type").and_then(Value::as_str) == Some("agent_completed") {
+        if matches!(
+            latest_item.get("type").and_then(Value::as_str),
+            Some("agent_completed" | "agent_turn_ended")
+        ) {
             let mut item = latest_item.clone();
             if latest_item.get("dismissed").and_then(Value::as_bool) == Some(true) {
                 item["read"] = Value::Bool(true);

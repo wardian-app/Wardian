@@ -8496,6 +8496,196 @@ fn cold_eof_indexes_recent_first_and_resumes_older_without_a_canonical_candidate
 }
 
 #[test]
+fn source_index_yields_large_late_cohort_tail_at_store_read_budget() {
+    let (_guard, temp) = isolated_home();
+    let path = temp.path().join("source-index-late-cohort-tail.jsonl");
+    let pair_text = "bounded replay commentary cohort";
+    let initial = format!(
+        "{}\n{}\n{}\n",
+        json!({"type":"session_meta","payload":{"id":"one"}}),
+        commentary_context_line(),
+        commentary_stream_line_with_text(pair_text)
+    );
+    let (snapshot, _) = owned_native_source(&path, &initial);
+    finish_source_index(&snapshot);
+
+    append_native_line(
+        &path,
+        &commentary_item_line_with_text("bounded-replay-B", pair_text),
+    );
+    finish_source_index(&snapshot);
+    let saved_pair = source_index_page(&snapshot);
+    assert!(saved_pair.counts_complete);
+    let saved_pair = saved_pair
+        .events
+        .iter()
+        .find(|event| event.text.as_deref() == Some(pair_text))
+        .expect("the complete A/B cohort is saved before late C");
+    let saved_members: BTreeSet<_> = saved_pair.metadata["chat_display_member_ids"]
+        .as_array()
+        .expect("the saved source row retains its two native members")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert_eq!(saved_members.len(), 2);
+
+    append_native_line(
+        &path,
+        &commentary_item_line_with_text("bounded-replay-late-C", pair_text),
+    );
+    finish_source_index(&snapshot);
+    let reopened = source_index_page(&snapshot);
+    assert!(reopened.counts_complete);
+    assert_eq!(
+        reopened
+            .events
+            .iter()
+            .filter(|event| event.text.as_deref() == Some(pair_text))
+            .count(),
+        3,
+        "late C reopens the saved A/B cohort before the large tail"
+    );
+
+    let context_line =
+        |turn_id: &str| json!({"type":"turn_context","payload":{"turn_id":turn_id}}).to_string();
+    let response_item = |id: &str, turn_id: &str, text: &str| {
+        json!({
+            "timestamp":"2026-10-24T17:38:18.275Z",
+            "type":"response_item",
+            "payload":{
+                "type":"message",
+                "id":id,
+                "role":"assistant",
+                "phase":"commentary",
+                "content":[{"type":"output_text","text":text}],
+                "internal_chat_message_metadata_passthrough":{
+                    "turn_id":turn_id,
+                    "create_time":"2026-10-24T17:38:18.275Z",
+                    "content_item_kinds":["unknown"]
+                }
+            }
+        })
+        .to_string()
+    };
+    let mut tail = String::new();
+    for index in 0..80 {
+        tail.push_str(&native_message(&format!("Bounded replay user {index}")));
+    }
+    for (turn, mirror, detail, mirror_id, detail_id) in [
+        (
+            "bounded-tail-turn-one",
+            "Bounded tail assistant one",
+            "Bounded tail detail one",
+            "bounded-tail-one-mirror",
+            "bounded-tail-one-detail",
+        ),
+        (
+            "bounded-tail-turn-two",
+            "Bounded tail assistant two",
+            "Bounded tail detail two",
+            "bounded-tail-two-mirror",
+            "bounded-tail-two-detail",
+        ),
+    ] {
+        tail.push_str(&context_line(turn));
+        tail.push('\n');
+        tail.push_str(&commentary_stream_line_with_text(mirror));
+        tail.push('\n');
+        tail.push_str(&response_item(mirror_id, turn, mirror));
+        tail.push('\n');
+        tail.push_str(&response_item(detail_id, turn, detail));
+        tail.push('\n');
+    }
+    let tail_records = tail.lines().count() as u64;
+    assert_eq!(tail_records, 88, "the tail matches the observed record mix");
+    let mut source_file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    std::io::Write::write_all(&mut source_file, tail.as_bytes()).unwrap();
+    source_file.sync_all().unwrap();
+    drop(source_file);
+
+    let expected_records = fs::read_to_string(&path).unwrap().lines().count() as u64;
+    let first_pending = super::advance_source_index(&snapshot).unwrap();
+    assert!(
+        first_pending,
+        "the large tail yields with work still pending"
+    );
+    let first_checkpoint = source_index_diagnostic_state(&snapshot, None);
+    assert_eq!(first_checkpoint["page"]["counts_complete"], false);
+    assert!(!first_checkpoint["head"]["before"].is_null());
+    let mut tail_advance_calls = 1usize;
+    let mut settled = false;
+    for _ in 1..128 {
+        tail_advance_calls += 1;
+        if !super::advance_source_index(&snapshot).unwrap() {
+            settled = true;
+            break;
+        }
+    }
+    assert!(
+        settled,
+        "the appended native interval reaches a complete checkpoint"
+    );
+    assert!(
+        tail_advance_calls > 1,
+        "the large tail yields through ordinary bounded source-index checkpoints"
+    );
+
+    let state = source_index_diagnostic_state(&snapshot, None);
+    assert_eq!(state["head"]["replay_settled"], true);
+    assert_eq!(state["head"]["counts_gapped"], false);
+    assert_eq!(
+        state["head"]["replay_records_decoded"].as_u64(),
+        Some(expected_records)
+    );
+    assert_eq!(state["head"]["replay_rows_admitted"].as_u64(), Some(89));
+
+    let mut before = None;
+    let mut all_events = Vec::new();
+    for _ in 0..4 {
+        let page = source_index_page_with_cursor(&snapshot, before.as_deref());
+        assert!(page.counts_complete);
+        all_events.extend(page.events);
+        before = page.next_before;
+        if before.is_none() {
+            break;
+        }
+    }
+    assert!(
+        before.is_none(),
+        "all replayed rows fit the bounded page walk"
+    );
+    assert_eq!(
+        all_events
+            .iter()
+            .filter(|event| event.text.as_deref() == Some(pair_text))
+            .count(),
+        3
+    );
+    for index in 0..80 {
+        let text = format!("Bounded replay user {index}");
+        assert!(
+            all_events
+                .iter()
+                .any(|event| event.text.as_deref() == Some(text.as_str())),
+            "replay retains user row {index}"
+        );
+    }
+    for text in [
+        "Bounded tail assistant one",
+        "Bounded tail detail one",
+        "Bounded tail assistant two",
+        "Bounded tail detail two",
+    ] {
+        assert!(
+            all_events
+                .iter()
+                .any(|event| event.text.as_deref() == Some(text)),
+            "replay retains assistant control {text}"
+        );
+    }
+}
+
+#[test]
 fn provisional_generation_cursors_and_details_expire_on_private_policy_change() {
     let (_guard, temp) = isolated_home();
     let mut contents = format!(

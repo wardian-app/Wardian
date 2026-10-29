@@ -246,6 +246,7 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
                 let candidate = patchLoadedChatMembers(eventWindow.current, next);
                 if (chatNeedsRevalidation(previous, next, true)) candidate = await renewCandidate(next, candidate, "older");
                 if (epoch !== scope.current || requestedWindow !== windowVersion.current) return;
+                windowDirection.current = "older"; setBrowsingOlder(true);
                 setEvents(candidate);
                 const updated = { ...latest.current!, revision: next.revision, progress: next.progress,
                   next_before: olderCursor.current?.before ?? latest.current!.next_before };

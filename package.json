@@ -51,7 +51,7 @@
     "docs:demo-gif:real": "node scripts/capture-readme-demo-real.mjs",
     "perf:workbench": "node scripts/measure-workbench-performance.mjs",
     "perf:workbench:check": "node scripts/measure-workbench-performance.mjs --check",
-    "test": "node --test scripts/rust-build-cache.test.mjs && vitest run",
+    "test": "node --test scripts/rust-build-cache.test.mjs scripts/claude-turn-ended-mod.test.mjs && vitest run",
     "test:coverage": "vitest run --coverage",
     "test:coverage:rust": "cd src-tauri && cargo llvm-cov --lcov --output-path ../coverage/rust-lcov.info",
     "test:watch": "vitest",
