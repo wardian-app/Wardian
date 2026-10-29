@@ -13,6 +13,10 @@ use completion::{
 };
 
 pub(super) fn spawn_information(app: &AppHandle, recipient: &str) {
+    // Controller replies stay in the canonical mailbox; controllers have no provider.
+    if recipient.starts_with("controller:") {
+        return;
+    }
     let app = app.clone();
     let recipient = recipient.to_owned();
     tauri::async_runtime::spawn(async move {
