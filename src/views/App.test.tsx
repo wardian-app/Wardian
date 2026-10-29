@@ -3140,7 +3140,7 @@ describe("Spawn Form", () => {
     setupDefaultMocks([], defaultClasses);
     render(<App />);
     await screen.findByText("No Active Instances");
-    expect(screen.getByPlaceholderText("C:/projects/my-app")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Enter workspace path")).toBeInTheDocument();
   });
 
   it("renders resume ID placeholder", async () => {
