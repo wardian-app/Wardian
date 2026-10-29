@@ -121,17 +121,13 @@ impl OwnedProxy {
         #[cfg(windows)]
         let job = crate::utils::process::create_kill_on_close_job("Codex proxy")
             .map_err(CodexSharedError::unsupported)?;
-        let mut child = command.spawn().map_err(|_| {
+        #[cfg(windows)]
+        let child_result = crate::utils::process::spawn_owned_command_in_job(&mut command, &job);
+        #[cfg(not(windows))]
+        let child_result = crate::utils::process::spawn_owned_command(&mut command);
+        let mut child = child_result.map_err(|_| {
             CodexSharedError::unsupported("Codex proxy spawn failed; no handshake was written")
         })?;
-        #[cfg(windows)]
-        let setup_error = child
-            .id()
-            .ok_or_else(|| "Codex proxy PID missing".to_owned())
-            .and_then(|pid| crate::utils::process::assign_pid_to_job(&job, pid, "Codex proxy"))
-            .err()
-            .map(CodexSharedError::unsupported);
-        #[cfg(not(windows))]
         let setup_error = None;
         // Piped stdio is guaranteed by Command above; no await or cancellation
         // point exists between spawn and transferring the child to its supervisor.
