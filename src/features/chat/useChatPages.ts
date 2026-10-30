@@ -241,7 +241,17 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
               const updated = { ...latest.current!, progress: next.progress };
               latest.current = updated; setPage(updated);
             } else {
-              if (next.reset && compatible) {
+              if (next.reset && next.older_page === true && ordinaryCompatible) {
+                if (!canAdmitOlderChatPage(next)) throw new Error("Older history page exceeds the visible window. Retry without advancing history.");
+                let candidate = applyChatPage(eventWindow.current, { ...next, reset: false }, "older");
+                if (chatNeedsRevalidation(previous, next, true)) candidate = await renewCandidate(next, candidate, "older");
+                if (epoch !== scope.current || requestedWindow !== windowVersion.current) return;
+                windowDirection.current = "older"; setBrowsingOlder(true);
+                setEvents(candidate);
+                olderCursor.current = { generation: next.generation, before: next.next_before };
+                latest.current = next; setPage(next); setError(null);
+              } else if (next.reset) {
+                if (!ordinaryCompatible) { settleOlderDemand(); setLoadingOlder(false); return; }
                 if (next.events.length > 80) throw new Error("Recent snapshot exceeds the metadata page limit");
                 let candidate = patchLoadedChatMembers(eventWindow.current, next);
                 if (chatNeedsRevalidation(previous, next, true)) candidate = await renewCandidate(next, candidate, "older");

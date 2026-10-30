@@ -70,6 +70,9 @@ pub struct AgentChatPage {
     pub next_before: Option<String>,
     pub unchanged: bool,
     pub reset: bool,
+    /// True only when the requested before frontier produced an admitted older page.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub older_page: bool,
     pub progress: String,
     pub aliases: Vec<AgentChatAlias>,
     pub removed_ids: Vec<String>,
@@ -80,6 +83,10 @@ pub struct AgentChatPage {
     pub revalidated_ids: Option<Vec<String>>,
     pub bytes_read: usize,
     pub records_decoded: usize,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

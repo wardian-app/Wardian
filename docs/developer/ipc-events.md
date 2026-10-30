@@ -255,7 +255,16 @@ existing IPC and HTTP surfaces. The request selects only backend-issued source
 observation IDs already present in the loaded window. It carries the current
 opaque revision and omits cursor and detail arguments. A successful page
 explicitly acknowledges the complete request in `revalidated_ids`; a missing
-acknowledgement leaves the existing window and older frontier unconfirmed.acknowledgement leaves the existing window and older frontier unconfirmed.
+acknowledgement leaves the existing window and older frontier unconfirmed.
+
+`reset` means the page was invalidated; it does not identify direction. The
+optional `older_page` response field defaults to false. The backend sets it
+true only when an admitted source, canonical, or bounded fallback read honored
+the requested older frontier. Recent fallback rows, rejected or unknown
+frontiers, detail reads, and renewal responses leave it false. A client may
+admit an older-demand reset as history only with `older_page=true` and after
+the ordinary scope, size, alias, removal, and full renewal checks pass. Missing
+or false preserves the loaded rows and saved older cursor.
 
 #### Ordinary canonical reads and first-page bootstrap
 

@@ -34,9 +34,13 @@ failure paths.
 
 An unchanged revision returns no narrative headers. A compatible refresh
 returns at most 80 changed headers across a bounded chain of immutable heads.
-If that chain cannot continue, the reader resets to the recent window. It
-never resets to a complete transcript. Older indexing updates already loaded
-headers without causing the client to load unseen older history.
+`reset` reports invalidation, not direction. When a source or canonical cursor
+still honors its requested before frontier, the response sets `older_page=true`
+and returns that bounded older interval even if `reset=true`. A rejected or
+unproven frontier that falls back to recent rows leaves `older_page` false; the
+client keeps its loaded cohort and saved older cursor. A read never resets to a
+complete transcript. Older indexing updates already loaded headers without
+causing the client to load unseen older history.
 
 ## Publication and privacy
 
@@ -220,7 +224,9 @@ no pending rows, normalizer output, or source gap. An older page uses indexed
 rows only when the current compatible head covers its requested physical
 frontier. Otherwise the existing 128 KiB / 16 KiB recent-window reader resumes
 at that opaque source cursor and returns only its contiguous decoded suffix.
-Sparse indexed prefixes never replace the recent window or move a cursor past an
+That bounded fallback is marked `older_page=true` only when its source scope
+matches and it actually returns headers before the requested frontier. Sparse
+indexed prefixes never replace the recent window or move a cursor past an
 unrendered gap. Full-source completion still gates relation certificates and
 revalidation acknowledgements.
 

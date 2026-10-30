@@ -84,6 +84,8 @@ export interface AgentChatPage {
     next_before: string | null;
     unchanged: boolean;
     reset: boolean;
+    /** Backend confirmation that this response honored an older-page frontier. */
+    older_page?: boolean;
     progress: string;
     aliases: { observation_id: string; canonical_id: string }[];
     removed_ids: string[];

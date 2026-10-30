@@ -204,6 +204,16 @@ frontier. A compatible recent metadata poll while browsing older history
 preserves that frontier. It does not replace it with the recent snapshot's
 first older cursor or add unseen recent rows to the loaded membership.
 
+`reset` reports invalidation and does not identify page direction. The optional
+`older_page` response field defaults to false and is true only when the backend
+honored the requested before frontier with an admitted source, canonical, or
+bounded fallback older page. A rejected frontier that falls back to recent
+headers, an unknown or changed scope, a detail read, and metadata renewal do
+not set it. The consumer admits an older-demand reset as history only when this
+field is true; it still applies the ordinary size, alias, removal, scope, and
+complete-renewal guards before committing the returned cursor. Other resets
+preserve the loaded cohort and its frontier.
+
 Ordinary older requests use that actual saved cursor. An exhausted frontier
 does not provide another ordinary older UI action. Tests that need a later
 older demand must establish sufficient preexisting history before A, rather
@@ -233,6 +243,10 @@ or mixed-producer write protocol requires separate compatibility evidence.
   After exactly eighty distinct appended history observations, the actual H1
   recent page and the next ordinary older page both exclude A. Complete
   backend-issued renewal batches preserve A, its display key, and its binding.
+- A same-scope source invalidation with a covered older frontier returns
+  `reset=true` and `older_page=true` with the actual older rows and continuation.
+  A rejected frontier that returns recent rows has `older_page=false`; the
+  consumer neither prepends those rows to an older demand nor adopts its cursor.
 - A later matching observation outside the incoming pages retracts the pair.
   Renewed raw A and B retain their own coordinates and full readable bodies.
   This repair also runs when the changed revision arrives with `reset=false`.

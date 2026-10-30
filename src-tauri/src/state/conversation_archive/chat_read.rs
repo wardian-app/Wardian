@@ -2052,6 +2052,415 @@ fn source_page_commentary_pairs(
         .collect()
 }
 
+fn archived_codex_commentary_text(event: &AgentChatEvent) -> Option<&str> {
+    let text = event
+        .text
+        .as_deref()
+        .filter(|text| !text.trim().is_empty() && text.len() < PREVIEW_BYTES)?;
+    if event.metadata["chat_body_pending"] == true
+        || event.metadata["chat_body_unavailable"] == true
+        || event.metadata["codex_display_text_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes != text.len() as u64)
+    {
+        return None;
+    }
+    Some(text)
+}
+
+fn archived_codex_commentary_fields_match(
+    archived: &AgentChatEvent,
+    native: &AgentChatEvent,
+    source: &str,
+    raw_types: &[&str],
+    companion_text: &str,
+) -> bool {
+    if archived.session_id != native.session_id
+        || archived.provider != "codex"
+        || archived.kind != wardian_core::models::chat::AgentChatEventKind::Message
+        || archived.role != Some(wardian_core::models::chat::AgentChatRole::Assistant)
+        || archived.source.as_deref() != Some(source)
+        || archived.turn_id != native.turn_id
+        || archived.metadata["chat_source_ref"].is_string()
+        || archived.metadata["generated"] == true
+        || archived
+            .metadata
+            .get("provider_log")
+            .is_some_and(|value| value != &json!(true))
+        || archived.metadata["raw_type"]
+            .as_str()
+            .is_some_and(|raw_type| !raw_types.contains(&raw_type))
+        || !archived
+            .text
+            .as_deref()
+            .is_some_and(|text| text == companion_text)
+        || archived_codex_commentary_text(archived) != Some(companion_text)
+        || !archived
+            .text
+            .as_deref()
+            .zip(native.text.as_deref())
+            .is_some_and(|(archived, current)| archived == current)
+    {
+        return false;
+    }
+    [
+        "provider_session_id",
+        "conversation_archive_id",
+        "provider_turn_id",
+        "provider_phase",
+        "log_path",
+        "source_path",
+        "chat_source_epoch",
+        "chat_source_admission",
+    ]
+    .into_iter()
+    .all(|key| {
+        archived
+            .metadata
+            .get(key)
+            .filter(|value| !value.is_null())
+            .is_none_or(|value| native.metadata.get(key) == Some(value))
+    })
+}
+
+fn archived_codex_commentary_matches(
+    archived: &AgentChatEvent,
+    native: &AgentChatEvent,
+    source: &str,
+    raw_types: &[&str],
+    companion_text: &str,
+) -> bool {
+    !archived.metadata["chat_display_member_ids"].is_array()
+        && archived_codex_commentary_fields_match(
+            archived,
+            native,
+            source,
+            raw_types,
+            companion_text,
+        )
+}
+
+/// A projected logical group has a different public ID from its physical
+/// members. Accept overlap only when the current SourcePage certifies exactly
+/// this A/B pair and the bounded relation contains no other native identity.
+fn projected_codex_commentary_group_members(
+    projected: &AgentChatEvent,
+    source_page: &super::chat_source_index::SourcePage,
+    live_id: &str,
+    completed_id: &str,
+) -> Option<(String, Vec<String>)> {
+    let physical_id = projected
+        .metadata
+        .get("chat_display_physical_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.trim().is_empty())?;
+    let members = projected
+        .metadata
+        .get("chat_display_member_ids")
+        .and_then(serde_json::Value::as_array)?;
+    if !(3..=4).contains(&members.len()) {
+        return None;
+    }
+    let members = members
+        .iter()
+        .map(serde_json::Value::as_str)
+        .collect::<Option<Vec<_>>>()?;
+    let member_set = members.iter().copied().collect::<BTreeSet<_>>();
+    if members.iter().any(|id| id.trim().is_empty())
+        || member_set.len() != members.len()
+        || !member_set.contains(live_id)
+        || !member_set.contains(completed_id)
+        || !member_set.contains(physical_id)
+    {
+        return None;
+    }
+
+    let mut native_ids = BTreeSet::new();
+    for event in &source_page.events {
+        native_ids.insert(event.id.as_str());
+        if let Some(id) = event.metadata["chat_source_ref"].as_str() {
+            native_ids.insert(id);
+        }
+        if let Some(id) = event.metadata["chat_display_physical_id"].as_str() {
+            native_ids.insert(id);
+        }
+        if let Some(ids) = event.metadata["chat_display_member_ids"].as_array() {
+            native_ids.extend(ids.iter().filter_map(serde_json::Value::as_str));
+        }
+    }
+    if projected.id == live_id
+        || projected.id == completed_id
+        || native_ids.contains(projected.id.as_str())
+        || members
+            .iter()
+            .any(|id| *id != live_id && *id != completed_id && native_ids.contains(*id))
+    {
+        return None;
+    }
+
+    Some((
+        physical_id.to_owned(),
+        members.into_iter().map(str::to_owned).collect(),
+    ))
+}
+
+fn certified_codex_commentary_member(
+    event: &AgentChatEvent,
+    source_ref: &str,
+    live_id: &str,
+    completed_id: &str,
+    source: &str,
+    raw_types: &[&str],
+) -> bool {
+    event.id == live_id
+        && event.provider == "codex"
+        && event.kind == wardian_core::models::chat::AgentChatEventKind::Message
+        && event.role == Some(wardian_core::models::chat::AgentChatRole::Assistant)
+        && event.source.as_deref() == Some(source)
+        && event.metadata["provider_log"] == true
+        && event.metadata["provider_phase"] == "commentary"
+        && event.metadata["raw_type"]
+            .as_str()
+            .is_some_and(|raw_type| raw_types.contains(&raw_type))
+        && event.metadata["chat_source_ref"].as_str() == Some(source_ref)
+        && event.metadata["chat_display_physical_id"].as_str() == Some(source_ref)
+        && event.metadata["chat_source_start"].as_u64().is_some()
+        && event.metadata["chat_source_end"].as_u64().is_some()
+        && event.metadata["chat_display_member_ids"]
+            .as_array()
+            .is_some_and(|members| {
+                members.len() == 2
+                    && members
+                        .iter()
+                        .filter_map(|member| member.as_str())
+                        .collect::<BTreeSet<_>>()
+                        == BTreeSet::from([live_id, completed_id])
+            })
+}
+
+fn reconcile_archived_codex_commentary_pairs(
+    snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
+    page: &mut AgentChatPage,
+    source_page: &super::chat_source_index::SourcePage,
+    logical_admitted: bool,
+    source_scope_valid: bool,
+    source_pairs: &[(String, String)],
+) {
+    if page.reset
+        || source_pairs.is_empty()
+        || !super::chat_source_index::current_complete(snapshot, source_page)
+    {
+        return;
+    }
+
+    let mut candidates = Vec::new();
+    for (live_id, completed_id) in source_pairs {
+        let live_rows = source_page
+            .events
+            .iter()
+            .filter(|event| {
+                certified_codex_commentary_member(
+                    event,
+                    live_id,
+                    live_id,
+                    completed_id,
+                    "event_msg",
+                    &["agent_message", "assistant_message"],
+                )
+            })
+            .collect::<Vec<_>>();
+        let completed_rows = source_page
+            .events
+            .iter()
+            .filter(|event| {
+                certified_codex_commentary_member(
+                    event,
+                    completed_id,
+                    live_id,
+                    completed_id,
+                    "response_item",
+                    &["message"],
+                )
+            })
+            .collect::<Vec<_>>();
+        let (Some(live), Some(completed)) = (
+            live_rows.first().filter(|_| live_rows.len() == 1),
+            completed_rows.first().filter(|_| completed_rows.len() == 1),
+        ) else {
+            continue;
+        };
+        if !crate::providers::chat_transcript::codex_display_pair(live, completed) {
+            continue;
+        }
+        let visible_display = page.events.iter().any(|event| {
+            event.id == *live_id
+                && event.metadata["chat_source_ref"].is_string()
+                && event.metadata["chat_display_member_ids"]
+                    .as_array()
+                    .is_some_and(|members| {
+                        members.len() == 2
+                            && members
+                                .iter()
+                                .filter_map(|member| member.as_str())
+                                .collect::<BTreeSet<_>>()
+                                == BTreeSet::from([live_id.as_str(), completed_id.as_str()])
+                    })
+        });
+        if !visible_display {
+            continue;
+        }
+
+        let companion_text = completed.text.as_deref().unwrap_or_default();
+        let response_rows = page
+            .events
+            .iter()
+            .filter(|event| {
+                archived_codex_commentary_matches(
+                    event,
+                    completed,
+                    "response_item",
+                    &["message"],
+                    companion_text,
+                )
+            })
+            .collect::<Vec<_>>();
+        let projected_rows = if logical_admitted && source_scope_valid {
+            page.events
+                .iter()
+                .filter_map(|event| {
+                    let group = projected_codex_commentary_group_members(
+                        event,
+                        source_page,
+                        live_id,
+                        completed_id,
+                    )?;
+                    archived_codex_commentary_fields_match(
+                        event,
+                        completed,
+                        "response_item",
+                        &["message"],
+                        companion_text,
+                    )
+                    .then_some((event, group))
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let (response, projected_group) =
+            match (response_rows.as_slice(), projected_rows.as_slice()) {
+                ([response], []) => (*response, None),
+                ([], [(response, (physical_id, members))]) => {
+                    (*response, Some((physical_id.clone(), members.clone())))
+                }
+                _ => continue,
+            };
+        let stream_rows = page
+            .events
+            .iter()
+            .filter(|event| {
+                archived_codex_commentary_matches(
+                    event,
+                    live,
+                    "event_msg",
+                    &["agent_message", "assistant_message"],
+                    companion_text,
+                )
+            })
+            .collect::<Vec<_>>();
+        let completion_message_id = completed
+            .turn_id
+            .as_deref()
+            .filter(|message_id| !message_id.trim().is_empty());
+        if projected_group.is_some()
+            && !completion_message_id
+                .is_some_and(|message_id| response.turn_id.as_deref() == Some(message_id))
+        {
+            continue;
+        }
+        let stream_id = match stream_rows.as_slice() {
+            [stream] => Some(stream.id.clone()),
+            [] if completion_message_id
+                .is_some_and(|message_id| response.turn_id.as_deref() == Some(message_id)) =>
+            {
+                None
+            }
+            _ => continue,
+        };
+        candidates.push((
+            live_id.clone(),
+            stream_id,
+            response.id.clone(),
+            projected_group,
+        ));
+    }
+
+    let mut stream_claims = HashMap::<String, usize>::new();
+    let mut response_claims = HashMap::<String, usize>::new();
+    let mut projected_group_claims = HashMap::<Vec<String>, usize>::new();
+    for (_, stream_id, response_id, projected_group) in &candidates {
+        if let Some(stream_id) = stream_id {
+            *stream_claims.entry(stream_id.clone()).or_default() += 1;
+        }
+        *response_claims.entry(response_id.clone()).or_default() += 1;
+        if let Some((_, members)) = projected_group {
+            let mut group_key = members.to_vec();
+            group_key.sort();
+            *projected_group_claims.entry(group_key).or_default() += 1;
+        }
+    }
+    let mut archived_ids = BTreeSet::new();
+    for (live_id, stream_id, response_id, projected_group) in candidates {
+        if stream_id
+            .as_ref()
+            .is_some_and(|stream_id| stream_claims.get(stream_id) != Some(&1))
+            || response_claims.get(&response_id) != Some(&1)
+            || projected_group.as_ref().is_some_and(|(_, members)| {
+                let mut group_key = members.to_vec();
+                group_key.sort();
+                projected_group_claims.get(&group_key) != Some(&1)
+            })
+        {
+            continue;
+        }
+
+        let mut observation_ids = BTreeSet::new();
+        if let Some(stream_id) = stream_id {
+            archived_ids.insert(stream_id.clone());
+            observation_ids.insert(stream_id);
+        }
+        archived_ids.insert(response_id.clone());
+        observation_ids.insert(response_id);
+        if let Some((physical_id, members)) = projected_group {
+            observation_ids.insert(physical_id);
+            observation_ids.extend(members);
+            // The group public ID and its physical members are one certified
+            // logical observation. Rewrite prior alias targets before adding
+            // the native live ID, so no observation points at both headers.
+            for alias in &mut page.aliases {
+                if observation_ids.contains(&alias.observation_id)
+                    || observation_ids.contains(&alias.canonical_id)
+                {
+                    alias.canonical_id = live_id.clone();
+                }
+            }
+        }
+        for observation_id in observation_ids {
+            if observation_id != live_id {
+                page.aliases
+                    .push(wardian_core::models::chat::AgentChatAlias {
+                        observation_id,
+                        canonical_id: live_id.clone(),
+                    });
+            }
+        }
+    }
+    if !archived_ids.is_empty() {
+        page.events
+            .retain(|event| !archived_ids.contains(&event.id));
+    }
+}
+
 /// The shared read boundary. Every disk/decode path uses fixed limits, including
 /// stale cursors and detail failures. No capture, repair or archive lock occurs.
 pub(crate) fn read_with_revalidation(
@@ -2140,6 +2549,7 @@ pub(crate) fn read(
         next_before: None,
         unchanged: false,
         reset: cold_rejected,
+        older_page: false,
         progress: seed.progress.clone(),
         aliases: Vec::new(),
         removed_ids: Vec::new(),
@@ -2398,6 +2808,7 @@ pub(crate) fn read(
                         if page.range_covered {
                             result.events = page.events;
                             result.next_before = page.next_before;
+                            result.older_page = true;
                         } else if let Some((before_offset, ordinal)) = page.cursor_frontier {
                             result.events.clear();
                             result.next_before = cursor.map(str::to_owned);
@@ -2436,6 +2847,7 @@ pub(crate) fn read(
                                         });
                                     }
                                     result.events = fallback.events;
+                                    result.older_page = !result.events.is_empty();
                                     let fallback_incomplete =
                                         fallback.checkpoint.as_ref().is_some_and(|checkpoint| {
                                             !checkpoint.window_complete
@@ -2450,6 +2862,7 @@ pub(crate) fn read(
                                         result.progress = fallback.progress;
                                         result.events.clear();
                                         result.next_before = cursor.map(str::to_owned);
+                                        result.older_page = false;
                                         if result.progress == "source_changed" {
                                             result.reset = true;
                                         }
@@ -2479,6 +2892,7 @@ pub(crate) fn read(
                                         });
                                     result.events.clear();
                                     result.next_before = cursor.map(str::to_owned);
+                                    result.older_page = false;
                                     result.progress = fallback.progress;
                                     if fallback_scope_changed {
                                         result.reset = true;
@@ -2500,6 +2914,7 @@ pub(crate) fn read(
                             result.next_before = cursor.map(str::to_owned);
                             result.progress = "source_changed".into();
                             result.reset = true;
+                            result.older_page = false;
                         }
                     } else if page.counts_complete {
                         result.events = page.events;
@@ -2509,6 +2924,7 @@ pub(crate) fn read(
                         // nor a valid source-page frontier.
                         result.events.clear();
                         result.next_before = None;
+                        result.older_page = false;
                     }
                     if let Some(published) = &current_head {
                         result.conversation_id = Some(published.conversation_id.clone());
@@ -2572,6 +2988,7 @@ pub(crate) fn read(
             if pinned.agent_id == context.agent_id && pinned.generation == published.generation {
                 (result.events, result.next_before) =
                     page(&mut store, reference, published, Some(before))?;
+                result.older_page = true;
             } else {
                 result.reset = true;
                 (result.events, result.next_before) = page(&mut store, reference, published, None)?;
@@ -3260,6 +3677,7 @@ pub(crate) fn read(
         result.aliases.clear();
         result.removed_ids.clear();
         result.next_before = cursor.map(str::to_owned);
+        result.older_page = false;
         if !matches!(
             result.progress.as_str(),
             "oversized_record" | "source_changed" | "ownership_pending"
@@ -3267,6 +3685,21 @@ pub(crate) fn read(
             result.progress = "indexing".into();
         }
         result.unchanged = false;
+    }
+    if cursor.is_none() && detail_ref.is_none() {
+        if let Some(source_page) = seed_source_page.as_ref() {
+            reconcile_archived_codex_commentary_pairs(
+                snapshot,
+                &mut result,
+                source_page,
+                logical_admitted,
+                source_scope_valid,
+                &source_page_pairs,
+            );
+        }
+    }
+    if detail_ref.is_some() {
+        result.older_page = false;
     }
     project_display_result(&mut result);
     result.bytes_read += store.bytes;
@@ -3442,6 +3875,7 @@ fn read_revalidated(
         next_before: None,
         unchanged: false,
         reset: canonical_rejected || progress == "source_changed",
+        older_page: false,
         progress,
         aliases: Vec::new(),
         removed_ids: Vec::new(),
@@ -3506,6 +3940,7 @@ fn finish_revalidated(
         next_before: None,
         unchanged: false,
         reset: false,
+        older_page: false,
         progress,
         aliases: Vec::new(),
         removed_ids: Vec::new(),

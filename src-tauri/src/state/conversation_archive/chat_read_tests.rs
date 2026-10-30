@@ -1133,34 +1133,7 @@ fn owned_native_source(
     crate::commands::chat::AgentArchiveCaptureSnapshot,
     SourcePolicy,
 ) {
-    fs::write(path, contents).unwrap();
-    let mut snapshot = snapshot(&context());
-    snapshot.provider = "codex".into();
-    snapshot.resume_session = Some("one".into());
-    snapshot.log_path = Some(path.to_owned());
-    let ctx = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
-    let anchor = &contents.as_bytes()[..contents.len().min(4096)];
-    let policy = SourcePolicy {
-        agent_id: ctx.agent_id.clone(),
-        source_key: ctx.provider_source_key.clone().unwrap(),
-        identity: crate::commands::provider_log_acquisition::native_file_identity(
-            &File::open(path).unwrap(),
-        )
-        .unwrap(),
-        anchor: crate::commands::provider_log_acquisition::ProviderLogContinuityAnchor {
-            start: 0,
-            len: anchor.len() as u64,
-            sha256: digest(anchor),
-        },
-        generation: 1,
-        unknown_before: 0,
-        disabled: Vec::new(),
-        open_disabled: None,
-        valid: true,
-        framed_starts: vec![0],
-    };
-    write_json_atomic(&policy_path(&ctx.agent_id).unwrap(), &Some(&policy)).unwrap();
-    (snapshot, policy)
+    owned_native_source_for_provider_session(path, contents, "agent-1", "one")
 }
 
 fn read_complete_detail(
@@ -8803,4 +8776,1488 @@ fn artifact_replacement_invalidates_a_body_without_changing_the_preview_or_path(
     )
     .unwrap();
     assert_eq!(new.detail.unwrap().text, "b".repeat(2000));
+}
+
+#[test]
+fn admitted_source_cursor_reset_attests_the_actual_older_page() {
+    let (_guard, temp) = isolated_home();
+    let mut contents = format!(
+        "{}\n",
+        json!({"type": "session_meta", "payload": {"id": "one"}})
+    );
+    for index in 0..200 {
+        contents.push_str(&native_message(&format!("older-reset-{index}")));
+    }
+    let (snapshot, _) =
+        owned_native_source(&temp.path().join("older-reset-source.jsonl"), &contents);
+    let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+    finish_source_index(&snapshot);
+
+    let recent = read(&context, &snapshot, None, None, None).unwrap();
+    let cursor = recent
+        .next_before
+        .clone()
+        .expect("the recent page has older history");
+    assert!(!recent.older_page);
+
+    // Rebuilding this derived head invalidates the old revision while retaining
+    // its trusted generation, admission, source epoch, and physical frontier.
+    let reference = super::super::chat_source_index::pointer("agent-1")
+        .unwrap()
+        .unwrap();
+    let mut store = super::store("agent-1").unwrap();
+    let mut legacy_head: serde_json::Value = store.read(&reference).unwrap();
+    legacy_head
+        .as_object_mut()
+        .unwrap()
+        .remove("logical_version");
+    let legacy_reference = store.put(&legacy_head).unwrap();
+    let pointer_path = super::locations("agent-1")
+        .unwrap()
+        .0
+        .with_file_name("chat-source-head.json");
+    wardian_core::conversations::write_json_atomic(&pointer_path, &Some(legacy_reference)).unwrap();
+    finish_source_index(&snapshot);
+
+    let older = read(
+        &context,
+        &snapshot,
+        Some(&cursor),
+        Some(&recent.revision),
+        None,
+    )
+    .unwrap();
+    assert!(older.reset, "the source-head invalidation remains visible");
+    assert!(
+        older.older_page,
+        "the admitted before frontier still selected older rows"
+    );
+    assert_eq!(older.generation, recent.generation);
+    assert_eq!(older.source_epoch, recent.source_epoch);
+    assert_eq!(older.events.len(), 80);
+    assert_eq!(
+        older
+            .events
+            .iter()
+            .map(|event| event.text.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        (40..120)
+            .map(|index| format!("older-reset-{index}"))
+            .collect::<Vec<_>>(),
+    );
+    assert!(
+        older.next_before.is_some(),
+        "the producer issues the next older frontier"
+    );
+    assert_eq!(serde_json::to_value(&older).unwrap()["older_page"], true);
+
+    let mixed_detail = read(
+        &context,
+        &snapshot,
+        Some(&cursor),
+        Some(&recent.revision),
+        Some("archive:nonseed-detail"),
+    )
+    .unwrap();
+    assert_eq!(
+        mixed_detail
+            .events
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>(),
+        older
+            .events
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(mixed_detail.next_before, older.next_before);
+    assert!(
+        !mixed_detail.older_page,
+        "detail input suppresses older-page attestation"
+    );
+}
+
+#[test]
+fn rejected_canonical_cursor_returns_recent_without_older_attestation() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    owner
+        .committed(
+            candidate(
+                (0..150)
+                    .map(|index| event(&format!("canonical-{index}"), "preview"))
+                    .collect(),
+            ),
+            "before-generation".into(),
+        )
+        .unwrap();
+    let ctx = context();
+    let snap = snapshot(&ctx);
+    let first = read(&ctx, &snap, None, None, None).unwrap();
+    assert_eq!(first.events.len(), PAGE_ROWS);
+    let cursor = first
+        .next_before
+        .clone()
+        .expect("the canonical page has older rows");
+    assert!(
+        !cursor.starts_with("source:"),
+        "the cursor is a real canonical head cursor"
+    );
+    let first_generation = first.generation.clone().unwrap();
+
+    let replacement_owner = ProjectionOwner::default();
+    replacement_owner
+        .committed(
+            candidate(
+                (0..151)
+                    .map(|index| event(&format!("canonical-{index}"), "preview"))
+                    .collect(),
+            ),
+            "after-generation".into(),
+        )
+        .unwrap();
+    let current = read(&ctx, &snap, None, None, None).unwrap();
+    assert_ne!(
+        current.generation.as_deref(),
+        Some(first_generation.as_str())
+    );
+    assert!(current
+        .events
+        .iter()
+        .any(|event| event.id == "canonical-150"));
+
+    let rejected = read(&ctx, &snap, Some(&cursor), Some(&first.revision), None).unwrap();
+    assert!(
+        rejected.reset,
+        "the old canonical generation resets to the current page"
+    );
+    assert!(
+        !rejected.older_page,
+        "a rejected canonical cursor is recent-page output"
+    );
+    assert_eq!(rejected.generation, current.generation);
+    assert_eq!(rejected.conversation_id, current.conversation_id);
+    assert_eq!(
+        rejected
+            .events
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>(),
+        current
+            .events
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(rejected.next_before, current.next_before);
+    assert!(rejected
+        .events
+        .iter()
+        .any(|event| event.id == "canonical-150"));
+    assert!(!rejected
+        .events
+        .iter()
+        .any(|event| event.id == "canonical-0"));
+}
+
+#[test]
+fn rejected_source_frontier_keeps_its_cursor_without_older_attestation() {
+    let (_guard, temp) = isolated_home();
+    let mut contents = format!(
+        "{}\n",
+        json!({"type": "session_meta", "payload": {"id": "one"}})
+    );
+    for index in 0..200 {
+        contents.push_str(&native_message(&format!("rejected-frontier-{index}")));
+    }
+    let (snapshot, _) = owned_native_source(
+        &temp.path().join("rejected-frontier-source.jsonl"),
+        &contents,
+    );
+    let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+    finish_source_index(&snapshot);
+    let recent = read(&context, &snapshot, None, None, None).unwrap();
+    let reference = super::super::chat_source_index::pointer("agent-1")
+        .unwrap()
+        .unwrap();
+    let mut store = super::store("agent-1").unwrap();
+    let source_head: serde_json::Value = store.read(&reference).unwrap();
+    let beyond_extent = source_head["target_extent"].as_u64().unwrap() + 1;
+    let rejected_cursor = format!("source:{reference}:{beyond_extent:020}:{:020}", 0);
+
+    let rejected = read(
+        &context,
+        &snapshot,
+        Some(&rejected_cursor),
+        Some(&recent.revision),
+        None,
+    )
+    .unwrap();
+    assert!(
+        rejected.reset,
+        "the same-scope reader rejects the out-of-range frontier"
+    );
+    assert!(!rejected.older_page);
+    assert_eq!(rejected.progress, "source_changed");
+    assert_eq!(
+        rejected.next_before.as_deref(),
+        Some(rejected_cursor.as_str())
+    );
+    assert!(
+        rejected.events.is_empty(),
+        "an untrusted frontier yields no recent or older rows"
+    );
+
+    let mut legacy_dto = serde_json::to_value(&rejected).unwrap();
+    assert!(
+        legacy_dto.get("older_page").is_none(),
+        "false remains wire-optional"
+    );
+    legacy_dto.as_object_mut().unwrap().remove("older_page");
+    let decoded: AgentChatPage = serde_json::from_value(legacy_dto).unwrap();
+    assert!(
+        !decoded.older_page,
+        "an older DTO defaults to conservative false"
+    );
+}
+
+fn owned_native_source_for_provider_session(
+    path: &Path,
+    contents: &str,
+    agent_id: &str,
+    provider_session_id: &str,
+) -> (
+    crate::commands::chat::AgentArchiveCaptureSnapshot,
+    SourcePolicy,
+) {
+    fs::write(path, contents).unwrap();
+    let base = ConversationArchiveContext::for_agent_id(agent_id, "codex");
+    let mut snapshot = snapshot(&base);
+    snapshot.session_id = agent_id.to_owned();
+    snapshot.provider = "codex".into();
+    snapshot.resume_session = Some(provider_session_id.to_owned());
+    snapshot.log_path = Some(path.to_owned());
+    let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+    let anchor = &contents.as_bytes()[..contents.len().min(4096)];
+    let policy = SourcePolicy {
+        agent_id: context.agent_id.clone(),
+        source_key: context.provider_source_key.clone().unwrap(),
+        identity: crate::commands::provider_log_acquisition::native_file_identity(
+            &File::open(path).unwrap(),
+        )
+        .unwrap(),
+        anchor: crate::commands::provider_log_acquisition::ProviderLogContinuityAnchor {
+            start: 0,
+            len: anchor.len() as u64,
+            sha256: digest(anchor),
+        },
+        generation: 1,
+        unknown_before: 0,
+        disabled: Vec::new(),
+        open_disabled: None,
+        valid: true,
+        framed_starts: vec![0],
+    };
+    write_json_atomic(&policy_path(&context.agent_id).unwrap(), &Some(&policy)).unwrap();
+    (snapshot, policy)
+}
+
+fn controlled_legacy_codex_response_item(
+    path: &Path,
+    contents: &str,
+    text: &str,
+    expected_phase: &str,
+    sparse_metadata: bool,
+) -> AgentChatEvent {
+    let mut legacy = crate::providers::chat_transcript::normalize_chat_lines(
+        "agent-1",
+        "codex",
+        contents.lines(),
+    )
+    .into_iter()
+    .find(|event| {
+        event.source.as_deref() == Some("response_item") && event.text.as_deref() == Some(text)
+    })
+    .expect("controlled source includes the legacy response item");
+    assert_eq!(legacy.metadata["provider_phase"], expected_phase);
+    legacy
+        .metadata
+        .as_object_mut()
+        .unwrap()
+        .remove("provider_phase");
+    if sparse_metadata {
+        legacy.metadata = json!({"raw_type":"message"});
+    }
+    let sequence = legacy
+        .sequence
+        .expect("controlled response has a source sequence");
+    legacy.metadata["provider_log"] = json!(true);
+    legacy.metadata["log_path"] = json!(path.to_string_lossy());
+    legacy.metadata["chat_legacy_source_sequence"] = json!(sequence);
+    legacy.id =
+        crate::commands::chat::archive_identity::legacy_provider_log_event_id(&legacy, path);
+    legacy
+}
+
+fn controlled_legacy_codex_commentary_row(
+    path: &Path,
+    contents: &str,
+    source: &str,
+    text: &str,
+    sparse_metadata: bool,
+) -> AgentChatEvent {
+    let raw_type = match source {
+        "event_msg" => "agent_message",
+        "response_item" => "message",
+        _ => panic!("unsupported controlled Codex commentary source"),
+    };
+    let mut legacy = crate::providers::chat_transcript::normalize_chat_lines(
+        "agent-1",
+        "codex",
+        contents.lines(),
+    )
+    .into_iter()
+    .find(|event| event.source.as_deref() == Some(source) && event.text.as_deref() == Some(text))
+    .expect("controlled source includes the legacy commentary row");
+    assert_eq!(legacy.metadata["provider_phase"], "commentary");
+    if sparse_metadata {
+        legacy.metadata = json!({"raw_type":raw_type});
+    } else {
+        legacy
+            .metadata
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_phase");
+        legacy.metadata["provider_log"] = json!(true);
+        legacy.metadata["log_path"] = json!(path.to_string_lossy());
+        legacy.metadata["chat_legacy_source_sequence"] = json!(legacy
+            .sequence
+            .expect("controlled row has a local sequence"));
+    }
+    legacy.id =
+        crate::commands::chat::archive_identity::legacy_provider_log_event_id(&legacy, path);
+    legacy
+}
+
+/// CONTROLLED_METADATA_SHAPE_UNIT_TEST: exercises ordinary normal-page loading
+/// with a synthetic missing-phase legacy row and a sparse DTO.
+#[test]
+fn captured_shape_controlled_legacy_codex_metadata_rejoins_only_certified_commentary() {
+    let (_guard, temp) = isolated_home();
+    let path = temp.path().join("controlled-legacy-codex.jsonl");
+    let first_text = "controlled legacy commentary A";
+    let second_text = "controlled legacy commentary B";
+    let contents = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        json!({"type":"session_meta","payload":{"id":"one"}}),
+        commentary_context_line(),
+        commentary_stream_line_with_text(first_text),
+        commentary_item_line_with_text("controlled-commentary-item-a", first_text),
+        commentary_stream_line_with_text(second_text),
+        commentary_item_line_with_text("controlled-commentary-item-b", second_text),
+    );
+    let (snapshot, _) = owned_native_source(&path, &contents);
+    let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+    let missing_phase =
+        controlled_legacy_codex_response_item(&path, &contents, first_text, "commentary", false);
+    let sparse =
+        controlled_legacy_codex_response_item(&path, &contents, second_text, "commentary", true);
+    assert!(missing_phase.metadata.get("provider_phase").is_none());
+    assert!(sparse.metadata.get("provider_phase").is_none());
+    assert!(sparse.metadata.get("provider_turn_id").is_none());
+    let archive = ConversationArchiveState::default();
+    archive
+        .append_chat_events_with_context(context.clone(), &[missing_phase.clone(), sparse.clone()])
+        .unwrap();
+
+    let mut foreign_owner = missing_phase.clone();
+    foreign_owner.session_id = "agent-controlled-foreign".into();
+    assert_eq!(
+        archive
+            .append_chat_events_with_context(context.clone(), &[foreign_owner])
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+
+    let mut batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        "agent-1",
+        "codex",
+        &path,
+        context.provider_source_key.as_deref().unwrap(),
+        None,
+        true,
+    )
+    .unwrap();
+    crate::commands::chat::decorate_forward_provider_log_events(&mut batch.events, "codex", &path);
+    assert_eq!(
+        batch
+            .events
+            .iter()
+            .filter(|event| event.kind == AgentChatEventKind::Message)
+            .count(),
+        4
+    );
+    assert!(batch
+        .events
+        .iter()
+        .filter(|event| event.kind == AgentChatEventKind::Message)
+        .all(|event| event.metadata["provider_phase"] == "commentary"));
+    archive
+        .append_provider_log_batch_with_context(context.clone(), &batch.events, None, &batch.next)
+        .unwrap();
+    finish_projection(&archive);
+    finish_source_index(&snapshot);
+
+    let source_page = source_index_page(&snapshot);
+    let page_result = read(&context, &snapshot, None, None, None);
+    let page = page_result.unwrap();
+    for (legacy, text) in [(&missing_phase, first_text), (&sparse, second_text)] {
+        let rows: Vec<_> = page
+            .events
+            .iter()
+            .filter(|event| {
+                event.role == Some(AgentChatRole::Assistant) && event.text.as_deref() == Some(text)
+            })
+            .collect();
+        assert_eq!(rows.len(), 1, "one certified display row for {text}");
+        let native: Vec<_> = batch
+            .events
+            .iter()
+            .filter(|event| {
+                event.kind == AgentChatEventKind::Message && event.text.as_deref() == Some(text)
+            })
+            .collect();
+        assert_eq!(native.len(), 2, "commentary pair has both native members");
+        let live = native
+            .iter()
+            .find(|event| event.source.as_deref() == Some("event_msg"))
+            .unwrap();
+        let completed = native
+            .iter()
+            .find(|event| event.source.as_deref() == Some("response_item"))
+            .unwrap();
+        let foreign_native = source_page
+            .events
+            .iter()
+            .find(|event| event.id != live.id && event.id != completed.id)
+            .expect("the second controlled pair supplies a foreign native identity");
+        let mut foreign_group = (*legacy).clone();
+        foreign_group.id = "controlled-projected-commentary-group".into();
+        foreign_group.metadata["chat_display_physical_id"] = json!(legacy.id.clone());
+        foreign_group.metadata["chat_display_member_ids"] = json!([
+            live.id.clone(),
+            completed.id.clone(),
+            legacy.id.clone(),
+            foreign_native.id.clone()
+        ]);
+        assert!(
+            super::projected_codex_commentary_group_members(
+                &foreign_group,
+                &source_page,
+                &live.id,
+                &completed.id,
+            )
+            .is_none(),
+            "a projected group cannot absorb another current native identity"
+        );
+        assert_eq!(rows[0].id, live.id);
+        let members: BTreeSet<_> = rows[0].metadata["chat_display_member_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|member| member.as_str())
+            .collect();
+        assert_eq!(
+            members,
+            BTreeSet::from([live.id.as_str(), completed.id.as_str()])
+        );
+        assert!(page
+            .aliases
+            .iter()
+            .any(|alias| { alias.observation_id == legacy.id && alias.canonical_id == live.id }));
+        let alias_targets: BTreeSet<_> = page
+            .aliases
+            .iter()
+            .filter(|alias| alias.observation_id == legacy.id)
+            .map(|alias| alias.canonical_id.as_str())
+            .collect();
+        assert_eq!(
+            alias_targets,
+            BTreeSet::from([live.id.as_str()]),
+            "completion-only projected observation resolves only to native A"
+        );
+    }
+}
+
+#[test]
+fn captured_shape_controlled_legacy_codex_both_rows_rejoin_only_certified_commentary() {
+    for (case_name, sparse_metadata) in [("missing-phase", false), ("sparse", true)] {
+        let (_guard, temp) = isolated_home();
+        let path = temp
+            .path()
+            .join(format!("controlled-legacy-codex-{case_name}.jsonl"));
+        let text = format!("controlled {case_name} commentary");
+        let completion_id = format!("controlled-{case_name}-completion");
+        let contents = format!(
+            "{}\n{}\n{}\n{}\n",
+            json!({"type":"session_meta","payload":{"id":"one"}}),
+            commentary_context_line(),
+            commentary_stream_line_with_text(&text),
+            commentary_item_line_with_text(&completion_id, &text),
+        );
+        let (snapshot, _) = owned_native_source(&path, &contents);
+        let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+        let legacy_stream = controlled_legacy_codex_commentary_row(
+            &path,
+            &contents,
+            "event_msg",
+            &text,
+            sparse_metadata,
+        );
+        let legacy_completion = controlled_legacy_codex_commentary_row(
+            &path,
+            &contents,
+            "response_item",
+            &text,
+            sparse_metadata,
+        );
+        assert_eq!(legacy_stream.sequence, Some(3));
+        assert_eq!(legacy_completion.sequence, Some(4));
+        assert_eq!(
+            legacy_completion.turn_id.as_deref(),
+            Some(completion_id.as_str())
+        );
+        if sparse_metadata {
+            for legacy in [&legacy_stream, &legacy_completion] {
+                for key in [
+                    "provider_log",
+                    "provider_phase",
+                    "provider_turn_id",
+                    "log_path",
+                    "chat_legacy_source_sequence",
+                ] {
+                    assert!(
+                        legacy.metadata.get(key).is_none(),
+                        "sparse row gained {key}"
+                    );
+                }
+            }
+        } else {
+            assert!(legacy_stream.metadata.get("provider_phase").is_none());
+            assert!(legacy_completion.metadata.get("provider_phase").is_none());
+        }
+
+        let archive = ConversationArchiveState::default();
+        archive
+            .append_chat_events_with_context(
+                context.clone(),
+                &[legacy_stream.clone(), legacy_completion.clone()],
+            )
+            .unwrap();
+        let mut batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            context.provider_source_key.as_deref().unwrap(),
+            None,
+            true,
+        )
+        .unwrap();
+        crate::commands::chat::decorate_forward_provider_log_events(
+            &mut batch.events,
+            "codex",
+            &path,
+        );
+        archive
+            .append_provider_log_batch_with_context(
+                context.clone(),
+                &batch.events,
+                None,
+                &batch.next,
+            )
+            .unwrap();
+        finish_projection(&archive);
+        finish_source_index(&snapshot);
+
+        let native_rows: Vec<_> = batch
+            .events
+            .iter()
+            .filter(|event| {
+                event.kind == AgentChatEventKind::Message
+                    && event.text.as_deref() == Some(text.as_str())
+            })
+            .collect();
+        let source_page = source_index_page(&snapshot);
+        let retained_before = archive.chat_events_for_agent("agent-1").unwrap();
+        let page_result = read(&context, &snapshot, None, None, None);
+        assert_eq!(native_rows.len(), 2);
+        let live = native_rows
+            .iter()
+            .find(|event| event.source.as_deref() == Some("event_msg"))
+            .unwrap();
+        let completed = native_rows
+            .iter()
+            .find(|event| event.source.as_deref() == Some("response_item"))
+            .unwrap();
+        assert_eq!(completed.turn_id.as_deref(), Some(completion_id.as_str()));
+        for native in &native_rows {
+            let admitted = source_page
+                .events
+                .iter()
+                .find(|event| {
+                    event.metadata["chat_source_ref"].as_str() == Some(native.id.as_str())
+                })
+                .expect("normal source page retains each native physical member");
+            assert_eq!(
+                admitted.metadata["chat_source_ref"].as_str(),
+                Some(native.id.as_str())
+            );
+            assert!(admitted.metadata["chat_source_start"].as_u64().is_some());
+            assert!(admitted.metadata["chat_source_end"].as_u64().is_some());
+        }
+
+        let page = page_result.unwrap();
+        let displays: Vec<_> = page
+            .events
+            .iter()
+            .filter(|event| {
+                event.role == Some(AgentChatRole::Assistant)
+                    && event.text.as_deref() == Some(text.as_str())
+            })
+            .collect();
+        assert_eq!(
+            displays.len(),
+            1,
+            "{case_name} has one certified display row"
+        );
+        let display = displays[0];
+        assert_eq!(display.id, live.id);
+        let display_members: BTreeSet<_> = display.metadata["chat_display_member_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|member| member.as_str())
+            .collect();
+        assert_eq!(
+            display_members,
+            BTreeSet::from([live.id.as_str(), completed.id.as_str()])
+        );
+        assert_eq!(
+            display.metadata["chat_source_ref"],
+            display.metadata["chat_display_physical_id"]
+        );
+        assert!(display.metadata["chat_source_start"].as_u64().is_some());
+        assert!(display.metadata["chat_source_end"].as_u64().is_some());
+        for legacy in [&legacy_stream, &legacy_completion] {
+            assert!(!page.events.iter().any(|event| event.id == legacy.id));
+            assert!(page.aliases.iter().any(|alias| {
+                alias.observation_id == legacy.id && alias.canonical_id == live.id
+            }));
+            let alias_targets: BTreeSet<_> = page
+                .aliases
+                .iter()
+                .filter(|alias| alias.observation_id == legacy.id)
+                .map(|alias| alias.canonical_id.as_str())
+                .collect();
+            assert_eq!(
+                alias_targets,
+                BTreeSet::from([live.id.as_str()]),
+                "every projected legacy observation resolves only to native A"
+            );
+        }
+
+        // The source-bound normal header uses A as its public ID while the
+        // certified relation keeps A/B as its physical membership identities.
+        let requested_ids = vec![live.id.clone(), completed.id.clone()];
+        let renewed = super::read_with_revalidation(
+            &context,
+            &snapshot,
+            None,
+            Some(&page.revision),
+            None,
+            Some(requested_ids.as_slice()),
+        )
+        .unwrap();
+        assert_eq!(renewed.revalidated_ids, Some(requested_ids.clone()));
+        assert!(!renewed.reset);
+        assert_eq!(renewed.events.len(), 1);
+        assert_eq!(renewed.events[0].id, live.id);
+        let renewed_members: BTreeSet<_> = renewed.events[0].metadata["chat_display_member_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|member| member.as_str())
+            .collect();
+        assert_eq!(
+            renewed_members,
+            BTreeSet::from([live.id.as_str(), completed.id.as_str()])
+        );
+        if case_name == "missing-phase" {
+            let stale_revision = format!("stale.{}", page.revision);
+            let no_ack = super::read_with_revalidation(
+                &context,
+                &snapshot,
+                None,
+                Some(&stale_revision),
+                None,
+                Some(requested_ids.as_slice()),
+            )
+            .unwrap();
+            assert_eq!(no_ack.progress, "source_changed");
+            assert_eq!(no_ack.revalidated_ids, None);
+            assert!(no_ack.events.is_empty());
+        }
+        let retained_after = archive.chat_events_for_agent("agent-1").unwrap();
+        assert_eq!(
+            serde_json::to_value(retained_after).unwrap(),
+            serde_json::to_value(retained_before).unwrap(),
+            "normal page reconciliation leaves archive records unchanged"
+        );
+        drop(archive);
+        let reopened_archive = ConversationArchiveState::default();
+        let reopened_retained = reopened_archive.chat_events_for_agent("agent-1").unwrap();
+        for legacy in [&legacy_stream, &legacy_completion] {
+            assert!(reopened_retained.iter().any(|event| event.id == legacy.id));
+        }
+        let reopened_page = read(&context, &snapshot, None, None, None).unwrap();
+        let reopened_displays: Vec<_> = reopened_page
+            .events
+            .iter()
+            .filter(|event| {
+                event.role == Some(AgentChatRole::Assistant)
+                    && event.text.as_deref() == Some(text.as_str())
+            })
+            .collect();
+        assert_eq!(reopened_displays.len(), 1);
+        assert_eq!(reopened_displays[0].id, live.id);
+        let reopened_members: BTreeSet<_> = reopened_displays[0].metadata
+            ["chat_display_member_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|member| member.as_str())
+            .collect();
+        assert_eq!(
+            reopened_members,
+            BTreeSet::from([live.id.as_str(), completed.id.as_str()])
+        );
+        for observation_id in [
+            live.id.as_str(),
+            completed.id.as_str(),
+            legacy_stream.id.as_str(),
+            legacy_completion.id.as_str(),
+        ] {
+            let targets: BTreeSet<_> = reopened_page
+                .aliases
+                .iter()
+                .filter(|alias| alias.observation_id == observation_id)
+                .map(|alias| alias.canonical_id.as_str())
+                .collect();
+            assert_eq!(
+                targets,
+                BTreeSet::from([live.id.as_str()]),
+                "same-home reopen preserves one canonical native A target"
+            );
+        }
+    }
+}
+
+/// CONTROLLED_SYNTHETIC_LEGACY_PROJECTION_UNIT_TEST: an admitted recent page
+/// stays loaded while its ordinary older cursor reaches the projected legacy pair.
+#[test]
+fn controlled_legacy_codex_projected_group_lands_on_older_page_with_recent_loaded() {
+    for (case_name, sparse_metadata) in [("missing-phase", false), ("sparse", true)] {
+        let (_guard, temp) = isolated_home();
+        let path = temp
+            .path()
+            .join(format!("controlled-legacy-codex-older-{case_name}.jsonl"));
+        let text = format!("controlled {case_name} older commentary");
+        let completion_id = format!("controlled-{case_name}-completion");
+        let contents = format!(
+            "{}\n{}\n{}\n{}\n",
+            json!({"type":"session_meta","payload":{"id":"one"}}),
+            commentary_context_line(),
+            commentary_stream_line_with_text(&text),
+            commentary_item_line_with_text(&completion_id, &text),
+        );
+        let filler_texts: BTreeSet<_> = (0..90)
+            .map(|index| format!("controlled {case_name} older filler {index}"))
+            .collect();
+        let (snapshot, _) = owned_native_source(&path, &contents);
+        let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+        let legacy_stream = controlled_legacy_codex_commentary_row(
+            &path,
+            &contents,
+            "event_msg",
+            &text,
+            sparse_metadata,
+        );
+        let legacy_completion = controlled_legacy_codex_commentary_row(
+            &path,
+            &contents,
+            "response_item",
+            &text,
+            sparse_metadata,
+        );
+        let archive = ConversationArchiveState::default();
+        archive
+            .append_chat_events_with_context(
+                context.clone(),
+                &[legacy_stream.clone(), legacy_completion.clone()],
+            )
+            .unwrap();
+        let mut batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            context.provider_source_key.as_deref().unwrap(),
+            None,
+            true,
+        )
+        .unwrap();
+        crate::commands::chat::decorate_forward_provider_log_events(
+            &mut batch.events,
+            "codex",
+            &path,
+        );
+        let native_pair: Vec<_> = batch
+            .events
+            .iter()
+            .filter(|event| {
+                event.kind == AgentChatEventKind::Message
+                    && event.text.as_deref() == Some(text.as_str())
+            })
+            .collect();
+        assert_eq!(native_pair.len(), 2, "{case_name} native pair");
+        let live = native_pair
+            .iter()
+            .find(|event| event.source.as_deref() == Some("event_msg"))
+            .unwrap();
+        let completed = native_pair
+            .iter()
+            .find(|event| event.source.as_deref() == Some("response_item"))
+            .unwrap();
+        let native_ids = BTreeSet::from([live.id.clone(), completed.id.clone()]);
+        archive
+            .append_provider_log_batch_with_context(
+                context.clone(),
+                &batch.events,
+                None,
+                &batch.next,
+            )
+            .unwrap();
+        finish_projection(&archive);
+        finish_source_index(&snapshot);
+
+        let initial_source = source_index_page(&snapshot);
+        assert!(initial_source.counts_complete);
+        assert_eq!(
+            initial_source.events.len(),
+            2,
+            "{case_name} initial native A/B source rows"
+        );
+        for id in &native_ids {
+            let physical = initial_source
+                .events
+                .iter()
+                .find(|event| event.metadata["chat_source_ref"].as_str() == Some(id.as_str()))
+                .expect("initial ordinary source page retains each native member");
+            assert!(physical.metadata["chat_source_start"].as_u64().is_some());
+            assert!(physical.metadata["chat_source_end"].as_u64().is_some());
+        }
+
+        let initial = read(&context, &snapshot, None, None, None).unwrap();
+        assert!(!initial.older_page);
+        let initial_targets: Vec<_> = initial
+            .events
+            .iter()
+            .filter(|event| {
+                event.role == Some(AgentChatRole::Assistant)
+                    && event.text.as_deref() == Some(text.as_str())
+            })
+            .collect();
+        assert_eq!(
+            initial_targets.len(),
+            1,
+            "{case_name} initial legacy-reconciled group"
+        );
+        assert_eq!(initial_targets[0].id, live.id);
+        let initial_members: BTreeSet<_> = initial_targets[0].metadata["chat_display_member_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|member| member.as_str())
+            .collect();
+        assert_eq!(
+            initial_members,
+            BTreeSet::from([live.id.as_str(), completed.id.as_str()])
+        );
+        for observation_id in [
+            &live.id,
+            &completed.id,
+            &legacy_stream.id,
+            &legacy_completion.id,
+        ] {
+            let matches: Vec<_> = initial
+                .aliases
+                .iter()
+                .filter(|alias| alias.observation_id == *observation_id)
+                .collect();
+            assert_eq!(
+                matches.len(),
+                1,
+                "{case_name} initial alias for observation {observation_id}; actual map: {:#?}",
+                initial.aliases
+            );
+            assert_eq!(matches[0].canonical_id, live.id);
+        }
+        let initial_requested = vec![live.id.clone(), completed.id.clone()];
+        let initial_ack = super::read_with_revalidation(
+            &context,
+            &snapshot,
+            None,
+            Some(&initial.revision),
+            None,
+            Some(initial_requested.as_slice()),
+        )
+        .unwrap();
+        assert_eq!(initial_ack.revalidated_ids, Some(initial_requested));
+        assert!(!initial_ack.reset);
+
+        for filler in &filler_texts {
+            append_native_line(&path, native_message(filler).trim_end());
+        }
+        let mut filler_batch =
+            crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+                "agent-1",
+                "codex",
+                &path,
+                context.provider_source_key.as_deref().unwrap(),
+                Some(batch.next.clone()),
+                true,
+            )
+            .unwrap();
+        crate::commands::chat::decorate_forward_provider_log_events(
+            &mut filler_batch.events,
+            "codex",
+            &path,
+        );
+        let acquired_fillers: Vec<_> = filler_batch
+            .events
+            .iter()
+            .filter(|event| {
+                event
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| filler_texts.contains(text))
+            })
+            .collect();
+        assert_eq!(
+            acquired_fillers.len(),
+            90,
+            "{case_name} incremental native fillers"
+        );
+        let acquired_filler_ids: BTreeSet<_> = acquired_fillers
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect();
+        assert_eq!(
+            acquired_filler_ids.len(),
+            90,
+            "{case_name} unique incremental filler IDs"
+        );
+        archive
+            .append_provider_log_batch_with_context(
+                context.clone(),
+                &filler_batch.events,
+                Some(&batch.next),
+                &filler_batch.next,
+            )
+            .unwrap();
+        finish_projection(&archive);
+        finish_source_index(&snapshot);
+
+        let recent_source = source_index_page(&snapshot);
+        assert!(recent_source.counts_complete);
+        assert_eq!(recent_source.events.len(), 80);
+        assert!(recent_source.next_before.is_some());
+        assert!(!recent_source.events.iter().any(|event| {
+            event.metadata["chat_source_ref"]
+                .as_str()
+                .is_some_and(|id| native_ids.contains(id))
+        }));
+
+        let recent = read(&context, &snapshot, None, None, None).unwrap();
+        assert!(!recent.older_page);
+        let recent_fillers: Vec<_> = recent
+            .events
+            .iter()
+            .filter(|event| {
+                event
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| filler_texts.contains(text))
+            })
+            .collect();
+        assert_eq!(recent_fillers.len(), 80, "{case_name} loaded recent rows");
+        assert!(!recent.events.iter().any(|event| {
+            event.role == Some(AgentChatRole::Assistant)
+                && event.text.as_deref() == Some(text.as_str())
+        }));
+        let recent_requested = vec![recent_fillers[0].id.clone()];
+        let recent_ack = super::read_with_revalidation(
+            &context,
+            &snapshot,
+            None,
+            Some(&recent.revision),
+            None,
+            Some(recent_requested.as_slice()),
+        )
+        .unwrap();
+        assert_eq!(recent_ack.revalidated_ids, Some(recent_requested));
+        assert!(!recent_ack.reset);
+
+        let cursor = recent
+            .next_before
+            .as_deref()
+            .expect("the loaded recent page issues its ordinary opaque older cursor");
+        let older_source = source_index_page_with_cursor(&snapshot, Some(cursor));
+        assert!(older_source.counts_complete);
+        for id in &native_ids {
+            let physical = older_source
+                .events
+                .iter()
+                .find(|event| event.metadata["chat_source_ref"].as_str() == Some(id.as_str()))
+                .expect("ordinary older source page retains each native member");
+            assert!(physical.metadata["chat_source_start"].as_u64().is_some());
+            assert!(physical.metadata["chat_source_end"].as_u64().is_some());
+        }
+        let older = read(
+            &context,
+            &snapshot,
+            Some(cursor),
+            Some(&recent.revision),
+            None,
+        )
+        .unwrap();
+        assert!(older.older_page);
+        assert!(!older.reset);
+        assert_eq!(older.conversation_id, recent.conversation_id);
+        assert_eq!(older.generation, recent.generation);
+        assert_eq!(older.source_epoch, recent.source_epoch);
+
+        let older_targets: Vec<_> = older
+            .events
+            .iter()
+            .filter(|event| {
+                event.role == Some(AgentChatRole::Assistant)
+                    && event.text.as_deref() == Some(text.as_str())
+            })
+            .collect();
+        assert_eq!(older_targets.len(), 1, "{case_name} older display group");
+        assert_eq!(older_targets[0].id, live.id);
+        assert_eq!(
+            initial_targets[0].id, older_targets[0].id,
+            "{case_name} loaded initial and older group share canonical A"
+        );
+        let display_members: BTreeSet<_> = older_targets[0].metadata["chat_display_member_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|member| member.as_str())
+            .collect();
+        assert_eq!(
+            display_members,
+            BTreeSet::from([live.id.as_str(), completed.id.as_str()])
+        );
+        let union_targets: Vec<_> = recent
+            .events
+            .iter()
+            .chain(&older.events)
+            .filter(|event| {
+                event.role == Some(AgentChatRole::Assistant)
+                    && event.text.as_deref() == Some(text.as_str())
+            })
+            .collect();
+        assert_eq!(union_targets.len(), 1, "{case_name} loaded-page union");
+
+        let filler_rows: Vec<_> = recent
+            .events
+            .iter()
+            .chain(&older.events)
+            .filter(|event| {
+                event
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| filler_texts.contains(text))
+            })
+            .collect();
+        let filler_text_union: BTreeSet<_> = filler_rows
+            .iter()
+            .filter_map(|event| event.text.as_deref())
+            .collect();
+        let expected_filler_texts: BTreeSet<_> = filler_texts.iter().map(String::as_str).collect();
+        let filler_ids: BTreeSet<_> = filler_rows.iter().map(|event| event.id.as_str()).collect();
+        assert_eq!(
+            filler_rows.len(),
+            90,
+            "{case_name} recent plus older fillers"
+        );
+        assert_eq!(filler_text_union, expected_filler_texts);
+        assert_eq!(
+            filler_ids.len(),
+            90,
+            "{case_name} no duplicate loaded filler"
+        );
+
+        for observation_id in [
+            &live.id,
+            &completed.id,
+            &legacy_stream.id,
+            &legacy_completion.id,
+        ] {
+            let aliases: Vec<_> = initial
+                .aliases
+                .iter()
+                .chain(recent.aliases.iter())
+                .chain(older.aliases.iter())
+                .filter(|alias| alias.observation_id == *observation_id)
+                .collect();
+            let targets: BTreeSet<_> = aliases
+                .iter()
+                .map(|alias| alias.canonical_id.as_str())
+                .collect();
+            assert_eq!(
+                targets,
+                BTreeSet::from([live.id.as_str()]),
+                "{case_name} alias targets for observation {observation_id}; initial={:#?}; recent={:#?}; older={:#?}",
+                initial.aliases,
+                recent.aliases,
+                older.aliases
+            );
+        }
+    }
+}
+
+/// CONTROLLED_SYNTHETIC_LEGACY_PROJECTION_UNIT_TEST: a distinct native payload
+/// with equal commentary text retracts the prior projected group and aliases.
+#[test]
+fn controlled_legacy_codex_projected_group_retracts_after_late_equal_text_native() {
+    for (case_name, sparse_metadata) in [("missing-phase", false), ("sparse", true)] {
+        let (_guard, temp) = isolated_home();
+        let path = temp.path().join(format!(
+            "controlled-legacy-codex-retraction-{case_name}.jsonl"
+        ));
+        let text = format!("controlled {case_name} repeated commentary");
+        let completion_id = format!("controlled-{case_name}-completion");
+        let contents = format!(
+            "{}\n{}\n{}\n{}\n",
+            json!({"type":"session_meta","payload":{"id":"one"}}),
+            commentary_context_line(),
+            commentary_stream_line_with_text(&text),
+            commentary_item_line_with_text(&completion_id, &text),
+        );
+        let (snapshot, _) = owned_native_source(&path, &contents);
+        let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+        let legacy_stream = controlled_legacy_codex_commentary_row(
+            &path,
+            &contents,
+            "event_msg",
+            &text,
+            sparse_metadata,
+        );
+        let legacy_completion = controlled_legacy_codex_commentary_row(
+            &path,
+            &contents,
+            "response_item",
+            &text,
+            sparse_metadata,
+        );
+        let archive = ConversationArchiveState::default();
+        archive
+            .append_chat_events_with_context(
+                context.clone(),
+                &[legacy_stream.clone(), legacy_completion.clone()],
+            )
+            .unwrap();
+        let mut first = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            context.provider_source_key.as_deref().unwrap(),
+            None,
+            true,
+        )
+        .unwrap();
+        crate::commands::chat::decorate_forward_provider_log_events(
+            &mut first.events,
+            "codex",
+            &path,
+        );
+        let native_pair: Vec<_> = first
+            .events
+            .iter()
+            .filter(|event| {
+                event.kind == AgentChatEventKind::Message
+                    && event.text.as_deref() == Some(text.as_str())
+            })
+            .collect();
+        assert_eq!(native_pair.len(), 2, "{case_name} initial native pair");
+        let live = native_pair
+            .iter()
+            .find(|event| event.source.as_deref() == Some("event_msg"))
+            .unwrap();
+        let completed = native_pair
+            .iter()
+            .find(|event| event.source.as_deref() == Some("response_item"))
+            .unwrap();
+        let live_id = live.id.clone();
+        let completed_id = completed.id.clone();
+        let provider_turn_id = "commentary-provider-turn";
+        assert_eq!(
+            completed.metadata["provider_turn_id"].as_str(),
+            Some(provider_turn_id),
+        );
+        archive
+            .append_provider_log_batch_with_context(
+                context.clone(),
+                &first.events,
+                None,
+                &first.next,
+            )
+            .unwrap();
+        finish_projection(&archive);
+        finish_source_index(&snapshot);
+
+        let qualified = read(&context, &snapshot, None, None, None).unwrap();
+        let qualified_targets: Vec<_> = qualified
+            .events
+            .iter()
+            .filter(|event| {
+                event.role == Some(AgentChatRole::Assistant)
+                    && event.text.as_deref() == Some(text.as_str())
+            })
+            .collect();
+        assert_eq!(qualified_targets.len(), 1, "{case_name} initial group");
+        assert_eq!(qualified_targets[0].id, live_id);
+        let initial_members: BTreeSet<_> = qualified_targets[0].metadata["chat_display_member_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|member| member.as_str())
+            .collect();
+        assert_eq!(
+            initial_members,
+            BTreeSet::from([live_id.as_str(), completed_id.as_str()])
+        );
+        let legacy_ids = BTreeSet::from([legacy_stream.id.clone(), legacy_completion.id.clone()]);
+        for legacy_id in &legacy_ids {
+            let aliases: Vec<_> = qualified
+                .aliases
+                .iter()
+                .filter(|alias| alias.observation_id == *legacy_id)
+                .collect();
+            assert_eq!(aliases.len(), 1, "{case_name} initial projected alias");
+            assert_eq!(aliases[0].canonical_id, live_id);
+        }
+
+        let initial_requested = vec![live_id.clone(), completed_id.clone()];
+        let initial_ack = super::read_with_revalidation(
+            &context,
+            &snapshot,
+            None,
+            Some(&qualified.revision),
+            None,
+            Some(initial_requested.as_slice()),
+        )
+        .unwrap();
+        assert_eq!(initial_ack.revalidated_ids, Some(initial_requested));
+        assert!(!initial_ack.reset);
+
+        let late_payload_id = format!("controlled-{case_name}-distinct-late-message");
+        append_native_line(
+            &path,
+            &commentary_item_line_with_text(&late_payload_id, &text),
+        );
+        let mut late = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+            "agent-1",
+            "codex",
+            &path,
+            context.provider_source_key.as_deref().unwrap(),
+            Some(first.next.clone()),
+            true,
+        )
+        .unwrap();
+        crate::commands::chat::decorate_forward_provider_log_events(
+            &mut late.events,
+            "codex",
+            &path,
+        );
+        let late_rows: Vec<_> = late
+            .events
+            .iter()
+            .filter(|event| {
+                event.kind == AgentChatEventKind::Message
+                    && event.source.as_deref() == Some("response_item")
+                    && event.text.as_deref() == Some(text.as_str())
+            })
+            .collect();
+        assert_eq!(late_rows.len(), 1, "{case_name} one late native payload");
+        let late_native_id = late_rows[0].id.clone();
+        assert_ne!(late_native_id, completed_id);
+        assert_eq!(
+            late_rows[0].turn_id.as_deref(),
+            Some(late_payload_id.as_str())
+        );
+        assert_eq!(
+            late_rows[0].metadata["provider_turn_id"].as_str(),
+            Some(provider_turn_id),
+        );
+        assert!(late_rows[0].metadata["chat_source_start"]
+            .as_u64()
+            .is_some());
+        assert!(late_rows[0].metadata["chat_source_end"].as_u64().is_some());
+        archive
+            .append_provider_log_batch_with_context(
+                context.clone(),
+                &late.events,
+                Some(&first.next),
+                &late.next,
+            )
+            .unwrap();
+        finish_projection(&archive);
+        finish_source_index(&snapshot);
+
+        let native_ids = BTreeSet::from([
+            live_id.clone(),
+            completed_id.clone(),
+            late_native_id.clone(),
+        ]);
+        let retained_before_read = archive.chat_events_for_agent("agent-1").unwrap();
+        assert!(native_ids
+            .iter()
+            .all(|id| { retained_before_read.iter().any(|event| event.id == *id) }));
+        let archive_before_read = serde_json::to_value(&retained_before_read).unwrap();
+        let retracted = read(&context, &snapshot, None, Some(&qualified.revision), None).unwrap();
+        assert!(
+            retracted.reset,
+            "{case_name} new native occurrence invalidates the old group"
+        );
+        let visible_source_ids: BTreeSet<_> = retracted
+            .events
+            .iter()
+            .filter_map(|event| event.metadata["chat_source_ref"].as_str())
+            .collect();
+        assert!(native_ids
+            .iter()
+            .all(|id| visible_source_ids.contains(id.as_str())));
+        for id in &native_ids {
+            let physical = retracted
+                .events
+                .iter()
+                .find(|event| event.metadata["chat_source_ref"].as_str() == Some(id.as_str()))
+                .expect("ordinary read retains each distinct native source identity");
+            assert!(physical.metadata["chat_source_start"].as_u64().is_some());
+            assert!(physical.metadata["chat_source_end"].as_u64().is_some());
+        }
+        assert!(!retracted.events.iter().any(|event| {
+            event.metadata["chat_display_member_ids"]
+                .as_array()
+                .is_some_and(|members| {
+                    members
+                        .iter()
+                        .filter_map(|member| member.as_str())
+                        .filter(|member| native_ids.contains(*member))
+                        .count()
+                        >= 2
+                })
+        }));
+        assert!(!retracted.aliases.iter().any(|alias| {
+            legacy_ids.contains(&alias.observation_id) && native_ids.contains(&alias.canonical_id)
+        }));
+
+        let retracted_requested: Vec<_> = native_ids.iter().cloned().collect();
+        let retracted_ack = super::read_with_revalidation(
+            &context,
+            &snapshot,
+            None,
+            Some(&retracted.revision),
+            None,
+            Some(retracted_requested.as_slice()),
+        )
+        .unwrap();
+        assert_eq!(retracted_ack.revalidated_ids, Some(retracted_requested));
+        assert!(!retracted_ack.reset);
+        assert_eq!(
+            serde_json::to_value(archive.chat_events_for_agent("agent-1").unwrap()).unwrap(),
+            archive_before_read,
+            "{case_name} normal reads do not rewrite archived observations"
+        );
+    }
+}
+
+#[test]
+fn captured_shape_controlled_legacy_codex_final_answer_does_not_join() {
+    let (_guard, temp) = isolated_home();
+    let path = temp.path().join("controlled-final-answer-codex.jsonl");
+    let text = "controlled legacy final answer negative";
+    let final_item = json!({
+        "timestamp":"2026-10-24T17:38:18.275Z",
+        "type":"response_item",
+        "payload":{
+            "type":"message",
+            "id":"controlled-final-answer-item",
+            "role":"assistant",
+            "phase":"final_answer",
+            "content":[{"type":"output_text","text":text}],
+            "internal_chat_message_metadata_passthrough":{
+                "turn_id":"commentary-provider-turn",
+                "create_time":"2026-10-24T17:38:18.275Z",
+                "content_item_kinds":["unknown"]
+            }
+        }
+    })
+    .to_string();
+    let contents = format!(
+        "{}\n{}\n{}\n{}\n",
+        json!({"type":"session_meta","payload":{"id":"one"}}),
+        commentary_context_line(),
+        commentary_stream_line_with_text(text),
+        final_item,
+    );
+    let (snapshot, _) = owned_native_source(&path, &contents);
+    let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+    let legacy =
+        controlled_legacy_codex_response_item(&path, &contents, text, "final_answer", false);
+    let archive = ConversationArchiveState::default();
+    archive
+        .append_chat_events_with_context(context.clone(), std::slice::from_ref(&legacy))
+        .unwrap();
+    let mut batch = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        "agent-1",
+        "codex",
+        &path,
+        context.provider_source_key.as_deref().unwrap(),
+        None,
+        true,
+    )
+    .unwrap();
+    crate::commands::chat::decorate_forward_provider_log_events(&mut batch.events, "codex", &path);
+    assert!(batch.events.iter().any(|event| {
+        event.source.as_deref() == Some("response_item")
+            && event.metadata["provider_phase"] == "final_answer"
+    }));
+    let native_ids: BTreeSet<_> = batch.events.iter().map(|event| event.id.clone()).collect();
+    archive
+        .append_provider_log_batch_with_context(context.clone(), &batch.events, None, &batch.next)
+        .unwrap();
+    finish_projection(&archive);
+    finish_source_index(&snapshot);
+
+    let page = read(&context, &snapshot, None, None, None).unwrap();
+    assert!(!page.aliases.iter().any(|alias| {
+        alias.observation_id == legacy.id && native_ids.contains(&alias.canonical_id)
+    }));
 }
