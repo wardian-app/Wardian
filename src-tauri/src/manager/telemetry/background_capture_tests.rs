@@ -941,6 +941,420 @@ async fn ordinary_off_registration_lookup_and_follow_up_capture_without_chat_rea
 }
 
 #[tokio::test]
+async fn ordinary_off_provisional_recent_page_becomes_admitted_after_capture() {
+    const ROW_COUNT: usize = 240;
+
+    let home = crate::control::test_support::TestWardianHome::new_async().await;
+    let (state, session_id, path) = registered_off_source(&home).await;
+    assert_eq!(dispatch_ordinary_capture(&state).await, 1);
+
+    let snapshot = crate::commands::chat::agent_archive_capture_snapshot(&state, &session_id)
+        .await
+        .unwrap();
+    let unknown_prefix_end = std::fs::metadata(&path).unwrap().len();
+    let primed = capture_state(&state, &snapshot);
+    assert_eq!(primed.committed_offset, unknown_prefix_end);
+    assert_eq!(primed.unknown_before_offset, Some(unknown_prefix_end));
+    assert_eq!(primed.status, "complete");
+    assert_eq!(
+        state
+            .conversation_archive
+            .active_conversation_id(&session_id)
+            .unwrap(),
+        None,
+        "priming the unknown prefix does not admit a conversation"
+    );
+
+    let mut provider_log = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    for index in 0..ROW_COUNT {
+        let record = serde_json::json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "turn_id": format!("page-turn-{index}"),
+                "message": format!("Bounded page history {index}"),
+            }
+        });
+        writeln!(provider_log, "{record}").unwrap();
+    }
+    drop(provider_log);
+    let appended_end = std::fs::metadata(&path).unwrap().len();
+
+    let source_index_dir = wardian_core::paths::agent_conversations_dir(&session_id)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let read_source_head = || {
+        let reference: Option<String> = serde_json::from_slice(
+            &std::fs::read(source_index_dir.join("chat-source-head.json")).unwrap(),
+        )
+        .unwrap();
+        let reference = reference.expect("ordinary capture publishes a source-index head");
+        let head: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(source_index_dir.join("chat-read-objects").join(&reference)).unwrap(),
+        )
+        .unwrap();
+        (reference, head)
+    };
+    let assert_source_head_prefix = |head: &serde_json::Value| {
+        assert_eq!(head["agent_id"].as_str(), Some(session_id.as_str()));
+        assert_eq!(
+            head["target_extent"].as_u64(),
+            Some(unknown_prefix_end),
+            "source index remains pinned at the primed capture prefix"
+        );
+        assert_eq!(
+            head["floor"].as_u64(),
+            primed.unknown_before_offset,
+            "source-index floor matches the captured unknown-prefix boundary"
+        );
+        assert!(
+            head["root"].is_null(),
+            "no source rows are rooted at the primed prefix"
+        );
+    };
+    let (primed_source_reference, primed_source_head) = read_source_head();
+    assert_source_head_prefix(&primed_source_head);
+
+    let provisional = crate::commands::chat::load_agent_chat_page_with_revalidation_for_state(
+        &state,
+        session_id.clone(),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let (source_reference_after_page, source_head_after_page) = read_source_head();
+    assert_eq!(source_reference_after_page, primed_source_reference);
+    assert_eq!(source_head_after_page, primed_source_head);
+    assert_source_head_prefix(&source_head_after_page);
+    assert_eq!(provisional.events.len(), 80);
+    assert_eq!(
+        provisional
+            .events
+            .first()
+            .and_then(|event| event.text.as_deref()),
+        Some("Bounded page history 160")
+    );
+    assert_eq!(
+        provisional
+            .events
+            .last()
+            .and_then(|event| event.text.as_deref()),
+        Some("Bounded page history 239")
+    );
+    assert_eq!(
+        provisional
+            .events
+            .last()
+            .and_then(|event| event.turn_id.as_deref()),
+        Some("page-turn-239")
+    );
+    assert!(provisional.conversation_id.is_none());
+    assert_eq!(
+        provisional.generation.as_deref(),
+        primed_source_head["generation"].as_str(),
+        "the provisional page is scoped to the actual source-index generation"
+    );
+    assert_eq!(
+        provisional.source_epoch.as_deref(),
+        primed_source_head["epoch"].as_str(),
+        "the provisional page is scoped to the actual source-index epoch"
+    );
+    assert_ne!(provisional.progress, "ready");
+    assert!(provisional.events.iter().all(|event| {
+        event.metadata["chat_provisional"] == true
+            && event.metadata["chat_identity_resolution"] == "unresolved"
+            && event.metadata["chat_source_ref"].as_str().is_some()
+            && event.metadata["chat_source_admission"].as_str().is_some()
+    }));
+    let still_primed = capture_state(&state, &snapshot);
+    assert_eq!(still_primed.committed_offset, unknown_prefix_end);
+    assert_eq!(still_primed.unknown_before_offset, Some(unknown_prefix_end));
+    assert_eq!(still_primed.status, "complete");
+    assert!(
+        state
+            .conversation_archive
+            .chat_events_for_agent(&session_id)
+            .unwrap()
+            .is_empty(),
+        "the provisional page read must leave the archive index at the primed prefix"
+    );
+
+    assert_eq!(dispatch_ordinary_capture(&state).await, 1);
+    let captured = capture_state(&state, &snapshot);
+    assert_eq!(captured.committed_offset, appended_end);
+    assert_eq!(captured.unknown_before_offset, Some(unknown_prefix_end));
+    assert_eq!(captured.status, "complete");
+
+    let admitted = crate::commands::chat::load_agent_chat_page_with_revalidation_for_state(
+        &state,
+        session_id.clone(),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let (_admitted_source_reference, admitted_source_head) = read_source_head();
+    let source_context =
+        crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+    let expected_source_key = source_context.provider_source_key.as_deref();
+    let observed_source_epoch = admitted.source_epoch.as_deref();
+    let observed_source_admission = admitted_source_head["admission"].as_str();
+    let root_present = admitted_source_head["root"]
+        .as_str()
+        .is_some_and(|root| !root.is_empty());
+    let metadata_keys = admitted
+        .events
+        .first()
+        .and_then(|event| event.metadata.as_object())
+        .map(|metadata| metadata.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let rows_with_admission = admitted
+        .events
+        .iter()
+        .filter(|event| {
+            event
+                .metadata
+                .get("chat_source_admission")
+                .is_some_and(|value| !value.is_null())
+        })
+        .count();
+    eprintln!(
+        "ordinary_off_admission progress={} session_matches={} conversation_present={} generation_matches_head={} epoch_matches_head={} owner_matches={} source_key_matches={} target_extent={:?} appended_frontier={} floor={:?} root_present={} admission_present={} rows={} row_admissions_present={} metadata_keys={:?}",
+        admitted.progress,
+        admitted.session_id == session_id,
+        admitted.conversation_id.as_deref().is_some_and(|id| !id.is_empty()),
+        admitted.generation.as_deref() == admitted_source_head["generation"].as_str(),
+        observed_source_epoch == admitted_source_head["epoch"].as_str(),
+        admitted_source_head["agent_id"].as_str() == Some(session_id.as_str()),
+        admitted_source_head["source_key"].as_str().is_some_and(|key| Some(key) == expected_source_key),
+        admitted_source_head["target_extent"].as_u64(),
+        appended_end,
+        admitted_source_head["floor"].as_u64(),
+        root_present,
+        observed_source_admission.is_some_and(|value| !value.is_empty()),
+        admitted.events.len(),
+        rows_with_admission,
+        metadata_keys,
+    );
+    assert_eq!(admitted.session_id, session_id);
+    assert!(
+        matches!(admitted.progress.as_str(), "ready" | "provisional"),
+        "postcapture page must reach ready or settled provisional progress"
+    );
+    assert!(admitted
+        .conversation_id
+        .as_deref()
+        .is_some_and(|id| !id.is_empty()));
+    assert_eq!(
+        admitted_source_head["agent_id"].as_str(),
+        Some(session_id.as_str())
+    );
+    assert_eq!(
+        admitted_source_head["source_key"].as_str(),
+        expected_source_key
+    );
+    assert_eq!(
+        admitted_source_head["epoch"].as_str(),
+        observed_source_epoch
+    );
+    assert_eq!(
+        admitted_source_head["target_extent"].as_u64(),
+        Some(appended_end)
+    );
+    assert_eq!(
+        admitted_source_head["floor"].as_u64(),
+        primed.unknown_before_offset
+    );
+    assert!(
+        root_present,
+        "postcapture source index has an admitted root"
+    );
+    let source_epoch = observed_source_epoch.expect("admitted page source epoch");
+    let source_admission = observed_source_admission
+        .filter(|admission| !admission.is_empty())
+        .expect("published source head admission");
+    assert_eq!(
+        admitted.generation.as_deref(),
+        admitted_source_head["generation"].as_str()
+    );
+    assert_eq!(
+        admitted_source_head["progress"].as_str(),
+        Some(admitted.progress.as_str())
+    );
+    assert_eq!(admitted.events.len(), 80);
+    assert_eq!(
+        admitted
+            .events
+            .first()
+            .and_then(|event| event.text.as_deref()),
+        Some("Bounded page history 160")
+    );
+    assert_eq!(
+        admitted
+            .events
+            .last()
+            .and_then(|event| event.text.as_deref()),
+        Some("Bounded page history 239")
+    );
+    assert_eq!(
+        admitted
+            .events
+            .last()
+            .and_then(|event| event.turn_id.as_deref()),
+        Some("page-turn-239")
+    );
+    assert!(!admitted.reset);
+    assert!(admitted.conversation_id.is_some());
+    assert!(admitted
+        .generation
+        .as_deref()
+        .is_some_and(|value| !value.is_empty()));
+    assert!(admitted.events.iter().all(|event| {
+        event.metadata["chat_source_epoch"].as_str() == Some(source_epoch)
+            && event
+                .metadata
+                .get("chat_source_admission")
+                .is_none_or(|value| value.is_null() || value.as_str() == Some(source_admission))
+    }));
+    assert!(
+        admitted
+            .next_before
+            .as_deref()
+            .is_some_and(|cursor| !cursor.is_empty()),
+        "the admitted page issues its opaque older cursor"
+    );
+    assert_eq!(
+        state
+            .conversation_archive
+            .active_conversation_id(&session_id)
+            .unwrap(),
+        admitted.conversation_id
+    );
+
+    let mut requested_ids = Vec::new();
+    let mut seen_source_ids = std::collections::HashSet::<String>::new();
+    for event in &admitted.events {
+        if event.metadata["optimistic"] == true {
+            continue;
+        }
+        let mut row_source_ids: Vec<String> = Vec::new();
+        if let Some(members) = event.metadata["chat_display_member_ids"].as_array() {
+            for member in members {
+                if let Some(id) = member
+                    .as_str()
+                    .filter(|id| id.starts_with("source:") && id.len() > 7)
+                {
+                    if !row_source_ids
+                        .iter()
+                        .any(|existing| existing.as_str() == id)
+                    {
+                        row_source_ids.push(id.to_owned());
+                    }
+                }
+            }
+        }
+        for id in [
+            event.metadata["chat_source_ref"].as_str(),
+            event.metadata["chat_display_physical_id"].as_str(),
+            Some(event.id.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|id| id.starts_with("source:") && id.len() > 7)
+        {
+            if !row_source_ids
+                .iter()
+                .any(|existing| existing.as_str() == id)
+            {
+                row_source_ids.push(id.to_owned());
+            }
+        }
+        assert!(
+            row_source_ids.len() <= 2,
+            "consumer permits at most two source IDs per row"
+        );
+        for id in row_source_ids {
+            if seen_source_ids.insert(id.clone()) {
+                requested_ids.push(id);
+            }
+            if requested_ids.len() == 8 {
+                break;
+            }
+        }
+        if requested_ids.len() == 8 {
+            break;
+        }
+    }
+    assert_eq!(requested_ids.len(), 8);
+    assert_eq!(
+        requested_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        8,
+        "the normal renewal request contains eight unique page IDs"
+    );
+    let renewed = crate::commands::chat::load_agent_chat_page_with_revalidation_for_state(
+        &state,
+        session_id.clone(),
+        None,
+        Some(admitted.revision.clone()),
+        None,
+        Some(requested_ids.clone()),
+    )
+    .await
+    .unwrap();
+    eprintln!(
+        "ordinary_off_admission renewal cursor_present={} ack_count={} ack_matches={} progress_matches={} scope_matches={} revision_matches={}",
+        admitted.next_before.as_deref().is_some_and(|cursor| !cursor.is_empty()),
+        renewed.revalidated_ids.as_ref().map_or(0, |ids| ids.len()),
+        renewed.revalidated_ids.as_deref() == Some(requested_ids.as_slice()),
+        renewed.progress == admitted.progress,
+        renewed.session_id == admitted.session_id
+            && renewed.conversation_id.as_deref() == admitted.conversation_id.as_deref()
+            && renewed.generation.as_deref() == admitted.generation.as_deref()
+            && renewed.source_epoch.as_deref() == admitted.source_epoch.as_deref(),
+        renewed.revision == admitted.revision,
+    );
+    assert_eq!(renewed.session_id, session_id);
+    assert_eq!(
+        renewed.revalidated_ids.as_deref(),
+        Some(requested_ids.as_slice())
+    );
+    assert!(!renewed.reset);
+    assert_eq!(renewed.revision, admitted.revision);
+    assert_eq!(
+        renewed.conversation_id.as_deref(),
+        admitted.conversation_id.as_deref()
+    );
+    assert_eq!(
+        renewed.generation.as_deref(),
+        admitted.generation.as_deref()
+    );
+    assert_eq!(
+        renewed.source_epoch.as_deref(),
+        admitted.source_epoch.as_deref()
+    );
+    let roster = state.agents.lock().await;
+    let agent = roster.get(&session_id).unwrap();
+    assert_eq!(*agent.current_status.lock().unwrap(), "Off");
+    assert!(
+        agent.runtime_generation.is_none(),
+        "no provider was submitted"
+    );
+}
+
+#[tokio::test]
 async fn background_policy_disable_preserves_backlog_and_skips_disabled_bytes() {
     let home = crate::control::test_support::TestWardianHome::new_async().await;
     let (state, session_id, path) = registered_off_source(&home).await;
