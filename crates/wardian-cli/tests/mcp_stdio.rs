@@ -22,6 +22,24 @@ fn run(test_home: &Path, requests: Vec<Value>) -> Vec<Value> {
     run_with_sender(test_home, requests, true)
 }
 
+fn response_shape(response: &Value) -> String {
+    let response_type = if response.get("error").is_some() {
+        "rpc_error"
+    } else if response.get("result").is_some() {
+        "tool_result"
+    } else {
+        "unknown"
+    };
+    format!(
+        "id={} type={} rpc_error_code={} result_is_error={} structured_error_code={}",
+        response["id"],
+        response_type,
+        response["error"]["code"],
+        response["result"]["isError"],
+        response["result"]["structuredContent"]["error"]["code"]
+    )
+}
+
 fn run_with_sender(test_home: &Path, requests: Vec<Value>, managed: bool) -> Vec<Value> {
     let executable = env!("CARGO_BIN_EXE_wardian-mcp");
     let mut command = Command::new(executable);
@@ -648,10 +666,17 @@ fn stdio_missing_sender_and_unknown_tools_fail_without_opening_control() {
     for response in [send, list] {
         assert_eq!(
             response["result"]["structuredContent"]["error"]["code"],
-            "missing_managed_sender"
+            "missing_managed_sender",
+            "{}",
+            response_shape(response)
         );
     }
-    assert_eq!(unknown["error"]["code"], -32602);
+    assert_eq!(
+        unknown["error"]["code"],
+        -32602,
+        "{}",
+        response_shape(unknown)
+    );
     assert!(!test_home.exists());
 }
 

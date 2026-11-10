@@ -29,7 +29,9 @@ const VERSION: &str = "2025-11-25";
 // Live MCP calls have a 61s transport timeout; this capacity drains in at most two waves.
 const TOOL_WORKERS: usize = 4;
 const TOOL_QUEUE: usize = 1;
-const OUTPUT_QUEUE: usize = TOOL_WORKERS + TOOL_QUEUE;
+// Buffer the full reservation budget so worker scheduling cannot look like overload.
+const TOOL_WORK_CAPACITY: usize = TOOL_WORKERS + TOOL_QUEUE;
+const OUTPUT_QUEUE: usize = TOOL_WORK_CAPACITY;
 const INPUT_POLL: Duration = Duration::from_millis(20);
 const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -77,6 +79,44 @@ struct AdmittedCall {
     idempotency_key: String,
 }
 
+// Counts executing and queued calls; channel occupancy alone depends on scheduling.
+#[derive(Clone, Default)]
+struct WorkBudget(Arc<std::sync::atomic::AtomicUsize>);
+
+impl WorkBudget {
+    fn try_reserve(&self) -> Option<WorkReservation> {
+        let mut reserved = self.0.load(Ordering::Acquire);
+        loop {
+            if reserved >= TOOL_WORK_CAPACITY {
+                return None;
+            }
+            match self.0.compare_exchange_weak(
+                reserved,
+                reserved + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(WorkReservation(Arc::clone(&self.0))),
+                Err(current) => reserved = current,
+            }
+        }
+    }
+}
+
+struct WorkReservation(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for WorkReservation {
+    fn drop(&mut self) {
+        let previous = self.0.fetch_sub(1, Ordering::Release);
+        debug_assert!(previous > 0, "work reservation released more than once");
+    }
+}
+
+struct ReservedCall {
+    call: AdmittedCall,
+    reservation: WorkReservation,
+}
+
 impl AdmittedCall {
     fn execute(self, backend: &mut impl messaging::Backend) -> Value {
         let result = messaging::call(&self.name, self.arguments, &self.idempotency_key, backend);
@@ -110,6 +150,23 @@ where
     W: Write + Send + 'static,
     B: messaging::Backend,
     F: Fn() -> B + Send + Sync + 'static,
+{
+    serve_concurrent_with_worker_start(input, output, create_backend, || {})
+}
+
+// Tests hold workers here to exercise admission before any dequeue can occur.
+fn serve_concurrent_with_worker_start<R, W, B, F, H>(
+    input: R,
+    output: W,
+    create_backend: F,
+    worker_start: H,
+) -> Result<(), ServeFailure>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+    B: messaging::Backend,
+    F: Fn() -> B + Send + Sync + 'static,
+    H: Fn() + Send + Sync + 'static,
 {
     let output_failed = Arc::new(AtomicBool::new(false));
     let (output_tx, output_rx) = mpsc::sync_channel::<Value>(OUTPUT_QUEUE);
@@ -160,11 +217,13 @@ where
         reader_finished.store(true, Ordering::Release);
     });
 
-    let (work_tx, work_rx) = mpsc::sync_channel(TOOL_QUEUE);
-    let workers = spawn_worker_pool::<B, F>(
+    let (work_tx, work_rx) = mpsc::sync_channel(TOOL_WORK_CAPACITY);
+    let work_budget = WorkBudget::default();
+    let workers = spawn_worker_pool::<B, F, H>(
         work_rx,
         TOOL_WORKERS,
         Arc::new(create_backend),
+        Arc::new(worker_start),
         output_tx.clone(),
         Arc::clone(&output_failed),
     );
@@ -201,23 +260,41 @@ where
                         }
                     }
                     Admission::Immediate(None) => {}
-                    Admission::Call(call) => match work_tx.try_send(call) {
-                        Ok(()) => {}
-                        Err(TrySendError::Full(call)) => {
+                    Admission::Call(call) => {
+                        let Some(reservation) = work_budget.try_reserve() else {
                             if let Err(error) =
                                 enqueue_response(&output_tx, call.queue_full(), &output_failed)
                             {
                                 primary_error = Some(error);
                                 break;
                             }
+                            continue;
+                        };
+                        let queued = ReservedCall { call, reservation };
+                        match work_tx.try_send(queued) {
+                            Ok(()) => {}
+                            Err(TrySendError::Full(ReservedCall { call, reservation })) => {
+                                let response = call.queue_full();
+                                let result = enqueue_response(&output_tx, response, &output_failed);
+                                drop(reservation);
+                                if let Err(error) = result {
+                                    primary_error = Some(error);
+                                    break;
+                                }
+                            }
+                            Err(TrySendError::Disconnected(ReservedCall { call, reservation })) => {
+                                let _ = enqueue_response(
+                                    &output_tx,
+                                    call.unavailable(),
+                                    &output_failed,
+                                );
+                                drop(reservation);
+                                primary_error =
+                                    Some(io::Error::other("MCP worker queue disconnected"));
+                                break;
+                            }
                         }
-                        Err(TrySendError::Disconnected(call)) => {
-                            let _ =
-                                enqueue_response(&output_tx, call.unavailable(), &output_failed);
-                            primary_error = Some(io::Error::other("MCP worker queue disconnected"));
-                            break;
-                        }
-                    },
+                    }
                 }
             }
             Ok(InputEvent::TooLarge) => {
@@ -340,33 +417,41 @@ fn enqueue_response(
     }
 }
 
-fn spawn_worker_pool<B, F>(
-    receiver: Receiver<AdmittedCall>,
+fn spawn_worker_pool<B, F, H>(
+    receiver: Receiver<ReservedCall>,
     count: usize,
     create_backend: Arc<F>,
+    worker_start: Arc<H>,
     output: SyncSender<Value>,
     output_failed: Arc<AtomicBool>,
 ) -> Vec<JoinHandle<()>>
 where
     B: messaging::Backend,
     F: Fn() -> B + Send + Sync + 'static,
+    H: Fn() + Send + Sync + 'static,
 {
     let receiver = Arc::new(Mutex::new(receiver));
     (0..count)
         .map(|_| {
             let receiver = Arc::clone(&receiver);
             let create_backend = Arc::clone(&create_backend);
+            let worker_start = Arc::clone(&worker_start);
             let output = output.clone();
             let output_failed = Arc::clone(&output_failed);
-            thread::spawn(move || loop {
-                let call = match receiver.lock() {
-                    Ok(receiver) => receiver.recv(),
-                    Err(_) => return,
-                };
-                let Ok(call) = call else { return };
-                let response = call.execute(&mut create_backend());
-                // Complete admitted work even when its response cannot be queued.
-                let _ = enqueue_response(&output, response, &output_failed);
+            thread::spawn(move || {
+                worker_start();
+                loop {
+                    let call = match receiver.lock() {
+                        Ok(receiver) => receiver.recv(),
+                        Err(_) => return,
+                    };
+                    let Ok(queued) = call else { return };
+                    let ReservedCall { call, reservation } = queued;
+                    let response = call.execute(&mut create_backend());
+                    // Complete admitted work even when its response cannot be queued.
+                    let _ = enqueue_response(&output, response, &output_failed);
+                    drop(reservation);
+                }
             })
         })
         .collect()

@@ -106,6 +106,44 @@ fn call(id: Value, name: &str, args: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":args}})
 }
 
+fn response_shape(response: &Value) -> String {
+    let response_type = if response.get("error").is_some() {
+        "rpc_error"
+    } else if response.get("result").is_some() {
+        "tool_result"
+    } else {
+        "unknown"
+    };
+    format!(
+        "id={} type={} rpc_error_code={} result_is_error={} structured_error_code={}",
+        response["id"],
+        response_type,
+        response["error"]["code"],
+        response["result"]["isError"],
+        response["result"]["structuredContent"]["error"]["code"]
+    )
+}
+
+#[derive(Clone)]
+struct MissingSenderBackend {
+    sender_checks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    invocations: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Backend for MissingSenderBackend {
+    fn require_sender(&self) -> io::Result<()> {
+        self.sender_checks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Err(io::ErrorKind::PermissionDenied.into())
+    }
+
+    fn invoke(&mut self, _request: AgentMessagingRequest) -> io::Result<Value> {
+        self.invocations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Err(io::ErrorKind::PermissionDenied.into())
+    }
+}
+
 #[test]
 fn five_tools_dispatch_typed_requests_and_literal_content() {
     let literal = "  中文 λ😀\r\nsecond\n\"quoted\" C:\\folder\\file\t\0\u{1b}  ";
@@ -910,6 +948,112 @@ fn full_worker_queue_rejects_before_execution() {
     );
     assert!(executed.contains(&"queued".to_string()));
     assert!(!executed.contains(&"overflow".to_string()));
+}
+
+#[test]
+fn idle_workers_do_not_report_queue_full_before_dequeue() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let output = CaptureWriter::default();
+    let server_output = output.clone();
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    let (worker_ready_tx, worker_ready_rx) = std::sync::mpsc::channel();
+    let worker_gate =
+        std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let _release_on_failure = ReleaseGateOnDrop(std::sync::Arc::clone(&worker_gate));
+    let sender_checks = std::sync::Arc::new(AtomicUsize::new(0));
+    let invocations = std::sync::Arc::new(AtomicUsize::new(0));
+    let backend = MissingSenderBackend {
+        sender_checks: std::sync::Arc::clone(&sender_checks),
+        invocations: std::sync::Arc::clone(&invocations),
+    };
+    let start_gate = std::sync::Arc::clone(&worker_gate);
+    let server = std::thread::spawn(move || {
+        serve_concurrent_with_worker_start(
+            ChannelReader {
+                frames: input_rx,
+                buffered: std::collections::VecDeque::new(),
+            },
+            server_output,
+            move || backend.clone(),
+            move || {
+                let _ = worker_ready_tx.send(());
+                let (released, wake) = &*start_gate;
+                let mut released = released.lock().unwrap();
+                while !*released {
+                    released = wake.wait(released).unwrap();
+                }
+            },
+        )
+    });
+
+    for _ in 0..TOOL_WORKERS {
+        worker_ready_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("each worker must reach the dequeue gate");
+    }
+    send_frame(&input_tx, initialize(VERSION));
+    assert!(output.wait_for_id(json!(1), Duration::from_secs(3)));
+    send_frame(
+        &input_tx,
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    );
+    for id in 10..15 {
+        send_frame(
+            &input_tx,
+            call(
+                json!(id),
+                "send_message",
+                json!({"target":"Peer","message":"fixture"}),
+            ),
+        );
+    }
+    send_frame(
+        &input_tx,
+        call(
+            json!(15),
+            "send_message",
+            json!({"target":"Peer","message":"overflow"}),
+        ),
+    );
+    send_frame(&input_tx, json!({"jsonrpc":"2.0","id":16,"method":"ping"}));
+    assert!(output.wait_for_id(json!(16), Duration::from_secs(3)));
+
+    let before_release: Vec<_> = output
+        .values()
+        .into_iter()
+        .filter(|response| (10..=15).contains(&response["id"].as_i64().unwrap_or_default()))
+        .collect();
+    let before_release_shapes: Vec<_> = before_release.iter().map(response_shape).collect();
+    release_gate(&worker_gate);
+    drop(input_tx);
+    assert!(server.join().unwrap().is_ok());
+
+    assert_eq!(
+        before_release.len(),
+        1,
+        "only the sixth request may be rejected before workers dequeue: {before_release_shapes:?}"
+    );
+    assert_eq!(before_release[0]["id"], 15);
+    assert_eq!(before_release[0]["error"]["code"], -32002);
+    let responses = output.values();
+    for id in 10..15 {
+        let response = responses
+            .iter()
+            .find(|response| response["id"] == id)
+            .unwrap();
+        assert_eq!(
+            response["result"]["structuredContent"]["error"]["code"],
+            "missing_managed_sender",
+            "{}",
+            response_shape(response)
+        );
+    }
+    assert_eq!(
+        sender_checks.load(Ordering::Relaxed),
+        TOOL_WORKERS + TOOL_QUEUE
+    );
+    assert_eq!(invocations.load(Ordering::Relaxed), 0);
 }
 
 #[test]
