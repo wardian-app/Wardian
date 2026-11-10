@@ -1,10 +1,21 @@
 # Agent messaging tools
 
 `wardian mcp serve` exposes Wardian peer messaging through model-facing tools.
-It runs as a local subprocess and reads and writes newline-delimited JSON-RPC
-through standard input and output. Protocol discovery works without launching
-or modifying a Wardian home. Operations require the running app for the
-server's `WARDIAN_HOME` and a managed caller identified by `WARDIAN_SESSION_ID`.
+It reads and writes newline-delimited JSON-RPC through standard input and output.
+Protocol discovery works without launching or modifying a Wardian home.
+Operations require the running app for the server's `WARDIAN_HOME` and a
+managed caller identified by `WARDIAN_SESSION_ID`.
+
+The server admits a bounded number of tool calls to a worker pool, so a slow
+operation does not block unrelated calls or protocol pings. Concurrent calls
+may execute and return in a different order than their request IDs. Await a
+mutation's response before issuing a dependent mutation.
+When a bounded queue is full, the server rejects the call before execution.
+That request ID remains consumed for the session; retry only with a new ID.
+Response buffering is bounded too. A saturated response queue closes the
+session; the server still finishes already admitted tools and waits up to five
+seconds for stdout to drain. A missing response can leave delivery uncertain;
+do not replay it automatically.
 
 ## Tool contract
 
@@ -147,11 +158,11 @@ approval settings. An occupied server name or missing CLI is reported instead
 of silently replacing configuration. The app's global provider home is not
 modified.
 
-On Windows, managed startup registers `wardian-mcp.exe`, a GUI-subsystem
-launcher that starts the console CLI with `CREATE_NO_WINDOW`. It passes the
-MCP server's standard input, output, and error through unchanged; closing the
-launcher also closes its server process. The ordinary `wardian-cli.exe`
-remains console-backed for interactive CLI use.
+On Windows, managed startup registers `wardian-mcp.exe`, a self-contained
+GUI-subsystem MCP server. It runs the maintained server implementation in the
+registered process and uses the inherited standard input, output, and error
+handles directly. It does not start an adjacent CLI process. The ordinary
+`wardian-cli.exe` remains console-backed for interactive CLI use.
 
 For a separately configured managed Codex host, the registration command is:
 

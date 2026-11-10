@@ -7,7 +7,7 @@ use wardian_core::{
 };
 
 /// Send exactly one authenticated messaging request with a hard transport bound.
-pub(crate) fn request(request: AgentMessagingRequest) -> io::Result<serde_json::Value> {
+pub fn request(request: AgentMessagingRequest) -> io::Result<serde_json::Value> {
     let origin = require_current_message_origin()?;
     let expected = request.clone();
     let runtime = build_runtime()?;
