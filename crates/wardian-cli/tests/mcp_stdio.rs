@@ -1,7 +1,7 @@
 //! Real CLI process and local control transport; no provider or Wardian app runs.
 use serde_json::{json, Value};
 use std::{
-    io::{BufRead, BufReader as StdBufReader, Read, Write},
+    io::{BufRead, BufReader as StdBufReader, Write},
     path::Path,
     process::{Command, Stdio},
     sync::mpsc,
@@ -23,10 +23,7 @@ fn run(test_home: &Path, requests: Vec<Value>) -> Vec<Value> {
 }
 
 fn run_with_sender(test_home: &Path, requests: Vec<Value>, managed: bool) -> Vec<Value> {
-    #[cfg(windows)]
     let executable = env!("CARGO_BIN_EXE_wardian-mcp");
-    #[cfg(not(windows))]
-    let executable = env!("CARGO_BIN_EXE_wardian-cli");
     let mut command = Command::new(executable);
     if managed {
         command.env("WARDIAN_SESSION_ID", "sender-managed-uuid");
@@ -69,9 +66,175 @@ fn run_with_sender(test_home: &Path, requests: Vec<Value>, managed: bool) -> Vec
         .collect()
 }
 
+fn spawn_interactive_mcp(
+    test_home: &Path,
+) -> (
+    std::process::Child,
+    std::process::ChildStdin,
+    StdBufReader<std::process::ChildStdout>,
+) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wardian-mcp"))
+        .args(["mcp", "serve"])
+        .env("WARDIAN_HOME", test_home)
+        .env("WARDIAN_SESSION_ID", "sender-managed-uuid")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdin = child.stdin.take().unwrap();
+    let stdout = StdBufReader::new(child.stdout.take().unwrap());
+    (child, stdin, stdout)
+}
+
+fn write_rpc(stdin: &mut std::process::ChildStdin, request: &Value) {
+    writeln!(stdin, "{request}").unwrap();
+}
+
+fn read_rpc(stdout: &mut StdBufReader<std::process::ChildStdout>) -> Value {
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    serde_json::from_str(&line).unwrap()
+}
+
+fn wait_success(child: &mut std::process::Child) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("MCP child did not exit after stdin EOF");
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        status.success(),
+        "{}",
+        child
+            .stderr
+            .take()
+            .map(|mut stderr| {
+                let mut text = String::new();
+                let _ = std::io::Read::read_to_string(&mut stderr, &mut text);
+                text
+            })
+            .unwrap_or_default()
+    );
+}
+
+#[test]
+fn output_failure_ends_the_direct_server_while_stdin_remains_open() {
+    let test_home = tempfile::tempdir().unwrap();
+    let (mut child, mut stdin, mut stdout) = spawn_interactive_mcp(test_home.path());
+    write_rpc(&mut stdin, &handshake()[0]);
+    assert_eq!(
+        read_rpc(&mut stdout)["result"]["serverInfo"]["name"],
+        "wardian"
+    );
+    drop(stdout);
+    write_rpc(&mut stdin, &handshake()[1]);
+    write_rpc(&mut stdin, &json!({"jsonrpc":"2.0","id":2,"method":"ping"}));
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            drop(stdin);
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("MCP server stayed alive after its output pipe failed");
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    drop(stdin);
+    assert_eq!(status.code(), Some(1));
+}
+
+#[test]
+fn unread_stdout_does_not_keep_the_direct_server_alive() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wardian-mcp"))
+        .args(["mcp", "serve"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let _stdout = child.stdout.take().unwrap();
+    let sender = thread::spawn(move || {
+        for id in 0..100_000 {
+            if writeln!(
+                stdin,
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"ping\"}}"
+            )
+            .is_err()
+            {
+                return;
+            }
+        }
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            sender.join().unwrap();
+            panic!("MCP server stayed alive while stdout remained unread");
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    sender.join().unwrap();
+    assert_eq!(status.code(), Some(1));
+}
+
+#[test]
+fn direct_entry_keeps_the_explicit_mcp_serve_command() {
+    let output = Command::new(env!("CARGO_BIN_EXE_wardian-mcp"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Usage:"));
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn console_cli_keeps_the_explicit_mcp_serve_command() {
+    let test_home = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wardian-cli"))
+        .args(["mcp", "serve"])
+        .env("WARDIAN_HOME", test_home.path())
+        .env_remove("WARDIAN_SESSION_ID")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = StdBufReader::new(child.stdout.take().unwrap());
+    write_rpc(&mut stdin, &handshake()[0]);
+    assert_eq!(
+        read_rpc(&mut stdout)["result"]["serverInfo"]["name"],
+        "wardian"
+    );
+    write_rpc(&mut stdin, &handshake()[1]);
+    write_rpc(&mut stdin, &json!({"jsonrpc":"2.0","id":2,"method":"ping"}));
+    assert_eq!(read_rpc(&mut stdout)["result"], json!({}));
+    drop(stdin);
+    wait_success(&mut child);
+}
+
 #[cfg(windows)]
 #[test]
-fn registered_mcp_launcher_uses_the_windows_gui_subsystem() {
+fn self_contained_mcp_server_uses_the_windows_gui_subsystem() {
     let image = std::fs::read(env!("CARGO_BIN_EXE_wardian-mcp")).unwrap();
     let pe_offset = u32::from_le_bytes(image[0x3c..0x40].try_into().unwrap()) as usize;
     assert_eq!(&image[pe_offset..pe_offset + 4], b"PE\0\0");
@@ -81,12 +244,12 @@ fn registered_mcp_launcher_uses_the_windows_gui_subsystem() {
             .try_into()
             .unwrap(),
     );
-    assert_eq!(subsystem, 2, "MCP launcher must not request a console");
+    assert_eq!(subsystem, 2, "MCP server must use the GUI subsystem");
 }
 
 #[cfg(windows)]
 #[test]
-fn terminating_registered_launcher_closes_the_mcp_child_stdio() {
+fn self_contained_mcp_server_has_no_adjacent_cli_child() {
     let test_home = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_wardian-mcp"))
         .args(["mcp", "serve"])
@@ -108,20 +271,75 @@ fn terminating_registered_launcher_closes_the_mcp_child_stdio() {
         "wardian"
     );
 
-    child.kill().unwrap();
-    child.wait().unwrap();
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let mut remaining = Vec::new();
-        let result = stdout.read_to_end(&mut remaining);
-        let _ = sender.send(result);
-    });
-    let closed = receiver.recv_timeout(Duration::from_secs(2)).is_ok();
-    drop(stdin);
+    thread::sleep(Duration::from_millis(100));
     assert!(
-        closed,
-        "killing the registered launcher must close its child's inherited MCP stdout"
+        !has_wardian_cli_child(child.id()),
+        "wardian-mcp must run the shared MCP server without spawning wardian-cli"
     );
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+    )
+    .unwrap();
+    writeln!(stdin, "{}", json!({"jsonrpc":"2.0","id":2,"method":"ping"})).unwrap();
+    response.clear();
+    stdout.read_line(&mut response).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&response).unwrap()["result"],
+        json!({})
+    );
+    drop(stdin);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("direct MCP server did not terminate after stdin EOF");
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success());
+}
+
+#[cfg(windows)]
+fn has_wardian_cli_child(parent_pid: u32) -> bool {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+        System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        },
+    };
+
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        assert_ne!(snapshot, INVALID_HANDLE_VALUE);
+        let mut entry = std::mem::zeroed::<PROCESSENTRY32W>();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut found = false;
+        let mut available = Process32FirstW(snapshot, &mut entry) != 0;
+        while available {
+            let length = entry
+                .szExeFile
+                .iter()
+                .position(|unit| *unit == 0)
+                .unwrap_or(entry.szExeFile.len());
+            let filename = String::from_utf16_lossy(&entry.szExeFile[..length]);
+            if entry.th32ParentProcessID == parent_pid
+                && filename.eq_ignore_ascii_case("wardian-cli.exe")
+            {
+                found = true;
+                break;
+            }
+            available = Process32NextW(snapshot, &mut entry) != 0;
+        }
+        CloseHandle(snapshot);
+        found
+    }
 }
 
 #[test]
@@ -136,7 +354,19 @@ fn stdio_discovery_and_rejections_do_not_create_home_or_need_app() {
     ]);
     let responses = run(&test_home, requests);
     assert_eq!(responses.len(), 4);
-    let tools = responses[1]["result"]["tools"].as_array().unwrap();
+    let list = responses
+        .iter()
+        .find(|response| response["id"] == 2)
+        .unwrap();
+    let invalid = responses
+        .iter()
+        .find(|response| response["id"] == 3)
+        .unwrap();
+    let ping = responses
+        .iter()
+        .find(|response| response["id"] == 4)
+        .unwrap();
+    let tools = list["result"]["tools"].as_array().unwrap();
     let names = tools
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
@@ -153,14 +383,10 @@ fn stdio_discovery_and_rejections_do_not_create_home_or_need_app() {
     );
     assert!(!names.contains(&"receive_messages"));
     assert!(!names.contains(&"wait_agent"));
-    let error: Value = serde_json::from_str(
-        responses[2]["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap();
+    let error: Value =
+        serde_json::from_str(invalid["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(error["error"]["code"], "invalid_arguments");
-    assert_eq!(responses[3]["result"], json!({}));
+    assert_eq!(ping["result"], json!({}));
     assert!(!test_home.exists(), "MCP entry must bypass CLI migrations");
 }
 
@@ -279,13 +505,24 @@ fn stdio_five_calls_use_typed_control_and_preserve_literal_body_origin_and_recei
             .map(|(_, _, response)| response.clone())
             .collect(),
     );
-    let mut requests = handshake();
+    let (mut child, mut stdin, mut stdout) = spawn_interactive_mcp(root.path());
+    write_rpc(&mut stdin, &handshake()[0]);
+    let mut responses = vec![read_rpc(&mut stdout)];
+    write_rpc(&mut stdin, &handshake()[1]);
     for (name, arguments, _) in &specs {
-        requests.push(json!({"jsonrpc":"2.0","id":name,"method":"tools/call","params":{"name":name,"arguments":arguments}}));
+        write_rpc(
+            &mut stdin,
+            &json!({"jsonrpc":"2.0","id":name,"method":"tools/call","params":{"name":name,"arguments":arguments}}),
+        );
+        responses.push(read_rpc(&mut stdout));
     }
-    // Notifications cannot create another control operation or interrupt.
-    requests.push(json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"followup_task"}}));
-    let responses = run(root.path(), requests);
+    // Each dependent mutation is awaited before the next request is written.
+    write_rpc(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"followup_task"}}),
+    );
+    drop(stdin);
+    wait_success(&mut child);
     let sent = server.join().unwrap();
     assert_eq!(sent.len(), specs.len());
     assert_eq!(responses.len(), specs.len() + 1);
@@ -346,12 +583,20 @@ fn stdio_interrupt_receipts_preserve_actor_facts_without_claiming_confirmation()
     })
     .collect();
     let server = control_fixture(root.path(), receipts.clone());
-    let mut requests = handshake();
+    let (mut child, mut stdin, mut stdout) = spawn_interactive_mcp(root.path());
+    write_rpc(&mut stdin, &handshake()[0]);
+    let mut responses = vec![read_rpc(&mut stdout)];
+    write_rpc(&mut stdin, &handshake()[1]);
     for index in 0..receipts.len() {
-        requests.push(json!({"jsonrpc":"2.0","id":index + 2,"method":"tools/call",
-            "params":{"name":"interrupt_agent","arguments":{"target":"peer-uuid"}}}));
+        write_rpc(
+            &mut stdin,
+            &json!({"jsonrpc":"2.0","id":index + 2,"method":"tools/call",
+                "params":{"name":"interrupt_agent","arguments":{"target":"peer-uuid"}}}),
+        );
+        responses.push(read_rpc(&mut stdout));
     }
-    let responses = run(root.path(), requests);
+    drop(stdin);
+    wait_success(&mut child);
     let sent = server.join().unwrap();
     assert_eq!(sent.len(), receipts.len());
     assert_eq!(responses.len(), receipts.len() + 1);
@@ -388,13 +633,25 @@ fn stdio_missing_sender_and_unknown_tools_fail_without_opening_control() {
         json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"send_input","arguments":{}}}),
     ]);
     let responses = run_with_sender(&test_home, requests, false);
-    for response in &responses[1..3] {
+    let send = responses
+        .iter()
+        .find(|response| response["id"] == 2)
+        .unwrap();
+    let list = responses
+        .iter()
+        .find(|response| response["id"] == 3)
+        .unwrap();
+    let unknown = responses
+        .iter()
+        .find(|response| response["id"] == 4)
+        .unwrap();
+    for response in [send, list] {
         assert_eq!(
             response["result"]["structuredContent"]["error"]["code"],
             "missing_managed_sender"
         );
     }
-    assert_eq!(responses[3]["error"]["code"], -32602);
+    assert_eq!(unknown["error"]["code"], -32602);
     assert!(!test_home.exists());
 }
 
@@ -410,18 +667,26 @@ fn stdio_backend_ambiguity_and_lost_receipt_preserve_errors_without_replay() {
     );
     let first = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_message","arguments":{"target":"Peer","message":"literal"}}});
     let second = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"followup_task","arguments":{"target":"peer-uuid","message":"literal"}}});
-    let mut requests = handshake();
-    requests.extend([first.clone(), first, second.clone(), second]);
-    let responses = run(root.path(), requests);
+    let (mut child, mut stdin, mut stdout) = spawn_interactive_mcp(root.path());
+    write_rpc(&mut stdin, &handshake()[0]);
+    let _ = read_rpc(&mut stdout);
+    write_rpc(&mut stdin, &handshake()[1]);
+    let mut responses = Vec::with_capacity(4);
+    for request in [&first, &first, &second, &second] {
+        write_rpc(&mut stdin, request);
+        responses.push(read_rpc(&mut stdout));
+    }
+    drop(stdin);
+    wait_success(&mut child);
     assert_eq!(server.join().unwrap().len(), 2);
     assert_eq!(
-        responses[1]["result"]["structuredContent"]["error"]["code"],
+        responses[0]["result"]["structuredContent"]["error"]["code"],
         "ambiguous_target"
     );
-    assert_eq!(responses[2]["error"]["code"], -32600);
+    assert_eq!(responses[1]["error"]["code"], -32600);
     assert_eq!(
-        responses[3]["result"]["structuredContent"]["error"]["code"],
+        responses[2]["result"]["structuredContent"]["error"]["code"],
         "invalid_receipt"
     );
-    assert_eq!(responses[4]["error"]["code"], -32600);
+    assert_eq!(responses[3]["error"]["code"], -32600);
 }

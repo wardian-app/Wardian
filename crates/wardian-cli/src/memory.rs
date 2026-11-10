@@ -322,7 +322,7 @@ mod tests {
 
     impl TestHome {
         fn new() -> Self {
-            let guard = crate::test_env_lock();
+            let guard = crate::test_support::test_env_lock();
             let home = tempfile::tempdir().expect("temp home");
             let previous_home = std::env::var_os("WARDIAN_HOME");
             let previous_session = std::env::var_os("WARDIAN_SESSION_ID");

@@ -1,14 +1,13 @@
-pub(crate) mod messaging;
-
-#[cfg(windows)]
-mod windows_pipe;
+use wardian_cli::control_client::{build_runtime, send_request};
+pub(crate) use wardian_cli::control_client::{
+    messaging, require_current_message_origin, ControlEndpointError,
+};
 
 use std::{
     fmt, io,
     time::{Duration, Instant},
 };
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wardian_core::browser::{
     BrowserActionResult, BrowserGetResult, BrowserScreenshotResult, BrowserSessionSummary,
     ConsoleEntry, PageSnapshot,
@@ -85,51 +84,6 @@ enum ControlOperation {
         requested: Duration,
     },
 }
-
-#[derive(Debug)]
-pub struct ControlEndpointError {
-    code: String,
-    message: String,
-    details: Option<serde_json::Value>,
-}
-
-impl ControlEndpointError {
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-            details: None,
-        }
-    }
-
-    pub fn with_details(
-        code: impl Into<String>,
-        message: impl Into<String>,
-        details: serde_json::Value,
-    ) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-            details: Some(details),
-        }
-    }
-
-    pub fn code(&self) -> &str {
-        &self.code
-    }
-
-    pub fn details(&self) -> Option<&serde_json::Value> {
-        self.details.as_ref()
-    }
-}
-
-impl fmt::Display for ControlEndpointError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for ControlEndpointError {}
 
 #[derive(Debug)]
 pub struct WaitTimeoutError {
@@ -651,15 +605,6 @@ pub fn automation_run(request: AutomationRunRequest) -> io::Result<AutomationRun
     serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))
 }
 
-pub fn require_current_message_origin() -> io::Result<MessageOrigin> {
-    current_message_origin().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "WARDIAN_SESSION_ID environment variable is not set",
-        )
-    })
-}
-
 pub fn create_notification(
     notification: InboxNotificationPayload,
     origin: MessageOrigin,
@@ -837,14 +782,6 @@ pub fn wait_agent_until_next(
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
-
-fn build_runtime() -> io::Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .map_err(|e| io::Error::other(e.to_string()))
-}
 
 fn timeout_block(
     runtime: &tokio::runtime::Runtime,
@@ -1164,14 +1101,6 @@ pub fn browser_downloads(
     )
 }
 
-fn current_message_origin() -> Option<MessageOrigin> {
-    std::env::var("WARDIAN_SESSION_ID")
-        .ok()
-        .map(|session_id| session_id.trim().to_string())
-        .filter(|session_id| !session_id.is_empty())
-        .map(|session_id| MessageOrigin::WardianAgent { session_id })
-}
-
 struct WaitBudget {
     started_at: Instant,
     timeout: Duration,
@@ -1376,77 +1305,9 @@ fn wait_target_snapshot(target: &str, budget: &WaitBudget) -> io::Result<AgentId
         })
 }
 
-async fn send_request(req: ControlRequest) -> io::Result<serde_json::Value> {
-    #[cfg(windows)]
-    {
-        send_request_windows(req).await
-    }
-    #[cfg(unix)]
-    {
-        send_request_unix(req).await
-    }
-}
-
-#[cfg(windows)]
-async fn send_request_windows(req: ControlRequest) -> io::Result<serde_json::Value> {
-    let pipe_name = wardian_core::control::pipe_name()
-        .ok_or_else(|| io::Error::other("could not resolve Wardian control pipe"))?;
-    windows_pipe::send_request(&pipe_name, req).await
-}
-
-#[cfg(unix)]
-async fn send_request_unix(req: ControlRequest) -> io::Result<serde_json::Value> {
-    use tokio::net::UnixStream;
-
-    let socket_path = wardian_core::control::socket_path()
-        .ok_or_else(|| io::Error::other("could not resolve Wardian control socket"))?;
-    let mut stream = UnixStream::connect(socket_path).await?;
-    exchange_json(&mut stream, req).await
-}
-
-async fn exchange_json<T>(stream: &mut T, req: ControlRequest) -> io::Result<serde_json::Value>
-where
-    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    let request = serde_json::to_string(&req).map_err(|e| io::Error::other(e.to_string()))?;
-    stream.write_all(request.as_bytes()).await?;
-    stream.write_all(b"\n").await?;
-    stream.flush().await?;
-
-    let mut line = String::new();
-    let mut reader = BufReader::new(stream);
-    reader.read_line(&mut line).await?;
-
-    // Detect backend error envelope {"error": {...}}
-    let value: serde_json::Value =
-        serde_json::from_str(&line).map_err(|e| io::Error::other(e.to_string()))?;
-    if let Some(err) = value.get("error") {
-        let code = err
-            .get("code")
-            .and_then(|c| c.as_str())
-            .unwrap_or("request_failed");
-        let msg = err
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("unknown error");
-        let endpoint_error = err.get("details").cloned().map_or_else(
-            || ControlEndpointError::new(code, msg),
-            |details| ControlEndpointError::with_details(code, msg, details),
-        );
-        return Err(io::Error::other(endpoint_error));
-    }
-
-    Ok(value)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wardian_core::control::MessageOrigin;
-
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::test_env_lock()
-    }
 
     #[test]
     fn agent_mutations_use_longer_control_timeout() {
@@ -1505,31 +1366,6 @@ mod tests {
             operation_timeout(&ControlOperation::Delivery { requested }),
             watch_timeout_for(requested)
         );
-    }
-
-    #[test]
-    fn current_message_origin_uses_wardian_session_id() {
-        let _guard = env_lock();
-        std::env::set_var("WARDIAN_SESSION_ID", "source-1");
-
-        assert_eq!(
-            current_message_origin(),
-            Some(MessageOrigin::WardianAgent {
-                session_id: "source-1".to_string()
-            })
-        );
-
-        std::env::remove_var("WARDIAN_SESSION_ID");
-    }
-
-    #[test]
-    fn current_message_origin_ignores_blank_session_id() {
-        let _guard = env_lock();
-        std::env::set_var("WARDIAN_SESSION_ID", "   ");
-
-        assert_eq!(current_message_origin(), None);
-
-        std::env::remove_var("WARDIAN_SESSION_ID");
     }
 
     #[test]
@@ -1888,40 +1724,5 @@ mod tests {
         .unwrap_err();
         assert_eq!(calls, 1);
         assert!(error.get_ref().unwrap().is::<WatchTimeoutError>());
-    }
-
-    #[test]
-    fn exchange_json_preserves_backend_error_details() {
-        let runtime = build_runtime().unwrap();
-        runtime.block_on(async {
-            let (mut client, mut server) = tokio::io::duplex(4096);
-            tokio::spawn(async move {
-            let mut line = String::new();
-            let mut reader = BufReader::new(&mut server);
-            reader.read_line(&mut line).await.unwrap();
-            let stream = reader.get_mut();
-            stream
-                .write_all(
-                    br#"{"schema":1,"error":{"code":"request_failed","message":"message delivery failed","details":{"delivery":[{"uuid":"agent-2","name":"CoderTwo","provider":"claude","runtime_state":"restored_without_sender","delivery_state":"failed","error":{"code":"no_input_channel","message":"missing sender"}}]}}}"#,
-                )
-                .await
-                .unwrap();
-            stream.write_all(b"\n").await.unwrap();
-            });
-
-            let error = exchange_json(&mut client, ControlRequest::AgentList)
-                .await
-                .unwrap_err();
-            let endpoint_error = error
-                .get_ref()
-                .and_then(|inner| inner.downcast_ref::<ControlEndpointError>())
-                .unwrap();
-
-            assert_eq!(endpoint_error.code(), "request_failed");
-            assert_eq!(
-                endpoint_error.details().unwrap()["delivery"][0]["runtime_state"],
-                "restored_without_sender"
-            );
-        });
     }
 }

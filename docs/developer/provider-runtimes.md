@@ -558,11 +558,10 @@ before ownership; interrupted publication leaves an unowned entry that retries
 preserve as a collision. See [the regression](https://github.com/wardian-app/Wardian/issues/1245).
 
 Managed Codex registration uses the staged `wardian-mcp.exe` on Windows. This
-GUI-subsystem launcher starts `wardian-cli.exe mcp serve` with
-`CREATE_NO_WINDOW`, preserving the MCP stdio handles while avoiding a console
-window. A Windows job object ties the server lifetime to the registered
-launcher. The normal `wardian-cli.exe` keeps its console subsystem and remains
-the target of interactive CLI launchers.
+self-contained GUI-subsystem executable runs the shared MCP server directly
+with inherited stdio handles; it creates no `wardian-cli.exe` child. The
+normal `wardian-cli.exe` keeps its console subsystem and remains the target of
+interactive CLI launchers.
 
 Codex compact-home ownership records and interactive launch configuration and
 journal files use the same parent-only canonicalization for long paths. Their
