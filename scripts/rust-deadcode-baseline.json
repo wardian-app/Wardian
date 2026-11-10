@@ -4,8 +4,7 @@
     {
       "reason": "Held only for Drop: the field owns an OS resource (a file watcher, a Windows job object) that must live exactly as long as the struct.",
       "entries": [
-        "src-tauri/src/state/app_state.rs::ExplorerWatchRegistration.watcher",
-        "src-tauri/src/state/user_terminal.rs::UserTerminalSession.job_object"
+        "src-tauri/src/state/app_state.rs::ExplorerWatchRegistration.watcher"
       ]
     },
     {

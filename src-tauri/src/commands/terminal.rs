@@ -478,30 +478,14 @@ fn spawn_user_terminal_session(
     cmd.cwd(&cwd);
     manager::apply_terminal_identity_env(&mut cmd);
 
+    #[cfg(windows)]
+    let job_object = Some(crate::utils::process::RuntimeProcessJob::prepare(&mut cmd)?);
+
     let child = pair
         .slave
         .spawn_command(cmd)
         .map_err(|e| format!("Failed to spawn user terminal: {}", e))?;
     let process_id = child.process_id();
-
-    #[cfg(windows)]
-    let job_object = {
-        if manager::app_process_supervisor_active() {
-            None
-        } else if let Ok(job) = manager::create_kill_on_close_job("user terminal fallback") {
-            if let Some(pid) = process_id {
-                if let Err(err) = manager::assign_pid_to_job(&job, pid, "user terminal fallback") {
-                    manager::log_debug(&format!(
-                        "[Wardian] Failed to assign user terminal PID {} to fallback job: {}",
-                        pid, err
-                    ));
-                }
-            }
-            Some(job)
-        } else {
-            None
-        }
-    };
 
     let mut reader = pair
         .master
@@ -613,8 +597,8 @@ async fn resize_user_terminal_master(
     .map_err(|e| format!("Failed to resize user terminal: {}", e))
 }
 
-fn user_terminal_exited(session: &UserTerminalSession) -> bool {
-    session.exited.lock().map(|value| *value).unwrap_or(true)
+fn user_terminal_exited(session: &mut UserTerminalSession) -> Result<bool, String> {
+    session.has_exited()
 }
 
 #[tauri::command]
@@ -626,8 +610,13 @@ pub async fn ensure_user_terminal(
 ) -> Result<String, String> {
     let (existing_master, current_session_id) = {
         let mut session = state.user_terminal.lock().await;
-        if session.as_ref().is_some_and(user_terminal_exited) {
-            session.take();
+        if session
+            .as_mut()
+            .map(user_terminal_exited)
+            .transpose()?
+            .unwrap_or(false)
+        {
+            UserTerminalSession::take_for_replacement(&mut session).await?;
         }
 
         if let Some(terminal) = session.as_ref() {
@@ -664,11 +653,11 @@ pub async fn send_binary_input_to_user_terminal(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let tx = {
-        let session = state.user_terminal.lock().await;
+        let mut session = state.user_terminal.lock().await;
         let terminal = session
-            .as_ref()
+            .as_mut()
             .ok_or("User terminal is not running".to_string())?;
-        if user_terminal_exited(terminal) {
+        if user_terminal_exited(terminal)? {
             return Err("User terminal has exited".to_string());
         }
         terminal.stdin_tx.clone()
@@ -730,7 +719,7 @@ pub async fn restart_user_terminal(
 ) -> Result<String, String> {
     {
         let mut session = state.user_terminal.lock().await;
-        session.take();
+        UserTerminalSession::take_for_replacement(&mut session).await?;
     }
     ensure_user_terminal(cols, rows, state, app).await
 }
@@ -739,11 +728,11 @@ pub async fn restart_user_terminal(
 pub async fn set_user_terminal_cwd(path: String, state: State<'_, AppState>) -> Result<(), String> {
     let path = validate_user_terminal_cwd(&path)?;
     let (tx, command) = {
-        let session = state.user_terminal.lock().await;
+        let mut session = state.user_terminal.lock().await;
         let terminal = session
-            .as_ref()
+            .as_mut()
             .ok_or("User terminal is not running".to_string())?;
-        if user_terminal_exited(terminal) {
+        if user_terminal_exited(terminal)? {
             return Err("User terminal has exited".to_string());
         }
         (
