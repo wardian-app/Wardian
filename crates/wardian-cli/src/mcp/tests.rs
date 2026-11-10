@@ -577,6 +577,10 @@ impl Write for CaptureWriter {
 
 impl CaptureWriter {
     fn wait_for_id(&self, id: Value, timeout: Duration) -> bool {
+        self.wait_for_response(timeout, |response| response["id"] == id)
+    }
+
+    fn wait_for_response(&self, timeout: Duration, matches: impl Fn(&Value) -> bool) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         let (output, wake) = &*self.0;
         let mut output = output.lock().unwrap();
@@ -584,7 +588,7 @@ impl CaptureWriter {
             if output
                 .split(|byte| *byte == b'\n')
                 .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
-                .any(|response| response["id"] == id)
+                .any(|response| matches(&response))
             {
                 return true;
             }
@@ -633,6 +637,13 @@ struct BlockingWriter {
     finished: std::sync::mpsc::Sender<()>,
 }
 
+struct GatedCaptureWriter {
+    bytes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    gate: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    started: std::sync::mpsc::Sender<()>,
+    blocked: bool,
+}
+
 impl Write for FailOnSecondResponse {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if bytes == b"\n" && self.completed_responses == 1 {
@@ -664,6 +675,26 @@ impl Write for BlockingWriter {
                 released = wake.wait(released).unwrap();
             }
         }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Write for GatedCaptureWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if !self.blocked {
+            self.blocked = true;
+            let (released, wake) = &*self.gate;
+            let mut released = released.lock().unwrap();
+            let _ = self.started.send(());
+            while !*released {
+                released = wake.wait(released).unwrap();
+            }
+        }
+        self.bytes.lock().unwrap().extend_from_slice(bytes);
         Ok(bytes.len())
     }
 
@@ -917,9 +948,20 @@ fn full_worker_queue_rejects_before_execution() {
     );
 
     send_frame(&input_tx, slow_call(15, "replay-with-same-id"));
+    assert!(
+        output.wait_for_response(Duration::from_secs(3), |response| {
+            response["id"] == 15 && response["error"]["code"] == -32600
+        }),
+        "duplicate request ID rejection must be written before releasing workers"
+    );
     release_gate(&gate);
     drop(input_tx);
-    assert!(server.join().unwrap().is_ok());
+    let server_result = server.join().expect("MCP server thread panicked");
+    assert!(
+        server_result.is_ok(),
+        "MCP server failed: {:?}",
+        server_result.err()
+    );
     let overflow_responses: Vec<_> = output
         .values()
         .into_iter()
@@ -948,6 +990,122 @@ fn full_worker_queue_rejects_before_execution() {
     );
     assert!(executed.contains(&"queued".to_string()));
     assert!(!executed.contains(&"overflow".to_string()));
+}
+
+#[test]
+fn late_worker_output_saturation_after_eof_is_reported() {
+    let ConcurrentBackendParts {
+        calls,
+        started_rx,
+        gate: worker_gate,
+        started,
+    } = concurrent_backend_parts();
+    let _release_workers_on_failure = ReleaseGateOnDrop(std::sync::Arc::clone(&worker_gate));
+    let output_gate =
+        std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let _release_output_on_failure = ReleaseGateOnDrop(std::sync::Arc::clone(&output_gate));
+    let output_bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let backend_calls = std::sync::Arc::clone(&calls);
+    let backend_gate = std::sync::Arc::clone(&worker_gate);
+    let writer_gate = std::sync::Arc::clone(&output_gate);
+    let writer_bytes = std::sync::Arc::clone(&output_bytes);
+    let (writer_started, writer_started_rx) = std::sync::mpsc::channel();
+    let (input_eof, input_eof_rx) = std::sync::mpsc::channel();
+    let (workers_joined, workers_joined_rx) = std::sync::mpsc::channel();
+    let input = input_frames([
+        initialize(VERSION),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        slow_call(10, "hold"),
+        slow_call(11, "hold"),
+        slow_call(12, "hold"),
+        slow_call(13, "hold"),
+        slow_call(14, "queued"),
+        slow_call(15, "overflow"),
+    ]);
+    let server = std::thread::spawn(move || {
+        serve_concurrent_with_hooks(
+            std::io::Cursor::new(input),
+            GatedCaptureWriter {
+                bytes: writer_bytes,
+                gate: writer_gate,
+                started: writer_started,
+                blocked: false,
+            },
+            move || ConcurrentBackend {
+                calls: std::sync::Arc::clone(&backend_calls),
+                started: started.clone(),
+                gate: std::sync::Arc::clone(&backend_gate),
+            },
+            || {},
+            move || {
+                let _ = input_eof.send(());
+            },
+            move || {
+                let _ = workers_joined.send(());
+            },
+        )
+    });
+
+    assert!(
+        writer_started_rx
+            .recv_timeout(Duration::from_secs(3))
+            .is_ok(),
+        "output writer must be held before worker responses"
+    );
+    assert!(
+        input_eof_rx.recv_timeout(Duration::from_secs(3)).is_ok(),
+        "server must consume EOF while workers remain gated"
+    );
+    for _ in 0..TOOL_WORKERS {
+        let request = started_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("each worker must reach its held backend call");
+        assert!(matches!(
+            request,
+            AgentMessagingRequest::FollowupTask { message, .. } if message == "hold"
+        ));
+    }
+
+    release_gate(&worker_gate);
+    assert!(
+        workers_joined_rx
+            .recv_timeout(Duration::from_secs(3))
+            .is_ok(),
+        "all workers must join after their bounded output attempts"
+    );
+    release_gate(&output_gate);
+
+    let failure = server
+        .join()
+        .expect("MCP server thread panicked")
+        .expect_err("late worker output saturation must fail the server");
+    assert_eq!(failure.error.kind(), io::ErrorKind::BrokenPipe);
+    assert!(failure.reader_joined);
+    assert!(failure.writer_joined);
+
+    let responses: Vec<Value> = output_bytes
+        .lock()
+        .unwrap()
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice(line).ok())
+        .collect();
+    assert_eq!(responses.len(), OUTPUT_QUEUE + 1);
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|response| { (10..=14).contains(&response["id"].as_i64().unwrap_or_default()) })
+            .count(),
+        TOOL_WORKERS,
+        "one of the five admitted worker responses must be lost to saturation"
+    );
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|response| response["id"] == 15 && response["error"]["code"] == -32002)
+            .count(),
+        1,
+        "the work-queue rejection must occupy the remaining output slot"
+    );
 }
 
 #[test]
