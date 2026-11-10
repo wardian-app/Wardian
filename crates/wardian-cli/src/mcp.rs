@@ -19,12 +19,29 @@ const VERSION: &str = "2025-11-25";
 
 #[derive(Debug, clap::Subcommand)]
 pub enum McpCommand {
-    /// Serve six agent messaging tools on stdio. Requires a managed sender and running Wardian app.
-    Serve,
+    /// Serve canonical messaging tools on stdio. Requires a managed sender or explicit controller mode and a running Wardian app.
+    Serve {
+        /// Use an explicitly owner-issued external controller credential.
+        #[arg(long)]
+        controller: bool,
+    },
 }
 
 /// Run the explicit server without passing protocol output through CLI rendering.
-pub fn run(_command: &McpCommand) -> i32 {
+pub fn run(command: &McpCommand) -> i32 {
+    let McpCommand::Serve { controller } = command;
+    if *controller {
+        let backend = messaging::ControllerLive::from_env();
+        return match backend
+            .and_then(|mut backend| serve(io::stdin().lock(), io::stdout().lock(), &mut backend))
+        {
+            Ok(()) => 0,
+            Err(_) => {
+                eprintln!("Controller MCP failed; check owner-issued credentials and avoid automatic replay.");
+                1
+            }
+        };
+    }
     match serve(
         io::stdin().lock(),
         io::stdout().lock(),

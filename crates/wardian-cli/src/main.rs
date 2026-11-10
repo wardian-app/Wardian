@@ -4,6 +4,7 @@ mod artifact;
 mod automation_invoker;
 mod automation_replay;
 mod browser;
+mod controller;
 mod disk;
 mod errors;
 mod graph;
@@ -59,12 +60,13 @@ fn run() -> i32 {
         Ok(cli) => cli,
         Err(error) => return handle_parse_error(error),
     };
-    if let Command::Mcp { command } = &cli.command {
-        return mcp::run(command);
-    }
-    // Static discovery must work without a home, migrations, or running app.
-    if let Command::Schema { path } = &cli.command {
-        return finish(schema::render(path));
+    // Static discovery and controller operations run without home migrations.
+    match &cli.command {
+        Command::Mcp { command } => return mcp::run(command),
+        Command::Schema { path } => return finish(schema::render(path)),
+        Command::Controller(args) => return finish(controller::handle(args)),
+        Command::Message(args) => return finish(messaging::handle(args)),
+        _ => {}
     }
     if let Command::Browser(args) = &cli.command {
         if let Some(help) = browser::target_help(args) {
@@ -83,9 +85,7 @@ fn run() -> i32 {
     {
         return finish(render_automation_node_types(node.as_deref(), *json));
     }
-    if let Command::Message(args) = &cli.command {
-        return finish(messaging::handle(args));
-    }
+
     if let Err(error) = wardian_core::automation_migration::migrate_current_home() {
         let error = CliError::generic(format!(
             "could not migrate legacy automation storage: {error}"
@@ -94,7 +94,7 @@ fn run() -> i32 {
         return error.code_i32();
     }
     let result = match cli.command {
-        Command::Mcp { .. } => unreachable!("MCP runs before home migration"),
+        Command::Mcp { .. } | Command::Controller(_) => unreachable!("early CLI command"),
         Command::Schema { path } => schema::render(&path),
         Command::Agent(args) => handle_agent(args),
         Command::Artifact(args) => artifact::handle_artifact(args),

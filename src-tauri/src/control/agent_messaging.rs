@@ -9,7 +9,9 @@ use wardian_core::agent_messaging::{
     AgentMessagingError, AgentMessagingRequest as Request, AgentMessagingResponse as Response,
 };
 use wardian_core::db::agent_messaging as store;
+mod controller;
 mod native;
+pub(super) use controller::handle as handle_controller;
 
 /// Restore both canonical work and original-conversation continuations.
 pub(super) fn spawn_after_restore(app: &AppHandle, session_id: &str) {
@@ -1097,7 +1099,28 @@ async fn admit(
         task,
     } = input;
     store::validate_message(message).map_err(control_error)?;
-    let resolved = resolve_exact(state, target).await?;
+    let resolved = if target.starts_with("controller:") {
+        if task {
+            return Err(ControlError::coded(
+                "invalid_target",
+                "Controllers are receive-only mailboxes, never task workers.",
+            ));
+        }
+        wardian_core::controllers::ControllerStore::current()
+            .and_then(|store| store.authorize_mailbox_sender(target, sender))
+            .map_err(|_| {
+                ControlError::coded(
+                    "forbidden",
+                    "Controller mailbox does not accept information from this sender.",
+                )
+            })?;
+        ResolvedRecipient {
+            id: target.into(),
+            provider: WorkerProviderClassification::Unknown,
+        }
+    } else {
+        resolve_exact(state, target).await?
+    };
     let recipient = resolved.id;
     // New Session/clear operations use this same per-agent lifecycle gate.
     // Hold it from the durable identity snapshot through canonical admission.

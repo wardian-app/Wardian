@@ -1,0 +1,53 @@
+name: Selected Agent Bridge
+on:
+  pull_request:
+    paths:
+      - 'extensions/selected-agent-bridge/**'
+      - '.github/workflows/selected-agent-bridge.yml'
+      - 'crates/wardian-core/src/controllers.rs'
+      - 'crates/wardian-core/src/control.rs'
+      - 'crates/wardian-cli/**'
+      - 'src-tauri/src/control/agent_messaging*'
+      - 'src-tauri/src/control/agent_messaging/**'
+  push:
+    branches: [main]
+    paths:
+      - 'extensions/selected-agent-bridge/**'
+      - '.github/workflows/selected-agent-bridge.yml'
+      - 'crates/wardian-core/src/controllers.rs'
+      - 'crates/wardian-core/src/control.rs'
+      - 'crates/wardian-cli/**'
+      - 'src-tauri/src/control/agent_messaging*'
+      - 'src-tauri/src/control/agent_messaging/**'
+permissions:
+  contents: read
+jobs:
+  stdio:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - run: npm --prefix extensions/selected-agent-bridge test
+  native-acceptance:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+      - run: cargo build -p wardian-cli
+      - name: Real CLI and canonical mailbox through HTTP and private-tunnel stdio
+        shell: pwsh
+        run: |
+          $env:WARDIAN_BRIDGE_E2E_CLI = Join-Path $env:GITHUB_WORKSPACE 'target/debug/wardian-cli.exe'
+          $env:WARDIAN_BRIDGE_E2E_DRIVER = Join-Path $env:GITHUB_WORKSPACE 'extensions/selected-agent-bridge/native-e2e-driver.mjs'
+          cargo test -p Wardian --lib controller_task_worker_reply_and_ack_use_canonical_mailbox_without_agent -- --test-threads=1 --nocapture
