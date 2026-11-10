@@ -2,9 +2,15 @@
 use std::sync::OnceLock;
 
 #[cfg(windows)]
-static APP_PROCESS_SUPERVISOR: OnceLock<AppProcessSupervisor> = OnceLock::new();
+static APP_PROCESS_SUPERVISOR: OnceLock<Result<AppProcessSupervisor, String>> = OnceLock::new();
+
+#[path = "process/owned_command.rs"]
+mod owned_command;
+pub(crate) use owned_command::spawn_owned_command;
 #[cfg(windows)]
-static APP_PROCESS_SUPERVISOR_ERROR: OnceLock<String> = OnceLock::new();
+pub(crate) use owned_command::spawn_owned_command_in_job;
+#[cfg(all(test, windows))]
+pub(crate) use owned_command::{test_owned_job_contains, tests as lifetime_test_support};
 
 /// A retained job distinguishes containment established before the provider
 /// runs from the older best-effort, post-launch fallback assignment.
@@ -162,8 +168,11 @@ impl RuntimeProcessJob {
     /// Windows creates the PTY child suspended, assigns this non-breakaway job,
     /// then resumes its thread. Assignment/resume failure fails the spawn.
     pub(crate) fn prepare(cmd: &mut portable_pty::CommandBuilder) -> Result<Self, String> {
+        // The outer job also owns a suspended child if Wardian dies before the
+        // nested assignment. Ordinary roots must never request breakaway.
+        init_app_process_supervisor()?;
         use std::os::windows::io::BorrowedHandle;
-        let job = create_kill_on_close_job("Claude runtime")?;
+        let job = create_kill_on_close_job("provider runtime")?;
         // SAFETY: job owns a valid handle throughout this call. The builder
         // duplicates it, so no borrowed handle survives beyond this call.
         let borrowed = unsafe { BorrowedHandle::borrow_raw(job.handle() as _) };
@@ -492,30 +501,16 @@ pub fn new_silent_std_command(program: &str) -> std::process::Command {
 
 #[cfg(windows)]
 pub fn init_app_process_supervisor() -> Result<(), String> {
-    if APP_PROCESS_SUPERVISOR.get().is_some() {
-        return Ok(());
-    }
-
-    if let Some(err) = APP_PROCESS_SUPERVISOR_ERROR.get() {
-        return Err(err.clone());
-    }
-
-    let supervisor = match create_app_process_supervisor() {
-        Ok(supervisor) => supervisor,
-        Err(err) => {
-            let _ = APP_PROCESS_SUPERVISOR_ERROR.set(err.clone());
-            return Err(err);
-        }
-    };
-
     APP_PROCESS_SUPERVISOR
-        .set(supervisor)
-        .map_err(|_| "app process supervisor was initialized concurrently".to_string())
+        .get_or_init(create_app_process_supervisor)
+        .as_ref()
+        .map(|_| ())
+        .map_err(Clone::clone)
 }
 
 #[cfg(windows)]
 pub fn app_process_supervisor_active() -> bool {
-    APP_PROCESS_SUPERVISOR.get().is_some()
+    matches!(APP_PROCESS_SUPERVISOR.get(), Some(Ok(_)))
 }
 
 #[cfg(windows)]

@@ -518,6 +518,14 @@ mod update_eligibility_tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn harmless_updater_probe_survives_abrupt_parent_exit() {
+        crate::utils::process::lifetime_test_support::updater_escape_survives_parent_exit(
+            windows_update_handoff_creation_flags(),
+        );
+    }
+
     #[test]
     fn windows_update_installer_args_preserve_tauri_updater_contract() {
         assert_eq!(
