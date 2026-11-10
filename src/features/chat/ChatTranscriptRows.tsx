@@ -264,7 +264,7 @@ export function MessageRow({
     <article
       aria-label={`${role} message`}
       className={`chat-row group/chat-message flex w-full flex-col ${
-        isAssistant ? "max-w-[76ch] items-start px-1 py-0.5" : "items-end"
+        isAssistant ? "min-w-0 items-start px-1 py-0.5" : "items-end"
       }`}
     >
       {text ? (
@@ -733,7 +733,7 @@ export function WorkGroupRow({
   const title = workGroupTitleFromEntries(row.entries);
   const duration = workGroupDurationLabel(row.entries);
   const latestEntry = row.entries[row.entries.length - 1];
-  const copyValue = formatPresentedWorkGroupForCopy(row);
+  const copyValue = () => formatPresentedWorkGroupForCopy(row);
 
   return (
     <article
@@ -764,7 +764,7 @@ export function WorkGroupRow({
             actions={[
               { label: "Copy work log", value: copyValue },
               ...(row.changedPaths.length > 0
-                ? [{ label: "Copy changed file paths", value: row.changedPaths.join("\n") }]
+                ? [{ label: "Copy changed file paths", value: () => row.changedPaths.join("\n") }]
                 : []),
             ]}
             className="chat-row-actions--rail"

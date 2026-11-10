@@ -4,6 +4,12 @@ export const MAX_LOADED_CHAT_HEADERS = 640;
 export const MAX_LOADED_CHAT_BYTES = 2 * 1024 * 1024;
 export type ChatWindowDirection = "recent" | "older";
 
+/** Retry a newly opened empty window promptly, with a one-second burst limit. */
+export function chatRecentRefreshDelay(intervalMs: number, openedAt: number, now: number, hasEvents: boolean): number {
+  const elapsed = now - openedAt;
+  return !hasEvents && elapsed >= 0 && elapsed < 1_000 ? Math.min(intervalMs, 100) : intervalMs;
+}
+
 /** Ignore absent and malformed receipts. A successful delivery alone proves no row. */
 export function chatInputReceipt(value: unknown): ChatInputReceipt | null {
   if (!value || typeof value !== "object") return null;
@@ -66,7 +72,7 @@ export function applyChatPage(
     confirmed.set(canonical.id, event.id);
     return false;
   });
-  const retain = !page.reset || (page.events.length === 0 && page.progress !== "ready");
+  const retain = page.recent_admission == null && (!page.reset || (page.events.length === 0 && page.progress !== "ready"));
   const admittedProvisional = new Set(page.events.filter((event) => event.metadata.chat_provisional === true
     && event.metadata.chat_source_epoch === page.source_epoch)
     .map((event) => event.metadata.chat_source_admission).filter((admission): admission is string => typeof admission === "string"));
@@ -120,11 +126,17 @@ export function boundChatEvents(events: AgentChatEvent[], direction: ChatWindowD
   return boundedChatEvents(events, direction);
 }
 
-export function chatReadProgress(progress: string): string | null {
+export function chatReadProgress(progress: string, hasRows = true): string | null {
   if (progress === "ready") return null;
-  if (progress === "provisional") return "Recent messages available. History is updating.";
+  if (progress === "provisional") return hasRows ? "Recent messages available. History is updating."
+    : "No public message in the recent window yet. History is updating.";
   if (progress === "oversized_record") return "Recent source contains a large record. History is updating.";
   if (progress === "ownership_pending") return "Waiting for a verified conversation source.";
   if (progress === "source_unavailable") return "Conversation source is not available yet.";
+  if (progress === "privacy_disabled") return "Conversation logging is disabled.";
+  if (progress === "no_admitted_rows") return "No captured message in the recent window yet.";
+  if (progress === "no_recent") return "Recent messages are not available yet. History is updating.";
+  if (progress === "source_gap") return hasRows ? "Verified recent messages available. Some history could not be read yet."
+    : "Recent history could not be read yet.";
   return "History is updating.";
 }

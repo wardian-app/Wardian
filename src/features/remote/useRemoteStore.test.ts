@@ -71,6 +71,151 @@ function chatMessage(id: string, text: string, sequence: number): AgentChatEvent
 }
 
 describe("useRemoteStore watchlists", () => {
+  it("refreshes canonical DB rows across an Older window without fictitious source ACKs", async () => {
+    const dbRow = (index: number, text: string): AgentChatEvent => ({
+      ...chatMessage(`agent-1:${index.toString(16).padStart(16, "0")}:opencode_db:part-${index}`, text, index),
+      provider: "opencode", source: "opencode_db", turn_id: `message-${index}`,
+      metadata: { provider_log: true, chat_display_key: `agent-1:${index.toString(16).padStart(16, "0")}:opencode_db:part-${index}`,
+        chat_recent_native_key: String(index).repeat(64), chat_recent_native_version: "a".repeat(64) },
+    });
+    const olderRow = dbRow(1, "older DB body"); const recentRow = dbRow(2, "original DB body");
+    const refreshed = { ...recentRow, text: "source-refreshed DB body",
+      metadata: { ...recentRow.metadata, chat_recent_native_version: "b".repeat(64) } };
+    const initial = { ...chatPageFields, revision: "db-r1", events: [recentRow], next_before: "db-before" };
+    const older = { ...initial, revision: "db-older-r1", events: [olderRow], next_before: null, older_page: true };
+    const changed = { ...initial, revision: "db-r2", events: [refreshed] };
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      chatPage: initial, chatEvents: [recentRow], chatHasOlder: true, chatNextBefore: "db-before" });
+    vi.mocked(remoteClient.loadAgentChatPage).mockImplementation(async (_session, before, revision, _detail, _signal, revalidateIds) => {
+      expect(revalidateIds).toBeUndefined();
+      if (before) { expect(before).toBe("db-before"); return older; }
+      expect(revision).toBe(initial.revision); return changed;
+    });
+    await useRemoteStore.getState().loadOlderActiveAgentChat();
+    expect(useRemoteStore.getState().chatEvents).toEqual([olderRow, recentRow]);
+    expect(useRemoteStore.getState().chatBrowsingOlder).toBe(true);
+    expect(useRemoteStore.getState().chatPage?.revision).toBe(initial.revision);
+    await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    expect(useRemoteStore.getState().chatEvents).toEqual([olderRow, refreshed]);
+    expect(useRemoteStore.getState().chatPage?.revision).toBe("db-r2");
+    expect(useRemoteStore.getState().chatError).toBe("");
+    expect(useRemoteStore.getState().chatLoading).toBe(false);
+    expect(useRemoteStore.getState().chatLoadingOlder).toBe(false);
+    expect(useRemoteStore.getState().chatBrowsingOlder).toBe(true);
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(2);
+  });
+
+  it("replaces a preview with the actual canonical reset cohort", async () => {
+    const canonical = { ...actualProducerPage("loaded-long-pair-H0-recent-full"), reset: true };
+    const previous = { ...chatPageFields, session_id: canonical.session_id, conversation_id: null, generation: null,
+      recent_admission: "owner", progress: "provisional", events: [{ ...chatMessage("preview", "Preview", 1), session_id: canonical.session_id }], next_before: null };
+    useRemoteStore.setState({ status: "ready", activeAgentId: canonical.session_id, activeAgentViewMode: "chat",
+      chatPage: previous, chatEvents: previous.events, chatHasOlder: false, chatNextBefore: null });
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValueOnce(canonical);
+    await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    expect(useRemoteStore.getState().chatEvents.map((event) => event.id)).toEqual(canonical.events.map((event) => event.id));
+    expect(useRemoteStore.getState().chatPage).toEqual(canonical);
+    expect(useRemoteStore.getState().chatError).toBe("");
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["next-owner", null] as const)("clears retired preview rows on empty %s", async (recent_admission) => {
+    const previous = { ...chatPageFields, conversation_id: null, generation: null,
+      recent_admission: "first-owner", progress: "provisional", events: [chatMessage("preview", "Preview", 1)], next_before: null };
+    const next = { ...previous, recent_admission, events: [], reset: true, progress: "no_recent", revision: "retired" };
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      chatPage: previous, chatEvents: previous.events, chatHasOlder: false, chatNextBefore: null });
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValueOnce(next);
+    await useRemoteStore.getState().refreshActiveAgentChat({ background: true });
+    expect(useRemoteStore.getState().chatEvents).toEqual([]);
+    expect(useRemoteStore.getState().chatPage).toEqual(next);
+    expect(useRemoteStore.getState().chatError).toBe("");
+  });
+
+  it("automatically recovers a selected Off agent after a retryable snapshot failure", async () => {
+    vi.useFakeTimers();
+    const agent = { session_id: "agent-1", session_name: "Coder", agent_class: "Coder", provider: "codex",
+      workspace: "<absolute-workspace-path>", status: "Off", latest_text: null };
+    vi.mocked(remoteClient.listAgents).mockResolvedValue([agent]);
+    vi.mocked(remoteClient.loadAgentChatPage)
+      .mockRejectedValueOnce(new RemoteRequestError("temporary", 503, "agent_chat_read_retryable"))
+      .mockResolvedValue({ ...chatPageFields, events: [chatMessage("latest", "Readable latest", 1)], next_before: null });
+    useRemoteStore.setState({ activeAgentViewModesById: { "agent-1": "chat" } });
+    await useRemoteStore.getState().load();
+    await useRemoteStore.getState().openAgent("agent-1");
+    expect(useRemoteStore.getState().status).toBe("ready");
+    expect(useRemoteStore.getState().chatLoading).toBe(false);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(2);
+    expect(useRemoteStore.getState().chatEvents[0]?.text).toBe("Readable latest");
+    expect(useRemoteStore.getState().agents[0]?.status).toBe("Off");
+  });
+
+  it("backs off stable unchanged Chat without dropping control progress or replacing rows", async () => {
+    vi.useFakeTimers();
+    const agent = { session_id: "agent-1", session_name: "Coder", agent_class: "Coder", provider: "codex",
+      workspace: "<absolute-workspace-path>", status: "Off", latest_text: null };
+    vi.mocked(remoteClient.listAgents).mockResolvedValue([agent]);
+    vi.mocked(remoteClient.loadAgentChatPage)
+      .mockResolvedValueOnce({ ...chatPageFields, progress: "indexing", events: [chatMessage("latest", "Latest", 1)], next_before: null })
+      .mockResolvedValue({ ...chatPageFields, unchanged: true, events: [], next_before: null });
+    useRemoteStore.setState({ activeAgentViewModesById: { "agent-1": "chat" } });
+    await useRemoteStore.getState().load();
+    await useRemoteStore.getState().openAgent("agent-1");
+    const rows = useRemoteStore.getState().chatEvents;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(6);
+    expect(useRemoteStore.getState().chatPage?.progress).toBe("ready");
+    expect(useRemoteStore.getState().chatEvents).toBe(rows);
+  });
+
+  it("discards hidden roster hints and resumes only one visible Chat read", async () => {
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const handlers: StatusStreamHandlers[] = [];
+    const agent = { session_id: "agent-1", session_name: "Coder", agent_class: "Coder", provider: "codex",
+      workspace: "<absolute-workspace-path>", status: "Off", latest_text: null };
+    vi.mocked(remoteClient.listAgents).mockResolvedValue([agent]);
+    vi.mocked(remoteClient.openStatusStream).mockImplementation(async (handler) => {
+      handlers.push(handler); return { close: vi.fn() } as unknown as WebSocket;
+    });
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValue({ ...chatPageFields,
+      events: [chatMessage("latest", "Latest", 1)], next_before: null });
+    useRemoteStore.setState({ activeAgentViewModesById: { "agent-1": "chat" } });
+    try {
+      await useRemoteStore.getState().load();
+      await useRemoteStore.getState().openAgent("agent-1");
+      visibility.mockReturnValue("hidden");
+      document.dispatchEvent(new Event("visibilitychange"));
+      handlers[0]!.onAgents([{ ...agent, latest_text: "A real hint" }]);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(1);
+      visibility.mockReturnValue("visible");
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(2);
+    } finally { visibility.mockRestore(); }
+  });
+
+  it("reuses the opaque revision when refreshing a scoped empty Chat window", async () => {
+    const empty = { ...chatPageFields, events: [], next_before: null };
+    vi.mocked(remoteClient.loadAgentChatPage)
+      .mockResolvedValueOnce(empty)
+      .mockResolvedValueOnce({ ...empty, unchanged: true });
+    useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
+      chatEvents: [], chatPage: null, chatNextBefore: null, chatHasOlder: false, chatBrowsingOlder: false });
+
+    await useRemoteStore.getState().refreshActiveAgentChat();
+    expect(useRemoteStore.getState().chatPage?.revision).toBe(empty.revision);
+    await useRemoteStore.getState().refreshActiveAgentChat();
+
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls[1]?.[2]).toBe(empty.revision);
+    expect(useRemoteStore.getState().chatEvents).toEqual([]);
+    expect(useRemoteStore.getState().chatError).toBe("");
+    expect(useRemoteStore.getState().status).toBe("ready");
+  });
+
   it.each([false, true])("resumes one older demand after an unchanged Off-agent reconnect (response during pause: %s)", async (delayed) => {
     vi.useFakeTimers();
     const handlers: StatusStreamHandlers[] = [];
@@ -225,21 +370,23 @@ describe("useRemoteStore watchlists", () => {
       .mockResolvedValueOnce({ ...chatPageFields, events: [], next_before: "cursor", progress: "indexing" })
       .mockResolvedValueOnce({ ...chatPageFields, events: [], next_before: "cursor", unchanged: true })
       .mockResolvedValueOnce({ ...chatPageFields, events: [chatMessage("older", "Older", 1)], next_before: null });
+    await useRemoteStore.getState().load();
     useRemoteStore.setState({ status: "ready", activeAgentId: "agent-1", activeAgentViewMode: "chat",
       chatEvents: [recent], chatPage: { ...chatPageFields, events: [recent], next_before: "cursor" },
       chatNextBefore: "cursor", chatHasOlder: true });
     const pending = useRemoteStore.getState().loadOlderActiveAgentChat();
     await Promise.resolve();
     visibility.mockReturnValue("hidden");
+    document.dispatchEvent(new Event("visibilitychange"));
     await vi.advanceTimersByTimeAsync(2_250);
     expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(1);
     expect(useRemoteStore.getState().chatLoadingOlder).toBe(true);
     visibility.mockReturnValue("visible");
+    document.dispatchEvent(new Event("visibilitychange"));
     await vi.advanceTimersByTimeAsync(750);
     expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls[1].slice(0, 3)).toEqual(["agent-1", undefined, "revision"]);
-    expect(useRemoteStore.getState().chatLoadingOlder).toBe(true);
-    await vi.advanceTimersByTimeAsync(750);
     await pending;
+    expect(useRemoteStore.getState().chatLoadingOlder).toBe(false);
     expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(3);
     expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls[2].slice(0, 2)).toEqual(["agent-1", "cursor"]);
     expect(useRemoteStore.getState().chatEvents.map((event) => event.id)).toEqual(["older", "recent"]);
@@ -656,7 +803,7 @@ describe("useRemoteStore watchlists", () => {
       expect(handlers).toHaveLength(1);
 
       // No later status-stream frame or user action supplies the refresh demand.
-      await vi.advanceTimersByTimeAsync(3_000);
+      await vi.advanceTimersByTimeAsync(999);
       expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(2);
       expect(freshOwnedCapture.request.revision).toBeNull();
       expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls[1]?.[1]).toBeUndefined();
@@ -737,14 +884,14 @@ describe("useRemoteStore watchlists", () => {
       expect(handlers).toHaveLength(1);
 
       // The timer is the only recovery trigger: no roster frame, visibility change, or user action follows.
-      await vi.advanceTimersByTimeAsync(3_000);
+      await vi.advanceTimersByTimeAsync(100);
       expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(2);
       expect(useRemoteStore.getState().chatEvents).toEqual([]);
       expect(useRemoteStore.getState().chatError).not.toBe("");
       expect(socketClose).not.toHaveBeenCalled();
       expect(handlers).toHaveLength(1);
 
-      await vi.advanceTimersByTimeAsync(3_000);
+      await vi.advanceTimersByTimeAsync(899);
       expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(3);
       expect(useRemoteStore.getState().chatEvents.map((event) => event.id)).toEqual([ownedEvent.id]);
       expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual([ownedEvent.text]);
@@ -898,9 +1045,8 @@ describe("useRemoteStore watchlists", () => {
 
       visibility.mockReturnValue("visible");
       document.dispatchEvent(new Event("visibilitychange"));
-      await vi.advanceTimersByTimeAsync(3_000 - 1);
       expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(0);
       expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(2);
     } finally {
       visibility.mockRestore();
@@ -1171,7 +1317,7 @@ describe("useRemoteStore watchlists", () => {
 
     await useRemoteStore.getState().openAgent("agent-1");
 
-    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledWith("agent-1", undefined, undefined, undefined, expect.any(AbortSignal));
+    expect(remoteClient.loadAgentChatPage).toHaveBeenCalledWith("agent-1", undefined, undefined, undefined, expect.any(AbortSignal), undefined, true);
     expect(useRemoteStore.getState().activeAgentViewMode).toBe("chat");
     expect(useRemoteStore.getState().chatEvents).toHaveLength(1);
   });
@@ -1486,7 +1632,7 @@ describe("useRemoteStore watchlists", () => {
       expect(useRemoteStore.getState().chatEvents.some((event) => event.id === "1001")).toBe(false);
       useRemoteStore.getState().jumpToLatestActiveAgentChat();
       await useRemoteStore.getState().refreshActiveAgentChat();
-      expect(remoteClient.loadAgentChatPage).toHaveBeenLastCalledWith("agent-1", undefined, undefined, undefined, expect.any(AbortSignal));
+      expect(remoteClient.loadAgentChatPage).toHaveBeenLastCalledWith("agent-1", undefined, undefined, undefined, expect.any(AbortSignal), undefined, true);
       expect(useRemoteStore.getState().chatBrowsingOlder).toBe(false);
       expect(useRemoteStore.getState().chatEvents.map((event) => event.id)).toEqual(rows(1001 - size).map((event) => event.id));
     },
@@ -1541,7 +1687,7 @@ describe("useRemoteStore watchlists", () => {
 
     expect(useRemoteStore.getState().chatEvents.map((event) => event.text)).toEqual(["Newest transcript"]);
     expect(useRemoteStore.getState().chatHasOlder).toBe(true);
-    expect(remoteClient.loadAgentChatPage).toHaveBeenLastCalledWith("agent-1", undefined, undefined, undefined, expect.any(AbortSignal));
+    expect(remoteClient.loadAgentChatPage).toHaveBeenLastCalledWith("agent-1", undefined, undefined, undefined, expect.any(AbortSignal), undefined, true);
 
     await useRemoteStore.getState().loadOlderActiveAgentChat();
 

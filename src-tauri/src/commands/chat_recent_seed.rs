@@ -233,11 +233,12 @@ fn normalize(
     .collect()
 }
 
-pub(crate) fn read(
+pub(crate) fn read_limited(
     snapshot: &AgentArchiveCaptureSnapshot,
     previous: Option<&str>,
+    limit: usize,
 ) -> io::Result<Seed> {
-    read_window(snapshot, previous, None)
+    read_window_limited(snapshot, previous, None, limit)
 }
 
 /// A background checkpoint seeks backward inside one independently admitted
@@ -247,6 +248,21 @@ pub(crate) fn read_window(
     previous: Option<&str>,
     before: Option<u64>,
 ) -> io::Result<Seed> {
+    read_window_limited(snapshot, previous, before, RECORDS)
+}
+
+fn read_window_limited(
+    snapshot: &AgentArchiveCaptureSnapshot,
+    previous: Option<&str>,
+    before: Option<u64>,
+    limit: usize,
+) -> io::Result<Seed> {
+    if !(1..=RECORDS).contains(&limit) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid recent Chat limit",
+        ));
+    }
     if !matches!(snapshot.provider.as_str(), "codex" | "claude" | "pi") {
         return Ok(Seed {
             revision: "unsupported".into(),
@@ -310,7 +326,12 @@ pub(crate) fn read_window(
         return Ok(Seed {
             revision,
             events: Vec::new(),
-            progress: "no_admitted_rows".into(),
+            progress: if policy.open_disabled.is_some() {
+                "privacy_disabled"
+            } else {
+                "no_admitted_rows"
+            }
+            .into(),
             bytes_read: header_bytes,
             records_decoded: 2,
             unchanged: false,
@@ -375,6 +396,7 @@ pub(crate) fn read_window(
     let mut window_complete = true;
     let mut event_groups = Vec::<Vec<AgentChatEvent>>::new();
     let mut event_count = 0usize;
+    let mut malformed = false;
     for (offset, raw) in window {
         let frame_end = offset + raw.len() as u64;
         if !policy.admits(offset, frame_end) {
@@ -385,24 +407,31 @@ pub(crate) fn read_window(
         if raw.len() > RECORD_BYTES {
             oversized = true;
             window_complete = false;
-            event_groups.clear();
-            event_count = 0;
+            // Preserve complete observations decoded before this oversized frame.
             normalizer = Default::default();
             continue;
         }
         decoded += 1;
         let Ok(raw) = std::str::from_utf8(raw) else {
             window_complete = false;
-            event_groups.clear();
-            event_count = 0;
+            malformed = true;
+            if before.is_some() {
+                // Older pages expose only the contiguous suffix after a gap.
+                // Recent reads retain independent proved rows without a gap ACK.
+                event_groups.clear();
+                event_count = 0;
+            }
             normalizer = Default::default();
             continue;
         };
         let raw = raw.trim_end_matches(['\r', '\n']);
         if !raw.trim().is_empty() && serde_json::from_str::<serde_json::Value>(raw).is_err() {
             window_complete = false;
-            event_groups.clear();
-            event_count = 0;
+            malformed = true;
+            if before.is_some() {
+                event_groups.clear();
+                event_count = 0;
+            }
             normalizer = Default::default();
             continue;
         }
@@ -437,14 +466,18 @@ pub(crate) fn read_window(
         if observations.len() > RECORDS {
             // A page boundary cannot split one physical record's ordinals.
             window_complete = false;
-            event_groups.clear();
-            event_count = 0;
+            oversized = true;
+            normalizer = Default::default();
             continue;
         }
         if !observations.is_empty() {
             event_count = event_count.saturating_add(observations.len());
             event_groups.push(observations);
-            while event_count > RECORDS {
+            while event_count > RECORDS
+                || event_groups.first().is_some_and(|frame| {
+                    event_groups.len() > 1 && event_count - frame.len() >= limit
+                })
+            {
                 let Some(older_frame) = event_groups.first() else {
                     break;
                 };
@@ -483,6 +516,8 @@ pub(crate) fn read_window(
             "source_changed"
         } else if oversized {
             "oversized_record"
+        } else if malformed {
+            "source_gap"
         } else {
             "provisional"
         }
@@ -559,4 +594,19 @@ pub(crate) fn detail(
         next: (!complete).then(|| format!("{}:{next_offset}", parts[..8].join(":"))),
         complete,
     })
+}
+
+#[cfg(test)]
+pub(crate) use test_support::read;
+
+#[cfg(test)]
+mod test_support {
+    use super::*;
+
+    pub(crate) fn read(
+        snapshot: &AgentArchiveCaptureSnapshot,
+        previous: Option<&str>,
+    ) -> io::Result<Seed> {
+        read_window(snapshot, previous, None)
+    }
 }

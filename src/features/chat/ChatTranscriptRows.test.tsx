@@ -1,13 +1,92 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+import userEvent from '@testing-library/user-event';
 
 import type { AgentChatDetail, AgentChatEvent, AgentChatPage } from '../../types';
 import producerFixture from './__fixtures__/chat-row-revalidation-producer-consumer-order-r3.json';
-import { ChatTranscriptRow } from './ChatTranscriptRows';
+import { ChatTranscriptRow, WorkGroupRow } from './ChatTranscriptRows';
 import { derivePresentedChatRows } from '../grid/workLogPresentation';
+import * as workLogPresentation from '../grid/workLogPresentation';
 import { chatRevalidationIds } from './chatRevalidation';
 import { applyRevalidationReplies } from '../../test/chatRevalidationTestHelpers';
 import { applyChatPage } from './chatReadState';
+
+vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ writeText: vi.fn() }));
+beforeEach(() => { vi.mocked(writeText).mockReset().mockResolvedValue(); });
+afterEach(() => { vi.restoreAllMocks(); });
+
+const actualWorkGroupCopy = workLogPresentation.formatPresentedWorkGroupForCopy;
+
+function largeWorkGroup() {
+  const events = Array.from({ length: 128 }, (_, index): AgentChatEvent => ({
+    ...memoryEvent, id: `copy-work-${index}`, kind: 'tool_call', role: 'assistant',
+    title: `Controlled work ${index}`, text: `result ${index}\n${'synthetic work detail\n'.repeat(80)}`,
+    command: `read controlled-${index}.ts`, path: `controlled-${index % 2}.ts`,
+    metadata: {}, sequence: index,
+  }));
+  const row = derivePresentedChatRows(events)[0];
+  if (row?.kind !== 'work_group') throw new Error('Expected the maintained large work group');
+  return row;
+}
+
+describe('gesture-lazy work log copy', () => {
+  it('avoids copy formatting on render, rerender, menu open and expansion and copies current row props', async () => {
+    const row = largeWorkGroup();
+    expect(row.entries).toHaveLength(128);
+    const updated = { ...row, entries: row.entries.map((entry, index) => index === 127
+      ? { ...entry, content: 'current final entry\nwith exact ordering' } : entry) };
+    const expected = actualWorkGroupCopy(updated);
+    const format = vi.spyOn(workLogPresentation, 'formatPresentedWorkGroupForCopy');
+    const view = render(<WorkGroupRow agentIsWorking={false} row={row} />);
+    expect(screen.getByTestId('chat-work-group')).toHaveAttribute('data-expanded', 'false');
+    view.rerender(<WorkGroupRow agentIsWorking={false} row={updated} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Work log actions' }));
+    expect(format).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTitle('Show all work'));
+    expect(screen.getByTestId('chat-work-group')).toHaveAttribute('data-expanded', 'true');
+    expect(format).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTitle('Collapse work log'));
+    expect(format).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Copy work log' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(expected));
+    expect(format).toHaveBeenCalledTimes(1);
+    expect(format).toHaveBeenCalledWith(updated);
+    expect(writeText).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['direct', 'menu'])('copies real formatter bytes exactly once through %s browser fallback', async (gesture) => {
+    const user = userEvent.setup();
+    const browserWrite = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
+    vi.mocked(writeText).mockRejectedValue(new Error('Native clipboard unavailable'));
+    const row = largeWorkGroup();
+    const expected = actualWorkGroupCopy(row);
+    const format = vi.spyOn(workLogPresentation, 'formatPresentedWorkGroupForCopy');
+    render(<WorkGroupRow agentIsWorking={false} row={row} />);
+    if (gesture === 'menu') await user.click(screen.getByRole('button', { name: 'Work log actions' }));
+    expect(format).not.toHaveBeenCalled();
+    await user.click(screen.getByRole(gesture === 'menu' ? 'menuitem' : 'button', { name: 'Copy work log' }));
+    await waitFor(() => expect(browserWrite).toHaveBeenCalledWith(expected));
+    expect(format).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(expected);
+    expect(browserWrite).toHaveBeenCalledExactlyOnceWith(expected);
+  });
+
+  it('joins already deduplicated changed paths only when their Copy item is selected', async () => {
+    const user = userEvent.setup();
+    const row = largeWorkGroup();
+    expect(row.changedPaths).toEqual(['controlled-0.ts', 'controlled-1.ts']);
+    const join = vi.spyOn(row.changedPaths, 'join');
+    const format = vi.spyOn(workLogPresentation, 'formatPresentedWorkGroupForCopy');
+    render(<WorkGroupRow agentIsWorking={false} row={row} />);
+    await user.click(screen.getByRole('button', { name: 'Work log actions' }));
+    expect(join).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('menuitem', { name: 'Copy changed file paths' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('controlled-0.ts\ncontrolled-1.ts'));
+    expect(join).toHaveBeenCalledExactlyOnceWith('\n');
+    expect(format).not.toHaveBeenCalled();
+  });
+});
 
 const memoryEvent: AgentChatEvent = {
   id: 'memory:event-1',

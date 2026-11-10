@@ -21,12 +21,24 @@ const page = (overrides: Partial<AgentChatPage> = {}): AgentChatPage => ({
   revision: "r1", events: [], next_before: "cursor", unchanged: false, reset: false, progress: "ready",
   aliases: [], removed_ids: [], detail: null, bytes_read: 0, records_decoded: 0, ...overrides,
 });
+const ownedDeferreds = new Set<{ promise: Promise<AgentChatPage>; reject: (reason: unknown) => void }>();
 const deferred = () => {
   let resolve!: (value: AgentChatPage) => void;
   let reject!: (reason: unknown) => void;
   const promise = new Promise<AgentChatPage>((yes, no) => { resolve = yes; reject = no; });
+  const owned = { promise, reject };
+  ownedDeferreds.add(owned);
+  void promise.then(() => ownedDeferreds.delete(owned), () => ownedDeferreds.delete(owned));
   return { promise, resolve, reject };
 };
+async function settleOwnedDeferreds() {
+  await act(async () => {
+    const pending = [...ownedDeferreds];
+    for (const reply of pending) reply.reject(new Error("Unused controlled reply at test cleanup"));
+    await Promise.allSettled(pending.map((reply) => reply.promise));
+  });
+  expect(ownedDeferreds.size).toBe(0);
+}
 const tick = async (ms = 1000) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); };
 
 async function setup(count = 80) {
@@ -37,17 +49,27 @@ async function setup(count = 80) {
   const ready = { ...target, metadata: { ...target.metadata, chat_body_pending: false, chat_detail_ref: "synthetic-detail:0" } };
   const older = [deferred(), deferred(), deferred(), deferred()];
   let olderIndex = 0, reads = 0, active = 0, maxActive = 0;
-  let recent: () => Promise<AgentChatPage> = async () => page({ events: [ready, generatedRow("unrelated")], revision: "r2", next_before: "wrong-newest" });
+  let recent: (request: Parameters<ChatPageLoader>[0]) => Promise<AgentChatPage> = async () => page({ events: [ready, generatedRow("unrelated")], revision: "r2", next_before: "wrong-newest" });
   let detail: () => Promise<AgentChatPage> = async () => page({ detail: { event_id: target.id, text: "synthetic body", next: null, complete: true } });
   const calls: Parameters<ChatPageLoader>[0][] = [];
+  const origin = Date.now();
+  const activeBySession = new Map<string, number>();
+  let maxPerSession = 0;
+  const timeline: { stage: string; at: number; request: Parameters<ChatPageLoader>[0]; active: number; perSession: number }[] = [];
   const loader: ChatPageLoader = vi.fn(async (request) => {
     calls.push(request); active++; maxActive = Math.max(maxActive, active);
+    const perSession = (activeBySession.get(request.sessionId) ?? 0) + 1;
+    activeBySession.set(request.sessionId, perSession); maxPerSession = Math.max(maxPerSession, perSession);
+    timeline.push({ stage: "start", at: Date.now() - origin, request: { ...request }, active, perSession });
     try {
       if (++reads === 1) return page({ events: initial });
       if (request.detailRef) return await detail();
       if (request.cursor) return await older[olderIndex++].promise;
-      return await recent();
-    } finally { active--; }
+      return await recent(request);
+    } finally {
+      active--; activeBySession.set(request.sessionId, activeBySession.get(request.sessionId)! - 1);
+      timeline.push({ stage: "settled", at: Date.now() - origin, request: { ...request }, active, perSession: activeBySession.get(request.sessionId)! });
+    }
   });
   const hook = renderHook(({ id, reload }) => useChatPages(id, loader, 1000, reload), { initialProps: { id: "agent", reload: 0 } });
   await act(async () => {});
@@ -55,12 +77,26 @@ async function setup(count = 80) {
   let demand!: Promise<void>;
   await act(async () => { demand = hook.result.current.loadOlder(); void demand.then(() => { settled++; }); });
   const empty = async (index = 0) => { await act(async () => { older[index].resolve(page({ progress: "indexing" })); }); };
-  return { hook, calls, older, initial, ready, demand, empty, stats: () => ({ settled, active, maxActive }),
-    recent: (read: () => Promise<AgentChatPage>) => { recent = read; },
+  const close = async () => {
+    try {
+      await settleOwnedDeferreds();
+      await act(async () => {
+        await Promise.allSettled(vi.mocked(loader).mock.results.flatMap((result) =>
+          result.type === "return" ? [result.value] : []));
+      });
+      expect(active).toBe(0);
+    } finally { hook.unmount(); }
+  };
+  return { hook, calls, older, initial, ready, demand, empty, timeline, close, stats: () => ({ settled, active, maxActive, maxPerSession }),
+    recent: (read: (request: Parameters<ChatPageLoader>[0]) => Promise<AgentChatPage>) => { recent = read; },
     detail: (read: () => Promise<AgentChatPage>) => { detail = read; } };
 }
 
-afterEach(() => { vi.useRealTimers(); });
+afterEach(async () => {
+  try {
+    await settleOwnedDeferreds();
+  } finally { vi.useRealTimers(); }
+});
 
 describe("same-cursor older/recent fairness: synthetic envelopes", () => {
   it.each([80, 81])("passively enriches loaded F129 at %i before settling older, then resumes that cursor", async (count) => {
@@ -367,24 +403,36 @@ describe("same-cursor older/recent fairness: synthetic envelopes", () => {
   });
 
   it.each(["reset", "jump", "switch", "unmount"] as const)("retires during recent %s, discarding its late answer without overlap", async (action) => {
-    const h = await setup(); const recent = deferred(); h.recent(() => recent.promise);
-    await h.empty(); await tick();
-    act(() => {
-      if (action === "reset") h.hook.result.current.reset();
-      else if (action === "jump") h.hook.result.current.jumpToLatest();
-      else if (action === "switch") h.hook.rerender({ id: "other", reload: 0 });
-      else h.hook.unmount();
-    });
-    await h.demand; expect(h.stats().settled).toBe(1);
-    await tick(5000); expect(h.calls).toHaveLength(3);
-    h.recent(async () => page({ session_id: action === "switch" ? "other" : "agent", events: [] }));
-    await act(async () => { recent.resolve(page({ events: [row("stale")] })); });
-    await tick(0);
-    if (action !== "unmount") {
-      expect(h.hook.result.current.events.some(e => e.id === "stale")).toBe(false);
-      h.hook.unmount();
-    }
-    expect(h.stats().settled).toBe(1); expect(h.stats().maxActive).toBe(1);
+    const h = await setup(); const recent = deferred(); const other = deferred();
+    h.recent((request) => request.sessionId === "other" ? other.promise : recent.promise);
+    try {
+      await h.empty(); await tick();
+      act(() => {
+        if (action === "reset") h.hook.result.current.reset();
+        else if (action === "jump") h.hook.result.current.jumpToLatest();
+        else if (action === "switch") h.hook.rerender({ id: "other", reload: 0 });
+        else h.hook.unmount();
+      });
+      await h.demand; expect(h.stats().settled).toBe(1);
+      await tick(5000);
+      expect(h.calls.filter(call => call.sessionId === "agent")).toHaveLength(3);
+      expect(h.calls.filter(call => call.sessionId === "other")).toEqual(
+        action === "switch" ? [{ sessionId: "other", revision: undefined }] : []);
+      expect(h.stats().maxPerSession).toBe(1);
+      expect(h.stats().active).toBe(action === "switch" ? 2 : 1);
+      h.recent((request) => request.sessionId === "other" ? other.promise : Promise.resolve(page({ events: [] })));
+      await act(async () => { recent.resolve(page({ events: [row("stale")] })); });
+      await tick(0);
+      if (action === "switch") {
+        expect(h.stats().active).toBe(1);
+        await act(async () => { other.resolve(page({ session_id: "other", next_before: null,
+          events: [{ ...generatedRow("current-other"), session_id: "other" }] })); });
+        expect(h.hook.result.current.events.map(event => event.id)).toEqual([generatedId("current-other")]);
+      }
+      if (action !== "unmount") expect(h.hook.result.current.events.some(e => e.id === "stale")).toBe(false);
+      expect(h.stats().settled).toBe(1);
+      expect(h.stats().maxActive).toBe(action === "switch" ? 2 : 1);
+    } finally { await h.close(); }
   });
 
   it("keeps recent failure retryable without settling older; older failure keeps its existing direction", async () => {
@@ -461,42 +509,73 @@ describe("same-cursor older/recent fairness: synthetic envelopes", () => {
 
   it("returns a committed detail prefix after slot wait and rejects the switched queued continuation", async () => {
     const h = await setup();
-    h.detail(async () => page({ detail: { event_id: h.ready.id, text: "committed synthetic prefix", next: "synthetic-prefix:16", complete: false } }));
-    const prefixRead = h.hook.result.current.loadDetail("synthetic-prefix:0");
-    expect(h.calls).toHaveLength(2);
-    await h.empty();
-    const prefix = await prefixRead;
-    expect(prefix).toMatchObject({ text: "committed synthetic prefix", next: "synthetic-prefix:16", complete: false });
-    expect(h.calls[2].detailRef).toBe("synthetic-prefix:0");
-    const recent = deferred(); h.recent(() => recent.promise);
-    await tick(); expect(h.calls[3].revision).toBe("r1");
-    const continuation = h.hook.result.current.loadDetail(prefix.next!);
-    const rejected = expect(continuation).rejects.toThrow("Conversation changed");
-    h.hook.rerender({ id: "other", reload: 0 });
-    await h.demand;
-    await tick(5000); expect(h.calls).toHaveLength(4);
-    h.recent(async () => page({ session_id: "other", events: [] }));
-    await act(async () => { recent.resolve(page({ events: [h.ready] })); });
-    await rejected; await tick(0);
-    expect(h.calls.filter(call => call.detailRef !== undefined)).toHaveLength(1);
-    expect(prefix.text).toBe("committed synthetic prefix");
-    expect(h.stats().settled).toBe(1); expect(h.stats().maxActive).toBe(1);
-    h.hook.unmount();
+    try {
+      h.detail(async () => page({ detail: { event_id: h.ready.id, text: "committed synthetic prefix", next: "synthetic-prefix:16", complete: false } }));
+      const prefixRead = h.hook.result.current.loadDetail("synthetic-prefix:0");
+      expect(h.calls).toHaveLength(2);
+      await h.empty();
+      const prefix = await prefixRead;
+      expect(prefix).toMatchObject({ text: "committed synthetic prefix", next: "synthetic-prefix:16", complete: false });
+      expect(h.calls[2].detailRef).toBe("synthetic-prefix:0");
+      const recent = deferred(); const other = deferred();
+      h.recent((request) => request.sessionId === "other" ? other.promise : recent.promise);
+      await tick(); expect(h.calls[3].revision).toBe("r1");
+      const continuation = h.hook.result.current.loadDetail(prefix.next!);
+      const rejected = expect(continuation).rejects.toThrow("Conversation changed");
+      let continuationSettled = false;
+      void continuation.then(() => { continuationSettled = true; }, () => { continuationSettled = true; });
+      h.hook.rerender({ id: "other", reload: 0 });
+      await h.demand;
+      await tick(5000);
+      expect(h.calls.filter(call => call.sessionId === "agent")).toHaveLength(4);
+      expect(h.calls.filter(call => call.sessionId === "other")).toEqual([{ sessionId: "other", revision: undefined }]);
+      expect(h.stats().active).toBe(2); expect(h.stats().maxPerSession).toBe(1);
+      expect(continuationSettled).toBe(false);
+      await act(async () => { recent.resolve(page({ events: [h.ready] })); });
+      await rejected; await tick(0);
+      expect(h.calls.filter(call => call.detailRef !== undefined)).toHaveLength(1);
+      expect(prefix.text).toBe("committed synthetic prefix");
+      expect(h.stats().active).toBe(1);
+      expect(h.stats().settled).toBe(1); expect(h.stats().maxActive).toBe(2);
+      await act(async () => { other.resolve(page({ session_id: "other", next_before: null,
+        events: [{ ...generatedRow("current-other"), session_id: "other" }] })); });
+      expect(h.hook.result.current.events.map(event => event.id)).toEqual([generatedId("current-other")]);
+    } finally { await h.close(); }
   });
 
   it("retires a queued detail on switch before it can dispatch and retains the older physical slot", async () => {
     const h = await setup();
-    const detail = h.hook.result.current.loadDetail("retired-detail");
-    const rejected = expect(detail).rejects.toThrow("Conversation changed");
-    h.recent(async () => page({ session_id: "other", events: [] }));
-    h.hook.rerender({ id: "other", reload: 0 });
-    await h.demand; expect(h.stats().settled).toBe(1);
-    await tick(5000); expect(h.calls).toHaveLength(2);
-    await h.empty(); await rejected; await tick(0);
-    expect(h.calls.some(call => call.detailRef !== undefined)).toBe(false);
-    expect(h.calls[2].sessionId).toBe("other");
-    expect(h.stats().maxActive).toBe(1);
-    h.hook.unmount();
+    try {
+      const detail = h.hook.result.current.loadDetail("retired-detail");
+      const rejected = expect(detail).rejects.toThrow("Conversation changed");
+      let detailSettled = false;
+      void detail.then(() => { detailSettled = true; }, () => { detailSettled = true; });
+      h.recent(async () => page({ session_id: "other", events: [] }));
+      h.hook.rerender({ id: "other", reload: 0 });
+      await h.demand; expect(h.stats().settled).toBe(1);
+      await tick(5000);
+      const otherReads = h.timeline.filter(read => read.stage === "start" && read.request.sessionId === "other");
+      // Independent opening contract: ten100ms burst opportunities then the
+      // configured1000ms cadence. Completed polls are not overlapping reads.
+      expect(otherReads.map(read => read.at)).toEqual([
+        ...Array.from({ length: 10 }, (_, index) => index * 100),
+        ...Array.from({ length: 5 }, (_, index) => (index + 1) * 1000),
+      ]);
+      expect(otherReads.map(read => read.request)).toEqual([
+        { sessionId: "other", revision: undefined },
+        ...Array.from({ length: 14 }, () => ({ sessionId: "other", revision: "r1" })),
+      ]);
+      expect(h.calls.filter(call => call.sessionId === "agent")).toEqual([
+        { sessionId: "agent", revision: undefined }, { sessionId: "agent", cursor: "cursor" },
+      ]);
+      expect(h.stats()).toMatchObject({ active: 1, maxActive: 2, maxPerSession: 1, settled: 1 });
+      expect(h.timeline.some(read => read.stage === "settled" && read.request.cursor)).toBe(false);
+      expect(detailSettled).toBe(false);
+      await h.empty(); await rejected; await tick(0);
+      expect(h.calls.some(call => call.detailRef !== undefined)).toBe(false);
+      expect(h.calls[2].sessionId).toBe("other");
+      expect(h.stats().active).toBe(0);
+    } finally { await h.close(); }
   });
 
   it("fails an oversized member enrichment without evicting loaded rows or advancing revision", async () => {

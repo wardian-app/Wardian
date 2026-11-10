@@ -38,6 +38,12 @@ impl Drop for LifecycleBoundary<'_> {
 }
 
 impl CapturePolicyGate {
+    /// Optimistic recent-header admission must stand aside for a registered
+    /// lifecycle boundary without waiting for older archive IO.
+    pub(crate) fn background_admission_open(&self) -> bool {
+        self.lifecycle_boundaries.load(Ordering::SeqCst) == 0
+    }
+
     /// Queues behind the running holder and any earlier queued caller. Policy
     /// transitions and lifecycle boundaries use this lane.
     pub async fn lock(&self) -> MutexGuard<'_, ()> {

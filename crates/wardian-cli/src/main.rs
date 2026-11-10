@@ -12,12 +12,13 @@ mod json_input;
 mod library;
 mod listener;
 mod live;
-mod mcp;
 mod memory;
 mod messaging;
 mod output;
 mod schema;
 mod telemetry;
+#[cfg(test)]
+mod test_support;
 mod watchlist;
 use args::{
     AgentArgs, AgentCommand, AgentWorktreeCommand, AutomationArgs, AutomationCommand,
@@ -44,23 +45,13 @@ fn main() {
     std::process::exit(run());
 }
 
-#[cfg(test)]
-fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    use std::sync::{Mutex, OnceLock};
-
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 fn run() -> i32 {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => return handle_parse_error(error),
     };
     if let Command::Mcp { command } = &cli.command {
-        return mcp::run(command);
+        return wardian_cli::mcp::run(command);
     }
     // Static discovery must work without a home, migrations, or running app.
     if let Command::Schema { path } = &cli.command {
@@ -1895,7 +1886,7 @@ mod tests {
     impl TestWardianHome {
         fn new(path: &std::path::Path) -> Self {
             let guard = Self {
-                _lock: crate::test_env_lock(),
+                _lock: crate::test_support::test_env_lock(),
                 previous_home: std::env::var_os("WARDIAN_HOME"),
                 previous_session_id: std::env::var_os("WARDIAN_SESSION_ID"),
             };

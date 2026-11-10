@@ -13,7 +13,7 @@ pub enum Command {
     /// Serve the explicit local agent messaging tool over MCP.
     Mcp {
         #[command(subcommand)]
-        command: crate::mcp::McpCommand,
+        command: wardian_cli::mcp::McpCommand,
     },
     /// Discover command arguments as compact JSON; optionally name a command path.
     Schema {

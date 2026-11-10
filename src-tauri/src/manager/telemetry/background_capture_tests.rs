@@ -1,5 +1,6 @@
 use super::*;
 use std::io::Write;
+use std::time::Duration;
 
 fn stopped_sample(
     _: Arc<tokio::sync::Mutex<sysinfo::System>>,
@@ -245,6 +246,1085 @@ async fn register_cold_scope_agent(state: &AppState, config: &wardian_core::mode
     crate::commands::agent::provider_log_tests::register_capture_test_agent(state, config, active)
         .await
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watch_publisher_recent_headers_precede_older_archive_gate() {
+    let _home = crate::control::test_support::TestWardianHome::new_async().await;
+    let state = Arc::new(AppState::new());
+    let session_id = "watch-recent-before-older";
+    let mut agent = super::tests::test_active_agent(session_id, "mock", "Off", None);
+    let config = {
+        let mut config = agent.config.lock().unwrap();
+        config.is_off = true;
+        config.conversation_logging =
+            wardian_core::conversations::AgentConversationLoggingSetting::Enabled;
+        config.clone()
+    };
+    agent.watch_state = Arc::new(std::sync::Mutex::new(crate::state::AgentWatchState::new(
+        session_id.into(),
+        512,
+        4 * 1024 * 1024,
+    )));
+    let watch = agent.watch_state.clone();
+    let message = |turn: String, text: String| wardian_core::control::WatchTranscriptMessage {
+        role: "assistant".into(),
+        text,
+        provider: "mock".into(),
+        turn_id: Some(turn),
+        source: Some("model".into()),
+        provider_provenance: None,
+    };
+    {
+        let mut watch = watch.lock().unwrap();
+        for index in 0..256 {
+            watch.push_transcript(message(
+                format!("old-{index}"),
+                format!("Earlier turn {index}: {}", "older body ".repeat(1024)),
+            ));
+        }
+    }
+    crate::commands::agent::provider_log_tests::register_capture_test_agent(&state, &config, agent)
+        .await
+        .unwrap();
+    // Watch-only Mock has no JSONL telemetry source. Exercise the real common
+    // archive publisher used by the existing Watch projection test, rather
+    // than pretending that log-based telemetry admitted a capture request.
+    let first = crate::commands::chat::archive_agent_chat_events_for_state(&state, session_id)
+        .await
+        .expect("initial real Watch publication");
+    assert!(first
+        .events
+        .iter()
+        .any(|event| event.turn_id.as_deref() == Some("old-255")));
+    assert_eq!(
+        first
+            .events
+            .iter()
+            .filter(|event| event.kind == wardian_core::models::chat::AgentChatEventKind::Message)
+            .count(),
+        256,
+        "fixture publishes the declared older cohort, not a truncated Watch tail"
+    );
+
+    let gate = state
+        .conversation_archive
+        .test_agent_archive_gate(session_id)
+        .unwrap();
+    let held_gate = gate.clone();
+    let (locked_tx, locked_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let holder = std::thread::spawn(move || {
+        let _guard = held_gate.lock().unwrap();
+        locked_tx.send(()).unwrap();
+        release_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("test releases owned gate");
+    });
+    locked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let holders_before_capture = Arc::strong_count(&gate);
+    let latest_text = "Latest owned Watch header before old archive IO";
+    watch
+        .lock()
+        .unwrap()
+        .push_transcript(message("latest-watch-turn".into(), latest_text.into()));
+    let capture_state = state.clone();
+    let capture = tokio::spawn(async move {
+        crate::commands::chat::archive_agent_chat_events_for_state(&capture_state, session_id).await
+    });
+    let recent = tokio::time::timeout(Duration::from_secs(2), async {
+        // The extra real gate reference proves that the producer reached the
+        // old archive operation. No guessed sleep or fabricated ready head.
+        while Arc::strong_count(&gate) <= holders_before_capture {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+            &state,
+            session_id.into(),
+            None,
+            None,
+            None,
+            None,
+            crate::commands::chat::RecentChatRead {
+                limit: Some(8),
+                preview: true,
+            },
+        )
+        .await
+    })
+    .await;
+    // Always release and join owned work before making the behavior assertion.
+    release_tx.send(()).unwrap();
+    let captured = tokio::time::timeout(Duration::from_secs(10), capture).await;
+    let released = holder.join();
+    assert!(released.is_ok(), "owned archive gate thread joined");
+    assert!(
+        captured.unwrap().unwrap().is_ok(),
+        "real Watch publisher completed after gate release"
+    );
+    let recent = recent
+        .expect("ordinary recent read remains bounded")
+        .unwrap();
+    assert!(
+        recent
+            .events
+            .iter()
+            .any(|event| event.text.as_deref() == Some(latest_text)
+                && event.turn_id.as_deref() == Some("latest-watch-turn")),
+        "actual newly observed Watch header must precede old archive completion"
+    );
+    assert!((1..=8).contains(&recent.events.len()));
+    assert!(serde_json::to_vec(&recent).unwrap().len() <= 256 * 1024);
+    assert!(
+        recent.next_before.is_none() && recent.detail.is_none() && recent.revalidated_ids.is_none()
+    );
+    assert!(
+        recent
+            .events
+            .iter()
+            .all(|event| event.session_id == session_id
+                && event.provider == "mock"
+                && event.metadata["chat_source_ref"].is_null()),
+        "Watch is not a forged native-frame source"
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recent_antigravity_observed_database_prelude_and_normal_canonical_handoff() {
+    let home = crate::control::test_support::TestWardianHome::new_async().await;
+    let native_session = "00000000-0000-4000-8000-000000000274";
+    let folder = home.path().join("conversations");
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = folder.join(format!("{native_session}.db"));
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE steps(idx INTEGER PRIMARY KEY,step_type INTEGER,step_payload BLOB)",
+        )
+        .unwrap();
+    let fixture: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../providers/antigravity/fixtures/chat-tools-1.1.27.json"
+    ))
+    .unwrap();
+    for row in fixture {
+        let bytes = row["step_payload_hex"]
+            .as_str()
+            .unwrap()
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect::<Vec<_>>();
+        connection
+            .execute(
+                "INSERT INTO steps VALUES (?1,?2,?3)",
+                rusqlite::params![
+                    row["step_index"].as_i64().unwrap(),
+                    row["step_type"].as_i64().unwrap(),
+                    bytes
+                ],
+            )
+            .unwrap();
+    }
+    let state = Arc::new(AppState::new());
+    let session = "recent-antigravity-native";
+    let agent = super::tests::test_active_agent(session, "antigravity", "Off", None);
+    *agent.log_path.lock().unwrap() = Some(path);
+    let config = {
+        let mut config = agent.config.lock().unwrap();
+        config.is_off = true;
+        config.resume_session = Some(native_session.into());
+        config.folder = home.path().to_string_lossy().into_owned();
+        config.reset_provider_config_for_provider();
+        config.conversation_logging =
+            wardian_core::conversations::AgentConversationLoggingSetting::Enabled;
+        config.clone()
+    };
+    crate::commands::agent::provider_log_tests::register_capture_test_agent(&state, &config, agent)
+        .await
+        .unwrap();
+    crate::commands::chat::publish_recent_for_state(&state, session, None).unwrap();
+    let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.into(),
+        None,
+        None,
+        None,
+        None,
+        crate::commands::chat::RecentChatRead {
+            limit: Some(2),
+            preview: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        page.recent_admission.is_some()
+            && page.next_before.is_none()
+            && page.revalidated_ids.is_none()
+    );
+    assert_eq!(
+        page.events
+            .iter()
+            .map(|event| event.metadata["step_index"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [4, 6]
+    );
+    assert!(page
+        .events
+        .iter()
+        .all(|event| event.sequence.is_none() && event.id.starts_with("preview:")));
+    assert!(state
+        .conversation_archive
+        .chat_events_for_agent(session)
+        .unwrap()
+        .is_empty());
+    crate::commands::chat::archive_agent_chat_events_until_stable_for_state(&state, session)
+        .await
+        .unwrap();
+    crate::commands::chat::publish_recent_for_state(&state, session, None).unwrap();
+    let canonical = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.into(),
+        None,
+        Some(page.revision),
+        None,
+        None,
+        crate::commands::chat::RecentChatRead {
+            limit: Some(2),
+            preview: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(canonical.recent_admission.is_none() && canonical.reset && !canonical.unchanged);
+    assert!(canonical
+        .events
+        .iter()
+        .any(|event| event.turn_id.as_deref() == Some("6")
+            && event.text.as_ref().is_some_and(|text| !text.is_empty())));
+    assert!(canonical
+        .events
+        .iter()
+        .all(|event| !event.id.starts_with("preview:")));
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recent_opencode_normal_selection_publishes_native_parts_before_archive_and_hands_off() {
+    use tauri::Manager;
+    let home = crate::control::test_support::TestWardianHome::new_async().await;
+    struct RestoreXdg(Option<std::ffi::OsString>);
+    impl Drop for RestoreXdg {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+        }
+    }
+    let _xdg = RestoreXdg(std::env::var_os("XDG_DATA_HOME"));
+    let provider_root = home.path().join("provider-data");
+    std::env::set_var("XDG_DATA_HOME", &provider_root);
+    let folder = provider_root.join("opencode");
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = folder.join("opencode.db");
+    let log_dir = folder.join("log");
+    std::fs::create_dir_all(&log_dir).unwrap();
+    let log_path = log_dir.join("opencode.log");
+    std::fs::write(&log_path, b"").unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute_batch("CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,data TEXT); CREATE TABLE part(id TEXT PRIMARY KEY,message_id TEXT,session_id TEXT,time_created INTEGER,data TEXT); CREATE INDEX part_recent ON part(session_id,time_created,id);").unwrap();
+    connection
+        .execute(
+            "INSERT INTO message VALUES ('message','ses_recent',1000,'{\"role\":\"assistant\"}')",
+            [],
+        )
+        .unwrap();
+    for index in 0..3 {
+        connection
+            .execute(
+                "INSERT INTO part VALUES (?1,'message','ses_recent',?2,?3)",
+                rusqlite::params![
+                    format!("part-{index}"),
+                    1001 + index,
+                    format!("{{\"type\":\"text\",\"text\":\"native-body-{index}\"}}")
+                ],
+            )
+            .unwrap();
+    }
+    let app = tauri::test::mock_app();
+    app.manage(AppState::new());
+    let state = app.state::<AppState>();
+    let session = "recent-native-selection";
+    let agent = super::tests::test_active_agent(session, "opencode", "Off", None);
+    *agent.log_path.lock().unwrap() = Some(log_path);
+    let config = {
+        let mut config = agent.config.lock().unwrap();
+        config.is_off = true;
+        config.resume_session = Some("ses_recent".into());
+        config.folder = home.path().to_string_lossy().into_owned();
+        config.conversation_logging =
+            wardian_core::conversations::AgentConversationLoggingSetting::Enabled;
+        config.clone()
+    };
+    crate::commands::agent::provider_log_tests::register_capture_test_agent(&state, &config, agent)
+        .await
+        .unwrap();
+    let gate = state
+        .conversation_archive
+        .test_agent_archive_gate(session)
+        .unwrap();
+    let (held_tx, held_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let holder = std::thread::spawn(move || {
+        let _guard = gate.lock().unwrap();
+        held_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    });
+    held_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    crate::commands::chat::queue_recent_capture_for_app(&state, app.handle(), session).unwrap();
+    let selected = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+                &state,
+                session.into(),
+                None,
+                None,
+                None,
+                None,
+                crate::commands::chat::RecentChatRead {
+                    limit: Some(2),
+                    preview: true,
+                },
+            )
+            .await
+            .unwrap();
+            if page.recent_admission.is_some() {
+                break page;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    let page = selected.unwrap();
+    let joined = tokio::time::timeout(Duration::from_secs(2), async {
+        while state
+            .conversation_archive
+            .chat_projection
+            .recent_pending_for_test()
+            != 0
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    joined.unwrap();
+    assert_eq!(
+        page.events
+            .iter()
+            .filter_map(|event| event.text.as_deref())
+            .collect::<Vec<_>>(),
+        ["native-body-1", "native-body-2"]
+    );
+    assert!(page.events.iter().all(|event| event.sequence.is_none()
+        && event.id.starts_with("preview:")
+        && event.metadata["opencode_session_id"] == "ses_recent"
+        && event.metadata["part_id"].is_string()));
+    assert!(page.next_before.is_none() && page.revalidated_ids.is_none());
+    assert!(state
+        .conversation_archive
+        .chat_events_for_agent(session)
+        .unwrap()
+        .is_empty());
+    crate::commands::chat::archive_agent_chat_events_until_stable_for_state(&state, session)
+        .await
+        .unwrap();
+    // Normal policy observation can establish the byte-log identity during
+    // capture. The next ordinary selection refresh binds that actual scope.
+    crate::commands::chat::queue_recent_capture_for_app(&state, app.handle(), session).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state
+            .conversation_archive
+            .chat_projection
+            .recent_pending_for_test()
+            != 0
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let canonical = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.into(),
+        None,
+        Some(page.revision.clone()),
+        None,
+        None,
+        crate::commands::chat::RecentChatRead {
+            limit: Some(2),
+            preview: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        canonical.recent_admission.is_none() && canonical.reset && !canonical.unchanged,
+        "published normal original IDs must cover every private native key/version before handoff"
+    );
+    assert!(
+        canonical
+            .events
+            .iter()
+            .all(|event| !event.id.starts_with("preview:"))
+            && canonical.events.iter().any(|event| event
+                .text
+                .as_ref()
+                .is_some_and(|text| text.contains("native-body-2"))),
+        "handoff must serve the actual latest canonical content, not an empty reset"
+    );
+    let persisted = state
+        .conversation_archive
+        .chat_events_for_agent(session)
+        .unwrap();
+    assert_eq!(
+        persisted
+            .iter()
+            .filter(|event| event.source.as_deref() == Some("opencode_db"))
+            .count(),
+        3
+    );
+    assert!(persisted
+        .iter()
+        .all(|event| !event.id.starts_with("preview:")));
+    connection.execute("UPDATE part SET data='{\"type\":\"text\",\"text\":\"edited native-body-2\"}' WHERE id='part-2'", []).unwrap();
+    crate::commands::chat::publish_recent_for_state(&state, session, None).unwrap();
+    let edited = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.into(),
+        None,
+        Some(canonical.revision.clone()),
+        None,
+        None,
+        crate::commands::chat::RecentChatRead {
+            limit: Some(2),
+            preview: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        edited.recent_admission.is_some(),
+        "old canonical version cannot cover edited part"
+    );
+    assert!(
+        !edited.events.is_empty(),
+        "an edited native version must provide its actual headers"
+    );
+    assert_eq!(
+        edited.events.last().unwrap().text.as_deref(),
+        Some("edited native-body-2")
+    );
+    crate::commands::chat::archive_agent_chat_events_until_stable_for_state(&state, session)
+        .await
+        .unwrap();
+    crate::commands::chat::publish_recent_for_state(&state, session, None).unwrap();
+    // A source-proved edit must reach real canonical publication while
+    // retaining the original observation and narrative identity.
+    let after_capture = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.into(),
+        None,
+        Some(edited.revision.clone()),
+        None,
+        None,
+        crate::commands::chat::RecentChatRead {
+            limit: Some(2),
+            preview: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        after_capture.recent_admission.is_none() && after_capture.reset,
+        "an actual refreshed canonical body/version must retire the preview"
+    );
+    assert_eq!(
+        after_capture.events.last().unwrap().text.as_deref(),
+        Some("edited native-body-2")
+    );
+    let after_persisted = state
+        .conversation_archive
+        .chat_events_for_agent(session)
+        .unwrap();
+    let native_rows: Vec<_> = after_persisted
+        .iter()
+        .filter(|event| event.source.as_deref() == Some("opencode_db"))
+        .collect();
+    assert_eq!(
+        native_rows.len(),
+        3,
+        "observing an edited part cannot append duplicate preview rows to history"
+    );
+    assert_eq!(
+        native_rows
+            .iter()
+            .map(|event| &event.id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3
+    );
+    assert_eq!(
+        native_rows
+            .iter()
+            .map(|event| &event.id)
+            .collect::<std::collections::HashSet<_>>(),
+        persisted
+            .iter()
+            .filter(|event| event.source.as_deref() == Some("opencode_db"))
+            .map(|event| &event.id)
+            .collect::<std::collections::HashSet<_>>()
+    );
+    assert_eq!(
+        native_rows
+            .iter()
+            .find(|event| event.metadata["part_id"] == "part-2")
+            .unwrap()
+            .text
+            .as_deref(),
+        Some("edited native-body-2"),
+        "source-proved refresh must persist the new body with the original identity"
+    );
+    let older = crate::commands::chat::load_agent_chat_page_with_revalidation_for_state(
+        &state,
+        session.into(),
+        Some(
+            after_capture
+                .next_before
+                .clone()
+                .expect("three canonical parts exceed the recent limit of two"),
+        ),
+        Some(after_capture.revision.clone()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(older.events.len(), 1);
+    let original_older = native_rows
+        .iter()
+        .find(|event| event.metadata["part_id"] == "part-0")
+        .unwrap();
+    assert_eq!(older.events[0].id, original_older.id);
+    assert_eq!(
+        older.events[0].metadata["chat_recent_native_key"],
+        original_older.metadata["chat_recent_native_key"]
+    );
+    assert_eq!(
+        older.events[0].metadata["chat_recent_native_version"],
+        original_older.metadata["chat_recent_native_version"]
+    );
+    assert_eq!(older.conversation_id, after_capture.conversation_id);
+    assert_eq!(older.generation, after_capture.generation);
+    assert!(older.recent_admission.is_none());
+    assert!(older.next_before.is_none());
+    assert!(persisted.iter().any(|event| event.id == older.events[0].id));
+
+    let large_body = format!("{}.", "source-proved materialized body\n".repeat(1200));
+    assert_eq!(large_body.trim(), large_body);
+    connection
+        .execute(
+            "UPDATE part SET data=?1 WHERE id='part-2'",
+            [serde_json::json!({"type":"text","text":large_body}).to_string()],
+        )
+        .unwrap();
+    crate::commands::chat::archive_agent_chat_events_until_stable_for_state(&state, session)
+        .await
+        .unwrap();
+    let full = crate::commands::chat::load_agent_chat_page_with_revalidation_for_state(
+        &state,
+        session.into(),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let original_large = native_rows
+        .iter()
+        .find(|event| event.metadata["part_id"] == "part-2")
+        .unwrap();
+    let large = full
+        .events
+        .iter()
+        .find(|event| event.id == original_large.id)
+        .unwrap();
+    assert!(large.metadata["chat_detail_ref"].is_string());
+    assert_eq!(
+        missing_body_details(&state, session, large, true).await,
+        large_body
+    );
+    assert_eq!(
+        large.id,
+        native_rows
+            .iter()
+            .find(|event| event.metadata["part_id"] == "part-2")
+            .unwrap()
+            .id
+    );
+    // This database adapter has no framed SourceIndex source ID. A canonical
+    // body/head alone must not manufacture file-source renewal authority.
+    assert!(large.metadata["chat_source_ref"].is_null());
+    assert!(
+        crate::commands::chat::load_agent_chat_page_with_revalidation_for_state(
+            &state,
+            session.into(),
+            None,
+            Some(full.revision.clone()),
+            None,
+            Some(vec![large.id.clone()]),
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recent_live_watch_survives_disabled_durable_capture_without_history() {
+    let home = crate::control::test_support::TestWardianHome::new_async().await;
+    let state = AppState::new();
+    let session = "recent-live-disabled";
+    let agent = super::tests::test_active_agent(session, "mock", "Off", None);
+    let started = "2026-11-07T00:00:00.000Z";
+    state
+        .conversation_archive
+        .begin_live_conversation(session, started)
+        .unwrap();
+    let config = {
+        let mut config = agent.config.lock().unwrap();
+        config.is_off = true;
+        config.folder = home.path().to_string_lossy().into_owned();
+        config.conversation_logging =
+            wardian_core::conversations::AgentConversationLoggingSetting::Disabled;
+        config.clone()
+    };
+    {
+        let mut watch = agent.watch_state.lock().unwrap();
+        watch.push_transcript(
+            crate::providers::transcript::extract_transcript_message(
+                "mock",
+                r#"{"type":"model","content":"pre-boundary old row","turn_id":"old"}"#,
+            )
+            .unwrap(),
+        );
+        watch.bind_live_chat(started);
+        watch.push_transcript(
+            crate::providers::transcript::extract_transcript_message(
+                "mock",
+                r#"{"type":"model","content":"current owned live row","turn_id":"new"}"#,
+            )
+            .unwrap(),
+        );
+        let mut unowned_db = crate::providers::transcript::extract_transcript_message(
+            "mock",
+            r#"{"type":"model","content":"must not resurrect DB","turn_id":"db"}"#,
+        )
+        .unwrap();
+        unowned_db.source = Some("opencode_db".into());
+        watch.push_transcript(unowned_db);
+    }
+    crate::commands::agent::provider_log_tests::register_capture_test_agent(&state, &config, agent)
+        .await
+        .unwrap();
+    crate::commands::chat::archive_agent_chat_events_for_state(&state, session)
+        .await
+        .unwrap();
+    crate::commands::chat::publish_recent_for_state(&state, session, None).unwrap();
+    let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.into(),
+        None,
+        None,
+        None,
+        None,
+        crate::commands::chat::RecentChatRead {
+            limit: Some(8),
+            preview: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        page.events
+            .iter()
+            .filter_map(|event| event.text.as_deref())
+            .collect::<Vec<_>>(),
+        ["current owned live row"]
+    );
+    assert!(page.recent_admission.is_some() && page.revalidated_ids.is_none());
+    assert!(
+        state
+            .conversation_archive
+            .chat_events_for_agent(session)
+            .unwrap()
+            .is_empty(),
+        "live preview never creates durable history"
+    );
+    state
+        .conversation_archive
+        .retire_live_conversation(session)
+        .unwrap();
+    assert!(crate::commands::chat::publish_recent_for_state(&state, session, None).is_err());
+    let retired = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.into(),
+        None,
+        Some(page.revision),
+        None,
+        None,
+        crate::commands::chat::RecentChatRead {
+            limit: Some(8),
+            preview: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(retired.reset && retired.events.is_empty() && retired.recent_admission.is_none());
+    {
+        let agents = state.agents.lock().await;
+        let agent = &agents[session];
+        agent.config.lock().unwrap().resume_session = Some("external-old-session".into());
+        agent
+            .watch_state
+            .lock()
+            .unwrap()
+            .bind_live_chat("2026-11-07T00:00:03.000Z");
+    }
+    state
+        .conversation_archive
+        .begin_live_conversation(session, "2026-11-07T00:00:03.000Z")
+        .unwrap();
+    assert!(crate::commands::chat::publish_recent_for_state(&state, session, None).is_err(),
+        "a newly created Watch cannot make replayed external-session history eligible for LIVE override");
+}
+
+async fn fresh_bound_codex_live_page(discover_log: bool) {
+    let home = crate::control::test_support::TestWardianHome::new_async().await;
+    let state = AppState::new();
+    let session = "recent-fresh-bound-codex";
+    let native = "00000000-0000-4000-8000-000000007009";
+    let started = "2026-11-07T00:00:00.000Z";
+    let agent = super::tests::test_active_agent(session, "codex", "Off", None);
+    state
+        .conversation_archive
+        .begin_live_conversation(session, started)
+        .unwrap();
+    let config = {
+        let mut config = agent.config.lock().unwrap();
+        config.is_off = true;
+        config.folder = home.path().to_string_lossy().into_owned();
+        config.conversation_logging =
+            wardian_core::conversations::AgentConversationLoggingSetting::Disabled;
+        crate::manager::session_identity::apply_provider_identity("codex", &mut config, native)
+            .unwrap();
+        assert_eq!(config.resume_session.as_deref(), Some(native));
+        assert_eq!(config.fresh_provider_session_id.as_deref(), Some(native));
+        config.clone()
+    };
+    let frame = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fresh current stdout answer"}]},"turn_id":"current-turn"}"#;
+    {
+        let mut watch = agent.watch_state.lock().unwrap();
+        watch.bind_live_chat(started);
+        watch.push_transcript(
+            crate::providers::transcript::extract_transcript_message("codex", frame).unwrap(),
+        );
+        watch.push_file_transcript(
+            crate::providers::transcript::extract_transcript_message(
+                "codex",
+                &frame.replace(
+                    "fresh current stdout answer",
+                    "file row cannot borrow current live ownership",
+                ),
+            )
+            .unwrap(),
+        );
+    }
+    if discover_log {
+        let path = home.path().join(format!("rollout-{native}.jsonl"));
+        let header =
+            serde_json::json!({"type":"session_meta","payload":{"id":native,"cwd":home.path()}});
+        std::fs::write(&path, format!("{header}\n{frame}\n")).unwrap();
+        *agent.log_path.lock().unwrap() = Some(path);
+    }
+    crate::commands::agent::provider_log_tests::register_capture_test_agent(&state, &config, agent)
+        .await
+        .unwrap();
+    crate::commands::chat::archive_agent_chat_events_for_state(&state, session)
+        .await
+        .unwrap();
+    crate::commands::chat::publish_recent_for_state(&state, session, None).unwrap();
+    let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+        &state,
+        session.into(),
+        None,
+        None,
+        None,
+        None,
+        crate::commands::chat::RecentChatRead {
+            limit: Some(8),
+            preview: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        page.events
+            .iter()
+            .filter_map(|event| event.text.as_deref())
+            .collect::<Vec<_>>(),
+        ["fresh current stdout answer"],
+        "fresh binding/log discovery cannot retire the same live Watch"
+    );
+    assert!(page.recent_admission.is_some() && page.revalidated_ids.is_none());
+    assert!(
+        state
+            .conversation_archive
+            .chat_events_for_agent(session)
+            .unwrap()
+            .is_empty(),
+        "disabled live admission must not persist history"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recent_live_watch_after_fresh_codex_binding_without_log() {
+    fresh_bound_codex_live_page(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recent_live_watch_after_fresh_codex_binding_with_owned_log() {
+    fresh_bound_codex_live_page(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recent_all_provider_watch_extractors_precede_first_archive_io() {
+    let home = crate::control::test_support::TestWardianHome::new_async().await;
+    let fixtures = [
+        (
+            "codex",
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Codex answer"}]},"turn_id":"turn-1"}"#,
+        ),
+        (
+            "claude",
+            r#"{"type":"assistant","message":{"id":"msg-1","content":[{"type":"text","text":"Claude answer"}]}}"#,
+        ),
+        (
+            "gemini",
+            r#"{"id":"gem-msg-1","type":"model","content":"Gemini answer","tokens":{"input":10,"output":2,"total":12}}"#,
+        ),
+        (
+            "antigravity",
+            r#"{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-05-20T09:21:54Z","content":"Antigravity answer"}"#,
+        ),
+        (
+            "opencode",
+            r#"{"type":"text","sessionID":"ses_test","part":{"type":"text","text":"OpenCode answer"}}"#,
+        ),
+        (
+            "pi",
+            r#"{"type":"message","id":"pi-entry","message":{"role":"assistant","content":[{"type":"text","text":"Pi answer"}],"stopReason":"stop"}}"#,
+        ),
+        (
+            "mock",
+            r#"{"type":"model","content":"Mock answer","turn_id":"turn-7"}"#,
+        ),
+    ];
+    for (provider, frame) in fixtures {
+        let state = Arc::new(AppState::new());
+        let session_id = format!("recent-watch-{provider}");
+        let agent = super::tests::test_active_agent(&session_id, provider, "Off", None);
+        let config = {
+            let mut config = agent.config.lock().unwrap();
+            config.is_off = true;
+            config.folder = home.path().to_string_lossy().into_owned();
+            config.reset_provider_config_for_provider();
+            config.conversation_logging =
+                wardian_core::conversations::AgentConversationLoggingSetting::Enabled;
+            config.clone()
+        };
+        let actual = crate::providers::transcript::extract_transcript_message(provider, frame)
+            .unwrap_or_else(|| panic!("{provider} production extractor admits its actual format"));
+        let expected_text = actual.text.clone();
+        let expected_turn = actual.turn_id.clone();
+        agent.watch_state.lock().unwrap().push_transcript(actual);
+        crate::commands::agent::provider_log_tests::register_capture_test_agent(
+            &state, &config, agent,
+        )
+        .await
+        .unwrap();
+        let (snapshot, _) =
+            crate::commands::chat::chat_read_snapshot_for_state(&state, &session_id).unwrap();
+        assert!(
+            snapshot.log_path.is_none(),
+            "{provider}: genuine Watch-only fixture, no foreign vendor source"
+        );
+        let gate = state
+            .conversation_archive
+            .test_agent_archive_gate(&session_id)
+            .unwrap();
+        let held_gate = gate.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let holder = std::thread::spawn(move || {
+            let _guard = held_gate.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        });
+        locked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let references = Arc::strong_count(&gate);
+        let publishing = state.clone();
+        let capture_session = session_id.clone();
+        let capture = tokio::spawn(async move {
+            crate::commands::chat::archive_agent_chat_events_for_state(
+                &publishing,
+                &capture_session,
+            )
+            .await
+        });
+        let page = tokio::time::timeout(Duration::from_secs(2), async {
+            while Arc::strong_count(&gate) <= references {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+                &state,
+                session_id.clone(),
+                None,
+                None,
+                None,
+                None,
+                crate::commands::chat::RecentChatRead {
+                    limit: Some(8),
+                    preview: true,
+                },
+            )
+            .await
+        })
+        .await;
+        release_tx.send(()).unwrap();
+        let captured = tokio::time::timeout(Duration::from_secs(10), capture).await;
+        holder.join().unwrap();
+        assert!(
+            captured.unwrap().unwrap().is_ok(),
+            "{provider} common publisher joined"
+        );
+        let page = page
+            .unwrap_or_else(|_| panic!("{provider}: bounded ordinary read"))
+            .unwrap();
+        assert_eq!(
+            page.events.len(),
+            1,
+            "{provider}: exact declared current message"
+        );
+        assert_eq!(page.events[0].provider, provider);
+        assert_eq!(page.events[0].text.as_deref(), Some(expected_text.as_str()));
+        assert_eq!(page.events[0].turn_id, expected_turn);
+        assert!(
+            page.recent_admission.is_some()
+                && page.generation.is_none()
+                && page.source_epoch.is_none()
+                && page.conversation_id.is_none()
+        );
+        assert!(
+            page.revalidated_ids.is_none() && page.aliases.is_empty() && page.next_before.is_none()
+        );
+        eprintln!("WATCH_FORMAT_PUBLICATION {provider} PASS; native-file/DB/paid-provider acceptance UNRUN");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recent_watch_prelude_does_not_wait_for_older_global_capture_work() {
+    let home = crate::control::test_support::TestWardianHome::new_async().await;
+    let state = Arc::new(AppState::new());
+    let session = "recent-before-global-work";
+    let agent = super::tests::test_active_agent(session, "mock", "Off", None);
+    let config = {
+        let mut config = agent.config.lock().unwrap();
+        config.is_off = true;
+        config.folder = home.path().to_string_lossy().into_owned();
+        config.conversation_logging =
+            wardian_core::conversations::AgentConversationLoggingSetting::Enabled;
+        config.clone()
+    };
+    agent.watch_state.lock().unwrap().push_transcript(
+        wardian_core::control::WatchTranscriptMessage {
+            role: "assistant".into(),
+            text: "Current header before global work".into(),
+            provider: "mock".into(),
+            turn_id: Some("current-turn".into()),
+            source: Some("model".into()),
+            provider_provenance: None,
+        },
+    );
+    crate::commands::agent::provider_log_tests::register_capture_test_agent(&state, &config, agent)
+        .await
+        .unwrap();
+    let global_work = state.conversation_capture_policy_lock.lock().await;
+    let capturing = state.clone();
+    let capture = tokio::spawn(async move {
+        crate::commands::chat::archive_agent_chat_events_for_state(&capturing, session).await
+    });
+    let read = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let page = crate::commands::chat::load_agent_chat_page_with_recent_for_state(
+                &state,
+                session.into(),
+                None,
+                None,
+                None,
+                None,
+                crate::commands::chat::RecentChatRead {
+                    limit: Some(8),
+                    preview: true,
+                },
+            )
+            .await
+            .unwrap();
+            if page.recent_admission.is_some() {
+                break page;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if read.is_err() {
+        let (snapshot, _) =
+            crate::commands::chat::chat_read_snapshot_for_state(&state, session).unwrap();
+        let (has_file_receipt, watch_cursor) = {
+            let watch = snapshot.watch_state.lock().unwrap();
+            (watch.recent_file_source().is_some(), watch.latest_cursor())
+        };
+        // Post-deadline diagnosis cannot qualify the already-failed read.
+        let publication = crate::commands::chat::publish_recent_for_state(&state, session, None)
+            .map_err(|error| (error.kind(), error.raw_os_error(), error.to_string()));
+        eprintln!("RECENT_PRELUDE_TIMEOUT admission_open={} file_path={} file_receipt={} cursor={watch_cursor:?} pending={} post_deadline_publication={publication:?}",
+            state.conversation_capture_policy_lock.background_admission_open(), snapshot.log_path.is_some(), has_file_receipt,
+            state.conversation_archive.chat_projection.recent_pending_for_test());
+    }
+    drop(global_work);
+    let capture = tokio::time::timeout(Duration::from_secs(10), capture).await;
+    assert!(
+        capture.unwrap().unwrap().is_ok(),
+        "owned full capture joined after releasing old work"
+    );
+    let page = read.expect("bounded header publication cannot wait behind another old capture");
+    assert_eq!(
+        page.events[0].text.as_deref(),
+        Some("Current header before global work")
+    );
 }
 
 async fn missing_body_fixture(
@@ -1352,6 +2432,272 @@ async fn ordinary_off_provisional_recent_page_becomes_admitted_after_capture() {
         agent.runtime_generation.is_none(),
         "no provider was submitted"
     );
+}
+
+#[tokio::test]
+async fn ordinary_off_page_retains_commentary_while_oversized_append_is_unindexed() {
+    let home = crate::control::test_support::TestWardianHome::new_async().await;
+    let (state, session_id, path) = registered_off_source(&home).await;
+    assert_eq!(dispatch_ordinary_capture(&state).await, 1);
+    let snapshot = crate::commands::chat::agent_archive_capture_snapshot(&state, &session_id)
+        .await
+        .unwrap();
+    let header_end = std::fs::metadata(&path).unwrap().len();
+    let primed_capture = capture_state(&state, &snapshot);
+    assert_eq!(primed_capture.committed_offset, header_end);
+    assert_eq!(primed_capture.unknown_before_offset, Some(header_end));
+    assert_eq!(primed_capture.status, "complete");
+    let source_identity = crate::commands::provider_log_acquisition::native_file_identity(
+        &std::fs::File::open(&path).unwrap(),
+    )
+    .unwrap();
+    let (epoch, admission, scoped_extent, _, source_policy) =
+        crate::commands::chat_recent_seed::source_scope_with_policy(&snapshot).unwrap();
+    assert_eq!(scoped_extent, header_end);
+    assert!(source_policy.valid);
+    assert_eq!(source_policy.agent_id, session_id);
+    assert_eq!(source_policy.unknown_before, header_end);
+    assert!(!source_policy.source_key.is_empty());
+    assert!(!epoch.is_empty());
+    assert!(!admission.is_empty());
+
+    let source_index_dir = wardian_core::paths::agent_conversations_dir(&session_id)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let read_source_head = || {
+        let reference: Option<String> = serde_json::from_slice(
+            &std::fs::read(source_index_dir.join("chat-source-head.json")).unwrap(),
+        )
+        .unwrap();
+        let reference = reference.expect("ordinary header capture publishes its source-index head");
+        let head: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(source_index_dir.join("chat-read-objects").join(&reference)).unwrap(),
+        )
+        .unwrap();
+        (reference, head)
+    };
+    let primed_head = read_source_head();
+    assert_eq!(
+        primed_head.1["agent_id"].as_str(),
+        Some(session_id.as_str())
+    );
+    assert_eq!(primed_head.1["target_extent"].as_u64(), Some(header_end));
+    assert_eq!(primed_head.1["floor"].as_u64(), Some(header_end));
+    assert!(primed_head.1["root"].is_null());
+    assert_eq!(primed_head.1["epoch"].as_str(), Some(epoch.as_str()));
+    assert!(primed_head.1["admission"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    assert!(state
+        .conversation_archive
+        .chat_events_for_agent(&session_id)
+        .unwrap()
+        .is_empty());
+
+    let pair_text = "A source-bound commentary observation.";
+    let context_line = serde_json::json!({
+        "type": "turn_context",
+        "payload": {"turn_id": "commentary-provider-turn"}
+    })
+    .to_string();
+    let stream_line = serde_json::json!({
+        "timestamp": "2026-10-24T17:38:18.275Z",
+        "type": "event_msg",
+        "payload": {"type": "agent_message", "phase": "commentary", "message": pair_text}
+    })
+    .to_string();
+    let item_line = serde_json::json!({
+        "timestamp": "2026-10-24T17:38:18.275Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "id": "msg-off-oversized-mirror",
+            "role": "assistant",
+            "phase": "commentary",
+            "content": [{"type": "output_text", "text": pair_text}],
+            "internal_chat_message_metadata_passthrough": {
+                "turn_id": "commentary-provider-turn",
+                "create_time": "2026-10-24T17:38:18.275Z",
+                "content_item_kinds": ["unknown"]
+            }
+        }
+    })
+    .to_string();
+    let output_line = serde_json::json!({
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call_output",
+            "call_id": "off-oversized-complete-output",
+            "output": "x".repeat(17 * 1024)
+        }
+    })
+    .to_string();
+    assert!(output_line.len() > 16 * 1024);
+    assert!(output_line.len() < 128 * 1024);
+    assert!(serde_json::from_str::<serde_json::Value>(&output_line).is_ok());
+    let trailing_bookkeeping = serde_json::json!({
+        "type": "turn_context",
+        "payload": {"turn_id": "bookkeeping-after-oversized-output"}
+    })
+    .to_string();
+    let mut appended = String::new();
+    appended.push_str(&context_line);
+    appended.push('\n');
+    let stream_start = header_end + appended.len() as u64;
+    let stream_end = stream_start + stream_line.len() as u64 + 1;
+    appended.push_str(&stream_line);
+    appended.push('\n');
+    let item_start = header_end + appended.len() as u64;
+    let item_end = item_start + item_line.len() as u64 + 1;
+    appended.push_str(&item_line);
+    appended.push('\n');
+    appended.push_str(&output_line);
+    appended.push('\n');
+    appended.push_str(&trailing_bookkeeping);
+    appended.push('\n');
+    assert!(appended.len() < 128 * 1024);
+
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(appended.as_bytes()).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let appended_end = std::fs::metadata(&path).unwrap().len();
+    assert_eq!(appended_end, header_end + appended.len() as u64);
+    assert_eq!(
+        crate::commands::provider_log_acquisition::native_file_identity(
+            &std::fs::File::open(&path).unwrap(),
+        )
+        .unwrap(),
+        source_identity,
+        "the source was extended in place"
+    );
+
+    let recent = crate::commands::chat_recent_seed::read(&snapshot, None).unwrap();
+    assert_eq!(recent.progress, "oversized_record");
+    assert_eq!(recent.events.len(), 2);
+    assert!(recent.bytes_read < 2 * 1024 * 1024);
+    assert!(recent.records_decoded <= 84);
+    assert!(recent
+        .checkpoint
+        .as_ref()
+        .is_some_and(|checkpoint| !checkpoint.window_complete && checkpoint.normalizer_complete));
+    let (current_epoch, current_admission, current_extent, _, _) =
+        crate::commands::chat_recent_seed::source_scope_with_policy(&snapshot).unwrap();
+    assert_eq!(current_epoch, epoch);
+    assert_eq!(current_admission, admission);
+    assert_eq!(current_extent, appended_end);
+
+    let page = crate::commands::chat::load_agent_chat_page_with_revalidation_for_state(
+        &state,
+        session_id.clone(),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.session_id, session_id);
+    assert_eq!(page.progress, "oversized_record");
+    assert!(!page.reset);
+    assert!(page.conversation_id.is_none());
+    assert_eq!(
+        page.generation.as_deref(),
+        primed_head.1["generation"].as_str()
+    );
+    assert_eq!(page.source_epoch.as_deref(), Some(epoch.as_str()));
+    assert!(
+        page.revalidated_ids.is_none(),
+        "a read-only page load is not a revalidation ACK"
+    );
+    assert!(
+        page.next_before.is_none(),
+        "an incomplete oversized window has no older cursor"
+    );
+    assert_eq!(page.events.len(), 2);
+    assert!(page.bytes_read < 2 * 1024 * 1024);
+    assert!(
+        serde_json::to_vec(&page).unwrap().len()
+            <= crate::state::conversation_archive::chat_read::IPC_BYTES
+    );
+
+    for (source, start, end, native_turn_id) in [
+        ("event_msg", stream_start, stream_end, None),
+        (
+            "response_item",
+            item_start,
+            item_end,
+            Some("msg-off-oversized-mirror"),
+        ),
+    ] {
+        let matching: Vec<_> = page
+            .events
+            .iter()
+            .filter(|event| event.source.as_deref() == Some(source))
+            .collect();
+        assert_eq!(matching.len(), 1, "one visible {source} observation");
+        let event = matching[0];
+        let source_ref = event.metadata["chat_source_ref"]
+            .as_str()
+            .expect("the visible row retains its source reference");
+        assert_eq!(event.id, source_ref);
+        assert_eq!(
+            event.kind,
+            wardian_core::models::chat::AgentChatEventKind::Message
+        );
+        assert_eq!(
+            event.role,
+            Some(wardian_core::models::chat::AgentChatRole::Assistant)
+        );
+        assert_eq!(event.turn_id.as_deref(), native_turn_id);
+        assert_eq!(event.text.as_deref(), Some(pair_text));
+        assert_eq!(event.metadata["chat_source_start"].as_u64(), Some(start));
+        assert_eq!(event.metadata["chat_source_end"].as_u64(), Some(end));
+        assert_eq!(
+            event.metadata["chat_source_epoch"].as_str(),
+            Some(epoch.as_str())
+        );
+        assert_eq!(
+            event.metadata["chat_source_admission"].as_str(),
+            Some(admission.as_str())
+        );
+        assert_eq!(event.metadata["chat_provisional"], serde_json::json!(true));
+        assert_eq!(
+            event.metadata["chat_identity_resolution"],
+            serde_json::json!("unresolved")
+        );
+        assert_eq!(
+            event.metadata["provider_turn_id"].as_str(),
+            Some("commentary-provider-turn")
+        );
+        assert!(
+            event.text.as_ref().unwrap().len()
+                <= crate::state::conversation_archive::chat_read::PREVIEW_BYTES
+        );
+    }
+    assert_eq!(
+        read_source_head(),
+        primed_head,
+        "the source-index head remains at the primed header"
+    );
+    let still_primed = capture_state(&state, &snapshot);
+    assert_eq!(still_primed.committed_offset, header_end);
+    assert_eq!(still_primed.unknown_before_offset, Some(header_end));
+    assert_eq!(still_primed.status, "complete");
+    assert!(state
+        .conversation_archive
+        .chat_events_for_agent(&session_id)
+        .unwrap()
+        .is_empty());
+    let roster = state.agents.lock().await;
+    let agent = roster.get(&session_id).unwrap();
+    assert_eq!(*agent.current_status.lock().unwrap(), "Off");
+    assert!(agent.runtime_generation.is_none());
 }
 
 #[tokio::test]

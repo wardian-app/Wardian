@@ -182,6 +182,46 @@ pub fn load_shell_settings() -> Result<ShellSettings, String> {
     load_shell_settings_from_path(&path)
 }
 
+/// The background recent-header prelude needs only logging policy. Bound its
+/// metadata read while retaining the normal legacy/schema-2 interpretation.
+pub(crate) fn recent_conversation_logging() -> Result<(ConversationLoggingSetting, usize), String> {
+    use std::io::Read;
+    let path = shell_settings_path()?;
+    let mut file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((default_conversation_logging(), 0))
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    if std::fs::symlink_metadata(&path)
+        .map_err(|error| error.to_string())?
+        .file_type()
+        .is_symlink()
+        || !file
+            .metadata()
+            .map_err(|error| error.to_string())?
+            .is_file()
+    {
+        return Err("recent logging policy is not a plain file".into());
+    }
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(32 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > 32 * 1024 {
+        return Err("recent logging policy exceeds metadata budget".into());
+    }
+    let content = std::str::from_utf8(&bytes).map_err(|error| error.to_string())?;
+    Ok((
+        parse_shell_settings_document(content)?
+            .settings
+            .conversation_logging,
+        bytes.len(),
+    ))
+}
+
 pub fn load_shell_settings_document() -> Result<ShellSettingsDocument, String> {
     let path = shell_settings_path()?;
     load_shell_settings_document_from_path(&path)
@@ -243,7 +283,11 @@ fn load_shell_settings_document_from_path(path: &Path) -> Result<ShellSettingsDo
     }
 
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let value = serde_json::from_str::<serde_json::Value>(&content).map_err(|e| e.to_string())?;
+    parse_shell_settings_document(&content)
+}
+
+fn parse_shell_settings_document(content: &str) -> Result<ShellSettingsDocument, String> {
+    let value = serde_json::from_str::<serde_json::Value>(content).map_err(|e| e.to_string())?;
     if value
         .get("schema_version")
         .and_then(|version| version.as_u64())

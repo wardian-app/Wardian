@@ -81,6 +81,36 @@ pub(super) fn read_capture_state(agent_id: &str) -> io::Result<ConversationCaptu
     serde_json::from_str(&content).map_err(io::Error::other)
 }
 
+/// Recent admission reads only this bounded policy object, never archive bodies.
+pub(super) fn read_recent_capture_state(
+    agent_id: &str,
+) -> io::Result<(ConversationCaptureState, usize)> {
+    use std::io::Read;
+    let path = capture_state_path(agent_id)?;
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok((Default::default(), 0))
+        }
+        Err(error) => return Err(error),
+    };
+    let limit = super::chat_read::POLICY_BYTES;
+    if file.metadata()?.len() > limit {
+        return Err(io::Error::other("recent capture policy exceeds byte limit"));
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(io::Error::other(
+            "recent capture policy grew past byte limit",
+        ));
+    }
+    Ok((
+        serde_json::from_slice(&bytes).map_err(io::Error::other)?,
+        bytes.len(),
+    ))
+}
+
 pub(super) fn write_capture_state(
     agent_id: &str,
     state: &ConversationCaptureState,

@@ -20,7 +20,7 @@ use crate::state::conversation_archive::{
 };
 use crate::state::{AgentWatchState, AppState};
 use sha2::{Digest, Sha256};
-use tauri::State;
+use tauri::{Manager, State};
 use wardian_core::control::{WatchEvent, WatchOutput, WatchTranscript, WatchTranscriptMessage};
 use wardian_core::conversations::{AgentConversationLoggingSetting, ConversationLoggingSetting};
 use wardian_core::identity::normalize_status;
@@ -51,29 +51,97 @@ pub async fn load_agent_chat_page(
     revision: Option<String>,
     detail_ref: Option<String>,
     revalidate_ids: Option<Vec<String>>,
-    state: State<'_, AppState>,
+    recent_preview: Option<bool>,
+    app: tauri::AppHandle,
 ) -> Result<wardian_core::models::chat::AgentChatPage, String> {
-    load_agent_chat_page_with_revalidation_for_state(
+    let state = app.state::<AppState>();
+    let queue_error = if recent_preview == Some(true)
+        && cursor.is_none()
+        && detail_ref.is_none()
+        && revalidate_ids.is_none()
+        && !session_id.trim().is_empty()
+        && revision.as_ref().is_none_or(|value| value.len() <= 512)
+    {
+        queue_recent_capture_for_app(&state, &app, &session_id).err()
+    } else {
+        None
+    };
+    let page = load_agent_chat_page_with_recent_for_state(
         &state,
         session_id,
         cursor,
         revision,
         detail_ref,
         revalidate_ids,
+        RecentChatRead {
+            limit: None,
+            preview: recent_preview.unwrap_or(false),
+        },
     )
-    .await
+    .await?;
+    // Retirement resets and already readable pages remain useful even when
+    // the two producer slots are busy. A cold empty miss is retryable.
+    if page.events.is_empty() && !page.reset && queue_error.is_some() {
+        return Err("chat snapshot temporarily busy".into());
+    }
+    Ok(page)
 }
 
-pub(crate) async fn load_agent_chat_page_with_revalidation_for_state(
+/// Coalesce a bounded selection prelude without doing source IO on the request
+/// thread. Capacity stays owned until the actual blocking job has joined.
+pub(crate) fn queue_recent_capture_for_app<R: tauri::Runtime>(
+    state: &AppState,
+    app: &tauri::AppHandle<R>,
+    session_id: &str,
+) -> Result<(), String> {
+    let (snapshot, runtime) = chat_read_snapshot_for_state(state, session_id)?;
+    let nonce = state
+        .conversation_archive
+        .chat_projection
+        .request_recent(&snapshot, &runtime)
+        .map_err(|_| "chat snapshot temporarily busy".to_string())?;
+    if let Some(nonce) = nonce {
+        let owner_app = app.clone();
+        let producer_app = app.clone();
+        let session_id = session_id.to_owned();
+        tauri::async_runtime::spawn(async move {
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                let state = producer_app.state::<AppState>();
+                publish_recent_for_state(&state, &session_id, Some(&runtime))
+            })
+            .await;
+            owner_app
+                .state::<AppState>()
+                .conversation_archive
+                .chat_projection
+                .finish_recent_request(&nonce);
+        });
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct RecentChatRead {
+    pub(crate) limit: Option<usize>,
+    pub(crate) preview: bool,
+}
+
+pub(crate) async fn load_agent_chat_page_with_recent_for_state(
     state: &AppState,
     session_id: String,
     cursor: Option<String>,
     revision: Option<String>,
     detail_ref: Option<String>,
     revalidate_ids: Option<Vec<String>>,
+    recent: RecentChatRead,
 ) -> Result<wardian_core::models::chat::AgentChatPage, String> {
+    let recent_limit = recent.limit;
     let revalidation_requested = revalidate_ids.is_some();
     if session_id.trim().is_empty()
+        || (recent.preview && (cursor.is_some() || detail_ref.is_some() || revalidation_requested))
+        || recent_limit.is_some_and(|limit| {
+            !(1..=crate::state::conversation_archive::chat_read::PAGE_ROWS).contains(&limit)
+        })
         || cursor.as_ref().is_some_and(|value| value.len() > 512)
         || revision.as_ref().is_some_and(|value| value.len() > 512)
         || detail_ref.as_ref().is_some_and(|value| value.len() > 512)
@@ -105,19 +173,44 @@ pub(crate) async fn load_agent_chat_page_with_revalidation_for_state(
     let (snapshot, incarnation) = chat_read_snapshot_for_state(state, &session_id)?;
     let context = conversation_archive_context_from_snapshot(&snapshot);
     let expected_source = context.provider_source_key.clone();
+    let previous_preview = recent.preview
+        && state
+            .conversation_archive
+            .chat_projection
+            .owns_recent_revision(revision.as_deref());
+    let recent_reader = recent.preview.then(|| {
+        state.conversation_archive.chat_projection.recent_reader(
+            snapshot.clone(),
+            incarnation.clone(),
+            revision.clone(),
+            recent_limit.unwrap_or(80),
+        )
+    });
     let result = tauri::async_runtime::spawn_blocking(move || {
-        crate::state::conversation_archive::chat_read::read_with_revalidation(
+        if let Some(read) = recent_reader {
+            if let Some(page) = read()? {
+                return Ok(page);
+            }
+        }
+        crate::state::conversation_archive::chat_read::read_with_revalidation_and_limit(
             &context,
             &snapshot,
             cursor.as_deref(),
             revision.as_deref(),
             detail_ref.as_deref(),
             revalidate_ids.as_deref(),
+            recent_limit,
         )
     })
     .await
     .map_err(|_| "chat read task failed".to_string())?
-    .map_err(|_| "chat projection read unavailable".to_string())?;
+    .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidInput {
+            "invalid chat read request".to_string()
+        } else {
+            "chat projection read unavailable".to_string()
+        }
+    })?;
     let current = chat_read_snapshot_for_state(state, &session_id)?;
     if !Arc::ptr_eq(&incarnation, &current.1)
         || conversation_archive_context_from_snapshot(&current.0).provider_source_key
@@ -126,6 +219,10 @@ pub(crate) async fn load_agent_chat_page_with_revalidation_for_state(
         return Err("chat runtime changed during read".into());
     }
     let mut result = result;
+    if previous_preview && result.recent_admission.is_none() {
+        result.reset = true;
+        result.unchanged = false;
+    }
     if result.revalidated_ids.is_some()
         && !crate::state::conversation_archive::chat_read::revalidation_page_is_current(
             &current.0, &result,
@@ -587,13 +684,24 @@ async fn agent_archive_capture_snapshot_bound(
 pub(crate) fn collect_agent_chat_events_for_archive(
     snapshot: &AgentArchiveCaptureSnapshot,
 ) -> Result<ArchiveCaptureResult, String> {
+    collect_agent_chat_events_for_archive_bound(snapshot, None)
+}
+
+fn collect_agent_chat_events_for_archive_bound(
+    snapshot: &AgentArchiveCaptureSnapshot,
+    native: Option<&[AgentChatEvent]>,
+) -> Result<ArchiveCaptureResult, String> {
     let mut provider_events = load_provider_log_chat_events(
         &snapshot.session_id,
         &snapshot.provider,
         snapshot.log_path.as_deref(),
         &snapshot.cleared_provider_sessions,
     );
-    provider_events.extend(load_opencode_db_chat_events_for_snapshot(snapshot));
+    provider_events.extend(
+        native
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| load_opencode_db_chat_events_for_snapshot(snapshot)),
+    );
     collect_agent_chat_events_with_provider_events(snapshot, provider_events, false)
 }
 
@@ -678,6 +786,11 @@ async fn archive_agent_chat_events_bound(
     lane: CaptureLane,
     expected: Option<&CaptureRequest>,
 ) -> Result<ArchiveCaptureResult, AgentChatTranscriptFailure> {
+    let _ = publish_recent_for_state(
+        state,
+        session_id,
+        expected.map(|request| &request.incarnation),
+    );
     // Lock order is policy gate, then the roster snapshot, then the archive's
     // per-agent gate. The snapshot must follow the gate: a pass that waits for
     // the gate through a lifecycle boundary would otherwise replay the old
@@ -732,6 +845,10 @@ async fn archive_agent_chat_events_bound(
         snapshot.agent_conversation_logging,
     ) == ConversationLoggingSetting::Enabled;
     let context = conversation_archive_context_from_snapshot(&snapshot);
+
+    // This bounded, nonauthoritative prelude precedes saved bootstrap, complete
+    // DB merge and legacy archive reads. Failure never skips the durable path.
+    let recent_tags = publish_watch_recent(state, &snapshot).unwrap_or_default();
 
     // Historical display admission has its own bounded checkpoints. It runs
     // under the same identity/policy gates, even at EOF or without a vendor file.
@@ -880,18 +997,25 @@ async fn archive_agent_chat_events_bound(
             // but it does not carry the database session/path binding. Keep
             // the canonical DB projection in this incremental provider batch
             // so the existing archive writer persists the bound observation.
-            let canonical_db_events = load_opencode_db_chat_events_for_snapshot(&snapshot);
+            let native_capture = logging_enabled
+                .then(|| load_opencode_db_capture_for_snapshot(&snapshot))
+                .flatten();
+            let canonical_db_events = native_capture
+                .as_ref()
+                .map(|capture| capture.events.clone())
+                .unwrap_or_else(|| load_opencode_db_chat_events_for_snapshot(&snapshot));
             if logging_enabled {
                 batch.events.extend(canonical_db_events.iter().cloned());
             }
             state
                 .conversation_archive
-                .append_verified_provider_log_batch_with_context(
+                .append_verified_provider_log_batch_with_native_messages(
                     context.clone(),
                     &batch.events,
                     batch.previous.as_ref(),
                     &batch.next,
                     batch.source_proof(),
+                    native_capture.as_ref().map(|capture| &capture.authority),
                 )
                 .map_err(|error| AgentChatTranscriptFailure {
                     stage: ChatTranscriptFailureStage::ArchiveWrite,
@@ -958,12 +1082,20 @@ async fn archive_agent_chat_events_bound(
         }
     }
 
-    let mut result = collect_agent_chat_events_for_archive(&snapshot).map_err(|message| {
-        AgentChatTranscriptFailure {
-            stage: ChatTranscriptFailureStage::ProviderProjection,
-            message,
-        }
+    let native_capture = logging_enabled
+        .then(|| load_opencode_db_capture_for_snapshot(&snapshot))
+        .flatten();
+    let mut result = collect_agent_chat_events_for_archive_bound(
+        &snapshot,
+        native_capture
+            .as_ref()
+            .map(|capture| capture.events.as_slice()),
+    )
+    .map_err(|message| AgentChatTranscriptFailure {
+        stage: ChatTranscriptFailureStage::ProviderProjection,
+        message,
     })?;
+    recent_tags.apply(&mut result.events);
     result.background_stop = if logging_enabled {
         CaptureStop::Observed {
             status: "projection".to_string(),
@@ -973,13 +1105,23 @@ async fn archive_agent_chat_events_bound(
         CaptureStop::Disabled
     };
     if logging_enabled {
-        state
-            .conversation_archive
-            .append_chat_events_with_context(result.context.clone(), &result.events)
-            .map_err(|error| AgentChatTranscriptFailure {
-                stage: ChatTranscriptFailureStage::ArchiveWrite,
-                message: format!("conversation archive append failed: {error}"),
-            })?;
+        let append = if let Some(capture) = native_capture.as_ref() {
+            state
+                .conversation_archive
+                .append_chat_events_with_native_messages(
+                    result.context.clone(),
+                    &result.events,
+                    &capture.authority,
+                )
+        } else {
+            state
+                .conversation_archive
+                .append_chat_events_with_context(result.context.clone(), &result.events)
+        };
+        append.map_err(|error| AgentChatTranscriptFailure {
+            stage: ChatTranscriptFailureStage::ArchiveWrite,
+            message: format!("conversation archive append failed: {error}"),
+        })?;
     } else {
         state
             .conversation_archive
@@ -993,9 +1135,464 @@ async fn archive_agent_chat_events_bound(
     Ok(result)
 }
 
+#[derive(Default)]
+struct RecentWatchTags {
+    rows: HashMap<String, (String, String)>,
+    cursor: Option<String>,
+}
+
+impl RecentWatchTags {
+    fn apply(&self, events: &mut [AgentChatEvent]) {
+        for event in events {
+            if let Some(metadata) = event.metadata.as_object_mut() {
+                metadata.remove("chat_recent_key");
+                metadata.remove("chat_recent_version");
+                // Retention/status changes can reuse a legacy mapper ordinal.
+                // Qualify the exact actual Watch snapshot, not that ID alone.
+                if let Some((key, version)) = self.rows.get(&event.id).filter(|_| {
+                    self.cursor.is_some()
+                        && metadata
+                            .get("transcript_cursor")
+                            .and_then(serde_json::Value::as_str)
+                            == self.cursor.as_deref()
+                }) {
+                    metadata.insert("chat_recent_key".into(), serde_json::json!(key));
+                    metadata.insert("chat_recent_version".into(), serde_json::json!(version));
+                }
+            }
+        }
+    }
+}
+
+fn publish_watch_recent(
+    state: &AppState,
+    snapshot: &AgentArchiveCaptureSnapshot,
+) -> std::io::Result<RecentWatchTags> {
+    use crate::state::conversation_archive::chat_read;
+    if !state
+        .conversation_capture_policy_lock
+        .background_admission_open()
+    {
+        return Err(std::io::Error::other(
+            "recent admission waits for lifecycle boundary",
+        ));
+    }
+    // A path discovered for this runtime does not describe every Watch row's
+    // origin. Only actual file-derived rows need this exact parser receipt.
+    let file_watch = if let Some(path) = &snapshot.log_path {
+        let receipt = snapshot
+            .watch_state
+            .lock()
+            .map_err(|_| std::io::Error::other("watch poisoned"))?
+            .recent_file_source()
+            .cloned();
+        match receipt {
+            Some((source, sequence)) if source.matches_path(path) && source.valid()? => {
+                Some((source, sequence))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let (current, runtime) =
+        chat_read_snapshot_for_state(state, &snapshot.session_id).map_err(std::io::Error::other)?;
+    if !Arc::ptr_eq(&current.watch_state, &snapshot.watch_state)
+        || conversation_archive_context_from_snapshot(&current).provider_source_key
+            != conversation_archive_context_from_snapshot(snapshot).provider_source_key
+    {
+        return Err(std::io::Error::other("recent producer retired"));
+    }
+    let owner = &state.conversation_archive.chat_projection;
+    if owner.has_recent_native(snapshot, &runtime) {
+        return Ok(RecentWatchTags::default());
+    }
+    let admission = owner.begin_recent_with_source(
+        snapshot,
+        &runtime,
+        file_watch.as_ref().map(|(source, _)| source.clone()),
+    )?;
+    let token = &admission.0;
+    let policy = crate::state::conversation_archive::recent_watch_policy(&snapshot.session_id)?;
+    let (global_logging, _) =
+        crate::utils::shell::recent_conversation_logging().map_err(std::io::Error::other)?;
+    let disabled =
+        effective_conversation_logging(global_logging, snapshot.agent_conversation_logging)
+            == ConversationLoggingSetting::Disabled;
+    let live_started = state
+        .conversation_archive
+        .live_conversation_started_at(&snapshot.session_id)?;
+    let source_key = conversation_archive_context_from_snapshot(snapshot).provider_source_key;
+    let mut headers = Vec::new();
+    let mut tags = HashMap::new();
+    let observed_cursor = {
+        let watch = snapshot
+            .watch_state
+            .lock()
+            .map_err(|_| std::io::Error::other("watch poisoned"))?;
+        if !watch.codex_attachment_ready() {
+            return Err(std::io::Error::other("recent watch attachment pending"));
+        }
+        let live = watch.live_chat_boundary().filter(|(started, _)| {
+            live_started.as_ref() == Some(started)
+                && (snapshot.resume_session.is_none()
+                    || provider_log_source_is_fresh(
+                        &snapshot.provider,
+                        snapshot.resume_session.as_deref(),
+                        snapshot.fresh_provider_session_id.as_deref(),
+                    ))
+        });
+        if disabled && watch.live_chat_boundary().is_some() && live.is_none() {
+            return Err(std::io::Error::other("recent live boundary retired"));
+        }
+        let transcript = WatchTranscript {
+            cursor: watch.latest_cursor(),
+            messages: Vec::new(),
+            latest_text: String::new(),
+            truncated: false,
+            omitted_bytes: 0,
+        };
+        watch.visit_recent_transcript(
+            &snapshot.current_status,
+            |native_sequence, sequence, file_derived, message| {
+                if file_derived
+                    && !file_watch
+                        .as_ref()
+                        .is_some_and(|(_, bound)| native_sequence == *bound)
+                {
+                    return;
+                }
+                if message.role.len() > 64
+                    || message.provider.len() > 32
+                    || message.turn_id.as_ref().is_some_and(|id| id.len() > 256)
+                    || message
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.len() > 128)
+                    || message.provider_provenance.is_some()
+                {
+                    return;
+                }
+                if message.source.as_deref() == Some("opencode_db") {
+                    return;
+                }
+                // Policy uses only the original mapper ID and metadata, never text.
+                // Do not clone a potentially huge Watch body just to classify it.
+                let shallow = WatchTranscriptMessage {
+                    role: message.role.clone(),
+                    text: String::new(),
+                    provider: message.provider.clone(),
+                    turn_id: message.turn_id.clone(),
+                    source: message.source.clone(),
+                    provider_provenance: None,
+                };
+                let mut event = message_event_from_transcript(
+                    &snapshot.session_id,
+                    &snapshot.provider,
+                    sequence,
+                    &shallow,
+                    &transcript,
+                );
+                let durable_permitted = policy(&event, source_key.as_deref());
+                let owned_live = disabled
+                    && !file_derived
+                    && live.is_some_and(|(_, floor)| native_sequence > *floor)
+                    && message.source.as_deref() != Some("opencode_db");
+                if event.provider != snapshot.provider
+                    || (!durable_permitted && !owned_live)
+                    || (disabled && live.is_some_and(|(_, floor)| native_sequence <= *floor))
+                {
+                    return;
+                }
+                let mut end = message.text.len().min(chat_read::PREVIEW_BYTES);
+                while !message.text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                event.text = Some(message.text[..end].to_owned());
+                let original_id = event.id.clone();
+                let key = format!("{token}:watch:{native_sequence}");
+                let version = crate::commands::chat_recent_seed::hash(key.as_bytes());
+                tags.insert(original_id, (key.clone(), version.clone()));
+                event.id = format!("preview:{token}:{native_sequence}");
+                event.sequence = Some(native_sequence);
+                event.metadata["chat_recent_key"] = serde_json::json!(key);
+                event.metadata["chat_recent_version"] = serde_json::json!(version);
+                headers.push(chat_read::header(&event));
+            },
+        );
+        transcript.cursor
+    };
+    headers.reverse();
+    let (after, after_runtime) =
+        chat_read_snapshot_for_state(state, &snapshot.session_id).map_err(std::io::Error::other)?;
+    if !state
+        .conversation_capture_policy_lock
+        .background_admission_open()
+        || !Arc::ptr_eq(&runtime, &after_runtime)
+        || !Arc::ptr_eq(&after.watch_state, &snapshot.watch_state)
+        || !owner.publish_recent(&after, &runtime, &admission, headers)?
+    {
+        return Err(std::io::Error::other("recent producer publication retired"));
+    }
+    owner.note_recent_coverage(&admission, &tags)?;
+    owner.note_recent_watch(&admission, observed_cursor.clone())?;
+    Ok(RecentWatchTags {
+        rows: tags,
+        cursor: Some(observed_cursor),
+    })
+}
+
+/// A bounded owner prelude shared with normal selection dispatch. It neither
+/// waits for capture/archive work. Native source discovery stays in this
+/// background/blocking producer, never in selection request dispatch.
+pub(crate) fn publish_recent_for_state(
+    state: &AppState,
+    session_id: &str,
+    expected_runtime: Option<&Arc<Mutex<String>>>,
+) -> std::io::Result<()> {
+    let (snapshot, runtime) =
+        chat_read_snapshot_for_state(state, session_id).map_err(std::io::Error::other)?;
+    if expected_runtime.is_some_and(|expected| !Arc::ptr_eq(expected, &runtime)) {
+        return Err(std::io::Error::other("recent request runtime retired"));
+    }
+    if publish_database_recent(state, &snapshot, &runtime)? {
+        return Ok(());
+    }
+    publish_watch_recent(state, &snapshot).map(|_| ())
+}
+
+fn publish_database_recent(
+    state: &AppState,
+    snapshot: &AgentArchiveCaptureSnapshot,
+    runtime: &Arc<Mutex<String>>,
+) -> std::io::Result<bool> {
+    use super::chat_recent_database;
+    if snapshot.provider == "antigravity" {
+        return publish_antigravity_recent(state, snapshot, runtime);
+    }
+    if snapshot.provider != "opencode" {
+        return Ok(false);
+    }
+    let Some(native_session) = opencode_session_id(
+        &snapshot.session_id,
+        snapshot.resume_session.as_deref(),
+        snapshot.fresh_provider_session_id.as_deref(),
+    ) else {
+        return Ok(false);
+    };
+    let Some(path) = opencode_database_path() else {
+        return Ok(false);
+    };
+    let (logging, _) =
+        crate::utils::shell::recent_conversation_logging().map_err(std::io::Error::other)?;
+    if effective_conversation_logging(logging, snapshot.agent_conversation_logging)
+        == ConversationLoggingSetting::Disabled
+    {
+        return Ok(false); // A database cannot use a current Watch's LIVE receipt.
+    }
+    if !state
+        .conversation_capture_policy_lock
+        .background_admission_open()
+    {
+        return Err(std::io::Error::other(
+            "recent database admission waits for lifecycle boundary",
+        ));
+    }
+    let owner = &state.conversation_archive.chat_projection;
+    let source = chat_recent_database::Source::open(&path)?;
+    let receipt = owner.begin_recent_with_source(snapshot, runtime, Some(source.clone()))?;
+    let result = (|| {
+        let policy =
+            crate::state::conversation_archive::recent_native_time_policy(&snapshot.session_id)?;
+        let source_key = conversation_archive_context_from_snapshot(snapshot).provider_source_key;
+        let batch = chat_recent_database::opencode(&path, &native_session)?;
+        if batch.source != source {
+            return Err(std::io::Error::other(
+                "recent database source changed during acquisition",
+            ));
+        }
+        let mut headers = Vec::new();
+        for row in batch.rows {
+            let created = row
+                .part
+                .part_time_created
+                .or(row.part.message_time_created)
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|time| time.to_rfc3339());
+            // This native time/identity policy intentionally withholds an
+            // unresolved legacy-ID cutoff. No guessed sequence reaches it.
+            if !policy(source_key.as_deref(), created.as_deref()) {
+                continue;
+            }
+            let identity = format!("preview:{}:{}", receipt.0, row.key);
+            let Some(mut event) = opencode_db_part_to_chat_event_with_identity(
+                &snapshot.session_id,
+                &native_session,
+                None,
+                row.part,
+                None,
+                Some(identity),
+            )
+            .map_err(std::io::Error::other)?
+            else {
+                continue;
+            };
+            event.created_at = created;
+            normalize_chat_event_visible_text(&mut event);
+            if event.text.as_ref().is_none_or(|text| text.is_empty()) {
+                continue;
+            }
+            event.metadata["chat_recent_key"] =
+                serde_json::json!(format!("{}:{}", receipt.0, row.key));
+            event.metadata["chat_recent_version"] = serde_json::json!(row.version);
+            let mut header = crate::state::conversation_archive::chat_read::header(&event);
+            // These are the actual bounded native keys, not reconstructed
+            // canonical identities or a sequence in a truncated DB window.
+            for key in ["opencode_session_id", "part_id"] {
+                if let Some(value) = event.metadata.get(key) {
+                    header.metadata[key] = value.clone();
+                }
+            }
+            headers.push(header);
+        }
+        let (after, after_runtime) = chat_read_snapshot_for_state(state, &snapshot.session_id)
+            .map_err(std::io::Error::other)?;
+        if !Arc::ptr_eq(runtime, &after_runtime)
+            || !Arc::ptr_eq(&snapshot.watch_state, &after.watch_state)
+            || !state
+                .conversation_capture_policy_lock
+                .background_admission_open()
+            || !owner.publish_recent(&after, runtime, &receipt, headers)?
+        {
+            return Err(std::io::Error::other("recent database publication retired"));
+        }
+        let _metrics = batch.metrics;
+        Ok(true)
+    })();
+    if result.is_err() {
+        owner.abandon_recent(&receipt);
+    }
+    result
+}
+
+fn publish_antigravity_recent(
+    state: &AppState,
+    snapshot: &AgentArchiveCaptureSnapshot,
+    runtime: &Arc<Mutex<String>>,
+) -> std::io::Result<bool> {
+    use super::chat_recent_database;
+    let Some(session) = snapshot
+        .resume_session
+        .as_deref()
+        .or(snapshot.fresh_provider_session_id.as_deref())
+    else {
+        return Ok(false);
+    };
+    let Some(path) = snapshot
+        .log_path
+        .as_deref()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "db"))
+    else {
+        return Ok(false);
+    };
+    if path.file_stem().and_then(|stem| stem.to_str()) != Some(session) {
+        return Err(std::io::Error::other(
+            "recent Antigravity source session mismatch",
+        ));
+    }
+    let (logging, _) =
+        crate::utils::shell::recent_conversation_logging().map_err(std::io::Error::other)?;
+    if effective_conversation_logging(logging, snapshot.agent_conversation_logging)
+        == ConversationLoggingSetting::Disabled
+    {
+        return Ok(false);
+    }
+    if !state
+        .conversation_capture_policy_lock
+        .background_admission_open()
+    {
+        return Err(std::io::Error::other(
+            "recent Antigravity admission waits for lifecycle boundary",
+        ));
+    }
+    let owner = &state.conversation_archive.chat_projection;
+    let source = chat_recent_database::Source::open(path)?;
+    let receipt = owner.begin_recent_with_source(snapshot, runtime, Some(source.clone()))?;
+    let result = (|| {
+        let policy =
+            crate::state::conversation_archive::recent_native_time_policy(&snapshot.session_id)?;
+        let source_key = conversation_archive_context_from_snapshot(snapshot).provider_source_key;
+        let batch = chat_recent_database::antigravity(path, session)?;
+        if batch.source != source {
+            return Err(std::io::Error::other(
+                "recent Antigravity source changed during acquisition",
+            ));
+        }
+        let mut headers = Vec::new();
+        for row in batch.rows {
+            if !policy(source_key.as_deref(), None) {
+                continue;
+            }
+            let id = format!("preview:{}:{}", receipt.0, row.key);
+            let mut event = antigravity_database_event(
+                &snapshot.session_id,
+                &snapshot.provider,
+                path,
+                None,
+                row.message,
+                Some(id),
+            )
+            .map_err(std::io::Error::other)?;
+            normalize_chat_event_visible_text(&mut event);
+            if event.text.as_ref().is_none_or(|text| text.is_empty()) {
+                continue;
+            }
+            event.metadata["chat_recent_key"] =
+                serde_json::json!(format!("{}:{}", receipt.0, row.key));
+            event.metadata["chat_recent_version"] = serde_json::json!(row.version);
+            let mut header = crate::state::conversation_archive::chat_read::header(&event);
+            header.metadata["step_index"] = event.metadata["step_index"].clone();
+            headers.push(header);
+        }
+        let (after, after_runtime) = chat_read_snapshot_for_state(state, &snapshot.session_id)
+            .map_err(std::io::Error::other)?;
+        if !Arc::ptr_eq(runtime, &after_runtime)
+            || !Arc::ptr_eq(&snapshot.watch_state, &after.watch_state)
+            || !state
+                .conversation_capture_policy_lock
+                .background_admission_open()
+            || !owner.publish_recent(&after, runtime, &receipt, headers)?
+        {
+            return Err(std::io::Error::other(
+                "recent Antigravity publication retired",
+            ));
+        }
+        let _metrics = batch.metrics;
+        Ok(true)
+    })();
+    if result.is_err() {
+        owner.abandon_recent(&receipt);
+    }
+    result
+}
+
+#[cfg(all(test, windows))]
+pub(crate) fn capture_opencode_messages_for_test(
+    path: &std::path::Path,
+    agent: &str,
+    session: &str,
+) -> std::io::Result<(
+    Vec<AgentChatEvent>,
+    super::chat_recent_database::MessageAuthority,
+)> {
+    let capture = super::chat_recent_database::capture_opencode(path, agent, session)?;
+    Ok((capture.events, capture.authority))
+}
+
 #[cfg(test)]
 pub(crate) use tests::{
     archive_agent_chat_events_for_state, archive_agent_chat_events_until_stable_for_state,
+    load_agent_chat_page_with_revalidation_for_state,
 };
 
 /// Drains the closing provider log for a lifecycle boundary (New Session, fresh
@@ -1644,68 +2241,34 @@ fn load_antigravity_database_chat_events(
     provider: &str,
     path: &Path,
 ) -> Vec<AgentChatEvent> {
-    let Ok(messages) = AntigravityProvider::conversation_messages_from_database(path) else {
+    let Ok(messages) =
+        AntigravityProvider::conversation_native_messages_from_database_since(path, None)
+    else {
         return Vec::new();
     };
+    let native_source = super::chat_recent_database::Source::open(path).ok();
+    let native_session = path.file_stem().and_then(|stem| stem.to_str());
 
     let mut events: Vec<_> = messages
         .into_iter()
         .enumerate()
-        .map(|(index, message)| {
-            let mut event = AgentChatEvent {
-                id: String::new(),
-                session_id: session_id.to_string(),
-                provider: provider.to_string(),
-                kind: AgentChatEventKind::Message,
-                role: Some(message.role.clone()),
-                text: Some(message.text),
-                title: None,
-                status: None,
-                turn_id: Some(message.step_index.to_string()),
-                source: Some("conversation_database".to_string()),
-                command: None,
-                exit_code: None,
-                path: None,
-                language: None,
-                created_at: None,
-                sequence: Some(index as u64 + 1),
-                metadata: serde_json::json!({
-                    "provider_log": true,
-                    "log_source": "antigravity_conversation_database",
-                    "log_path": path.to_string_lossy(),
-                    "step_index": message.step_index,
-                }),
-            };
-            // Preserve the previous database message identity even when an
-            // explicit provider source corrects its display role below.
-            event.id = stable_provider_log_event_id(&event, path);
-            if message.role == AgentChatRole::User
-                && message.source.is_some_and(|source| source != 4)
-            {
-                event.role = Some(AgentChatRole::System);
+        .filter_map(|(index, native)| {
+            let step = native.message.step_index;
+            let mut event = antigravity_database_event(
+                session_id,
+                provider,
+                path,
+                Some(index as u64 + 1),
+                native.message,
+                None,
+            )
+            .ok()?;
+            if let (Some(source), Some(session)) = (&native_source, native_session) {
+                event.metadata["chat_recent_native_key"] =
+                    serde_json::json!(source.key("antigravity", session, &step.to_string()));
+                event.metadata["chat_recent_native_version"] = serde_json::json!(native.version);
             }
-            if let Some(source) = message.source {
-                event.metadata["provider_step_source"] = serde_json::json!(source);
-            }
-            if message.role == AgentChatRole::User {
-                // Only USER_MESSAGE steps reach this role. Source 4 is
-                // USER_EXPLICIT in paired provider SQLite/JSONL records.
-                // Retain the legacy fallback when source is unreported, but
-                // never promote an explicitly different source to a request.
-                let is_request = message.source.is_none_or(|source| source == 4);
-                event.metadata["input_origin"] = serde_json::json!(if is_request {
-                    "human_input"
-                } else {
-                    "provider_internal"
-                });
-                event.metadata["input_purpose"] =
-                    serde_json::json!(if is_request { "request" } else { "internal" });
-                event.metadata["context_observation"] = serde_json::json!("unreported");
-                if is_request {
-                    event.metadata["request_root_id"] = serde_json::json!(&event.id);
-                }
-            }
-            event
+            Some(event)
         })
         .collect();
     if let Ok(tools) =
@@ -1720,6 +2283,63 @@ fn load_antigravity_database_chat_events(
         event.sequence = Some(index as u64 + 1);
     }
     events
+}
+
+fn antigravity_database_event(
+    session_id: &str,
+    provider: &str,
+    path: &Path,
+    sequence: Option<u64>,
+    message: crate::providers::antigravity::AntigravityConversationMessage,
+    native_preview_id: Option<String>,
+) -> Result<AgentChatEvent, String> {
+    let mut event = AgentChatEvent {
+        id: String::new(),
+        session_id: session_id.to_owned(),
+        provider: provider.to_owned(),
+        kind: AgentChatEventKind::Message,
+        role: Some(message.role.clone()),
+        text: Some(message.text),
+        title: None,
+        status: None,
+        turn_id: Some(message.step_index.to_string()),
+        source: Some("conversation_database".into()),
+        command: None,
+        exit_code: None,
+        path: None,
+        language: None,
+        created_at: None,
+        sequence,
+        metadata: serde_json::json!({ "provider_log": true, "log_source": "antigravity_conversation_database",
+            "log_path": path.to_string_lossy(), "step_index": message.step_index }),
+    };
+    // Preserve the full producer's historical identity before role correction.
+    event.id = match (native_preview_id, sequence) {
+        (Some(identity), _) => identity,
+        (None, Some(_)) => stable_provider_log_event_id(&event, path),
+        (None, None) => return Err("Antigravity native identity is unavailable".into()),
+    };
+    if message.role == AgentChatRole::User && message.source.is_some_and(|source| source != 4) {
+        event.role = Some(AgentChatRole::System);
+    }
+    if let Some(source) = message.source {
+        event.metadata["provider_step_source"] = serde_json::json!(source);
+    }
+    if message.role == AgentChatRole::User {
+        let is_request = message.source.is_none_or(|source| source == 4);
+        event.metadata["input_origin"] = serde_json::json!(if is_request {
+            "human_input"
+        } else {
+            "provider_internal"
+        });
+        event.metadata["input_purpose"] =
+            serde_json::json!(if is_request { "request" } else { "internal" });
+        event.metadata["context_observation"] = serde_json::json!("unreported");
+        if is_request {
+            event.metadata["request_root_id"] = serde_json::json!(&event.id);
+        }
+    }
+    Ok(event)
 }
 
 fn hex_prefix(bytes: &[u8], len: usize) -> String {
@@ -1879,6 +2499,25 @@ fn load_opencode_db_chat_events_for_snapshot(
     )
 }
 
+fn load_opencode_db_capture_for_snapshot(
+    snapshot: &AgentArchiveCaptureSnapshot,
+) -> Option<super::chat_recent_database::FullOpenCodeCapture> {
+    if snapshot.provider != "opencode" {
+        return None;
+    }
+    let session = opencode_session_id(
+        &snapshot.session_id,
+        snapshot.resume_session.as_deref(),
+        snapshot.fresh_provider_session_id.as_deref(),
+    )?;
+    super::chat_recent_database::capture_opencode(
+        &opencode_database_path()?,
+        &snapshot.session_id,
+        &session,
+    )
+    .ok()
+}
+
 fn load_opencode_db_chat_events_from_db(
     db_path: &Path,
     wardian_session_id: &str,
@@ -1887,6 +2526,23 @@ fn load_opencode_db_chat_events_from_db(
     let conn =
         rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|err| err.to_string())?;
+    let recent_source = super::chat_recent_database::Source::open(db_path).ok();
+    project_opencode_database_connection(
+        &conn,
+        db_path,
+        wardian_session_id,
+        opencode_session_id,
+        recent_source.as_ref(),
+    )
+}
+
+pub(super) fn project_opencode_database_connection(
+    conn: &rusqlite::Connection,
+    db_path: &Path,
+    wardian_session_id: &str,
+    opencode_session_id: &str,
+    recent_source: Option<&super::chat_recent_database::Source>,
+) -> Result<Vec<AgentChatEvent>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT p.id, p.data, p.time_created, m.id, m.data, m.time_created
@@ -1915,6 +2571,10 @@ fn load_opencode_db_chat_events_from_db(
     let mut text_sequence = 0;
     for row in rows {
         let row = row.map_err(|err| err.to_string())?;
+        let recent_binding = recent_source.and_then(|source| {
+            super::chat_recent_database::opencode_part_binding(source, opencode_session_id, &row)
+                .ok()
+        });
         events.extend(opencode_tools::project(
             wardian_session_id,
             opencode_session_id,
@@ -1934,6 +2594,10 @@ fn load_opencode_db_chat_events_from_db(
             continue;
         };
         let mut event = event;
+        if let Some((key, version)) = recent_binding {
+            event.metadata["chat_recent_native_key"] = serde_json::json!(key);
+            event.metadata["chat_recent_native_version"] = serde_json::json!(version);
+        }
         // Keep legacy text IDs stable when previously omitted tool parts appear.
         text_sequence += 1;
         event.sequence = Some(events.len() as u64 + 1);
@@ -1961,13 +2625,13 @@ fn load_opencode_db_chat_events_from_db(
     Ok(events)
 }
 
-struct OpencodeDbPart {
-    part_id: String,
-    part_data: String,
-    part_time_created: Option<i64>,
-    message_id: String,
-    message_data: String,
-    message_time_created: Option<i64>,
+pub(super) struct OpencodeDbPart {
+    pub(super) part_id: String,
+    pub(super) part_data: String,
+    pub(super) part_time_created: Option<i64>,
+    pub(super) message_id: String,
+    pub(super) message_data: String,
+    pub(super) message_time_created: Option<i64>,
 }
 
 fn opencode_db_part_to_chat_event(
@@ -1976,6 +2640,24 @@ fn opencode_db_part_to_chat_event(
     sequence: u64,
     row: OpencodeDbPart,
     request_root_id: Option<&str>,
+) -> Result<Option<AgentChatEvent>, String> {
+    opencode_db_part_to_chat_event_with_identity(
+        wardian_session_id,
+        opencode_session_id,
+        Some(sequence),
+        row,
+        request_root_id,
+        None,
+    )
+}
+
+pub(super) fn opencode_db_part_to_chat_event_with_identity(
+    wardian_session_id: &str,
+    opencode_session_id: &str,
+    sequence: Option<u64>,
+    row: OpencodeDbPart,
+    request_root_id: Option<&str>,
+    native_preview_id: Option<String>,
 ) -> Result<Option<AgentChatEvent>, String> {
     let message: serde_json::Value =
         serde_json::from_str(&row.message_data).map_err(|err| err.to_string())?;
@@ -2043,11 +2725,15 @@ fn opencode_db_part_to_chat_event(
     };
 
     Ok(Some(AgentChatEvent {
-        id: event_id(
-            wardian_session_id,
-            sequence,
-            &format!("opencode_db:{}", row.part_id),
-        ),
+        id: match (native_preview_id, sequence) {
+            (Some(identity), _) => identity,
+            (None, Some(sequence)) => event_id(
+                wardian_session_id,
+                sequence,
+                &format!("opencode_db:{}", row.part_id),
+            ),
+            (None, None) => return Err("native database identity is unavailable".into()),
+        },
         session_id: wardian_session_id.to_string(),
         provider: "opencode".to_string(),
         kind: AgentChatEventKind::Message,
@@ -2062,7 +2748,7 @@ fn opencode_db_part_to_chat_event(
         path: None,
         language: None,
         created_at: None,
-        sequence: Some(sequence),
+        sequence,
         metadata,
     }))
 }
@@ -2991,6 +3677,103 @@ fn event_id(session_id: &str, sequence: u64, source: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    pub(crate) async fn load_agent_chat_page_with_revalidation_for_state(
+        state: &AppState,
+        session_id: String,
+        cursor: Option<String>,
+        revision: Option<String>,
+        detail_ref: Option<String>,
+        revalidate_ids: Option<Vec<String>>,
+    ) -> Result<wardian_core::models::chat::AgentChatPage, String> {
+        load_agent_chat_page_with_limit_for_state(
+            state,
+            session_id,
+            cursor,
+            revision,
+            detail_ref,
+            revalidate_ids,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn load_agent_chat_page_with_limit_for_state(
+        state: &AppState,
+        session_id: String,
+        cursor: Option<String>,
+        revision: Option<String>,
+        detail_ref: Option<String>,
+        revalidate_ids: Option<Vec<String>>,
+        recent_limit: Option<usize>,
+    ) -> Result<wardian_core::models::chat::AgentChatPage, String> {
+        load_agent_chat_page_with_recent_for_state(
+            state,
+            session_id,
+            cursor,
+            revision,
+            detail_ref,
+            revalidate_ids,
+            RecentChatRead {
+                limit: recent_limit,
+                preview: false,
+            },
+        )
+        .await
+    }
+
+    #[test]
+    fn recent_watch_canonical_binding_rejects_reused_legacy_id_from_another_cursor() {
+        let message = WatchTranscriptMessage {
+            role: "assistant".into(),
+            text: "current".into(),
+            provider: "mock".into(),
+            turn_id: None,
+            source: None,
+            provider_provenance: None,
+        };
+        let original = WatchTranscript {
+            cursor: "watch:01".into(),
+            messages: Vec::new(),
+            latest_text: String::new(),
+            truncated: false,
+            omitted_bytes: 0,
+        };
+        let mut actual = message_event_from_transcript("agent", "mock", 1, &message, &original);
+        let mut other = message_event_from_transcript(
+            "agent",
+            "mock",
+            1,
+            &WatchTranscriptMessage {
+                text: "different physical row".into(),
+                ..message
+            },
+            &WatchTranscript {
+                cursor: "watch:02".into(),
+                ..original.clone()
+            },
+        );
+        assert_eq!(
+            actual.id, other.id,
+            "the real mapper's legacy ordinal alone is insufficient"
+        );
+        let tags = RecentWatchTags {
+            rows: HashMap::from([(
+                actual.id.clone(),
+                ("owned-native-key".into(), "actual-version".into()),
+            )]),
+            cursor: Some(original.cursor),
+        };
+        tags.apply(std::slice::from_mut(&mut actual));
+        assert_eq!(actual.metadata["chat_recent_key"], "owned-native-key");
+        other.metadata["chat_recent_key"] = serde_json::json!("forged-key");
+        other.metadata["chat_recent_version"] = serde_json::json!("forged-version");
+        tags.apply(std::slice::from_mut(&mut other));
+        assert!(
+            other.metadata.get("chat_recent_key").is_none()
+                && other.metadata.get("chat_recent_version").is_none()
+        );
+    }
 
     pub(crate) async fn archive_agent_chat_events_for_state(
         state: &AppState,

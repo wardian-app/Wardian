@@ -79,6 +79,8 @@ export interface AgentChatPage {
     conversation_id: string | null;
     generation: string | null;
     source_epoch: string | null;
+    /** Trusted recent-preview owner, never canonical identity or renewal authority. */
+    recent_admission?: string | null;
     revision: string;
     events: AgentChatEvent[];
     next_before: string | null;

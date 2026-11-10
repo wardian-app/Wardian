@@ -4,6 +4,570 @@ use wardian_core::conversations::AgentConversationLoggingSetting;
 use wardian_core::models::chat::{AgentChatEventKind, AgentChatRole};
 
 #[test]
+fn recent_watch_cutoff_without_timestamp_or_recorded_identity_is_withheld() {
+    let policy = super::super::ConversationCaptureState {
+        skip_events_at_or_before: Some("2026-11-07T00:00:00Z".into()),
+        ..Default::default()
+    };
+    let observation = event(
+        "unproved-old-watch-id",
+        "must not resurrect before the cutoff",
+    );
+    assert!(
+        !policy.permits_recent_watch(&observation, None),
+        "a missing timestamp cannot turn an unrecorded old identity into a fresh live observation"
+    );
+}
+
+#[test]
+fn recent_native_time_policy_never_guesses_a_legacy_identity_or_unknown_cutoff() {
+    let mut policy = super::super::ConversationCaptureState::default();
+    assert!(policy.permits_recent_native_time(None, Some("2026-11-07T00:00:02Z")));
+    policy.skip_events_at_or_before = Some("2026-11-07T00:00:01Z".into());
+    assert!(!policy.permits_recent_native_time(None, None));
+    assert!(!policy.permits_recent_native_time(None, Some("malformed-time")));
+    assert!(!policy.permits_recent_native_time(None, Some("2026-11-07T00:00:01Z")));
+    assert!(policy.permits_recent_native_time(None, Some("2026-11-07T00:00:02Z")));
+    policy
+        .skip_event_ids
+        .push("unresolved-legacy-sequence-id".into());
+    assert!(!policy.permits_recent_native_time(None, Some("2026-11-07T00:00:02Z")),
+        "a later timestamp cannot resolve an explicit legacy-ID exclusion from a truncated native tail");
+}
+
+#[test]
+fn recent_owner_native_database_replacement_or_truncation_resets_without_old_data() {
+    let (_guard, temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".into()));
+    let path = temp.path().join("native.db");
+    fs::write(&path, b"controlled native extent").unwrap();
+    let anchor = crate::commands::chat_recent_database::Source::open(&path).unwrap();
+    let receipt = owner
+        .begin_recent_with_source(&source, &runtime, Some(anchor.clone()))
+        .unwrap();
+    let native_header = |receipt: &(String, u64), id: &str, text: &str| {
+        let mut row = event(id, text);
+        row.metadata["chat_recent_key"] = json!(format!("{}:{}", receipt.0, digest(id.as_bytes())));
+        row.metadata["chat_recent_version"] = json!(digest(text.as_bytes()));
+        row
+    };
+    owner
+        .publish_recent(
+            &source,
+            &runtime,
+            &receipt,
+            vec![native_header(&receipt, "native-row", "current")],
+        )
+        .unwrap();
+    let page = owner.recent_reader(source.clone(), runtime.clone(), None, 8)()
+        .unwrap()
+        .unwrap();
+    fs::rename(&path, temp.path().join("old.db")).unwrap();
+    fs::write(&path, b"controlled native extent").unwrap();
+    assert!(!owner
+        .publish_recent(
+            &source,
+            &runtime,
+            &receipt,
+            vec![event("late", "old native source")]
+        )
+        .unwrap());
+    let retired = owner.recent_reader(source.clone(), runtime.clone(), Some(page.revision), 8)()
+        .unwrap()
+        .unwrap();
+    assert!(retired.reset && retired.events.is_empty() && retired.recent_admission.is_none());
+    let next_anchor = crate::commands::chat_recent_database::Source::open(&path).unwrap();
+    let next = owner
+        .begin_recent_with_source(&source, &runtime, Some(next_anchor))
+        .unwrap();
+    assert_ne!(receipt.0, next.0);
+    owner
+        .publish_recent(
+            &source,
+            &runtime,
+            &next,
+            vec![native_header(&next, "new-native-row", "new")],
+        )
+        .unwrap();
+    File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+    let retired = owner.recent_reader(source, runtime, None, 8)()
+        .unwrap()
+        .unwrap();
+    assert!(retired.reset && retired.events.is_empty() && retired.recent_admission.is_none());
+}
+
+#[test]
+fn recent_owner_unpublished_admission_does_not_reappear_after_retirement() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".into()));
+    let first = owner.begin_recent(&source, &runtime).unwrap();
+    owner
+        .publish_recent(&source, &runtime, &first, vec![event("current", "current")])
+        .unwrap();
+    let old = owner.recent_reader(source.clone(), runtime.clone(), None, 8)()
+        .unwrap()
+        .unwrap();
+    owner.retire_recent(&source.session_id).unwrap();
+    let _failed_publication = owner.begin_recent(&source, &runtime).unwrap();
+    let retired = owner.recent_reader(source, runtime, Some(old.revision), 8)()
+        .unwrap()
+        .unwrap();
+    assert!(retired.reset && retired.events.is_empty() && retired.recent_admission.is_none());
+}
+
+#[test]
+fn recent_owner_handoff_requires_published_coverage_of_every_current_version() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".into()));
+    let receipt = owner.begin_recent(&source, &runtime).unwrap();
+    let mut events = (0..81)
+        .map(|index| event(&format!("canonical-{index}"), "actual body"))
+        .collect::<Vec<_>>();
+    let mut tags = HashMap::new();
+    for index in [0, 80] {
+        let key = format!("{}:native:{index}", receipt.0);
+        let version = format!("version-{index}");
+        tags.insert(events[index].id.clone(), (key.clone(), version.clone()));
+        events[index].metadata["chat_recent_key"] = json!(key);
+        events[index].metadata["chat_recent_version"] = json!(version);
+    }
+    let previews = [0, 80]
+        .into_iter()
+        .map(|index| {
+            let mut preview = events[index].clone();
+            preview.id = format!("preview-{index}");
+            preview
+        })
+        .collect();
+    owner
+        .publish_recent(&source, &runtime, &receipt, previews)
+        .unwrap();
+    owner.note_recent_coverage(&receipt, &tags).unwrap();
+    let first = owner.recent_reader(source.clone(), runtime.clone(), None, 8)()
+        .unwrap()
+        .unwrap();
+    assert!(owner.owns_recent_revision(Some(&first.revision)));
+    let mut pending = candidate(events);
+    pending.context = crate::commands::chat::conversation_archive_context_from_snapshot(&source);
+    owner.committed(pending, "current-capture".into()).unwrap();
+    assert!(
+        owner.recent_reader(
+            source.clone(),
+            runtime.clone(),
+            Some(first.revision.clone()),
+            8
+        )()
+        .unwrap()
+        .is_some(),
+        "queued or partially published candidate cannot retire the preview"
+    );
+    let mut complete = false;
+    for _ in 0..512 {
+        if !owner.advance("agent-1").unwrap() {
+            complete = true;
+            break;
+        }
+    }
+    assert!(
+        complete,
+        "controlled 81-row projection must finish within its existing test budget"
+    );
+    assert!(
+        owner.recent_reader(source.clone(), runtime.clone(), Some(first.revision), 8)()
+            .unwrap()
+            .is_none(),
+        "only actual published original IDs, keys and versions release the canonical read"
+    );
+    let next = owner.begin_recent(&source, &runtime).unwrap();
+    let mut edited = event("preview-edited", "edited native part");
+    edited.metadata["chat_recent_key"] = json!(format!("{}:native:80", next.0));
+    edited.metadata["chat_recent_version"] = json!("new-version");
+    let next_tags = HashMap::from([(
+        "canonical-80".into(),
+        (format!("{}:native:80", next.0), "new-version".into()),
+    )]);
+    owner
+        .publish_recent(&source, &runtime, &next, vec![edited])
+        .unwrap();
+    owner.note_recent_coverage(&next, &next_tags).unwrap();
+    assert!(
+        owner.recent_reader(source, runtime, None, 8)()
+            .unwrap()
+            .is_some(),
+        "old canonical version cannot cover a newer part edit"
+    );
+}
+
+#[test]
+fn recent_owner_selection_coalesces_until_actual_join_and_tracks_watch_cursor() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".to_string()));
+    let request = owner.request_recent(&source, &runtime).unwrap().unwrap();
+    assert!(owner.request_recent(&source, &runtime).unwrap().is_none());
+    let mut other = snapshot(&context());
+    other.session_id = "agent-other".into();
+    let second = owner.request_recent(&other, &runtime).unwrap().unwrap();
+    let mut third = snapshot(&context());
+    third.session_id = "agent-third".into();
+    assert_eq!(
+        owner.request_recent(&third, &runtime).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    owner.finish_recent_request("unrelated-nonce");
+    assert_eq!(
+        owner.request_recent(&third, &runtime).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    owner.finish_recent_request(&request);
+    let receipt = owner.begin_recent(&source, &runtime).unwrap();
+    owner
+        .publish_recent(
+            &source,
+            &runtime,
+            &receipt,
+            vec![event("current", "current")],
+        )
+        .unwrap();
+    owner
+        .note_recent_watch(&receipt, source.watch_state.lock().unwrap().latest_cursor())
+        .unwrap();
+    assert!(
+        owner.request_recent(&source, &runtime).unwrap().is_none(),
+        "unchanged Watch does not schedule a producer on every poll"
+    );
+    let next = owner.request_recent(&third, &runtime).unwrap().unwrap();
+    owner.finish_recent_request(&second);
+    owner.finish_recent_request(&next);
+    let guard = owner.recent_boundary(Some(&source.session_id)).unwrap();
+    assert!(owner.request_recent(&source, &runtime).unwrap().is_none());
+    drop(guard);
+    assert!(
+        owner.request_recent(&source, &runtime).unwrap().is_some(),
+        "retirement must not keep the old cursor coalescing fence"
+    );
+}
+
+#[test]
+fn recent_owner_pending_old_incarnation_cannot_release_replacement_work() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let old = snapshot(&context());
+    let current = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".to_string()));
+    let old_request = owner.request_recent(&old, &runtime).unwrap().unwrap();
+    let replacement = owner.request_recent(&current, &runtime).unwrap().unwrap();
+    assert_ne!(old_request, replacement);
+    owner.finish_recent_request(&old_request);
+    assert!(owner.request_recent(&current, &runtime).unwrap().is_none());
+    assert_eq!(owner.recent.lock().unwrap().pending.len(), 1);
+    owner.finish_recent_request(&replacement);
+    assert!(owner.recent.lock().unwrap().pending.is_empty());
+}
+
+#[test]
+fn recent_owner_older_same_scope_work_cannot_overwrite_newer_publication() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".to_string()));
+    let old = owner.begin_recent(&source, &runtime).unwrap();
+    let new = owner.begin_recent(&source, &runtime).unwrap();
+    assert_eq!(
+        old.0, new.0,
+        "ordinary work preserves the actual admission epoch"
+    );
+    assert!(new.1 > old.1);
+    assert!(owner
+        .publish_recent(&source, &runtime, &new, vec![event("new", "newer")])
+        .unwrap());
+    assert!(!owner
+        .publish_recent(&source, &runtime, &old, vec![event("old", "older")])
+        .unwrap());
+    let page = owner.recent_reader(source, runtime, None, 8)()
+        .unwrap()
+        .unwrap();
+    assert_eq!(page.events[0].id, "new");
+}
+
+#[test]
+fn recent_owner_privacy_guard_blocks_read_and_readmission_until_actual_end() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".to_string()));
+    let old = owner.begin_recent(&source, &runtime).unwrap();
+    owner
+        .publish_recent(&source, &runtime, &old, vec![event("old", "old")])
+        .unwrap();
+    let first = owner.recent_reader(source.clone(), runtime.clone(), None, 8)()
+        .unwrap()
+        .unwrap();
+    let boundary = owner.recent_boundary(Some("agent-1")).unwrap();
+    assert!(owner.begin_recent(&source, &runtime).is_err());
+    assert!(!owner
+        .publish_recent(&source, &runtime, &old, vec![event("late", "late")])
+        .unwrap());
+    let retired = owner.recent_reader(source.clone(), runtime.clone(), Some(first.revision), 8)()
+        .unwrap()
+        .unwrap();
+    assert!(retired.reset && retired.events.is_empty() && retired.recent_admission.is_none());
+    drop(boundary);
+    let new = owner.begin_recent(&source, &runtime).unwrap();
+    assert_ne!(new.0, old.0);
+    assert!(owner
+        .publish_recent(&source, &runtime, &new, vec![event("new", "new")])
+        .unwrap());
+    assert_eq!(
+        owner.recent_reader(source, runtime, None, 8)()
+            .unwrap()
+            .unwrap()
+            .events[0]
+            .id,
+        "new"
+    );
+}
+
+#[test]
+fn recent_owner_keeps_same_content_stable_and_retires_empty_without_ack() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".to_string()));
+    let admission = owner.begin_recent(&source, &runtime).unwrap();
+    assert!(owner
+        .publish_recent(&source, &runtime, &admission, vec![event("actual", "one")])
+        .unwrap());
+    let first = owner.recent_reader(source.clone(), runtime.clone(), None, 8)()
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.events.len(), 1);
+    assert!(
+        first.conversation_id.is_none()
+            && first.generation.is_none()
+            && first.source_epoch.is_none()
+    );
+    assert!(
+        first.next_before.is_none() && first.detail.is_none() && first.revalidated_ids.is_none()
+    );
+    assert!(first.aliases.is_empty() && first.removed_ids.is_empty());
+    assert!(owner
+        .publish_recent(&source, &runtime, &admission, vec![event("actual", "one")])
+        .unwrap());
+    let unchanged = owner.recent_reader(
+        source.clone(),
+        runtime.clone(),
+        Some(first.revision.clone()),
+        8,
+    )()
+    .unwrap()
+    .unwrap();
+    assert!(unchanged.unchanged && unchanged.events.is_empty());
+    assert_eq!(unchanged.revision, first.revision);
+    assert!(owner
+        .publish_recent(
+            &source,
+            &runtime,
+            &admission,
+            vec![event("actual", "edited")]
+        )
+        .unwrap());
+    let edited = owner.recent_reader(
+        source.clone(),
+        runtime.clone(),
+        Some(first.revision.clone()),
+        8,
+    )()
+    .unwrap()
+    .unwrap();
+    assert_ne!(edited.revision, first.revision);
+    assert_eq!(edited.events[0].text.as_deref(), Some("edited"));
+    owner.retire_recent(&source.session_id).unwrap();
+    let retired = owner.recent_reader(source.clone(), runtime.clone(), Some(edited.revision), 8)()
+        .unwrap()
+        .unwrap();
+    assert!(retired.reset && retired.events.is_empty() && retired.recent_admission.is_none());
+    assert!(!retired.unchanged && retired.revalidated_ids.is_none());
+    assert!(owner.recent_reader(source, runtime, None, 8)()
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn recent_owner_fences_same_source_different_runtime_watch_and_aba() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let a = snapshot(&context());
+    let runtime_a = Arc::new(Mutex::new("Idle".to_string()));
+    let old = owner.begin_recent(&a, &runtime_a).unwrap();
+    let b = snapshot(&context());
+    let runtime_b = Arc::new(Mutex::new("Idle".to_string()));
+    let new = owner.begin_recent(&b, &runtime_b).unwrap();
+    assert_ne!(
+        old.0, new.0,
+        "identical source keys do not identify a runtime"
+    );
+    assert!(!owner
+        .publish_recent(&a, &runtime_a, &old, vec![event("late", "old")])
+        .unwrap());
+    let back = owner.begin_recent(&a, &runtime_a).unwrap();
+    assert_ne!(
+        old.0, back.0,
+        "returning to the same actual Arcs never resurrects a retired epoch"
+    );
+    assert!(!owner
+        .publish_recent(&a, &runtime_a, &old, vec![event("late", "old")])
+        .unwrap());
+    assert!(owner
+        .publish_recent(&a, &runtime_a, &back, vec![event("current", "new")])
+        .unwrap());
+    assert!(owner.recent_reader(a.clone(), runtime_b, None, 8)()
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        owner.recent_reader(a.clone(), runtime_a.clone(), None, 8)()
+            .unwrap()
+            .unwrap()
+            .events[0]
+            .id,
+        "current",
+        "a delayed foreign read cannot retire the new owner"
+    );
+    let watch_replacement = snapshot(&context());
+    assert!(owner.recent_reader(watch_replacement, runtime_a, None, 8)()
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn recent_owner_policy_change_rejects_inflight_publication() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let source = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".to_string()));
+    let admission = owner.begin_recent(&source, &runtime).unwrap();
+    owner
+        .publish_recent(
+            &source,
+            &runtime,
+            &admission,
+            vec![event("original-id", "current")],
+        )
+        .unwrap();
+    let first = owner.recent_reader(source.clone(), runtime.clone(), None, 8)()
+        .unwrap()
+        .unwrap();
+    let mut policy = super::super::ConversationCaptureState::default();
+    policy.skip_event_ids.push("original-id".into());
+    super::super::storage::write_capture_state(&source.session_id, &policy).unwrap();
+    assert!(!owner
+        .publish_recent(&source, &runtime, &admission, vec![event("late", "old")])
+        .unwrap());
+    let retired = owner.recent_reader(source, runtime, Some(first.revision), 8)()
+        .unwrap()
+        .unwrap();
+    assert!(retired.events.is_empty() && retired.reset && retired.recent_admission.is_none());
+}
+
+#[test]
+fn recent_owner_reads_and_retires_before_busy_legacy_work() {
+    let (_guard, _temp) = isolated_home();
+    let owner = Arc::new(ProjectionOwner::default());
+    let source = snapshot(&context());
+    let runtime = Arc::new(Mutex::new("Idle".to_string()));
+    let admission = owner.begin_recent(&source, &runtime).unwrap();
+    owner
+        .publish_recent(&source, &runtime, &admission, vec![event("current", "new")])
+        .unwrap();
+    let read = owner.recent_reader(source, runtime, None, 8);
+    let work = owner.work.lock().unwrap();
+    let (send, recv) = std::sync::mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || send.send(read()).unwrap());
+    let observed = recv.recv_timeout(std::time::Duration::from_secs(1));
+    drop(work);
+    reader.join().unwrap();
+    assert!(observed
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .recent_admission
+        .is_some());
+    let work = owner.work.lock().unwrap();
+    let retiring = owner.clone();
+    let retire = std::thread::spawn(move || retiring.invalidate("agent-1"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let mut retired_before_release = false;
+    while std::time::Instant::now() < deadline {
+        if owner.recent.lock().unwrap().slots.is_empty() {
+            retired_before_release = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    drop(work);
+    retire.join().unwrap().unwrap();
+    assert!(
+        retired_before_release,
+        "retirement must precede waiting for old work"
+    );
+}
+
+#[test]
+fn recent_owner_resident_budget_evicts_to_safe_miss() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    let mut alive = Vec::new();
+    let mut first = None;
+    for index in 0..32 {
+        let mut source = snapshot(&context());
+        source.session_id = format!("resident-{index}");
+        let runtime = Arc::new(Mutex::new("Idle".to_string()));
+        let admission = owner.begin_recent(&source, &runtime).unwrap();
+        let rows = (0..80)
+            .map(|row| {
+                let mut item = event(&format!("row-{row}"), &"x".repeat(PREVIEW_BYTES));
+                item.session_id = source.session_id.clone();
+                item
+            })
+            .collect();
+        owner
+            .publish_recent(&source, &runtime, &admission, rows)
+            .unwrap();
+        if first.is_none() {
+            first = Some((source.clone(), runtime.clone()));
+        }
+        alive.push((source, runtime));
+        let recent = owner.recent.lock().unwrap();
+        assert!(
+            recent
+                .slots
+                .iter()
+                .map(|slot| 1 + slot.headers.len())
+                .sum::<usize>()
+                <= 512
+        );
+        assert!(recent.slots.iter().map(|slot| slot.charge).sum::<usize>() <= 1024 * 1024);
+    }
+    let (source, runtime) = first.unwrap();
+    assert!(owner.recent_reader(source, runtime, None, 8)()
+        .unwrap()
+        .is_none());
+    assert_eq!(alive.len(), 32);
+}
+
+#[test]
 fn display_headers_preserve_all_bounded_status_variants() {
     use wardian_core::models::chat::AgentChatStatus;
     for status in [
@@ -644,6 +1208,325 @@ fn recent_headers_publish_before_older_backfill_and_unchanged_poll_decodes_only_
     assert_eq!(older.events.len(), 70);
     assert_eq!(older.events.first().unwrap().id, "row-0");
     assert!(!older.reset);
+}
+
+#[test]
+fn recent_limit_reduces_serialized_headers_without_skipping_older_rows() {
+    let (_guard, _temp) = isolated_home();
+    let owner = ProjectionOwner::default();
+    owner
+        .committed(
+            candidate(
+                (0..150)
+                    .map(|index| event(&format!("row-{index}"), "preview"))
+                    .collect(),
+            ),
+            "limit-seal".into(),
+        )
+        .unwrap();
+    let ctx = context();
+    let snap = snapshot(&ctx);
+    let small =
+        read_with_revalidation_and_limit(&ctx, &snap, None, None, None, None, Some(8)).unwrap();
+    assert_eq!(small.events.len(), 8);
+    assert_eq!(small.events.first().unwrap().id, "row-142");
+    assert_eq!(small.events.last().unwrap().id, "row-149");
+    let unchanged = read_with_revalidation_and_limit(
+        &ctx,
+        &snap,
+        None,
+        Some(&small.revision),
+        None,
+        None,
+        Some(8),
+    )
+    .unwrap();
+    assert!(unchanged.unchanged && unchanged.events.is_empty());
+    let normal = read(&ctx, &snap, None, Some(&small.revision), None).unwrap();
+    assert!(!normal.unchanged);
+    assert_eq!(normal.events.len(), 80);
+    assert_ne!(normal.revision, small.revision);
+    let small_bytes = serde_json::to_vec(&small).unwrap().len();
+    let normal_bytes = serde_json::to_vec(&normal).unwrap().len();
+    eprintln!("CHAT_RECENT_SERIALIZED_BYTES limit8={small_bytes} default80={normal_bytes}");
+    assert!(small_bytes * 4 < normal_bytes);
+    owner.advance("agent-1").unwrap();
+    let mut ids = small
+        .events
+        .iter()
+        .map(|row| row.id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut cursor = small.next_before;
+    for _ in 0..4 {
+        let Some(before) = cursor.take() else {
+            break;
+        };
+        // A recent limit never truncates an Older response.
+        let older =
+            read_with_revalidation_and_limit(&ctx, &snap, Some(&before), None, None, None, Some(8))
+                .unwrap();
+        assert!(older.older_page);
+        for row in older.events {
+            assert!(ids.insert(row.id), "no skipped/duplicate page boundary");
+        }
+        assert_ne!(older.next_before.as_deref(), Some(before.as_str()));
+        cursor = older.next_before;
+    }
+    assert!(cursor.is_none());
+    assert_eq!(
+        ids,
+        (0..150)
+            .map(|index| format!("row-{index}"))
+            .collect::<BTreeSet<_>>()
+    );
+    for invalid in [0, 81, usize::MAX] {
+        assert!(read_with_revalidation_and_limit(
+            &ctx,
+            &snap,
+            None,
+            None,
+            None,
+            None,
+            Some(invalid)
+        )
+        .is_err());
+    }
+}
+
+#[test]
+fn recent_soft_limit_keeps_complete_physical_frames_and_certified_members() {
+    let mut rows = (0..12).map(|index| {
+        let mut row = event(&format!("member-{index}"), "same frame");
+        row.metadata = json!({"chat_source_epoch":"epoch", "chat_source_start":100, "chat_source_end":200});
+        row
+    }).collect::<Vec<_>>();
+    assert_eq!(recent_window_start(&rows, 8), 0);
+    rows.push(event("separate", "newest"));
+    assert_eq!(recent_window_start(&rows, 8), 0);
+    assert_eq!(recent_window_start(&rows, 1), 12);
+    let mut old = event("old-member", "equal text is not a relation");
+    old.metadata = json!({"chat_display_member_ids":["old-member", "new-member"]});
+    let mut new = event("new-member", "different body");
+    new.metadata = json!({"chat_display_member_ids":["old-member", "new-member"]});
+    assert_eq!(recent_window_start(&[old, new], 1), 0);
+}
+
+#[test]
+fn recent_native_window_tracks_actual_emitted_frontier_through_canonical_catchup() {
+    let (_guard, temp) = isolated_home();
+    let path = temp.path().join("recent-window.jsonl");
+    let frame = |index| {
+        format!(
+            "{}\n",
+            json!({"type":"event_msg","payload":{
+        "type":"user_message","message":format!("Declared native row {index}")}})
+        )
+    };
+    let contents = format!(
+        "{}\n{}",
+        json!({"type":"session_meta","payload":{"id":"one"}}),
+        (0..20).map(frame).collect::<String>()
+    );
+    let (snapshot, _) = owned_native_source(&path, &contents);
+    let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+    let archive = ConversationArchiveState::default();
+    // An archive append alone does not qualify a foreign provider's raw row
+    // as part of this owned native source. Keep the default-80 policy intact.
+    assert_eq!(
+        archive
+            .append_chat_events_with_context(
+                context.clone(),
+                &[event("foreign-raw", "Unqualified foreign row")]
+            )
+            .unwrap(),
+        1
+    );
+    let mut acquired = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        "agent-1",
+        "codex",
+        &path,
+        context.provider_source_key.as_deref().unwrap(),
+        None,
+        true,
+    )
+    .unwrap();
+    crate::commands::chat::decorate_forward_provider_log_events(
+        &mut acquired.events,
+        "codex",
+        &path,
+    );
+    archive
+        .append_verified_provider_log_batch_with_context(
+            context.clone(),
+            &acquired.events,
+            acquired.previous.as_ref(),
+            &acquired.next,
+            acquired.source_proof(),
+        )
+        .unwrap();
+    finish_source_index(&snapshot);
+    finish_projection(&archive);
+    let ordinary = read(&context, &snapshot, None, None, None).unwrap();
+    assert_eq!(ordinary.events.len(), 20);
+    assert!(!ordinary.events.iter().any(|row| row.id == "foreign-raw"));
+    let initial =
+        read_with_revalidation_and_limit(&context, &snapshot, None, None, None, None, Some(8))
+            .unwrap();
+    assert_eq!(
+        initial
+            .events
+            .iter()
+            .filter_map(|row| row.text.as_deref())
+            .collect::<Vec<_>>(),
+        (12..20)
+            .map(|index| format!("Declared native row {index}"))
+            .collect::<Vec<_>>()
+    );
+
+    let mut source = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    for index in 20..26 {
+        std::io::Write::write_all(&mut source, frame(index).as_bytes()).unwrap();
+    }
+    drop(source);
+    let pending =
+        read_with_revalidation_and_limit(&context, &snapshot, None, None, None, None, Some(8))
+            .unwrap();
+    assert_eq!(
+        pending
+            .events
+            .iter()
+            .filter_map(|row| row.text.as_deref())
+            .collect::<Vec<_>>(),
+        (18..26)
+            .map(|index| format!("Declared native row {index}"))
+            .collect::<Vec<_>>()
+    );
+
+    let mut source = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    for index in 26..36 {
+        std::io::Write::write_all(&mut source, frame(index).as_bytes()).unwrap();
+    }
+    drop(source);
+    let unpublished =
+        read_with_revalidation_and_limit(&context, &snapshot, None, None, None, None, Some(8))
+            .unwrap();
+    assert_eq!(
+        unpublished
+            .events
+            .iter()
+            .filter_map(|row| row.text.as_deref())
+            .collect::<Vec<_>>(),
+        (28..36)
+            .map(|index| format!("Declared native row {index}"))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        unpublished.next_before.is_none(),
+        "no cursor past headers not yet published"
+    );
+    assert_ne!(unpublished.progress, "ready");
+    assert!(unpublished.revalidated_ids.is_none());
+
+    let mut next = crate::commands::provider_log_acquisition::acquire_provider_log_batch(
+        "agent-1",
+        "codex",
+        &path,
+        context.provider_source_key.as_deref().unwrap(),
+        Some(acquired.next.clone()),
+        true,
+    )
+    .unwrap();
+    crate::commands::chat::decorate_forward_provider_log_events(&mut next.events, "codex", &path);
+    archive
+        .append_verified_provider_log_batch_with_context(
+            context.clone(),
+            &next.events,
+            next.previous.as_ref(),
+            &next.next,
+            next.source_proof(),
+        )
+        .unwrap();
+    finish_source_index(&snapshot);
+    finish_projection(&archive);
+    let current =
+        read_with_revalidation_and_limit(&context, &snapshot, None, None, None, None, Some(8))
+            .unwrap();
+    assert_eq!(current.events.len(), 8);
+    let mut rows = current
+        .events
+        .iter()
+        .filter_map(|row| row.text.clone())
+        .collect::<BTreeSet<_>>();
+    let mut cursor = current.next_before;
+    for _ in 0..3 {
+        let Some(before) = cursor.take() else {
+            break;
+        };
+        let older = read(&context, &snapshot, Some(&before), None, None).unwrap();
+        assert!(older.older_page);
+        for row in older.events {
+            assert!(
+                rows.insert(row.text.unwrap()),
+                "no skipped or duplicate native boundary"
+            );
+        }
+        assert_ne!(older.next_before.as_deref(), Some(before.as_str()));
+        cursor = older.next_before;
+    }
+    assert!(cursor.is_none());
+    let expected = (0..36)
+        .map(|index| format!("Declared native row {index}"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(rows, expected);
+}
+
+#[test]
+fn recent_complete_malformed_frames_retain_independent_proved_rows_without_gap_ack() {
+    for malformed in [b"{broken JSON}\n".as_slice(), b"\xff\n".as_slice()] {
+        let (_guard, temp) = isolated_home();
+        let path = temp.path().join("malformed-recent.jsonl");
+        let contents = format!(
+            "{}\n{}\n",
+            json!({"type":"session_meta","payload":{"id":"one"}}),
+            json!({"type":"event_msg","payload":{"type":"user_message","message":"Proved before gap"}})
+        );
+        let (snap, _) = owned_native_source(&path, &contents);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut file, malformed).unwrap();
+        std::io::Write::write_all(&mut file, format!("{}\n", json!({"type":"event_msg","payload":{"type":"user_message","message":"Independent after gap"}})).as_bytes()).unwrap();
+        drop(file);
+        let seed = crate::commands::chat_recent_seed::read(&snap, None).unwrap();
+        assert_eq!(seed.progress, "source_gap");
+        assert_eq!(seed.events.len(), 2);
+        assert_eq!(seed.events[0].text.as_deref(), Some("Proved before gap"));
+        assert_eq!(
+            seed.events[1].text.as_deref(),
+            Some("Independent after gap")
+        );
+        assert_ne!(seed.events[0].id, seed.events[1].id);
+        assert!(!seed.checkpoint.as_ref().unwrap().window_complete);
+        for row in &seed.events {
+            assert_eq!(
+                row.metadata["chat_source_ref"].as_str(),
+                Some(row.id.as_str())
+            );
+            assert!(row.metadata["chat_display_member_ids"].is_null());
+        }
+        let ctx = crate::commands::chat::conversation_archive_context_from_snapshot(&snap);
+        let page = read(&ctx, &snap, None, None, None).unwrap();
+        assert!(!page.events.is_empty());
+        assert!(page.revalidated_ids.is_none());
+        assert!(page.next_before.is_none());
+    }
 }
 
 #[test]
@@ -8168,6 +9051,116 @@ fn a_giant_unindexed_final_record_reports_progress_with_bounded_reads() {
 }
 
 #[test]
+fn recent_seed_preserves_commentary_before_a_complete_oversized_tool_output() {
+    let (_guard, temp) = isolated_home();
+    let path = temp.path().join("oversized-complete-tool-output.jsonl");
+    let pair_text = "A source-bound commentary observation.";
+    let output_line = serde_json::to_string(&json!({
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call_output",
+            "call_id": "oversized-complete-output",
+            "output": "x".repeat(17 * 1024),
+        }
+    }))
+    .unwrap();
+    assert!(output_line.len() > 16 * 1024);
+    assert!(output_line.len() < 128 * 1024);
+    assert!(serde_json::from_str::<serde_json::Value>(&output_line).is_ok());
+
+    let mut contents = format!(
+        "{}\n",
+        json!({"type":"session_meta","payload":{"id":"one"}})
+    );
+    let context_line = commentary_context_line();
+    contents.push_str(&context_line);
+    contents.push('\n');
+    let stream_line = commentary_stream_line_with_text(pair_text);
+    let stream_start = contents.len() as u64;
+    let stream_end = stream_start + stream_line.len() as u64 + 1;
+    contents.push_str(&stream_line);
+    contents.push('\n');
+    let item_line = commentary_item_line_with_text("msg-oversized-seed-mirror", pair_text);
+    let item_start = contents.len() as u64;
+    let item_end = item_start + item_line.len() as u64 + 1;
+    contents.push_str(&item_line);
+    contents.push('\n');
+    contents.push_str(&output_line);
+    contents.push('\n');
+    contents.push_str(
+        &json!({"type":"turn_context","payload":{"turn_id":"bookkeeping-after-oversized-output"}})
+            .to_string(),
+    );
+    contents.push('\n');
+    assert!(contents.len() < 128 * 1024);
+
+    let (snapshot, _) = owned_native_source(&path, &contents);
+    let (epoch, admission, extent, _, _) =
+        crate::commands::chat_recent_seed::source_scope_with_policy(&snapshot).unwrap();
+    let seed = crate::commands::chat_recent_seed::read(&snapshot, None).unwrap();
+    assert_eq!(seed.progress, "oversized_record");
+    assert!(seed.bytes_read < 2 * 1024 * 1024);
+    assert!(seed.records_decoded <= 84);
+    assert_eq!(seed.events.len(), 2);
+    let checkpoint = seed
+        .checkpoint
+        .as_ref()
+        .expect("the stable owned source retains its checkpoint");
+    assert_eq!(checkpoint.extent, extent);
+    assert_eq!(checkpoint.extent, contents.len() as u64);
+    assert_eq!(checkpoint.epoch, epoch);
+    assert_eq!(checkpoint.admission, admission);
+    assert!(!checkpoint.window_complete);
+    assert!(checkpoint.normalizer_complete);
+
+    for (source, start, end, native_turn_id) in [
+        ("event_msg", stream_start, stream_end, None),
+        (
+            "response_item",
+            item_start,
+            item_end,
+            Some("msg-oversized-seed-mirror"),
+        ),
+    ] {
+        let matching: Vec<_> = seed
+            .events
+            .iter()
+            .filter(|event| event.source.as_deref() == Some(source))
+            .collect();
+        assert_eq!(matching.len(), 1, "one retained {source} observation");
+        let event = matching[0];
+        let source_ref = event.metadata["chat_source_ref"]
+            .as_str()
+            .expect("the retained row has its source reference");
+        assert_eq!(event.id, source_ref);
+        assert_eq!(event.turn_id.as_deref(), native_turn_id);
+        assert_eq!(event.kind, AgentChatEventKind::Message);
+        assert_eq!(event.role, Some(AgentChatRole::Assistant));
+        assert_eq!(event.text.as_deref(), Some(pair_text));
+        assert_eq!(event.metadata["chat_source_start"].as_u64(), Some(start));
+        assert_eq!(event.metadata["chat_source_end"].as_u64(), Some(end));
+        assert_eq!(
+            event.metadata["chat_source_epoch"].as_str(),
+            Some(epoch.as_str())
+        );
+        assert_eq!(
+            event.metadata["chat_source_admission"].as_str(),
+            Some(admission.as_str())
+        );
+        assert_eq!(event.metadata["chat_provisional"], json!(true));
+        assert_eq!(
+            event.metadata["chat_identity_resolution"],
+            json!("unresolved")
+        );
+        assert_eq!(
+            event.metadata["provider_turn_id"].as_str(),
+            Some("commentary-provider-turn")
+        );
+        assert!(event.text.as_ref().unwrap().len() <= super::PREVIEW_BYTES);
+    }
+}
+
+#[test]
 fn ipc_trimming_keeps_recent_rows_and_continues_before_the_first_retained_key() {
     let (_guard, _temp) = isolated_home();
     let owner = ProjectionOwner::default();
@@ -8365,51 +9358,63 @@ fn source_older_falls_back_from_sparse_prefix_at_recent_physical_frontier() {
 
 #[test]
 fn older_seed_fallback_holds_its_cursor_at_an_unframed_gap() {
-    let (_guard, temp) = isolated_home();
-    let mut contents = format!(
-        "{}\n",
-        json!({"type":"session_meta","payload":{"id":"one"}})
-    );
-    for index in 0..300 {
-        if index == 150 {
-            contents.push_str("{malformed source record}\n");
+    for invalid_utf8 in [false, true] {
+        let (_guard, temp) = isolated_home();
+        let mut contents = format!(
+            "{}\n",
+            json!({"type":"session_meta","payload":{"id":"one"}})
+        );
+        for index in 0..300 {
+            if index == 150 {
+                contents.push_str("{malformed source record}\n");
+            }
+            contents.push_str(&native_message(&format!("gap-message-{index}")));
         }
-        contents.push_str(&native_message(&format!("gap-message-{index}")));
+        let (snapshot, _) = owned_native_source(&temp.path().join("gap-source.jsonl"), &contents);
+        if invalid_utf8 {
+            let marker = b"{malformed source record}";
+            let mut bytes = contents.as_bytes().to_vec();
+            let offset = bytes
+                .windows(marker.len())
+                .position(|row| row == marker)
+                .unwrap();
+            bytes[offset] = 0xff;
+            std::fs::write(temp.path().join("gap-source.jsonl"), bytes).unwrap();
+        }
+        let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
+        assert!(advance_source_index(&snapshot).unwrap());
+        finish_source_index(&snapshot);
+        assert!(!source_index_page(&snapshot).counts_complete);
+
+        let recent = read(&context, &snapshot, None, None, None).unwrap();
+        assert_eq!(recent.events.len(), 80);
+        assert_eq!(
+            recent.events.first().unwrap().text.as_deref(),
+            Some("gap-message-220")
+        );
+        let cursor = recent.next_before.clone().unwrap();
+        assert!(cursor.starts_with("source:"));
+
+        let older = read(
+            &context,
+            &snapshot,
+            Some(&cursor),
+            Some(&recent.revision),
+            None,
+        )
+        .unwrap();
+        let actual = older
+            .events
+            .iter()
+            .map(|event| event.text.as_deref().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        let expected = (150..220)
+            .map(|index| format!("gap-message-{index}"))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "invalid_utf8={invalid_utf8}");
+        assert_eq!(older.next_before.as_deref(), Some(cursor.as_str()));
+        assert!(!older.reset);
     }
-    let (snapshot, _) = owned_native_source(&temp.path().join("gap-source.jsonl"), &contents);
-    let context = crate::commands::chat::conversation_archive_context_from_snapshot(&snapshot);
-    assert!(advance_source_index(&snapshot).unwrap());
-    finish_source_index(&snapshot);
-    assert!(!source_index_page(&snapshot).counts_complete);
-
-    let recent = read(&context, &snapshot, None, None, None).unwrap();
-    assert_eq!(recent.events.len(), 80);
-    assert_eq!(
-        recent.events.first().unwrap().text.as_deref(),
-        Some("gap-message-220")
-    );
-    let cursor = recent.next_before.clone().unwrap();
-    assert!(cursor.starts_with("source:"));
-
-    let older = read(
-        &context,
-        &snapshot,
-        Some(&cursor),
-        Some(&recent.revision),
-        None,
-    )
-    .unwrap();
-    let actual = older
-        .events
-        .iter()
-        .map(|event| event.text.as_deref().unwrap().to_owned())
-        .collect::<Vec<_>>();
-    let expected = (150..220)
-        .map(|index| format!("gap-message-{index}"))
-        .collect::<Vec<_>>();
-    assert_eq!(actual, expected);
-    assert_eq!(older.next_before.as_deref(), Some(cursor.as_str()));
-    assert!(!older.reset);
 }
 
 #[test]
@@ -10260,4 +11265,33 @@ fn captured_shape_controlled_legacy_codex_final_answer_does_not_join() {
     assert!(!page.aliases.iter().any(|alias| {
         alias.observation_id == legacy.id && native_ids.contains(&alias.canonical_id)
     }));
+}
+
+pub(crate) fn read_with_revalidation(
+    context: &ConversationArchiveContext,
+    snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
+    cursor: Option<&str>,
+    revision: Option<&str>,
+    detail_ref: Option<&str>,
+    revalidate_ids: Option<&[String]>,
+) -> io::Result<AgentChatPage> {
+    read_with_revalidation_and_limit(
+        context,
+        snapshot,
+        cursor,
+        revision,
+        detail_ref,
+        revalidate_ids,
+        None,
+    )
+}
+
+pub(crate) fn read(
+    context: &ConversationArchiveContext,
+    snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
+    cursor: Option<&str>,
+    revision: Option<&str>,
+    detail_ref: Option<&str>,
+) -> io::Result<AgentChatPage> {
+    read_with_recent_limit(context, snapshot, cursor, revision, detail_ref, PAGE_ROWS)
 }

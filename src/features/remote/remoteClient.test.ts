@@ -2,6 +2,38 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { RemoteChatTimeoutError, RemoteRequestError, remoteClient } from "./remoteClient";
 
 describe("remoteClient error propagation", () => {
+  it("opts into preview only for explicit recent reads", async () => {
+    const fetcher = vi.fn().mockImplementation(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetcher);
+    await remoteClient.loadAgentChatPage("agent-1");
+    await remoteClient.loadAgentChatPage("agent-1", undefined, undefined, undefined, undefined, undefined, true);
+    await remoteClient.loadAgentChatPage("agent-1", "before", undefined, undefined, undefined, undefined, true);
+    await remoteClient.loadAgentChatPage("agent-1", undefined, undefined, "detail", undefined, undefined, true);
+    await remoteClient.loadAgentChatPage("agent-1", undefined, "revision", undefined, undefined, ["source:one"], true);
+    const queries = fetcher.mock.calls.map(([url]) => new URL(String(url), "https://fixture.test").searchParams);
+    expect(queries[0].has("recent_preview")).toBe(false);
+    expect(queries[1].get("recent_preview")).toBe("true");
+    expect(queries.slice(2).every((query) => !query.has("recent_preview"))).toBe(true);
+    expect(queries[2].get("before")).toBe("before");
+    expect(queries[3].get("detail")).toBe("detail");
+    expect(queries[4].get("revalidate_ids")).toBe('["source:one"]');
+  });
+  it("requests eight recent headers without limiting Older, detail, or renewal reads", async () => {
+    const fetcher = vi.fn().mockImplementation(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetcher);
+    await remoteClient.loadAgentChatPage("agent-1");
+    await remoteClient.loadAgentChatPage("agent-1", "opaque-before");
+    await remoteClient.loadAgentChatPage("agent-1", undefined, undefined, "opaque-detail");
+    await remoteClient.loadAgentChatPage("agent-1", undefined, "opaque-revision", undefined, undefined, ["actual-source"]);
+    const queries = fetcher.mock.calls.map(([url]) => new URL(String(url), "https://fixture.test").searchParams);
+    expect(queries[0].get("limit")).toBe("8");
+    expect(queries.slice(1).every((query) => !query.has("limit"))).toBe(true);
+    expect(queries[1].get("before")).toBe("opaque-before");
+    expect(queries[2].get("detail")).toBe("opaque-detail");
+    expect(queries[3].get("revision")).toBe("opaque-revision");
+    expect(queries[3].get("revalidate_ids")).toBe('["actual-source"]');
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
     remoteClient.setCsrfNonce(null);

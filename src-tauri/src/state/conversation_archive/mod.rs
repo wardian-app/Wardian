@@ -209,6 +209,24 @@ struct ConversationCaptureState {
     provider_log_sources: Vec<crate::commands::provider_log_acquisition::ProviderLogCaptureState>,
 }
 
+pub(crate) fn recent_watch_policy(
+    agent_id: &str,
+) -> io::Result<impl Fn(&AgentChatEvent, Option<&str>) -> bool> {
+    let (state, _) = storage::read_recent_capture_state(agent_id)?;
+    Ok(move |event: &AgentChatEvent, source: Option<&str>| {
+        state.permits_recent_watch(event, source)
+    })
+}
+
+pub(crate) fn recent_native_time_policy(
+    agent_id: &str,
+) -> io::Result<impl Fn(Option<&str>, Option<&str>) -> bool> {
+    let (state, _) = storage::read_recent_capture_state(agent_id)?;
+    Ok(move |source: Option<&str>, created: Option<&str>| {
+        state.permits_recent_native_time(source, created)
+    })
+}
+
 struct CapturePreparation<'a> {
     state: &'a mut ConversationCaptureState,
     previous: Option<&'a crate::commands::provider_log_acquisition::ProviderLogCaptureState>,
@@ -230,6 +248,87 @@ struct ConversationCaptureEventScope {
 }
 
 impl ConversationCaptureState {
+    fn permits_recent_native_time(&self, source: Option<&str>, created: Option<&str>) -> bool {
+        // A bounded native tail cannot reconstruct legacy sequence-derived
+        // identities. An unresolved identity exclusion therefore stays a miss.
+        if (source.is_none() && !self.skip_event_ids.is_empty())
+            || self.skip_event_scopes.iter().any(|scope| {
+                scope.provider_source_key.as_deref() == source && !scope.event_ids.is_empty()
+            })
+        {
+            return false;
+        }
+        let created = created
+            .map(chrono::DateTime::parse_from_rfc3339)
+            .transpose();
+        let Ok(created) = created else {
+            return false;
+        };
+        let after = |cutoff: Option<&str>| match cutoff {
+            None => true,
+            Some(cutoff) => created
+                .zip(chrono::DateTime::parse_from_rfc3339(cutoff).ok())
+                .is_some_and(|(created, cutoff)| created > cutoff),
+        };
+        if source.is_none() && !after(self.skip_events_at_or_before.as_deref()) {
+            return false;
+        }
+        if self.skip_event_scopes.iter().any(|scope| {
+            scope.provider_source_key.as_deref() == source
+                && (!after(scope.skip_events_at_or_before.as_deref())
+                    || scope.disabled_from.is_some())
+        }) {
+            return false;
+        }
+        !self.provider_log_sources.iter().any(|policy| {
+            Some(policy.provider_source_key.as_str()) == source
+                && (policy.unknown_before_offset.unwrap_or(0) > 0
+                    || !policy.disabled_spans.is_empty()
+                    || policy.open_disabled_from.is_some())
+        })
+    }
+
+    fn recent_policy_stamp(&self) -> io::Result<String> {
+        let sources = self
+            .provider_log_sources
+            .iter()
+            .map(|source| {
+                serde_json::json!({
+                    "key": source.provider_source_key, "identity": source.native_identity,
+                    "generation": source.policy_generation, "unknown": source.unknown_before_offset,
+                    "disabled": source.disabled_spans, "open": source.open_disabled_from,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(chat_read_store::digest(
+            &serde_json::to_vec(&serde_json::json!({
+                "cutoff": self.skip_events_at_or_before, "ids": self.skip_event_ids,
+                "scopes": self.skip_event_scopes, "sources": sources,
+            }))
+            .map_err(io::Error::other)?,
+        ))
+    }
+
+    fn permits_recent_watch(&self, event: &AgentChatEvent, source_key: Option<&str>) -> bool {
+        let undated_cutoff = event.created_at.is_none()
+            && ((source_key.is_none() && self.skip_events_at_or_before.is_some())
+                || self.skip_event_scopes.iter().any(|scope| {
+                    scope.provider_source_key.as_deref() == source_key
+                        && (scope.skip_events_at_or_before.is_some()
+                            || scope.disabled_from.is_some())
+                }));
+        // Apply the original identity first. Watch supplies no byte coordinates,
+        // so it cannot prove a native row lies beyond an excluded source span.
+        !undated_cutoff
+            && !self.should_skip_event(event, source_key)
+            && !self.provider_log_sources.iter().any(|source| {
+                Some(source.provider_source_key.as_str()) == source_key
+                    && (source.unknown_before_offset.unwrap_or(0) > 0
+                        || !source.disabled_spans.is_empty()
+                        || source.open_disabled_from.is_some())
+            })
+    }
+
     fn should_skip_event(&self, event: &AgentChatEvent, provider_source_key: Option<&str>) -> bool {
         let event_ids = event_identity_ids(event);
         let legacy_unscoped_match = provider_source_key.is_none()
@@ -291,6 +390,37 @@ impl ConversationCaptureState {
             .as_deref()
             .is_some_and(|created_at| created_at <= cutoff)
     }
+    /// A part born before a disabled interval may contain text written inside
+    /// it. Its creation time alone cannot admit a replacement aggregate body.
+    fn permits_native_message_refresh(&self, event: &AgentChatEvent, source: Option<&str>) -> bool {
+        !self.should_skip_event(event, source)
+            && self
+                .skip_event_scopes
+                .iter()
+                .filter(|scope| scope.provider_source_key.as_deref() == source)
+                .all(|scope| {
+                    if let Some(from) = scope.disabled_from.as_deref() {
+                        return scope
+                            .disabled_until
+                            .as_deref()
+                            .zip(event.created_at.as_deref())
+                            .and_then(|(until, created)| {
+                                Some((
+                                    chrono::DateTime::parse_from_rfc3339(from).ok()?,
+                                    chrono::DateTime::parse_from_rfc3339(until).ok()?,
+                                    chrono::DateTime::parse_from_rfc3339(created).ok()?,
+                                ))
+                            })
+                            .is_some_and(|(from, until, created)| {
+                                from <= until && created > until
+                            });
+                    }
+                    scope.skip_events_at_or_before.is_none()
+                        || event.created_at.as_deref().is_some_and(|created| {
+                            chrono::DateTime::parse_from_rfc3339(created).is_ok()
+                        })
+                })
+    }
 }
 
 fn timestamp_is_in_disabled_window(
@@ -326,6 +456,7 @@ impl ConversationArchiveState {
     /// emitted. This remains available when conversation logging is disabled,
     /// because live Chat still projects memory activity.
     pub fn begin_live_conversation(&self, agent_id: &str, started_at: &str) -> io::Result<()> {
+        let _recent_boundary = self.chat_projection.recent_boundary(Some(agent_id))?;
         let agent_id = agent_id.trim();
         let started_at = started_at.trim();
         if agent_id.is_empty() || started_at.is_empty() {
@@ -348,6 +479,15 @@ impl ConversationArchiveState {
             .map_err(|_| io::Error::other("live conversation boundary lock poisoned"))?
             .get(agent_id.trim())
             .cloned())
+    }
+
+    pub(crate) fn retire_live_conversation(&self, agent_id: &str) -> io::Result<()> {
+        let _boundary = self.chat_projection.recent_boundary(Some(agent_id))?;
+        self.live_started_at
+            .lock()
+            .map_err(|_| io::Error::other("live conversation boundary lock poisoned"))?
+            .remove(agent_id);
+        Ok(())
     }
 
     pub fn active_conversation_id(&self, agent_id: &str) -> io::Result<Option<String>> {
@@ -582,6 +722,24 @@ impl ConversationArchiveState {
         context: ConversationArchiveContext,
         events: &[AgentChatEvent],
     ) -> io::Result<usize> {
+        self.append_chat_events_bound(context, events, None)
+    }
+
+    pub(crate) fn append_chat_events_with_native_messages(
+        &self,
+        context: ConversationArchiveContext,
+        events: &[AgentChatEvent],
+        authority: &crate::commands::chat_recent_database::MessageAuthority,
+    ) -> io::Result<usize> {
+        self.append_chat_events_bound(context, events, Some(authority))
+    }
+
+    fn append_chat_events_bound(
+        &self,
+        context: ConversationArchiveContext,
+        events: &[AgentChatEvent],
+        authority: Option<&crate::commands::chat_recent_database::MessageAuthority>,
+    ) -> io::Result<usize> {
         if !events
             .iter()
             .any(|event| record_kind_from_chat_event_kind(&event.kind).is_some())
@@ -600,19 +758,15 @@ impl ConversationArchiveState {
         }
         let agent_lock = agent_lock_for(&self.agent_locks, &context.agent_id)?;
         let _agent_guard = lock_agent_archive(&agent_lock)?;
-        let (count, candidate) = self.append_chat_events_with_context_locked(context, events)?;
+        let (count, candidate) =
+            self.append_chat_events_prepared_locked(context, events, None, authority)?;
+        if let Some(authority) = authority {
+            authority.require_current()?;
+        }
         if let Some(candidate) = candidate {
             self.publish_chat_candidate(candidate)?;
         }
         Ok(count)
-    }
-
-    fn append_chat_events_with_context_locked(
-        &self,
-        context: ConversationArchiveContext,
-        events: &[AgentChatEvent],
-    ) -> io::Result<(usize, Option<chat_read::Candidate>)> {
-        self.append_chat_events_prepared_locked(context, events, None)
     }
 
     fn append_chat_events_prepared_locked(
@@ -620,6 +774,7 @@ impl ConversationArchiveState {
         mut context: ConversationArchiveContext,
         events: &[AgentChatEvent],
         capture: Option<CapturePreparation<'_>>,
+        native_messages: Option<&crate::commands::chat_recent_database::MessageAuthority>,
     ) -> io::Result<(usize, Option<chat_read::Candidate>)> {
         let recovering = if let Some(capture) = capture.as_ref() {
             compatibility_claims::pending(capture.state, &context.agent_id)?
@@ -644,6 +799,41 @@ impl ConversationArchiveState {
             context.provider_session_ids = provider_session_ids_from_events(events);
         }
         let capture_state = read_capture_state(&context.agent_id)?;
+        if let Some(authority) = native_messages {
+            authority.require_current()?;
+            if events
+                .iter()
+                .any(|event| authority.claims(event) && !authority.proves(&context, event))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "OpenCode message does not match its actual capture",
+                ));
+            }
+        }
+        let sanitized: Vec<_> = events
+            .iter()
+            .cloned()
+            .map(|mut event| {
+                // Generic provider/Watch strings cannot establish this binding.
+                if let Some(metadata) = event.metadata.as_object_mut() {
+                    metadata.remove(crate::commands::chat_recent_database::MESSAGE_CAPTURE_BINDING);
+                }
+                if let Some(authority) =
+                    native_messages.filter(|authority| authority.proves(&context, &event))
+                {
+                    if capture_state
+                        .permits_native_message_refresh(&event, provider_source_key.as_deref())
+                    {
+                        event.metadata
+                            [crate::commands::chat_recent_database::MESSAGE_CAPTURE_BINDING] =
+                            authority.binding(&event);
+                    }
+                }
+                event
+            })
+            .collect();
+        let events = sanitized.as_slice();
         let active_events = events
             .iter()
             .filter(|event| !capture_state.should_skip_event(event, provider_source_key.as_deref()))
@@ -660,6 +850,28 @@ impl ConversationArchiveState {
         let mut existing_records: Vec<ConversationNarrativeRecord> =
             read_jsonl_records(&conversation_path)?;
         let mut existing_events: Vec<AgentChatEvent> = read_jsonl_records(&events_path)?;
+        if let Some(authority) = native_messages {
+            for current in events
+                .iter()
+                .filter(|event| authority.proves(&context, event))
+            {
+                for old in existing_events.iter().filter(|old| old.id == current.id) {
+                    let known_key = old.metadata["chat_recent_native_key"].as_str();
+                    let bound = !old.metadata
+                        [crate::commands::chat_recent_database::MESSAGE_CAPTURE_BINDING]
+                        .is_null();
+                    if known_key.is_some_and(|key| {
+                        current.metadata["chat_recent_native_key"].as_str() != Some(key)
+                    }) || (bound && !authority.permits_refresh(old, current))
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "OpenCode archive observation changed native identity",
+                        ));
+                    }
+                }
+            }
+        }
         let before_compatibility_events = existing_events.clone();
         let (batch_events, compatibility_overlay) = if let Some(capture) = capture {
             #[cfg(test)]
@@ -742,6 +954,25 @@ impl ConversationArchiveState {
         let delivered_refreshed =
             provenance::bind_delivered_inputs(&mut existing_events, &existing_records)?;
         let mut events_refreshed = events_refreshed || delivered_refreshed;
+        let native_ids = if let Some(authority) = native_messages {
+            provenance::refresh_native_messages(
+                &mut existing_events,
+                &existing_records,
+                events,
+                authority,
+                &effective_context,
+                |event| {
+                    capture_state
+                        .permits_native_message_refresh(event, provider_source_key.as_deref())
+                        && before_refresh_events
+                            .iter()
+                            .filter(|old| old.id == event.id)
+                            .all(|old| authority.permits_refresh(old, event))
+                },
+            )?
+        } else {
+            HashSet::new()
+        };
         let observed = existing_events
             .iter()
             .filter(|event| {
@@ -752,6 +983,14 @@ impl ConversationArchiveState {
             .cloned()
             .collect::<Vec<_>>();
         provenance::refresh_records(&mut existing_records, &observed);
+        if native_messages.is_some() {
+            provenance::refresh_native_message_records(
+                &mut existing_records,
+                &existing_events,
+                events,
+                &native_ids,
+            );
+        }
         reconcile_codex_user_mirror_records(&mut existing_records, &mut existing_events)?;
         events_refreshed = events_refreshed || before_refresh_events != existing_events;
         for record in &mut existing_records {
@@ -764,7 +1003,7 @@ impl ConversationArchiveState {
             }
         }
         for event in &mut existing_events {
-            if provenance::completed_native_tool(event) {
+            if provenance::completed_native_tool(event) || native_ids.contains(&event.id) {
                 if let Some(record) = existing_records
                     .iter()
                     .find(|record| record.event_refs.contains(&event.id))
@@ -773,6 +1012,7 @@ impl ConversationArchiveState {
                 }
             }
         }
+        events_refreshed |= before_refresh_events != existing_events;
         let records_refreshed = before_refresh_records != existing_records;
         let refreshed = events_refreshed || records_refreshed;
         let mut changed_observation_ids = provenance::changed_observation_ids(
@@ -801,6 +1041,9 @@ impl ConversationArchiveState {
             Some(&durable_event_ids),
             &mut next_seq,
         )?;
+        if let Some(authority) = native_messages {
+            authority.require_current()?;
+        }
         if events_refreshed {
             write_jsonl_atomic(&events_path, &existing_events)?;
         }
@@ -1391,6 +1634,25 @@ impl ConversationArchiveState {
         next: &crate::commands::provider_log_acquisition::ProviderLogCaptureState,
         source_proof: Option<&crate::commands::provider_log_acquisition::ProviderLogSourceProof>,
     ) -> io::Result<usize> {
+        self.append_verified_provider_log_batch_with_native_messages(
+            context,
+            events,
+            expected,
+            next,
+            source_proof,
+            None,
+        )
+    }
+
+    pub(crate) fn append_verified_provider_log_batch_with_native_messages(
+        &self,
+        context: ConversationArchiveContext,
+        events: &[AgentChatEvent],
+        expected: Option<&crate::commands::provider_log_acquisition::ProviderLogCaptureState>,
+        next: &crate::commands::provider_log_acquisition::ProviderLogCaptureState,
+        source_proof: Option<&crate::commands::provider_log_acquisition::ProviderLogSourceProof>,
+        native_messages: Option<&crate::commands::chat_recent_database::MessageAuthority>,
+    ) -> io::Result<usize> {
         if events
             .iter()
             .any(|event| event.session_id != context.agent_id)
@@ -1406,6 +1668,20 @@ impl ConversationArchiveState {
                 "provider-log cursor source does not match archive context",
             ));
         }
+
+        let recent_policy_changed = expected.is_none_or(|old| {
+            old.native_identity != next.native_identity
+                || old.policy_generation != next.policy_generation
+                || old.unknown_before_offset != next.unknown_before_offset
+                || old.disabled_spans != next.disabled_spans
+                || old.open_disabled_from != next.open_disabled_from
+        });
+        let _recent_boundary = recent_policy_changed
+            .then(|| {
+                self.chat_projection
+                    .recent_boundary(Some(&context.agent_id))
+            })
+            .transpose()?;
 
         let agent_lock = agent_lock_for(&self.agent_locks, &context.agent_id)?;
         let _agent_guard = lock_agent_archive(&agent_lock)?;
@@ -1430,19 +1706,14 @@ impl ConversationArchiveState {
                 next,
                 source_proof,
             }),
+            native_messages,
         )?;
         if let Some(index) = current_index {
             capture_state.provider_log_sources[index] = next.clone();
         } else {
             capture_state.provider_log_sources.push(next.clone());
         }
-        let policy_changed = expected.is_none_or(|old| {
-            old.native_identity != next.native_identity
-                || old.policy_generation != next.policy_generation
-                || old.unknown_before_offset != next.unknown_before_offset
-                || old.disabled_spans != next.disabled_spans
-                || old.open_disabled_from != next.open_disabled_from
-        });
+        let policy_changed = recent_policy_changed;
         if policy_changed {
             chat_read::policy_barrier(&context.agent_id)?;
         }
@@ -1464,6 +1735,9 @@ impl ConversationArchiveState {
             return Err(io::Error::other(
                 "injected compatibility failure after cursor",
             ));
+        }
+        if let Some(authority) = native_messages {
+            authority.require_current()?;
         }
         if let Some(candidate) = candidate {
             self.publish_chat_candidate(candidate)?;
@@ -1812,6 +2086,7 @@ impl ConversationArchiveState {
         agent_id: &str,
         reason: ConversationBoundaryReason,
     ) -> io::Result<Option<String>> {
+        let _recent_boundary = self.chat_projection.recent_boundary(Some(agent_id))?;
         let agent_lock = agent_lock_for(&self.agent_locks, agent_id)?;
         let _agent_guard = lock_agent_archive(&agent_lock)?;
         let Some(handle) = lock_active(&self.active)?.get(agent_id).cloned() else {
@@ -1868,6 +2143,7 @@ impl ConversationArchiveState {
         provider_source_key: Option<&str>,
         events: &[AgentChatEvent],
     ) -> io::Result<Option<String>> {
+        let _recent_boundary = self.chat_projection.recent_boundary(Some(agent_id))?;
         let agent_lock = agent_lock_for(&self.agent_locks, agent_id)?;
         let _agent_guard = lock_agent_archive(&agent_lock)?;
         let removed = lock_active(&self.active)?
@@ -1940,6 +2216,9 @@ impl ConversationArchiveState {
         &self,
         context: ConversationArchiveContext,
     ) -> io::Result<()> {
+        let _recent_boundary = self
+            .chat_projection
+            .recent_boundary(Some(&context.agent_id))?;
         let Some(provider_source_key) = context.provider_source_key else {
             return Ok(());
         };

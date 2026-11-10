@@ -65,6 +65,9 @@ pub struct AgentChatPage {
     pub conversation_id: Option<String>,
     pub generation: Option<String>,
     pub source_epoch: Option<String>,
+    /// Trusted ephemeral recent-preview owner; grants no canonical or ACK authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent_admission: Option<String>,
     pub revision: String,
     pub events: Vec<AgentChatEvent>,
     pub next_before: Option<String>,

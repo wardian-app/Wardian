@@ -2002,3 +2002,390 @@ fn archive_only_roles_and_tail_replay_order_preserve_claude_contract() {
     assert_eq!(view[0].id, "old");
     assert_eq!(view[1].id, "new");
 }
+
+#[cfg(windows)]
+mod native_refresh {
+    use super::*;
+    use crate::commands::chat::capture_opencode_messages_for_test as capture;
+
+    fn database(path: &std::path::Path, body: &str) -> rusqlite::Connection {
+        let db = rusqlite::Connection::open(path).unwrap();
+        db.execute_batch("CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,data TEXT); CREATE TABLE part(id TEXT PRIMARY KEY,message_id TEXT,session_id TEXT,time_created INTEGER,data TEXT); INSERT INTO message VALUES('message','native-session',1000,'{\"role\":\"assistant\"}');").unwrap();
+        db.execute(
+            "INSERT INTO part VALUES('part','message','native-session',1000,?1)",
+            [serde_json::json!({"type":"text","text":body}).to_string()],
+        )
+        .unwrap();
+        db
+    }
+
+    fn update(db: &rusqlite::Connection, body: &str) {
+        db.execute(
+            "UPDATE part SET data=?1 WHERE id='part'",
+            [serde_json::json!({"type":"text","text":body}).to_string()],
+        )
+        .unwrap();
+    }
+
+    fn context() -> ConversationArchiveContext {
+        let mut context = ConversationArchiveContext::for_agent_id("native-refresh", "opencode");
+        context.provider_source_key = Some("opencode:session:native-session".into());
+        context.provider_session_ids = vec!["native-session".into()];
+        context
+    }
+
+    fn archive_dir(archive: &ConversationArchiveState) -> std::path::PathBuf {
+        conversation_dir(
+            "native-refresh",
+            &archive
+                .active_conversation_id("native-refresh")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn opencode_native_refresh_rejects_tampering_stale_capture_and_foreign_context() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let path = temp.path().join("native.db");
+        let db = database(&path, "original");
+        let archive = ConversationArchiveState::default();
+        let (old, old_proof) = capture(&path, "native-refresh", "native-session").unwrap();
+        archive
+            .append_chat_events_with_native_messages(context(), &old, &old_proof)
+            .unwrap();
+        let dir = archive_dir(&archive);
+        let before_event = std::fs::read(dir.join("events.jsonl")).unwrap();
+        let before_record = std::fs::read(dir.join("conversation.jsonl")).unwrap();
+        for field in [
+            "chat_recent_native_key",
+            "chat_recent_native_version",
+            "part_id",
+            "opencode_session_id",
+            "source_path",
+        ] {
+            let mut forged = old.clone();
+            forged[0].metadata.as_object_mut().unwrap().remove(field);
+            assert!(
+                archive
+                    .append_chat_events_with_native_messages(context(), &forged, &old_proof)
+                    .is_err(),
+                "missing {field}"
+            );
+        }
+        let mut forged = old.clone();
+        forged[0].text = Some("unobserved body".into());
+        assert!(archive
+            .append_chat_events_with_native_messages(context(), &forged, &old_proof)
+            .is_err());
+        let mut foreign = context();
+        foreign.provider_source_key = Some("opencode:session:other".into());
+        assert!(archive
+            .append_chat_events_with_native_messages(foreign, &old, &old_proof)
+            .is_err());
+        assert_eq!(
+            std::fs::read(dir.join("events.jsonl")).unwrap(),
+            before_event
+        );
+        assert_eq!(
+            std::fs::read(dir.join("conversation.jsonl")).unwrap(),
+            before_record
+        );
+        update(&db, "updated");
+        let (new, new_proof) = capture(&path, "native-refresh", "native-session").unwrap();
+        archive
+            .append_chat_events_with_native_messages(context(), &new, &new_proof)
+            .unwrap();
+        let final_event = std::fs::read(dir.join("events.jsonl")).unwrap();
+        assert_eq!(
+            archive
+                .append_chat_events_with_native_messages(context(), &old, &old_proof)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            std::fs::read(dir.join("events.jsonl")).unwrap(),
+            final_event
+        );
+        let stored = archive.chat_events_for_agent("native-refresh").unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].id, old[0].id);
+        assert_eq!(stored[0].text, new[0].text);
+        let previous: Vec<ConversationNarrativeRecord> = before_record
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        let records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&dir.join("conversation.jsonl")).unwrap();
+        assert_eq!(records[0].seq, previous[0].seq);
+        assert_eq!(records[0].at, previous[0].at);
+        assert_eq!(records[0].event_refs, previous[0].event_refs);
+        assert_eq!(records[0].source_refs, previous[0].source_refs);
+        assert_eq!(stored[0].created_at, old[0].created_at);
+        assert_eq!(stored[0].sequence, old[0].sequence);
+    }
+
+    #[test]
+    fn opencode_native_refresh_rejects_replaced_database_and_retains_unknown_legacy_body() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let path = temp.path().join("native.db");
+        let db = database(&path, "original");
+        let (old, proof) = capture(&path, "native-refresh", "native-session").unwrap();
+        let archive = ConversationArchiveState::default();
+        archive
+            .append_chat_events_with_native_messages(context(), &old, &proof)
+            .unwrap();
+        assert!(
+            std::fs::rename(&path, temp.path().join("cannot-replace.db")).is_err(),
+            "live native descriptor forbids replacement"
+        );
+        drop(proof);
+        drop(db);
+        std::fs::rename(&path, temp.path().join("retained-old.db")).unwrap();
+        let replacement = database(&path, "replacement");
+        let (new, replacement_proof) = capture(&path, "native-refresh", "native-session").unwrap();
+        assert_ne!(
+            old[0].metadata["chat_recent_native_key"],
+            new[0].metadata["chat_recent_native_key"]
+        );
+        let dir = archive_dir(&archive);
+        let before = std::fs::read(dir.join("events.jsonl")).unwrap();
+        assert!(archive
+            .append_chat_events_with_native_messages(context(), &new, &replacement_proof)
+            .is_err());
+        assert_eq!(std::fs::read(dir.join("events.jsonl")).unwrap(), before);
+        // Generic callers cannot launder even a copied real receipt into a
+        // durable native binding. Legacy observations remain unrewritable.
+        let legacy = ConversationArchiveState::default();
+        let other_home = temp.path().join("legacy-home");
+        std::env::set_var("WARDIAN_HOME", &other_home);
+        let mut forged = new.clone();
+        forged[0].metadata[crate::commands::chat_recent_database::MESSAGE_CAPTURE_BINDING] =
+            replacement_proof.binding(&new[0]);
+        legacy
+            .append_chat_events_with_context(context(), &forged)
+            .unwrap();
+        let saved = legacy.chat_events_for_agent("native-refresh").unwrap();
+        assert!(
+            saved[0].metadata[crate::commands::chat_recent_database::MESSAGE_CAPTURE_BINDING]
+                .is_null()
+        );
+        update(&replacement, "newer body cannot rewrite unknown legacy");
+        let (next, next_proof) = capture(&path, "native-refresh", "native-session").unwrap();
+        legacy
+            .append_chat_events_with_native_messages(context(), &next, &next_proof)
+            .unwrap();
+        let saved = legacy.chat_events_for_agent("native-refresh").unwrap();
+        assert_eq!(saved[0].text, new[0].text);
+        assert_eq!(
+            saved[0].metadata["chat_recent_native_version"],
+            new[0].metadata["chat_recent_native_version"]
+        );
+    }
+
+    #[test]
+    fn opencode_native_refresh_does_not_publish_disabled_interval_mutations() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let path = temp.path().join("native.db");
+        let db = database(&path, "captured before privacy boundary");
+        let archive = ConversationArchiveState::default();
+        let (old, proof) = capture(&path, "native-refresh", "native-session").unwrap();
+        archive
+            .append_chat_events_with_native_messages(context(), &old, &proof)
+            .unwrap();
+        drop(proof);
+        write_capture_state(
+            "native-refresh",
+            &ConversationCaptureState {
+                skip_event_scopes: vec![ConversationCaptureEventScope {
+                    provider_source_key: context().provider_source_key,
+                    disabled_from: Some("1970-01-01T00:00:02Z".into()),
+                    disabled_until: Some("1970-01-01T00:00:03Z".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        update(&db, "aggregate may contain disabled text");
+        db.execute("INSERT INTO part VALUES('later-part','message','native-session',4000,'{\"type\":\"text\",\"text\":\"new part after closed interval\"}')", []).unwrap();
+        let (new, proof) = capture(&path, "native-refresh", "native-session").unwrap();
+        archive
+            .append_chat_events_with_native_messages(context(), &new, &proof)
+            .unwrap();
+        let stored = archive.chat_events_for_agent("native-refresh").unwrap();
+        assert_eq!(stored.len(), 2);
+        let original = stored.iter().find(|event| event.id == old[0].id).unwrap();
+        assert_eq!(original.text, old[0].text);
+        assert_eq!(
+            original.metadata["chat_recent_native_version"],
+            old[0].metadata["chat_recent_native_version"]
+        );
+        assert_eq!(
+            stored
+                .iter()
+                .find(|event| event.metadata["part_id"] == "later-part")
+                .unwrap()
+                .text
+                .as_deref(),
+            Some("new part after closed interval")
+        );
+    }
+
+    #[test]
+    fn opencode_native_refresh_materializes_new_body_and_repairs_event_first_retry() {
+        let _guard = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("WARDIAN_HOME", temp.path());
+        let path = temp.path().join("native.db");
+        let old_body = format!("{}.", "original full body\n".repeat(2000));
+        let new_body = format!("{}.", "updated full body\n".repeat(2100));
+        assert_eq!(old_body.trim(), old_body);
+        assert_eq!(new_body.trim(), new_body);
+        let db = database(&path, &old_body);
+        let archive = ConversationArchiveState::default();
+        let (old, proof) = capture(&path, "native-refresh", "native-session").unwrap();
+        archive
+            .append_chat_events_with_native_messages(context(), &old, &proof)
+            .unwrap();
+        drop(proof);
+        let dir = archive_dir(&archive);
+        let stale = std::fs::read(dir.join("conversation.jsonl")).unwrap();
+        let old_records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&dir.join("conversation.jsonl")).unwrap();
+        assert_eq!(old_records[0].artifact_refs.len(), 1);
+        let old_artifact = dir.join("artifacts").join(&old_records[0].artifact_refs[0]);
+        update(&db, &new_body);
+        let (new, proof) = capture(&path, "native-refresh", "native-session").unwrap();
+        use std::os::windows::fs::OpenOptionsExt;
+        let held_narrative = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(dir.join("conversation.jsonl"))
+            .unwrap();
+        archive
+            .append_chat_events_with_native_messages(context(), &new, &proof)
+            .expect_err("narrative publication cannot replace an unshared-delete file");
+        assert_eq!(
+            std::fs::read(dir.join("conversation.jsonl")).unwrap(),
+            stale
+        );
+        let published_events: Vec<AgentChatEvent> =
+            read_jsonl_records(&dir.join("events.jsonl")).unwrap();
+        assert_eq!(
+            published_events[0].metadata["chat_recent_native_version"],
+            new[0].metadata["chat_recent_native_version"]
+        );
+        drop(held_narrative);
+        archive
+            .append_chat_events_with_native_messages(context(), &new, &proof)
+            .unwrap();
+        let final_records: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&dir.join("conversation.jsonl")).unwrap();
+        assert_eq!(final_records[0].artifact_refs.len(), 1);
+        assert_ne!(final_records[0].artifact_refs, old_records[0].artifact_refs);
+        let new_artifact = dir
+            .join("artifacts")
+            .join(&final_records[0].artifact_refs[0]);
+        assert_eq!(std::fs::read_to_string(&new_artifact).unwrap(), new_body);
+        assert_eq!(std::fs::read_to_string(old_artifact).unwrap(), old_body);
+        let repaired: Vec<ConversationNarrativeRecord> =
+            read_jsonl_records(&dir.join("conversation.jsonl")).unwrap();
+        assert_eq!(repaired, final_records);
+        let paths = [
+            dir.join("events.jsonl"),
+            dir.join("conversation.jsonl"),
+            new_artifact,
+        ];
+        let before: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                (
+                    std::fs::read(path).unwrap(),
+                    std::fs::metadata(path).unwrap().modified().unwrap(),
+                )
+            })
+            .collect();
+        let repeated = archive
+            .append_chat_events_with_native_messages(context(), &new, &proof)
+            .unwrap();
+        for (path, (bytes, modified)) in paths.iter().zip(before) {
+            let after = std::fs::read(path).unwrap();
+            let field_changes = || {
+                let first = |raw: &[u8]| {
+                    serde_json::from_slice::<serde_json::Value>(
+                        raw.split(|byte| *byte == b'\n').next().unwrap(),
+                    )
+                    .unwrap()
+                };
+                let prior = first(&bytes);
+                let next = first(&after);
+                prior
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .filter(|key| prior[*key] != next[*key])
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            assert!(
+                after == bytes,
+                "unchanged replay wrote {} fields {:?}",
+                path.file_name().unwrap().to_string_lossy(),
+                field_changes()
+            );
+            assert_eq!(
+                std::fs::metadata(path).unwrap().modified().unwrap(),
+                modified
+            );
+        }
+        assert_eq!(repeated, 0);
+        assert_eq!(std::fs::read_dir(dir.join("artifacts")).unwrap().count(), 2);
+    }
+}
+
+#[test]
+fn opencode_native_refresh_disabled_aggregate_requires_birth_after_closed_window() {
+    let source = Some("opencode:session:native-session");
+    let mut state = ConversationCaptureState {
+        skip_event_scopes: vec![ConversationCaptureEventScope {
+            provider_source_key: source.map(str::to_owned),
+            disabled_from: Some("2026-01-02T00:00:00Z".into()),
+            disabled_until: Some("2026-01-03T00:00:00Z".into()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut row = event("native-row", "opencode", None);
+    for created in [
+        None,
+        Some("invalid"),
+        Some("2026-01-01T00:00:00Z"),
+        Some("2026-01-02T12:00:00Z"),
+        Some("2026-01-03T00:00:00Z"),
+    ] {
+        row.created_at = created.map(str::to_owned);
+        assert!(!state.permits_native_message_refresh(&row, source));
+        assert!(!state.permits_recent_native_time(source, row.created_at.as_deref()));
+    }
+    row.created_at = Some("2026-01-04T00:00:00Z".into());
+    assert!(state.permits_native_message_refresh(&row, source));
+    // Recent partial DB reads deliberately keep their stricter historical fence.
+    assert!(!state.permits_recent_native_time(source, row.created_at.as_deref()));
+    for from in ["invalid", "2026-01-05T00:00:00Z"] {
+        state.skip_event_scopes[0].disabled_from = Some(from.into());
+        assert!(!state.permits_native_message_refresh(&row, source));
+    }
+    state.skip_event_scopes[0].disabled_from = Some("2026-01-02T00:00:00Z".into());
+    state.skip_event_scopes[0].disabled_until = None;
+    assert!(!state.permits_native_message_refresh(&row, source));
+}

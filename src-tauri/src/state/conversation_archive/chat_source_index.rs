@@ -1353,6 +1353,17 @@ pub(super) fn page(
     cursor: Option<&str>,
     previous: Option<&str>,
 ) -> io::Result<SourcePage> {
+    page_limited(snapshot, store, reference, cursor, previous, PAGE_ROWS)
+}
+
+pub(super) fn page_limited(
+    snapshot: &AgentArchiveCaptureSnapshot,
+    store: &mut Store,
+    reference: &str,
+    cursor: Option<&str>,
+    previous: Option<&str>,
+    limit: usize,
+) -> io::Result<SourcePage> {
     let (head, extent) = admitted_head(snapshot, store, reference)?;
     let counts_complete = coverage_complete(&head, extent);
     let mut reset = previous
@@ -1478,6 +1489,15 @@ pub(super) fn page(
         events.push(row.event);
     }
     events.reverse();
+    let start = super::chat_read::recent_window_start(&events, limit);
+    let next = if start > 0 {
+        events[start].metadata["chat_page_key"]
+            .as_str()
+            .map(|key| format!("source:{reference}:{key}"))
+    } else {
+        next
+    };
+    events.drain(..start);
     Ok(SourcePage {
         reference: reference.to_owned(),
         generation: head.generation,

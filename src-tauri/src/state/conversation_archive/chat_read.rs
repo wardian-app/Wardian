@@ -1,12 +1,12 @@
 //! The capture owner builds immutable display indexes in bounded checkpoints.
 //! Normal Chat never enters the archive gate or reads raw archive JSONL.
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 #[cfg(test)]
 use std::fs;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -390,8 +390,774 @@ impl BodySource {
 #[derive(Default)]
 pub(crate) struct ProjectionOwner {
     work: Mutex<HashMap<String, Work>>,
+    recent: Arc<Mutex<RecentSlots>>,
     #[cfg(test)]
     fail_checkpoint_stage: std::sync::atomic::AtomicU8,
+}
+
+struct RecentSlot {
+    agent_id: String,
+    runtime: Weak<Mutex<String>>,
+    watch: Weak<Mutex<crate::state::AgentWatchState>>,
+    scope: String,
+    request_scope: String,
+    watch_cursor: Option<String>,
+    admission: String,
+    issued: u64,
+    published: bool,
+    version: String,
+    headers: Vec<AgentChatEvent>,
+    coverage: Vec<RecentCoverage>,
+    native_source: Option<crate::commands::chat_recent_database::Source>,
+    charge: usize,
+}
+
+#[derive(Clone, Serialize)]
+struct RecentCoverage {
+    event_id: String,
+    key: String,
+    version: String,
+    native_key: Option<String>,
+}
+
+struct RecentSlots {
+    revision_owner: String,
+    slots: VecDeque<RecentSlot>,
+    boundaries: BTreeMap<String, u32>,
+    global_boundaries: u64,
+    pending: Vec<PendingRecent>,
+}
+
+struct PendingRecent {
+    agent_id: String,
+    runtime: Weak<Mutex<String>>,
+    watch: Weak<Mutex<crate::state::AgentWatchState>>,
+    nonce: String,
+}
+
+/// Keeps an actual privacy mutation fenced across its IO and error paths.
+/// It owns no work lock, source handle or provider payload.
+pub(crate) struct RecentBoundary {
+    recent: Arc<Mutex<RecentSlots>>,
+    agent_id: Option<String>,
+}
+
+impl Drop for RecentBoundary {
+    fn drop(&mut self) {
+        let Ok(mut recent) = self.recent.lock() else {
+            return;
+        };
+        if let Some(agent_id) = &self.agent_id {
+            recent.slots.retain(|slot| &slot.agent_id != agent_id);
+            if let Some(count) = recent.boundaries.get_mut(agent_id) {
+                *count -= 1;
+                if *count == 0 {
+                    recent.boundaries.remove(agent_id);
+                }
+            }
+        } else {
+            recent.slots.clear();
+            recent.global_boundaries -= 1;
+        }
+    }
+}
+
+impl Default for RecentSlots {
+    fn default() -> Self {
+        Self {
+            revision_owner: uuid::Uuid::new_v4().to_string(),
+            slots: VecDeque::new(),
+            boundaries: BTreeMap::new(),
+            global_boundaries: 0,
+            pending: Vec::new(),
+        }
+    }
+}
+
+fn recent_scope(
+    snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
+) -> io::Result<(String, usize)> {
+    let (policy, policy_bytes) = super::storage::read_recent_capture_state(&snapshot.session_id)?;
+    let (global_logging, logging_bytes) =
+        crate::utils::shell::recent_conversation_logging().map_err(io::Error::other)?;
+    let live = snapshot
+        .watch_state
+        .lock()
+        .map_err(|_| io::Error::other("recent watch poisoned"))?
+        .live_chat_boundary()
+        .cloned()
+        .filter(|_| {
+            super::effective_conversation_logging(
+                global_logging,
+                snapshot.agent_conversation_logging,
+            ) == wardian_core::conversations::ConversationLoggingSetting::Disabled
+        });
+    let native = snapshot
+        .log_path
+        .as_deref()
+        .map(|path| {
+            if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+                return Err(io::Error::other("linked recent source"));
+            }
+            crate::commands::provider_log_acquisition::native_file_identity(&File::open(path)?)
+        })
+        .transpose()?;
+    Ok((digest(&serde_json::to_vec(&json!({
+        "provider": snapshot.provider, "resume": snapshot.resume_session,
+        "fresh": snapshot.fresh_provider_session_id, "cleared": snapshot.cleared_provider_sessions,
+        "path": snapshot.log_path, "native": native, "logging": snapshot.agent_conversation_logging,
+        // Disabled durable capture records every observed ID/cutoff. A proven
+        // fresh Watch has a separate LIVE purpose and no durable capability.
+        "policy": if let Some(boundary) = live { json!({ "live_watch": boundary }) } else { json!(policy.recent_policy_stamp()?) },
+        "global_logging": global_logging,
+    })).map_err(io::Error::other)?), policy_bytes + logging_bytes))
+}
+
+fn recent_request_scope(
+    snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
+) -> io::Result<String> {
+    Ok(digest(&serde_json::to_vec(&json!({
+        "provider": snapshot.provider, "resume": snapshot.resume_session,
+        "fresh": snapshot.fresh_provider_session_id, "cleared": snapshot.cleared_provider_sessions,
+        "path": snapshot.log_path, "logging": snapshot.agent_conversation_logging,
+    })).map_err(io::Error::other)?))
+}
+
+impl ProjectionOwner {
+    pub(crate) fn recent_boundary(&self, agent_id: Option<&str>) -> io::Result<RecentBoundary> {
+        let mut recent = self
+            .recent
+            .lock()
+            .map_err(|_| io::Error::other("recent owner poisoned"))?;
+        // Reserve one control entry for a global fence. At extreme concurrent
+        // boundary pressure, withholding every preview is the safe fallback.
+        let agent_id = agent_id.filter(|agent| {
+            agent.len() <= 256
+                && (recent.boundaries.contains_key(*agent) || recent.boundaries.len() < 509)
+        });
+        if let Some(agent) = agent_id {
+            recent.slots.retain(|slot| slot.agent_id != agent);
+            let count = recent.boundaries.entry(agent.to_owned()).or_default();
+            *count = count
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("recent boundary count exhausted"))?;
+        } else {
+            recent.slots.clear();
+            recent.global_boundaries = recent
+                .global_boundaries
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("recent global boundary count exhausted"))?;
+        }
+        trim_recent_slots(&mut recent);
+        Ok(RecentBoundary {
+            recent: self.recent.clone(),
+            agent_id: agent_id.map(str::to_owned),
+        })
+    }
+
+    /// Admit before old archive work. The token fences IO finishing after a
+    /// runtime, Watch, source or privacy retirement, including A-B-A changes.
+    pub(crate) fn begin_recent_with_source(
+        &self,
+        snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
+        runtime: &Arc<Mutex<String>>,
+        native_source: Option<crate::commands::chat_recent_database::Source>,
+    ) -> io::Result<(String, u64)> {
+        if native_source
+            .as_ref()
+            .is_some_and(|source| !source.valid().unwrap_or(false))
+        {
+            return Err(io::Error::other("recent native source retired"));
+        }
+        if snapshot.session_id.len() > 256 {
+            return Err(io::Error::other("recent agent identity exceeds byte limit"));
+        }
+        let (scope, _) = recent_scope(snapshot)?;
+        let mut recent = self
+            .recent
+            .lock()
+            .map_err(|_| io::Error::other("recent owner poisoned"))?;
+        if recent.global_boundaries > 0 || recent.boundaries.contains_key(&snapshot.session_id) {
+            return Err(io::Error::other("recent privacy boundary pending"));
+        }
+        if let Some(slot) = recent
+            .slots
+            .iter_mut()
+            .find(|slot| slot.agent_id == snapshot.session_id)
+        {
+            if slot.scope == scope
+                && slot.native_source == native_source
+                && slot.runtime.ptr_eq(&Arc::downgrade(runtime))
+                && slot.watch.ptr_eq(&Arc::downgrade(&snapshot.watch_state))
+            {
+                slot.issued = slot
+                    .issued
+                    .checked_add(1)
+                    .ok_or_else(|| io::Error::other("recent issue exhausted"))?;
+                return Ok((slot.admission.clone(), slot.issued));
+            }
+        }
+        recent
+            .slots
+            .retain(|slot| slot.agent_id != snapshot.session_id);
+        let admission = uuid::Uuid::new_v4().to_string();
+        recent.slots.push_back(RecentSlot {
+            agent_id: snapshot.session_id.clone(),
+            runtime: Arc::downgrade(runtime),
+            watch: Arc::downgrade(&snapshot.watch_state),
+            scope,
+            request_scope: recent_request_scope(snapshot)?,
+            watch_cursor: None,
+            admission: admission.clone(),
+            issued: 1,
+            published: false,
+            version: digest(b"empty"),
+            headers: Vec::new(),
+            coverage: Vec::new(),
+            charge: 1024
+                + snapshot.session_id.len()
+                + 100
+                + serde_json::to_vec(&native_source)
+                    .map_err(io::Error::other)?
+                    .len(),
+            native_source,
+        });
+        trim_recent_slots(&mut recent);
+        Ok((admission, 1))
+    }
+
+    pub(crate) fn abandon_recent(&self, receipt: &(String, u64)) {
+        if let Ok(mut recent) = self.recent.lock() {
+            recent
+                .slots
+                .retain(|slot| slot.admission != receipt.0 || slot.issued != receipt.1);
+        }
+    }
+
+    pub(crate) fn has_recent_native(
+        &self,
+        snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
+        runtime: &Arc<Mutex<String>>,
+    ) -> bool {
+        self.recent.lock().is_ok_and(|recent| {
+            recent.slots.iter().any(|slot| {
+                slot.agent_id == snapshot.session_id
+                    && slot
+                        .native_source
+                        .as_ref()
+                        .is_some_and(|source| source.is_database())
+                    && slot.runtime.ptr_eq(&Arc::downgrade(runtime))
+                    && slot.watch.ptr_eq(&Arc::downgrade(&snapshot.watch_state))
+            })
+        })
+    }
+
+    /// Selection dispatch performs no source IO or body decoding. A pending
+    /// request is released only after its actual blocking job joins.
+    pub(crate) fn request_recent(
+        &self,
+        snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
+        runtime: &Arc<Mutex<String>>,
+    ) -> io::Result<Option<String>> {
+        if snapshot.session_id.len() > 256 {
+            return Err(io::Error::other("recent agent identity exceeds byte limit"));
+        }
+        let scope = recent_request_scope(snapshot)?;
+        let cursor = snapshot
+            .watch_state
+            .try_lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "recent watch busy"))?
+            .latest_cursor();
+        let mut recent = self
+            .recent
+            .lock()
+            .map_err(|_| io::Error::other("recent owner poisoned"))?;
+        if recent.global_boundaries > 0 || recent.boundaries.contains_key(&snapshot.session_id) {
+            return Ok(None);
+        }
+        if recent.pending.iter().any(|pending| {
+            pending.agent_id == snapshot.session_id
+                && pending.runtime.ptr_eq(&Arc::downgrade(runtime))
+                && pending.watch.ptr_eq(&Arc::downgrade(&snapshot.watch_state))
+        }) {
+            return Ok(None);
+        }
+        let database_provider = matches!(snapshot.provider.as_str(), "opencode" | "antigravity");
+        if !database_provider
+            && recent.slots.iter().any(|slot| {
+                slot.agent_id == snapshot.session_id
+                    && slot.runtime.ptr_eq(&Arc::downgrade(runtime))
+                    && slot.watch.ptr_eq(&Arc::downgrade(&snapshot.watch_state))
+                    && slot.request_scope == scope
+                    && slot.watch_cursor.as_deref() == Some(cursor.as_str())
+            })
+        {
+            return Ok(None);
+        }
+        if recent.pending.len() >= 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "recent producer capacity busy",
+            ));
+        }
+        let nonce = uuid::Uuid::new_v4().to_string();
+        recent.pending.push(PendingRecent {
+            agent_id: snapshot.session_id.clone(),
+            runtime: Arc::downgrade(runtime),
+            watch: Arc::downgrade(&snapshot.watch_state),
+            nonce: nonce.clone(),
+        });
+        trim_recent_slots(&mut recent);
+        Ok(Some(nonce))
+    }
+
+    pub(crate) fn finish_recent_request(&self, nonce: &str) {
+        if let Ok(mut recent) = self.recent.lock() {
+            recent.pending.retain(|pending| pending.nonce != nonce);
+        }
+    }
+
+    pub(crate) fn note_recent_watch(
+        &self,
+        receipt: &(String, u64),
+        cursor: String,
+    ) -> io::Result<()> {
+        let mut recent = self
+            .recent
+            .lock()
+            .map_err(|_| io::Error::other("recent owner poisoned"))?;
+        if let Some(slot) = recent
+            .slots
+            .iter_mut()
+            .find(|slot| slot.admission == receipt.0 && slot.issued == receipt.1)
+        {
+            slot.watch_cursor = Some(cursor);
+        }
+        Ok(())
+    }
+
+    /// The normal publisher supplies original mapper identities. The cache
+    /// never derives canonical identities from preview IDs or body text.
+    pub(crate) fn note_recent_coverage(
+        &self,
+        receipt: &(String, u64),
+        tags: &HashMap<String, (String, String)>,
+    ) -> io::Result<()> {
+        let mut recent = self
+            .recent
+            .lock()
+            .map_err(|_| io::Error::other("recent owner poisoned"))?;
+        if let Some(slot) = recent
+            .slots
+            .iter_mut()
+            .find(|slot| slot.admission == receipt.0 && slot.issued == receipt.1)
+        {
+            let mut coverage = Vec::new();
+            for header in &slot.headers {
+                let mut matching = tags.iter().filter(|(_, (key, version))| {
+                    header.metadata["chat_recent_key"].as_str() == Some(key.as_str())
+                        && header.metadata["chat_recent_version"].as_str() == Some(version.as_str())
+                });
+                let Some((id, (key, version))) = matching.next() else {
+                    return Ok(());
+                };
+                if matching.next().is_some() {
+                    return Ok(());
+                }
+                if id.len() > 512 {
+                    return Ok(());
+                }
+                coverage.push(RecentCoverage {
+                    event_id: id.clone(),
+                    key: key.clone(),
+                    version: version.clone(),
+                    native_key: None,
+                });
+            }
+            let bytes = serde_json::to_vec(&coverage)
+                .map_err(io::Error::other)?
+                .len();
+            slot.charge = slot.charge.saturating_sub(
+                serde_json::to_vec(&slot.coverage)
+                    .map_err(io::Error::other)?
+                    .len(),
+            ) + bytes;
+            slot.coverage = coverage;
+        }
+        trim_recent_slots(&mut recent);
+        Ok(())
+    }
+
+    pub(crate) fn owns_recent_revision(&self, revision: Option<&str>) -> bool {
+        self.recent.lock().is_ok_and(|recent| {
+            revision.is_some_and(|revision| {
+                revision.starts_with(&format!("recent:{}:", recent.revision_owner))
+            })
+        })
+    }
+
+    /// Only the still-current producer token may publish. No provider IO or
+    /// archive/projection work lock is held while touching this short mutex.
+    pub(crate) fn publish_recent(
+        &self,
+        snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
+        runtime: &Arc<Mutex<String>>,
+        receipt: &(String, u64),
+        headers: Vec<AgentChatEvent>,
+    ) -> io::Result<bool> {
+        let (admission, issued) = receipt;
+        let native_source = self
+            .recent
+            .lock()
+            .map_err(|_| io::Error::other("recent owner poisoned"))?
+            .slots
+            .iter()
+            .find(|slot| slot.admission == *admission && slot.issued == *issued)
+            .and_then(|slot| slot.native_source.clone());
+        if native_source
+            .as_ref()
+            .is_some_and(|source| !source.valid().unwrap_or(false))
+        {
+            return Ok(false);
+        }
+        let (scope, _) = recent_scope(snapshot)?;
+        if headers.len() > PAGE_ROWS
+            || headers
+                .iter()
+                .map(|event| &event.id)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != headers.len()
+            || headers.iter().any(|event| {
+                event.id.is_empty()
+                    || event.session_id != snapshot.session_id
+                    || event.provider != snapshot.provider
+                    || event
+                        .text
+                        .as_ref()
+                        .is_some_and(|text| text.len() > PREVIEW_BYTES)
+            })
+        {
+            return Err(io::Error::other("invalid recent header cohort"));
+        }
+        let bytes = serde_json::to_vec(&headers).map_err(io::Error::other)?;
+        let coverage = if native_source
+            .as_ref()
+            .is_some_and(|source| source.is_database())
+        {
+            headers
+                .iter()
+                .map(|header| {
+                    let key = header.metadata["chat_recent_key"]
+                        .as_str()
+                        .unwrap_or_default();
+                    let native_key = key
+                        .strip_prefix(&format!("{admission}:"))
+                        .filter(|key| {
+                            key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+                        .ok_or_else(|| io::Error::other("invalid native recent key"))?
+                        .to_owned();
+                    let version = header.metadata["chat_recent_version"]
+                        .as_str()
+                        .ok_or_else(|| io::Error::other("missing native recent version"))?
+                        .to_owned();
+                    Ok(RecentCoverage {
+                        event_id: String::new(),
+                        key: key.to_owned(),
+                        version,
+                        native_key: Some(native_key),
+                    })
+                })
+                .collect::<io::Result<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
+        let charge = bytes.len()
+            + scope.len()
+            + snapshot.session_id.len()
+            + admission.len()
+            + 1024
+            + serde_json::to_vec(&native_source)
+                .map_err(io::Error::other)?
+                .len()
+            + serde_json::to_vec(&coverage)
+                .map_err(io::Error::other)?
+                .len();
+        if charge > IPC_BYTES {
+            return Ok(false);
+        }
+        let version = digest(&bytes);
+        let mut recent = self
+            .recent
+            .lock()
+            .map_err(|_| io::Error::other("recent owner poisoned"))?;
+        if recent.global_boundaries > 0 || recent.boundaries.contains_key(&snapshot.session_id) {
+            return Ok(false);
+        }
+        let Some(slot) = recent.slots.iter_mut().find(|slot| {
+            slot.agent_id == snapshot.session_id
+                && slot.admission == *admission
+                && slot.issued == *issued
+                && slot.scope == scope
+                && slot.runtime.ptr_eq(&Arc::downgrade(runtime))
+                && slot.watch.ptr_eq(&Arc::downgrade(&snapshot.watch_state))
+        }) else {
+            return Ok(false);
+        };
+        slot.headers = headers;
+        slot.coverage = coverage;
+        slot.version = version;
+        slot.charge = charge;
+        slot.published = true;
+        trim_recent_slots(&mut recent);
+        Ok(true)
+    }
+
+    /// Move bounded policy/native metadata reads off the async command thread.
+    /// The returned closure owns only the cache and actual runtime identities.
+    pub(crate) fn recent_reader(
+        &self,
+        snapshot: crate::commands::chat::AgentArchiveCaptureSnapshot,
+        runtime: Arc<Mutex<String>>,
+        revision: Option<String>,
+        limit: usize,
+    ) -> impl FnOnce() -> io::Result<Option<AgentChatPage>> + Send + 'static {
+        let cache = self.recent.clone();
+        move || {
+            if !(1..=PAGE_ROWS).contains(&limit) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid recent limit",
+                ));
+            }
+            let native_source = cache
+                .lock()
+                .map_err(|_| io::Error::other("recent owner poisoned"))?
+                .slots
+                .iter()
+                .find(|slot| {
+                    slot.agent_id == snapshot.session_id
+                        && slot.runtime.ptr_eq(&Arc::downgrade(&runtime))
+                        && slot.watch.ptr_eq(&Arc::downgrade(&snapshot.watch_state))
+                })
+                .and_then(|slot| slot.native_source.clone());
+            let source_valid = native_source
+                .as_ref()
+                .is_none_or(|source| source.valid().unwrap_or(false));
+            let scope = recent_scope(&snapshot);
+            let recent = cache
+                .lock()
+                .map_err(|_| io::Error::other("recent owner poisoned"))?;
+            let prefix = format!("recent:{}:", recent.revision_owner);
+            let previous_preview = revision
+                .as_deref()
+                .is_some_and(|value| value.starts_with(&prefix));
+            let blocked = !source_valid
+                || recent.global_boundaries > 0
+                || recent.boundaries.contains_key(&snapshot.session_id);
+            let valid = recent.slots.iter().position(|slot| {
+                slot.agent_id == snapshot.session_id
+                    && slot.published
+                    && slot.native_source == native_source
+                    && !blocked
+                    && scope.as_ref().is_ok_and(|(scope, _)| *scope == slot.scope)
+                    && slot.runtime.ptr_eq(&Arc::downgrade(&runtime))
+                    && slot.watch.ptr_eq(&Arc::downgrade(&snapshot.watch_state))
+            });
+            let mut coverage = Vec::new();
+            let (admission, token, headers, progress) = if let Some(index) = valid {
+                let slot = &recent.slots[index];
+                if slot.headers.is_empty() && !previous_preview {
+                    return Ok(None);
+                }
+                coverage = slot.coverage.clone();
+                let token = format!("{prefix}{}:{}:{limit}", slot.admission, slot.version);
+                let headers = slot
+                    .headers
+                    .iter()
+                    .skip(slot.headers.len().saturating_sub(limit))
+                    .cloned()
+                    .collect();
+                (
+                    Some(slot.admission.clone()),
+                    token,
+                    headers,
+                    if slot.headers.is_empty() {
+                        "no_recent"
+                    } else {
+                        "provisional"
+                    },
+                )
+            } else {
+                // A delayed reader from another incarnation must not erase a
+                // newer owner's slot. Only producer/boundary paths retire it.
+                if !previous_preview && !blocked {
+                    return Ok(None);
+                }
+                (
+                    None,
+                    format!("{prefix}retired"),
+                    Vec::new(),
+                    if blocked {
+                        "source_changed"
+                    } else if scope.is_err() {
+                        "source_unavailable"
+                    } else {
+                        "no_recent"
+                    },
+                )
+            };
+            let unchanged = admission.is_some() && revision.as_deref() == Some(token.as_str());
+            let mut page = AgentChatPage {
+                session_id: snapshot.session_id.clone(),
+                conversation_id: None,
+                generation: None,
+                source_epoch: None,
+                recent_admission: admission,
+                revision: token,
+                events: if unchanged { Vec::new() } else { headers },
+                next_before: None,
+                unchanged,
+                reset: blocked || (previous_preview && !unchanged),
+                older_page: false,
+                progress: progress.into(),
+                aliases: Vec::new(),
+                removed_ids: Vec::new(),
+                detail: None,
+                revalidated_ids: None,
+                bytes_read: scope.as_ref().map(|(_, bytes)| *bytes).unwrap_or(0),
+                records_decoded: 0,
+            };
+            drop(recent);
+            if page.recent_admission.is_some() {
+                let canonical = recent_canonical_covers(&snapshot, &coverage);
+                // Validate again after copying the bounded cohort. The final
+                // cache check linearizes this response against privacy guards
+                // and newer publications without holding a mutex over IO.
+                let after = recent_scope(&snapshot);
+                let source_valid = native_source
+                    .as_ref()
+                    .is_none_or(|source| source.valid().unwrap_or(false));
+                page.bytes_read += after.as_ref().map(|(_, bytes)| *bytes).unwrap_or(0);
+                let current = cache
+                    .lock()
+                    .map_err(|_| io::Error::other("recent owner poisoned"))?;
+                let valid = source_valid
+                    && current.global_boundaries == 0
+                    && !current.boundaries.contains_key(&snapshot.session_id)
+                    && current.slots.iter().any(|slot| {
+                        slot.agent_id == snapshot.session_id
+                            && slot.published
+                            && slot.native_source == native_source
+                            && after.as_ref().is_ok_and(|(scope, _)| *scope == slot.scope)
+                            && slot.runtime.ptr_eq(&Arc::downgrade(&runtime))
+                            && slot.watch.ptr_eq(&Arc::downgrade(&snapshot.watch_state))
+                            && page.recent_admission.as_deref() == Some(slot.admission.as_str())
+                            && page.revision
+                                == format!("{prefix}{}:{}:{limit}", slot.admission, slot.version)
+                    });
+                if !valid {
+                    page.events.clear();
+                    page.recent_admission = None;
+                    page.reset = true;
+                    page.unchanged = false;
+                    page.revision = format!("{prefix}retired");
+                    page.progress = "source_changed".into();
+                } else if canonical.as_ref().is_ok_and(|(covered, _)| *covered) {
+                    // The caller performs its ordinary canonical read and
+                    // explicitly resets an incoming owner-preview revision.
+                    return Ok(None);
+                }
+                page.bytes_read += canonical.map(|(_, bytes)| bytes).unwrap_or(0);
+            }
+            Ok(Some(page))
+        }
+    }
+}
+
+fn recent_canonical_covers(
+    snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
+    coverage: &[RecentCoverage],
+) -> io::Result<(bool, usize)> {
+    if coverage.is_empty() {
+        return Ok((false, 0));
+    }
+    let Some(reference) = head(&snapshot.session_id)? else {
+        return Ok((false, 0));
+    };
+    let mut store = store(&snapshot.session_id)?;
+    let published: Head = store.read(&reference)?;
+    let context = crate::commands::chat::conversation_archive_context_from_snapshot(snapshot);
+    if published.agent_id != snapshot.session_id
+        || published.source_key != context.provider_source_key
+        || !cold_bootstrap::scope_matches(&published, &context)
+    {
+        return Ok((false, store.bytes));
+    }
+    for binding in coverage {
+        let identity = binding.native_key.as_ref().map_or_else(
+            || digest(binding.event_id.as_bytes()),
+            |key| recent_native_index_key(key),
+        );
+        let Some(row_ref) = store.get(&published.identities, &identity)? else {
+            return Ok((false, store.bytes));
+        };
+        let row: Row = store.read(&row_ref)?;
+        let bound = if let Some(native_key) = &binding.native_key {
+            row.event.metadata["chat_recent_native_key"].as_str() == Some(native_key.as_str())
+                && row.event.metadata["chat_recent_native_version"].as_str()
+                    == Some(binding.version.as_str())
+        } else {
+            row.event.id == binding.event_id
+                && row.event.metadata["chat_recent_key"].as_str() == Some(binding.key.as_str())
+                && row.event.metadata["chat_recent_version"].as_str()
+                    == Some(binding.version.as_str())
+        };
+        if row.agent_id != snapshot.session_id
+            || row.conversation_id != published.conversation_id
+            || row.event.provider != snapshot.provider
+            || !bound
+            || store.get(&published.root, &row.key)?.as_deref() != Some(row_ref.as_str())
+        {
+            return Ok((false, store.bytes));
+        }
+    }
+    Ok((
+        head(&snapshot.session_id)?.as_deref() == Some(reference.as_str()),
+        store.bytes,
+    ))
+}
+
+fn recent_native_index_key(key: &str) -> String {
+    digest(format!("recent-native:{key}").as_bytes())
+}
+
+fn trim_recent_slots(recent: &mut RecentSlots) {
+    let controls =
+        recent.boundaries.len() + usize::from(recent.global_boundaries > 0) + recent.pending.len();
+    let control_bytes = recent
+        .boundaries
+        .keys()
+        .map(|key| key.len() + 128)
+        .sum::<usize>()
+        + recent
+            .pending
+            .iter()
+            .map(|pending| pending.agent_id.len() + pending.nonce.len() + 128)
+            .sum::<usize>()
+        + 4096;
+    while recent
+        .slots
+        .iter()
+        .map(|slot| 1 + slot.headers.len())
+        .sum::<usize>()
+        + controls
+        > 512
+        || recent.slots.iter().map(|slot| slot.charge).sum::<usize>() + control_bytes > 1024 * 1024
+    {
+        recent.slots.pop_front();
+    }
 }
 
 impl std::fmt::Debug for ProjectionOwner {
@@ -402,6 +1168,27 @@ impl std::fmt::Debug for ProjectionOwner {
 
 #[cfg(test)]
 impl ProjectionOwner {
+    pub(crate) fn recent_pending_for_test(&self) -> usize {
+        self.recent.lock().unwrap().pending.len()
+    }
+
+    pub(crate) fn begin_recent(
+        &self,
+        snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
+        runtime: &Arc<Mutex<String>>,
+    ) -> io::Result<(String, u64)> {
+        self.begin_recent_with_source(snapshot, runtime, None)
+    }
+
+    pub(crate) fn retire_recent(&self, agent_id: &str) -> io::Result<()> {
+        self.recent
+            .lock()
+            .map_err(|_| io::Error::other("recent owner poisoned"))?
+            .slots
+            .retain(|slot| slot.agent_id != agent_id);
+        Ok(())
+    }
+
     fn checkpoint_fault(&self, stage: u8) -> io::Result<()> {
         use std::sync::atomic::Ordering;
         if self
@@ -783,6 +1570,10 @@ pub(crate) fn header(event: &AgentChatEvent) -> AgentChatEvent {
         "chat_source_end",
         "chat_source_epoch",
         "chat_source_admission",
+        "chat_recent_key",
+        "chat_recent_version",
+        "chat_recent_native_key",
+        "chat_recent_native_version",
         "chat_identity_resolution",
         "tool_name",
     ] {
@@ -1286,6 +2077,7 @@ impl ProjectionOwner {
     }
 
     pub(crate) fn invalidate(&self, agent_id: &str) -> io::Result<()> {
+        let _recent_boundary = self.recent_boundary(Some(agent_id))?;
         self.work
             .lock()
             .map_err(|_| io::Error::other("chat projection owner poisoned"))?
@@ -1398,6 +2190,21 @@ fn insert_row(store: &mut Store, head: &mut Head, row: &Row) -> io::Result<Strin
     if let Some(source_ref) = row.event.metadata["chat_source_ref"].as_str() {
         head.identities =
             Some(store.insert(&head.identities, &digest(source_ref.as_bytes()), &reference)?);
+    }
+    if let Some(native) = row.event.metadata["chat_recent_native_key"]
+        .as_str()
+        .filter(|key| key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        if (row.event.source.as_deref() == Some("opencode_db") && row.event.provider == "opencode")
+            || (row.event.source.as_deref() == Some("conversation_database")
+                && row.event.provider == "antigravity")
+        {
+            head.identities = Some(store.insert(
+                &head.identities,
+                &recent_native_index_key(native),
+                &reference,
+            )?);
+        }
     }
     Ok(reference)
 }
@@ -1539,16 +2346,67 @@ pub(super) fn page(
     head: &Head,
     before: Option<&str>,
 ) -> io::Result<(Vec<AgentChatEvent>, Option<String>)> {
+    page_limited(store, head_ref, head, before, PAGE_ROWS)
+}
+
+/// A recent target never splits a physical frame or certified member component.
+pub(super) fn recent_window_start(events: &[AgentChatEvent], limit: usize) -> usize {
+    fn linked(a: &AgentChatEvent, b: &AgentChatEvent) -> bool {
+        let same_frame = a.metadata["chat_source_epoch"].as_str().is_some()
+            && a.metadata["chat_source_epoch"] == b.metadata["chat_source_epoch"]
+            && a.metadata["chat_source_start"].as_u64().is_some()
+            && a.metadata["chat_source_start"] == b.metadata["chat_source_start"]
+            && a.metadata["chat_source_end"].as_u64().is_some()
+            && a.metadata["chat_source_end"] == b.metadata["chat_source_end"];
+        let contains = |event: &AgentChatEvent, id: &str| {
+            event.id == id
+                || event.metadata["chat_source_ref"].as_str() == Some(id)
+                || event.metadata["chat_display_member_ids"]
+                    .as_array()
+                    .is_some_and(|members| members.iter().any(|member| member.as_str() == Some(id)))
+        };
+        same_frame
+            || contains(a, &b.id)
+            || contains(b, &a.id)
+            || a.metadata["chat_display_member_ids"]
+                .as_array()
+                .is_some_and(|members| {
+                    members
+                        .iter()
+                        .filter_map(|member| member.as_str())
+                        .any(|member| contains(b, member))
+                })
+    }
+    let mut start = events.len().saturating_sub(limit);
+    while let Some(earlier) = events[..start].iter().position(|event| {
+        events[start..]
+            .iter()
+            .any(|selected| linked(event, selected))
+    }) {
+        start = earlier;
+    }
+    start
+}
+
+fn page_limited(
+    store: &mut Store,
+    head_ref: &str,
+    head: &Head,
+    before: Option<&str>,
+    limit: usize,
+) -> io::Result<(Vec<AgentChatEvent>, Option<String>)> {
     let entries = store.page(&head.root, before, PAGE_ROWS + 1)?;
     let has_older = entries.len() > PAGE_ROWS;
     let mut events = Vec::new();
     let mut last = None;
+    let mut emitted_keys = Vec::new();
     for (key, reference) in entries.into_iter().take(PAGE_ROWS) {
         let row: Row = store.read(&reference)?;
         if row.agent_id != head.agent_id || row.conversation_id != head.conversation_id {
             return Err(io::Error::other("foreign chat row"));
         }
         last = Some(key);
+        emitted_keys.push(last.clone().expect("a row key was just selected"));
         let mut event = display_event(row, &reference);
         if let Some(detail) = event.metadata["chat_detail_ref"].as_str() {
             event.metadata["chat_detail_ref"] = json!(format!("{head_ref}:{detail}"));
@@ -1556,7 +2414,13 @@ pub(super) fn page(
         events.push(event);
     }
     events.reverse();
-    let next = if has_older || head.progress == "indexing" {
+    emitted_keys.reverse();
+    let start = recent_window_start(&events, limit);
+    if start > 0 {
+        last = emitted_keys.get(start).cloned();
+        events.drain(..start);
+    }
+    let next = if has_older || start > 0 || head.progress == "indexing" {
         last.as_deref()
             .or(before)
             .map(|key| format!("{head_ref}:{key}"))
@@ -1564,6 +2428,38 @@ pub(super) fn page(
         None
     };
     Ok((events, next))
+}
+
+/// Bind a reduced mixed window to the first physical row actually emitted.
+/// A new raw suffix may have no canonical row yet. In that case Older waits
+/// for publication rather than inheriting a cursor past omitted headers.
+fn canonical_recent_frontier(
+    store: &mut Store,
+    reference: &str,
+    head: &Head,
+    event: &AgentChatEvent,
+) -> io::Result<Option<String>> {
+    let Some(source) = event.metadata["chat_source_ref"].as_str() else {
+        return Ok(None);
+    };
+    let Some(row_ref) = store.get(&head.identities, &digest(source.as_bytes()))? else {
+        return Ok(None);
+    };
+    let row: Row = store.read(&row_ref)?;
+    if row.agent_id != head.agent_id
+        || row.conversation_id != head.conversation_id
+        || row.event.metadata["chat_source_ref"].as_str() != Some(source)
+        || row.event.metadata["chat_source_epoch"] != event.metadata["chat_source_epoch"]
+        || row.event.metadata["chat_source_start"] != event.metadata["chat_source_start"]
+        || row.event.metadata["chat_source_end"] != event.metadata["chat_source_end"]
+        || store.get(&head.root, &row.key)?.as_deref() != Some(row_ref.as_str())
+    {
+        return Err(io::Error::other("foreign recent chat frontier"));
+    }
+    Ok(
+        (!store.page(&head.root, Some(&row.key), 1)?.is_empty() || head.progress == "indexing")
+            .then(|| format!("{reference}:{}", row.key)),
+    )
 }
 
 fn changes_since(
@@ -2463,16 +3359,24 @@ fn reconcile_archived_codex_commentary_pairs(
 
 /// The shared read boundary. Every disk/decode path uses fixed limits, including
 /// stale cursors and detail failures. No capture, repair or archive lock occurs.
-pub(crate) fn read_with_revalidation(
+pub(crate) fn read_with_revalidation_and_limit(
     context: &ConversationArchiveContext,
     snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
     cursor: Option<&str>,
     revision: Option<&str>,
     detail_ref: Option<&str>,
     revalidate_ids: Option<&[String]>,
+    limit: Option<usize>,
 ) -> io::Result<AgentChatPage> {
+    let limit = limit.unwrap_or(PAGE_ROWS);
+    if !(1..=PAGE_ROWS).contains(&limit) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid recent Chat limit",
+        ));
+    }
     let Some(revalidate_ids) = revalidate_ids else {
-        return read(context, snapshot, cursor, revision, detail_ref);
+        return read_with_recent_limit(context, snapshot, cursor, revision, detail_ref, limit);
     };
     let Some(source_ids) = validate_revalidation_request(
         &context.agent_id,
@@ -2487,13 +3391,20 @@ pub(crate) fn read_with_revalidation(
     read_revalidated(context, snapshot, revision.unwrap(), &source_ids)
 }
 
-pub(crate) fn read(
+fn read_with_recent_limit(
     context: &ConversationArchiveContext,
     snapshot: &crate::commands::chat::AgentArchiveCaptureSnapshot,
     cursor: Option<&str>,
     revision: Option<&str>,
     detail_ref: Option<&str>,
+    limit: usize,
 ) -> io::Result<AgentChatPage> {
+    let limit = if cursor.is_none() && detail_ref.is_none() {
+        limit
+    } else {
+        PAGE_ROWS
+    };
+    let window_suffix = format!(":recent:{limit}");
     let mut current = head(&context.agent_id).unwrap_or(None);
     let mut store = store(&context.agent_id)?;
     let decoded_head = current
@@ -2508,10 +3419,27 @@ pub(crate) fn read(
         current = None;
     }
     let source_pointer = super::chat_source_index::pointer(&context.agent_id).unwrap_or(None);
+    let previous_window_matches = revision
+        .and_then(|value| value.split_once('.'))
+        .map(|(_, seed)| seed.split_once('~').map_or(seed, |(seed, _)| seed))
+        .is_none_or(|seed| {
+            if limit == PAGE_ROWS {
+                !seed.contains(":recent:")
+            } else {
+                seed.ends_with(&window_suffix)
+            }
+        });
     let previous_seed = revision
         .and_then(|value| value.split_once('.'))
         .filter(|(previous, _)| *previous == current.as_deref().unwrap_or("none"))
-        .map(|(_, seed)| seed.split_once('~').map_or(seed, |(seed, _)| seed));
+        .map(|(_, seed)| seed.split_once('~').map_or(seed, |(seed, _)| seed))
+        .and_then(|seed| {
+            if limit == PAGE_ROWS {
+                (!seed.contains(":recent:")).then_some(seed)
+            } else {
+                seed.strip_suffix(&window_suffix)
+            }
+        });
     let previous_source = revision
         .and_then(|value| value.split_once('.'))
         .filter(|(previous, _)| *previous == current.as_deref().unwrap_or("none"))
@@ -2525,7 +3453,7 @@ pub(crate) fn read(
             ..Default::default()
         }
     } else if cursor.is_none() && detail_ref.is_none() {
-        crate::commands::chat_recent_seed::read(snapshot, previous_seed)?
+        crate::commands::chat_recent_seed::read_limited(snapshot, previous_seed, limit)?
     } else {
         crate::commands::chat_recent_seed::Seed {
             revision: "page".into(),
@@ -2533,10 +3461,17 @@ pub(crate) fn read(
             ..Default::default()
         }
     };
+    let seed_token = |seed: &str| {
+        if limit == PAGE_ROWS {
+            seed.to_owned()
+        } else {
+            format!("{seed}{window_suffix}")
+        }
+    };
     let mut token = format!(
         "{}.{}~{}",
         current.as_deref().unwrap_or("none"),
-        seed.revision,
+        seed_token(&seed.revision),
         source_pointer.as_deref().unwrap_or("none")
     );
     let mut result = AgentChatPage {
@@ -2544,6 +3479,7 @@ pub(crate) fn read(
         conversation_id: None,
         generation: None,
         source_epoch: None,
+        recent_admission: None,
         revision: token.clone(),
         events: Vec::new(),
         next_before: None,
@@ -2562,7 +3498,12 @@ pub(crate) fn read(
         result.source_epoch = Some(checkpoint.epoch.clone());
     }
     if current.is_none() && result.progress == "ready" {
-        result.progress = "projection_pending".into();
+        result.progress = if seed.revision == "unsupported" {
+            "no_recent"
+        } else {
+            "projection_pending"
+        }
+        .into();
     }
     if cold_rejected {
         result.bytes_read += store.bytes;
@@ -2593,7 +3534,7 @@ pub(crate) fn read(
         if published.progress != "ready"
             && !matches!(
                 result.progress.as_str(),
-                "oversized_record" | "source_changed" | "ownership_pending"
+                "oversized_record" | "source_gap" | "source_changed" | "ownership_pending"
             )
         {
             result.progress = published.progress.clone();
@@ -2652,7 +3593,8 @@ pub(crate) fn read(
             && cursor.is_none()
             && detail_ref.is_none()
         {
-            let revalidated_seed = crate::commands::chat_recent_seed::read(snapshot, None)?;
+            let revalidated_seed =
+                crate::commands::chat_recent_seed::read_limited(snapshot, None, limit)?;
             result.bytes_read += revalidated_seed.bytes_read;
             result.records_decoded += revalidated_seed.records_decoded;
             let current_commentary =
@@ -2678,7 +3620,7 @@ pub(crate) fn read(
             token = format!(
                 "{}.{}~{}",
                 current.as_deref().unwrap_or("none"),
-                seed.revision,
+                seed_token(&seed.revision),
                 source_pointer.as_deref().unwrap_or("none")
             );
             result.revision.clone_from(&token);
@@ -2748,12 +3690,13 @@ pub(crate) fn read(
         if let Some(reference) = &source_pointer {
             result.bytes_read += (2 * HEAD_BYTES + POLICY_BYTES) as usize;
             result.records_decoded += 2;
-            match super::chat_source_index::page(
+            match super::chat_source_index::page_limited(
                 snapshot,
                 &mut store,
                 reference,
                 None,
                 previous_source.filter(|source| *source != "none"),
+                limit,
             ) {
                 Ok(page) => {
                     source_page_pairs = source_page_commentary_pairs(snapshot, &page);
@@ -2761,7 +3704,7 @@ pub(crate) fn read(
                     result.reset |= page.reset;
                     if !matches!(
                         result.progress.as_str(),
-                        "oversized_record" | "source_changed" | "ownership_pending"
+                        "oversized_record" | "source_gap" | "source_changed" | "ownership_pending"
                     ) {
                         result.progress = page.progress.clone();
                     }
@@ -2783,12 +3726,13 @@ pub(crate) fn read(
         if let Some(reference) = &source_pointer {
             result.bytes_read += (2 * HEAD_BYTES + POLICY_BYTES) as usize;
             result.records_decoded += 2;
-            match super::chat_source_index::page(
+            match super::chat_source_index::page_limited(
                 snapshot,
                 &mut store,
                 reference,
                 cursor.filter(|_| source_cursor),
                 previous_source.filter(|source| *source != "none"),
+                limit,
             ) {
                 Ok(page) => {
                     source_page_pairs = source_page_commentary_pairs(snapshot, &page);
@@ -2991,7 +3935,8 @@ pub(crate) fn read(
                 result.older_page = true;
             } else {
                 result.reset = true;
-                (result.events, result.next_before) = page(&mut store, reference, published, None)?;
+                (result.events, result.next_before) =
+                    page_limited(&mut store, reference, published, None, limit)?;
             }
         } else {
             let previous = revision
@@ -3002,15 +3947,16 @@ pub(crate) fn read(
             // otherwise refresh the bounded window when it certifies a pair.
             let refresh_source_projection =
                 source_page_reset || (cursor.is_none() && !source_page_pairs.is_empty());
-            let delta = if refresh_source_projection {
-                None
-            } else {
-                previous
-                    .filter(|previous| valid_ref(previous))
-                    .map(|previous| changes_since(&mut store, reference, published, previous))
-                    .transpose()?
-                    .flatten()
-            };
+            let delta =
+                if refresh_source_projection || limit != PAGE_ROWS || !previous_window_matches {
+                    None
+                } else {
+                    previous
+                        .filter(|previous| valid_ref(previous))
+                        .map(|previous| changes_since(&mut store, reference, published, previous))
+                        .transpose()?
+                        .flatten()
+                };
             if let Some(mut delta) = delta {
                 delta.sort_by_key(|event| event.sequence);
                 result.events = delta;
@@ -3024,13 +3970,14 @@ pub(crate) fn read(
                 };
             } else {
                 result.reset |= previous.is_some();
-                (result.events, result.next_before) = page(&mut store, reference, published, None)?;
+                (result.events, result.next_before) =
+                    page_limited(&mut store, reference, published, None, limit)?;
             }
         }
         if published.progress != "ready"
             && !matches!(
                 result.progress.as_str(),
-                "oversized_record" | "source_changed" | "ownership_pending"
+                "oversized_record" | "source_gap" | "source_changed" | "ownership_pending"
             )
         {
             result.progress = published.progress.clone();
@@ -3288,6 +4235,29 @@ pub(crate) fn read(
         }
         if result.events.len() > PAGE_ROWS {
             result.events.drain(..result.events.len() - PAGE_ROWS);
+        }
+        if limit < PAGE_ROWS {
+            let start = recent_window_start(&result.events, limit);
+            if start > 0 {
+                let first = &result.events[start];
+                result.next_before =
+                    if let (Some(reference), Some(published)) = (&current, &current_head) {
+                        canonical_recent_frontier(&mut store, reference, published, first)?
+                    } else if let (Some(reference), Some(checkpoint)) =
+                        (&source_pointer, &seed.checkpoint)
+                    {
+                        super::chat_source_index::continuation(
+                            snapshot,
+                            &mut store,
+                            reference,
+                            checkpoint,
+                            Some(first),
+                        )?
+                    } else {
+                        None
+                    };
+                result.events.drain(..start);
+            }
         }
     }
     let mut current_canonical_retractions = BTreeSet::<String>::new();
@@ -3870,6 +4840,7 @@ fn read_revalidated(
             .map(|value| value.conversation_id.clone()),
         generation,
         source_epoch: epoch,
+        recent_admission: None,
         revision: revision.to_owned(),
         events,
         next_before: None,
@@ -3935,6 +4906,7 @@ fn finish_revalidated(
         conversation_id: published.map(|value| value.conversation_id),
         generation,
         source_epoch: epoch,
+        recent_admission: None,
         revision: revision.to_owned(),
         events,
         next_before: None,
@@ -4050,6 +5022,9 @@ fn project_display_result(result: &mut AgentChatPage) {
         .dedup_by(|a, b| a.observation_id == b.observation_id && a.canonical_id == b.canonical_id);
     result.events = events;
 }
+
+#[cfg(test)]
+pub(crate) use tests::{read, read_with_revalidation};
 
 #[cfg(test)]
 #[path = "chat_read_tests.rs"]

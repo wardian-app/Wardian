@@ -59,6 +59,8 @@ function chatNavigation() {
   } as unknown as WorkbenchNavigationService;
 }
 
+const ownedDeferreds = new Set<{ promise: Promise<unknown>; reject: (reason?: unknown) => void }>();
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -66,7 +68,25 @@ function deferred<T>() {
     resolve = resolvePromise;
     reject = rejectPromise;
   });
+  const owned = { promise, reject };
+  ownedDeferreds.add(owned);
+  // Observe unused fixture replies too. Rejecting one during cleanup is an
+  // actual mock backend settlement, not cancellation of production IPC.
+  void promise.then(() => ownedDeferreds.delete(owned), () => ownedDeferreds.delete(owned));
   return { promise, reject, resolve };
+}
+
+async function settleOwnedDeferreds() {
+  await act(async () => {
+    const pending = [...ownedDeferreds];
+    for (const reply of pending) reply.reject(new Error("Unused controlled reply at test cleanup"));
+    await Promise.allSettled(pending.map((reply) => reply.promise));
+    // Join real adapter returns and their pool finally callbacks. Never reset
+    // production ownership or label a still-running backend read cancelled.
+    await Promise.allSettled(invokeMock.mock.results.flatMap((result) =>
+      result.type === "return" && result.value instanceof Promise ? [result.value] : []));
+  });
+  expect(ownedDeferreds.size).toBe(0);
 }
 
 const event = (overrides: Partial<AgentChatEvent>): AgentChatEvent => ({
@@ -112,9 +132,13 @@ describe("AgentChatView", () => {
     writeTextMock.mockReset();
   });
 
-  afterEach(() => {
-    cleanup();
-    vi.useRealTimers();
+  afterEach(async () => {
+    try {
+      await settleOwnedDeferreds();
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
   });
 
   it("blocks every mutating Chat action on read-only surfaces while history remains readable", async () => {
@@ -254,7 +278,7 @@ describe("AgentChatView", () => {
     expect(screen.getByText("Read test output")).toBeInTheDocument();
     expect(screen.getByText("npm run test")).toBeInTheDocument();
     expect(container.querySelector('code[data-language="shell"]')?.textContent).toContain("tests failed in AgentChatView");
-    expect(invokeMock).toHaveBeenCalledWith("load_agent_chat_page", { sessionId: "agent-1", cursor: undefined, revision: undefined, detailRef: undefined });
+    expect(invokeMock).toHaveBeenCalledWith("load_agent_chat_page", { sessionId: "agent-1", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true });
     expect(screen.queryByText("codex")).not.toBeInTheDocument();
     expect(screen.queryByText("Processing")).not.toBeInTheDocument();
     expect(screen.queryByText("Read-only")).not.toBeInTheDocument();
@@ -379,6 +403,7 @@ describe("AgentChatView", () => {
       expect(stableOlderButton).toBeEnabled();
     } finally {
       view.unmount();
+      await settleOwnedDeferreds();
       vi.useRealTimers();
     }
   });
@@ -1395,6 +1420,7 @@ describe("AgentChatView", () => {
       expect(screen.queryByRole("button", { name: "Loading older transcript..." })).not.toBeInTheDocument();
       expect(scroll.scrollTop).toBe(400);
     } finally {
+      await settleOwnedDeferreds();
       vi.useRealTimers();
     }
   });
@@ -1428,6 +1454,7 @@ describe("AgentChatView", () => {
       expect(loadOlder).toHaveBeenCalledWith("saved-before");
       expect(screen.getByText("older row")).toBeInTheDocument();
     } finally {
+      await settleOwnedDeferreds();
       vi.useRealTimers();
     }
   });
@@ -1436,43 +1463,51 @@ describe("AgentChatView", () => {
     const firstOlder = deferred<AgentChatPage>();
     const secondOlder = deferred<AgentChatPage>();
     const loadOlder = vi.fn((sessionId: string) => sessionId === "agent-1" ? firstOlder.promise : secondOlder.promise);
-    invokeMock.mockImplementation((command, args) => {
-      if (command !== "load_agent_chat_page") return Promise.resolve(undefined);
-      const request = args as Record<string, unknown> | undefined;
-      const sessionId = request?.sessionId as string;
-      return request?.cursor ? loadOlder(sessionId) : Promise.resolve(olderReadPage({
-        session_id: sessionId, events: [event({ id: `${sessionId}-recent`, session_id: sessionId, text: `${sessionId} recent`, sequence: 2 })],
-      }));
-    });
-    const { rerender } = render(<AgentChatView sessionId="agent-1" refreshIntervalMs={60000} />);
-    await screen.findByText("agent-1 recent");
-    fireEvent.scroll(screen.getByTestId("agent-chat-scroll-region"));
-    rerender(<AgentChatView sessionId="agent-2" refreshIntervalMs={60000} />);
-    expect(screen.getByText("Loading transcript...")).toBeInTheDocument();
-    expect(loadOlder).toHaveBeenCalledOnce();
-    expect(invokeMock).toHaveBeenCalledTimes(2);
-    await act(async () => firstOlder.resolve(olderReadPage({
-      events: [event({ id: "retired-older", text: "Retired older row", sequence: 1 })],
-    })));
-    await screen.findByText("agent-2 recent");
-    expect(screen.queryByText("Retired older row")).not.toBeInTheDocument();
-    const scroll = screen.getByTestId("agent-chat-scroll-region");
-    const row = scroll.querySelector<HTMLElement>("[data-chat-row-key]")!;
-    vi.spyOn(row, "getBoundingClientRect").mockImplementation(() => ({
-      top: screen.queryByText("agent-2 older") ? 350 : 50,
-      bottom: screen.queryByText("agent-2 older") ? 370 : 70,
-    } as DOMRect));
-    scroll.scrollTop = 100;
-    fireEvent.scroll(scroll);
-    expect(scroll.scrollTop).toBe(100);
-    fireEvent.scroll(scroll);
-    expect(loadOlder).toHaveBeenCalledTimes(2);
-    await act(async () => secondOlder.resolve(olderReadPage({
-      session_id: "agent-2", next_before: null,
-      events: [event({ id: "agent-2-older", session_id: "agent-2", text: "agent-2 older", sequence: 1 })],
-    })));
-    expect(screen.getByText("agent-2 older")).toBeInTheDocument();
-    expect(scroll.scrollTop).toBe(400);
+    try {
+      invokeMock.mockImplementation((command, args) => {
+        if (command !== "load_agent_chat_page") return Promise.resolve(undefined);
+        const request = args as Record<string, unknown> | undefined;
+        const sessionId = request?.sessionId as string;
+        return request?.cursor ? loadOlder(sessionId) : Promise.resolve(olderReadPage({
+          session_id: sessionId, events: [event({ id: `${sessionId}-recent`, session_id: sessionId, text: `${sessionId} recent`, sequence: 2 })],
+        }));
+      });
+      const { rerender } = render(<AgentChatView sessionId="agent-1" refreshIntervalMs={60000} />);
+      await screen.findByText("agent-1 recent");
+      fireEvent.scroll(screen.getByTestId("agent-chat-scroll-region"));
+      rerender(<AgentChatView sessionId="agent-2" refreshIntervalMs={60000} />);
+      expect(screen.getByText("Loading transcript...")).toBeInTheDocument();
+      expect(loadOlder).toHaveBeenCalledOnce();
+      expect(invokeMock.mock.calls.filter(([command]) => command === "load_agent_chat_page").map(([, request]) => request)).toEqual([
+        { sessionId: "agent-1", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true },
+        { sessionId: "agent-1", cursor: "saved-before", revision: undefined, detailRef: undefined, recentPreview: false },
+        { sessionId: "agent-2", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true },
+      ]);
+      await act(async () => firstOlder.resolve(olderReadPage({
+        events: [event({ id: "retired-older", text: "Retired older row", sequence: 1 })],
+      })));
+      await screen.findByText("agent-2 recent");
+      expect(screen.queryByText("Retired older row")).not.toBeInTheDocument();
+      const scroll = screen.getByTestId("agent-chat-scroll-region");
+      const row = scroll.querySelector<HTMLElement>("[data-chat-row-key]")!;
+      vi.spyOn(row, "getBoundingClientRect").mockImplementation(() => ({
+        top: screen.queryByText("agent-2 older") ? 350 : 50,
+        bottom: screen.queryByText("agent-2 older") ? 370 : 70,
+      } as DOMRect));
+      scroll.scrollTop = 100;
+      fireEvent.scroll(scroll);
+      expect(scroll.scrollTop).toBe(100);
+      fireEvent.scroll(scroll);
+      expect(loadOlder).toHaveBeenCalledTimes(2);
+      await act(async () => secondOlder.resolve(olderReadPage({
+        session_id: "agent-2", next_before: null,
+        events: [event({ id: "agent-2-older", session_id: "agent-2", text: "agent-2 older", sequence: 1 })],
+      })));
+      expect(screen.getByText("agent-2 older")).toBeInTheDocument();
+      expect(scroll.scrollTop).toBe(400);
+    } finally {
+      await settleOwnedDeferreds();
+    }
   });
 
   it("anchors long transcript loads to the latest visible rows", async () => {
@@ -2048,6 +2083,7 @@ describe("AgentChatView", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(0); });
       expect(invokeMock).toHaveBeenCalledTimes(4);
     } finally {
+      await settleOwnedDeferreds();
       vi.useRealTimers();
     }
   });
@@ -2091,6 +2127,7 @@ describe("AgentChatView", () => {
       expect(screen.queryByText("Older read failed")).not.toBeInTheDocument();
       expect(scroll.scrollTop).toBe(400);
     } finally {
+      await settleOwnedDeferreds();
       vi.useRealTimers();
     }
   });
@@ -2098,7 +2135,12 @@ describe("AgentChatView", () => {
   it.each(["success", "failure"] as const)("presents a slow first read with the original passive copy until actual %s", async (settlement) => {
     vi.useFakeTimers();
     const first = deferred<AgentChatEvent[]>();
-    invokeMock.mockReturnValueOnce(first.promise).mockResolvedValue([]);
+    let firstChatRead = true;
+    invokeMock.mockImplementation((command) => {
+      if (command !== "load_agent_chat_page") return Promise.resolve(undefined);
+      if (firstChatRead) { firstChatRead = false; return first.promise; }
+      return Promise.resolve([]);
+    });
     try {
       render(<AgentChatView sessionId="agent-1" refreshIntervalMs={100} />);
       await act(async () => { await vi.advanceTimersByTimeAsync(29_999); });
@@ -2106,18 +2148,18 @@ describe("AgentChatView", () => {
       expect(screen.queryByText("Waiting for transcript read")).not.toBeInTheDocument();
       await act(async () => { await vi.advanceTimersByTimeAsync(1); });
       expect(screen.getByText("Waiting for transcript read")).toBeInTheDocument();
-      expect(screen.getByText("The transcript read is still running after 30 seconds. Waiting for it to settle.")).toBeInTheDocument();
+      expect(screen.getByText("A read for this conversation is still running. Waiting for it to settle.")).toBeInTheDocument();
       expect(screen.queryByText("Loading transcript...")).not.toBeInTheDocument();
       expect(screen.queryByText("Unable to load transcript")).not.toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
       await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
-      expect(invokeMock).toHaveBeenCalledTimes(1);
+      expect(invokeMock.mock.calls.filter(([command]) => command === "load_agent_chat_page")).toHaveLength(1);
       await act(async () => {
         if (settlement === "success") first.resolve([event({ text: "Settled transcript row" })]);
         else first.reject(new Error("Actual read failure"));
       });
       expect(screen.queryByText("Waiting for transcript read")).not.toBeInTheDocument();
-      expect(screen.queryByText("The transcript read is still running after 30 seconds. Waiting for it to settle.")).not.toBeInTheDocument();
+      expect(screen.queryByText("A read for this conversation is still running. Waiting for it to settle.")).not.toBeInTheDocument();
       if (settlement === "success") expect(screen.getByText("Settled transcript row")).toBeInTheDocument();
       else {
         expect(screen.getByText("Actual read failure")).toBeInTheDocument();
@@ -2126,6 +2168,7 @@ describe("AgentChatView", () => {
         expect(screen.getByText("No chat transcript yet")).toBeInTheDocument();
       }
     } finally {
+      await settleOwnedDeferreds();
       vi.useRealTimers();
     }
   });
@@ -2143,30 +2186,32 @@ describe("AgentChatView", () => {
       const { rerender } = render(<AgentChatView sessionId="agent-1" refreshIntervalMs={60_000} />);
       await act(async () => { await vi.advanceTimersByTimeAsync(elapsed); });
       expect(screen.queryByText("Waiting for transcript read") !== null).toBe(elapsed === 30_000);
+      const admittedAt = Date.now();
       rerender(<AgentChatView sessionId="agent-2" refreshIntervalMs={60_000} />);
       expect(screen.queryByText("Waiting for transcript read")).not.toBeInTheDocument();
       expect(screen.getByText("Loading transcript...")).toBeInTheDocument();
-      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
-      expect(screen.queryByText("Waiting for transcript read")).not.toBeInTheDocument();
-      expect(invokeMock).toHaveBeenCalledTimes(1);
-      await act(async () => { retired.resolve([event({ text: "Retired transcript row" })]); });
-      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-      const admittedAt = Date.now();
-      expect(invokeMock).toHaveBeenCalledTimes(2);
-      expect(screen.getByText("Loading transcript...")).toBeInTheDocument();
-      expect(screen.queryByText("Retired transcript row")).not.toBeInTheDocument();
+      expect(invokeMock.mock.calls.filter(([command]) => command === "load_agent_chat_page").map(([, request]) => request)).toEqual([
+        { sessionId: "agent-1", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true },
+        { sessionId: "agent-2", cursor: undefined, revision: undefined, detailRef: undefined, recentPreview: true },
+      ]);
       await act(async () => { await vi.advanceTimersByTimeAsync(29_999); });
       expect(screen.queryByText("Waiting for transcript read")).not.toBeInTheDocument();
       await act(async () => { await vi.advanceTimersByTimeAsync(1); });
       expect(Date.now() - admittedAt).toBe(30_000);
       expect(screen.getByText("Waiting for transcript read")).toBeInTheDocument();
+      await act(async () => { retired.resolve([event({ text: "Retired transcript row" })]); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      // A distinct conversation already used the second physical slot. The
+      // retired owner's settlement cannot restart the current owner's clock.
+      expect(screen.getByText("Waiting for transcript read")).toBeInTheDocument();
       expect(screen.queryByText("Retired transcript row")).not.toBeInTheDocument();
-      expect(invokeMock).toHaveBeenCalledTimes(2);
+      expect(invokeMock.mock.calls.filter(([command]) => command === "load_agent_chat_page")).toHaveLength(2);
       await act(async () => { current.resolve([event({ session_id: "agent-2", text: "Current transcript row" })]); });
       expect(screen.queryByText("Waiting for transcript read")).not.toBeInTheDocument();
       expect(screen.getByText("Current transcript row")).toBeInTheDocument();
     } finally {
       await act(async () => { retired.resolve([]); current.resolve([]); });
+      await settleOwnedDeferreds();
       vi.useRealTimers();
     }
   });
@@ -2190,6 +2235,7 @@ describe("AgentChatView", () => {
       expect(screen.getByLabelText("user message")).toHaveTextContent("Retained pending message");
       expect(screen.getByText("Settled first read")).toBeInTheDocument();
     } finally {
+      await settleOwnedDeferreds();
       vi.useRealTimers();
     }
   });
@@ -3184,6 +3230,7 @@ describe("AgentChatView", () => {
       });
       expect(screen.getByText("Updated transcript")).toBeInTheDocument();
     } finally {
+      await settleOwnedDeferreds();
       vi.useRealTimers();
     }
   });
@@ -3235,6 +3282,7 @@ describe("AgentChatView", () => {
 
       expect(screen.getByText("Older transcript")).toBeInTheDocument();
     } finally {
+      await settleOwnedDeferreds();
       vi.useRealTimers();
     }
   });
@@ -3345,6 +3393,7 @@ describe("AgentChatView", () => {
       expect(screen.getByRole("button", { name: "Load older transcript" })).toBeEnabled();
     } finally {
       view.unmount();
+      await settleOwnedDeferreds();
       vi.useRealTimers();
     }
   });

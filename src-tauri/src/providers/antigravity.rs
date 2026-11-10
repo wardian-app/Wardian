@@ -109,6 +109,11 @@ pub struct AntigravityConversationMessage {
     pub text: String,
 }
 
+pub(crate) struct AntigravityNativeMessage {
+    pub(crate) message: AntigravityConversationMessage,
+    pub(crate) version: String,
+}
+
 /// Historical telemetry extracted from one Antigravity SQLite conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AntigravityConversationMetrics {
@@ -267,12 +272,6 @@ impl AntigravityProvider {
         transcript.is_file().then_some(transcript)
     }
 
-    pub fn conversation_messages_from_database(
-        path: &Path,
-    ) -> Result<Vec<AntigravityConversationMessage>, String> {
-        Self::conversation_messages_from_database_since(path, None)
-    }
-
     /// Reads projected conversation messages at or after `minimum_step_index`.
     ///
     /// The inclusive boundary lets the live watcher re-read a small overlap so
@@ -282,6 +281,14 @@ impl AntigravityProvider {
         path: &Path,
         minimum_step_index: Option<u64>,
     ) -> Result<Vec<AntigravityConversationMessage>, String> {
+        Self::conversation_native_messages_from_database_since(path, minimum_step_index)
+            .map(|messages| messages.into_iter().map(|record| record.message).collect())
+    }
+
+    pub(crate) fn conversation_native_messages_from_database_since(
+        path: &Path,
+        minimum_step_index: Option<u64>,
+    ) -> Result<Vec<AntigravityNativeMessage>, String> {
         let profile = crate::utils::runtime_profile::RuntimeProfileSpan::start(
             crate::utils::runtime_profile::RuntimeMetric::AntigravityMessageScan,
         );
@@ -319,39 +326,57 @@ impl AntigravityProvider {
             let payload = row.get::<_, Vec<u8>>(2).map_err(|error| {
                 format!("failed to decode Antigravity conversation step payload: {error}")
             })?;
-            let (role, text) = match step_type {
-                // USER_MESSAGE: payload.user_message.text
-                14 => (
-                    AgentChatRole::User,
-                    protobuf_string_at_path(&payload, &[19, 2]),
-                ),
-                // PLANNER_RESPONSE: preserve the existing final/text fallback.
-                // Paired 1.1.27 JSONL labels field 3 as thinking; this fallback
-                // does not establish that it is a second final answer.
-                15 => (
-                    AgentChatRole::Assistant,
-                    protobuf_string_at_path(&payload, &[20, 1])
-                        .or_else(|| protobuf_string_at_path(&payload, &[20, 3])),
-                ),
-                _ => continue,
-            };
-            let Some(text) = text
-                .map(|text| text.trim().to_string())
-                .filter(|text| !text.is_empty())
-            else {
-                continue;
-            };
-            messages.push(AntigravityConversationMessage {
-                step_index: step_index.max(0) as u64,
-                source: protobuf_message_at_path(&payload, &[5])
-                    .and_then(|metadata| protobuf_varint_field(metadata, 3)),
-                role,
-                text,
-            });
+            if let Some(message) = Self::message_from_database_step(step_index, step_type, &payload)
+            {
+                messages.push(AntigravityNativeMessage {
+                    message,
+                    version: Self::database_step_version(step_index, step_type, &payload),
+                });
+            }
         }
 
         profile.finish(messages.len() as u64);
         Ok(messages)
+    }
+
+    pub(crate) fn message_from_database_step(
+        step_index: i64,
+        step_type: i64,
+        payload: &[u8],
+    ) -> Option<AntigravityConversationMessage> {
+        let (role, text) = match step_type {
+            14 => (
+                AgentChatRole::User,
+                protobuf_string_at_path(payload, &[19, 2]),
+            ),
+            // Preserve the maintained final/text fallback. Field 3 alone does
+            // not establish another final answer in the paired wire format.
+            15 => (
+                AgentChatRole::Assistant,
+                protobuf_string_at_path(payload, &[20, 1])
+                    .or_else(|| protobuf_string_at_path(payload, &[20, 3])),
+            ),
+            _ => return None,
+        };
+        let text = text
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())?;
+        Some(AntigravityConversationMessage {
+            step_index: step_index.max(0) as u64,
+            source: protobuf_message_at_path(payload, &[5])
+                .and_then(|metadata| protobuf_varint_field(metadata, 3)),
+            role,
+            text,
+        })
+    }
+
+    pub(crate) fn database_step_version(step_index: i64, step_type: i64, payload: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut version = Sha256::new();
+        version.update(step_index.to_le_bytes());
+        version.update(step_type.to_le_bytes());
+        version.update(payload);
+        format!("{:x}", version.finalize())
     }
 
     /// Reads durable user-message timestamps from the current Antigravity
@@ -1149,8 +1174,9 @@ SET dp0=%~dp0
             AntigravityProvider::conversation_log_path(home, conversation_id),
             Some(database.clone())
         );
-        let messages = AntigravityProvider::conversation_messages_from_database(&database)
-            .expect("read conversation database");
+        let messages =
+            AntigravityProvider::conversation_messages_from_database_since(&database, None)
+                .expect("read conversation database");
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, AgentChatRole::User);
         assert_eq!(messages[0].text, "Make brownies.");

@@ -30,12 +30,27 @@ export class ChatRevalidationError extends Error {
   }
 }
 
-export type ChatScopeRelation = "same" | "canonical" | "bootstrap" | "changed" | "unknown";
+export type ChatScopeRelation = "same" | "canonical" | "bootstrap" | "preview" | "changed" | "unknown";
 
 const sourceId = (value: unknown): value is string =>
   typeof value === "string" && value.startsWith("source:") && value.length > 7;
 
 const utf8Length = (value: string) => new TextEncoder().encode(value).length;
+
+function validRecentPreview(page: AgentChatPage): boolean {
+  return typeof page.recent_admission === "string" && page.recent_admission.length > 0
+    && page.recent_admission.length <= 256
+    && (["conversation_id", "generation", "source_epoch"] as const)
+      .every((field) => page[field] === null || nonEmptyScopeValue(page[field]))
+    && typeof page.reset === "boolean" && typeof page.unchanged === "boolean"
+    && (page.progress === "provisional" || page.progress === "no_recent")
+    && page.next_before === null && page.detail === null
+    && (!Object.prototype.hasOwnProperty.call(page, "older_page") || page.older_page === false)
+    && page.revalidated_ids == null && page.aliases.length === 0 && page.removed_ids.length === 0
+    && page.events.length <= 80 && new Set(page.events.map((event) => event.id)).size === page.events.length
+    && page.events.every((event) => event.session_id === page.session_id && event.id.length > 0
+      && utf8Length(event.text ?? "") <= 1024);
+}
 
 /** Only producer-issued source references and display members can select rows. */
 export function chatSourceIdsForEvent(event: AgentChatEvent): string[] {
@@ -179,6 +194,15 @@ export function chatPageScopeRelation(
     && previous.session_id !== next.session_id) return "changed";
   if (!nonEmptyScopeValue(previous.session_id) || !nonEmptyScopeValue(next.session_id)) return "unknown";
 
+  if (previous.recent_admission != null || next.recent_admission != null) {
+    if ((previous.recent_admission != null && !validRecentPreview(previous))
+      || (next.recent_admission != null && !validRecentPreview(next))) return "unknown";
+    if (previous.recent_admission !== next.recent_admission) return "changed";
+    if (hasOlderFrontier || requireAdmissionProof) return "unknown";
+    return (["conversation_id", "generation", "source_epoch"] as const)
+      .every((field) => previous[field] === next[field]) ? "preview" : "changed";
+  }
+
   for (const field of ["conversation_id", "generation", "source_epoch"] as const) {
     const oldValue = previous[field];
     const newValue = next[field];
@@ -235,7 +259,7 @@ export function chatPageScopeRelation(
 }
 
 export function chatPageScopeAllowsOrdinaryRead(relation: ChatScopeRelation): boolean {
-  return relation === "same" || relation === "canonical" || relation === "bootstrap";
+  return relation === "same" || relation === "canonical" || relation === "bootstrap" || relation === "preview";
 }
 
 export function chatNeedsRevalidation(
@@ -243,7 +267,8 @@ export function chatNeedsRevalidation(
   next: AgentChatPage,
   browsingOlder: boolean,
 ): boolean {
-  return browsingOlder && previous !== null && completeScope(previous) && completeScope(next)
+  return previous?.recent_admission == null && next.recent_admission == null
+    && browsingOlder && previous !== null && completeScope(previous) && completeScope(next)
     && previous.session_id === next.session_id && previous.source_epoch === next.source_epoch
     && (next.reset || next.revision !== previous.revision);
 }
@@ -322,6 +347,9 @@ export async function revalidateChatWindow(
   direction: ChatWindowDirection = "recent",
   now: () => number = Date.now,
 ): Promise<AgentChatEvent[]> {
+  if (target.recent_admission != null) {
+    throw new ChatRevalidationError("Recent previews cannot authorize source renewal. Retry the canonical Chat window.");
+  }
   const hasUnverifiableRow = candidateEvents.some((event) =>
     event.metadata.optimistic !== true && chatSourceIdsForEvent(event).length === 0
       && !isCanonicalGeneratedEvent(event, target));
@@ -380,7 +408,7 @@ export async function revalidateChatWindow(
     if (reply.revision !== target.revision) {
       throw new ChatRevalidationError("Chat source changed during renewal. The current window was kept; retry Chat.");
     }
-    if (reply.reset || reply.unchanged || (reply.progress !== "ready" && reply.progress !== "provisional")
+    if (reply.recent_admission != null || reply.reset || reply.unchanged || (reply.progress !== "ready" && reply.progress !== "provisional")
       || reply.detail !== null || !sameIds(reply.revalidated_ids, batch)) {
       throw new ChatRevalidationError("The server did not confirm the complete Chat source renewal. The current window was kept; retry Chat.");
     }

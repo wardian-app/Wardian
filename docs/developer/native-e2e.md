@@ -779,6 +779,29 @@ For OpenCode rendering runs, the lab defaults to the free remote OpenCode model 
 The lab fails the run for obvious Wardian-side evidence problems before manual screenshot inspection: non-empty screenshot requirements, missing fixed audit text after resize, unchanged columns when a resize state expects a geometry change, screen rectangle mismatch against xterm cell metrics, paused-buffer mismatch, and rendered rows that do not stabilize before the settle timeout. Outside-terminal parity is still captured separately with `scripts/capture-outside-provider-rendering.ps1` when side-by-side native Windows Terminal evidence is needed.
 ## Windows WebView2 profile isolation
 
+The maintained `chat-turn-change-native` case uses the opt-in Mock
+`chat_acceptance` scenario. It opens the ordinary Roster row and owned session
+surface with WebDriver clicks before any transcript/page prewarm. A passive IPC
+observer retains the original Promise and records actual scope and row identity.
+Readable timing requires the independently declared completed assistant body to
+intersect the Chat viewport through two animation frames. Usability requires
+trusted composer input, or actual scrolling for the saved-Off restart. The
+original Chat selection clock must satisfy both endpoints in less than one
+second; Roster selection is recorded separately. Cold-process, same-process warm,
+and same-home saved-Off results are separate. Raw log inspection warms the
+filesystem, so these measurements do not establish OS-cold performance.
+
+After timing, genuine wheel/button actions load Older pages through opaque
+cursors and expand the declared 60,000-byte body. The fixture preserves both
+Edit/work turns and distinct equal-text assistant turns. Preview retirement is
+reported only when actually observed; a canonical-first response leaves that
+transition unrun. Startup and cleanup errors fail the case. App-free tests in
+`harness-invoke.test.mjs` check observer boundaries and raw fixture grammar;
+they do not establish native normalization, latency, saved-Off, UI, or provider
+acceptance. Native execution still requires a matching built App/CLI bundle and
+exclusive owned runtime resources. Results stay in the isolated home's
+`artifacts/chat-normal-flow/` directory with identity strings hashed.
+
 Every Windows session started by the native harness creates a unique
 `.webview2-*` directory beneath its locked native test home. The driver child
 receives `WEBVIEW2_USER_DATA_FOLDER` pointing there; the parent environment and

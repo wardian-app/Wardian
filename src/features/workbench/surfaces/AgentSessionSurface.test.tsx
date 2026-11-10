@@ -130,6 +130,7 @@ describe("AgentSessionSurface", () => {
     expect(await screen.findByText("agent-1 older history")).toBeInTheDocument();
     expect(vi.mocked(invoke)).toHaveBeenCalledWith("load_agent_chat_page", {
       sessionId: "agent-1", cursor: "older-cursor", revision: undefined, detailRef: undefined,
+      recentPreview: false,
     });
     expect(vi.mocked(invoke).mock.calls.every(([command]) => command === "load_agent_chat_page")).toBe(true);
     expect(screen.getByRole("textbox", { name: "Message agent" })).toBeEnabled();

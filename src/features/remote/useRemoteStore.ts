@@ -13,6 +13,7 @@ import {
   addChatSubmission,
   applyChatPage,
   canAdmitOlderChatPage,
+  chatRecentRefreshDelay,
   submittedChatEvent,
   type ChatWindowDirection,
 } from "../chat/chatReadState";
@@ -140,6 +141,7 @@ const statusFromError = (error: unknown): RemoteStatus => {
 
 const chatConnectionStatusFromError = (error: unknown): RemoteStatus | null => {
   if (error instanceof RemoteChatTimeoutError || error instanceof RemoteChatBodyError) return null;
+  if (error instanceof RemoteRequestError && error.code === "agent_chat_read_retryable" && error.status === 503) return null;
   const status = statusFromError(error);
   // Ordinary chat failures and HTTP 500 do not establish status-stream loss; gateway failures still do.
   return error instanceof RemoteRequestError
@@ -167,6 +169,7 @@ const chatErrorMessage = (error: unknown): string => {
       agent_chat_archive_write_failed: "Chat history could not be saved",
       agent_chat_projection_failed: "Chat history could not be prepared",
       agent_chat_projection_unavailable: "Chat history could not be prepared",
+      agent_chat_read_retryable: "Chat history is temporarily unavailable",
       agent_chat_provenance_failed: "Chat history ownership could not be verified",
     };
     const stage = error.code && Object.prototype.hasOwnProperty.call(stages, error.code) ? stages[error.code] : undefined;
@@ -183,6 +186,8 @@ const REMOTE_TERMINAL_FONT_SIZE_STORAGE_KEY = "wardian.remote.terminalFontSize";
 const REMOTE_HISTORY_DETAIL_VIEW = "agent_detail";
 const BACKGROUND_CHAT_REFRESH_MIN_INTERVAL_MS = 750;
 const SELECTED_CHAT_REFRESH_INTERVAL_MS = 3_000;
+let activeChatOpenedAt = 0;
+let selectedChatUnchangedReads = 0;
 const STATUS_STREAM_RECONNECT_BASE_DELAY_MS = 250;
 const STATUS_STREAM_RECONNECT_MAX_DELAY_MS = 5_000;
 
@@ -329,6 +334,7 @@ async function renewRemoteChatWindow(
 }
 
 const retireActiveChatReads = () => {
+  selectedChatUnchangedReads = 0;
   chatReadInFlight?.controller.abort();
   chatOlderReadInFlight?.controller.abort();
   chatOlderReadInFlight?.settle();
@@ -405,6 +411,7 @@ const closeStatusStream = () => {
 };
 
 const runBackgroundActiveChatRefresh = async (set: RemoteSet, get: RemoteGet) => {
+  if (!isSelectedChatVisible(get)) return;
   if (backgroundChatRefreshInFlight) {
     backgroundChatRefreshQueued = true;
     return;
@@ -455,7 +462,7 @@ const scheduleBackgroundActiveChatRefreshAt = (
   dueAt: number,
   kind: "hint" | "selected_poll",
 ) => {
-  if (!get().activeAgentId || get().activeAgentViewMode !== "chat") return;
+  if (!isSelectedChatVisible(get)) return;
   if (backgroundChatRefreshTimer !== null && backgroundChatRefreshDueAt !== null) {
     const earlierHint = dueAt === backgroundChatRefreshDueAt
       && kind === "hint" && backgroundChatRefreshKind === "selected_poll";
@@ -467,14 +474,15 @@ const scheduleBackgroundActiveChatRefreshAt = (
   backgroundChatRefreshTimer = window.setTimeout(() => {
     const firedKind = backgroundChatRefreshKind;
     clearBackgroundChatRefreshTimer();
-    if (get().activeAgentViewMode !== "chat") return;
+    if (!isSelectedChatVisible(get)) return;
     if (firedKind === "selected_poll" && !canRefreshSelectedChat(get)) return;
     void runBackgroundActiveChatRefresh(set, get);
   }, Math.max(0, dueAt - Date.now()));
 };
 
 const scheduleBackgroundActiveChatRefresh = (set: RemoteSet, get: RemoteGet) => {
-  if (!get().activeAgentId || isSelectedChatRefreshBlocked()) return;
+  if (!isSelectedChatVisible(get) || isSelectedChatRefreshBlocked()) return;
+  selectedChatUnchangedReads = 0;
   const elapsed = Date.now() - lastBackgroundChatRefreshStartedAt;
   scheduleBackgroundActiveChatRefreshAt(
     set,
@@ -484,20 +492,21 @@ const scheduleBackgroundActiveChatRefresh = (set: RemoteSet, get: RemoteGet) => 
   );
 };
 
-const canRefreshSelectedChat = (get: RemoteGet) =>
+const isSelectedChatVisible = (get: RemoteGet) =>
   Boolean(get().activeAgentId)
   && get().activeAgentViewMode === "chat"
   && get().status === "ready"
-  && statusStreamSocket !== null
-  && document.visibilityState !== "hidden"
-  && chatOlderReadInFlight === null;
+  && document.visibilityState !== "hidden";
+
+const canRefreshSelectedChat = (get: RemoteGet) => isSelectedChatVisible(get) && chatOlderReadInFlight === null;
 
 const scheduleSelectedChatRefresh = (set: RemoteSet, get: RemoteGet) => {
   if (!canRefreshSelectedChat(get) || isSelectedChatRefreshBlocked()) return;
   scheduleBackgroundActiveChatRefreshAt(
     set,
     get,
-    Date.now() + SELECTED_CHAT_REFRESH_INTERVAL_MS,
+    Date.now() + chatRecentRefreshDelay(Math.min(15_000, SELECTED_CHAT_REFRESH_INTERVAL_MS * 2 ** Math.min(selectedChatUnchangedReads, 3)), activeChatOpenedAt,
+      Date.now(), get().chatEvents.length > 0),
     "selected_poll",
   );
 };
@@ -506,10 +515,11 @@ const trackSelectedChatVisibility = (set: RemoteSet, get: RemoteGet) => {
   clearStatusStreamVisibilityHandler();
   statusStreamVisibilityHandler = () => {
     if (document.visibilityState === "hidden") {
-      if (backgroundChatRefreshKind === "selected_poll") clearBackgroundChatRefreshTimer();
+      clearBackgroundChatRefreshTimer();
+      backgroundChatRefreshQueued = false;
       return;
     }
-    scheduleSelectedChatRefresh(set, get);
+    scheduleBackgroundActiveChatRefresh(set, get);
   };
   document.addEventListener("visibilitychange", statusStreamVisibilityHandler);
 };
@@ -1012,6 +1022,8 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     }));
   },
   async openAgent(id) {
+    selectedChatUnchangedReads = 0;
+    activeChatOpenedAt = Date.now();
     retireActiveChatReads();
     failedChatRevalidationKey = null;
     chatRefreshRequestSerial += 1;
@@ -1082,6 +1094,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     }));
     if (mode === "terminal") clearBackgroundChatRefresh();
     if (mode === "chat" && get().chatEvents.length === 0) {
+      activeChatOpenedAt = Date.now();
       await get().refreshActiveAgentChat();
       return;
     }
@@ -1131,13 +1144,21 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       const before = get();
       const previous = before.chatPage;
       const startingEvents = before.chatEvents;
+      const canReuseRevision = previous?.session_id === activeAgentId
+        && chatPageScopeAllowsOrdinaryRead(chatPageScopeRelation(previous, previous, startingEvents));
       const startingFingerprint = JSON.stringify(startingEvents);
       const browsingOlder = before.chatBrowsingOlder || interleavedRecent;
       const page = await remoteClient.loadAgentChatPage(activeAgentId, undefined,
-        !chatForceRecentRead && previous?.session_id === activeAgentId && startingEvents.length > 0 ? previous.revision : undefined,
-        undefined, controller.signal);
+        !chatForceRecentRead && canReuseRevision ? previous.revision : undefined,
+        undefined, controller.signal, undefined, !browsingOlder);
       if (requestSerial !== chatRefreshRequestSerial || requestedWindow !== chatWindowRequestSerial
         || get().activeAgentId !== activeAgentId || page.session_id !== activeAgentId) return;
+      if (page.recent_admission != null && chatPageScopeRelation(page, page, [], false) !== "preview") {
+        throw new ChatRevalidationError("Invalid recent preview capability.");
+      }
+      const agentStatus = get().agents.find((agent) => agent.session_id === activeAgentId)?.status;
+      selectedChatUnchangedReads = page.unchanged && page.progress === "ready"
+        && !activeAgentStatusShouldRefreshChat(agentStatus ?? "") ? selectedChatUnchangedReads + 1 : 0;
       const scopeRelation = chatPageScopeRelation(previous, page, startingEvents,
         before.chatNextBefore !== null || chatOlderCursor !== null || browsingOlder
           || (previous !== null && previous.next_before !== null));
@@ -1150,7 +1171,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
         failedChatRevalidationKey = null;
         chatOlderCursor = null;
         chatForceRecentRead = !page.reset;
-        if (page.reset) {
+        if (page.reset || previous.recent_admission != null || page.recent_admission != null) {
           set({ chatEvents: applyChatPage([], page, "recent"), chatPage: page, chatBrowsingOlder: false,
             chatHasOlder: page.next_before !== null, chatNextBefore: page.next_before, chatLoading: false,
             chatLoadingOlder: false, chatError: "" });
@@ -1203,7 +1224,9 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
         if (interleavedRecent && !ordinaryCompatible && !page.reset) throw new Error("Conversation changed during recent read");
         if (!page.unchanged && (page.reset || !chatOlderCursor || chatOlderCursor.serial !== requestSerial || chatOlderCursor.generation !== page.generation)) chatOlderCursor = null;
         const nextBefore = chatOlderCursor ? chatOlderCursor.before : page.next_before;
-        const nextPage = page.unchanged ? state.chatPage : { ...page, next_before: nextBefore };
+        const nextPage = page.unchanged && state.chatPage
+          ? { ...state.chatPage, progress: page.progress, bytes_read: page.bytes_read, records_decoded: page.records_decoded }
+          : { ...page, next_before: nextBefore };
         chatForceRecentRead = false;
         const chatBrowsingOlder = page.reset ? false : state.chatBrowsingOlder;
         const mergedChatEvents = applyChatPage(state.chatEvents, page, "recent", chatBrowsingOlder ? "older" : "recent");

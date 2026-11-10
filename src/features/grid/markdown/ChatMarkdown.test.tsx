@@ -20,6 +20,17 @@ describe("safeMarkdownUrl", () => {
 });
 
 describe("ChatMarkdown", () => {
+  it("limits prose blocks without narrowing the technical Markdown lane", () => {
+    const view = render(<ChatMarkdown source={"# Heading\n\nParagraph\n\n- List\n\n> Quote\n\n```js\nconst wide = true;\n```\n\n| A | B |\n|---|---|\n| 1 | 2 |"} />);
+    expect(view.container.querySelector(".chat-markdown")).not.toHaveClass("chat-prose-block");
+    expect(screen.getByText("Paragraph")).toHaveClass("chat-prose-block");
+    expect(screen.getByText("Heading")).toHaveClass("chat-prose-block");
+    expect(view.container.querySelector("ul")).toHaveClass("chat-prose-block");
+    expect(view.container.querySelector("blockquote")).toHaveClass("chat-prose-block");
+    expect(screen.getByRole("table").closest(".chat-prose-block")).toBeNull();
+    expect(view.container.querySelector("pre")?.closest(".chat-prose-block") ?? null).toBeNull();
+  });
+
   it("renders email summaries as semantic GFM tables", () => {
     render(
       <ChatMarkdown

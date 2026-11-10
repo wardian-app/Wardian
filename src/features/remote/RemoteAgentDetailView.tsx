@@ -510,7 +510,7 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
 
   return (
     <main
-      className="flex h-dvh overflow-hidden flex-col bg-wardian-bg text-primary"
+      className="wardian-chat-pane flex h-dvh overflow-hidden flex-col bg-wardian-bg text-primary"
       data-testid="remote-agent-detail"
     >
       <header className="shrink-0 border-b border-wardian-border bg-wardian-bg/95 px-3 py-3 backdrop-blur">
@@ -592,7 +592,7 @@ export const RemoteAgentDetailView: React.FC<{ agent: RemoteAgentSummary }> = ({
       )}
 
       {activeAgentViewMode === "chat" && (
-        <form onSubmit={(event) => void submit(event)} className="shrink-0 border-t border-wardian-border bg-wardian-bg/95 p-3 backdrop-blur">
+        <form onSubmit={(event) => void submit(event)} className="chat-composer shrink-0 border-t border-wardian-border bg-wardian-bg/95 p-3 backdrop-blur">
           <div className="flex items-end gap-2">
             <textarea
               aria-label={`Prompt ${agent.session_name}`}
@@ -1071,7 +1071,7 @@ function ChatPane({
       prepend.current = null;
     }
   }, [loadingOlder, visibleEvents, settledPrepend]);
-  const progressText = chatReadProgress(progress);
+  const progressText = chatReadProgress(progress, visibleEvents.some(shouldShowChatEvent));
   const rows = useMemo(
     () =>
       withTurnChangeSummaries(derivePresentedChatRows(visibleEvents.filter(shouldShowChatEvent), readingPresentation.boundaries), {
@@ -1084,7 +1084,7 @@ function ChatPane({
   );
   const liveApprovalId = useMemo(() => liveApprovalEventId(sortTranscriptEvents(visibleEvents)), [visibleEvents]);
   return (
-    <section className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`} ref={scrollRef} onScroll={() => {
+    <section className="chat-transcript-scroll min-h-0 min-w-0 flex-1 overflow-y-auto px-3 py-3" aria-label={`${agent.session_name} chat`} ref={scrollRef} onScroll={() => {
       const scroll = scrollRef.current;
       if (!scroll || prepend.current) return;
       if (scroll.scrollTop <= 160 && hasOlder && !loadingOlder) { void loadOlder(); return; }

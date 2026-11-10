@@ -3,6 +3,11 @@
 Issue: #1593. Scope: desktop Chat and Remote Chat, including mobile. Archive
 capture and full-history inspection retain their existing ownership.
 
+The [latest-first publication contract](2026-11-07-chat-recent-publication.md)
+adds a bounded, non-authoritative memory slot in the existing projection owner.
+Its admission, retirement and canonical handoff preserve the stronger read
+proofs below; recent publication grants no Older, detail or ACK authority.
+
 ## Read contract
 
 Normal Chat uses `load_agent_chat_page`. It does not await native capture,
@@ -20,7 +25,12 @@ uses `load_agent_chat_transcript_for_state` for full transcript evidence. These
 existing capture and evidence operations retain their contracts independently
 of the bounded normal Chat page and detail reader.
 
-The initial window and each older page contain at most 80 headers. Previews
+The initial window and each older page contain at most 80 physical headers.
+Normal recent reads may request a soft target from 1 through 80; the PWA asks
+for eight and omission retains 80. Complete frames and certified display groups
+remain atomic within the hard 80-header cap. This target never changes Older,
+detail or revalidation budgets, and 80 physical headers need not mean 80
+displayed logical rows. Previews
 contain at most 1 KiB of UTF-8 text; each body chunk contains at most 16 KiB.
 The immutable object reader allows at most 512 object attempts and 1 MiB of
 object bytes. A recent-source observation adds at most two 128 KiB tail reads

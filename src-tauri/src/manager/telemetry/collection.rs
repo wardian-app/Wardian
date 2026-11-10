@@ -366,7 +366,7 @@ pub(super) async fn collect_agent_metrics_with_sampler(
                                         i_ts = metrics.init_timestamp;
                                     }
                                 }
-                            } else if let Ok(content) = read_log_bounded(path) {
+                            } else if let Ok((content, recent_source)) = read_log_with_watch_source(path, &snap.provider) {
                                 if let Some(mtime) = new_mtime {
                                     *snap.log_last_modified.lock().unwrap() = Some(mtime);
                                 }
@@ -569,7 +569,7 @@ pub(super) async fn collect_agent_metrics_with_sampler(
                                             );
                                         }
                                         if snap.provider == "gemini" {
-                                            record_latest_gemini_assistant_text(snap, &content);
+                                            record_latest_gemini_with_source(snap, &content, recent_source);
                                         }
                                     }
                                 }

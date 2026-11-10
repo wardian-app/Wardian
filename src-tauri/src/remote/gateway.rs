@@ -843,6 +843,7 @@ fn parse_remote_automation_monitor_query(
 struct RemoteChatQuery {
     before: Option<String>,
     limit: Option<usize>,
+    recent_preview: Option<bool>,
     revision: Option<String>,
     detail: Option<String>,
     // Keep this a single canonical JSON-list value; Axum's `Query<Vec<_>>`
@@ -956,17 +957,57 @@ async fn load_remote_agent_chat<R: Runtime>(
         require_audited_remote_session(&ctx, &headers, &origin, "chat_read", "load_agent_chat")
             .await?;
     let state = ctx.app.state::<crate::state::AppState>();
-    let _limit = query.limit;
-    let page = crate::remote::operations::remote_agent_chat_page_with_revalidation(
+    if query.limit.is_some_and(|limit| {
+        !(1..=crate::state::conversation_archive::chat_read::PAGE_ROWS).contains(&limit)
+    }) {
+        return Err(RemoteGatewayError::bad_request(
+            "agent_chat_projection_unavailable",
+        ));
+    }
+    let queue_error = if query.recent_preview == Some(true)
+        && query.before.is_none()
+        && query.detail.is_none()
+        && revalidate_ids.is_none()
+        && !session_id.trim().is_empty()
+        && query
+            .revision
+            .as_ref()
+            .is_none_or(|value| value.len() <= 512)
+    {
+        crate::commands::chat::queue_recent_capture_for_app(&state, &ctx.app, &session_id).err()
+    } else {
+        None
+    };
+    let page = crate::remote::operations::remote_agent_chat_page_with_recent(
         &state,
         &session_id,
         query.before,
         query.revision,
         query.detail,
         revalidate_ids,
+        crate::commands::chat::RecentChatRead {
+            limit: query.limit,
+            preview: query.recent_preview.unwrap_or(false),
+        },
     )
     .await
-    .map_err(|_| RemoteGatewayError::bad_request("agent_chat_projection_unavailable"))?;
+    .map_err(|error| match error.as_str() {
+        "chat snapshot temporarily busy"
+        | "chat config temporarily busy"
+        | "chat status temporarily busy"
+        | "chat source temporarily busy"
+        | "chat runtime changed during read"
+        | "chat read task failed"
+        | "chat projection read unavailable" => {
+            RemoteGatewayError::service_unavailable("agent_chat_read_retryable")
+        }
+        _ => RemoteGatewayError::bad_request("agent_chat_projection_unavailable"),
+    })?;
+    if page.events.is_empty() && !page.reset && queue_error.is_some() {
+        return Err(RemoteGatewayError::service_unavailable(
+            "agent_chat_read_retryable",
+        ));
+    }
     audit_gateway_event(
         &session,
         &origin,
@@ -2648,6 +2689,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_chat_recent_limit_preserves_retryable_and_query_statuses() {
+        let temp = tempfile::tempdir().expect("temp home");
+        let _home = WardianHomeEnvGuard::set_async(temp.path()).await;
+        crate::remote::storage::save_remote_config_at(temp.path(), &config()).unwrap();
+        seed_active_remote_devices(temp.path(), &["device-1"]);
+        let app = tauri::test::mock_app();
+        app.manage(AppState::new());
+        let state = app.state::<AppState>();
+        let session = {
+            let mut runtime = state.remote_runtime.lock().await;
+            crate::remote::auth::create_session(
+                &mut runtime,
+                "device-1",
+                chrono::Utc::now().timestamp_millis(),
+            )
+        };
+        // The ordinary reader must fail promptly on this held roster gate.
+        // Query validation remains a client error under the same contention.
+        let roster = state.agents.lock().await;
+        for (query, status, code) in [
+            (
+                "limit=8",
+                StatusCode::SERVICE_UNAVAILABLE,
+                "agent_chat_read_retryable",
+            ),
+            (
+                "limit=0",
+                StatusCode::BAD_REQUEST,
+                "agent_chat_projection_unavailable",
+            ),
+            (
+                "limit=81",
+                StatusCode::BAD_REQUEST,
+                "agent_chat_projection_unavailable",
+            ),
+            (
+                "limit=eight",
+                StatusCode::BAD_REQUEST,
+                "agent_chat_projection_unavailable",
+            ),
+        ] {
+            let error = load_remote_agent_chat(
+                State(RemoteGatewayContext {
+                    app: app.handle().clone(),
+                    config: config(),
+                }),
+                action_headers(&session),
+                AxumPath("private-agent".into()),
+                RawQuery(Some(query.into())),
+            )
+            .await
+            .expect_err("held reader or invalid query must not qualify a page");
+            let response = error.into_response();
+            assert_eq!(response.status(), status);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["code"], code);
+            assert!(payload.get("detail").is_none());
+            assert!(!String::from_utf8(body.to_vec())
+                .unwrap()
+                .contains("private-agent"));
+        }
+        drop(roster);
+    }
+
+    #[tokio::test]
     async fn remote_chat_gateway_returns_repeated_codex_turns_after_legacy_archive_identity() {
         use std::io::Write as _;
 
@@ -2830,7 +2939,7 @@ mod tests {
                 State(ctx),
                 action_headers(&session),
                 AxumPath("synthetic-codex-agent".to_string()),
-                RawQuery(Some("limit=100".to_string())),
+                RawQuery(Some("limit=80".to_string())),
             ),
         )
         .await

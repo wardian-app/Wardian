@@ -266,6 +266,20 @@ boundary.
   open and earlier chat remains visible. Select **Retry Chat**. If the error
   repeats, inspect the host's chat and archive diagnostics; re-pairing does not
   resolve an error from the chat endpoint.
+- **Chat is briefly busy while the desktop is healthy:** the selected Chat
+  retries automatically, including for an Off agent. Earlier readable rows
+  stay visible. A recent window can be readable while older history is still
+  catching up. Scroll to request older headers; full details load when opened.
+  Stable, unchanged Chat uses fewer background reads, and fresh visible
+  updates bring the next read forward.
+  The PWA starts with an eight-header recent target; an omitted target retains
+  80. Complete groups can exceed the small target within the 80-header cap.
+  This target changes neither older-history nor detail-read limits.
+  A newly selected Chat can show recent text before saved history finishes
+  loading. Older history and full details become available after their normal
+  publication. Recent text does not enable either action early. Changing or
+  clearing the conversation removes the previous recent window, including
+  when the new conversation has no messages.
 - **A Chat response stops before its history finishes arriving:** earlier rows
   remain visible with **Retry Chat**. An interrupted successful Chat response
   does not by itself establish that the desktop is unreachable.

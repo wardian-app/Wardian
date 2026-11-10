@@ -701,7 +701,7 @@ describe("RemoteMobileApp", () => {
 
     expect(await screen.findByText("Loaded default chat.")).toBeVisible();
     expect(fetchMock).toHaveBeenCalledWith(
-      "/remote/api/agents/agent-1/chat",
+      "/remote/api/agents/agent-1/chat?limit=8&recent_preview=true",
       expect.objectContaining({ method: "GET" }),
     );
   });

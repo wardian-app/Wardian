@@ -91,7 +91,7 @@ function createComponents(linkHandling?: ChatMarkdownProps["linkHandling"]): Com
       );
     },
     blockquote({ children }) {
-      return <blockquote className="border-l-2 border-wardian-light pl-3 text-muted-neutral">{children}</blockquote>;
+      return <blockquote className="chat-prose-block border-l-2 border-wardian-light pl-3 text-muted-neutral">{children}</blockquote>;
     },
     code({ className, children }) {
       const raw = String(children).replace(/\n$/, "");
@@ -112,22 +112,22 @@ function createComponents(linkHandling?: ChatMarkdownProps["linkHandling"]): Com
       return <del className="text-muted-neutral">{children}</del>;
     },
     h1({ children }) {
-      return <div className="mt-1 text-[14px] font-bold leading-5 text-primary">{children}</div>;
+      return <div className="chat-prose-block mt-1 text-[14px] font-bold leading-5 text-primary">{children}</div>;
     },
     h2({ children }) {
-      return <div className="mt-1 text-[14px] font-bold leading-5 text-primary">{children}</div>;
+      return <div className="chat-prose-block mt-1 text-[14px] font-bold leading-5 text-primary">{children}</div>;
     },
     h3({ children }) {
-      return <div className="mt-1 text-[13px] font-bold leading-5 text-primary">{children}</div>;
+      return <div className="chat-prose-block mt-1 text-[13px] font-bold leading-5 text-primary">{children}</div>;
     },
     h4({ children }) {
-      return <div className="mt-1 text-[13px] font-bold leading-5 text-primary">{children}</div>;
+      return <div className="chat-prose-block mt-1 text-[13px] font-bold leading-5 text-primary">{children}</div>;
     },
     h5({ children }) {
-      return <div className="mt-1 text-[13px] font-bold leading-5 text-primary">{children}</div>;
+      return <div className="chat-prose-block mt-1 text-[13px] font-bold leading-5 text-primary">{children}</div>;
     },
     h6({ children }) {
-      return <div className="mt-1 text-[13px] font-bold leading-5 text-primary">{children}</div>;
+      return <div className="chat-prose-block mt-1 text-[13px] font-bold leading-5 text-primary">{children}</div>;
     },
     hr() {
       return <hr className="border-0 border-t border-wardian-light" />;
@@ -160,10 +160,10 @@ function createComponents(linkHandling?: ChatMarkdownProps["linkHandling"]): Com
       return <li className="break-words">{children}</li>;
     },
     ol({ children }) {
-      return <ol className="list-decimal space-y-1 pl-5 marker:text-muted-neutral">{children}</ol>;
+      return <ol className="chat-prose-block list-decimal space-y-1 pl-5 marker:text-muted-neutral">{children}</ol>;
     },
     p({ children }) {
-      return <p className="break-words">{children}</p>;
+      return <p className="chat-prose-block break-words">{children}</p>;
     },
     pre({ children }) {
       return <>{children}</>;
@@ -203,14 +203,14 @@ function createComponents(linkHandling?: ChatMarkdownProps["linkHandling"]): Com
       return <thead className="border-b border-wardian-light">{children}</thead>;
     },
     ul({ children }) {
-      return <ul className="list-disc space-y-1 pl-5 marker:text-muted-neutral">{children}</ul>;
+      return <ul className="chat-prose-block list-disc space-y-1 pl-5 marker:text-muted-neutral">{children}</ul>;
     },
   };
 }
 
 export function ChatMarkdown({ linkHandling, source }: ChatMarkdownProps) {
   return (
-    <div className="space-y-2 text-[13px] leading-5 text-primary">
+    <div className="chat-markdown min-w-0 space-y-2 text-[13px] leading-5 text-primary">
       <Markdown components={createComponents(linkHandling)} remarkPlugins={[[remarkGfm, { singleTilde: false }]]} skipHtml urlTransform={markdownUrlTransform}>
         {source}
       </Markdown>

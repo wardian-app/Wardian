@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type SetStateAction } from "react";
 import type { AgentChatEvent, AgentChatPage } from "../../types";
-import { addChatSubmission, applyChatPage, canAdmitOlderChatPage, type ChatWindowDirection } from "./chatReadState";
+import { addChatSubmission, applyChatPage, canAdmitOlderChatPage, chatRecentRefreshDelay, type ChatWindowDirection } from "./chatReadState";
 import {
   ChatRevalidationError,
   chatNeedsRevalidation,
@@ -16,9 +16,34 @@ export type ChatPageLoader = (request: {
   revision?: string;
   detailRef?: string;
   revalidateIds?: string[];
+  recentPreview?: boolean;
 }) => Promise<AgentChatPage>;
 
 const CHAT_FIRST_READ_WAIT_MS = 30_000;
+// One retained call may coexist with the newly selected conversation. Further
+// switches wait honestly instead of accumulating never-settling physical work.
+const MAX_PHYSICAL_CHAT_READS = 2;
+const CHAT_CAPACITY_BUSY = "Chat is busy with earlier reads. Retrying when a read finishes.";
+
+interface PhysicalChatRead {
+  request: symbol;
+  done: Promise<void>;
+}
+interface ChatReadPool {
+  reads: Map<string, PhysicalChatRead>;
+  settled: Set<(request: symbol) => void>;
+}
+// The stable loader identifies the backend ownership domain. Keyed views can
+// retire without cancelling backend work; only actual settlement frees a slot.
+const physicalChatReads = new WeakMap<ChatPageLoader, ChatReadPool>();
+function chatReadPool(loader: ChatPageLoader): ChatReadPool {
+  let pool = physicalChatReads.get(loader);
+  if (!pool) {
+    pool = { reads: new Map(), settled: new Set() };
+    physicalChatReads.set(loader, pool);
+  }
+  return pool;
+}
 
 interface OlderChatDemand {
   scope: number;
@@ -59,8 +84,9 @@ function patchLoadedChatMembers(current: AgentChatEvent[], next: AgentChatPage):
   return result;
 }
 
-/** One request at a time per conversation. Polls cannot invalidate a slow read. */
+/** Share physical ownership across views using the same stable loader. */
 export function useChatPages(sessionId: string, loader: ChatPageLoader, intervalMs: number, reloadKey: number) {
+  const readPool = chatReadPool(loader);
   const [page, setPage] = useState<AgentChatPage | null>(null);
   const [events, setRenderedEvents] = useState<AgentChatPage["events"]>([]);
   const eventWindow = useRef<AgentChatPage["events"]>([]);
@@ -79,12 +105,14 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
   const latest = useRef<AgentChatPage | null>(null);
   const inFlight = useRef<symbol | null>(null);
   const physicalReadDone = useRef<Promise<void> | null>(null);
+  const capacityBlocked = useRef(false);
   const activeSession = useRef<string | null>(null);
   const olderCursor = useRef<{ generation: string | null; before: string | null } | null>(null);
   const queuedRefresh = useRef(false);
   const refresh = useRef<() => void>(() => {});
   const lastReload = useRef(reloadKey);
   const pollInterval = useRef(intervalMs);
+  const openedAt = useRef(Date.now());
   const lastActivationVersion = useRef(activationVersion);
   const windowVersion = useRef(0);
   const windowDirection = useRef<ChatWindowDirection>("recent");
@@ -115,8 +143,15 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
     const epoch = reset ? scope.current : ++scope.current;
     const switched = activeSession.current !== sessionId;
     activeSession.current = sessionId;
+    capacityBlocked.current = false;
+    // A retired conversation keeps its physical slot, without starving another one.
+    const retainedRead = readPool.reads.get(sessionId);
+    inFlight.current = retainedRead?.request ?? null;
+    physicalReadDone.current = retainedRead?.done ?? null;
+    if (retainedRead && (switched || reset)) setWaiting(true);
     // Retired calls retain the physical slot until their own finally block.
     if (switched || reset) {
+      openedAt.current = Date.now();
       latest.current = null; olderCursor.current = null;
       windowDirection.current = "recent"; setBrowsingOlder(false);
       queuedRefresh.current = inFlight.current !== null; setPage(null); setEvents([]);
@@ -129,7 +164,24 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
     };
     const poll = async () => {
       if (epoch !== scope.current) return;
+      // Another mounted view may have acquired this conversation since our
+      // previous poll. Read the shared slot before every admission attempt.
+      const retained = readPool.reads.get(sessionId);
+      inFlight.current = retained?.request ?? null;
+      physicalReadDone.current = retained?.done ?? null;
       if (!inFlight.current && document.visibilityState !== "hidden") {
+        if (readPool.reads.size >= MAX_PHYSICAL_CHAT_READS) {
+          capacityBlocked.current = true;
+          queuedRefresh.current = false;
+          failedReadDirection.current = olderDemand.current ? "older" : "recent";
+          setError(CHAT_CAPACITY_BUSY); setLoading(false); setLoadingOlder(false); setWaiting(false);
+          schedule(pollInterval.current);
+          return;
+        }
+        if (capacityBlocked.current) {
+          capacityBlocked.current = false;
+          setError(null); setLoading(latest.current === null);
+        }
         const pending = olderDemand.current;
         if (pending && (pending.scope !== epoch || pending.window !== windowVersion.current
           || pending.conversation !== latest.current?.conversation_id
@@ -145,6 +197,7 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
         inFlight.current = request;
         let releaseRead = () => {};
         physicalReadDone.current = new Promise<void>((resolve) => { releaseRead = resolve; });
+        readPool.reads.set(sessionId, { request, done: physicalReadDone.current });
         if (!demand && !latest.current) {
           // A passive first-read presentation timer never releases the physical read.
           waitingTimer.current = setTimeout(() => {
@@ -182,9 +235,13 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
         };
         try {
           const next = await loader(readingOlder ? { sessionId, cursor: demand!.cursor }
-            : { sessionId, revision: forceRecentRead.current ? undefined : latest.current?.revision });
+            : { sessionId, revision: forceRecentRead.current ? undefined : latest.current?.revision,
+              ...(windowDirection.current === "older" ? { recentPreview: false } : {}) });
           if (readingOlder && next.session_id !== sessionId) throw new Error("Conversation changed during older read");
           if (epoch !== scope.current || requestedWindow !== windowVersion.current || next.session_id !== sessionId) return;
+          if (next.recent_admission != null && chatPageScopeRelation(next, next, [], false) !== "preview") {
+            throw new ChatRevalidationError("Invalid recent preview capability.");
+          }
           const previous = latest.current;
           const browsingOlder = readingOlder || windowDirection.current === "older";
           const scopeRelation = chatPageScopeRelation(previous, next, eventWindow.current,
@@ -201,7 +258,7 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
             windowDirection.current = "recent";
             failedRevalidation.current = null;
             forceRecentRead.current = !next.reset;
-            if (next.reset) {
+            if (next.reset || previous.recent_admission != null || next.recent_admission != null) {
               const fresh = applyChatPage([], next, "recent");
               latest.current = next; setPage(next); setEvents(fresh); setError(null);
               setBrowsingOlder(false); setLoadingOlder(false);
@@ -307,14 +364,19 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
             if (readingOlder && demand && olderDemand.current === demand) { settleOlderDemand(); setLoadingOlder(false); }
           }
         } finally {
+          if (readPool.reads.get(sessionId)?.request === request) readPool.reads.delete(sessionId);
+          releaseRead();
           if (inFlight.current === request) {
-            inFlight.current = null; physicalReadDone.current = null; releaseRead();
+            inFlight.current = null; physicalReadDone.current = null;
             if (epoch !== scope.current || requestedWindow !== windowVersion.current) refresh.current();
           }
           if (epoch === scope.current && requestedWindow === windowVersion.current) { clearWaiting(); setLoading(false); }
+          for (const settled of readPool.settled) settled(request);
         }
       }
-      const delay = !olderDemand.current && queuedRefresh.current && !inFlight.current ? 0 : pollInterval.current;
+      const ordinaryDelay = olderDemand.current ? pollInterval.current
+        : chatRecentRefreshDelay(pollInterval.current, openedAt.current, Date.now(), eventWindow.current.length > 0);
+      const delay = !olderDemand.current && queuedRefresh.current && !inFlight.current ? 0 : ordinaryDelay;
       if (!inFlight.current && !olderDemand.current) queuedRefresh.current = false;
       schedule(delay);
     };
@@ -329,10 +391,25 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
       queuedRefresh.current = false;
       schedule(0);
     };
+    const physicalSettled = (request: symbol) => {
+      if (epoch !== scope.current) return;
+      if (inFlight.current === request) {
+        inFlight.current = null; physicalReadDone.current = null;
+        refresh.current();
+      } else if (capacityBlocked.current && readPool.reads.size < MAX_PHYSICAL_CHAT_READS) {
+        refresh.current();
+      }
+    };
+    readPool.settled.add(physicalSettled);
     runScheduledRead.current = poll;
     void poll();
-    return () => { settleOlderDemand(); clearWaiting(); if (epoch === scope.current) scope.current += 1; if (timer) clearTimeout(timer); };
-  }, [sessionId, loader, activationVersion, settleOlderDemand, clearWaiting, setEvents]);
+    return () => {
+      readPool.settled.delete(physicalSettled);
+      settleOlderDemand(); clearWaiting();
+      if (epoch === scope.current) scope.current += 1;
+      if (timer) clearTimeout(timer);
+    };
+  }, [sessionId, loader, readPool, activationVersion, settleOlderDemand, clearWaiting, setEvents]);
 
   useEffect(() => {
     if (lastReload.current === reloadKey) return;
@@ -354,6 +431,7 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
 
   const jumpToLatest = useCallback(() => {
     settleOlderDemand(); clearWaiting(); failedReadDirection.current = "recent";
+    if (inFlight.current) setWaiting(true);
     failedRevalidation.current = null;
     windowVersion.current += 1; forceRecentRead.current = true; olderCursor.current = null;
     windowDirection.current = "recent"; queuedRefresh.current = true;
@@ -398,17 +476,17 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
       && latest.current?.generation === generation && latest.current?.conversation_id === conversation
       && latest.current?.source_epoch === source;
     // Every invocation of the shared loader owns the same physical slot.
-    while (inFlight.current) {
-      const done = physicalReadDone.current;
-      if (!done) throw new Error("Conversation changed during detail read");
-      await done;
+    while (readPool.reads.has(sessionId)) {
+      await readPool.reads.get(sessionId)!.done;
       if (!currentScope()) throw new Error("Conversation changed during detail read");
     }
     if (!currentScope()) throw new Error("Conversation changed during detail read");
+    if (readPool.reads.size >= MAX_PHYSICAL_CHAT_READS) throw new Error(CHAT_CAPACITY_BUSY);
     const request = Symbol("chat detail read");
     inFlight.current = request;
     let releaseRead = () => {};
     physicalReadDone.current = new Promise<void>((resolve) => { releaseRead = resolve; });
+    readPool.reads.set(sessionId, { request, done: physicalReadDone.current });
     try {
       const next = await loader({ sessionId, detailRef });
       if (!currentScope() || next.generation !== generation || next.conversation_id !== conversation
@@ -417,12 +495,15 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
       }
       return next.detail;
     } finally {
+      if (readPool.reads.get(sessionId)?.request === request) readPool.reads.delete(sessionId);
+      releaseRead();
       if (inFlight.current === request) {
-        inFlight.current = null; physicalReadDone.current = null; releaseRead();
+        inFlight.current = null; physicalReadDone.current = null;
         refresh.current();
       }
+      for (const settled of readPool.settled) settled(request);
     }
-  }, [loader, sessionId]);
+  }, [loader, readPool, sessionId]);
 
   const addSubmitted = useCallback((event: AgentChatEvent) => {
     setEvents((current) => addChatSubmission(current, latest.current, event));

@@ -3056,6 +3056,10 @@ async fn spawn_agent_inner(
         4096,
         262_144,
     )));
+    watch_state
+        .lock()
+        .map_err(|_| "Failed to bind live Chat Watch")?
+        .bind_live_chat(&live_conversation_started_at);
     // Keep the attachment gate on the runtime's existing ActiveAgent-owned
     // watch-state Arc so every status/readiness/admission path sees it.
     let codex_attachment_ready = {
@@ -4090,7 +4094,7 @@ async fn spawn_agent_inner(
                                         codex_watch_binding.extract_message(&raw_line)
                                     {
                                         if let Ok(mut watch_state) = watcher_watch_state.lock() {
-                                            watch_state.push_transcript(message);
+                                            watch_state.push_file_transcript(message);
                                         }
                                     }
                                     if let Some(event) = event {
@@ -4221,7 +4225,7 @@ async fn spawn_agent_inner(
                                     );
                                 }
                                 if let Ok(mut watch_state) = watcher_watch_state.lock() {
-                                    watch_state.push_transcript(message);
+                                    watch_state.push_file_transcript(message);
                                 }
                             }
                             if let Some(event) = watcher_provider.parse_output(&raw_line) {
@@ -4409,7 +4413,7 @@ async fn spawn_agent_inner(
                                 let message = extract_transcript_message("claude", raw_line);
                                 if let Some(message) = message {
                                     if let Ok(mut watch_state) = watcher_watch_state.lock() {
-                                        watch_state.push_transcript(message.clone());
+                                        watch_state.push_file_transcript(message.clone());
                                     }
                                 }
                                 if let Some(event) = watcher_provider.parse_output(raw_line) {
@@ -4764,7 +4768,7 @@ async fn spawn_agent_inner(
                             if !projected.is_empty() {
                                 if let Ok(mut watch_state) = watcher_watch_state.lock() {
                                     for message in projected {
-                                        watch_state.push_transcript(message);
+                                        watch_state.push_file_transcript(message);
                                     }
                                 }
                             }
@@ -4821,7 +4825,7 @@ async fn spawn_agent_inner(
                                         extract_transcript_message("antigravity", &raw_line)
                                     {
                                         if let Ok(mut watch_state) = watcher_watch_state.lock() {
-                                            watch_state.push_transcript(message);
+                                            watch_state.push_file_transcript(message);
                                         }
                                     }
                                     if let Some(event) = watcher_provider.parse_output(&raw_line) {

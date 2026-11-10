@@ -1,4 +1,10 @@
-use std::{collections::HashSet, sync::atomic::Ordering};
+use std::{
+    collections::HashSet,
+    io,
+    sync::{atomic::Ordering, Arc, Mutex},
+};
+
+use super::agent_lock_for;
 
 use super::{
     derive_turn_records, effective_conversation_logging, index_records_by_sequence,
@@ -22,6 +28,12 @@ use wardian_core::models::chat::{
 use wardian_core::paths::{agent_conversation_dir, agent_conversations_dir};
 
 impl ConversationArchiveState {
+    /// Let producer tests hold the real archive gate independently of policy
+    /// admission, so an early recent-header publication cannot rely on old IO.
+    pub(crate) fn test_agent_archive_gate(&self, agent_id: &str) -> io::Result<Arc<Mutex<()>>> {
+        agent_lock_for(&self.agent_locks, agent_id)
+    }
+
     pub(crate) fn fail_next_chat_cursor_commit_for_test(&self) {
         self.fail_next_chat_cursor_commit
             .store(true, Ordering::SeqCst);

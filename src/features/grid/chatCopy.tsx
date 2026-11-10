@@ -4,9 +4,12 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 
 type CopyState = "idle" | "copied" | "error";
 
+/** A synchronous value factory runs once per Copy gesture, never while rendering actions. */
+type ChatCopyValue = string | (() => string);
+
 export interface ChatCopyAction {
   label: string;
-  value: string;
+  value: ChatCopyValue;
 }
 
 async function writeClipboardText(value: string) {
@@ -20,7 +23,7 @@ async function writeClipboardText(value: string) {
   }
 }
 
-function useCopyValue(value: string) {
+function useCopyValue(value: ChatCopyValue) {
   const [state, setState] = useState<CopyState>("idle");
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -40,9 +43,10 @@ function useCopyValue(value: string) {
   );
 
   const copy = async () => {
-    if (!value) return;
     try {
-      await writeClipboardText(value);
+      const text = typeof value === "function" ? value() : value;
+      if (!text) return;
+      await writeClipboardText(text);
       setState("copied");
       scheduleReset(1400);
     } catch {
@@ -58,7 +62,7 @@ function copyStateLabel(label: string, state: CopyState) {
   return state === "copied" ? `${label} copied` : state === "error" ? `${label} failed` : label;
 }
 
-export function CopyIconButton({ label, value }: { label: string; value: string }) {
+export function CopyIconButton({ label, value }: { label: string; value: ChatCopyValue }) {
   const { copy, state } = useCopyValue(value);
 
   return (

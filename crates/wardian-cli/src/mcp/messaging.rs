@@ -1,10 +1,10 @@
-use crate::live;
+use crate::control_client::{self, ControlEndpointError};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io;
 use wardian_core::agent_messaging::{AgentMessagingRequest, AgentMessagingResponse};
 
-pub(super) trait Backend {
+pub(super) trait Backend: Send + 'static {
     fn require_sender(&self) -> io::Result<()>;
     fn invoke(&mut self, request: AgentMessagingRequest) -> io::Result<Value>;
 }
@@ -13,11 +13,11 @@ pub(super) struct Live;
 
 impl Backend for Live {
     fn require_sender(&self) -> io::Result<()> {
-        live::require_current_message_origin().map(|_| ())
+        control_client::require_current_message_origin().map(|_| ())
     }
 
     fn invoke(&mut self, request: AgentMessagingRequest) -> io::Result<Value> {
-        live::messaging::request(request)
+        control_client::messaging::request(request)
     }
 }
 
@@ -169,8 +169,8 @@ fn parse(name: &str, arguments: Value, key: &str) -> Result<AgentMessagingReques
 fn transport_error(error: io::Error) -> Value {
     let code = error
         .get_ref()
-        .and_then(|error| error.downcast_ref::<live::ControlEndpointError>())
-        .map(live::ControlEndpointError::code)
+        .and_then(|error| error.downcast_ref::<ControlEndpointError>())
+        .map(ControlEndpointError::code)
         .unwrap_or("control_transport_error");
     failure(code, "The operation failed or its receipt was lost. Delivery may be uncertain; do not replay automatically.")
 }

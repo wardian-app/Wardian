@@ -16,6 +16,48 @@ import {
   revalidateChatWindow,
 } from "./chatRevalidation";
 
+describe("trusted recent preview scope", () => {
+  const preview = (): AgentChatPage => ({ ...scope, conversation_id: null, generation: null, source_epoch: null,
+    recent_admission: "opaque-owner", revision: "opaque-preview", next_before: null, progress: "provisional" });
+  it("admits the same actual preview owner without inventing canonical scope", () => {
+    const first = preview();
+    expect(chatPageScopeAllowsOrdinaryRead(chatPageScopeRelation(first, { ...first, unchanged: true }))).toBe(true);
+  });
+  it.each(["different-owner", null] as const)("retires preview data on %s even when the next page is empty", (recent_admission) => {
+    const first = preview();
+    expect(chatPageScopeRelation(first, { ...first, recent_admission, reset: true, progress: "no_recent" })).toBe("changed");
+  });
+  it.each(["older", "detail", "ack", "alias", "removed", "wrong-status"])("rejects preview %s capabilities", (kind) => {
+    const first = preview(); const next = preview();
+    if (kind === "older") next.next_before = "foreign-frontier";
+    if (kind === "detail") next.detail = { event_id: "row", text: "body", complete: true, next: null };
+    if (kind === "ack") next.revalidated_ids = ["source:actual"];
+    if (kind === "alias") next.aliases = [{ observation_id: "old", canonical_id: "new" }];
+    if (kind === "removed") next.removed_ids = ["row"];
+    if (kind === "wrong-status") next.progress = "ready";
+    expect(chatPageScopeRelation(first, next)).toBe("unknown");
+  });
+  it("rejects a preview target before issuing any renewal, even with forged canonical fields", async () => {
+    const loader = vi.fn();
+    const target = { ...scope, recent_admission: "opaque-owner" };
+    const rows = [sourceEvent(1)];
+    await expect(revalidateChatWindow(rows, rows, target, loader, () => true)).rejects.toMatchObject({
+      name: "ChatRevalidationError", diagnostic: expect.stringContaining("Recent previews cannot authorize"),
+    });
+    expect(loader).not.toHaveBeenCalled();
+  });
+  it.each([undefined, null, 0, "false", {}, []])("rejects a malformed present Older marker %s in preview proof", (value) => {
+    const first = preview(); const next = preview();
+    Object.defineProperty(next, "older_page", { value, enumerable: true });
+    expect(chatPageScopeRelation(first, next)).toBe("unknown");
+  });
+  it.each(["conversation_id", "generation", "source_epoch"] as const)("rejects non-null untyped %s scope", (field) => {
+    const first = preview(); const next = preview();
+    Object.defineProperty(next, field, { value: 0, enumerable: true });
+    expect(chatPageScopeRelation(first, next)).toBe("unknown");
+  });
+});
+
 const scope: AgentChatPage = {
   session_id: "session",
   conversation_id: "conversation",
@@ -64,6 +106,27 @@ const sourceEvent = (index: number, paired = false): AgentChatEvent => {
 };
 
 describe("bounded Chat source revalidation", () => {
+  it("excludes DB-native identities from framed renewal while admitting canonical revision refresh", async () => {
+    const db: AgentChatEvent = {
+      ...sourceEvent(7), id: "session:0000000000000007:opencode_db:part-7",
+      provider: "opencode", role: "assistant", source: "opencode_db", turn_id: "message-7",
+      metadata: { provider_log: true, chat_recent_native_key: "a".repeat(64), chat_recent_native_version: "b".repeat(64) },
+    };
+    const previous: AgentChatPage = { ...scope, source_epoch: null, events: [db], revision: "db-r1" };
+    const next: AgentChatPage = { ...previous, revision: "db-r2", events: [{ ...db, text: "refreshed body",
+      metadata: { ...db.metadata, chat_recent_native_version: "c".repeat(64) } }] };
+    expect(chatRevalidationIds([db])).toEqual([]);
+    const framed = sourceEvent(8);
+    expect(chatRevalidationIds([db, framed])).toEqual([framed.id]);
+    expect(chatPageScopeRelation(previous, next, previous.events, true)).toBe("canonical");
+    expect(chatPageScopeAllowsOrdinaryRead("canonical")).toBe(true);
+    expect(chatNeedsRevalidation(previous, next, true)).toBe(false);
+    const forgedAckLoader = vi.fn(async () => ({ ...next, revalidated_ids: [db.id] }));
+    await expect(revalidateChatWindow(previous.events, next.events, next, forgedAckLoader, () => true, "older"))
+      .rejects.toMatchObject({ name: "ChatRevalidationError", diagnostic: expect.stringContaining("no verifiable source reference") });
+    expect(forgedAckLoader).not.toHaveBeenCalled();
+  });
+
   it("stages a selected row's bounded physical pair before applying the visible window limits", async () => {
     const current = sourceEvent(12);
     const liveId = current.id;

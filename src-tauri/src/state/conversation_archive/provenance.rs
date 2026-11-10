@@ -446,6 +446,104 @@ fn enrich(old: &mut AgentChatEvent, current: &AgentChatEvent) -> io::Result<()> 
     Ok(())
 }
 
+/// Refresh only an already attested native message, never a metadata-only
+/// provider/Watch claim. IDs, ordering and delivery provenance are immutable.
+pub(super) fn refresh_native_messages(
+    archived: &mut [AgentChatEvent],
+    records: &[ConversationNarrativeRecord],
+    current: &[AgentChatEvent],
+    authority: &crate::commands::chat_recent_database::MessageAuthority,
+    context: &super::ConversationArchiveContext,
+    permitted: impl Fn(&AgentChatEvent) -> bool,
+) -> io::Result<HashSet<String>> {
+    use crate::commands::chat_recent_database::MESSAGE_CAPTURE_BINDING;
+    authority.require_current()?;
+    let mut approved = HashSet::new();
+    for current in current {
+        if !authority.proves(context, current) || !permitted(current) {
+            continue;
+        }
+        let matching: Vec<_> = archived
+            .iter()
+            .enumerate()
+            .filter_map(|(index, old)| {
+                (same_observation(old, current) && authority.permits_refresh(old, current))
+                    .then_some(index)
+            })
+            .collect();
+        let [index] = matching.as_slice() else {
+            continue;
+        };
+        if records
+            .iter()
+            .filter(|record| record.event_refs.contains(&archived[*index].id))
+            .count()
+            != 1
+        {
+            continue;
+        }
+        let old = &mut archived[*index];
+        if old.metadata["chat_recent_native_version"]
+            != current.metadata["chat_recent_native_version"]
+        {
+            old.text = current.text.clone();
+            old.metadata["chat_recent_native_version"] =
+                current.metadata["chat_recent_native_version"].clone();
+            old.metadata[MESSAGE_CAPTURE_BINDING] = authority.binding(current);
+            if let Some(metadata) = old.metadata.as_object_mut() {
+                metadata.remove("text_excerpt");
+                metadata.remove("text_artifact_refs");
+            }
+        }
+        approved.insert(old.id.clone());
+    }
+    Ok(approved)
+}
+
+/// Repair a narrative left behind by event-first publication failure using
+/// the same current typed source observation. Existing artifact files remain.
+pub(super) fn refresh_native_message_records(
+    records: &mut [ConversationNarrativeRecord],
+    archived: &[AgentChatEvent],
+    current: &[AgentChatEvent],
+    approved: &HashSet<String>,
+) {
+    for source in current.iter().filter(|event| approved.contains(&event.id)) {
+        let Some(stored) = archived.iter().find(|event| event.id == source.id) else {
+            continue;
+        };
+        let Some(record) = records
+            .iter_mut()
+            .find(|record| record.event_refs.contains(&source.id))
+        else {
+            continue;
+        };
+        let same_inline = source.text.is_some() && record.text == source.text;
+        let refs: Vec<_> = stored.metadata["text_artifact_refs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.as_str().map(ToString::to_string))
+            .collect();
+        if stored.text.is_none()
+            && !refs.is_empty()
+            && stored.metadata["chat_recent_native_version"]
+                == source.metadata["chat_recent_native_version"]
+        {
+            // Event-first publication already persisted the newly materialized
+            // body. Reuse those exact refs on retry: materializing again picks
+            // another suffix and would leave event/narrative refs diverged.
+            record.text = None;
+            record.excerpt = stored.metadata["text_excerpt"].as_str().map(str::to_owned);
+            record.artifact_refs = refs;
+        } else if !same_inline {
+            record.text = source.text.clone();
+            record.excerpt = None;
+            record.artifact_refs.clear();
+        }
+    }
+}
+
 /// Enrich in archive order, retaining original IDs and archive-only history.
 /// A current event may collapse two legacy aliases of that same observation.
 /// Build a candidate first, so conflicting evidence cannot partially mutate it.

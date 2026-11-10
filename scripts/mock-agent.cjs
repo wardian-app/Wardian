@@ -14,6 +14,7 @@
  * Supported scenarios:
  *   basic         — init → user → generating → model_response → turn_completed
  *   file_changes  — init → user → read/edit/write/shell tool calls → model_response → turn_completed
+ *   chat_acceptance — file_changes → paged history/full body/distinct repeated turns → completed assistant (waits for stdin)
  *   resume        — init(session_id) → generating → model_response → turn_completed
  *   action_needed — init → user → action_required (waits for stdin) → turn_completed
  *   delayed_ready — init → user → generating → MOCK_INPUT_READY → model_response → turn_completed
@@ -223,6 +224,49 @@ async function runFileChanges() {
   emit(events.modelResponse("Widened the change kinds."));
   await sleep(delay);
   emit(events.turnCompleted());
+}
+
+/** Independent raw-provider declaration; importing it never starts a provider. */
+function chatAcceptanceFixture() {
+  return {
+    historyTurns: 96,
+    longBody: "bounded mock body ".repeat(3334).slice(0, 59999) + ".",
+    repeatBody: "These are two distinct completed assistant turns with equal text.",
+    latestBody: "Native acceptance completed assistant: the amber otter has finished.",
+    latestTurn: "chat-acceptance-completed",
+    // Each added turn has user/model/result frames. The unchanged file_changes
+    // prefix has fewer than 32 frames. Status frames are included conservatively.
+    maxRawFrames: 32 + (96 + 4) * 3,
+  };
+}
+
+/** Real Mock grammar, consumed by the normal producer, never prebuilt Chat DTOs. */
+function* chatAcceptanceEvents() {
+  const fixture = chatAcceptanceFixture();
+  const turns = Array.from({ length: fixture.historyTurns }, (_, index) => ({
+    id: `chat-acceptance-history-${index}`,
+    prompt: `Please retain controlled history turn ${index}.`,
+    body: `Controlled assistant history ${index} is complete.`,
+  }));
+  turns.push(
+    { id: "chat-acceptance-long", prompt: "Retain the full bounded body.", body: fixture.longBody },
+    { id: "chat-acceptance-repeat-a", prompt: "Complete repeated turn A.", body: fixture.repeatBody },
+    { id: "chat-acceptance-repeat-b", prompt: "Complete repeated turn B.", body: fixture.repeatBody },
+    { id: fixture.latestTurn, prompt: "Complete the independent native timing target.", body: fixture.latestBody },
+  );
+  for (const turn of turns) {
+    yield { type: "user", turn_id: turn.id, content: turn.prompt };
+    yield { type: "model", turn_id: turn.id, content: turn.body };
+    yield { type: "result", turn_id: turn.id, status: "success" };
+  }
+}
+
+async function runChatAcceptance() {
+  await runFileChanges();
+  for (const event of chatAcceptanceEvents()) emit(event);
+  // Keep live and saved-Off measurements distinct. Only the owned test's normal
+  // pause ends this process; no submitted Chat prompt is needed for the fixture.
+  await waitForStdin();
 }
 
 async function runResume() {
@@ -443,6 +487,7 @@ async function main() {
   const scenarios = {
     basic: runBasic,
     file_changes: runFileChanges,
+    chat_acceptance: runChatAcceptance,
     resume: runResume,
     action_needed: runActionNeeded,
     delayed_ready: runDelayedReady,
@@ -470,7 +515,11 @@ async function main() {
   process.exit(0);
 }
 
-main().catch((err) => {
-  process.stderr.write(`Mock agent error: ${err.message}\n`);
-  process.exit(1);
-});
+module.exports = { chatAcceptanceFixture, chatAcceptanceEvents };
+
+if (require.main === module) {
+  main().catch((err) => {
+    process.stderr.write(`Mock agent error: ${err.message}\n`);
+    process.exit(1);
+  });
+}

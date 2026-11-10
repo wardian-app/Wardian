@@ -26,9 +26,12 @@ saves, configuration replacement, disable, shutdown, and foreign-port refusal.
 
 ## Agent chat transcript errors
 
-`GET /remote/api/agents/{session_id}/chat` returns HTTP 400 when transcript
-capture or projection fails. Its JSON `code` identifies the backend stage that
-failed:
+`GET /remote/api/agents/{session_id}/chat` returns HTTP 503 with the sanitized
+code `agent_chat_read_retryable` when its bounded reader is temporarily busy,
+its runtime changes, or its projection cannot currently be read. The selected
+Chat retries without treating a healthy desktop as disconnected. Invalid
+query values retain HTTP 400; authentication and authorization retain their
+existing statuses. Capture-stage diagnostics use these sanitized codes:
 
 | Code | Stage |
 | --- | --- |
@@ -44,6 +47,39 @@ do not identify the root cause within a stage. In particular, a stage code
 observed in a fixture or test does not establish the cause of a failure in a
 live session. Existing authentication and authorization failures retain their
 own status and error codes.
+
+## Recent header windows
+
+The optional recent-only `limit` is an integer from 1 through 80. The PWA asks
+for eight headers; an omitted limit retains the default of 80. A complete
+physical frame or certified display group stays atomic, so a soft target may
+be exceeded within the hard 80-header budget. Older, detail and revalidation
+requests retain their existing budgets.
+
+Normal initial/latest desktop and PWA reads opt into `recent_preview=true`.
+The default is false, and Older, detail and revalidation requests cannot opt
+in. A non-null opaque `recent_admission` marks bounded, non-authoritative
+headers from the current producer incarnation. These pages issue no Older
+cursor, detail capability, aliases or row-revalidation ACK. Consumers retain
+the marker unchanged and replace the window when it changes or is retired,
+including an empty retirement response. Actual canonical publication must
+cover every current native observation and version before the reader leaves
+preview mode. That transition explicitly resets the window; clients do not
+invent aliases between provisional and canonical IDs.
+
+The existing projection owner keeps the recent slot separately from slow
+archive work. Normal selection only coalesces bounded producer work; source
+IO runs off the request thread. Source, privacy or runtime changes invalidate
+the slot. An unavailable or expensive native source remains a normal pending
+read rather than bypassing admission. See the repository specification
+`docs/specs/2026-11-07-chat-recent-publication.md` for producer fences and caps.
+
+The opaque revision identifies the requested window as well as its source
+scope. Changing the recent target must not produce a false unchanged result.
+Older starts before the oldest row actually emitted. When a new raw suffix
+has no qualified archive frontier yet, the reader waits for publication
+rather than returning a cursor past omitted headers. Clients carry issued
+revisions and cursors unchanged; they do not parse their structure.
 
 ## Chat row revalidation
 

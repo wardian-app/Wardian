@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentChatEvent, AgentChatPage } from "../../types";
-import { addChatSubmission, applyChatPage, canAdmitOlderChatPage, chatInputReceipt, MAX_LOADED_CHAT_BYTES, MAX_LOADED_CHAT_HEADERS, submittedChatEvent, utf8Window } from "./chatReadState";
+import { addChatSubmission, applyChatPage, canAdmitOlderChatPage, chatInputReceipt, chatReadProgress, MAX_LOADED_CHAT_BYTES, MAX_LOADED_CHAT_HEADERS, submittedChatEvent, utf8Window } from "./chatReadState";
 
 const event = (id: string, metadata: Record<string, unknown> = {}): AgentChatEvent => ({
   id, session_id: "agent", provider: "codex", kind: "message", role: "user", text: "identical prompt",
@@ -15,6 +15,17 @@ const page = (events: AgentChatEvent[], overrides: Partial<AgentChatPage> = {}):
 });
 
 describe("bounded Chat state", () => {
+  it("distinguishes bounded no-row, unavailable, disabled, and partial history from empty success", () => {
+    expect(chatReadProgress("ready", false)).toBeNull();
+    expect(chatReadProgress("provisional", false)).toContain("No public message");
+    expect(chatReadProgress("provisional", true)).toContain("Recent messages available");
+    expect(chatReadProgress("privacy_disabled", false)).toContain("logging is disabled");
+    expect(chatReadProgress("source_unavailable", false)).toContain("not available");
+    expect(chatReadProgress("no_recent", false)).toContain("not available yet");
+    expect(chatReadProgress("source_gap", false)).toBe("Recent history could not be read yet.");
+    expect(chatReadProgress("source_gap", true)).toContain("Verified recent messages");
+  });
+
   it("leaves unchanged polls and unresolved equal-text identities alone", () => {
     const pending = submittedChatEvent("agent", "codex", "identical prompt", undefined);
     const current = [event("source:1", { chat_provisional: true }), pending];

@@ -1587,21 +1587,23 @@ fn queue_timestamp(value: &str) -> i64 {
         .unwrap_or_else(|_| chrono::Utc::now().timestamp_millis())
 }
 
-pub(crate) async fn remote_agent_chat_page_with_revalidation(
+pub(crate) async fn remote_agent_chat_page_with_recent(
     state: &AppState,
     session_id: &str,
     before: Option<String>,
     revision: Option<String>,
     detail: Option<String>,
     revalidate_ids: Option<Vec<String>>,
+    recent: crate::commands::chat::RecentChatRead,
 ) -> Result<wardian_core::models::chat::AgentChatPage, String> {
-    crate::commands::chat::load_agent_chat_page_with_revalidation_for_state(
+    crate::commands::chat::load_agent_chat_page_with_recent_for_state(
         state,
         session_id.to_string(),
         before,
         revision,
         detail,
         revalidate_ids,
+        recent,
     )
     .await
 }
@@ -1820,7 +1822,54 @@ async fn send_remote_prompt_with_idempotency(
 mod test_support;
 
 #[cfg(test)]
+pub(crate) use tests::remote_agent_chat_page_with_revalidation;
+
+#[cfg(test)]
 mod tests {
+    pub(crate) async fn remote_agent_chat_page_with_revalidation(
+        state: &AppState,
+        session_id: &str,
+        before: Option<String>,
+        revision: Option<String>,
+        detail: Option<String>,
+        revalidate_ids: Option<Vec<String>>,
+    ) -> Result<wardian_core::models::chat::AgentChatPage, String> {
+        remote_agent_chat_page_with_limit(
+            state,
+            session_id,
+            before,
+            revision,
+            detail,
+            revalidate_ids,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn remote_agent_chat_page_with_limit(
+        state: &AppState,
+        session_id: &str,
+        before: Option<String>,
+        revision: Option<String>,
+        detail: Option<String>,
+        revalidate_ids: Option<Vec<String>>,
+        limit: Option<usize>,
+    ) -> Result<wardian_core::models::chat::AgentChatPage, String> {
+        remote_agent_chat_page_with_recent(
+            state,
+            session_id,
+            before,
+            revision,
+            detail,
+            revalidate_ids,
+            crate::commands::chat::RecentChatRead {
+                limit,
+                preview: false,
+            },
+        )
+        .await
+    }
+
     use super::test_support::{HeldMutex, TestWardianHome};
     use super::*;
     use crate::state::{ActiveAgent, AgentWatchState, AppState};

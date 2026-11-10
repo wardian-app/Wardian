@@ -24,6 +24,219 @@ const row = (id: string, text = id): AgentChatPage["events"][number] => ({
 afterEach(() => { vi.useRealTimers(); });
 
 describe("normal Chat page polling", () => {
+  it("refreshes a canonical DB window while browsing Older without enqueuing unsupported renewal IDs", async () => {
+    vi.useFakeTimers();
+    const dbRow = (index: number, text: string): AgentChatPage["events"][number] => ({
+      ...row(`agent:${index.toString(16).padStart(16, "0")}:opencode_db:part-${index}`, text),
+      provider: "opencode", role: "assistant", source: "opencode_db", turn_id: `message-${index}`, sequence: index,
+      metadata: { provider_log: true, chat_display_key: `agent:${index.toString(16).padStart(16, "0")}:opencode_db:part-${index}`,
+        chat_recent_native_key: String(index).repeat(64), chat_recent_native_version: "a".repeat(64) },
+    });
+    const olderRow = dbRow(1, "older DB body"); const recentRow = dbRow(2, "original DB body");
+    const refreshed = { ...recentRow, text: "source-refreshed DB body",
+      metadata: { ...recentRow.metadata, chat_recent_native_version: "b".repeat(64) } };
+    const initial = page("agent", { source_epoch: null, revision: "db-r1", progress: "ready", events: [recentRow], next_before: "db-before" });
+    const older = { ...initial, revision: "db-older-r1", events: [olderRow], next_before: null, older_page: true };
+    const changed = { ...initial, revision: "db-r2", events: [refreshed] };
+    const loader = vi.fn<ChatPageLoader>().mockImplementation(async (request) => {
+      expect(request.revalidateIds).toBeUndefined();
+      if (request.cursor) { expect(request.cursor).toBe("db-before"); return older; }
+      if (request.revision) { expect(request.revision).toBe("db-older-r1"); return changed; }
+      return initial;
+    });
+    const hook = renderHook(({ reload }) => useChatPages("agent", loader, 60_000, reload), { initialProps: { reload: 0 } });
+    try {
+      await act(async () => {});
+      expect(hook.result.current.events.map((event) => event.id)).toEqual([recentRow.id]);
+      await act(async () => { await hook.result.current.loadOlder(); });
+      expect(hook.result.current.browsingOlder).toBe(true);
+      expect(hook.result.current.events.map((event) => event.id)).toEqual([olderRow.id, recentRow.id]);
+      hook.rerender({ reload: 1 });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(hook.result.current.events).toEqual([olderRow, refreshed]);
+      expect(hook.result.current.page?.revision).toBe("db-r2");
+      expect(hook.result.current.error).toBeNull();
+      expect(hook.result.current.loadingOlder).toBe(false);
+      expect(hook.result.current.browsingOlder).toBe(true);
+      expect(loader).toHaveBeenCalledTimes(3);
+    } finally { hook.unmount(); }
+  });
+
+  it("replaces a preview with a real canonical reset without fabricating aliases", async () => {
+    const canonical = { ...actualProducerPage("loaded-long-pair-H0-recent-full"), reset: true };
+    const preview = page(canonical.session_id, { conversation_id: null, generation: null, source_epoch: null,
+      recent_admission: "owner", progress: "provisional", events: [{ ...row("preview"), session_id: canonical.session_id }] });
+    const loader = vi.fn<ChatPageLoader>().mockResolvedValueOnce(preview).mockResolvedValue(canonical);
+    const hook = renderHook(({ reload }) => useChatPages(canonical.session_id, loader, 3_000, reload), { initialProps: { reload: 0 } });
+    try {
+      await waitFor(() => expect(hook.result.current.events.map((event) => event.id)).toEqual(["preview"]));
+      hook.rerender({ reload: 1 });
+      await waitFor(() => expect(hook.result.current.events.map((event) => event.id)).toEqual(canonical.events.map((event) => event.id)));
+      expect(hook.result.current.page).toEqual(canonical);
+      expect(hook.result.current.error).toBeNull();
+      expect(loader.mock.calls.every(([request]) => request.revalidateIds === undefined)).toBe(true);
+    } finally { hook.unmount(); }
+  });
+
+  it.each(["new-owner", null] as const)("clears a retired preview on an empty %s response", async (admission) => {
+    const preview = page("agent", { conversation_id: null, generation: null, source_epoch: null,
+      recent_admission: "initial-owner", progress: "provisional", events: [row("preview")] });
+    const empty = page("agent", { conversation_id: null, generation: null, source_epoch: null,
+      recent_admission: admission, progress: "no_recent", reset: true });
+    const loader = vi.fn<ChatPageLoader>().mockResolvedValueOnce(preview).mockResolvedValue(empty);
+    const hook = renderHook(({ reload }) => useChatPages("agent", loader, 3_000, reload), { initialProps: { reload: 0 } });
+    try {
+      await waitFor(() => expect(hook.result.current.events.map((event) => event.id)).toEqual(["preview"]));
+      hook.rerender({ reload: 1 });
+      await waitFor(() => expect(loader).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(hook.result.current.events).toEqual([]));
+      expect(hook.result.current.error).toBeNull();
+      expect(hook.result.current.page?.recent_admission ?? null).toBe(admission);
+    } finally { hook.unmount(); }
+  });
+
+  it("retains physical ownership across keyed unmounts without blocking another conversation", async () => {
+    vi.useFakeTimers();
+    const a = deferred(); const b = deferred();
+    const loader = vi.fn<ChatPageLoader>()
+      .mockImplementationOnce(() => a.promise)
+      .mockImplementationOnce(() => b.promise)
+      .mockResolvedValue(page("agent", { events: [row("fresh-after-remount")], progress: "ready" }));
+    const first = renderHook(() => useChatPages("agent", loader, 3_000, 0));
+    first.unmount();
+    const other = renderHook(() => useChatPages("other", loader, 3_000, 0));
+    other.unmount();
+    const remounted = renderHook(() => useChatPages("agent", loader, 3_000, 0));
+    try {
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(loader.mock.calls.map(([request]) => request.sessionId)).toEqual(["agent", "other"]);
+      expect(remounted.result.current.events).toEqual([]);
+      expect(remounted.result.current.waiting).toBe(true);
+      await act(async () => {
+        a.resolve(page("agent", { events: [row("retired-payload")] }));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(loader).toHaveBeenCalledTimes(3);
+      expect(remounted.result.current.events.map((event) => event.id)).toEqual(["fresh-after-remount"]);
+    } finally {
+      remounted.unmount();
+      await act(async () => { a.resolve(page("agent")); b.resolve(page("other")); });
+    }
+  });
+
+  it("shares pending calls between mounted views and releases them on actual rejection", async () => {
+    vi.useFakeTimers();
+    const pending = deferred();
+    const loader = vi.fn<ChatPageLoader>().mockImplementationOnce(() => pending.promise)
+      .mockResolvedValue(page("agent", { events: [row("fresh-waiter")], progress: "ready" }));
+    const owner = renderHook(() => useChatPages("agent", loader, 3_000, 0));
+    const waiter = renderHook(() => useChatPages("agent", loader, 3_000, 0));
+    try {
+      await act(async () => { await vi.advanceTimersByTimeAsync(6_000); });
+      expect(loader).toHaveBeenCalledTimes(1);
+      owner.unmount();
+      await act(async () => {
+        pending.reject(new Error("retired physical read failed"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(loader).toHaveBeenCalledTimes(2);
+      expect(waiter.result.current.error).toBeNull();
+      expect(waiter.result.current.events.map((event) => event.id)).toEqual(["fresh-waiter"]);
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      owner.unmount(); waiter.unmount();
+      await act(async () => { pending.resolve(page("agent")); });
+    }
+  });
+
+  it("bounds retained calls across mounts within each loader ownership domain", async () => {
+    vi.useFakeTimers();
+    const a = deferred(); const b = deferred();
+    const loader = vi.fn<ChatPageLoader>().mockImplementationOnce(() => a.promise)
+      .mockImplementationOnce(() => b.promise).mockResolvedValue(page("selected", { progress: "ready" }));
+    const independentLoader = vi.fn<ChatPageLoader>().mockResolvedValue(page("independent", { progress: "ready" }));
+    const first = renderHook(() => useChatPages("a", loader, 3_000, 0)); first.unmount();
+    const second = renderHook(() => useChatPages("b", loader, 3_000, 0)); second.unmount();
+    const selected = renderHook(() => useChatPages("selected", loader, 3_000, 0));
+    const independent = renderHook(() => useChatPages("independent", independentLoader, 3_000, 0));
+    try {
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(loader).toHaveBeenCalledTimes(2);
+      expect(selected.result.current.error).toMatch(/busy.*earlier reads/i);
+      expect(independent.result.current.page?.session_id).toBe("independent");
+      await act(async () => { a.resolve(page("a")); await vi.advanceTimersByTimeAsync(0); });
+      expect(loader).toHaveBeenCalledTimes(3);
+      expect(selected.result.current.page?.session_id).toBe("selected");
+      expect(selected.result.current.error).toBeNull();
+    } finally {
+      selected.unmount(); independent.unmount();
+      await act(async () => { a.resolve(page("a")); b.resolve(page("b")); });
+    }
+  });
+
+  it("bounds retired physical reads, reports busy, and resumes only after actual settlement", async () => {
+    vi.useFakeTimers();
+    const reads = Array.from({ length: 12 }, () => deferred());
+    const current = { ...row("selected-row"), session_id: "selected" };
+    const loader = vi.fn<ChatPageLoader>().mockImplementation(({ sessionId }) => sessionId === "selected"
+      ? Promise.resolve(page("selected", { events: [current], progress: "ready" }))
+      : reads[Number(sessionId.slice("stalled-".length))].promise);
+    const hook = renderHook(({ sessionId }) => useChatPages(sessionId, loader, 3_000, 0), {
+      initialProps: { sessionId: "stalled-0" },
+    });
+    try {
+      for (let index = 1; index < reads.length; index += 1) hook.rerender({ sessionId: `stalled-${index}` });
+      hook.rerender({ sessionId: "selected" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(loader.mock.calls.map(([request]) => request.sessionId)).toEqual(["stalled-0", "stalled-1"]);
+      expect(hook.result.current.error).toMatch(/busy.*earlier reads/i);
+      expect(hook.result.current.loading).toBe(false);
+      expect(hook.result.current.events).toEqual([]);
+      expect(vi.getTimerCount()).toBe(1);
+      // Returning to a retained conversation reuses its actual physical call.
+      hook.rerender({ sessionId: "stalled-0" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(loader).toHaveBeenCalledTimes(2);
+      hook.rerender({ sessionId: "selected" });
+      await act(async () => {
+        reads[0].resolve(page("stalled-0", { events: [{ ...row("retired"), session_id: "stalled-0" }] }));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(loader.mock.calls.map(([request]) => request.sessionId)).toEqual(["stalled-0", "stalled-1", "selected"]);
+      expect(hook.result.current.error).toBeNull();
+      expect(hook.result.current.events.map((event) => event.id)).toEqual(["selected-row"]);
+    } finally {
+      hook.unmount();
+      await act(async () => { reads.forEach((read, index) => read.resolve(page(`stalled-${index}`))); });
+    }
+  });
+
+  it.each(["claude", "codex", "gemini", "antigravity", "opencode", "pi", "mock"] as const)(
+    "loads a newly selected %s conversation while another conversation read is stalled",
+    async (provider) => {
+      vi.useFakeTimers();
+      const stalled = deferred();
+      const current = { ...row("current", "Latest selected message"), session_id: "selected", provider };
+      const loader = vi.fn<ChatPageLoader>().mockImplementation(({ sessionId }) => sessionId === "stalled"
+        ? stalled.promise : Promise.resolve(page("selected", { events: [current], progress: "ready" })));
+      const hook = renderHook(({ sessionId }) => useChatPages(sessionId, loader, 3_000, 0), {
+        initialProps: { sessionId: "stalled" },
+      });
+      try {
+        expect(loader.mock.calls.map(([request]) => request.sessionId)).toEqual(["stalled"]);
+        hook.rerender({ sessionId: "selected" });
+        await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+        expect(loader.mock.calls.map(([request]) => request.sessionId)).toEqual(["stalled", "selected"]);
+        expect(hook.result.current.events).toEqual([{ ...current, metadata: { chat_display_key: current.id } }]);
+        expect(hook.result.current.loading).toBe(false);
+        expect(hook.result.current.page?.session_id).toBe("selected");
+      } finally {
+        hook.unmount();
+        await act(async () => { stalled.resolve(page("stalled", { events: [{ ...row("retired"), session_id: "stalled" }] })); });
+      }
+    },
+  );
+
   it("uses ordinary canonical-only pages for older reads and recent refreshes", async () => {
     vi.useFakeTimers();
     const recent = row("recent", "Initial recent");
@@ -47,11 +260,51 @@ describe("normal Chat page polling", () => {
 
     hook.rerender({ reload: 1 });
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-    expect(loader.mock.calls[2][0]).toEqual({ sessionId: "agent", revision: "canonical-r2" });
+    expect(loader.mock.calls[2][0]).toEqual({ sessionId: "agent", revision: "canonical-r2", recentPreview: false });
     expect(hook.result.current.events.map((event) => event.id)).toEqual(["older", "recent"]);
     expect(hook.result.current.events.find((event) => event.id === "recent")?.text).toBe("Refreshed recent");
     expect(hook.result.current.page?.next_before).toBe("canonical-before-2");
     expect(loader.mock.calls.every(([request]) => request.revalidateIds === undefined)).toBe(true);
+    hook.unmount();
+  });
+
+  it("retries an empty first recent page before the one-second readable-message deadline", async () => {
+    vi.useFakeTimers();
+    const pending = page("agent", {
+      conversation_id: null, generation: null, source_epoch: null, revision: "pending",
+      events: [], next_before: null, progress: "projection_pending",
+    });
+    const complete = page("agent", {
+      source_epoch: null, revision: "canonical-ready", events: [row("first-complete", "Readable recent message")],
+      progress: "ready",
+    });
+    const loader = vi.fn<ChatPageLoader>().mockResolvedValueOnce(pending).mockResolvedValue(complete);
+    const hook = renderHook(() => useChatPages("agent", loader, 3_000, 0));
+
+    await act(async () => {});
+    expect(loader).toHaveBeenCalledTimes(1);
+    expect(hook.result.current.events).toEqual([]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(999); });
+
+    expect(loader).toHaveBeenCalledTimes(2);
+    expect(hook.result.current.events.map((event) => event.text)).toEqual(["Readable recent message"]);
+    expect(hook.result.current.error).toBeNull();
+    hook.unmount();
+  });
+
+  it("ends rapid empty-window retries after the initial second", async () => {
+    vi.useFakeTimers();
+    const loader = vi.fn<ChatPageLoader>().mockResolvedValue(page("agent"));
+    const hook = renderHook(() => useChatPages("agent", loader, 3_000, 0));
+    await act(async () => {});
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    const initialCalls = loader.mock.calls.length;
+    expect(initialCalls).toBeGreaterThan(1);
+    expect(initialCalls).toBeLessThanOrEqual(11);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_999); });
+    expect(loader).toHaveBeenCalledTimes(initialCalls);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(loader).toHaveBeenCalledTimes(initialCalls + 1);
     hook.unmount();
   });
 
@@ -253,7 +506,7 @@ describe("normal Chat page polling", () => {
     hook.unmount();
   });
 
-  it.each(["reset", "jump"] as const)("clears first-read waiting on %s while retaining the old physical call", async (action) => {
+  it.each(["reset", "jump"] as const)("shows retained physical waiting on %s without duplicating the old call", async (action) => {
     vi.useFakeTimers();
     const retired = deferred();
     const current = deferred();
@@ -262,9 +515,9 @@ describe("normal Chat page polling", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(hook.result.current.waiting).toBe(true);
     act(() => { if (action === "reset") hook.result.current.reset(); else hook.result.current.jumpToLatest(); });
-    expect(hook.result.current.waiting).toBe(false);
+    expect(hook.result.current.waiting).toBe(true);
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
-    expect(hook.result.current.waiting).toBe(false);
+    expect(hook.result.current.waiting).toBe(true);
     expect(loader).toHaveBeenCalledTimes(1);
     await act(async () => { retired.resolve(page("agent", { events: [row("retired")] })); });
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
@@ -282,19 +535,20 @@ describe("normal Chat page polling", () => {
     vi.useFakeTimers();
     const oldA = deferred();
     const newA = deferred();
-    const loader = vi.fn<ChatPageLoader>().mockReturnValueOnce(oldA.promise).mockReturnValueOnce(newA.promise);
+    const loader = vi.fn<ChatPageLoader>().mockReturnValueOnce(oldA.promise)
+      .mockResolvedValueOnce(page("b")).mockReturnValueOnce(newA.promise);
     const hook = renderHook(({ id }) => useChatPages(id, loader, 60_000, 0), { initialProps: { id: "a" } });
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(hook.result.current.waiting).toBe(true);
     hook.rerender({ id: "b" });
     hook.rerender({ id: "a" });
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
-    expect(hook.result.current.waiting).toBe(false);
-    expect(loader).toHaveBeenCalledTimes(1);
+    expect(hook.result.current.waiting).toBe(true);
+    expect(loader.mock.calls.map(([request]) => request.sessionId)).toEqual(["a", "b"]);
     await act(async () => { oldA.resolve(page("a", { events: [row("stale-a")] })); });
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-    expect(loader).toHaveBeenCalledTimes(2);
-    expect(loader.mock.calls[1][0].sessionId).toBe("a");
+    expect(loader).toHaveBeenCalledTimes(3);
+    expect(loader.mock.calls[2][0].sessionId).toBe("a");
     expect(hook.result.current.events).toEqual([]);
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(hook.result.current.waiting).toBe(true);
@@ -644,16 +898,16 @@ describe("normal Chat page polling", () => {
   it("rejects a response from an earlier A to B to A scope", async () => {
     const old = deferred();
     const loader = vi.fn<ChatPageLoader>().mockReturnValueOnce(old.promise)
+      .mockResolvedValueOnce(page("b"))
       .mockResolvedValueOnce(page("a", { revision: "new-a" }));
     const hook = renderHook(({ id }) => useChatPages(id, loader, 60_000, 0), { initialProps: { id: "a" } });
     hook.rerender({ id: "b" });
     hook.rerender({ id: "a" });
-    expect(loader).toHaveBeenCalledTimes(1);
+    expect(loader.mock.calls.map(([request]) => request.sessionId)).toEqual(["a", "b"]);
     expect(hook.result.current.page).toBeNull();
     await act(async () => { old.resolve(page("a", { revision: "stale-a", events: [row("stale-a")] })); });
     await waitFor(() => expect(hook.result.current.page?.revision).toBe("new-a"));
-    expect(loader).toHaveBeenCalledTimes(2);
-    expect(loader.mock.calls[1][0].sessionId).toBe("a");
+    expect(loader.mock.calls.map(([request]) => request.sessionId)).toEqual(["a", "b", "a"]);
     expect(hook.result.current.events.some((event) => event.id === "stale-a")).toBe(false);
     hook.unmount();
   });

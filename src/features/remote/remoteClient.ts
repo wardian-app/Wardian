@@ -208,12 +208,15 @@ export const remoteClient = {
     detail?: string,
     signal?: AbortSignal,
     revalidateIds?: string[],
+    recentPreview = false,
   ): Promise<RemoteAgentChatPage> {
     const query = new URLSearchParams();
     if (before) query.set("before", before);
     if (revision) query.set("revision", revision);
     if (detail) query.set("detail", detail);
     if (revalidateIds?.length) query.set("revalidate_ids", JSON.stringify(revalidateIds));
+    if (!before && !detail && !revalidateIds?.length) query.set("limit", "8");
+    if (recentPreview && !before && !detail && !revalidateIds?.length) query.set("recent_preview", "true");
     return remoteJson<RemoteAgentChatPage>(`/remote/api/agents/${encodeURIComponent(sessionId)}/chat${query.size ? `?${query}` : ""}`, { signal }, true);
   },
   async loadAgentTerminal(sessionId: string) {

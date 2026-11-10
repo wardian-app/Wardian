@@ -72,9 +72,10 @@ const CHAT_REFRESH_INTERVAL_MS = 3000;
 type AwaitingResponseMarker = { id: string; response_ids: Set<string> };
 
 const CHAT_SCROLL_BOTTOM_THRESHOLD_PX = 48;
-const loadChatPage: ChatPageLoader = ({ sessionId, cursor, revision, detailRef, revalidateIds }) =>
+const loadChatPage: ChatPageLoader = ({ sessionId, cursor, revision, detailRef, revalidateIds, recentPreview }) =>
   invoke<AgentChatPage>("load_agent_chat_page", {
     sessionId, cursor, revision, detailRef, ...(revalidateIds ? { revalidateIds } : {}),
+    recentPreview: recentPreview !== false && !cursor && !detailRef && !revalidateIds,
   });
 
 export function AgentChatView({
@@ -103,7 +104,6 @@ export function AgentChatView({
   const error = chat.error;
   const loadState: LoadState = events.length === 0 && chat.waiting ? "waiting"
     : chat.loading && events.length === 0 ? "loading" : error !== null && events.length === 0 ? "error" : "ready";
-  const progressText = page ? chatReadProgress(page.progress) : null;
   const [internalDraft, setInternalDraft] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isInterrupting, setIsInterrupting] = useState(false);
@@ -187,6 +187,7 @@ export function AgentChatView({
     [displayEvents, readingPresentation.boundaries],
   );
   const visibleChatRows = chatRows;
+  const progressText = page ? chatReadProgress(page.progress, visibleChatRows.length > 0) : null;
   const latestVisibleRowKey = visibleChatRows.length > 0 ? chatTranscriptRowKey(visibleChatRows[visibleChatRows.length - 1]) : "";
   const hasActionRequired = mergedEvents.some((event) => event.status === "action_required");
   const liveApprovalId = useMemo(() => liveApprovalEventId(sortTranscriptEvents(mergedEvents)), [mergedEvents]);
@@ -1011,7 +1012,7 @@ function WaitingState({ compact = false }: { compact?: boolean }) {
       <div>
         <div className="text-[13px] font-semibold text-primary">Waiting for transcript read</div>
         <div className="mt-1 max-w-[42ch] text-[12px] leading-5 text-muted-neutral">
-          The transcript read is still running after 30 seconds. Waiting for it to settle.
+          A read for this conversation is still running. Waiting for it to settle.
         </div>
       </div>
     </div>
