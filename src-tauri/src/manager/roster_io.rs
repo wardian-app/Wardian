@@ -139,20 +139,61 @@ pub(crate) async fn save_live_state<C: Send + 'static>(
 /// filesystem publication, SQLite deletion and live publication or compensation.
 /// Unlike best-effort saves, deletion must observe the physical write's error.
 pub(crate) async fn write_snapshot_strict(
+    barrier: &AgentRosterBarrier,
+    home: std::path::PathBuf,
+    configs: Vec<AgentConfig>,
+) -> Result<(), String> {
+    write_snapshot_strict_with_removal(barrier, home, configs, None).await
+}
+
+/// The explicit removal ID is the sole saved quarantine record this owned
+/// deletion may omit. All unrelated excluded configurations remain on disk.
+pub(crate) async fn write_snapshot_strict_with_removal(
     _barrier: &AgentRosterBarrier,
     home: std::path::PathBuf,
     configs: Vec<AgentConfig>,
+    removed_id: Option<String>,
 ) -> Result<(), String> {
     #[cfg(test)]
     let probe = super::ROSTER_IO_PROBE
         .try_with(|probe| probe.borrow_mut().take())
         .ok()
         .flatten();
-    let operation = move || super::try_save_state_snapshot_for_home(&home, &configs);
+    let operation = move || {
+        super::try_save_state_snapshot_for_home_with_removal(&home, &configs, removed_id.as_deref())
+    };
     #[cfg(test)]
     let operation =
         move || super::ROSTER_IO_PROBE.sync_scope(std::cell::RefCell::new(probe), operation);
     tokio::task::spawn_blocking(operation)
         .await
         .map_err(|error| format!("Roster deletion I/O task failed: {error}"))?
+}
+
+/// Merge only actual saved quarantine records, while the caller owns the roster
+/// barrier. A ledger row never supplies a replacement configuration.
+pub(super) fn preserve_excluded_configs(
+    home: &std::path::Path,
+    configs: &[AgentConfig],
+    removed_id: Option<&str>,
+) -> Result<Vec<AgentConfig>, String> {
+    let previous: Vec<AgentConfig> = match std::fs::read(home.join("settings/state.json")) {
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).map_err(|_| "Could not decode saved agent roster")?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return Err("Could not read saved agent roster".into()),
+    };
+    let mut snapshot = configs.to_vec();
+    for saved in previous {
+        if removed_id != Some(saved.session_id.as_str())
+            && !snapshot
+                .iter()
+                .any(|config| config.session_id == saved.session_id)
+            && wardian_core::agent_spawn::restore_is_excluded(&saved.session_id)?
+        {
+            snapshot.push(saved);
+        }
+    }
+    Ok(snapshot)
 }

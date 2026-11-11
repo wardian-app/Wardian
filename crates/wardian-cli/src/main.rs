@@ -1,4 +1,6 @@
 mod agent_control;
+mod agent_spawn;
+use agent_spawn::{handle_agent_spawn, handle_agent_spawn_status, handle_agent_spawn_wait};
 mod args;
 mod artifact;
 mod automation_invoker;
@@ -295,22 +297,12 @@ fn handle_agent(args: AgentArgs) -> Result<String, CliError> {
         Some(AgentCommand::NewSession { target }) => agent_control::new_session(target),
         Some(AgentCommand::Pause { target }) => agent_control::pause(target),
         Some(AgentCommand::Resume { target }) => agent_control::resume(target),
-        Some(AgentCommand::Spawn {
-            provider,
-            class,
-            name,
-            workspace,
-            model,
-            reasoning_effort,
-        }) => handle_agent_spawn(
-            provider,
-            class,
-            name.as_deref(),
-            workspace.as_deref(),
-            model.as_deref(),
-            reasoning_effort.as_deref(),
-            &args,
-        ),
+        Some(command @ AgentCommand::Spawn { .. }) => handle_agent_spawn(command, &args),
+        Some(AgentCommand::SpawnStatus { operation_id }) => handle_agent_spawn_status(operation_id),
+        Some(AgentCommand::SpawnWait {
+            operation_id,
+            timeout,
+        }) => handle_agent_spawn_wait(operation_id, timeout),
         Some(AgentCommand::Update {
             target,
             class,
@@ -386,20 +378,6 @@ fn handle_agent_rename(target: &str, new_name: &str) -> Result<String, CliError>
     serde_json::to_string(&response)
         .map(|json| format!("{json}\n"))
         .map_err(|error| CliError::generic(error.to_string()))
-}
-
-fn handle_agent_spawn(
-    provider: &str,
-    class: &str,
-    name: Option<&str>,
-    workspace: Option<&str>,
-    model: Option<&str>,
-    reasoning_effort: Option<&str>,
-    args: &AgentArgs,
-) -> Result<String, CliError> {
-    let agent = live::agent_spawn(provider, class, name, workspace, model, reasoning_effort)
-        .map_err(control_error)?;
-    render_show(&agent, &render_options(args))
 }
 
 fn handle_agent_models(provider: &str, force_refresh: bool) -> Result<String, CliError> {

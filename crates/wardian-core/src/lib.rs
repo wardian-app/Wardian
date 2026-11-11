@@ -1,5 +1,6 @@
 pub mod agent_messaging;
 pub mod agent_replacement;
+pub mod agent_spawn;
 pub mod artifacts;
 mod atomic_file;
 pub mod automation;

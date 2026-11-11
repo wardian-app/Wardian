@@ -141,7 +141,6 @@
         "crates/wardian-core/src/native_transport.rs::is_automatically_retryable",
         "crates/wardian-core/src/paths.rs::cli_bin_path",
         "crates/wardian-core/src/queue.rs::read_recent_items",
-        "crates/wardian-core/src/telemetry/matrix.rs::empty",
         "crates/wardian-core/src/telemetry/models.rs::any_reported",
         "crates/wardian-core/src/telemetry/query.rs::SeriesPoint",
         "crates/wardian-core/src/telemetry/query.rs::series",

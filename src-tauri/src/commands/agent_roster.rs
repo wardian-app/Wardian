@@ -38,6 +38,7 @@ pub fn agent_roster_restored(state: State<'_, AppState>) -> bool {
 /// more event gives every window a refresh that sees the flag.
 pub(crate) fn mark_agent_roster_restored(app: &AppHandle) {
     if mark_restored(&app.state::<AppState>()) {
+        crate::spawn_operations::start(app.clone());
         let _ = app.emit("agents-updated", ());
     }
 }
@@ -71,7 +72,11 @@ fn roster_restored(state: &AppState) -> bool {
 
 /// Sets the flag, returning whether this call was the one that set it.
 fn mark_restored(state: &AppState) -> bool {
-    !state.agent_roster_restored.swap(true, Ordering::AcqRel)
+    let first = !state.agent_roster_restored.swap(true, Ordering::AcqRel);
+    if first {
+        state.spawn_operation_slots.add_permits(2);
+    }
+    first
 }
 
 #[cfg(test)]
@@ -82,13 +87,16 @@ mod tests {
     fn roster_starts_incomplete_and_is_marked_complete_once() {
         let state = AppState::default();
         assert!(!roster_restored(&state));
+        assert_eq!(state.spawn_operation_slots.available_permits(), 0);
 
         assert!(mark_restored(&state), "first mark sets the flag");
         assert!(roster_restored(&state));
+        assert_eq!(state.spawn_operation_slots.available_permits(), 2);
 
         // Startup marks after pass 1 and again on the fallback path; the second
         // mark must not emit a redundant refresh.
         assert!(!mark_restored(&state), "a repeated mark is a no-op");
+        assert_eq!(state.spawn_operation_slots.available_permits(), 2);
         assert!(roster_restored(&state));
     }
 

@@ -34,10 +34,7 @@ pub(crate) use session_identity::{
     apply_provider_identity, validate_config_for_launch, validate_session_values_for_launch,
 };
 pub use spawn::{resize_pty, spawn_agent_with_lease};
-pub(crate) use spawn::{
-    spawn_agent_for_registration, spawn_agent_provisionally, RegistrationPublicationState,
-    SpawnPublicationDisposition,
-};
+pub(crate) use spawn::{RegistrationPublicationState, SpawnPublicationDisposition};
 pub use telemetry::{get_all_metrics, get_app_metrics};
 
 pub use crate::utils::fs::*;
@@ -1349,6 +1346,30 @@ pub(crate) fn try_save_state_snapshot_for_home(
     app_dir: &std::path::Path,
     configs: &[AgentConfig],
 ) -> Result<(), String> {
+    try_save_state_snapshot_for_home_with_removal(app_dir, configs, None)
+}
+
+pub(crate) fn try_save_state_snapshot_for_home_with_removal(
+    app_dir: &std::path::Path,
+    configs: &[AgentConfig],
+    removed_id: Option<&str>,
+) -> Result<(), String> {
+    try_save_state_snapshot_captured_for_home(
+        app_dir,
+        removed_id,
+        || Ok(configs.to_vec()),
+        || Ok(()),
+    )
+}
+
+/// Physical-write admission happens after the I/O wait. Removal can recapture
+/// current live data and reject a lost owner before compensation reaches disk.
+pub(crate) fn try_save_state_snapshot_captured_for_home(
+    app_dir: &std::path::Path,
+    removed_id: Option<&str>,
+    capture: impl FnOnce() -> Result<Vec<AgentConfig>, String>,
+    fence: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
     std::fs::create_dir_all(app_dir).map_err(|error| error.to_string())?;
     let settings_dir = app_dir.join("settings");
     std::fs::create_dir_all(&settings_dir).map_err(|error| error.to_string())?;
@@ -1362,7 +1383,10 @@ pub(crate) fn try_save_state_snapshot_for_home(
         let _ = probe.entered.send(());
         probe.release.recv().map_err(|error| error.to_string())?;
     }
-    write_json_atomic(&settings_dir.join("state.json"), configs).map_err(|error| error.to_string())
+    let configs = capture()?;
+    let configs = roster_io::preserve_excluded_configs(app_dir, &configs, removed_id)?;
+    fence()?;
+    write_json_atomic(&settings_dir.join("state.json"), &configs).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

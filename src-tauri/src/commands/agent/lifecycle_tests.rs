@@ -322,7 +322,7 @@ async fn failed_legacy_stop_blocks_normal_owner_preparation_until_explicit_retry
         workspace: fixture.workspace.clone(),
         config,
     };
-    let error = CodexSharedOwner::start(&spec, std::future::pending())
+    let error = CodexSharedOwner::start(&spec, None, std::future::pending())
         .await
         .unwrap_err();
     assert!(
@@ -360,7 +360,7 @@ async fn failed_legacy_stop_blocks_normal_owner_preparation_until_explicit_retry
         .expect("explicit lifecycle retry joins the retained handle");
     assert_eq!(child.drops.load(Ordering::SeqCst), 1);
     await_quiescent(&fixture.home, id).await.unwrap();
-    let error = CodexSharedOwner::start(&spec, std::future::pending())
+    let error = CodexSharedOwner::start(&spec, None, std::future::pending())
         .await
         .unwrap_err();
     assert!(
