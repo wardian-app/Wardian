@@ -1985,25 +1985,25 @@ dddddddddddddddddddddddddddddddddddddddd\x1f\x1ffeature/review\x1fInitial commit
     #[cfg(unix)]
     #[test]
     fn run_git_tries_next_candidate_when_lookup_is_missing() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = tempfile::tempdir().unwrap();
-        let fake_git = temp.path().join("git");
-        std::fs::write(&fake_git, "#!/bin/sh\necho git version fake\n").unwrap();
-
-        let mut permissions = std::fs::metadata(&fake_git).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&fake_git, permissions).unwrap();
-
         let missing_git = temp.path().join("missing").join("git");
+        assert!(
+            !missing_git.exists(),
+            "missing Git candidate unexpectedly exists: {missing_git:?}"
+        );
+        let candidates = [missing_git, PathBuf::from("/bin/sh")];
         let output = run_git_with_candidates(
             temp.path().to_str().unwrap(),
-            &["--version"],
-            &[missing_git, fake_git],
+            &["-c", "printf '%s\\n' 'git version fake'"],
+            &candidates,
         )
-        .unwrap();
-
-        assert_eq!(output.trim(), "git version fake");
+        .unwrap_or_else(|error| {
+            panic!(
+                "Git fallback failed: candidates={candidates:?}, cwd={:?}, error={error}",
+                temp.path()
+            )
+        });
+        assert_eq!(output, "git version fake\n");
     }
 
     #[test]
