@@ -219,7 +219,7 @@ test("small recent Chat keeps Older and full body demand lazy and complete", asy
   await expect(page.locator("[data-chat-row-key]")).toHaveCount(80);
 });
 
-test("phone Chat reserves its gutter and exposes a real touch-sized message menu", async ({ browser }) => {
+test("phone Chat reserves its gutter and exposes a real touch-sized message menu", async ({ browser }, testInfo) => {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   try {
     const page = await context.newPage();
@@ -232,6 +232,21 @@ test("phone Chat reserves its gutter and exposes a real touch-sized message menu
     expect(await page.locator(".chat-transcript-scroll").evaluate((element) => getComputedStyle(element).paddingLeft)).toBe("8px");
     await trigger.tap();
     await expect(page.getByRole("menuitem", { name: "Copy message", exact: true })).toBeVisible();
+    const screenshotDir = process.env.WARDIAN_CHAT_RECOVERY_SCREENSHOT_DIR;
+    if (screenshotDir) {
+      const relative = path.relative(path.resolve("e2e/screenshots/chat"), path.resolve(screenshotDir));
+      expect(path.isAbsolute(screenshotDir) && relative.length > 0 && !path.isAbsolute(relative)
+        && !relative.split(path.sep).includes(".."), "capture output must be an owned e2e/screenshots/chat/<timestamp> directory").toBe(true);
+      fs.mkdirSync(screenshotDir, { recursive: true });
+      const imagePath = path.join(screenshotDir, "phone-chat-copy-menu.png");
+      await testInfo.attach("phone-chat-copy-menu-geometry", {
+        body: JSON.stringify({ viewport: page.viewportSize(), trigger: box,
+          menu: await page.getByRole("menu").boundingBox() }, null, 2),
+        contentType: "application/json",
+      });
+      await page.screenshot({ path: imagePath, type: "png", animations: "disabled" });
+      await testInfo.attach("phone-chat-copy-menu.png", { path: imagePath, contentType: "image/png" });
+    }
   } finally {
     await context.close();
   }

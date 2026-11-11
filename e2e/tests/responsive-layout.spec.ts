@@ -1,7 +1,9 @@
+import fs from "node:fs";
+import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
-import type { AgentChatPage } from "../../src/types";
+import type { AgentChatEvent, AgentChatPage } from "../../src/types";
 
-import { surfacePanel } from "../fixtures/workbench";
+import { surfacePanel, surfaceTab, waitForStableBoundingBoxes } from "../fixtures/workbench";
 import {
   installWorkbenchIpcMock,
   makeWorkbenchDocument,
@@ -120,6 +122,13 @@ test.describe("responsive layout", () => {
 });
 
 test("desktop Chat transcript and composer share the technical lane in a split workbench", async ({ page }, testInfo) => {
+  const screenshotDir = process.env.WARDIAN_CHAT_RECOVERY_SCREENSHOT_DIR;
+  if (screenshotDir) {
+    const relative = path.relative(path.resolve("e2e/screenshots/chat"), path.resolve(screenshotDir));
+    expect(path.isAbsolute(screenshotDir) && relative.length > 0 && !path.isAbsolute(relative)
+      && !relative.split(path.sep).includes(".."), "capture output must be an owned e2e/screenshots/chat/<timestamp> directory").toBe(true);
+    fs.mkdirSync(screenshotDir, { recursive: true });
+  }
   const overview = makeWorkbenchSurface("chat-lane-overview", "agents-overview", {
     state: { mode: "single", focused_agent_id: responsiveAgents[0].session_id, search_query: "", status_filter: [] },
   });
@@ -144,6 +153,20 @@ test("desktop Chat transcript and composer share the technical lane in a split w
       title: null, status: null, turn_id: "layout-turn", source: "watch", command: null, exit_code: null,
       path: null, language: null, created_at: "2026-01-01T00:00:00Z", sequence: 1, metadata: {} }],
   };
+  if (screenshotDir) {
+    response.events[0] = { ...response.events[0], text: [
+      "Review the pane measurements and keep the composer aligned with the technical transcript.",
+      "```typescript\nconst laneWidth = Math.min(paneWidth, 1152);\nrenderTranscript({ laneWidth });\n```",
+      "| Check | Evidence | State |\n| --- | --- | --- |\n| Code | Local overflow | Ready |\n| Composer | Shared lane | Ready |",
+    ].join("\n\n") };
+    response.events.push(...[
+      { title: "Inspect source", text: "Inspected the synthetic Chat layout fixture.", command: "rg --files src/features/chat" },
+      { title: "Check layout", text: "Checked the synthetic transcript and composer alignment.", command: "npm run test -- AgentChatView.test.tsx" },
+      { title: "Summarize work", text: "Summarized the synthetic capture preparation.", command: "git diff --stat" },
+    ].map((tool, index): AgentChatEvent => ({ ...response.events[0], id: `layout-work-${index + 1}`,
+      kind: "tool_call", role: null, text: tool.text, title: tool.title, status: "succeeded",
+      source: "provider_log", command: tool.command, exit_code: 0, language: "shell", sequence: index + 2 })));
+  }
   await page.addInitScript(() => localStorage.setItem("wardian-settings", JSON.stringify({
     state: { gridCardDisplayMode: "chat" }, version: 2,
   })));
@@ -154,7 +177,27 @@ test("desktop Chat transcript and composer share the technical lane in a split w
   await page.goto("/", { waitUntil: "domcontentloaded" });
   const chat = page.locator(".agent-chat-view");
   await expect(chat.locator(".chat-markdown")).toBeVisible();
+  const workGroup = chat.getByTestId("chat-work-group");
+  if (screenshotDir) {
+    await expect(workGroup).toHaveCount(1);
+    await workGroup.getByTitle("Show all work", { exact: true }).click();
+    await expect(workGroup).toHaveAttribute("data-expanded", "true");
+    await expect(workGroup).toContainText("3 events");
+  }
+  const capture = async (name: string) => {
+    if (!screenshotDir) throw new Error("Capture requires the explicit screenshot opt-in");
+    const technical = chat.locator(".chat-markdown").first();
+    await expect(workGroup).toHaveAttribute("data-expanded", "true");
+    for (const content of [technical.locator(".chat-prose-block").first(), technical.locator("pre"),
+      technical.locator("table"), workGroup, chat.locator(".chat-composer")]) {
+      await expect(content).toBeInViewport({ ratio: 1 });
+    }
+    const imagePath = path.join(screenshotDir, name);
+    await page.screenshot({ path: imagePath, type: "png", animations: "disabled" });
+    await testInfo.attach(name, { path: imagePath, contentType: "image/png" });
+  };
   const geometry = [];
+  let capturedSplit = false;
   for (const width of [1440, 1792, 1920, 2112]) {
     await page.setViewportSize({ width, height: 1080 });
     // The workbench's ResizeObserver commits pane sizes on the next frame.
@@ -177,6 +220,42 @@ test("desktop Chat transcript and composer share the technical lane in a split w
     expect(Math.abs(sample.lane.width - sample.composer.width)).toBeLessThanOrEqual(1);
     expect(Math.abs(sample.lane.left - sample.composer.left)).toBeLessThanOrEqual(1);
     expect(sample.document).toBeLessThanOrEqual(sample.viewport + 1);
+    if (screenshotDir && !capturedSplit && sample.pane >= 600 && sample.pane <= 760) {
+      const [pane, lane, composer] = await waitForStableBoundingBoxes(page,
+        [chat, chat.locator(".chat-transcript-list"), chat.locator(".chat-composer")]);
+      expect(pane.width).toBeGreaterThanOrEqual(600);
+      expect(pane.width).toBeLessThanOrEqual(760);
+      await capture("desktop-split-chat-width.png");
+      await testInfo.attach("desktop-split-chat-width-geometry", {
+        body: JSON.stringify({ outerViewport: page.viewportSize(), pane, lane, composer, loopSample: sample }, null, 2),
+        contentType: "application/json",
+      });
+      capturedSplit = true;
+    }
   }
   await testInfo.attach("desktop-split-chat-geometry", { body: JSON.stringify(geometry, null, 2), contentType: "application/json" });
+  if (screenshotDir) {
+    expect(capturedSplit, "no measured Chat pane in the requested 600–760px range was reached").toBe(true);
+    // Surface content is portaled outside its header; the tab identifies its owning pane.
+    const group = surfaceTab(page, "agents-overview")
+      .locator('xpath=ancestor::*[@data-testid="workbench-group"][1]');
+    await group.getByLabel("Pane actions", { exact: true }).click();
+    await page.getByRole("menu", { name: "Pane actions", exact: true })
+      .getByRole("menuitem", { name: "Zoom pane", exact: true }).click();
+    if (await workGroup.getAttribute("data-expanded") !== "true") {
+      await workGroup.getByTitle("Show all work", { exact: true }).click();
+    }
+    const [pane, lane, composer] = await waitForStableBoundingBoxes(page,
+      [chat, chat.locator(".chat-transcript-list"), chat.locator(".chat-composer")]);
+    expect(page.viewportSize()?.width).toBe(2112);
+    expect(pane.width).toBeGreaterThan(1152);
+    expect(lane.width).toBeLessThanOrEqual(1152);
+    expect(lane.width).toBeCloseTo(1152, 0);
+    expect(Math.abs(lane.width - composer.width)).toBeLessThanOrEqual(1);
+    expect(Math.abs(lane.x - composer.x)).toBeLessThanOrEqual(1);
+    await capture("desktop-wide-chat-width.png");
+    await testInfo.attach("desktop-wide-chat-width-geometry", {
+      body: JSON.stringify({ outerViewport: page.viewportSize(), pane, lane, composer }, null, 2), contentType: "application/json",
+    });
+  }
 });
