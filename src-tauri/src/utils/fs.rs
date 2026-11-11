@@ -618,19 +618,75 @@ pub(crate) fn ensure_codex_home_projection(
     agent_id: &str,
 ) -> Result<(), String> {
     let upstream = super::codex_home::resolve_upstream_home()?;
+    let policy = crate::utils::load_codex_runtime_policy().unwrap_or_default();
+    ensure_codex_home_projection_from_source(
+        habitat_root,
+        workspace_root,
+        agent_id,
+        &upstream,
+        &policy,
+        upstream.explicit,
+    )
+}
+
+pub(crate) fn ensure_codex_home_projection_with_context(
+    habitat_root: &std::path::Path,
+    workspace_root: &std::path::Path,
+    agent_id: &str,
+    context: &super::codex_home::CodexLaunchContext,
+) -> Result<(), String> {
+    let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
+    let projected_home = super::codex_home::resolve_managed_home(&wardian_home, agent_id)?;
+    sync_codex_agent_home_with_context(
+        &context.upstream().path,
+        &projected_home,
+        &habitat_root.join(".agents").join("skills"),
+        context,
+    )?;
+    if context.effective_policy().trust_workspaces {
+        trust_codex_workspace_in_home(&projected_home, workspace_root)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn sync_codex_agent_home_with_context(
+    real_codex_home: &std::path::Path,
+    projected_home: &std::path::Path,
+    wardian_skills: &std::path::Path,
+    context: &super::codex_home::CodexLaunchContext,
+) -> Result<(), String> {
+    if real_codex_home != context.upstream().path.as_path() {
+        return Err("Codex bootstrap source does not match the selected launch context".into());
+    }
+    sync_codex_agent_home_from_source(
+        real_codex_home,
+        projected_home,
+        wardian_skills,
+        context.upstream().explicit,
+        Some(context),
+    )
+    .map_err(|_| "Codex bootstrap source projection failed".to_string())
+}
+
+fn ensure_codex_home_projection_from_source(
+    habitat_root: &std::path::Path,
+    workspace_root: &std::path::Path,
+    agent_id: &str,
+    upstream: &super::codex_home::UpstreamHome,
+    policy: &crate::utils::CodexRuntimePolicy,
+    strict_projection: bool,
+) -> Result<(), String> {
     let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
     let projected_home = super::codex_home::resolve_managed_home(&wardian_home, agent_id)?;
     let wardian_skills = habitat_root.join(".agents").join("skills");
-    if upstream.explicit {
-        sync_codex_agent_home_with_policy(&upstream.path, &projected_home, &wardian_skills, true)?;
-    } else {
-        sync_codex_agent_home(&upstream.path, &projected_home, &wardian_skills)?;
-    }
+    sync_codex_agent_home_with_policy(
+        &upstream.path,
+        &projected_home,
+        &wardian_skills,
+        strict_projection,
+    )?;
 
-    if crate::utils::load_codex_runtime_policy()
-        .map(|policy| policy.trust_workspaces)
-        .unwrap_or(false)
-    {
+    if policy.trust_workspaces {
         trust_codex_workspace_in_home(&projected_home, workspace_root)?;
     }
 
@@ -651,6 +707,25 @@ fn sync_codex_agent_home_with_policy(
     wardian_skills: &std::path::Path,
     strict_projection: bool,
 ) -> Result<(), String> {
+    sync_codex_agent_home_from_source(
+        real_codex_home,
+        projected_home,
+        wardian_skills,
+        strict_projection,
+        None,
+    )
+}
+
+fn sync_codex_agent_home_from_source(
+    real_codex_home: &std::path::Path,
+    projected_home: &std::path::Path,
+    wardian_skills: &std::path::Path,
+    strict_projection: bool,
+    context: Option<&super::codex_home::CodexLaunchContext>,
+) -> Result<(), String> {
+    if let Some(context) = context {
+        context.revalidate()?;
+    }
     // Validate both namespaces before migrating either one or publishing indexes.
     // Otherwise a valid active tree could be moved before a foreign archive link
     // is discovered, leaving the child attached to an unintended upstream home.
@@ -694,19 +769,51 @@ fn sync_codex_agent_home_with_policy(
     for shared_name in CODEX_SHARED_HOME_FILES {
         let source = real_codex_home.join(shared_name);
         let target = projected_home.join(shared_name);
-        if source.exists() && source.is_file() {
+        if let Some(context) = context {
+            // Detach the managed leaf before writing so an old link cannot
+            // redirect selected credential bytes into an upstream home.
+            match std::fs::remove_file(&target) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.to_string()),
+            }
+            if let Some(bytes) = context.source_contents(shared_name) {
+                use std::io::Write;
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                let mut file = options.open(&target).map_err(|error| error.to_string())?;
+                file.write_all(bytes).map_err(|error| error.to_string())?;
+            }
+        } else if source.exists() && source.is_file() {
             project_file(&source, &target)?;
         }
     }
 
     sync_codex_provider_assets(real_codex_home, projected_home)?;
 
-    reconcile_codex_config(
-        &real_codex_home.join("config.toml"),
-        &projected_home.join("config.toml"),
-        real_codex_home,
-        projected_home,
-    )?;
+    if let Some(context) = context {
+        let contents =
+            std::str::from_utf8(context.source_contents("config.toml").unwrap_or_default())
+                .map_err(|_| "Codex launch config is not readable")?;
+        reconcile_codex_config_contents(
+            contents,
+            &projected_home.join("config.toml"),
+            real_codex_home,
+            projected_home,
+        )?;
+    } else {
+        reconcile_codex_config(
+            &real_codex_home.join("config.toml"),
+            &projected_home.join("config.toml"),
+            real_codex_home,
+            projected_home,
+        )?;
+    }
 
     sync_codex_windows_sandbox_support(real_codex_home, projected_home)?;
 
@@ -1284,6 +1391,20 @@ fn reconcile_codex_config(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(error) => return Err(error.to_string()),
     };
+    reconcile_codex_config_contents(
+        &base_content,
+        agent_config_path,
+        real_codex_home,
+        projected_home,
+    )
+}
+
+fn reconcile_codex_config_contents(
+    base_content: &str,
+    agent_config_path: &std::path::Path,
+    real_codex_home: &std::path::Path,
+    projected_home: &std::path::Path,
+) -> Result<(), String> {
     let agent_content = match std::fs::read_to_string(agent_config_path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),

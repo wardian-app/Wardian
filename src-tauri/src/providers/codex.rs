@@ -116,19 +116,27 @@ impl CodexProvider {
         Some("Approval required".to_string())
     }
 
-    pub(crate) fn append_common_args(
-        &self,
-        args: &mut Vec<String>,
-        config: &AgentConfig,
-        is_exec_mode: bool,
-    ) {
-        let runtime_policy = crate::utils::load_codex_runtime_policy().unwrap_or_default();
-        self.append_common_args_with_runtime_policy(args, config, is_exec_mode, &runtime_policy);
-    }
-
     /// App-server owns execution policy; the attached TUI must not replace it.
     /// Reject launch forms whose semantics have not been verified for remote mode.
     pub(crate) fn shared_server_args(&self, config: &AgentConfig) -> Result<Vec<String>, String> {
+        let global = crate::utils::load_codex_runtime_policy().unwrap_or_default();
+        self.shared_server_args_with_policy(config, &global)
+    }
+
+    pub(crate) fn shared_server_args_with_policy(
+        &self,
+        config: &AgentConfig,
+        global: &CodexRuntimePolicy,
+    ) -> Result<Vec<String>, String> {
+        let policy = effective_codex_runtime_policy(&config.codex_config(), global);
+        self.shared_server_args_with_effective_policy(config, &policy)
+    }
+
+    pub(crate) fn shared_server_args_with_effective_policy(
+        &self,
+        config: &AgentConfig,
+        policy: &CodexRuntimePolicy,
+    ) -> Result<Vec<String>, String> {
         let codex = config.codex_config();
         if codex
             .profile
@@ -141,8 +149,6 @@ impl CodexProvider {
         {
             return Err("shared Codex does not yet support profile/custom launch arguments".into());
         }
-        let global = crate::utils::load_codex_runtime_policy().unwrap_or_default();
-        let policy = effective_codex_runtime_policy(&codex, &global);
         if policy.approval_policy == "untrusted" && !policy.full_auto {
             return Err(
                 "installed Codex rejects untrusted; choose an explicit supported policy".into(),
@@ -189,7 +195,25 @@ impl CodexProvider {
     /// flags must be appended after that subcommand.
     pub(crate) fn append_headless_global_args(&self, args: &mut Vec<String>, config: &AgentConfig) {
         let runtime_policy = crate::utils::load_codex_runtime_policy().unwrap_or_default();
-        self.append_shared_args_with_runtime_policy(args, config, &runtime_policy, true);
+        self.append_headless_global_args_with_policy(args, config, &runtime_policy);
+    }
+
+    pub(crate) fn append_headless_global_args_with_policy(
+        &self,
+        args: &mut Vec<String>,
+        config: &AgentConfig,
+        runtime_policy: &CodexRuntimePolicy,
+    ) {
+        self.append_shared_args_with_runtime_policy(args, config, runtime_policy, true);
+    }
+
+    pub(crate) fn append_headless_global_args_with_effective_policy(
+        &self,
+        args: &mut Vec<String>,
+        config: &AgentConfig,
+        effective_policy: &CodexRuntimePolicy,
+    ) {
+        self.append_shared_args_with_effective_policy(args, config, effective_policy, true);
     }
 
     /// Append flags owned by `codex exec` (or `codex exec resume`).
@@ -269,25 +293,23 @@ impl CodexProvider {
         );
     }
 
-    fn append_common_args_with_runtime_policy(
-        &self,
-        args: &mut Vec<String>,
-        config: &AgentConfig,
-        is_exec_mode: bool,
-        runtime_policy: &CodexRuntimePolicy,
-    ) {
-        self.append_shared_args_with_runtime_policy(args, config, runtime_policy, false);
-
-        if is_exec_mode {
-            self.append_headless_exec_args(args, Some(config));
-        }
-    }
-
     fn append_shared_args_with_runtime_policy(
         &self,
         args: &mut Vec<String>,
         config: &AgentConfig,
         runtime_policy: &CodexRuntimePolicy,
+        is_headless: bool,
+    ) {
+        let effective_policy =
+            effective_codex_runtime_policy(&config.codex_config(), runtime_policy);
+        self.append_shared_args_with_effective_policy(args, config, &effective_policy, is_headless);
+    }
+
+    fn append_shared_args_with_effective_policy(
+        &self,
+        args: &mut Vec<String>,
+        config: &AgentConfig,
+        effective_policy: &CodexRuntimePolicy,
         is_headless: bool,
     ) {
         let codex = config.codex_config();
@@ -315,7 +337,6 @@ impl CodexProvider {
             }
         }
 
-        let effective_policy = effective_codex_runtime_policy(&codex, runtime_policy);
         if effective_policy.trust_workspaces {
             if let Some(project_override) = codex_trusted_project_override(&config.folder) {
                 args.push("-c".into());
@@ -355,12 +376,12 @@ impl CodexProvider {
         } else {
             if !effective_policy.sandbox_mode.trim().is_empty() {
                 args.push("--sandbox".into());
-                args.push(effective_policy.sandbox_mode);
+                args.push(effective_policy.sandbox_mode.clone());
             }
 
             if !effective_policy.approval_policy.trim().is_empty() {
                 args.push("--ask-for-approval".into());
-                args.push(effective_policy.approval_policy);
+                args.push(effective_policy.approval_policy.clone());
             }
         }
 
@@ -382,12 +403,22 @@ impl CodexProvider {
         }
     }
 
-    #[cfg(test)]
     fn spawn_args_with_runtime_policy(
         &self,
         config: &AgentConfig,
         is_resume: bool,
         runtime_policy: &CodexRuntimePolicy,
+    ) -> Vec<String> {
+        let effective_policy =
+            effective_codex_runtime_policy(&config.codex_config(), runtime_policy);
+        self.get_spawn_args_with_effective_policy(config, is_resume, &effective_policy)
+    }
+
+    pub(crate) fn get_spawn_args_with_effective_policy(
+        &self,
+        config: &AgentConfig,
+        is_resume: bool,
+        effective_policy: &CodexRuntimePolicy,
     ) -> Vec<String> {
         let mut args: Vec<String> = Vec::new();
 
@@ -402,7 +433,7 @@ impl CodexProvider {
             }
         }
 
-        self.append_common_args_with_runtime_policy(&mut args, config, false, runtime_policy);
+        self.append_shared_args_with_effective_policy(&mut args, config, effective_policy, false);
 
         if let Some(ref custom) = config.custom_args {
             if let Some(parsed) = shlex::split(custom) {
@@ -458,7 +489,7 @@ fn codex_trusted_project_override(folder: &str) -> Option<String> {
     ))
 }
 
-fn effective_codex_runtime_policy(
+pub(crate) fn effective_codex_runtime_policy(
     config: &CodexProviderConfig,
     global_policy: &CodexRuntimePolicy,
 ) -> CodexRuntimePolicy {
@@ -575,28 +606,8 @@ impl AgentProvider for CodexProvider {
     }
 
     fn get_spawn_args(&self, config: &AgentConfig, is_resume: bool) -> Vec<String> {
-        let mut args: Vec<String> = Vec::new();
-
-        if is_resume {
-            args.push("resume".into());
-            if let Some(resume_id) = config
-                .resume_session
-                .as_ref()
-                .filter(|s| !s.trim().is_empty())
-            {
-                args.push(resume_id.clone());
-            }
-        }
-
-        self.append_common_args(&mut args, config, false);
-
-        if let Some(ref custom) = config.custom_args {
-            if let Some(parsed) = shlex::split(custom) {
-                args.extend(parsed);
-            }
-        }
-
-        args
+        let runtime_policy = crate::utils::load_codex_runtime_policy().unwrap_or_default();
+        self.spawn_args_with_runtime_policy(config, is_resume, &runtime_policy)
     }
 
     fn parse_output(&self, line: &str) -> Option<AgentEvent> {

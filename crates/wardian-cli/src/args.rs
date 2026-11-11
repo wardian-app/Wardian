@@ -1384,6 +1384,23 @@ pub enum AgentCommand {
         /// Provider-discovered reasoning effort. Omit for the provider default.
         #[arg(long = "reasoning-effort")]
         reasoning_effort: Option<String>,
+        /// Return the durable operation receipt without waiting for registration.
+        #[arg(long = "async")]
+        async_mode: bool,
+        /// Reuse a previously selected idempotency key after an uncertain reply.
+        #[arg(long = "operation-id")]
+        operation_id: Option<String>,
+        /// Maximum time to observe this spawn before returning its operation key.
+        #[arg(long = "wait-timeout", default_value = "60s")]
+        wait_timeout: String,
+    },
+    /// Read the durable state of a previously submitted spawn operation.
+    SpawnStatus { operation_id: String },
+    /// Wait a bounded time for a previously submitted spawn operation.
+    SpawnWait {
+        operation_id: String,
+        #[arg(long, default_value = "60s")]
+        timeout: String,
     },
     /// Update live agent configuration without restarting the provider process.
     Update {
@@ -2598,6 +2615,64 @@ mod tests {
                 && class == "Coder"
                 && name.as_deref() == Some("coder-b1")
                 && workspace.as_deref() == Some("D:/Projects/foo")
+        ));
+    }
+
+    #[test]
+    fn parses_durable_spawn_submission_and_lookup_commands() {
+        let operation_id = "5d4ebea1-1ce4-44fa-a67e-410f74aa1e0c";
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "agent",
+            "spawn",
+            "--provider",
+            "codex",
+            "--class",
+            "Coder",
+            "--workspace",
+            "D:/Projects/foo",
+            "--async",
+            "--operation-id",
+            operation_id,
+        ])
+        .unwrap();
+        let Command::Agent(args) = cli.command else {
+            panic!()
+        };
+        assert!(matches!(
+            args.command,
+            Some(AgentCommand::Spawn {
+                async_mode: true,
+                operation_id: Some(ref parsed),
+                ..
+            }) if parsed == operation_id
+        ));
+
+        let cli = Cli::try_parse_from(["wardian", "agent", "spawn-status", operation_id]).unwrap();
+        let Command::Agent(args) = cli.command else {
+            panic!()
+        };
+        assert!(matches!(
+            args.command,
+            Some(AgentCommand::SpawnStatus { operation_id: ref parsed }) if parsed == operation_id
+        ));
+
+        let cli = Cli::try_parse_from([
+            "wardian",
+            "agent",
+            "spawn-wait",
+            operation_id,
+            "--timeout",
+            "12s",
+        ])
+        .unwrap();
+        let Command::Agent(args) = cli.command else {
+            panic!()
+        };
+        assert!(matches!(
+            args.command,
+            Some(AgentCommand::SpawnWait { operation_id: ref parsed, ref timeout })
+                if parsed == operation_id && timeout == "12s"
         ));
     }
 

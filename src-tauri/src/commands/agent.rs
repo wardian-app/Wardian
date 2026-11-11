@@ -34,10 +34,12 @@ pub use settings::{
     AgentModelLiveApplication, AgentModelSelectionUpdateResult, AgentRuntimeBinding,
     AgentSettingIntent, AgentSettingLiveStatus, AgentSettingUpdateResult,
 };
+mod name_claims;
 #[cfg(test)]
 #[path = "agent/provider_log_tests.rs"]
 pub(crate) mod provider_log_tests;
 mod removal;
+mod spawn;
 use agent_lifecycle::{
     acquire_agent_lifecycle_guard, hold_previous_provider_before_rotation, lock_agent_lifecycle,
     lock_agent_roster_for_best_effort_save, lock_agent_roster_for_save, lock_rename_mutation,
@@ -49,7 +51,17 @@ use agent_naming::{
 };
 use codex_onboarding::register_new_agent;
 pub(crate) use codex_onboarding::rollback_provisional_codex;
+use name_claims::{
+    abort_failed_rename, existing_spawn_session_names, release_spawn_name_reservation,
+    reserve_rename_session_name, reserve_spawn_session_name, LegacyNameClaimGuard,
+    SpawnNameReservation,
+};
+pub(crate) use removal::recover_bound_removals;
 use removal::remove_agent;
+pub(crate) use spawn::{
+    launch_prepared_agent_spawn, planned_provider_session_id, prepare_durable_agent_spawn,
+};
+use spawn::{new_agent_identity_plan, prepare_agent_spawn};
 
 const MAX_AGENT_DESCRIPTION_CHARS: usize = 280;
 
@@ -395,18 +407,30 @@ fn acquire_agent_lifecycle_transition_lease(
     config: &AgentConfig,
     operation: &str,
 ) -> Result<wardian_core::conversation_lease::PersistedConversationLeaseGuard, String> {
+    acquire_agent_lifecycle_transition_lease_for_identity(
+        &config.session_id,
+        &config.session_name,
+        &config.provider,
+        config.resume_session.as_deref().unwrap_or_default(),
+        operation,
+    )
+}
+
+/// Metadata deletion retries acquire the existing lifecycle authority directly
+/// from a sealed identity, without reconstructing a roster or provider config.
+fn acquire_agent_lifecycle_transition_lease_for_identity(
+    agent_id: &str,
+    name: &str,
+    provider: &str,
+    resume_session: &str,
+    operation: &str,
+) -> Result<wardian_core::conversation_lease::PersistedConversationLeaseGuard, String> {
     let now = chrono::Utc::now();
     let now_rfc3339 = now.to_rfc3339();
-    let resume_session = config
-        .resume_session
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_default()
-        .to_string();
+    let resume_session = resume_session.trim().to_string();
     let lease = wardian_core::conversation_lease::ConversationLease {
-        agent_id: config.session_id.clone(),
-        provider: config.provider.clone(),
+        agent_id: agent_id.to_string(),
+        provider: provider.to_string(),
         resume_session,
         owner_kind: "agent_lifecycle".to_string(),
         owner_id: format!("{operation}:{}", uuid::Uuid::new_v4()),
@@ -426,11 +450,11 @@ fn acquire_agent_lifecycle_transition_lease(
             conflict,
         )) => Err(format!(
             "cannot {operation} agent {} while its saved conversation is in use by {} {} ({})",
-            config.session_name, conflict.owner_kind, conflict.owner_id, conflict.mode
+            name, conflict.owner_kind, conflict.owner_id, conflict.mode
         )),
         Err(error) => Err(format!(
             "cannot {operation} agent {} because its conversation lease could not be acquired: {error}",
-            config.session_name
+            name
         )),
     }
 }
@@ -1172,21 +1196,6 @@ fn provider_uses_manual_session_id(provider_name: &str) -> bool {
     matches!(provider_name, "claude" | "gemini" | "pi" | "mock")
 }
 
-struct NewAgentIdentityPlan {
-    wardian_session_id: String,
-    fresh_provider_session_id: Option<String>,
-    bootstrap_provider_session: bool,
-}
-
-fn new_agent_identity_plan(provider_name: &str) -> NewAgentIdentityPlan {
-    NewAgentIdentityPlan {
-        wardian_session_id: uuid::Uuid::new_v4().to_string(),
-        fresh_provider_session_id: provider_uses_manual_session_id(provider_name)
-            .then(|| uuid::Uuid::new_v4().to_string()),
-        bootstrap_provider_session: provider_name == "codex",
-    }
-}
-
 fn ensure_provider_available_before_session_bootstrap(provider_name: &str) -> Result<(), String> {
     crate::providers::readiness::ensure_provider_available_for_launch(provider_name)
 }
@@ -1313,7 +1322,7 @@ fn set_agent_status_after_failed_runtime_start(
         .map(|agent| replace_agent_status_incarnation(agent, status))
 }
 
-#[cfg(test)]
+/// Record a proved stop without reviving or replacing the saved incarnation.
 fn mark_agent_paused_off(agent: &mut crate::state::ActiveAgent) {
     agent.runtime_generation = None;
     {
@@ -1372,6 +1381,7 @@ enum AgentOrderPlacement<'a> {
 struct AgentRegistrationOptions<'a> {
     clone_name_base: Option<&'a str>,
     reserved_session_name: Option<&'a str>,
+    name_claim_owner_id: Option<&'a str>,
     placement: AgentOrderPlacement<'a>,
     emit_roster_update: bool,
 }
@@ -1408,107 +1418,6 @@ fn insert_new_agent_order(
             order.insert(index, session_id.to_string());
         }
     }
-}
-
-#[derive(Debug)]
-struct SpawnNameReservation {
-    session_name: String,
-}
-
-async fn reserve_spawn_session_name(
-    state: &AppState,
-    requested_session_name: &str,
-    agent_class: &str,
-) -> Result<SpawnNameReservation, String> {
-    let mut existing_names = persisted_agent_session_names()?;
-    let agents = state.agents.lock().await;
-    existing_names.extend(
-        agents
-            .values()
-            .map(|agent| agent.config.lock().unwrap().session_name.clone())
-            .collect::<HashSet<_>>(),
-    );
-    let mut reservations = state.agent_name_reservations.lock().await;
-    existing_names.extend(reservations.iter().cloned());
-    let session_name =
-        resolve_requested_spawn_session_name(requested_session_name, agent_class, &existing_names)?;
-    reservations.insert(session_name.clone());
-    Ok(SpawnNameReservation { session_name })
-}
-
-async fn existing_spawn_session_names(state: &AppState) -> Result<HashSet<String>, String> {
-    let mut existing_names = persisted_agent_session_names()?;
-    let agents = state.agents.lock().await;
-    existing_names.extend(
-        agents
-            .values()
-            .map(|agent| agent.config.lock().unwrap().session_name.clone())
-            .collect::<HashSet<_>>(),
-    );
-    let reservations = state.agent_name_reservations.lock().await;
-    existing_names.extend(reservations.iter().cloned());
-    Ok(existing_names)
-}
-
-async fn release_spawn_name_reservation(state: &AppState, session_name: &str) {
-    let mut reservations = state.agent_name_reservations.lock().await;
-    reservations.remove(session_name);
-}
-
-/// Reserve a requested rename name using the same lock order as spawn-name
-/// reservation. The reservation closes the gap between checking the live
-/// roster and committing the rename while another spawn is in flight.
-async fn reserve_rename_session_name(
-    state: &AppState,
-    session_id: &str,
-    new_name: &str,
-) -> Result<Option<SpawnNameReservation>, String> {
-    let persisted_names = persisted_agent_session_names()?;
-    let agents = state.agents.lock().await;
-    let current_name = agents
-        .get(session_id)
-        .ok_or_else(|| format!("Agent {} not found", session_id))?
-        .config
-        .lock()
-        .map_err(|_| "Agent configuration lock poisoned".to_string())?
-        .session_name
-        .clone();
-
-    if current_name == new_name {
-        return Ok(None);
-    }
-
-    if persisted_names.iter().any(|name| name == new_name) {
-        return Err(format!(
-            "An agent with the name '{}' already exists.",
-            new_name
-        ));
-    }
-
-    if agents.values().any(|agent| {
-        agent
-            .config
-            .lock()
-            .map(|config| config.session_name == new_name && config.session_id != session_id)
-            .unwrap_or(false)
-    }) {
-        return Err(format!(
-            "An agent with the name '{}' already exists.",
-            new_name
-        ));
-    }
-
-    let mut reservations = state.agent_name_reservations.lock().await;
-    if reservations.contains(new_name) {
-        return Err(format!(
-            "An agent with the name '{}' already exists.",
-            new_name
-        ));
-    }
-    reservations.insert(new_name.to_string());
-    Ok(Some(SpawnNameReservation {
-        session_name: new_name.to_string(),
-    }))
 }
 
 fn normalize_workspace_record_path(path: &std::path::Path) -> String {
@@ -2347,94 +2256,49 @@ pub async fn spawn_agent(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<AgentConfig, String> {
-    let requested_session_name = req.session_name;
+    let requested_session_name = req.session_name.clone();
     let agent_class = canonical_agent_class_name(&req.agent_class)?;
-    let folder = normalize_spawn_folder(&req.folder)?;
-    let resume_session = req.resume_session;
-    let is_off = req.is_off;
-    let config_override = req.config_override;
-
-    let provider_name = config_override
+    let provider_name = req
+        .config_override
         .as_ref()
         .map(|c| c.provider.clone())
         .unwrap_or_else(|| "claude".to_string());
     let provider_name = canonical_agent_provider_name(&provider_name)?;
     ensure_provider_available_before_session_bootstrap(&provider_name)?;
-
-    let name_reservation =
-        reserve_spawn_session_name(&state, &requested_session_name, &agent_class).await?;
+    let identity = new_agent_identity_plan(&provider_name);
+    let name_reservation = reserve_spawn_session_name(
+        &state,
+        &requested_session_name,
+        &agent_class,
+        &identity.wardian_session_id,
+    )
+    .await?;
     let session_name = name_reservation.session_name.clone();
-
     manager::log_debug(&format!(
         "[WARDIAN] spawn_agent called for session name: {}, class: {}",
         session_name, agent_class
     ));
-    let identity = new_agent_identity_plan(&provider_name);
-    let session_id = identity.wardian_session_id;
-    let mut config = config_override.unwrap_or_default();
-    config.provider = provider_name.clone();
-    config.session_id = session_id.clone();
-    config.session_name = session_name.clone();
-    config.agent_class = agent_class.clone();
-    config.folder = folder;
-    config.resume_session = None;
-    config.fresh_provider_session_id = None;
-    config.is_off = is_off.unwrap_or(false);
-    config.normalize_provider_config_for_provider();
-    config.mark_provider_config_nested_for_save();
-    let requested_resume = resume_session.filter(|value| !value.trim().is_empty());
-    let actual_resume =
-        if let Some(resume_session) = requested_resume {
-            config.resume_session = Some(resume_session.clone());
-            if let Err(error) =
-                manager::apply_provider_identity(&provider_name, &mut config, &resume_session)
-            {
-                release_spawn_name_reservation(&state, &session_name).await;
-                return Err(error);
-            }
-            Some(resume_session)
-        } else if let Some(fresh_provider_session_id) = identity.fresh_provider_session_id {
-            config.fresh_provider_session_id = Some(fresh_provider_session_id.clone());
-            Some(fresh_provider_session_id)
-        } else if identity.bootstrap_provider_session {
-            let cwd = crate::utils::fs::resolve_cwd(&config.folder, "");
-            let provider_session_id =
-                match manager::obtain_session_id(&cwd, Some(&config.agent_class), Some(&config))
-                    .await
-                {
-                    Ok(provider_session_id) => provider_session_id,
-                    Err(error) => {
-                        release_spawn_name_reservation(&state, &session_name).await;
-                        return Err(format!(
-                            "Failed to initialize the provider session: {error}"
-                        ));
-                    }
-                };
-            if let Err(error) =
-                manager::apply_provider_identity(&provider_name, &mut config, &provider_session_id)
-            {
-                release_spawn_name_reservation(&state, &session_name).await;
-                return Err(error);
-            }
-            Some(provider_session_id)
-        } else {
-            None
-        };
-    let registered = register_new_agent(
-        config,
-        actual_resume,
+    let prepared = match prepare_agent_spawn(req, identity, session_name.clone()) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            release_spawn_name_reservation(&state, &name_reservation).await;
+            return Err(error);
+        }
+    };
+    let registered = launch_prepared_agent_spawn(
+        prepared,
         &state,
         &app,
-        AgentRegistrationOptions {
-            clone_name_base: None,
-            reserved_session_name: Some(&session_name),
-            placement: configured_new_agent_order_placement(),
-            emit_roster_update: true,
-        },
+        Some(name_reservation.owner_id.clone()),
+        None,
     )
-    .await;
+    .await
+    .map(|registered| registered.config);
     if registered.is_err() {
-        release_spawn_name_reservation(&state, &session_name).await;
+        manager::log_debug(&format!(
+            "[WARDIAN] retaining spawn name claim after uncertain registration for {}",
+            name_reservation.session_name
+        ));
     }
     registered
 }
@@ -2489,7 +2353,7 @@ pub async fn clone_agent(
             session_name
         ));
     }
-
+    let name_claim_owner_id = uuid::Uuid::new_v4().to_string();
     manager::log_debug(&format!(
         "[WARDIAN] clone_agent called for source session: {}, mode: {:?}",
         source_session_id, req.mode
@@ -2506,7 +2370,7 @@ pub async fn clone_agent(
 
     let mut config = clone_sanitize_config(
         &source_config,
-        session_name,
+        session_name.clone(),
         clone_provider,
         folder_override,
         clone_class,
@@ -2519,6 +2383,18 @@ pub async fn clone_agent(
     config.session_id = session_id.clone();
     config.resume_session = None;
     config.fresh_provider_session_id = identity.fresh_provider_session_id.clone();
+    wardian_core::agent_spawn::reserve_legacy_name(
+        &name_claim_owner_id,
+        &session_id,
+        wardian_core::agent_spawn::LegacyNamePurpose::Clone,
+        None,
+        &config.session_name,
+    )?;
+
+    let mut name_claim_guard = LegacyNameClaimGuard::new(SpawnNameReservation {
+        session_name: session_name.clone(),
+        owner_id: name_claim_owner_id.clone(),
+    });
 
     if !is_session_id_available(&state, &session_id).await {
         return Err(format!(
@@ -2536,6 +2412,9 @@ pub async fn clone_agent(
         None
     };
     let mut created_profile_dirs = Vec::new();
+
+    wardian_core::agent_spawn::begin_legacy_name_effects(&name_claim_owner_id, &session_id)?;
+    name_claim_guard.retain_for_uncertain_launch();
 
     if let Some(home) = profile_home.as_ref() {
         clone_ensure_profile_destination_available(home, &session_id, None)
@@ -2557,6 +2436,7 @@ pub async fn clone_agent(
         clone_refresh_profile_system_include_directories(&mut config, &session_id, true);
     }
 
+    name_claim_guard.retain_for_uncertain_launch();
     let actual_resume = if let Some(fresh_provider_session_id) = identity.fresh_provider_session_id
     {
         Some(fresh_provider_session_id)
@@ -2583,14 +2463,18 @@ pub async fn clone_agent(
         &app,
         AgentRegistrationOptions {
             clone_name_base: generated_session_name.then_some(source_config.session_name.as_str()),
-            reserved_session_name: None,
+            reserved_session_name: Some(&session_name),
+            name_claim_owner_id: Some(&name_claim_owner_id),
             placement: AgentOrderPlacement::After(&source_session_id),
             emit_roster_update: false,
         },
+        None,
     )
-    .await;
+    .await
+    .map(|registered| registered.config);
     match registered {
         Ok(config) => {
+            name_claim_guard.commit();
             if let Err(error) = crate::commands::watchlist::preserve_clone_team_placement(
                 &app,
                 &source_session_id,
@@ -2619,7 +2503,9 @@ pub async fn clone_agent(
             Ok(config)
         }
         Err(error) => {
-            clone_cleanup_created_profile_dirs(&created_profile_dirs);
+            if !codex_onboarding::is_ownership_pending(&error) {
+                clone_cleanup_created_profile_dirs(&created_profile_dirs);
+            }
             Err(error)
         }
     }
@@ -4013,6 +3899,10 @@ pub async fn rename_agent<R: tauri::Runtime>(
     let (_lifecycle_guard, _roster_barrier) = lock_rename_mutation(&state, &session_id).await?;
     let rename_reservation = reserve_rename_session_name(&state, &session_id, &new_name).await?;
 
+    if let Some(reservation) = rename_reservation.as_ref() {
+        wardian_core::agent_spawn::begin_legacy_name_effects(&reservation.owner_id, &session_id)?;
+    }
+
     let mut agents = state.agents.lock().await;
     let order = state.agent_order.lock().await;
 
@@ -4059,7 +3949,13 @@ pub async fn rename_agent<R: tauri::Runtime>(
                 }
             }
             if let Some(reservation) = rename_reservation.as_ref() {
-                release_spawn_name_reservation(&state, &reservation.session_name).await;
+                abort_failed_rename(reservation, &session_id)
+                    .map_err(|pending| format!("{pending}; rename persistence failed: {error}"))?;
+                state
+                    .agent_name_reservations
+                    .lock()
+                    .await
+                    .remove(&reservation.session_name);
             }
             return Err(format!("Failed to persist agent rename: {error}"));
         }
@@ -4085,7 +3981,14 @@ pub async fn rename_agent<R: tauri::Runtime>(
             .map(|error| format!("; rename rollback failed: {error}"))
             .unwrap_or_default();
             if let Some(reservation) = rename_reservation.as_ref() {
-                release_spawn_name_reservation(&state, &reservation.session_name).await;
+                abort_failed_rename(reservation, &session_id).map_err(|pending| {
+                    format!("{pending}; roster write failed: {snapshot_error}{rollback_error}")
+                })?;
+                state
+                    .agent_name_reservations
+                    .lock()
+                    .await
+                    .remove(&reservation.session_name);
             }
             return Err(format!(
                 "Failed to persist agent rename: {snapshot_error}{rollback_error}"
@@ -4093,12 +3996,38 @@ pub async fn rename_agent<R: tauri::Runtime>(
         }
         let _ = app.emit("agents-updated", ());
         if let Some(reservation) = rename_reservation.as_ref() {
-            release_spawn_name_reservation(&state, &reservation.session_name).await;
+            let finalized = (|| {
+                let roster = crate::spawn_operations::persisted_roster()?;
+                wardian_core::agent_spawn::complete_legacy_name(
+                    &reservation.owner_id,
+                    &sid,
+                    &roster,
+                )?;
+                match wardian_core::agent_spawn::finalize_legacy_name(
+                    &reservation.owner_id,
+                    &sid,
+                    &roster,
+                )? {
+                    wardian_core::agent_spawn::LegacyNameFinalization::Committed
+                    | wardian_core::agent_spawn::LegacyNameFinalization::AlreadyCommitted => Ok(()),
+                    wardian_core::agent_spawn::LegacyNameFinalization::Conflict => {
+                        Err("Rename ownership conflict".into())
+                    }
+                }
+            })();
+            finalized.map_err(|error: String| {
+                codex_onboarding::ownership_pending(&sid, &reservation.owner_id, &error)
+            })?;
+            state
+                .agent_name_reservations
+                .lock()
+                .await
+                .remove(&reservation.session_name);
         }
         Ok(())
     } else {
         if let Some(reservation) = rename_reservation.as_ref() {
-            release_spawn_name_reservation(&state, &reservation.session_name).await;
+            release_spawn_name_reservation(&state, reservation).await;
         }
         Err(format!("Agent {} not found", session_id))
     }
@@ -6341,12 +6270,14 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         wardian_core::db::init_db().expect("initialize test database");
         let state = AppState::new();
 
-        let first = reserve_spawn_session_name(&state, "", "Coder")
-            .await
-            .expect("first reservation");
-        let second = reserve_spawn_session_name(&state, "", "Coder")
-            .await
-            .expect("second reservation");
+        let first =
+            reserve_spawn_session_name(&state, "", "Coder", &uuid::Uuid::new_v4().to_string())
+                .await
+                .expect("first reservation");
+        let second =
+            reserve_spawn_session_name(&state, "", "Coder", &uuid::Uuid::new_v4().to_string())
+                .await
+                .expect("second reservation");
 
         assert_eq!(first.session_name, "Coder-alpha");
         assert_eq!(second.session_name, "Coder-bravo");
@@ -6378,9 +6309,10 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
         .expect("persist test agent");
 
         let state = AppState::new();
-        let reservation = reserve_spawn_session_name(&state, "", "Coder")
-            .await
-            .expect("reservation after persisted collision");
+        let reservation =
+            reserve_spawn_session_name(&state, "", "Coder", &uuid::Uuid::new_v4().to_string())
+                .await
+                .expect("reservation after persisted collision");
 
         assert_eq!(reservation.session_name, "Coder-bravo");
 
@@ -6441,10 +6373,10 @@ Add-Content -LiteralPath $env:WARDIAN_COMMAND_SMOKE_LOG -Value $lines
 
         assert_eq!(first.is_ok(), !second.is_ok());
         if let Ok(Some(reservation)) = first {
-            release_spawn_name_reservation(&state, &reservation.session_name).await;
+            release_spawn_name_reservation(&state, &reservation).await;
         }
         if let Ok(Some(reservation)) = second {
-            release_spawn_name_reservation(&state, &reservation.session_name).await;
+            release_spawn_name_reservation(&state, &reservation).await;
         }
     }
 

@@ -242,6 +242,7 @@ struct SpawnPublicationGate {
     unpublished_failure: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     registration: Option<std::sync::Arc<RegistrationPublicationState>>,
     pi_bridge: Option<std::sync::Arc<crate::delivery::pi_bridge::PiBridgeOwner>>,
+    codex_launch_context: Option<std::sync::Arc<crate::utils::codex_home::CodexLaunchContext>>,
 }
 
 /// Registration may put a runtime in the map before its roster and provider
@@ -2073,6 +2074,105 @@ fn line_event_status_for_pty_provider(
     )
 }
 
+/// Publish first native discovery only for the current runtime, before saving
+/// it. Lifecycle and roster exclusion bind the receipt to this exact config Arc.
+fn bind_first_runtime_identity<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    expected_config: &std::sync::Arc<std::sync::Mutex<AgentConfig>>,
+    generation: u64,
+    native_id: &str,
+    folder: Option<&str>,
+) -> Option<AgentConfig> {
+    let result: Result<Option<AgentConfig>, String> = tauri::async_runtime::block_on(async {
+        let state = app.state::<AppState>();
+        let agent_id = expected_config
+            .lock()
+            .map_err(|error| error.to_string())?
+            .session_id
+            .clone();
+        let lifecycle = state.lock_agent_lifecycle(&agent_id).await;
+        let barrier = super::roster_io::acquire_roster_barrier().await?;
+        let current = {
+            let agents = state.agents.lock().await;
+            agents.get(&agent_id).is_some_and(|active| {
+                std::sync::Arc::ptr_eq(&active.config, expected_config)
+                    && active.runtime_generation == Some(generation)
+            })
+        };
+        if !current {
+            return Ok(None);
+        }
+        let mut config = expected_config
+            .lock()
+            .map_err(|error| error.to_string())?
+            .clone();
+        if config
+            .resume_session
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+        {
+            return Ok(None);
+        }
+        let provider = config.provider.clone();
+        apply_provider_identity(&provider, &mut config, native_id)?;
+        config.fresh_provider_session_id = None;
+        if let Some(folder) = folder {
+            config.folder = folder.to_string();
+        }
+        let native_id = native_id.to_string();
+        let receipt_agent = agent_id.clone();
+        let receipt_native = native_id.clone();
+        let correlated = tokio::task::spawn_blocking(move || {
+            wardian_core::agent_spawn::record_first_native_binding(
+                &receipt_agent,
+                &provider,
+                &receipt_native,
+                generation,
+            )
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        let mut configs = {
+            let agents = state.agents.lock().await;
+            let order = state.agent_order.lock().await;
+            super::state_configs_snapshot(&agents, &order)
+        };
+        let proposed = configs
+            .iter_mut()
+            .find(|saved| saved.session_id == agent_id)
+            .ok_or("Current first-native target is missing")?;
+        *proposed = config.clone();
+        let expected_config = expected_config.clone();
+        let home = crate::utils::get_wardian_home().ok_or("Wardian home is unavailable")?;
+        let published = super::roster_io::run_roster_io(barrier, move || {
+            let _lifecycle = lifecycle;
+            // Keep the live binding unassigned until the strict write and
+            // receipt finalize. A failed write leaves the same watcher retryable.
+            super::try_save_state_snapshot_for_home(&home, &configs)?;
+            if correlated
+                && !wardian_core::agent_spawn::mark_first_native_published(
+                    &agent_id, &native_id, generation,
+                )?
+            {
+                return Err("First-native receipt lost its publication fence".into());
+            }
+            *expected_config.lock().map_err(|error| error.to_string())? = config.clone();
+            Ok(config)
+        })
+        .await?;
+        Ok(Some(published))
+    });
+    match result {
+        Ok(config) => config,
+        Err(error) => {
+            log_debug(&format!(
+                "[WARDIAN] First provider identity publication retained: {error}"
+            ));
+            None
+        }
+    }
+}
+
 /// Persists the admitted live roster after an identity watcher releases its config lock.
 pub(crate) fn persist_runtime_agent_configs<R: tauri::Runtime>(app: &AppHandle<R>) {
     let state = app.state::<AppState>();
@@ -2158,12 +2258,13 @@ pub(crate) async fn spawn_agent_with_lease_for_startup_restore(
     .active)
 }
 
-pub(crate) async fn spawn_agent_provisionally(
+pub(crate) async fn spawn_agent_provisionally_with_codex_context(
     app: AppHandle,
     config: AgentConfig,
     is_restored: bool,
     initial_timestamp: Option<String>,
     registration: std::sync::Arc<RegistrationPublicationState>,
+    codex_launch_context: Option<std::sync::Arc<crate::utils::codex_home::CodexLaunchContext>>,
 ) -> Result<SpawnedAgent, String> {
     spawn_agent_inner(
         app,
@@ -2175,6 +2276,7 @@ pub(crate) async fn spawn_agent_provisionally(
         SpawnPublicationGate {
             unpublished_failure: None,
             registration: Some(registration),
+            codex_launch_context,
             ..Default::default()
         },
     )
@@ -2182,10 +2284,11 @@ pub(crate) async fn spawn_agent_provisionally(
     .map_err(|error| error.to_string())
 }
 
-pub(crate) async fn spawn_agent_for_registration(
+pub(crate) async fn spawn_agent_for_registration_with_codex_context(
     app: AppHandle,
     config: AgentConfig,
     registration: std::sync::Arc<RegistrationPublicationState>,
+    codex_launch_context: Option<std::sync::Arc<crate::utils::codex_home::CodexLaunchContext>>,
 ) -> Result<ActiveAgent, String> {
     Ok(spawn_agent_inner(
         app,
@@ -2197,6 +2300,7 @@ pub(crate) async fn spawn_agent_for_registration(
         SpawnPublicationGate {
             unpublished_failure: None,
             registration: Some(registration),
+            codex_launch_context,
             ..Default::default()
         },
     )
@@ -2214,6 +2318,32 @@ async fn spawn_agent_inner(
     inherited_lease: Option<wardian_core::conversation_lease::PersistedConversationLeaseGuard>,
     mut gate: SpawnPublicationGate,
 ) -> Result<SpawnedAgent, StartupRestoreSpawnError> {
+    let codex_launch_context = gate.codex_launch_context.take();
+    if is_restored {
+        let restore_session_id = config.session_id.clone();
+        let excluded = tokio::task::spawn_blocking(move || {
+            wardian_core::agent_spawn::restore_is_excluded(&restore_session_id)
+        })
+        .await
+        .map_err(|error| {
+            StartupRestoreSpawnError::Other(format!(
+                "automatic restore is quarantined because durable spawn lookup failed: {error}"
+            ))
+        })?
+        .map_err(|_| {
+            StartupRestoreSpawnError::Other(
+                "automatic restore is quarantined because durable spawn state is unavailable"
+                    .to_string(),
+            )
+        })?;
+        if excluded {
+            return Err(format!(
+                "automatic restore is quarantined by durable spawn operation for agent {}",
+                config.session_id
+            )
+            .into());
+        }
+    }
     let spawn_started_at = std::time::Instant::now();
     super::validate_session_values_for_launch(
         &config.session_id,
@@ -2550,7 +2680,19 @@ async fn spawn_agent_inner(
         .resume_session
         .as_deref()
         .is_some_and(|s| !s.is_empty());
-    let mut spawn_args = provider.get_spawn_args(&config, is_resume);
+    let mut spawn_args = if config.provider == "codex" {
+        if let Some(context) = codex_launch_context.as_deref() {
+            CodexProvider::new().get_spawn_args_with_effective_policy(
+                &config,
+                is_resume,
+                context.effective_policy(),
+            )
+        } else {
+            provider.get_spawn_args(&config, is_resume)
+        }
+    } else {
+        provider.get_spawn_args(&config, is_resume)
+    };
     if let Some(plan) = &pi_launch_plan {
         plan.apply_args(&mut spawn_args)?;
     }
@@ -2609,13 +2751,16 @@ async fn spawn_agent_inner(
             prepare_codex_owner_after_reservation(&config, inherited_lease, || async {
                 app_state
                     .native_delivery
-                    .prepare_codex_tui(crate::delivery::native_broker::NativeSessionSpec {
-                        target_agent_id: config.session_id.clone(),
-                        provider: "codex".into(),
-                        generation: provider_generation,
-                        workspace: provider_cwd.clone(),
-                        config: config.clone(),
-                    })
+                    .prepare_codex_tui(
+                        crate::delivery::native_broker::NativeSessionSpec {
+                            target_agent_id: config.session_id.clone(),
+                            provider: "codex".into(),
+                            generation: provider_generation,
+                            workspace: provider_cwd.clone(),
+                            config: config.clone(),
+                        },
+                        codex_launch_context.clone(),
+                    )
                     .await
                     .map_err(|error| error.to_string())
             })
@@ -2837,6 +2982,9 @@ async fn spawn_agent_inner(
     } else {
         None
     };
+    if let Some(context) = codex_launch_context.as_deref() {
+        context.revalidate()?;
+    }
     // Provider records written after this instant belong to this runtime.
     let provider_launched_at_ms = chrono::Utc::now().timestamp_millis();
     let child_result = pair.slave.spawn_command(cmd);
@@ -2967,6 +3115,23 @@ async fn spawn_agent_inner(
         .await
         .map_err(|error| format!("Failed to start terminal session broker: {error}"))?;
     child.runtime(app_state.terminal_sessions.clone(), runtime_generation);
+
+    if matches!(config.provider.as_str(), "opencode" | "antigravity") {
+        let native_config = config.clone();
+        if !matches!(
+            tokio::task::spawn_blocking(move || {
+                wardian_core::agent_spawn::record_first_native_runtime(
+                    &native_config,
+                    runtime_generation,
+                    is_restored,
+                )
+            })
+            .await,
+            Ok(Ok(()))
+        ) {
+            log_debug("[WARDIAN] First provider runtime evidence unavailable");
+        }
+    }
 
     if config.resume_session.is_some() {
         if let (Some(plan), Some(process_id), Some(provider_session_id), Some(config_fingerprint)) = (
@@ -4610,6 +4775,7 @@ async fn spawn_agent_inner(
         let watcher_current_status = current_status.clone();
         let watcher_log_path = log_path.clone();
         let watcher_config = config_lock.clone();
+        let watcher_generation = runtime_generation;
         let watcher_watch_state = watch_state.clone();
         let watcher_skip_existing_log = is_restored;
         let watcher_workspace = provider_cwd.clone();
@@ -4637,7 +4803,7 @@ async fn spawn_agent_inner(
 
                 let home = AntigravityProvider::antigravity_home();
                 let (conversation_id, captured_identity) = {
-                    let mut cfg = watcher_config.lock().unwrap_or_else(|e| e.into_inner());
+                    let cfg = watcher_config.lock().unwrap_or_else(|e| e.into_inner());
                     let existing = cfg
                         .resume_session
                         .as_ref()
@@ -4665,24 +4831,23 @@ async fn spawn_agent_inner(
                             })
                         },
                     );
-                    if capture_identity {
-                        if let Some(conversation_id) = conversation_id.as_deref() {
-                            if apply_provider_identity("antigravity", &mut cfg, conversation_id)
-                                .is_ok()
-                            {
-                                (Some(conversation_id.to_string()), true)
-                            } else {
-                                (Some(conversation_id.to_string()), false)
-                            }
-                        } else {
-                            (None, false)
-                        }
-                    } else {
-                        (conversation_id, false)
-                    }
+                    (conversation_id, capture_identity)
                 };
                 if captured_identity {
-                    persist_runtime_agent_configs(&watcher_app);
+                    if let Some(id) = conversation_id.as_deref() {
+                        if bind_first_runtime_identity(
+                            &watcher_app,
+                            &watcher_config,
+                            watcher_generation,
+                            id,
+                            None,
+                        )
+                        .is_none()
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(250));
+                            continue;
+                        }
+                    }
                 }
 
                 let path = conversation_id.as_deref().and_then(|conversation_id| {
@@ -4870,6 +5035,7 @@ async fn spawn_agent_inner(
         let watcher_session = config.session_id.clone();
         let started_after_ms = chrono::Utc::now().timestamp_millis();
         let mut discovery = OpenCodeSessionDiscovery::default();
+        let mut pending_native_id = None;
         std::thread::spawn(move || loop {
             let current = watcher_current_status
                 .lock()
@@ -4878,27 +5044,25 @@ async fn spawn_agent_inner(
             if current == "Off" {
                 break;
             }
-            if let Some(provider_session_id) = discovery.poll(
-                &current,
-                &watcher_workspace,
-                started_after_ms,
-                &watcher_session,
-            ) {
-                let binding_config = if let Ok(mut cfg) = watcher_config.lock() {
-                    cfg.resume_session = Some(provider_session_id);
-                    cfg.fresh_provider_session_id = None;
-                    cfg.folder = fresh_expected_folder.clone();
-                    Some(cfg.clone())
-                } else {
-                    None
-                };
-                persist_runtime_agent_configs(&watcher_app);
+            pending_native_id = pending_native_id.take().or_else(|| {
+                discovery.poll(
+                    &current,
+                    &watcher_workspace,
+                    started_after_ms,
+                    &watcher_session,
+                )
+            });
+            if let Some(provider_session_id) = pending_native_id.as_deref() {
+                let binding_config = bind_first_runtime_identity(
+                    &watcher_app,
+                    &watcher_config,
+                    fresh_runtime_generation,
+                    provider_session_id,
+                    Some(&fresh_expected_folder),
+                );
                 let Some(mut binding_config) = binding_config else {
-                    tauri::async_runtime::block_on(
-                        fresh_broker
-                            .fail_opencode_http(&watcher_session, fresh_provider_generation),
-                    );
-                    break;
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    continue;
                 };
                 let Some(plan) = fresh_opencode_http_plan.take() else {
                     break;
@@ -6285,6 +6449,129 @@ mod tests {
         assert!(!assistant_messages
             .iter()
             .any(|message| message.text == "old"));
+    }
+
+    #[test]
+    fn first_native_discovery_rejects_stale_config_and_generation_before_publication() {
+        let _home = crate::control::test_support::TestWardianHome::new();
+        let app = tauri::test::mock_app();
+        app.manage(AppState::new());
+        let state = app.state::<AppState>();
+        let mut active = agent_without_pty();
+        active.runtime_generation = Some(7);
+        let agent_id = uuid::Uuid::new_v4().to_string();
+        *active.config.lock().unwrap() = AgentConfig {
+            session_id: agent_id.clone(),
+            session_name: "native-owned".into(),
+            provider: "opencode".into(),
+            agent_class: "Coder".into(),
+            folder: "workspace".into(),
+            ..Default::default()
+        };
+        let expected = active.config.clone();
+        let foreign = std::sync::Arc::new(std::sync::Mutex::new(expected.lock().unwrap().clone()));
+        let original = expected.lock().unwrap().clone();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let request = wardian_core::agent_spawn::AgentSpawnRequest {
+            provider: "opencode".into(),
+            class: "Coder".into(),
+            name: Some(original.session_name.clone()),
+            workspace: Some(original.folder.clone()),
+            model: None,
+            reasoning_effort: None,
+        };
+        wardian_core::agent_spawn::admit(&operation_id, &request, &agent_id, None).unwrap();
+        let attempt = wardian_core::agent_spawn::claim_queued(&operation_id)
+            .unwrap()
+            .unwrap()
+            .attempt_id
+            .unwrap();
+        wardian_core::agent_spawn::set_prepared_identity(
+            &operation_id,
+            &attempt,
+            "Coder",
+            "workspace",
+        )
+        .unwrap();
+        wardian_core::agent_spawn::mark_launching(&operation_id, &attempt).unwrap();
+        wardian_core::agent_spawn::record_first_native_runtime(&original, 7, false).unwrap();
+        wardian_core::db::upsert_agent(&wardian_core::db::AgentUpsert {
+            session_id: &agent_id,
+            session_name: &original.session_name,
+            description: "",
+            agent_class: "Coder",
+            provider: "opencode",
+            workspace: Some("workspace"),
+            project: None,
+            is_off: false,
+            created_at: None,
+        })
+        .unwrap();
+        assert!(wardian_core::agent_spawn::mark_registered(&operation_id, &attempt, None).unwrap());
+        super::super::try_save_state_snapshot_unlocked(std::slice::from_ref(&original)).unwrap();
+        tauri::async_runtime::block_on(state.agents.lock()).insert(agent_id.clone(), active);
+        assert!(
+            bind_first_runtime_identity(app.handle(), &foreign, 7, "ses_owned", None).is_none()
+        );
+        assert!(
+            bind_first_runtime_identity(app.handle(), &expected, 8, "ses_owned", None).is_none()
+        );
+        assert!(expected.lock().unwrap().resume_session.is_none());
+        let (entered, _entered_rx) = tokio::sync::oneshot::channel();
+        let (started, _started_rx) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        drop(release);
+        let failed = super::super::ROSTER_IO_PROBE.sync_scope(
+            std::cell::RefCell::new(Some(super::super::RosterIoProbe {
+                entered,
+                started,
+                release: release_rx,
+            })),
+            || bind_first_runtime_identity(app.handle(), &expected, 7, "ses_owned", None),
+        );
+        assert!(failed.is_none());
+        let pending = wardian_core::agent_spawn::plan(&operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            pending.first_native_session_id.as_deref(),
+            Some("ses_owned")
+        );
+        assert!(!pending.first_native_published);
+        assert!(wardian_core::agent_spawn::restore_is_excluded(&agent_id).unwrap());
+        assert!(expected.lock().unwrap().resume_session.is_none());
+        let saved = crate::spawn_operations::persisted_roster().unwrap();
+        assert!(saved[0].resume_session.is_none());
+        wardian_core::agent_spawn::recover_first_native_bindings(&saved).unwrap();
+        assert!(
+            !wardian_core::agent_spawn::plan(&operation_id)
+                .unwrap()
+                .unwrap()
+                .first_native_published
+        );
+        let bound =
+            bind_first_runtime_identity(app.handle(), &expected, 7, "ses_owned", None).unwrap();
+        assert!(
+            wardian_core::agent_spawn::plan(&operation_id)
+                .unwrap()
+                .unwrap()
+                .first_native_published
+        );
+        assert!(!wardian_core::agent_spawn::restore_is_excluded(&agent_id).unwrap());
+        assert_eq!(bound.resume_session.as_deref(), Some("ses_owned"));
+        assert_eq!(
+            crate::spawn_operations::persisted_roster().unwrap()[0]
+                .resume_session
+                .as_deref(),
+            Some("ses_owned")
+        );
+        let mut replacement = agent_without_pty();
+        replacement.runtime_generation = Some(8);
+        *replacement.config.lock().unwrap() = bound;
+        tauri::async_runtime::block_on(state.agents.lock()).insert(agent_id, replacement);
+        assert!(
+            bind_first_runtime_identity(app.handle(), &expected, 7, "ses_other", None).is_none()
+        );
     }
 
     pub(super) fn agent_without_pty() -> crate::state::ActiveAgent {

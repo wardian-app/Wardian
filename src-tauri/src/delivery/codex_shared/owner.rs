@@ -246,6 +246,7 @@ fn prepare_owner_habitat(
     class_name: &str,
     agent_id: &str,
     timings: &mut OwnerStartTimings,
+    codex_launch_context: Option<&crate::utils::codex_home::CodexLaunchContext>,
 ) -> Result<(PathBuf, PathBuf), CodexSharedError> {
     let habitat = phase(&mut timings.habitat_workspace, || {
         crate::utils::fs::prepare_habitat_workspace(workspace, class_name, agent_id)
@@ -267,9 +268,15 @@ fn prepare_owner_habitat(
     })
     .map_err(CodexSharedError::unsupported)?;
     let codex_home = attachment::canonical_home(&compact_home)?;
-    phase(&mut timings.codex_projection, || {
-        crate::utils::fs::ensure_codex_home_projection(&habitat, workspace, agent_id)
-    })
+    phase(
+        &mut timings.codex_projection,
+        || match codex_launch_context {
+            Some(context) => crate::utils::fs::ensure_codex_home_projection_with_context(
+                &habitat, workspace, agent_id, context,
+            ),
+            None => crate::utils::fs::ensure_codex_home_projection(&habitat, workspace, agent_id),
+        },
+    )
     .map_err(CodexSharedError::unsupported)?;
     if let crate::utils::codex_messaging::Registration::Unavailable(reason) =
         phase(&mut timings.managed_messaging, || {
@@ -293,6 +300,7 @@ async fn prepare_owner_habitat_after_observation(
     timings: &mut OwnerStartTimings,
     deadline: tokio::time::Instant,
     cancelled: impl Future<Output = ()>,
+    codex_launch_context: Option<&crate::utils::codex_home::CodexLaunchContext>,
 ) -> Result<(PathBuf, PathBuf), CodexSharedError> {
     let home = crate::utils::get_wardian_home()
         .ok_or_else(|| CodexSharedError::unsupported("Wardian home unavailable"))?;
@@ -305,7 +313,13 @@ async fn prepare_owner_habitat_after_observation(
         _ = tokio::time::sleep_until(deadline) => return Err(CodexSharedError::unsupported("Codex owner startup timed out before home preparation")),
         turn = turn.lock_owned() => turn,
     };
-    prepare_owner_habitat(workspace, class_name, agent_id, timings)
+    prepare_owner_habitat(
+        workspace,
+        class_name,
+        agent_id,
+        timings,
+        codex_launch_context,
+    )
 }
 
 /// Launch identity only. After any private saved-reviewer checkpoint is evicted,
@@ -351,8 +365,9 @@ impl std::fmt::Debug for CodexSharedOwner {
 
 impl CodexSharedOwner {
     /// Caller holds the agent lifecycle/ownership gate. No process is started by push.
-    pub async fn start(
+    pub(crate) async fn start(
         spec: &NativeSessionSpec,
+        codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
         cancelled: impl std::future::Future<Output = ()>,
     ) -> Result<Arc<Self>, CodexSharedError> {
         if spec.provider != "codex" || spec.target_agent_id != spec.config.session_id {
@@ -367,9 +382,12 @@ impl CodexSharedOwner {
         .map_err(CodexSharedError::unsupported)?;
         // Capture once for this generation, before any home/overlay/process
         // side effects. Both clients must use these same effective choices.
-        let mut args = crate::providers::CodexProvider::new()
-            .shared_server_args(&spec.config)
-            .map_err(CodexSharedError::unsupported)?;
+        let mut args = (match codex_launch_context.as_deref() {
+            Some(context) => crate::providers::CodexProvider::new()
+                .shared_server_args_with_effective_policy(&spec.config, context.effective_policy()),
+            None => crate::providers::CodexProvider::new().shared_server_args(&spec.config),
+        })
+        .map_err(CodexSharedError::unsupported)?;
         let needs_reviewer_checkpoint = !spec.config.is_off && spec.config.resume_session.is_some();
         if needs_reviewer_checkpoint {
             // Observe eviction before the ordinary TUI's cold load. Set the
@@ -402,6 +420,7 @@ impl CodexSharedOwner {
             &mut timings,
             preparation_deadline,
             &mut cancelled,
+            codex_launch_context.as_deref(),
         )
         .await?;
         let socket = attachment::default_socket(&codex_home)?;
@@ -471,6 +490,11 @@ impl CodexSharedOwner {
                 super::launch_config::prepare_tui_launch_config(&codex_home, &generated_args)
             })?)
         };
+        if let Some(context) = codex_launch_context.as_deref() {
+            context
+                .revalidate()
+                .map_err(CodexSharedError::unsupported)?;
+        }
         let child_spawn_at = std::time::Instant::now();
         let mut child = match command.spawn() {
             Ok(child) => child,

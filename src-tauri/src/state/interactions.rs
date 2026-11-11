@@ -786,6 +786,32 @@ impl InteractionState {
         self: &Arc<Self>,
         session_id: &str,
     ) -> Result<(), String> {
+        self.delete_agent_durable_state_after_removal(session_id, false)
+            .await
+    }
+
+    /// Name disposition shares the deletion transaction only when the removal
+    /// owner has proved roster absence and joined the exact owned processes.
+    pub(crate) async fn delete_agent_durable_state_after_removal(
+        self: &Arc<Self>,
+        session_id: &str,
+        closure_proved: bool,
+    ) -> Result<(), String> {
+        let agent_id = session_id.to_string();
+        self.delete_agent_durable_state_fenced(session_id, move || {
+            wardian_core::db::delete_agent_after_owned_removal(&agent_id, closure_proved)
+                .map_err(|error| format!("Failed to delete agent state: {error}"))
+        })
+        .await
+    }
+
+    /// Invoke fresh ownership checks at the physical SQL boundary, after the
+    /// provider fences and I/O admission wait. The closure retains its authority.
+    pub(crate) async fn delete_agent_durable_state_fenced(
+        self: &Arc<Self>,
+        session_id: &str,
+        delete: impl FnOnce() -> Result<(), String> + Send + 'static,
+    ) -> Result<(), String> {
         let mutation = Arc::clone(&self.mutation_lock).lock_owned().await;
         let owner = Arc::clone(self);
         let session_id = session_id.to_string();
@@ -803,7 +829,6 @@ impl InteractionState {
             drop(mutation);
             owner.wait_for_provider_generation_fences(&session_id).await;
             let _mutation = Arc::clone(&owner.mutation_lock).lock_owned().await;
-            let database_session_id = session_id.clone();
             let delete_result = tokio::task::spawn_blocking(move || {
                 #[cfg(test)]
                 if let Some(probe) = probe {
@@ -811,8 +836,7 @@ impl InteractionState {
                     let _ = probe.entered.send(());
                     probe.release.recv().map_err(|error| error.to_string())?;
                 }
-                wardian_core::db::delete_agent(&database_session_id)
-                    .map_err(|error| format!("Failed to delete agent state: {error}"))
+                delete()
             })
             .await
             .map_err(|error| format!("Agent state deletion I/O task failed: {error}"));

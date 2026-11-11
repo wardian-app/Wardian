@@ -175,13 +175,64 @@ pub(crate) fn codex_status_from_log(lines: &[serde_json::Value]) -> Option<Strin
 pub(crate) fn codex_bootstrap_launch_context(
     wardian_home: &std::path::Path,
     workspace_cwd: &std::path::Path,
-) -> (std::path::PathBuf, std::path::PathBuf) {
+    attempt_id: &str,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    let attempt_id = uuid::Uuid::parse_str(attempt_id).map_err(|_| "Invalid bootstrap attempt")?;
     let bootstrap_home = wardian_home
         .join("provider-bootstrap")
         .join("codex")
-        .join(codex_bootstrap_workspace_key(workspace_cwd))
-        .join(".codex");
-    (workspace_cwd.to_path_buf(), bootstrap_home)
+        .join("attempts")
+        .join(attempt_id.to_string());
+    std::fs::create_dir_all(bootstrap_home.parent().ok_or("Missing bootstrap parent")?)
+        .map_err(|error| error.to_string())?;
+    // Exclusive creation proves no previous projection, credentials or worker
+    // can supply stale contents for this launch. An existing attempt fails shut.
+    std::fs::create_dir(&bootstrap_home).map_err(|error| error.to_string())?;
+    Ok((workspace_cwd.to_path_buf(), bootstrap_home.join(".codex")))
+}
+
+/// Retires only this attempt's credential leaves after owned process closure.
+/// Uncertain child cleanup keeps its input intact for inspection and recovery.
+pub(crate) struct BootstrapCredentialRetirement {
+    home: std::path::PathBuf,
+    closed: bool,
+}
+
+impl BootstrapCredentialRetirement {
+    pub(crate) fn new(home: std::path::PathBuf) -> Self {
+        Self { home, closed: true }
+    }
+
+    pub(crate) fn child_may_start(&mut self) {
+        self.closed = false;
+    }
+
+    pub(crate) fn confirm_closed(&mut self, closed: bool) -> Result<(), String> {
+        self.closed = closed;
+        self.retire()
+    }
+
+    fn retire(&self) -> Result<(), String> {
+        if !self.closed {
+            return Ok(());
+        }
+        for name in ["auth.json", "cap_sid", "config.toml"] {
+            match std::fs::remove_file(self.home.join(name)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err("Could not retire bootstrap credential snapshot".into()),
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for BootstrapCredentialRetirement {
+    fn drop(&mut self) {
+        if let Err(error) = self.retire() {
+            crate::utils::logging::log_debug(&format!("[Wardian] {error}"));
+        }
+    }
 }
 
 pub(crate) fn migrate_codex_bootstrap_home(
@@ -438,15 +489,41 @@ mod tests {
     }
 
     #[test]
-    fn codex_bootstrap_launch_context_is_stable_for_same_workspace() {
-        let wardian_home = Path::new("C:/Users/test/.wardian");
-        let workspace_cwd = Path::new("D:/Development/Wardian");
+    fn codex_bootstrap_attempts_are_private_even_for_the_same_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let wardian_home = temp.path();
+        let workspace_cwd = Path::new("workspace");
+        let first_id = uuid::Uuid::new_v4().to_string();
 
-        let (_, first_bootstrap_home) = codex_bootstrap_launch_context(wardian_home, workspace_cwd);
-        let (_, second_bootstrap_home) =
-            codex_bootstrap_launch_context(wardian_home, workspace_cwd);
+        let (_, first_bootstrap_home) =
+            codex_bootstrap_launch_context(wardian_home, workspace_cwd, &first_id).unwrap();
+        let (_, second_bootstrap_home) = codex_bootstrap_launch_context(
+            wardian_home,
+            workspace_cwd,
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .unwrap();
 
-        assert_eq!(first_bootstrap_home, second_bootstrap_home);
+        assert_ne!(first_bootstrap_home, second_bootstrap_home);
+        assert!(codex_bootstrap_launch_context(wardian_home, workspace_cwd, &first_id).is_err());
+    }
+
+    #[test]
+    fn bootstrap_credentials_retire_only_with_verified_closure() {
+        for closed in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            for name in ["auth.json", "cap_sid", "config.toml", "receipt.json"] {
+                std::fs::write(directory.path().join(name), "fixture").unwrap();
+            }
+            let mut retirement = BootstrapCredentialRetirement::new(directory.path().to_path_buf());
+            retirement.child_may_start();
+            retirement.confirm_closed(closed).unwrap();
+            drop(retirement);
+            for name in ["auth.json", "cap_sid", "config.toml"] {
+                assert_eq!(directory.path().join(name).exists(), !closed);
+            }
+            assert!(directory.path().join("receipt.json").exists());
+        }
     }
 
     #[test]
@@ -696,10 +773,15 @@ mod tests {
 
     #[test]
     fn codex_bootstrap_launch_context_uses_real_workspace_cwd() {
-        let wardian_home = Path::new("C:/Users/test/.wardian");
-        let workspace_cwd = Path::new("D:/Development/Wardian");
-        let (provider_cwd, bootstrap_home) =
-            codex_bootstrap_launch_context(wardian_home, workspace_cwd);
+        let temp = tempfile::tempdir().unwrap();
+        let wardian_home = temp.path();
+        let workspace_cwd = Path::new("workspace");
+        let (provider_cwd, bootstrap_home) = codex_bootstrap_launch_context(
+            wardian_home,
+            workspace_cwd,
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .unwrap();
 
         assert_eq!(provider_cwd, workspace_cwd);
         assert!(bootstrap_home.starts_with(wardian_home.join("provider-bootstrap").join("codex")));
