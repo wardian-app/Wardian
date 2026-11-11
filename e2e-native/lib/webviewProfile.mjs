@@ -8,7 +8,8 @@ import { lockHolderAlive, readHomeLock } from "./sessionHome.mjs";
  * default without changing the parent environment or deleting any profile.
  */
 export function nativeSessionEnvironment({ home, runId, env = process.env, platform = process.platform }) {
-  const childEnv = { ...env, WARDIAN_HOME: home, WARDIAN_E2E_NATIVE_HOME: home };
+  const childEnv = { ...env, WARDIAN_HOME: home, WARDIAN_E2E_NATIVE_HOME: home,
+    ...(runId ? { WARDIAN_E2E_RUN_ID: runId } : {}) };
   if (platform !== "win32") return childEnv;
 
   const owner = readHomeLock(home);

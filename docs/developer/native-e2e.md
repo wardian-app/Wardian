@@ -828,12 +828,25 @@ independent recent-body oracle, original identities and every archive/index/arti
 hash are validated before staging into a freshly claimed home, before the first
 app start. The source archive and index remain unchanged. The staged configuration
 is Off, uses the owned fixture folder and Test class, and retains its source logging
-policy. An empty owned `CODEX_HOME` isolates native acquisition; no original native
-source, user configuration, auth, junction or logging override is imported. Effective
+policy. The agent array is staged at `<owned-home>/settings/state.json` for normal
+startup restore. Empty owned `CODEX_HOME` and `CLAUDE_CONFIG_DIR` directories
+isolate the fixture's provider configuration; no original native source, user
+configuration, auth, junction or logging override is imported. Directory overrides
+do not establish zero internal credential-store reads. Effective
 policy is recorded after measurement. Validation/staging warms the filesystem.
 The independent target must be visible naturally; a final-80 eligibility declaration
 alone cannot qualify a viewport, and the test never scrolls the target into view
 before timing. Missing lineage, scope or viewport proof fails honestly.
+
+If the Roster selection fails, the case captures bounded registry and Roster DOM
+metadata after that failure. Its two-second passive registry deadline cannot
+replace the original error, retry the activation, or produce a timing sample.
+Explicit native run IDs matching the owned home claim also enable bounded
+`[native-provider-discovery]` records in `wardian_debug.log`. They describe the
+existing command, original child identity when known, and actual outcome without
+logging provider output or unexpected argument values. These diagnostics confer
+no readiness or authorization. Missing identity or witness evidence leaves
+provider isolation unqualified.
 
 Final native qualification also requires the approved caller's original process
 handle/full birth identity, bounded actual exit, positive stdout/stderr EOF and

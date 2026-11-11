@@ -90,19 +90,45 @@ test("external archive plan preserves declared identities and maps only owned ar
   }
 });
 
-test("staging preserves archive bytes/native identity and isolates Off config without a logging override", (t) => {
+test("staging publishes normal startup settings and preserves Off archive identity without a logging override", (t) => {
   const f = fixture(t);
   const fresh = freshSavedHome(f.harness); f.claim();
   const staged = stageSavedFixture(f.harness, f.manifestPath, fresh);
-  const config = JSON.parse(fs.readFileSync(path.join(f.harness.isolatedHome, "state.json"), "utf8"))[0];
+  const configs = JSON.parse(fs.readFileSync(path.join(f.harness.isolatedHome, "settings", "state.json"), "utf8"));
+  assert.equal(configs.length, 1);
+  const [config] = configs;
+  assert.equal(fs.existsSync(path.join(f.harness.isolatedHome, "state.json")), false);
   assert.equal(config.session_id, "fixture-agent"); assert.equal(config.resume_session, "fixture-native");
   assert.equal(config.is_off, true); assert.equal(config.agent_class, "TestClass");
   assert.equal(config.conversation_logging, "default"); assert.deepEqual(config.include_directories, []);
   assert.equal(config.custom_args, null); assert.notEqual(config.folder, "unowned-original-folder");
   assert.deepEqual(fs.readdirSync(staged.codexHome), []);
+  assert.deepEqual(fs.readdirSync(staged.claudeConfigDir), []);
+  assert.equal(path.dirname(staged.claudeConfigDir), f.harness.isolatedHome);
   assert.equal(staged.body, f.body); assert.equal(staged.eventId, "saved-public-event");
   verifySavedFixture(f.harness, staged);
   assert.throws(() => stageSavedFixture(f.harness, f.manifestPath, fresh), /precede/);
+});
+
+test("existing startup settings cannot be overwritten after fresh-home ownership was claimed", (t) => {
+  const f = fixture(t);
+  const fresh = freshSavedHome(f.harness); f.claim();
+  const settings = path.join(f.harness.isolatedHome, "settings");
+  fs.mkdirSync(settings);
+  const state = path.join(settings, "state.json");
+  fs.writeFileSync(state, "original-startup-state");
+  assert.throws(() => stageSavedFixture(f.harness, f.manifestPath, fresh), /precede/);
+  assert.equal(fs.readFileSync(state, "utf8"), "original-startup-state");
+  assert.equal(fs.existsSync(path.join(f.harness.isolatedHome, "agents")), false);
+});
+
+test("a settings directory link cannot redirect staged startup state outside the owned home", (t) => {
+  const f = fixture(t);
+  const fresh = freshSavedHome(f.harness); f.claim();
+  fs.symlinkSync(f.source, path.join(f.harness.isolatedHome, "settings"), "junction");
+  assert.throws(() => stageSavedFixture(f.harness, f.manifestPath, fresh), /ordinary owned directory/);
+  assert.equal(fs.existsSync(path.join(f.source, "state.json")), false);
+  assert.equal(fs.existsSync(path.join(f.harness.isolatedHome, "agents")), false);
 });
 
 test("rendered witnesses are prepared from frozen raw Markdown before staging, without a response-selected oracle", (t) => {
@@ -125,6 +151,7 @@ test("a rich body without a safe independent rendered witness fails fixture elig
     assert.throws(() => stageSavedFixture(f.harness, f.manifestPath, fresh), /fixture eligibility/);
     assert.equal(fs.existsSync(path.join(f.harness.isolatedHome, "agents")), false);
     assert.equal(fs.existsSync(path.join(f.harness.isolatedHome, "state.json")), false);
+    assert.equal(fs.existsSync(path.join(f.harness.isolatedHome, "settings", "state.json")), false);
   }
 });
 

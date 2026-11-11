@@ -138,6 +138,113 @@ function actualRedaction(value) {
   return vm.runInNewContext(`${source.slice(start, end)}\nredactObservation(value);`, { value, createHash });
 }
 
+/** Execute the maintained failure callback without importing its native case. */
+function rosterDiagnosticHarness(invoke, roster = null) {
+  const source = fs.readFileSync(new URL("./chat-turn-change-native.test.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("function captureRosterDiagnostics(sessionId, name, done) {");
+  const end = source.indexOf("async function visible(driver, selector", start);
+  assert.ok(start >= 0 && end > start);
+  let expire;
+  let completions = 0;
+  const result = new Promise((resolve) => {
+    vm.runInNewContext(`${source.slice(start, end)}\ncaptureRosterDiagnostics("session", "Owned Saved", done);`, {
+      window: { __TAURI_INTERNALS__: { invoke }, getComputedStyle: () => ({ display: "block", visibility: "visible" }) },
+      document: { querySelector: () => roster },
+      done: (value) => { completions += 1; resolve(value); },
+      setTimeout: (callback, ms) => { assert.equal(ms, 2_000); expire = callback; return 1; },
+      clearTimeout: () => {},
+    });
+  });
+  return { result, expire: () => expire(), completions: () => completions };
+}
+
+function rosterMeasurement(driver, evidence, visible, ownedSurface) {
+  const source = fs.readFileSync(new URL("./chat-turn-change-native.test.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("async function measureChat(driver,");
+  const end = source.indexOf("async function closeTerminalSurface(driver,", start);
+  assert.ok(start >= 0 && end > start);
+  return vm.runInNewContext(`${source.slice(start, end)}\nmeasureChat(driver, "session", "test-phase", "Owned Saved", evidence, false);`,
+    { driver, evidence, visible, ownedSurface, captureRosterDiagnostics() {} });
+}
+
+test("Roster failure metadata distinguishes registry membership from bounded visible rows without changing results", async () => {
+  const agents = Array.from({ length: 70 }, (_, index) => ({
+    session_id: index === 69 ? "session" : "other-" + index,
+    session_name: index === 69 ? "Owned Saved" : "Other " + index,
+    provider: "codex", agent_class: "TestClass", is_off: true, folder: "private-folder",
+  }));
+  const before = JSON.stringify(agents);
+  const rows = agents.map((agent) => ({
+    isConnected: true, getAttribute: () => "Agent " + agent.session_name,
+    getBoundingClientRect: () => ({ width: 240, height: 30 }),
+  }));
+  const roster = { isConnected: true, getBoundingClientRect: () => ({ width: 0, height: 600 }),
+    querySelectorAll: () => rows,
+    querySelector: (selector) => selector === "input" ? { value: "private-filter" } : { textContent: "All Agents" } };
+  const calls = [];
+  const harness = rosterDiagnosticHarness(async (command, args) => {
+    calls.push({ command, args }); return agents;
+  }, roster);
+  const metadata = await harness.result;
+  assert.equal(calls.length, 1); assert.equal(calls[0].command, "list_agents");
+  assert.equal(Object.keys(calls[0].args).length, 0);
+  assert.equal(metadata.registry.status, "OBSERVED_REGISTRY");
+  assert.equal(metadata.registry.count, 70); assert.equal(metadata.registry.agents.length, 64);
+  assert.equal(metadata.registry.expectedOwnerPresent, true);
+  assert.equal(metadata.registry.expectedNamePresent, true);
+  assert.equal(metadata.roster.geometry.hasLayout, false);
+  assert.equal(metadata.roster.rowCount, 70); assert.equal(metadata.roster.rows.length, 64);
+  assert.equal(metadata.roster.expectedNamePresent, true);
+  assert.equal(JSON.stringify(agents), before);
+  assert.equal(JSON.stringify(metadata).includes("private-folder"), false);
+  const redacted = actualRedaction(metadata);
+  assert.equal(redacted.registry.status, "OBSERVED_REGISTRY");
+  assert.notEqual(redacted.registry.agents[0].session_name, agents[0].session_name);
+  assert.notEqual(redacted.roster.rows[0].aria_label, rows[0].getAttribute());
+  assert.notEqual(redacted.roster.filter, "private-filter");
+});
+
+test("Roster metadata records rejection, malformed registry and a bounded timeout without accepting late results", async () => {
+  const rejected = await rosterDiagnosticHarness(async () => { throw { code: "registry_unavailable", message: "private-error" }; }).result;
+  assert.equal(rejected.registry.status, "REGISTRY_ERROR");
+  assert.equal(rejected.registry.code, "registry_unavailable");
+  const malformed = await rosterDiagnosticHarness(async () => ({})).result;
+  assert.equal(malformed.registry.status, "MALFORMED_REGISTRY");
+  let release;
+  const pending = rosterDiagnosticHarness(() => new Promise((resolve) => { release = resolve; }));
+  await Promise.resolve();
+  pending.expire();
+  assert.equal((await pending.result).registry.status, "REGISTRY_TIMEOUT");
+  release([]);
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(pending.completions(), 1);
+});
+
+test("measurement captures metadata only on Roster failure and preserves its original rejection", async () => {
+  const original = new Error("original Roster lookup failed");
+  for (const captureFails of [false, true]) {
+    const evidence = { rosterFailures: [] };
+    let captures = 0;
+    const driver = { executeScript: async () => {}, executeAsyncScript: async () => {
+      captures += 1;
+      if (captureFails) throw new Error("secondary capture failed");
+      return { registry: { status: "OBSERVED_REGISTRY", count: 0 } };
+    } };
+    await assert.rejects(rosterMeasurement(driver, evidence, async () => { throw original; },
+      async () => { throw new Error("must not activate"); }), (error) => error === original);
+    assert.equal(captures, 1); assert.equal(evidence.rosterFailures.length, 1);
+    assert.equal(evidence.rosterFailures[0].label, "test-phase");
+  }
+  let captures = 0;
+  const afterActivation = new Error("later surface failure");
+  await assert.rejects(rosterMeasurement({
+    executeScript: async () => {},
+    executeAsyncScript: async () => { captures += 1; },
+  }, { rosterFailures: [] }, async () => ({ click: async () => {} }),
+  async () => { throw afterActivation; }), (error) => error === afterActivation);
+  assert.equal(captures, 0);
+});
+
 function driverResult(result) {
   return { executeAsyncScript: async () => result };
 }

@@ -1,3 +1,5 @@
+mod discovery_witness;
+
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Mutex;
@@ -7,6 +9,7 @@ use once_cell::sync::Lazy;
 
 use crate::providers::readiness::provider_readiness;
 use crate::providers::ProviderFactory;
+use discovery_witness::DiscoveryWitness;
 
 const CATALOG_CACHE_TTL: Duration = Duration::from_secs(300);
 const PROVIDER_COMMAND_TIMEOUT: Duration = Duration::from_secs(12);
@@ -317,24 +320,57 @@ async fn discover_line_catalog(
 }
 
 async fn provider_command_output(provider: &str, arguments: &[&str]) -> Result<String, String> {
-    let provider = ProviderFactory::resolve(provider)?;
-    let (program, base_arguments) = provider.get_executable();
+    let provider_impl = ProviderFactory::resolve(provider)?;
+    let (program, base_arguments) = provider_impl.get_executable();
     let mut command = crate::utils::process::new_silent_command(&program);
     command
-        .args(base_arguments)
+        .args(&base_arguments)
         .args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    let child = command
-        .spawn()
-        .map_err(|error| format!("failed to start provider discovery: {error}"))?;
-    let output = tokio::time::timeout(PROVIDER_COMMAND_TIMEOUT, child.wait_with_output())
-        .await
-        .map_err(|_| "provider discovery timed out".to_string())?
-        .map_err(|error| format!("provider discovery failed: {error}"))?;
+    let mut witness =
+        DiscoveryWitness::begin(provider, &program, &base_arguments, arguments, &command);
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(witness) = witness {
+                witness.finish("spawn_failed", None, Some(error.kind()));
+            }
+            return Err(format!("failed to start provider discovery: {error}"));
+        }
+    };
+    if let Some(witness) = witness.as_mut() {
+        witness.bind_child(&child);
+    }
+    let wait = tokio::time::timeout(PROVIDER_COMMAND_TIMEOUT, child.wait_with_output());
+    // Start the existing deadline before any diagnostic append; capture cannot
+    // give discovery additional time.
+    if let Some(witness) = witness.as_ref() {
+        witness.spawned();
+    }
+    let output = match wait.await {
+        Ok(Ok(output)) => {
+            if let Some(witness) = witness {
+                witness.finish("exited", Some(&output.status), None);
+            }
+            output
+        }
+        Ok(Err(error)) => {
+            if let Some(witness) = witness {
+                witness.finish("wait_failed", None, Some(error.kind()));
+            }
+            return Err(format!("provider discovery failed: {error}"));
+        }
+        Err(_) => {
+            if let Some(witness) = witness {
+                witness.finish("timeout", None, None);
+            }
+            return Err("provider discovery timed out".to_string());
+        }
+    };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let detail = first_nonempty_line(stderr.as_ref())

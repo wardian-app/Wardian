@@ -299,6 +299,59 @@ function withEnv(t, key, value) {
   });
 }
 
+/** Failure-only metadata; layout boxes are diagnostics, never a paint witness. */
+function captureRosterDiagnostics(sessionId, name, done) {
+  const bounded = (value) => typeof value === "string" ? value.slice(0, 160) : null;
+  const result = { roster: null, registry: null };
+  let finished = false;
+  let timer;
+  const finish = (registry) => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timer);
+    done({ ...result, registry });
+  };
+  try {
+    const roster = document.querySelector('[data-testid="agent-watchlist"]');
+    const rows = roster ? Array.from(roster.querySelectorAll('[aria-label^="Agent "]')) : [];
+    const geometry = (node) => {
+      const rect = node.getBoundingClientRect();
+      const style = window.getComputedStyle(node);
+      return { width: rect.width, height: rect.height,
+        hasLayout: node.isConnected && rect.width > 0 && rect.height > 0
+          && style.display !== "none" && style.visibility !== "hidden" };
+    };
+    result.roster = { present: Boolean(roster), geometry: roster ? geometry(roster) : null,
+      rowCount: rows.length, truncated: rows.length > 64,
+      expectedNamePresent: rows.some((row) => row.getAttribute("aria-label") === "Agent " + name),
+      rows: rows.slice(0, 64).map((row) => ({
+        aria_label: bounded(row.getAttribute("aria-label")), ...geometry(row),
+      })),
+      filter: bounded(roster?.querySelector("input")?.value),
+      heading: bounded(roster?.querySelector("h2")?.textContent) };
+  } catch (error) {
+    result.roster = { error: bounded(String(error)) };
+  }
+  // Bound the passive IPC inside the WebView so a late result cannot replace
+  // a timeout or leave this diagnostic callback waiting for the backend.
+  timer = setTimeout(() => finish({ status: "REGISTRY_TIMEOUT" }), 2_000);
+  Promise.resolve().then(() => window.__TAURI_INTERNALS__.invoke("list_agents", {})).then(
+    (agents) => {
+      if (!Array.isArray(agents)) return finish({ status: "MALFORMED_REGISTRY" });
+      finish({ status: "OBSERVED_REGISTRY", count: agents.length, truncated: agents.length > 64,
+        expectedOwnerPresent: agents.some((agent) => agent?.session_id === sessionId),
+        expectedNamePresent: agents.some((agent) => agent?.session_name === name),
+        agents: agents.slice(0, 64).map((agent) => ({
+          session_id: bounded(agent?.session_id), session_name: bounded(agent?.session_name),
+          provider: bounded(agent?.provider), agent_class: bounded(agent?.agent_class),
+          is_off: typeof agent?.is_off === "boolean" ? agent.is_off : null,
+        })) });
+    },
+    (error) => finish({ status: "REGISTRY_ERROR", code: bounded(error?.code),
+      error: bounded(error?.message ?? String(error)) }),
+  );
+}
+
 async function visible(driver, selector, within = driver) {
   return driver.wait(async () => {
     for (const element of await within.findElements(By.css(selector))) {
@@ -335,10 +388,20 @@ async function waitForProducer(driver, harness, sessionId, fixture) {
   }, 30_000, "independently declared completed Mock body/result never published");
 }
 
-async function measureChat(driver, sessionId, label, name, keyboard = true) {
+async function measureChat(driver, sessionId, label, name, evidence, keyboard = true) {
   await driver.executeScript((phase) => window.__chatAcceptance.arm(phase), label);
   const deadline = Date.now() + 5_000;
-  await (await visible(driver, `[aria-label="Agent ${name}"]`)).click();
+  try {
+    await (await visible(driver, `[aria-label="Agent ${name}"]`)).click();
+  } catch (error) {
+    try {
+      const metadata = await driver.executeAsyncScript(captureRosterDiagnostics, sessionId, name);
+      evidence.rosterFailures.push({ label, metadata });
+    } catch (captureError) {
+      evidence.rosterFailures.push({ label, status: "CAPTURE_FAILED", error: String(captureError).slice(0, 160) });
+    }
+    throw error;
+  }
   const surface = await ownedSurface(driver, sessionId);
   const mode = await visible(driver, 'button[title="Switch to Chat"], button[title="Switch to Terminal"]', surface);
   const explicit = await mode.getAttribute("title") === "Switch to Chat";
@@ -493,7 +556,8 @@ function redactObservation(value) {
     const publicToken = ["label", "command", "kind", "provider", "role", "progress"].includes(key)
       || (key === "exposureKind" && ["automatic", "explicit-toggle"].includes(item))
       || (key === "witnessKind" && ["whole", "needle"].includes(item))
-      || (key === "status" && ["UNPROVEN", "OBSERVED_ENDPOINTS_CLOSURE_UNPROVEN"].includes(item))
+      || (key === "status" && ["UNPROVEN", "OBSERVED_ENDPOINTS_CLOSURE_UNPROVEN",
+        "OBSERVED_REGISTRY", "REGISTRY_TIMEOUT", "MALFORMED_REGISTRY", "REGISTRY_ERROR", "CAPTURE_FAILED"].includes(item))
       || (/Sha256$/.test(key) && typeof item === "string" && /^[a-f0-9]{64}$/i.test(item))
       || (["agentPolicy", "globalPolicy", "effectivePolicy"].includes(key) && ["default", "enabled", "disabled"].includes(item));
     result[key] = typeof item === "string" && publicToken ? item : redactObservation(item);
@@ -517,12 +581,13 @@ test("chat transcript renders the per-turn change surface", { timeout: 600_000 }
   prepareIsolatedHome(harness);
   const archive = externalManifest ? stageSavedFixture(harness, externalManifest, freshHome) : null;
   if (archive) withEnv(t, "CODEX_HOME", archive.codexHome);
+  if (archive) withEnv(t, "CLAUDE_CONFIG_DIR", archive.claudeConfigDir);
   const workspace = path.join(harness.isolatedHome, `chat-workspace-${RUN_ID}`);
   fs.mkdirSync(workspace, { recursive: true });
   const sessions = [];
   const cleanupOwner = { sessionId: null };
   let paused = false;
-  const evidence = { timings: [], history: null, endpoints: "UNRUN", preselectionIndex: [],
+  const evidence = { timings: [], history: null, endpoints: "UNRUN", preselectionIndex: [], rosterFailures: [],
     closure: { status: "UNPROVEN", reason: "original-handle/fullbirth/exit+stream-EOF/Job-empty caller receipt required; timer is not proof" },
     cacheState: "cold process only; raw producer inspection warms filesystem", transition: "UNRUN" };
   t.after(async () => {
@@ -566,10 +631,10 @@ test("chat transcript renders the per-turn change surface", { timeout: 600_000 }
     await external.session.driver.executeScript((id) => window.__chatAcceptance.bind(id), archive.sessionId);
     publishedState(archive.sessionId, "genuine-archive-saved-off-cold-process");
     const timings = [await measureChat(external.session.driver, archive.sessionId,
-      "genuine-archive-saved-off-cold-process", archive.name, false)];
+      "genuine-archive-saved-off-cold-process", archive.name, evidence, false)];
     await closeTerminalSurface(external.session.driver, archive.sessionId);
     timings.push(await measureChat(external.session.driver, archive.sessionId,
-      "genuine-archive-saved-off-warm-reopen", archive.name, false));
+      "genuine-archive-saved-off-warm-reopen", archive.name, evidence, false));
     const actual = (await invokeTauri(external.session.driver, "list_agents"))
       .find((agent) => agent.session_id === archive.sessionId);
     assert.equal(actual?.is_off, true, "genuine Saved fixture resumed a provider");
@@ -595,9 +660,9 @@ test("chat transcript renders the per-turn change surface", { timeout: 600_000 }
   await driver.executeScript((id) => window.__chatAcceptance.bind(id), sessionId);
   const producer = await waitForProducer(driver, harness, sessionId, fixture);
   publishedState(sessionId, "live-cold-process-first-chat");
-  evidence.timings.push(await measureChat(driver, sessionId, "live-cold-process-first-chat", name));
+  evidence.timings.push(await measureChat(driver, sessionId, "live-cold-process-first-chat", name, evidence));
   await closeTerminalSurface(driver, sessionId, true);
-  evidence.timings.push(await measureChat(driver, sessionId, "live-same-process-warm-reopen", name));
+  evidence.timings.push(await measureChat(driver, sessionId, "live-same-process-warm-reopen", name, evidence));
   const surface = await ownedSurface(driver, sessionId);
   evidence.history = await exerciseHistory(driver, sessionId, fixture);
 
@@ -648,9 +713,9 @@ test("chat transcript renders the per-turn change surface", { timeout: 600_000 }
   const saved = await open();
   await saved.session.driver.executeScript((id) => window.__chatAcceptance.bind(id), sessionId);
   publishedState(sessionId, "small-mock-saved-off-cold-process");
-  evidence.timings.push(await measureChat(saved.session.driver, sessionId, "small-mock-saved-off-cold-process", name, false));
+  evidence.timings.push(await measureChat(saved.session.driver, sessionId, "small-mock-saved-off-cold-process", name, evidence, false));
   await closeTerminalSurface(saved.session.driver, sessionId);
-  evidence.timings.push(await measureChat(saved.session.driver, sessionId, "small-mock-saved-off-warm-reopen", name, false));
+  evidence.timings.push(await measureChat(saved.session.driver, sessionId, "small-mock-saved-off-warm-reopen", name, evidence, false));
   const agents = await invokeTauri(saved.session.driver, "list_agents");
   assert.equal(agents.find((entry) => entry.session_id === sessionId)?.is_off, true, "saved session resumed");
   const after = await waitForProducer(saved.session.driver, harness, sessionId, fixture);

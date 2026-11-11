@@ -160,6 +160,13 @@ export function stageSavedFixture(harness, manifestPath, fresh) {
   }
   assert.ok(!fs.readdirSync(home).some((name) => /^(agents|state\.json|state\.db|\.webview2-)/.test(name)),
     "fixture staging must precede agent state and first app start");
+  const settings = path.join(home, "settings");
+  const settingsStat = fs.lstatSync(settings, { throwIfNoEntry: false });
+  assert.ok(!settingsStat || (settingsStat.isDirectory() && !settingsStat.isSymbolicLink()),
+    "fixture settings must be an ordinary owned directory");
+  const statePath = path.join(settings, "state.json");
+  assert.ok(!fs.lstatSync(statePath, { throwIfNoEntry: false }),
+    "fixture staging must precede startup state and first app start");
   const root = path.dirname(path.resolve(manifestPath));
   const metadata = plainFile(root, path.basename(manifestPath), null, 4 * 1024 * 1024);
   const manifest = JSON.parse(metadata.bytes.toString("utf8"));
@@ -214,7 +221,8 @@ export function stageSavedFixture(harness, manifestPath, fresh) {
   assert.ok(records("index.jsonl").some((row) => row.conversation_id === archive.conversation_id), "original index omits archive");
   const workspace = path.join(home, "saved-chat-workspace");
   const codexHome = path.join(home, "saved-chat-empty-codex-home");
-  fs.mkdirSync(workspace); fs.mkdirSync(codexHome);
+  const claudeConfigDir = path.join(home, "saved-chat-empty-claude-config");
+  fs.mkdirSync(workspace); fs.mkdirSync(codexHome); fs.mkdirSync(claudeConfigDir);
   const staged = sources.map((file) => {
     assert.equal(readHomeLock(home)?.runId, harness.runId, "owned home claim changed during staging");
     const output = path.join(home, ...file.output.split("/"));
@@ -229,12 +237,15 @@ export function stageSavedFixture(harness, manifestPath, fresh) {
     resume_session: config.resume_session, is_off: true, provider: config.provider, debug: null, model: config.model,
     include_directories: [], system_include_directories: [], custom_args: null, session_persistence: config.session_persistence,
     conversation_logging: config.conversation_logging, provider_config: { type: config.provider } };
-  fs.writeFileSync(path.join(home, "state.json"), JSON.stringify([isolated]), { flag: "wx" });
+  // Startup reads this current-layout path; root state.json has never been a
+  // migration source (the legacy filename was wardian_state.json).
+  fs.mkdirSync(settings, { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify([isolated]), { flag: "wx" });
   return { sessionId: config.session_id, name: config.session_name, provider: config.provider, policy: config.conversation_logging,
-    conversation: archive.conversation_id, eventId: event.id, body: event.text, witness, codexHome, staged,
+    conversation: archive.conversation_id, eventId: event.id, body: event.text, witness, codexHome, claudeConfigDir, staged,
     metadata: { manifestSha256: metadata.sha256, oracleSha256: oracleBytes.sha256, leaves: staged.length, bytes: plan.total,
       bodySha256: witness.bodySha256, witnessKind: witness.kind,
-      nativeSource: "not staged; empty owned CODEX_HOME; original external paths never opened by fixture",
+      nativeSource: "not staged; empty owned CODEX_HOME and CLAUDE_CONFIG_DIR; original external paths never opened by fixture",
       eligibility: "independent final80 rank; viewport still requires actual paint",
       cacheState: "cold process only; validation/staging warmed filesystem" } };
 }
