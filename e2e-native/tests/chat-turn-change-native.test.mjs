@@ -33,11 +33,23 @@ function installChatObservation(config) {
     const owner = bounded(node.getAttribute(kind === "agent-session" ? "data-resource-key" : "data-agent-grid-card-id"));
     const semantic = kind === "agent-session" ? node : node.closest('[data-testid="agents-overview-surface"]');
     const panel = semantic?.closest('[data-testid="surface-panel"]');
-    const tabpanel = panel?.closest('[role="tabpanel"]');
-    const tabId = bounded(tabpanel?.getAttribute("aria-labelledby"));
-    const tab = tabId ? document.getElementById(tabId) : null;
     const host = panel?.closest('[data-testid="workbench-host"]');
     const surfaceId = bounded(semantic?.getAttribute("data-surface-id"));
+    const tabs = Array.from(document.querySelectorAll('[role="tab"][data-surface-id]')).filter((item) =>
+      host?.contains(item) && item.getAttribute("data-surface-id") === surfaceId
+      && item.getAttribute("data-surface-type") === kind && item.getAttribute("aria-selected") === "true");
+    const tab = tabs.length === 1 ? tabs[0] : null;
+    const tabId = bounded(tab?.getAttribute("id"));
+    const panelId = bounded(tab?.getAttribute("aria-controls"));
+    const tabpanel = panelId ? document.getElementById(panelId) : null;
+    const ancestor = panel?.closest('[role="tabpanel"]');
+    // Dockview renders panel content in its sibling overlay, outside the ARIA
+    // tabpanel. Bind that placement to the same Dockview root and real selected
+    // tab's bidirectional ARIA link; ordinary nested tabpanels remain supported.
+    const portal = ancestor ? null : panel?.closest('.dv-render-overlay');
+    const dockRoot = panel?.closest('.dv-shell');
+    const placement = ancestor ? ancestor === tabpanel : Boolean(portal && dockRoot
+      && dockRoot === tabpanel?.closest('.dv-shell') && dockRoot === tab?.closest('.dv-shell'));
     const hosts = Array.from(document.querySelectorAll('[data-testid="workbench-host"]'))
       .filter((item) => item.isConnected && readable(item));
     const rect = node.getBoundingClientRect();
@@ -46,15 +58,16 @@ function installChatObservation(config) {
       && rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.bottom > 0
       && rect.left < innerWidth && rect.top < innerHeight;
     const valid = Boolean(bounded(state.owner) && owner === state.owner && surfaceId && visible
-      && hosts.length === 1 && host === hosts[0] && host.contains(node) && host.contains(tab)
+      && hosts.length === 1 && host === hosts[0] && host.contains(node) && host.contains(tab) && host.contains(tabpanel)
       && !host.inert && host.getAttribute("data-reset-pending") !== "true"
       && panel.getAttribute("data-surface-id") === surfaceId && panel.getAttribute("data-surface-type") === kind
+      && placement && tabId && tabpanel.getAttribute("role") === "tabpanel" && tabpanel.getAttribute("aria-labelledby") === tabId
       && tab.getAttribute("role") === "tab" && tab.getAttribute("aria-selected") === "true"
       && tab.getAttribute("aria-controls") === tabpanel.getAttribute("id")
       && tab.getAttribute("data-surface-id") === surfaceId && tab.getAttribute("data-surface-type") === kind
       && (kind !== "agent-session" || (panel.getAttribute("data-resource-key") === owner
         && tab.getAttribute("data-resource-key") === owner)));
-    return { node, panel, tabpanel, tab, host, valid,
+    return { node, panel, tabpanel, tab, host, portal, dockRoot, valid,
       identity: { kind, owner, surfaceId, panelId: bounded(tabpanel?.getAttribute("id")), tabId },
       visible, selected: tab?.getAttribute("aria-selected") === "true" };
   };
@@ -75,7 +88,7 @@ function installChatObservation(config) {
     ? JSON.stringify([scope.session, scope.conversation, scope.generation, scope.epoch, scope.revision, scope.admission]) : null;
   const parse = (value) => { try { return JSON.parse(value); } catch { return null; } };
   const sameBody = (left, right) => left && right && left.node === right.node && left.scroll === right.scroll
-    && ["node", "panel", "tabpanel", "tab", "host"].every((key) => left.container[key] === right.container[key])
+    && ["node", "panel", "tabpanel", "tab", "host", "portal", "dockRoot"].every((key) => left.container[key] === right.container[key])
     && JSON.stringify({ ...left.evidence, receiptAt: null }) === JSON.stringify({ ...right.evidence, receiptAt: null });
   let inputEvidence = null;
   let wheelEvidence = null;
@@ -312,6 +325,10 @@ function installChatObservation(config) {
       if (owner !== state.owner) throw new Error("container owner does not match bound observation");
       return surface();
     },
+    containerTab(owner) {
+      if (owner !== state.owner) throw new Error("container owner does not match bound observation");
+      return ownedContainer()?.tab ?? null;
+    },
     describeContainers() {
       const nodes = containerNodes();
       const matches = ownedContainers();
@@ -519,10 +536,8 @@ async function measureChat(driver, sessionId, label, name, evidence, keyboard = 
 async function closeTerminalSurface(driver, sessionId, restoreLiveTerminal = false) {
   const surface = await ownedSurface(driver, sessionId);
   if (restoreLiveTerminal) await (await visible(driver, 'button[title="Switch to Terminal"]', surface)).click();
-  const panel = await surface.findElement(By.xpath("ancestor::*[@role='tabpanel'][1]"));
-  const tabId = await panel.getAttribute("aria-labelledby");
-  assert.ok(tabId, "owned surface has no actual tab identity");
-  const tab = await driver.findElement(By.id(tabId));
+  const tab = await driver.executeScript((owner) => window.__chatAcceptance.containerTab(owner), sessionId);
+  assert.ok(tab, "owned surface has no actual selected tab");
   await (await visible(driver, "[data-tab-close]", tab)).click();
 }
 

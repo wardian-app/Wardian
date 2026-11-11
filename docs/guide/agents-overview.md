@@ -64,6 +64,12 @@ The roster's explicit **Open** and **Open to Side** controls remain terminal
 actions: they open or focus Agent Session tabs instead of changing the
 contextual Agents destination.
 
+Selecting an Off agent in the roster reveals its card in Agents without
+resuming it. Other Off cards stay hidden. The card keeps your configured
+Terminal or Chat mode; use its mode toggle to read Saved Chat. Reading that
+history keeps the agent Off and defers provider model discovery until an
+explicit model-selection action.
+
 ## Choose a Layout Mode
 
 The surface header provides three modes:

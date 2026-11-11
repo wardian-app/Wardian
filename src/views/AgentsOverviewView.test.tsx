@@ -36,18 +36,21 @@ vi.mock('../features/grid/AgentChatView', () => ({
   AgentChatView: ({
     sessionId,
     autoFocusComposer,
+    deferModelDiscovery,
     draft,
     onComposerAutoFocused,
     onDraftChange,
   }: {
     sessionId: string;
     autoFocusComposer?: boolean;
+    deferModelDiscovery?: boolean;
     draft?: string;
     onDraftChange?: (value: string) => void;
     onComposerAutoFocused?: () => void;
   }) => (
     <MockAgentChatView
       autoFocusComposer={autoFocusComposer}
+      deferModelDiscovery={deferModelDiscovery}
       draft={draft}
       onComposerAutoFocused={onComposerAutoFocused}
       onDraftChange={onDraftChange}
@@ -58,12 +61,14 @@ vi.mock('../features/grid/AgentChatView', () => ({
 
 function MockAgentChatView({
   autoFocusComposer,
+  deferModelDiscovery,
   draft,
   onComposerAutoFocused,
   onDraftChange,
   sessionId,
 }: {
   autoFocusComposer?: boolean;
+  deferModelDiscovery?: boolean;
   draft?: string;
   onComposerAutoFocused?: () => void;
   onDraftChange?: (value: string) => void;
@@ -81,6 +86,7 @@ function MockAgentChatView({
       <textarea
         aria-label={`Mock chat composer ${sessionId}`}
         data-autofocus={autoFocusComposer ? "true" : "false"}
+        data-defer-model-discovery={deferModelDiscovery ? "true" : "false"}
         data-testid={`chat-${sessionId}`}
         onChange={(event) => onDraftChange?.(event.target.value)}
         value={draft ?? ""}
@@ -688,15 +694,46 @@ describe('AgentsOverviewView maximize behavior', () => {
     expect(screen.getByTestId('terminal-agent-1')).toBeInTheDocument();
   });
 
-  it('falls back to the remaining active agent in Single mode when focus is off', () => {
+  it('keeps the focused Off agent in Single mode', () => {
     renderGrid('agent-1', agents, vi.fn(), {
       offAgentIds: new Set(['agent-1']),
     });
     const root = screen.getByTestId('agent-grid');
 
     expect(root.style.gridAutoRows).toBe('100%');
-    expect(screen.queryByTestId('terminal-agent-1')).not.toBeInTheDocument();
-    expect(screen.getByTestId('terminal-agent-2')).toBeInTheDocument();
+    expect(screen.getByTestId('terminal-agent-1')).toBeVisible();
+    expect(screen.getByTestId('terminal-agent-2')).not.toBeVisible();
+  });
+
+  it.each(['grid', 'single'] as const)('reveals only the focused Off card in %s without waking it or changing its mode', (mode) => {
+    const focused = { ...agents[0], is_off: true };
+    const quiet = { ...agents[1], is_off: true };
+    const active = { ...agents[1], session_id: 'agent-3', session_name: 'Gamma' };
+    const props = {
+      ...gridProps('agent-1', [focused, quiet, active], vi.fn(), { offAgentIds: new Set(['agent-1', 'agent-2']) }),
+      mode,
+    };
+    render(<AgentsOverviewView {...props} />);
+    expect(screen.getByTestId('terminal-agent-1')).toBeInTheDocument();
+    expect(screen.queryByTestId('terminal-agent-2')).not.toBeInTheDocument();
+    if (mode === 'grid') expect(screen.getByTestId('terminal-agent-3')).toBeVisible();
+    else expect(screen.getByTestId('terminal-agent-3')).not.toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Alpha mode: Terminal. Switch to Chat.' }));
+    expect(screen.getByTestId('chat-agent-1')).toHaveAttribute('data-defer-model-discovery', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'Alpha mode: Chat. Switch to Terminal.' }));
+    expect(screen.getByTestId('terminal-agent-1')).toBeInTheDocument();
+    expect(focused.is_off).toBe(true);
+    expect(useSettingsStore.getState().gridCardDisplayMode).toBe('terminal');
+    expect(props.onQuery).not.toHaveBeenCalled();
+    expect(props.onRestart).not.toHaveBeenCalled();
+  });
+
+  it('defers model discovery only for Off Chat cards while preserving the Chat preference', () => {
+    useSettingsStore.setState({ gridCardDisplayMode: 'chat' });
+    render(<AgentsOverviewView {...gridProps('agent-1', agents, vi.fn(), { offAgentIds: new Set(['agent-1']) })} mode="grid" />);
+    expect(screen.getByTestId('chat-agent-1')).toHaveAttribute('data-defer-model-discovery', 'true');
+    expect(screen.getByTestId('chat-agent-2')).toHaveAttribute('data-defer-model-discovery', 'false');
+    expect(useSettingsStore.getState().gridCardDisplayMode).toBe('chat');
   });
 
   it('keeps a persisted Single focus while the roster has not loaded', () => {

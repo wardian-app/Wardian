@@ -3509,7 +3509,7 @@ describe("Sidebar Navigation", () => {
 // ── Agent Off State Tests ──────────────────────────────────────────────
 
 describe("Agent Off State Operations", () => {
-  it("hides a paused agent from the main grid and requires Start from context menu", async () => {
+  it("keeps a focused paused agent readable, hides it when unfocused, and requires Start to resume", async () => {
     setupDefaultMocks(sampleAgents, defaultClasses);
     await act(async () => {
       render(<App />);
@@ -3523,6 +3523,7 @@ describe("Agent Off State Operations", () => {
     const alphaWatchlistText = screen.getByText("Alpha", { selector: "p" });
     const alphaWatchlistRow = alphaWatchlistText.closest("div.watchlist-row");
     expect(alphaWatchlistRow).not.toBeNull();
+    fireEvent.click(alphaWatchlistRow!);
     
     await act(async () => {
       fireEvent.contextMenu(alphaWatchlistRow!);
@@ -3533,7 +3534,15 @@ describe("Agent Off State Operations", () => {
       pauseButton.click();
     });
 
-    // Paused agents stay available in the watchlist but leave the main grid.
+    // Pausing preserves the focused card without restarting its runtime.
+    await waitFor(() => {
+      expect(currentAgents.find((agent) => agent.session_id === "agent-1")?.is_off).toBe(true);
+      expect(screen.getByTestId("terminal-agent-1")).toBeVisible();
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", expect.anything());
+
+    // An unfocused Off card is still excluded from the overview.
+    fireEvent.click(screen.getByLabelText("Agent Beta"));
     await waitFor(() => {
       expect(screen.queryByTestId("terminal-agent-1")).not.toBeInTheDocument();
       expect(screen.getAllByText("Alpha").length).toBe(1);
@@ -3554,6 +3563,7 @@ describe("Agent Off State Operations", () => {
     });
 
     // Click Start Session
+    expect(mockInvoke).not.toHaveBeenCalledWith("resume_agent", expect.anything());
     const startButtons = screen.getAllByText("Start Session");
     await act(async () => {
       startButtons[0].click();
@@ -3562,6 +3572,8 @@ describe("Agent Off State Operations", () => {
     // The agent should reappear in the grid (2 occurrences again)
     await waitFor(() => {
       expect(screen.getAllByText("Alpha").length).toBe(2);
+      expect(currentAgents.find((agent) => agent.session_id === "agent-1")?.is_off).toBe(false);
+      expect(mockInvoke).toHaveBeenCalledWith("resume_agent", expect.objectContaining({ sessionId: "agent-1" }));
     });
   });
 

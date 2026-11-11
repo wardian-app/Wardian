@@ -41,6 +41,7 @@ function observationHarness(invoke, options = {}) {
     getAttribute(name) { return this.attributes[name] ?? null; },
     getBoundingClientRect: () => ({ top: 0, bottom: 500, left: 0, right: 500, width: 500, height: 500 }),
     matches(selector) {
+      if (selector.startsWith('.')) return (this.attributes.class ?? '').split(/\s+/).includes(selector.slice(1));
       return [...selector.matchAll(/\[([\w-]+)(?:="([^"]*)")?\]/g)]
         .every(([, name, value]) => value === undefined ? this.getAttribute(name) !== null : this.getAttribute(name) === value);
     },
@@ -66,12 +67,14 @@ function observationHarness(invoke, options = {}) {
   const routes = [];
   const addContainer = (kind = "agent-session", owner = "session") => {
     const surfaceId = `surface-${routes.length}`;
+    const dockRoot = options.portal ? element({ class: "dv-shell" }, host) : null;
+    const portal = options.portal ? element({ class: "dv-render-overlay" }, dockRoot) : null;
     const tab = element({ id: `tab-${surfaceId}`, role: "tab", "aria-selected": "true",
       "data-surface-id": surfaceId, "data-surface-type": kind, "data-resource-key": owner,
-      "aria-controls": `panel-${surfaceId}` }, host);
-    const tabpanel = element({ id: `panel-${surfaceId}`, role: "tabpanel", "aria-labelledby": tab.getAttribute("id") }, host);
+      "aria-controls": `panel-${surfaceId}` }, dockRoot ?? host);
+    const tabpanel = element({ id: `panel-${surfaceId}`, role: "tabpanel", "aria-labelledby": tab.getAttribute("id") }, dockRoot ?? host);
     const panel = element({ "data-testid": "surface-panel", "data-surface-id": surfaceId,
-      "data-surface-type": kind, "data-resource-key": owner }, tabpanel);
+      "data-surface-type": kind, "data-resource-key": owner }, portal ?? tabpanel);
     const semantic = element({ "data-testid": kind === "agents-overview" ? "agents-overview-surface" : "agent-session-surface",
       "data-surface-id": surfaceId, "data-resource-key": owner }, panel);
     const root = kind === "agents-overview" ? element({ "data-agent-grid-card-id": owner }, semantic) : semantic;
@@ -85,7 +88,7 @@ function observationHarness(invoke, options = {}) {
     const close = element({ "data-tab-close": "" }, tab);
     close.click = async () => { tab.closed = true; tab.isConnected = false; tabpanel.isConnected = false; root.isConnected = false; };
     tab.findElements = async (selector) => close.matches(selector) ? [close] : [];
-    const route = { root, semantic, panel, tabpanel, tab, host, kind };
+    const route = { root, semantic, panel, tabpanel, tab, host, portal, dockRoot, kind };
     routes.push(route);
     return route;
   };
@@ -206,6 +209,42 @@ function actualSurfaceOperations(harness) {
 }
 
 const actualOwnedSurface = (harness) => actualSurfaceOperations(harness).lookup();
+
+test("the maintained oracle and close helper resolve real Dockview overlay placement through its current tab", async () => {
+  for (const route of ["agents-overview", "agent-session"]) {
+    const harness = observationHarness(() => Promise.resolve(actualPage()), { route, portal: true });
+    assert.equal(harness.route.root.closest('[role="tabpanel"]'), null);
+    assert.equal(await actualOwnedSurface(harness), harness.route.root);
+    assert.equal(harness.observer.containerTab("session"), harness.route.tab);
+    harness.mode("chat"); harness.clock(100); harness.roster();
+    harness.clock(110); await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+    harness.observer.sample(); harness.frame(); harness.frame();
+    assert.equal(harness.observer.state.phase.rosterAt, 100);
+    assert.equal(harness.observer.state.phase.paintAt, 142);
+    harness.input(); harness.frame(); harness.frame();
+    assert.equal(harness.observer.state.phase.usableAt, 174);
+    await actualSurfaceOperations(harness).close();
+    assert.equal(harness.route.tab.closed, true);
+  }
+});
+
+test("Dockview portal placement still requires the same root and bidirectional current-tab ownership", async () => {
+  for (const change of [
+    (h) => { h.route.tabpanel.attributes["aria-labelledby"] = "foreign-tab"; },
+    (h) => { h.route.tab.attributes["aria-controls"] = "foreign-panel"; },
+    (h) => { h.route.tab.attributes["aria-selected"] = "false"; },
+    (h) => { h.route.portal.parentElement = h.route.host; },
+    (h) => { h.route.tabpanel.parentElement = h.route.host; },
+    (h) => { h.route.tab.parentElement = h.route.host; },
+    (h) => { h.route.portal.style.visibility = "hidden"; },
+    (h) => { h.route.root.attributes["data-agent-grid-card-id"] = "foreign-owner"; },
+  ]) {
+    const harness = observationHarness(() => Promise.resolve(actualPage()), { route: "agents-overview", portal: true });
+    change(harness);
+    await assert.rejects(actualOwnedSurface(harness), /owned container unavailable/);
+    assert.equal(harness.observer.containerTab("session"), null);
+  }
+});
 
 test("normal Roster Overview and actual AgentSession share the maintained driver and observer container", async () => {
   for (const route of ["agents-overview", "agent-session"]) {
