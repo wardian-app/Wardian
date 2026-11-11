@@ -783,12 +783,31 @@ The maintained `chat-turn-change-native` case uses the opt-in Mock
 `chat_acceptance` scenario. It opens the ordinary Roster row and owned session
 surface with WebDriver clicks before any transcript/page prewarm. A passive IPC
 observer retains the original Promise and records actual scope and row identity.
-Readable timing requires the independently declared completed assistant body to
-intersect the Chat viewport through two animation frames. Usability requires
-trusted composer input, or actual scrolling for the saved-Off restart. The
-original Chat selection clock must satisfy both endpoints in less than one
-second; Roster selection is recorded separately. Cold-process, same-process warm,
-and same-home saved-Off results are separate. Raw log inspection warms the
+Passive markers on the existing Chat scroll region and message row expose the
+page actually admitted by the consumer and its rendered event/member identity.
+The observer matches these markers to the actual response, including conversation,
+generation, nullable source epoch, opaque window revision and admission. A returned
+response alone cannot qualify an unadmitted page. Any display-slot alias requires
+the response's actual alias proof.
+Readable timing retains the independent full raw assistant body/hash in the RPC
+proof. Before App startup, the existing Markdown parser prepares a bounded
+rendered-text witness; plain Mock text retains whole-text matching. The actual
+witness text range must intersect the Chat viewport through two animation frames.
+A body without a safe independent witness fails fixture eligibility before App
+startup, rather than being reported as a UI latency failure.
+
+Off agents normally open directly in Chat. The explicit-toggle timestamp remains
+null for that route, with a separate observed automatic-exposure timestamp. Live
+Terminal measurements retain the trusted Chat toggle. The original trusted Roster
+selection/open clock must satisfy both readable and usable endpoints in less than
+one second; neither route resets it. Usability requires trusted unsent composer
+input, or actual scrolling when the owned viewport has overflow. A non-overflowing
+Saved view uses the enabled empty composer without submission or model discovery.
+The fixture never toggles Off Chat away or loads history to manufacture activation
+or overflow. Both paint and trusted interaction retain the same admitted body and
+scope through two animation frames. Live cold/warm and small Mock Saved-Off cold/warm
+reopens are separate measurements. Each reopen uses the normal Roster action.
+Raw log inspection warms the
 filesystem, so these measurements do not establish OS-cold performance.
 
 After timing, genuine wheel/button actions load Older pages through opaque
@@ -801,6 +820,30 @@ they do not establish native normalization, latency, saved-Off, UI, or provider
 acceptance. Native execution still requires a matching built App/CLI bundle and
 exclusive owned runtime resources. Results stay in the isolated home's
 `artifacts/chat-normal-flow/` directory with identity strings hashed.
+
+The same case accepts an optional `WARDIAN_CHAT_SAVED_FIXTURE_MANIFEST` value of
+`<absolute-fixture-manifest>`. This external data-only Saved witness is labelled
+separately from the small Mock restart. Its bounded manifest, selected configuration,
+independent recent-body oracle, original identities and every archive/index/artifact
+hash are validated before staging into a freshly claimed home, before the first
+app start. The source archive and index remain unchanged. The staged configuration
+is Off, uses the owned fixture folder and Test class, and retains its source logging
+policy. An empty owned `CODEX_HOME` isolates native acquisition; no original native
+source, user configuration, auth, junction or logging override is imported. Effective
+policy is recorded after measurement. Validation/staging warms the filesystem.
+The independent target must be visible naturally; a final-80 eligibility declaration
+alone cannot qualify a viewport, and the test never scrolls the target into view
+before timing. Missing lineage, scope or viewport proof fails honestly.
+
+Final native qualification also requires the approved caller's original process
+handle/full birth identity, bounded actual exit, positive stdout/stderr EOF and
+owned Job-empty closure receipts. The existing harness termination timer and
+kill-on-close supervisor do not provide that complete receipt. This ownership hook
+must be resolved before a qualification run; the case's private result labels
+observed endpoints separately from unproved closure. A timer-only cleanup cannot
+establish PASS. This fixture does not establish OS-cold or real-provider performance,
+greater-than-64-KiB body continuation, native finite-renewal ACK/physical-read counts,
+HTTPS conformance or PWA behavior; those retain their existing verification layers.
 
 Every Windows session started by the native harness creates a unique
 `.webview2-*` directory beneath its locked native test home. The driver child

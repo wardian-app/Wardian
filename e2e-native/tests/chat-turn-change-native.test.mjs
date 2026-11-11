@@ -15,6 +15,7 @@ import {
   waitForAppShell,
   invokeTauri,
 } from "../lib/harness.mjs";
+import { chatBodyWitness, freshSavedHome, stageSavedFixture, verifySavedFixture } from "../lib/chatSavedFixture.mjs";
 
 const { chatAcceptanceFixture } = createRequire(import.meta.url)("../../scripts/mock-agent.cjs");
 
@@ -28,17 +29,71 @@ function installChatObservation(config) {
   const surface = () => Array.from(document.querySelectorAll('[data-testid="agent-session-surface"]'))
     .find((node) => node.getAttribute("data-resource-key") === state.owner);
   const now = () => performance.now();
+  const members = (value) => Array.isArray(value) && value.length <= 384
+    && value.every((id) => bounded(id)) ? [...value] : null;
+  const scopeKey = (scope) => scope && bounded(scope.session) && bounded(scope.conversation)
+    && bounded(scope.generation) && bounded(scope.revision)
+    && (scope.epoch === null || bounded(scope.epoch))
+    && (scope.admission === null || bounded(scope.admission))
+    ? JSON.stringify([scope.session, scope.conversation, scope.generation, scope.epoch, scope.revision, scope.admission]) : null;
+  const parse = (value) => { try { return JSON.parse(value); } catch { return null; } };
+  const sameBody = (left, right) => left && right && left.node === right.node && left.scroll === right.scroll
+    && JSON.stringify({ ...left.evidence, receiptAt: null }) === JSON.stringify({ ...right.evidence, receiptAt: null });
   let inputEvidence = null;
   let wheelEvidence = null;
+  let paintedBody = null;
+  const witness = config.witness ?? { kind: "whole", text: config.body };
+  const matchesText = (text) => typeof text === "string" && (witness.kind === "whole"
+    ? text === witness.text : witness.kind === "needle" && witness.text.length >= 16
+      && witness.text.length <= 128 && text.indexOf(witness.text) >= 0
+      && text.indexOf(witness.text, text.indexOf(witness.text) + 1) === -1);
+  const readable = (element) => {
+    for (let node = element; node; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (style.visibility === "hidden" || style.visibility === "collapse" || style.display === "none"
+        || style.opacity === "0" || node.getAttribute("aria-hidden") === "true") return false;
+    }
+    return true;
+  };
+  const textRange = (content) => {
+    if (!matchesText(content.textContent)) return null;
+    const range = document.createRange();
+    if (witness.kind === "whole") { range.selectNodeContents(content); return range; }
+    // Anchor the independent needle itself, including when emphasis splits text
+    // nodes. A visible header elsewhere in this message cannot stand in for it.
+    const start = content.textContent.indexOf(witness.text);
+    const end = start + witness.text.length;
+    const walker = document.createTreeWalker(content, 4 /* SHOW_TEXT */);
+    let offset = 0;
+    let count = 0;
+    let anchored = false;
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (++count > 8192) return null;
+      const next = offset + node.textContent.length;
+      if (next > start && offset < end && !readable(node.parentElement)) return null;
+      if (!anchored && next > start) { range.setStart(node, start - offset); anchored = true; }
+      if (anchored && next >= end) {
+        range.setEnd(node, end - offset);
+        return range.toString() === witness.text ? range : null;
+      }
+      offset = next;
+    }
+    return null;
+  };
   const fail = (error) => { if (state.errors.length < 8) state.errors.push(String(error).slice(0, 160)); };
   const record = (command, args, dto, returnedAt) => {
     if (command !== "load_agent_chat_page" || !dto || !Array.isArray(dto.events)) return;
     if (state.receipts.length >= 128 || dto.events.length > 384) throw new Error("passive receipt bound exceeded");
     if (dto.recent_admission != null && (typeof dto.recent_admission !== "string"
       || !dto.recent_admission || dto.recent_admission.length > 1024)) throw new Error("invalid recent admission");
+    const aliases = Array.isArray(dto.aliases) && dto.aliases.length <= 384 ? dto.aliases.map((alias) => ({
+      observation: bounded(alias.observation_id), canonical: bounded(alias.canonical_id),
+    })) : [];
     state.receipts.push({
       at: returnedAt, session: bounded(dto.session_id), conversation: bounded(dto.conversation_id),
-      generation: bounded(dto.generation), epoch: bounded(dto.source_epoch), revision: bounded(dto.revision),
+      requestSession: bounded(args?.sessionId),
+      generation: bounded(dto.generation), epoch: dto.source_epoch === null ? null : bounded(dto.source_epoch),
+      validEpoch: dto.source_epoch === null || Boolean(bounded(dto.source_epoch)), revision: bounded(dto.revision), aliases,
       admission: dto.recent_admission == null ? null : bounded(dto.recent_admission),
       progress: bounded(dto.progress), older: dto.older_page, reset: dto.reset,
       before: bounded(args?.cursor), next: bounded(dto.next_before), detail: Boolean(dto.detail),
@@ -47,8 +102,13 @@ function installChatObservation(config) {
         session: bounded(row.session_id), provider: bounded(row.provider), role: row.role, kind: row.kind,
         turn: bounded(row.turn_id), text: typeof row.text === "string" ? row.text.slice(0, 96) : null,
         length: typeof row.text === "string" ? row.text.length : null,
-        target: row.kind === "message" && row.role === "assistant" && row.provider === "mock"
-          && row.text === config.body,
+        members: members(row.metadata?.chat_display_member_ids),
+        refs: members(row.metadata?.archive_record?.event_refs),
+        target: row.kind === "message" && row.role === "assistant" && row.provider === (config.provider ?? "mock")
+          && row.text === config.body && (config.eventId == null || row.id === config.eventId
+            || members(row.metadata?.chat_display_member_ids)?.includes(config.eventId)
+            || members(row.metadata?.archive_record?.event_refs)?.includes(config.eventId)
+            || aliases.some((alias) => alias.observation === config.eventId && alias.canonical === row.id)),
       })),
     });
   };
@@ -73,72 +133,105 @@ function installChatObservation(config) {
     return result;
   };
   const visibleBody = () => {
+    if (document.visibilityState !== "visible") return null;
     const root = surface();
     const scroll = root?.querySelector('[data-testid="agent-chat-scroll-region"]');
-    if (!scroll) return null;
+    if (!scroll || !root.querySelector('button[title="Switch to Terminal"]')) return null;
+    // Read the consumer's admitted page, not merely the last returned DTO.
+    const admitted = parse(scroll.getAttribute("data-chat-page-scope"));
+    const admittedKey = scopeKey(admitted);
+    if (!admittedKey || admitted.session !== state.owner
+      || (config.conversation != null && admitted.conversation !== config.conversation)) return null;
     const region = scroll.getBoundingClientRect();
     const contents = Array.from(root.querySelectorAll('article[aria-label="assistant message"] .chat-message-content'));
     for (const content of contents) {
-      if (content.textContent !== config.body) continue;
-      const key = content.closest("[data-chat-row-key]")?.getAttribute("data-chat-row-key");
+      if (!content.isConnected || !readable(content)) continue;
+      const range = textRange(content);
+      if (!range) continue;
+      const slot = content.closest("[data-chat-row-key]");
+      const key = slot?.getAttribute("data-chat-row-key");
+      const identity = parse(slot?.getAttribute("data-chat-row-identity"));
       const receipt = state.receipts.findLast((item) => item.session === state.owner
-        && item.revision && item.generation && item.rows.some((row) => row.target
-          && row.session === state.owner && row.key === key));
+        && item.requestSession === state.owner && item.validEpoch && !item.detail
+        && scopeKey(item) === admittedKey && item.rows.some((row) => row.target
+          && row.session === state.owner && row.id === identity?.id
+          && JSON.stringify(row.members) === JSON.stringify(identity.members)
+          && (row.key === key || item.aliases.some((alias) => alias.observation === key && alias.canonical === row.id))));
       if (!receipt || !key) continue;
       // Measure the actual body text, not the row/header of a tall message.
-      const range = document.createRange();
-      range.selectNodeContents(content);
       const rects = Array.from(range.getClientRects());
       if (!rects.some((rect) => rect.width > 0 && rect.height > 0
         && rect.bottom > Math.max(0, region.top) && rect.top < Math.min(innerHeight, region.bottom)
         && rect.right > Math.max(0, region.left) && rect.left < Math.min(innerWidth, region.right))) continue;
-      return { key, receiptAt: receipt.at, revision: receipt.revision, generation: receipt.generation,
+      return { node: content, scroll, evidence: { key, eventId: identity.id, members: identity.members,
+        session: receipt.session, receiptAt: receipt.at, window: receipt.revision, revision: receipt.revision, generation: receipt.generation,
         epoch: receipt.epoch, conversation: receipt.conversation, admission: receipt.admission,
-        matchingBodySlots: contents.filter((node) => node.textContent === config.body).length };
+        witnessKind: witness.kind, bodySha256: witness.bodySha256 ?? null,
+        matchingBodySlots: contents.filter((node) => matchesText(node.textContent)).length } };
     }
     return null;
   };
   const checkUsable = (phase) => {
-    if (!phase || phase.chatAt === null || phase.usableAt !== null || phase.usableChecking || !visibleBody()) return;
-    const valid = () => (inputEvidence?.phase === phase
+    if (!phase || phase.exposureAt === null || phase.usableAt !== null || phase.usableChecking
+      || paintedBody?.phase !== phase) return;
+    const body = paintedBody.body;
+    const valid = () => sameBody(body, visibleBody()) && ((inputEvidence?.phase === phase
+      && sameBody(inputEvidence.body, body)
       && inputEvidence.node.value === config.probe && document.activeElement === inputEvidence.node)
-      || (wheelEvidence?.phase === phase && wheelEvidence.node.scrollTop !== wheelEvidence.before);
+      || (wheelEvidence?.phase === phase && sameBody(wheelEvidence.body, body)
+        && wheelEvidence.node.scrollTop !== wheelEvidence.before));
     if (!valid()) return;
     phase.usableChecking = true;
     requestAnimationFrame(() => requestAnimationFrame(() => {
       phase.usableChecking = false;
-      if (state.phase === phase && valid() && visibleBody()) phase.usableAt = now();
+      if (state.phase === phase && valid()) phase.usableAt = now();
     }));
   };
   const sample = () => {
     const presented = visibleBody();
     if (presented && state.presentations.length < 64
-      && state.presentations.at(-1)?.revision !== presented.revision) {
-      state.presentations.push({ at: now(), ...presented });
+      && JSON.stringify(state.presentations.at(-1)?.body) !== JSON.stringify(presented.evidence)) {
+      state.presentations.push({ at: now(), body: presented.evidence, ...presented.evidence });
     }
     const phase = state.phase;
+    if (phase && phase.rosterAt !== null && presented && phase.exposureAt === null) {
+      phase.exposureAt = now();
+      phase.exposureKind = phase.chatAt === null ? "automatic" : "explicit-toggle";
+    }
     checkUsable(phase);
-    if (!phase || phase.chatAt === null || phase.paintAt !== null || phase.checking) return;
+    if (!phase || phase.exposureAt === null || phase.paintAt !== null || phase.checking) return;
     const body = presented;
-    if (!body || body.receiptAt > now()) return;
+    if (!body || body.evidence.receiptAt > now()) return;
     phase.checking = true;
     const commitAt = now();
     requestAnimationFrame(() => requestAnimationFrame(() => {
       phase.checking = false;
       if (state.phase !== phase) return;
       const current = visibleBody();
-      if (current && current.key === body.key && current.revision === body.revision) {
+      if (sameBody(current, body)) {
         phase.commitAt = commitAt;
         phase.paintAt = now();
-        phase.body = current;
+        phase.body = current.evidence;
+        paintedBody = { phase, body: current };
+        checkUsable(phase);
       }
     }));
   };
+  const rosterSelection = (event) => {
+    if (!event.isTrusted || !state.phase) return;
+    const row = event.target.closest(`[aria-label="Agent ${config.name}"]`);
+    if (row?.getAttribute("aria-label") === `Agent ${config.name}` && state.phase.rosterAt === null) {
+      state.phase.rosterAt = now();
+      state.phase.rosterAction = event.type;
+      state.phase.preselectionPage = surface()?.querySelector('[data-testid="agent-chat-scroll-region"]')
+        ?.getAttribute("data-chat-page-scope") ?? null;
+    }
+  };
+  document.addEventListener("pointerdown", rosterSelection, true);
   document.addEventListener("click", (event) => {
     if (!event.isTrusted || !state.phase) return;
+    rosterSelection(event);
     const phase = state.phase;
-    const row = event.target.closest(`[aria-label="Agent ${config.name}"]`);
-    if (row?.getAttribute("aria-label") === `Agent ${config.name}` && phase.rosterAt === null) phase.rosterAt = now();
     const root = surface();
     const button = event.target.closest('button[title="Switch to Chat"]');
     if (button && root?.contains(button) && phase.chatAt === null) {
@@ -152,10 +245,10 @@ function installChatObservation(config) {
   }, true);
   document.addEventListener("input", (event) => {
     const phase = state.phase;
-    if (!event.isTrusted || !phase || phase.chatAt === null || phase.usableAt !== null
+    if (!event.isTrusted || !phase || phase.exposureAt === null || phase.usableAt !== null
       || !surface()?.contains(event.target) || event.target.getAttribute("aria-label") !== "Message agent"
       || event.target.value !== config.probe || document.activeElement !== event.target) return;
-    inputEvidence = { phase, node: event.target };
+    inputEvidence = { phase, node: event.target, body: visibleBody() };
     checkUsable(phase);
   }, true);
   document.addEventListener("wheel", (event) => {
@@ -164,22 +257,25 @@ function installChatObservation(config) {
       const phase = state.phase;
       const scroll = surface()?.querySelector('[data-testid="agent-chat-scroll-region"]');
       const before = scroll?.scrollTop;
-      if (phase && phase.chatAt !== null && scroll && phase.usableAt === null) {
-        wheelEvidence = { phase, node: scroll, before };
+      if (phase && phase.exposureAt !== null && scroll && scroll.scrollHeight > scroll.clientHeight && phase.usableAt === null) {
+        wheelEvidence = { phase, node: scroll, before, body: visibleBody() };
         requestAnimationFrame(() => checkUsable(phase));
       }
     }
   }, true);
   const observer = new MutationObserver(sample);
-  observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+  observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true,
+    attributes: true, attributeFilter: ["data-chat-page-scope", "data-chat-row-identity"] });
   window.__chatAcceptance = {
     state,
     bind(owner) { if (state.owner && state.owner !== owner) throw new Error("owner cannot change"); state.owner = owner; },
     arm(label) {
-      if (state.phases.length >= 3) throw new Error("measurement phase bound exceeded");
+      if (state.phases.length >= 4) throw new Error("measurement phase bound exceeded");
       inputEvidence = null;
       wheelEvidence = null;
-      state.phase = { label, rosterAt: null, chatAt: null, commitAt: null, paintAt: null, usableAt: null, body: null, checking: false };
+      paintedBody = null;
+      state.phase = { label, rosterAt: null, chatAt: null, exposureAt: null, exposureKind: null,
+        commitAt: null, paintAt: null, usableAt: null, body: null, checking: false };
       state.phases.push(state.phase);
     },
     sample,
@@ -239,33 +335,66 @@ async function waitForProducer(driver, harness, sessionId, fixture) {
   }, 30_000, "independently declared completed Mock body/result never published");
 }
 
-async function measureChat(driver, sessionId, label, name, openRoster, keyboard = true) {
+async function measureChat(driver, sessionId, label, name, keyboard = true) {
   await driver.executeScript((phase) => window.__chatAcceptance.arm(phase), label);
-  if (openRoster) await (await visible(driver, `[aria-label="Agent ${name}"]`)).click();
+  const deadline = Date.now() + 5_000;
+  await (await visible(driver, `[aria-label="Agent ${name}"]`)).click();
   const surface = await ownedSurface(driver, sessionId);
-  const toggle = await visible(driver, 'button[title="Switch to Chat"]', surface);
-  await toggle.click();
-  const input = keyboard ? await visible(driver, 'textarea[aria-label="Message agent"]', surface) : null;
-  if (input) await input.sendKeys("native-input-probe");
-  else await driver.actions({ async: true }).scroll(0, 0, 0, -20,
-    await visible(driver, '[data-testid="agent-chat-scroll-region"]', surface)).perform();
-  await driver.wait(async () => {
+  const mode = await visible(driver, 'button[title="Switch to Chat"], button[title="Switch to Terminal"]', surface);
+  const explicit = await mode.getAttribute("title") === "Switch to Chat";
+  if (keyboard) assert.ok(explicit, "live Terminal measurement requires its real Chat toggle");
+  if (explicit) await mode.click();
+  const waitForEndpoint = (field) => driver.wait(async () => {
     const observation = await readObservation(driver);
     assert.deepEqual(observation.errors, [], "passive observer failed");
-    return observation.phase.paintAt !== null && observation.phase.usableAt !== null;
-  }, 5_000, `${label}: no source-bound readable body and trusted usable input`);
+    return observation.phase[field] !== null;
+  }, Math.max(1, deadline - Date.now()), `${label}: no source-bound ${field}`);
+  await waitForEndpoint("paintAt");
+  const scroll = await visible(driver, '[data-testid="agent-chat-scroll-region"]', surface);
+  const viewport = await driver.executeScript((node) => ({ overflow: node.scrollHeight > node.clientHeight,
+    top: node.scrollTop }), scroll);
+  // Normal Off Chat may fit entirely in its viewport. Its enabled textarea only
+  // updates the unsent local draft; focus does not open deferred model discovery.
+  const input = keyboard || !viewport.overflow
+    ? await visible(driver, 'textarea[aria-label="Message agent"]', surface) : null;
+  if (input) {
+    assert.ok(await input.isEnabled(), "no safe enabled unsent composer interaction");
+    assert.equal(await input.getAttribute("value"), "", "fixture must not replace an existing draft");
+    await input.sendKeys("native-input-probe");
+  } else await driver.actions({ async: true }).scroll(0, 0, 0, viewport.top > 0 ? -20 : 20, scroll).perform();
+  await waitForEndpoint("usableAt");
   const state = await readObservation(driver);
   const phase = state.phase;
-  assert.ok(Number.isFinite(phase.chatAt), "trusted owned Chat selection was not observed");
-  assert.ok(phase.commitAt >= phase.chatAt && phase.paintAt >= phase.commitAt);
-  assert.ok(phase.usableAt >= phase.chatAt);
-  assert.ok(phase.paintAt - phase.chatAt < 1000, `${label}: readable Chat exceeded 1000ms`);
-  assert.ok(phase.usableAt - phase.chatAt < 1000, `${label}: usable Chat exceeded 1000ms`);
-  if (openRoster) assert.ok(phase.rosterAt !== null && phase.rosterAt <= phase.chatAt);
-  assert.ok(state.calls.every((call) => call.at >= state.phases[0].chatAt), "Chat was prewarmed before selection");
+  assert.ok(Number.isFinite(phase.rosterAt), "original trusted Roster selection was not observed");
+  if (explicit) {
+    assert.ok(Number.isFinite(phase.chatAt) && phase.chatAt >= phase.rosterAt,
+      "trusted owned Chat toggle was not observed");
+    assert.equal(phase.exposureKind, "explicit-toggle");
+    assert.ok(phase.exposureAt >= phase.chatAt);
+  } else {
+    assert.equal(phase.chatAt, null, "automatic Chat must not invent an explicit toggle timestamp");
+    assert.equal(phase.exposureKind, "automatic");
+  }
+  assert.ok(Number.isFinite(phase.exposureAt) && phase.exposureAt >= phase.rosterAt
+    && phase.commitAt >= phase.exposureAt && phase.paintAt >= phase.commitAt);
+  assert.ok(phase.usableAt >= phase.paintAt);
+  assert.ok(phase.paintAt - phase.rosterAt < 1000, `${label}: Roster-to-readable Chat exceeded 1000ms`);
+  assert.ok(phase.usableAt - phase.rosterAt < 1000, `${label}: Roster-to-usable Chat exceeded 1000ms`);
+  assert.ok(state.calls.every((call) => call.at >= state.phases[0].rosterAt), "Chat was prewarmed before Roster selection");
   assert.ok(state.calls.every((call) => call.command !== "load_agent_chat_transcript"), "legacy transcript prewarm");
   if (input) await input.sendKeys(Key.chord(Key.CONTROL, "a"), Key.BACK_SPACE);
   return phase;
+}
+
+/** Preserve the live Terminal route when requested; never toggle a Saved Off view. */
+async function closeTerminalSurface(driver, sessionId, restoreLiveTerminal = false) {
+  const surface = await ownedSurface(driver, sessionId);
+  if (restoreLiveTerminal) await (await visible(driver, 'button[title="Switch to Terminal"]', surface)).click();
+  const panel = await surface.findElement(By.xpath("ancestor::*[@role='tabpanel'][1]"));
+  const tabId = await panel.getAttribute("aria-labelledby");
+  assert.ok(tabId, "owned surface has no actual tab identity");
+  const tab = await driver.findElement(By.id(tabId));
+  await (await visible(driver, "[data-tab-close]", tab)).click();
 }
 
 function canonicalHistoryReceipts(receipts, sessionId) {
@@ -356,12 +485,18 @@ async function exerciseHistory(driver, sessionId, fixture) {
 }
 
 function redactObservation(value) {
+  if (typeof value === "string") return createHash("sha256").update(value).digest("hex");
   if (Array.isArray(value)) return value.map(redactObservation);
   if (!value || typeof value !== "object") return value;
   const result = {};
   for (const [key, item] of Object.entries(value)) {
-    result[key] = typeof item === "string" && !["label", "command", "kind", "provider", "role", "progress"].includes(key)
-      ? createHash("sha256").update(item).digest("hex") : redactObservation(item);
+    const publicToken = ["label", "command", "kind", "provider", "role", "progress"].includes(key)
+      || (key === "exposureKind" && ["automatic", "explicit-toggle"].includes(item))
+      || (key === "witnessKind" && ["whole", "needle"].includes(item))
+      || (key === "status" && ["UNPROVEN", "OBSERVED_ENDPOINTS_CLOSURE_UNPROVEN"].includes(item))
+      || (/Sha256$/.test(key) && typeof item === "string" && /^[a-f0-9]{64}$/i.test(item))
+      || (["agentPolicy", "globalPolicy", "effectivePolicy"].includes(key) && ["default", "enabled", "disabled"].includes(item));
+    result[key] = typeof item === "string" && publicToken ? item : redactObservation(item);
   }
   return result;
 }
@@ -377,19 +512,24 @@ test("chat transcript renders the per-turn change surface", { timeout: 600_000 }
   withEnv(t, "WARDIAN_MOCK_SCENARIO", "chat_acceptance");
   withEnv(t, "WARDIAN_MOCK_DELAY_MS", "5");
   withEnv(t, "WARDIAN_NATIVE_SESSION_START_ATTEMPTS", "1");
+  const externalManifest = process.env.WARDIAN_CHAT_SAVED_FIXTURE_MANIFEST;
+  const freshHome = externalManifest ? freshSavedHome(harness) : null;
   prepareIsolatedHome(harness);
+  const archive = externalManifest ? stageSavedFixture(harness, externalManifest, freshHome) : null;
+  if (archive) withEnv(t, "CODEX_HOME", archive.codexHome);
   const workspace = path.join(harness.isolatedHome, `chat-workspace-${RUN_ID}`);
   fs.mkdirSync(workspace, { recursive: true });
   const sessions = [];
   const cleanupOwner = { sessionId: null };
   let paused = false;
-  const evidence = { timings: [], history: null, endpoints: "UNRUN", preselectionIndex: "UNOBSERVED",
+  const evidence = { timings: [], history: null, endpoints: "UNRUN", preselectionIndex: [],
+    closure: { status: "UNPROVEN", reason: "original-handle/fullbirth/exit+stream-EOF/Job-empty caller receipt required; timer is not proof" },
     cacheState: "cold process only; raw producer inspection warms filesystem", transition: "UNRUN" };
   t.after(async () => {
     const errors = [];
     for (const entry of sessions.toReversed()) {
       if (entry.closed) continue;
-      try { evidence.lastObservation = redactObservation(await readObservation(entry.session.driver)); }
+      try { evidence.lastObservation = await readObservation(entry.session.driver); }
       catch (error) { evidence.observationReadError = String(error).slice(0, 160); }
       try {
         if (cleanupOwner.sessionId && !paused) {
@@ -401,17 +541,50 @@ test("chat transcript renders the per-turn change surface", { timeout: 600_000 }
     }
     const evidenceDir = path.join(harness.isolatedHome, "artifacts", "chat-normal-flow");
     fs.mkdirSync(evidenceDir, { recursive: true });
-    fs.writeFileSync(path.join(evidenceDir, "result.json"), JSON.stringify(evidence, null, 2));
+    // Redact once at the write boundary, including failure-path partial timings.
+    fs.writeFileSync(path.join(evidenceDir, "result.json"), JSON.stringify(redactObservation(evidence), null, 2));
     if (errors.length) throw new AggregateError(errors, "owned native cleanup failed");
   });
-  const open = async () => {
+  const open = async (observation = { name, body: fixture.latestBody, witness: chatBodyWitness(fixture.latestBody),
+    probe: "native-input-probe" }) => {
     const session = await startNativeSession(harness);
     const entry = { session, closed: false };
     sessions.push(entry);
     await waitForAppShell(session.driver, 30_000);
-    await session.driver.executeScript(installChatObservation, { name, body: fixture.latestBody, probe: "native-input-probe" });
+    await session.driver.executeScript(installChatObservation, observation);
     return entry;
   };
+  const publishedState = (sessionId, label) => {
+    const index = path.join(harness.isolatedHome, "agents", sessionId, "conversations", "index.jsonl");
+    evidence.preselectionIndex.push({ label, present: fs.existsSync(index),
+      bytes: fs.existsSync(index) ? fs.statSync(index).size : null,
+      observation: "filesystem metadata only before original Roster action; not an unindexed/OS-cold claim" });
+  };
+  if (archive) {
+    const external = await open({ name: archive.name, body: archive.body, witness: archive.witness, provider: archive.provider,
+      eventId: archive.eventId, conversation: archive.conversation, probe: "native-input-probe" });
+    await external.session.driver.executeScript((id) => window.__chatAcceptance.bind(id), archive.sessionId);
+    publishedState(archive.sessionId, "genuine-archive-saved-off-cold-process");
+    const timings = [await measureChat(external.session.driver, archive.sessionId,
+      "genuine-archive-saved-off-cold-process", archive.name, false)];
+    await closeTerminalSurface(external.session.driver, archive.sessionId);
+    timings.push(await measureChat(external.session.driver, archive.sessionId,
+      "genuine-archive-saved-off-warm-reopen", archive.name, false));
+    const actual = (await invokeTauri(external.session.driver, "list_agents"))
+      .find((agent) => agent.session_id === archive.sessionId);
+    assert.equal(actual?.is_off, true, "genuine Saved fixture resumed a provider");
+    assert.equal(actual.provider, archive.provider);
+    assert.equal(actual.conversation_logging, archive.policy, "source policy was overridden");
+    const shell = await invokeTauri(external.session.driver, "load_shell_settings");
+    evidence.genuineArchiveSaved = { ...archive.metadata, timings,
+      agentPolicy: actual.conversation_logging, globalPolicy: shell.settings.conversation_logging,
+      effectivePolicy: actual.conversation_logging === "default" ? shell.settings.conversation_logging : actual.conversation_logging,
+      observation: await readObservation(external.session.driver) };
+    verifySavedFixture(harness, archive);
+    await closeTerminalSurface(external.session.driver, archive.sessionId);
+    await external.session.close();
+    external.closed = true;
+  } else evidence.genuineArchiveSaved = "UNRUN: optional external manifest absent; small Mock Saved is a separate witness";
   const first = await open();
   const driver = first.session.driver;
   const agent = await invokeTauri(driver, "spawn_agent", { req: { sessionName: name, agentClass: "Coder", folder: workspace,
@@ -421,10 +594,11 @@ test("chat transcript renders the per-turn change surface", { timeout: 600_000 }
   assert.ok(sessionId);
   await driver.executeScript((id) => window.__chatAcceptance.bind(id), sessionId);
   const producer = await waitForProducer(driver, harness, sessionId, fixture);
-  evidence.timings.push(await measureChat(driver, sessionId, "cold-process-first-chat", name, true));
+  publishedState(sessionId, "live-cold-process-first-chat");
+  evidence.timings.push(await measureChat(driver, sessionId, "live-cold-process-first-chat", name));
+  await closeTerminalSurface(driver, sessionId, true);
+  evidence.timings.push(await measureChat(driver, sessionId, "live-same-process-warm-reopen", name));
   const surface = await ownedSurface(driver, sessionId);
-  await (await visible(driver, 'button[title="Switch to Terminal"]', surface)).click();
-  evidence.timings.push(await measureChat(driver, sessionId, "same-process-warm-chat", name, false));
   evidence.history = await exerciseHistory(driver, sessionId, fixture);
 
   // Preserve the original two tool-turn contracts, after all timing and lazy UI
@@ -444,7 +618,7 @@ test("chat transcript renders the per-turn change surface", { timeout: 600_000 }
   assert.ok((await surface.findElements(By.css('[data-testid="chat-work-group"]'))).length >= 1);
   const panel = await visible(driver, '[data-testid="tool-structured-edit"]', surface);
   assert.match(await panel.getText(), /Before\/after|New contents/);
-  evidence.live = redactObservation(await readObservation(driver));
+  evidence.live = await readObservation(driver);
   const presentations = (await readObservation(driver)).presentations;
   const preview = presentations.find((item) => item.admission);
   const canonical = preview && presentations.find((item) => item.at > preview.at && item.admission === null);
@@ -473,12 +647,15 @@ test("chat transcript renders the per-turn change surface", { timeout: 600_000 }
     "original driver child did not join before same-home restart");
   const saved = await open();
   await saved.session.driver.executeScript((id) => window.__chatAcceptance.bind(id), sessionId);
-  evidence.timings.push(await measureChat(saved.session.driver, sessionId, "saved-off-restart", name, true, false));
+  publishedState(sessionId, "small-mock-saved-off-cold-process");
+  evidence.timings.push(await measureChat(saved.session.driver, sessionId, "small-mock-saved-off-cold-process", name, false));
+  await closeTerminalSurface(saved.session.driver, sessionId);
+  evidence.timings.push(await measureChat(saved.session.driver, sessionId, "small-mock-saved-off-warm-reopen", name, false));
   const agents = await invokeTauri(saved.session.driver, "list_agents");
   assert.equal(agents.find((entry) => entry.session_id === sessionId)?.is_off, true, "saved session resumed");
   const after = await waitForProducer(saved.session.driver, harness, sessionId, fixture);
   assert.deepEqual(after, producer, "saved-Off changed the original provider inode/content");
-  evidence.saved = redactObservation(await readObservation(saved.session.driver));
-  evidence.timings = redactObservation(evidence.timings);
-  evidence.endpoints = "PASS: owned Mock normal UI only; no real-provider/OS-cold/PWA/whole-suite claim";
+  evidence.saved = await readObservation(saved.session.driver);
+  evidence.status = "OBSERVED_ENDPOINTS_CLOSURE_UNPROVEN";
+  evidence.endpoints = "OBSERVED: owned normal UI endpoints; final qualification still requires positive caller closure receipts";
 });

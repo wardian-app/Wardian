@@ -89,6 +89,21 @@ ownerless. This preserves an existing user ownership choice without making
 mount, focus, or registration implicit activation signals, and without letting
 registration order select a new owner.
 
+The desktop keeps that presentation's renderer hidden while its recovery
+handoff awaits acknowledgement. The hold starts before replacement geometry
+can queue a sizing frame and applies at both reveal entry and the final
+generation/write/layout check. An older recovery cannot clear a newer hold.
+Sizing, visibility re-entry, and renderer restoration resume pending recovery
+using the current renderer's metrics, with one handoff in flight. The existing
+reveal retry also checks for metrics that settle without a bounds change.
+Failed handoffs remain hidden until a current retry succeeds or current broker ownership
+makes the presentation a mirror. Switching to read-only retires the local
+handoff hold before waiting for a queued native update; disposal also retires
+the attempt. Passive and mirrored presentations remain
+renderable without owning the runtime, and legacy protocol fallback keeps its
+existing rendering path. This visibility fence does not establish provider
+input readiness.
+
 ## Ordered Stream and Recovery
 
 PTY reads and broker state changes are serialized by the per-session actor.

@@ -388,6 +388,9 @@ export function AgentChatView({
       <div
         className="chat-transcript-scroll min-h-0 flex-1 overflow-auto px-2.5 py-2.5"
         data-testid="agent-chat-scroll-region"
+        data-chat-page-scope={page ? JSON.stringify({ session: page.session_id,
+          conversation: page.conversation_id, generation: page.generation,
+          epoch: page.source_epoch, revision: page.revision, admission: page.recent_admission ?? null }) : undefined}
         onScroll={handleTranscriptScroll}
         ref={transcriptScrollRef}
       >
@@ -425,7 +428,9 @@ export function AgentChatView({
               </li>
             ) : null}
             {visibleChatRows.map((row) => (
-              <li key={`${sessionId}:${readingPresentation.rowEpoch}:${chatTranscriptRowKey(row)}`} data-chat-row-key={chatTranscriptRowKey(row)}>
+              <li key={`${sessionId}:${readingPresentation.rowEpoch}:${chatTranscriptRowKey(row)}`} data-chat-row-key={chatTranscriptRowKey(row)}
+                data-chat-row-identity={row.kind === "event" ? JSON.stringify({ id: row.event.id,
+                  members: row.event.metadata.chat_display_member_ids ?? null }) : undefined}>
                 <ChatTranscriptRow
                   agentIsWorking={showThinking}
                   isSubmitting={isSubmitting || readOnly}

@@ -27,6 +27,25 @@ and examples. Documentation tests run separately because `--all-targets` does
 not include them. The command-contract tests in `src/verify-ci.test.ts` pin
 this coverage and exercise invalid arguments and workflow declarations.
 
+## Frontend test phases
+
+The normal `npm run test` entry first runs the existing cache and turn-ended
+Node contracts, the bounded-runner contracts, and the app-free Chat Saved-fixture
+and harness-observer contracts. It then runs the complete
+`scripts/compiler-input-guard.test.mjs` suite in a dedicated Node child before
+starting Vitest and its jsdom workers. The child retains its existing Node
+executable, unfiltered arguments, cwd, inherited environment, UTF-8 capture,
+and 30-second deadline.
+
+The runner emits the full captured stdout and stderr, including partial output
+on a timeout, followed by structured spawn context. An execution error, signal,
+missing status, or nonzero status fails `npm run test` before Vitest and later
+verification commands. The other verification argument and workflow contracts
+remain in Vitest. No separate manual guard command is required.
+
+Earlier timeouts remain historical failures. Moving the required suite out of
+the DOM worker pool does not identify their original active case or cause.
+
 ## Protected compiler inputs
 
 Schedulers can supply `WARDIAN_PROTECTED_INPUT_MANIFESTS` as a JSON array of

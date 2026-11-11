@@ -141,6 +141,20 @@ describe("AgentChatView", () => {
     }
   });
 
+  it("exposes the actually admitted page and rendered member identity without replacing a null source epoch", async () => {
+    const page = olderReadPage({ source_epoch: null, progress: "ready", next_before: null,
+      events: [event({ id: "original-member", text: "Scope-bound readable body",
+        metadata: { chat_display_member_ids: ["original-member", "second-member"] } })] });
+    invokeMock.mockImplementation((command) => Promise.resolve(command === "load_agent_chat_page" ? page : []));
+    render(<AgentChatView sessionId="agent-1" readOnly deferModelDiscovery refreshIntervalMs={60_000} />);
+    const body = await screen.findByText("Scope-bound readable body");
+    expect(JSON.parse(screen.getByTestId("agent-chat-scroll-region").getAttribute("data-chat-page-scope")!))
+      .toEqual({ session: "agent-1", conversation: "conversation", generation: "generation", epoch: null,
+        revision: "saved-revision", admission: null });
+    expect(JSON.parse(body.closest("[data-chat-row-identity]")!.getAttribute("data-chat-row-identity")!))
+      .toEqual({ id: "original-member", members: ["original-member", "second-member"] });
+  });
+
   it("blocks every mutating Chat action on read-only surfaces while history remains readable", async () => {
     invokeMock.mockImplementation((command) => {
       if (command === "load_agent_chat_page") return Promise.resolve([event({

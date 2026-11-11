@@ -97,10 +97,22 @@ process.stdin.resume();
   await driver.wait(() => driver.findElements(By.css(
     `[data-testid="agent-terminal-host"][data-terminal-session-id="${agent.session_id}"]`,
   )).then(elements => elements.length > 0), 20_000);
+  const offRuntime = await driver.executeAsyncScript((sid, done) => {
+    window.__TAURI_INTERNALS__.invoke("request_terminal_snapshot", {
+      request: { session_id: sid },
+    }).then(
+      () => done({ exists: true }),
+      error => done({ exists: false, error: String(error) }),
+    );
+  }, agent.session_id);
+  assert.equal(offRuntime.exists, false, "The restored Off agent already had a runtime");
+  assert.match(offRuntime.error, /SessionNotFound/);
+  // An Off runtime cannot acknowledge activation. Its restored renderer stays
+  // hidden until the real resume below completes the ownership handshake.
   await driver.wait(() => driver.executeScript(sid => {
     const host = document.querySelector(`[data-testid="agent-terminal-host"][data-terminal-session-id="${sid}"]`);
-    return host && getComputedStyle(host).visibility === "visible";
-  }, agent.session_id), 20_000, "Off terminal did not finish its initial registration attempt");
+    return host?.querySelector(".xterm") && getComputedStyle(host).visibility === "hidden";
+  }, agent.session_id), 20_000, "Off terminal revealed before its runtime could acknowledge activation");
   await invoke(driver, "resume_agent", { sessionId: agent.session_id });
   // No tab/terminal click or DOM focus after resume. The selected view must
   // complete the normal ownership handshake and resize by itself.
