@@ -2,6 +2,10 @@
 
 use super::*;
 
+#[cfg(test)]
+mod resource_tests;
+mod resources;
+
 pub(super) async fn collect_agent_metrics_with_sampler(
     state: &AppState,
     sample_processes: impl FnOnce(
@@ -144,6 +148,12 @@ pub(super) async fn collect_agent_metrics_with_sampler(
                     }
                 }
             }
+
+            (cpu, mem, uptime) = resources::display_values(
+                &snap.current_status,
+                snap.process_id,
+                system_snapshot.as_ref().map(|_| (cpu, mem, uptime)),
+            );
 
             // Detect whether the agent process is still alive. If system sampling
             // is skipped, liveness is unknown and must not force a status change.
@@ -705,6 +715,12 @@ pub(super) async fn collect_agent_metrics_with_sampler(
     let mut follow_up =
         apply_provider_status_observations(state, &result.provider_statuses, &mut result.metrics)
             .await;
+    resources::retain_current_runtime_metrics(
+        state,
+        &result.provider_statuses,
+        &mut result.metrics,
+    )
+    .await;
     follow_up.background_captures = result.background_captures;
     let publish = publish_started.elapsed();
     if pre_pass.max(publish) >= TELEMETRY_SLOW_PASS_THRESHOLD {

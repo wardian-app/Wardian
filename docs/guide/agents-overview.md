@@ -121,6 +121,14 @@ notice provides a **Retry** action.
 
 Auto adds columns only when the pane can support their preferred working width and permits vertical overflow. Below that threshold it switches to a one-column roster without hiding agents. Grid always honors the user's chosen tracks and row sizing instead of silently changing the user's arrangement.
 
+## Resource Sampling Gaps
+
+If process sampling temporarily cannot finish, an agent retains its last sampled
+CPU, memory, and uptime for display. These values can be stale during the gap;
+they do not establish whether the process is alive. Fresh sampling resumes
+updates automatically. Replacement sessions do not inherit the previous
+runtime's resource values.
+
 ## Important Boundaries
 
 - Closing Agents closes only that Workbench presentation. Agents keep running.
