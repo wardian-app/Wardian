@@ -9,6 +9,8 @@ import { acquireHomeLock, HOME_LOCK_FILE } from "../lib/sessionHome.mjs";
 import { chatBodyWitness, savedFixturePlan, freshSavedHome, stageSavedFixture, verifySavedFixture } from "../lib/chatSavedFixture.mjs";
 
 const digest = (value) => createHash("sha256").update(value).digest("hex");
+const rosterContract = JSON.parse(fs.readFileSync(
+  new URL("../../crates/wardian-core/tests/fixtures/chat-saved-roster.json", import.meta.url), "utf8"));
 
 function fixture(t, body = "An independently declared recent body.") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "wardian-chat-saved-tests-"));
@@ -41,9 +43,9 @@ function fixture(t, body = "An independently declared recent body.") {
   leaves.push({ kind: "full-index", ...write("index.jsonl", jsonl({ conversation_id: "fixture-conversation" })) });
   leaves.push({ kind: "artifact:fixture.txt", ...write("archive/artifacts/fixture.txt", "original fixture artifact") });
   const config = write("selected-config.json", JSON.stringify({ session_id: "fixture-agent", session_name: "Saved Fixture",
-    resume_session: "fixture-native", provider: "codex", provider_config: { type: "codex" }, is_off: false,
+    resume_session: "fixture-native", provider: "codex", provider_config: { type: "codex" }, model: "fixture-model", is_off: false,
     folder: "unowned-original-folder", include_directories: ["unowned-original-include"],
-    custom_args: ["unowned-original-argument"], conversation_logging: "default", session_persistence: "persistent" }));
+    custom_args: ["unowned-original-argument"], conversation_logging: "default", session_persistence: "resume" }));
   const oracleFile = write("independent-oracle.json", JSON.stringify(oracle));
   const manifest = { fixture_root: source, source_drift: false, original_sources_changed: false,
     identity: { owner: "fixture-agent", conversation_id: "fixture-conversation", provider: "codex",
@@ -108,6 +110,18 @@ test("staging publishes normal startup settings and preserves Off archive identi
   assert.equal(staged.body, f.body); assert.equal(staged.eventId, "saved-public-event");
   verifySavedFixture(f.harness, staged);
   assert.throws(() => stageSavedFixture(f.harness, f.manifestPath, fresh), /precede/);
+});
+
+test("actual staged roster matches the shared production serde contract", (t) => {
+  const f = fixture(t);
+  const fresh = freshSavedHome(f.harness); f.claim();
+  const staged = stageSavedFixture(f.harness, f.manifestPath, fresh);
+  const configs = JSON.parse(fs.readFileSync(path.join(f.harness.isolatedHome, "settings", "state.json"), "utf8"));
+  assert.equal(configs.length, 1);
+  assert.equal(configs[0].folder, path.join(f.harness.isolatedHome, "saved-chat-workspace"));
+  // Only the owned workspace path varies; retain every serialized key and value.
+  assert.deepEqual(configs.map((config) => ({ ...config, folder: "<owned-workspace>" })), rosterContract);
+  verifySavedFixture(f.harness, staged);
 });
 
 test("existing startup settings cannot be overwritten after fresh-home ownership was claimed", (t) => {

@@ -982,6 +982,46 @@ mod tests {
     use crate::conversations::AgentConversationLoggingSetting;
     use crate::models::AgentSessionPersistenceOverride;
 
+    const SAVED_ROSTER_CONTRACT: &[u8] =
+        include_bytes!("../../tests/fixtures/chat-saved-roster.json");
+
+    #[test]
+    fn shared_saved_roster_deserializes_through_production_contract() {
+        let configs: Vec<AgentConfig> = serde_json::from_slice(SAVED_ROSTER_CONTRACT).unwrap();
+        assert_eq!(configs.len(), 1);
+        let config = &configs[0];
+        assert_eq!(config.session_id, "fixture-agent");
+        assert_eq!(config.session_name, "Saved Fixture");
+        assert_eq!(config.description, "");
+        assert_eq!(config.agent_class, "TestClass");
+        assert_eq!(config.folder, "<owned-workspace>");
+        assert_eq!(config.resume_session.as_deref(), Some("fixture-native"));
+        assert_eq!(config.model.as_deref(), Some("fixture-model"));
+        assert!(config.is_off);
+        assert_eq!(config.provider, "codex");
+        assert!(matches!(config.provider_config, ProviderConfig::Codex(_)));
+        assert_eq!(
+            config.session_persistence,
+            AgentSessionPersistenceOverride::Resume
+        );
+        assert_eq!(
+            config.conversation_logging,
+            AgentConversationLoggingSetting::Default
+        );
+    }
+
+    #[test]
+    fn shared_saved_roster_rejects_the_original_null_description() {
+        let mut roster: serde_json::Value = serde_json::from_slice(SAVED_ROSTER_CONTRACT).unwrap();
+        roster[0]["description"] = serde_json::Value::Null;
+        let bytes = serde_json::to_vec(&roster).unwrap();
+        let error = serde_json::from_slice::<Vec<AgentConfig>>(&bytes).unwrap_err();
+        assert!(error.is_data());
+        assert!(error
+            .to_string()
+            .contains("invalid type: null, expected a string"));
+    }
+
     #[test]
     fn pending_pi_identity_survives_saved_off_reload_but_confirmed_marker_does_not() {
         let mut config = AgentConfig {

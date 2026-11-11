@@ -232,7 +232,7 @@ export function stageSavedFixture(harness, manifestPath, fresh) {
     return { output: file.output, bytes: file.bytes.length, sha256: file.sha256, dev: String(stat.dev), ino: String(stat.ino) };
   });
   // Preserve provider/native/agent identity and policy, while isolating launch configuration.
-  const isolated = { session_id: config.session_id, session_name: config.session_name, description: null,
+  const isolated = { session_id: config.session_id, session_name: config.session_name, description: "",
     agent_class: "TestClass", folder: workspace, git_worktree: null, git_worktree_source: null, git_worktree_folder: null,
     resume_session: config.resume_session, is_off: true, provider: config.provider, debug: null, model: config.model,
     include_directories: [], system_include_directories: [], custom_args: null, session_persistence: config.session_persistence,
