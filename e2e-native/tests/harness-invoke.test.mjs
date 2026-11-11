@@ -35,12 +35,72 @@ function observationHarness(invoke, options = {}) {
   const scroll = { scrollTop: 100, scrollHeight: 1000, clientHeight: 500,
     getBoundingClientRect: () => ({ top: 0, bottom: 500, left: 0, right: 500 }),
     getAttribute: () => JSON.stringify(admitted) };
-  const surface = { getAttribute: () => "session", contains: (node) => node.owned === true,
-    querySelector: (selector) => selector.includes("Switch to Terminal") ? (chatMode ? {} : null)
-      : shown && chatMode ? scroll : null,
-    querySelectorAll: () => shown && chatMode ? [content] : [] };
+  const element = (attributes, parentElement = null) => ({
+    attributes, parentElement, isConnected: true, hidden: false,
+    style: { visibility: "visible", display: "block", opacity: "1" },
+    getAttribute(name) { return this.attributes[name] ?? null; },
+    getBoundingClientRect: () => ({ top: 0, bottom: 500, left: 0, right: 500, width: 500, height: 500 }),
+    matches(selector) {
+      return [...selector.matchAll(/\[([\w-]+)(?:="([^"]*)")?\]/g)]
+        .every(([, name, value]) => value === undefined ? this.getAttribute(name) !== null : this.getAttribute(name) === value);
+    },
+    closest(selector) {
+      if (this.matches?.(selector)) return this;
+      for (let node = this.parentElement; node; node = node.parentElement) if (node.matches?.(selector)) return node;
+      return null;
+    },
+    contains(node) {
+      if (typeof node.owned === "boolean") return node.owned;
+      for (let current = node; current; current = current.parentElement) if (current === this) return true;
+      return false;
+    },
+    isDisplayed() {
+      if (!this.isConnected || this.hidden || this.style.display === "none" || this.style.visibility === "hidden") return false;
+      for (let node = this.parentElement; node; node = node.parentElement) {
+        if (!node.isConnected || node.hidden || node.style.display === "none" || node.style.visibility === "hidden") return false;
+      }
+      return true;
+    },
+  });
+  const host = element({ "data-testid": "workbench-host", "data-reset-pending": "false" });
+  const routes = [];
+  const addContainer = (kind = "agent-session", owner = "session") => {
+    const surfaceId = `surface-${routes.length}`;
+    const tab = element({ id: `tab-${surfaceId}`, role: "tab", "aria-selected": "true",
+      "data-surface-id": surfaceId, "data-surface-type": kind, "data-resource-key": owner,
+      "aria-controls": `panel-${surfaceId}` }, host);
+    const tabpanel = element({ id: `panel-${surfaceId}`, role: "tabpanel", "aria-labelledby": tab.getAttribute("id") }, host);
+    const panel = element({ "data-testid": "surface-panel", "data-surface-id": surfaceId,
+      "data-surface-type": kind, "data-resource-key": owner }, tabpanel);
+    const semantic = element({ "data-testid": kind === "agents-overview" ? "agents-overview-surface" : "agent-session-surface",
+      "data-surface-id": surfaceId, "data-resource-key": owner }, panel);
+    const root = kind === "agents-overview" ? element({ "data-agent-grid-card-id": owner }, semantic) : semantic;
+    root.querySelector = (selector) => selector.includes("Switch to Terminal") ? (chatMode ? {} : null)
+      : shown && chatMode ? scroll : null;
+    root.querySelectorAll = () => shown && chatMode ? [content] : [];
+    root.findElement = async (selector) => {
+      assert.equal(selector, "ancestor::*[@role='tabpanel'][1]");
+      return root.closest('[role="tabpanel"]');
+    };
+    const close = element({ "data-tab-close": "" }, tab);
+    close.click = async () => { tab.closed = true; tab.isConnected = false; tabpanel.isConnected = false; root.isConnected = false; };
+    tab.findElements = async (selector) => close.matches(selector) ? [close] : [];
+    const route = { root, semantic, panel, tabpanel, tab, host, kind };
+    routes.push(route);
+    return route;
+  };
+  let route = addContainer(options.route);
+  content.parentElement = route.root;
+  scroll.parentElement = route.root;
   const document = { documentElement: {}, activeElement: null, visibilityState: "visible",
-    querySelectorAll: () => [surface], addEventListener: (type, callback) => listeners.set(type, callback),
+    querySelectorAll: (selector) => {
+      const nodes = selector.includes('role="tab"') ? routes.map((item) => item.tab)
+        : selector.includes('data-testid="workbench-host"') ? [host] : routes.map((item) => item.root);
+      return nodes.filter((node) => selector.split(",").some((part) => node.matches(part)));
+    },
+    getElementById: (id) => routes.flatMap((item) => [item.tab, item.tabpanel])
+      .find((node) => node.getAttribute("id") === id) ?? null,
+    addEventListener: (type, callback) => listeners.set(type, callback),
     createTreeWalker: () => {
       let offset = 0;
       const nodes = (options.textSegments ?? [content.textContent]).map((text) => {
@@ -65,13 +125,20 @@ function observationHarness(invoke, options = {}) {
     performance: { now: () => clock }, innerHeight: 500, innerWidth: 500,
     MutationObserver: class { observe() {} }, requestAnimationFrame: (callback) => frames.push(callback) };
   vm.runInNewContext(`${source.slice(start, end)}\ninstallChatObservation(config);`,
-    { ...context, getComputedStyle: () => ({ visibility: "visible", display: "block", opacity: "1" }),
+    { ...context, getComputedStyle: (node) => node.style ?? { visibility: "visible", display: "block", opacity: "1" },
       config: { name: "Owned", body: rawBody, witness: options.witness, probe: "native-input-probe" } });
   const observer = context.window.__chatAcceptance;
   observer.bind("session");
   observer.arm("cold");
   return {
-    observer, document, content, wrapper: context.window.__TAURI_INTERNALS__.invoke,
+    observer, document, content, route, window: context.window, wrapper: context.window.__TAURI_INTERNALS__.invoke,
+    addContainer,
+    replaceContainer() {
+      route.root.isConnected = false;
+      route = addContainer(route.kind);
+      content.parentElement = route.root; scroll.parentElement = route.root;
+      return route;
+    },
     clock(value) { clock = value; }, shown(value) { shown = value; }, rectangle(value) { rect = value; },
     needleRectangle(value) { needleRect = value; }, mode(value) { chatMode = value === "chat"; },
     overflow(value) { scroll.scrollHeight = value ? 1000 : scroll.clientHeight; },
@@ -114,6 +181,97 @@ function observationHarness(invoke, options = {}) {
   };
 }
 
+/** Run the actual maintained driver selector against the same observer/DOM. */
+function actualSurfaceOperations(harness) {
+  const source = fs.readFileSync(new URL("./chat-turn-change-native.test.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("async function visible(driver, selector");
+  const end = source.indexOf("/** Wait only for the real raw producer", start);
+  const closeStart = source.indexOf("async function closeTerminalSurface(driver,");
+  const closeEnd = source.indexOf("function canonicalHistoryReceipts(", closeStart);
+  assert.ok(start >= 0 && end > start && closeStart >= 0 && closeEnd > closeStart);
+  const driver = {
+    findElements: async (selector) => harness.document.querySelectorAll(selector),
+    findElement: async (id) => harness.document.getElementById(id),
+    executeScript: async (script, ...args) => script(...args),
+    wait: async (predicate, timeout) => {
+      assert.equal(timeout, 10_000);
+      const value = await predicate();
+      if (!value) throw new Error("owned container unavailable");
+      return value;
+    },
+  };
+  return vm.runInNewContext(`${source.slice(start, end)}\n${source.slice(closeStart, closeEnd)}
+    ({ lookup: () => ownedSurface(driver, "session"), close: () => closeTerminalSurface(driver, "session") });`,
+    { driver, assert, window: harness.window, By: { css: (selector) => selector, xpath: (selector) => selector, id: (id) => id } });
+}
+
+const actualOwnedSurface = (harness) => actualSurfaceOperations(harness).lookup();
+
+test("normal Roster Overview and actual AgentSession share the maintained driver and observer container", async () => {
+  for (const route of ["agents-overview", "agent-session"]) {
+    const harness = observationHarness(() => Promise.resolve(actualPage()), { route });
+    assert.equal(await actualOwnedSurface(harness), harness.route.root);
+    harness.mode("chat"); harness.clock(100); harness.roster();
+    harness.clock(110); await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+    harness.observer.sample(); harness.frame(); harness.frame();
+    assert.equal(harness.observer.state.phase.rosterAt, 100);
+    assert.equal(harness.observer.state.phase.paintAt, 142);
+    harness.input(); harness.frame(); harness.frame();
+    assert.equal(harness.observer.state.phase.usableAt, 174);
+  }
+});
+
+test("maintained surface oracle rejects foreign hidden detached stale and ambiguous containers", async () => {
+  for (const route of ["agents-overview", "agent-session"]) {
+    for (const change of [
+      (h) => { h.route.root.attributes[route === "agents-overview" ? "data-agent-grid-card-id" : "data-resource-key"] = "foreign"; },
+      (h) => { h.route.root.style.visibility = "hidden"; },
+      (h) => { h.route.root.hidden = true; },
+      (h) => { h.document.visibilityState = "hidden"; },
+      (h) => { h.route.root.isConnected = false; },
+      (h) => { h.route.tab.attributes["aria-selected"] = "false"; },
+      (h) => { h.route.tab.attributes["aria-controls"] = "stale-panel"; },
+      (h) => { h.route.panel.attributes["data-surface-id"] = "foreign-surface"; },
+      (h) => { h.addContainer(route); },
+      (h) => { h.route.host.attributes["data-reset-pending"] = "true"; },
+    ]) {
+      const harness = observationHarness(() => Promise.resolve(actualPage()), { route });
+      change(harness);
+      await assert.rejects(actualOwnedSurface(harness));
+      harness.click(); await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+      harness.observer.sample(); harness.frame(); harness.frame();
+      assert.equal(harness.observer.state.phase.paintAt, null);
+    }
+  }
+});
+
+test("a changed container cannot reuse body and scroll nodes across either two-frame witness", async () => {
+  for (const boundary of ["paint", "input"]) {
+    const harness = observationHarness(() => Promise.resolve(actualPage()));
+    harness.click(); await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+    harness.observer.sample();
+    if (boundary === "input") { harness.frame(); harness.frame(); harness.input(); }
+    harness.frame(); harness.replaceContainer(); harness.frame();
+    assert.equal(harness.observer.state.phase[boundary === "paint" ? "paintAt" : "usableAt"], null);
+  }
+});
+
+test("the maintained close route uses the actual parent tab for Overview and AgentSession before normal reopen", async () => {
+  for (const route of ["agents-overview", "agent-session"]) {
+    const harness = observationHarness(() => Promise.resolve(actualPage()), { route });
+    const operations = actualSurfaceOperations(harness);
+    await operations.close();
+    assert.equal(harness.route.tab.closed, true);
+    const reopened = harness.replaceContainer();
+    assert.equal(await operations.lookup(), reopened.root);
+    harness.observer.arm("warm"); harness.mode("chat"); harness.clock(1000); harness.roster();
+    await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+    harness.observer.sample(); harness.frame(); harness.frame();
+    assert.equal(harness.observer.state.phase.rosterAt, 1000);
+    assert.equal(harness.observer.state.phase.paintAt, 1032);
+  }
+});
+
 function actualPage(overrides = {}) {
   return { session_id: "session", conversation_id: "conversation", generation: "generation", source_epoch: "epoch",
     revision: "opaque-revision", recent_admission: null, next_before: null, progress: "ready",
@@ -139,7 +297,7 @@ function actualRedaction(value) {
 }
 
 /** Execute the maintained failure callback without importing its native case. */
-function rosterDiagnosticHarness(invoke, roster = null) {
+function rosterDiagnosticHarness(invoke, roster = null, observer = null) {
   const source = fs.readFileSync(new URL("./chat-turn-change-native.test.mjs", import.meta.url), "utf8");
   const start = source.indexOf("function captureRosterDiagnostics(sessionId, name, done) {");
   const end = source.indexOf("async function visible(driver, selector", start);
@@ -148,7 +306,8 @@ function rosterDiagnosticHarness(invoke, roster = null) {
   let completions = 0;
   const result = new Promise((resolve) => {
     vm.runInNewContext(`${source.slice(start, end)}\ncaptureRosterDiagnostics("session", "Owned Saved", done);`, {
-      window: { __TAURI_INTERNALS__: { invoke }, getComputedStyle: () => ({ display: "block", visibility: "visible" }) },
+      window: { __TAURI_INTERNALS__: { invoke }, __chatAcceptance: observer,
+        getComputedStyle: () => ({ display: "block", visibility: "visible" }) },
       document: { querySelector: () => roster },
       done: (value) => { completions += 1; resolve(value); },
       setTimeout: (callback, ms) => { assert.equal(ms, 2_000); expire = callback; return 1; },
@@ -220,7 +379,7 @@ test("Roster metadata records rejection, malformed registry and a bounded timeou
   assert.equal(pending.completions(), 1);
 });
 
-test("measurement captures metadata only on Roster failure and preserves its original rejection", async () => {
+test("measurement captures click and surface failures only after rejection, preserving the original error", async () => {
   const original = new Error("original Roster lookup failed");
   for (const captureFails of [false, true]) {
     const evidence = { rosterFailures: [] };
@@ -237,12 +396,36 @@ test("measurement captures metadata only on Roster failure and preserves its ori
   }
   let captures = 0;
   const afterActivation = new Error("later surface failure");
+  const evidence = { rosterFailures: [] };
   await assert.rejects(rosterMeasurement({
     executeScript: async () => {},
     executeAsyncScript: async () => { captures += 1; },
-  }, { rosterFailures: [] }, async () => ({ click: async () => {} }),
+  }, evidence, async () => ({ click: async () => {} }),
   async () => { throw afterActivation; }), (error) => error === afterActivation);
-  assert.equal(captures, 0);
+  assert.equal(captures, 1);
+  assert.equal(evidence.rosterFailures[0].stage, "surface-resolution");
+});
+
+test("failure-only container metadata is bounded and contains identities and visibility without body text", async () => {
+  const harness = observationHarness(() => Promise.resolve(actualPage()), { route: "agents-overview" });
+  const metadata = await rosterDiagnosticHarness(async () => [], null, harness.observer).result;
+  assert.equal(metadata.containers.status, "OBSERVED_CONTAINERS");
+  assert.equal(metadata.containers.count, 1);
+  assert.equal(metadata.containers.containers[0].eligible, true);
+  assert.equal(metadata.containers.ownedMatchCount, 1);
+  assert.equal(metadata.containers.containers[0].kind, "agents-overview");
+  assert.equal(JSON.stringify(metadata).includes(chatAcceptanceFixture().latestBody), false);
+  const redacted = actualRedaction(metadata);
+  assert.equal(redacted.containers.status, "OBSERVED_CONTAINERS");
+  assert.notEqual(redacted.containers.containers[0].owner, "session");
+  for (let index = 0; index < 70; index += 1) harness.addContainer("agents-overview", `foreign-${index}`);
+  const bounded = await rosterDiagnosticHarness(async () => [], null, harness.observer).result;
+  assert.equal(bounded.containers.truncated, true);
+  assert.equal(bounded.containers.containers.length, 64);
+  harness.addContainer("agents-overview");
+  const ambiguous = await rosterDiagnosticHarness(async () => [], null, harness.observer).result;
+  assert.equal(ambiguous.containers.ambiguous, true);
+  assert.equal(ambiguous.containers.ownedMatchCount, 2);
 });
 
 function driverResult(result) {

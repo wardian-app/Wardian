@@ -780,14 +780,22 @@ The lab fails the run for obvious Wardian-side evidence problems before manual s
 ## Windows WebView2 profile isolation
 
 The maintained `chat-turn-change-native` case uses the opt-in Mock
-`chat_acceptance` scenario. It opens the ordinary Roster row and owned session
-surface with WebDriver clicks before any transcript/page prewarm. A passive IPC
+`chat_acceptance` scenario. Its ordinary plain Roster click reveals the agent in
+Agents Overview; explicit Open is a separate route that can create an AgentSession.
+The driver and passive observer share one exact-owner container resolver for the
+visible Overview card or actual AgentSession. It verifies the current workbench,
+surface and selected tab/tabpanel linkage, and rejects hidden, detached, stale,
+foreign or ambiguous containers. Closing and reopening uses that actual parent
+tab and the normal Roster action. No context-menu Open substitutes for the timed
+primary click, and no transcript/page prewarm occurs. A passive IPC
 observer retains the original Promise and records actual scope and row identity.
 Passive markers on the existing Chat scroll region and message row expose the
 page actually admitted by the consumer and its rendered event/member identity.
 The observer matches these markers to the actual response, including conversation,
 generation, nullable source epoch, opaque window revision and admission. A returned
-response alone cannot qualify an unadmitted page. Any display-slot alias requires
+response alone cannot qualify an unadmitted page. Both animation-frame witnesses
+also retain the same actual container, panel and tab nodes; reused body/scroll
+nodes cannot hide a container replacement. Any display-slot alias requires
 the response's actual alias proof.
 Readable timing retains the independent full raw assistant body/hash in the RPC
 proof. Before App startup, the existing Markdown parser prepares a bounded
@@ -809,6 +817,11 @@ scope through two animation frames. Live cold/warm and small Mock Saved-Off cold
 reopens are separate measurements. Each reopen uses the normal Roster action.
 Raw log inspection warms the
 filesystem, so these measurements do not establish OS-cold performance.
+
+Roster click, container lookup and mode lookup failures retain bounded failure-only
+registry and container/tab ownership/visibility metadata, including ambiguity.
+This capture reads no Chat body, performs no prewarm and preserves the original
+exception and unmeasured endpoints even if the secondary capture fails.
 
 After timing, genuine wheel/button actions load Older pages through opaque
 cursors and expand the declared 60,000-byte body. The fixture preserves both

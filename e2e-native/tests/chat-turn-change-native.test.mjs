@@ -26,8 +26,45 @@ const { chatAcceptanceFixture } = createRequire(import.meta.url)("../../scripts/
 function installChatObservation(config) {
   const state = { owner: null, phase: null, phases: [], calls: [], receipts: [], presentations: [], errors: [], intents: [], captureCostMs: 0 };
   const bounded = (value) => typeof value === "string" && value.length <= 1024 ? value : null;
-  const surface = () => Array.from(document.querySelectorAll('[data-testid="agent-session-surface"]'))
-    .find((node) => node.getAttribute("data-resource-key") === state.owner);
+  const containerNodes = () => Array.from(document.querySelectorAll(
+    '[data-testid="agent-session-surface"], [data-agent-grid-card-id]'));
+  const inspectContainer = (node) => {
+    const kind = node.getAttribute("data-testid") === "agent-session-surface" ? "agent-session" : "agents-overview";
+    const owner = bounded(node.getAttribute(kind === "agent-session" ? "data-resource-key" : "data-agent-grid-card-id"));
+    const semantic = kind === "agent-session" ? node : node.closest('[data-testid="agents-overview-surface"]');
+    const panel = semantic?.closest('[data-testid="surface-panel"]');
+    const tabpanel = panel?.closest('[role="tabpanel"]');
+    const tabId = bounded(tabpanel?.getAttribute("aria-labelledby"));
+    const tab = tabId ? document.getElementById(tabId) : null;
+    const host = panel?.closest('[data-testid="workbench-host"]');
+    const surfaceId = bounded(semantic?.getAttribute("data-surface-id"));
+    const hosts = Array.from(document.querySelectorAll('[data-testid="workbench-host"]'))
+      .filter((item) => item.isConnected && readable(item));
+    const rect = node.getBoundingClientRect();
+    const visible = document.visibilityState === "visible" && [node, semantic, panel, tabpanel, tab, host]
+      .every((item) => item?.isConnected && !item.hidden && readable(item))
+      && rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.bottom > 0
+      && rect.left < innerWidth && rect.top < innerHeight;
+    const valid = Boolean(bounded(state.owner) && owner === state.owner && surfaceId && visible
+      && hosts.length === 1 && host === hosts[0] && host.contains(node) && host.contains(tab)
+      && !host.inert && host.getAttribute("data-reset-pending") !== "true"
+      && panel.getAttribute("data-surface-id") === surfaceId && panel.getAttribute("data-surface-type") === kind
+      && tab.getAttribute("role") === "tab" && tab.getAttribute("aria-selected") === "true"
+      && tab.getAttribute("aria-controls") === tabpanel.getAttribute("id")
+      && tab.getAttribute("data-surface-id") === surfaceId && tab.getAttribute("data-surface-type") === kind
+      && (kind !== "agent-session" || (panel.getAttribute("data-resource-key") === owner
+        && tab.getAttribute("data-resource-key") === owner)));
+    return { node, panel, tabpanel, tab, host, valid,
+      identity: { kind, owner, surfaceId, panelId: bounded(tabpanel?.getAttribute("id")), tabId },
+      visible, selected: tab?.getAttribute("aria-selected") === "true" };
+  };
+  const ownedContainers = () => containerNodes().filter((node) => node.getAttribute("data-resource-key") === state.owner
+      || node.getAttribute("data-agent-grid-card-id") === state.owner).map(inspectContainer).filter((item) => item.valid);
+  const ownedContainer = () => {
+    const matches = ownedContainers();
+    return matches.length === 1 ? matches[0] : null;
+  };
+  const surface = () => ownedContainer()?.node ?? null;
   const now = () => performance.now();
   const members = (value) => Array.isArray(value) && value.length <= 384
     && value.every((id) => bounded(id)) ? [...value] : null;
@@ -38,6 +75,7 @@ function installChatObservation(config) {
     ? JSON.stringify([scope.session, scope.conversation, scope.generation, scope.epoch, scope.revision, scope.admission]) : null;
   const parse = (value) => { try { return JSON.parse(value); } catch { return null; } };
   const sameBody = (left, right) => left && right && left.node === right.node && left.scroll === right.scroll
+    && ["node", "panel", "tabpanel", "tab", "host"].every((key) => left.container[key] === right.container[key])
     && JSON.stringify({ ...left.evidence, receiptAt: null }) === JSON.stringify({ ...right.evidence, receiptAt: null });
   let inputEvidence = null;
   let wheelEvidence = null;
@@ -134,7 +172,8 @@ function installChatObservation(config) {
   };
   const visibleBody = () => {
     if (document.visibilityState !== "visible") return null;
-    const root = surface();
+    const container = ownedContainer();
+    const root = container?.node;
     const scroll = root?.querySelector('[data-testid="agent-chat-scroll-region"]');
     if (!scroll || !root.querySelector('button[title="Switch to Terminal"]')) return null;
     // Read the consumer's admitted page, not merely the last returned DTO.
@@ -163,7 +202,8 @@ function installChatObservation(config) {
       if (!rects.some((rect) => rect.width > 0 && rect.height > 0
         && rect.bottom > Math.max(0, region.top) && rect.top < Math.min(innerHeight, region.bottom)
         && rect.right > Math.max(0, region.left) && rect.left < Math.min(innerWidth, region.right))) continue;
-      return { node: content, scroll, evidence: { key, eventId: identity.id, members: identity.members,
+      return { node: content, scroll, container, evidence: { key, eventId: identity.id, members: identity.members,
+        container: container.identity,
         session: receipt.session, receiptAt: receipt.at, window: receipt.revision, revision: receipt.revision, generation: receipt.generation,
         epoch: receipt.epoch, conversation: receipt.conversation, admission: receipt.admission,
         witnessKind: witness.kind, bodySha256: witness.bodySha256 ?? null,
@@ -268,6 +308,21 @@ function installChatObservation(config) {
     attributes: true, attributeFilter: ["data-chat-page-scope", "data-chat-row-identity"] });
   window.__chatAcceptance = {
     state,
+    container(owner) {
+      if (owner !== state.owner) throw new Error("container owner does not match bound observation");
+      return surface();
+    },
+    describeContainers() {
+      const nodes = containerNodes();
+      const matches = ownedContainers();
+      return { status: "OBSERVED_CONTAINERS", count: nodes.length, truncated: nodes.length > 64,
+        ownedMatchCount: matches.length, ambiguous: matches.length > 1,
+        containers: nodes.slice(0, 64).map((node) => {
+          const item = inspectContainer(node);
+          return { ...item.identity, connected: node.isConnected, visible: item.visible,
+            selected: item.selected, eligible: item.valid, expectedOwner: item.identity.owner === state.owner };
+        }) };
+    },
     bind(owner) { if (state.owner && state.owner !== owner) throw new Error("owner cannot change"); state.owner = owner; },
     arm(label) {
       if (state.phases.length >= 4) throw new Error("measurement phase bound exceeded");
@@ -302,7 +357,7 @@ function withEnv(t, key, value) {
 /** Failure-only metadata; layout boxes are diagnostics, never a paint witness. */
 function captureRosterDiagnostics(sessionId, name, done) {
   const bounded = (value) => typeof value === "string" ? value.slice(0, 160) : null;
-  const result = { roster: null, registry: null };
+  const result = { roster: null, registry: null, containers: null };
   let finished = false;
   let timer;
   const finish = (registry) => {
@@ -331,6 +386,11 @@ function captureRosterDiagnostics(sessionId, name, done) {
       heading: bounded(roster?.querySelector("h2")?.textContent) };
   } catch (error) {
     result.roster = { error: bounded(String(error)) };
+  }
+  try {
+    result.containers = window.__chatAcceptance?.describeContainers?.() ?? { status: "OBSERVER_UNAVAILABLE" };
+  } catch (error) {
+    result.containers = { status: "CONTAINER_CAPTURE_ERROR", error: bounded(String(error)) };
   }
   // Bound the passive IPC inside the WebView so a late result cannot replace
   // a timeout or leave this diagnostic callback waiting for the backend.
@@ -362,7 +422,8 @@ async function visible(driver, selector, within = driver) {
 }
 
 async function ownedSurface(driver, sessionId) {
-  return visible(driver, `[data-testid="agent-session-surface"][data-resource-key="${sessionId}"]`);
+  return driver.wait(() => driver.executeScript((owner) => window.__chatAcceptance.container(owner), sessionId),
+    10_000, "owned visible current Chat container missing or ambiguous");
 }
 
 /** Wait only for the real raw producer, never a transcript/index/admission IPC. */
@@ -391,19 +452,24 @@ async function waitForProducer(driver, harness, sessionId, fixture) {
 async function measureChat(driver, sessionId, label, name, evidence, keyboard = true) {
   await driver.executeScript((phase) => window.__chatAcceptance.arm(phase), label);
   const deadline = Date.now() + 5_000;
+  let surface;
+  let mode;
+  let stage = "roster-click";
   try {
     await (await visible(driver, `[aria-label="Agent ${name}"]`)).click();
+    stage = "surface-resolution";
+    surface = await ownedSurface(driver, sessionId);
+    stage = "mode-resolution";
+    mode = await visible(driver, 'button[title="Switch to Chat"], button[title="Switch to Terminal"]', surface);
   } catch (error) {
     try {
       const metadata = await driver.executeAsyncScript(captureRosterDiagnostics, sessionId, name);
-      evidence.rosterFailures.push({ label, metadata });
+      evidence.rosterFailures.push({ label, stage, metadata });
     } catch (captureError) {
-      evidence.rosterFailures.push({ label, status: "CAPTURE_FAILED", error: String(captureError).slice(0, 160) });
+      evidence.rosterFailures.push({ label, stage, status: "CAPTURE_FAILED", error: String(captureError).slice(0, 160) });
     }
     throw error;
   }
-  const surface = await ownedSurface(driver, sessionId);
-  const mode = await visible(driver, 'button[title="Switch to Chat"], button[title="Switch to Terminal"]', surface);
   const explicit = await mode.getAttribute("title") === "Switch to Chat";
   if (keyboard) assert.ok(explicit, "live Terminal measurement requires its real Chat toggle");
   if (explicit) await mode.click();
@@ -557,7 +623,9 @@ function redactObservation(value) {
       || (key === "exposureKind" && ["automatic", "explicit-toggle"].includes(item))
       || (key === "witnessKind" && ["whole", "needle"].includes(item))
       || (key === "status" && ["UNPROVEN", "OBSERVED_ENDPOINTS_CLOSURE_UNPROVEN",
-        "OBSERVED_REGISTRY", "REGISTRY_TIMEOUT", "MALFORMED_REGISTRY", "REGISTRY_ERROR", "CAPTURE_FAILED"].includes(item))
+        "OBSERVED_REGISTRY", "REGISTRY_TIMEOUT", "MALFORMED_REGISTRY", "REGISTRY_ERROR", "CAPTURE_FAILED",
+        "OBSERVED_CONTAINERS", "OBSERVER_UNAVAILABLE", "CONTAINER_CAPTURE_ERROR"].includes(item))
+      || (key === "stage" && ["roster-click", "surface-resolution", "mode-resolution"].includes(item))
       || (/Sha256$/.test(key) && typeof item === "string" && /^[a-f0-9]{64}$/i.test(item))
       || (["agentPolicy", "globalPolicy", "effectivePolicy"].includes(key) && ["default", "enabled", "disabled"].includes(item));
     result[key] = typeof item === "string" && publicToken ? item : redactObservation(item);
