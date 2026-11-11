@@ -134,13 +134,13 @@ Set-Location <absolute-workspace-path>
 Get-Location
 ```
 
-Use the resulting absolute path in the spawn form. Do not use a private credential folder or a provider configuration directory as the workspace.
+Use the resulting absolute path in the spawn form's **Workspace Path** field, or use **Choose workspace folder** to select it. The empty field shows **Enter workspace path**; this guidance is not a default workspace. Do not use a private credential folder or a provider configuration directory as the workspace.
 
 ## 6. Spawn the First Agent
 
 Open the **Agent Configuration** rail item and fill in the spawn form:
 
-![Wardian spawn agent form with agent name, class, workspace, provider, and Spawn Agent controls](../assets/screenshots/spawn-agent/spawn-form.png)
+![Wardian spawn agent form with agent name, class, portable workspace guidance, provider, and Spawn Agent controls](../assets/screenshots/spawn-agent/spawn-form.png)
 
 1. Choose an agent class, such as **Coder** or **Researcher**. Classes are reusable blueprints; see [Class Management](./class-management.md) for the model and the [Library](./library.md#3-classes) when you want to inspect or customize them.
 2. Select the provider you installed and authenticated.
