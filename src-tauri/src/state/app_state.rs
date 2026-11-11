@@ -76,6 +76,8 @@ pub struct AppState {
     // then `agents` holds only part of the roster; see `commands::agent_roster`.
     pub agent_roster_restored: std::sync::atomic::AtomicBool,
     pub agent_name_reservations: Mutex<HashSet<String>>,
+    /// Durable spawn workers run independently of control-client lifetimes.
+    pub spawn_operation_slots: Arc<tokio::sync::Semaphore>,
     pub agent_lifecycle_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub delivery_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub status_observation_sequences: std::sync::Mutex<HashMap<String, u64>>,
@@ -522,6 +524,7 @@ impl Default for AppState {
             agent_order: Mutex::new(Vec::new()),
             agent_roster_restored: std::sync::atomic::AtomicBool::new(false),
             agent_name_reservations: Mutex::new(HashSet::new()),
+            spawn_operation_slots: Arc::new(tokio::sync::Semaphore::new(0)),
             agent_lifecycle_locks: Mutex::new(HashMap::new()),
             delivery_locks: Mutex::new(HashMap::new()),
             status_observation_sequences: std::sync::Mutex::new(HashMap::new()),

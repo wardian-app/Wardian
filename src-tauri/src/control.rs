@@ -1,4 +1,5 @@
 mod agent_lifecycle;
+mod agent_spawn;
 mod pi_startup;
 use pi_startup::pi_output_has_startup_ready_prompt;
 
@@ -398,10 +399,10 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             confirm_name,
             force,
         } => {
-            let uuid = resolve_target_uuid(app, &target)
-                .await
-                .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
             let state = app.state::<AppState>();
+            let uuid = agent_spawn::resolve_removal_uuid(&state, &target)
+                .await?
+                .ok_or_else(|| ControlError::not_found(format!("agent not found: {target}")))?;
             crate::commands::agent::delete_agent(uuid, confirm_name, force, state, app.clone())
                 .await
                 .map_err(ControlError::bad_request)?;
@@ -444,33 +445,11 @@ async fn dispatch_request(line: &str, app: &AppHandle) -> Result<String, Control
             force_refresh,
         } => ok_json(&crate::providers::models::model_catalog(&provider, force_refresh).await),
 
-        ControlRequest::AgentSpawn {
-            provider,
-            class,
-            name,
-            workspace,
-            model,
-            reasoning_effort,
-        } => {
-            use crate::commands::agent::spawn_agent;
-            let provider = crate::commands::agent::canonical_agent_provider_name(&provider)
-                .map_err(ControlError::bad_request)?;
-            let class = crate::commands::agent::canonical_agent_class_name(&class)
-                .map_err(ControlError::not_found)?;
-            let req = build_spawn_agent_request(
-                provider,
-                class,
-                name,
-                workspace,
-                model,
-                reasoning_effort,
-            )
-            .map_err(ControlError::bad_request)?;
-            let config = spawn_agent(req, app.state::<AppState>(), app.clone())
-                .await
-                .map_err(ControlError::request_failed)?;
-            let identity = agent_config_to_identity(&config, app).await;
-            ok_json(&AgentResponse::new(identity))
+        request @ (ControlRequest::AgentSpawn { .. }
+        | ControlRequest::AgentSpawnAsync { .. }
+        | ControlRequest::AgentSpawnOperationGet { .. }
+        | ControlRequest::AgentSpawnOperationWait { .. }) => {
+            agent_spawn::dispatch(request, app).await
         }
 
         ControlRequest::AgentUpdate {
@@ -4015,7 +3994,7 @@ impl ControlError {
         }
     }
 
-    fn not_found(message: impl Into<String>) -> Self {
+    pub(crate) fn not_found(message: impl Into<String>) -> Self {
         Self {
             code: "not_found",
             message: message.into(),
@@ -4031,7 +4010,7 @@ impl ControlError {
         }
     }
 
-    fn coded(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn coded(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),

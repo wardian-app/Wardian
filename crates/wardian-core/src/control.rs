@@ -61,6 +61,18 @@ pub enum ControlRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<String>,
     },
+    /// Admit a durable spawn with a client-known idempotency key.
+    AgentSpawnAsync {
+        operation_id: String,
+        request: crate::agent_spawn::AgentSpawnRequest,
+    },
+    AgentSpawnOperationGet {
+        operation_id: String,
+    },
+    AgentSpawnOperationWait {
+        operation_id: String,
+        timeout_ms: u64,
+    },
     AgentUpdate {
         target: String,
         class: Option<String>,
@@ -459,6 +471,35 @@ pub enum MailboxDeliveryPhase {
 pub struct AgentListResponse {
     pub schema: u8,
     pub agents: Vec<AgentIdentity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSpawnAdmissionResponse {
+    pub schema: u8,
+    pub operation: crate::agent_spawn::AgentSpawnOperation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSpawnOperationResponse {
+    pub schema: u8,
+    pub operation: crate::agent_spawn::AgentSpawnOperation,
+    pub timed_out: bool,
+    #[serde(default)]
+    pub availability: AgentSpawnAvailability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_agent: Option<AgentIdentity>,
+}
+
+/// Current authoritative roster evidence, independent of historical registration.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSpawnAvailability {
+    NotRegistered,
+    Current,
+    Missing,
+    Incompatible,
+    #[default]
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1193,6 +1234,44 @@ mod tests {
         assert!(json.contains(r#""class":"Reviewer""#));
         assert!(json.contains(r#""model":"gpt-5.6-sol""#));
         assert!(json.contains(r#""reasoning_effort":"high""#));
+    }
+
+    #[test]
+    fn durable_spawn_protocol_has_separate_admission_get_and_wait_commands() {
+        let request = crate::agent_spawn::AgentSpawnRequest {
+            provider: "codex".into(),
+            class: "Reviewer".into(),
+            name: Some("reviewer-a1".into()),
+            workspace: Some("<workspace>".into()),
+            model: None,
+            reasoning_effort: None,
+        };
+        let admission = ControlRequest::AgentSpawnAsync {
+            operation_id: "135f2570-fb38-4b35-9af9-dd9e576e8cc1".into(),
+            request,
+        };
+        let json = serde_json::to_string(&admission).unwrap();
+        assert!(json.contains(r#""command":"agent_spawn_async""#));
+        assert!(json.contains(r#""operation_id":"135f2570-fb38-4b35-9af9-dd9e576e8cc1""#));
+        assert!(serde_json::from_str::<ControlRequest>(&json).is_ok());
+
+        for (request, command) in [
+            (
+                ControlRequest::AgentSpawnOperationGet {
+                    operation_id: "135f2570-fb38-4b35-9af9-dd9e576e8cc1".into(),
+                },
+                "agent_spawn_operation_get",
+            ),
+            (
+                ControlRequest::AgentSpawnOperationWait {
+                    operation_id: "135f2570-fb38-4b35-9af9-dd9e576e8cc1".into(),
+                    timeout_ms: 15_000,
+                },
+                "agent_spawn_operation_wait",
+            ),
+        ] {
+            assert!(serde_json::to_string(&request).unwrap().contains(command));
+        }
     }
 
     #[test]

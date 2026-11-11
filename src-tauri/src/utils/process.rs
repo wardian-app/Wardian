@@ -376,6 +376,193 @@ impl RuntimeProcessJob {
     }
 }
 
+/// Owns a short-lived bootstrap process and its platform containment boundary.
+/// Windows starts suspended, assigns the process to a kill-on-close job, then
+/// resumes it. Other platforms fail before spawn until they provide a retained
+/// containment handle; a numeric process group cannot prove ownership after reap.
+pub(crate) struct OwnedBootstrapChild {
+    child: tokio::process::Child,
+    complete: bool,
+    #[cfg(windows)]
+    job: Option<win32job::Job>,
+}
+
+impl OwnedBootstrapChild {
+    pub(crate) fn spawn(
+        command: &mut tokio::process::Command,
+        on_started: impl FnOnce(),
+    ) -> Result<Self, String> {
+        command.kill_on_drop(true);
+        #[cfg(windows)]
+        {
+            let job = create_kill_on_close_job("agent bootstrap")?;
+            command.creation_flags(windows_silent_process_creation_flags() | 0x0000_0004);
+            let mut child = command.spawn().map_err(|error| error.to_string())?;
+            on_started();
+            let pid = child
+                .id()
+                .ok_or_else(|| "bootstrap process has no owned process identity".to_string())?;
+            if let Err(error) = assign_pid_to_job(&job, pid, "agent bootstrap") {
+                let _ = child.start_kill();
+                return Err(error);
+            }
+            if let Err(error) = resume_suspended_process(pid) {
+                let _ = child.start_kill();
+                return Err(error);
+            }
+            Ok(Self {
+                child,
+                complete: false,
+                job: Some(job),
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = command;
+            let _ = on_started;
+            Err("owned bootstrap containment is unavailable on this platform".to_string())
+        }
+    }
+
+    pub(crate) fn child_mut(&mut self) -> &mut tokio::process::Child {
+        &mut self.child
+    }
+
+    pub(crate) async fn wait_for_containment_empty(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), String> {
+        loop {
+            #[cfg(windows)]
+            let empty = bootstrap_job_active_processes(
+                self.job
+                    .as_ref()
+                    .ok_or_else(|| "bootstrap containment handle is unavailable".to_string())?,
+            )? == 0;
+            #[cfg(not(windows))]
+            let empty = true;
+            if empty {
+                return Ok(());
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err("bootstrap process containment did not become empty".to_string());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20).min(deadline - now)).await;
+        }
+    }
+
+    pub(crate) async fn terminate_and_reap(
+        &mut self,
+        deadline: tokio::time::Instant,
+    ) -> Result<std::process::ExitStatus, String> {
+        #[cfg(windows)]
+        if let Some(job) = self.job.as_ref() {
+            if unsafe { winapi::um::jobapi2::TerminateJobObject(job.handle() as _, 1) } == 0 {
+                return Err(format!(
+                    "bootstrap job termination failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+        let _ = self.child.start_kill();
+        let status = tokio::time::timeout_at(deadline, self.child.wait())
+            .await
+            .map_err(|_| "bootstrap child did not exit during bounded cleanup".to_string())?
+            .map_err(|error| format!("bootstrap child wait failed: {error}"))?;
+        self.wait_for_containment_empty(deadline).await?;
+        Ok(status)
+    }
+
+    pub(crate) fn release_after_verified_exit(&mut self) {
+        self.complete = true;
+        #[cfg(windows)]
+        {
+            self.job.take();
+        }
+    }
+}
+
+impl Drop for OwnedBootstrapChild {
+    fn drop(&mut self) {
+        if self.complete {
+            return;
+        }
+        #[cfg(windows)]
+        {
+            // Closing a kill-on-close job is the cancellation containment path.
+            self.job.take();
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod bootstrap_containment_tests {
+    #[test]
+    fn unavailable_containment_rejects_before_any_child_can_start() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("started");
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg("touch -- \"$1\"")
+            .arg("sh")
+            .arg(&marker);
+        let error = super::OwnedBootstrapChild::spawn(&mut command, || {})
+            .err()
+            .unwrap();
+        assert!(error.contains("containment is unavailable"));
+        assert!(!marker.exists());
+    }
+}
+
+#[cfg(windows)]
+fn bootstrap_job_active_processes(job: &win32job::Job) -> Result<u32, String> {
+    use winapi::um::{
+        jobapi2::QueryInformationJobObject,
+        winnt::{JobObjectBasicAccountingInformation, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION},
+    };
+    let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        QueryInformationJobObject(
+            job.handle() as _,
+            JobObjectBasicAccountingInformation,
+            &mut info as *mut _ as _,
+            std::mem::size_of_val(&info) as u32,
+            std::ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(info.ActiveProcesses)
+}
+
+#[cfg(windows)]
+fn resume_suspended_process(pid: u32) -> Result<(), String> {
+    use winapi::um::processthreadsapi::OpenProcess;
+    const PROCESS_SUSPEND_RESUME: u32 = 0x0800;
+    let process = unsafe { OpenProcess(PROCESS_SUSPEND_RESUME, 0, pid) };
+    if process.is_null() {
+        return Err(format!(
+            "failed to open suspended bootstrap process: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn NtResumeProcess(process: winapi::um::winnt::HANDLE) -> i32;
+    }
+    let status = unsafe { NtResumeProcess(process) };
+    unsafe { winapi::um::handleapi::CloseHandle(process) };
+    if status < 0 {
+        return Err(format!(
+            "failed to resume suspended bootstrap process (status {status})"
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn windows_create_no_window_flag() -> u32 {
     0x0800_0000
 }

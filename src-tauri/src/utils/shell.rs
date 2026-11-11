@@ -266,7 +266,7 @@ pub fn build_interactive_shell_launch() -> Result<InteractiveShellLaunchSpec, St
     build_interactive_shell_launch_with_settings(&settings, &available)
 }
 
-fn shell_settings_path() -> Result<PathBuf, String> {
+pub(crate) fn shell_settings_path() -> Result<PathBuf, String> {
     let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
     Ok(wardian_home.join(SHELL_SETTINGS_FILE))
 }
@@ -276,18 +276,23 @@ fn load_shell_settings_from_path(path: &Path) -> Result<ShellSettings, String> {
 }
 
 fn load_shell_settings_document_from_path(path: &Path) -> Result<ShellSettingsDocument, String> {
-    if !path.exists() {
-        return Ok(shell_settings_document_from_overrides(
-            ShellSettingsOverrides::default(),
-        ));
+    match std::fs::read(path) {
+        Ok(content) => load_shell_settings_document_from_content(&content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(
+            shell_settings_document_from_overrides(ShellSettingsOverrides::default()),
+        ),
+        Err(error) => Err(error.to_string()),
     }
-
-    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    parse_shell_settings_document(&content)
 }
 
 fn parse_shell_settings_document(content: &str) -> Result<ShellSettingsDocument, String> {
-    let value = serde_json::from_str::<serde_json::Value>(content).map_err(|e| e.to_string())?;
+    load_shell_settings_document_from_content(content.as_bytes())
+}
+
+fn load_shell_settings_document_from_content(
+    content: &[u8],
+) -> Result<ShellSettingsDocument, String> {
+    let value = serde_json::from_slice::<serde_json::Value>(content).map_err(|e| e.to_string())?;
     if value
         .get("schema_version")
         .and_then(|version| version.as_u64())
@@ -309,6 +314,30 @@ fn parse_shell_settings_document(content: &str) -> Result<ShellSettingsDocument,
             &old_defaults,
         )),
     })
+}
+
+pub(crate) fn load_codex_runtime_policy_source(
+) -> Result<(CodexRuntimePolicy, PathBuf, Option<String>), String> {
+    use sha2::{Digest, Sha256};
+
+    let path = shell_settings_path()?;
+    match std::fs::read(&path) {
+        Ok(content) => {
+            let policy = load_shell_settings_document_from_content(&content)?
+                .settings
+                .codex_runtime_policy;
+            let source_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            let digest = format!("{:x}", Sha256::digest(&content));
+            Ok((policy, source_path, Some(digest)))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if path.symlink_metadata().is_ok() {
+                return Err("Codex policy source exists but could not be read".into());
+            }
+            Ok((CodexRuntimePolicy::default(), path, None))
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 fn save_shell_settings_to_path(

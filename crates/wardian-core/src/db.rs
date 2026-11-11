@@ -311,6 +311,7 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
     crate::telemetry::run_telemetry_migrations(conn)?;
     crate::temporary_workers::migrate(conn)?;
     agent_messaging::migrate(conn)?;
+    crate::agent_spawn::migrate(conn)?;
     Ok(())
 }
 
@@ -516,7 +517,63 @@ pub fn delete_agent(session_id: &str) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 fn delete_agent_with_conn(conn: &mut Connection, session_id: &str) -> rusqlite::Result<()> {
+    delete_agent_with_claims(conn, session_id, false)
+}
+
+/// The app supplies true only after exact-incarnation roster removal and joined
+/// process closure. Generic deletion retains unresolved name ownership.
+pub fn delete_agent_after_owned_removal(
+    session_id: &str,
+    closure_proved: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut guard = DB_CONN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let conn = guard.as_mut().ok_or("database not initialized")?;
+    delete_agent_with_claims(conn, session_id, closure_proved)?;
+    Ok(())
+}
+
+fn delete_agent_with_claims(
+    conn: &mut Connection,
+    session_id: &str,
+    closure_proved: bool,
+) -> rusqlite::Result<()> {
     let transaction = conn.transaction()?;
+    if closure_proved {
+        crate::agent_spawn::delete_removed_agent_claims(&transaction, session_id)?;
+    }
+    delete_agent_records(&transaction, session_id)?;
+    transaction.commit()
+}
+
+/// Preserve outer lifecycle ownership across SQL lock waits. The callback must
+/// validate only the retained lease, without acquiring an outer agent-map lock.
+pub fn delete_agent_after_owned_removal_fenced(
+    session_id: &str,
+    closure_proved: bool,
+    fence: impl FnOnce() -> Result<(), String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut guard = DB_CONN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let conn = guard.as_mut().ok_or("database not initialized")?;
+    let transaction = conn.transaction()?;
+    crate::agent_spawn::reject_bound_ordinary_delete(&transaction, session_id)?;
+    fence()?;
+    if closure_proved {
+        crate::agent_spawn::delete_removed_agent_claims(&transaction, session_id)?;
+    }
+    delete_agent_records(&transaction, session_id)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// The caller owns the encompassing deletion and name-disposition transaction.
+pub(crate) fn delete_agent_records(
+    transaction: &Connection,
+    session_id: &str,
+) -> rusqlite::Result<()> {
     let interaction_ids = {
         let mut statement = transaction.prepare(
             "SELECT id, sender_session_id, target_session_ids, parent_interaction_id
@@ -598,7 +655,7 @@ fn delete_agent_with_conn(conn: &mut Connection, session_id: &str) -> rusqlite::
         "DELETE FROM native_session_bindings WHERE target_agent_id = ?1",
         params![session_id],
     )?;
-    agent_messaging::delete_references(&transaction, session_id, &interaction_ids)?;
+    agent_messaging::delete_references(transaction, session_id, &interaction_ids)?;
     for interaction_id in interaction_ids {
         transaction.execute(
             "DELETE FROM mailbox_messages WHERE interaction_id = ?1",
@@ -637,7 +694,7 @@ fn delete_agent_with_conn(conn: &mut Connection, session_id: &str) -> rusqlite::
         "DELETE FROM agents WHERE session_id = ?1",
         params![session_id],
     )?;
-    transaction.commit()
+    Ok(())
 }
 
 pub fn get_agent_by_session_id_with_conn(
@@ -1991,6 +2048,114 @@ mod tests {
             )
             .unwrap();
         assert_eq!(event_count, 1);
+    }
+
+    #[test]
+    fn owned_removal_claim_disposition_is_atomic_and_preserves_foreign_uncertainty() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        upsert_agent_with_conn(
+            &conn,
+            &AgentUpsert {
+                session_id: "removed",
+                session_name: "pending",
+                description: "",
+                agent_class: "Coder",
+                provider: "mock",
+                workspace: None,
+                project: None,
+                is_off: true,
+                created_at: None,
+            },
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO agent_name_claims VALUES ('pending', 'legacy', 'attempt', 'now');
+             INSERT INTO agent_name_claims VALUES ('foreign', 'legacy', 'other', 'now');
+             INSERT INTO agent_name_claims VALUES ('unknown', 'legacy', 'uncertain', 'now');
+             INSERT INTO legacy_name_attempts
+             (attempt_id, agent_id, purpose, new_name, phase) VALUES
+             ('attempt', 'removed', 'spawn', 'pending', 'completed'),
+             ('uncertain', 'removed', 'clone', 'unknown', 'effects_possible');
+             CREATE TRIGGER abort_removal BEFORE DELETE ON agents
+             BEGIN SELECT RAISE(ABORT, 'storage unavailable'); END;",
+        )
+        .unwrap();
+        assert!(delete_agent_with_claims(&mut conn, "removed", true).is_err());
+        let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap();
+        assert_eq!(
+            count("SELECT COUNT(*) FROM agents WHERE session_id = 'removed'"),
+            1
+        );
+        assert_eq!(count("SELECT COUNT(*) FROM agent_name_claims"), 3);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM legacy_name_attempts WHERE phase = 'completed'"),
+            1
+        );
+        conn.execute_batch("DROP TRIGGER abort_removal").unwrap();
+        delete_agent_with_claims(&mut conn, "removed", true).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM agents", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        let remaining = conn
+            .prepare("SELECT session_name FROM agent_name_claims ORDER BY session_name")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(remaining, ["foreign", "unknown"]);
+        assert_eq!(
+            conn.query_row(
+                "SELECT phase FROM legacy_name_attempts WHERE attempt_id = 'attempt'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "removed"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT phase FROM legacy_name_attempts WHERE attempt_id = 'uncertain'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "effects_possible"
+        );
+    }
+
+    #[test]
+    fn deletion_without_closure_preserves_bound_name_and_operation_claims() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO agent_name_claims VALUES ('owned', 'agent', 'removed', 'now');
+             INSERT INTO agent_name_claims VALUES ('pending', 'legacy', 'attempt', 'now');
+             INSERT INTO agent_name_claims VALUES ('operation', 'operation', 'op', 'now');
+             INSERT INTO legacy_name_attempts
+             (attempt_id, agent_id, purpose, new_name, phase)
+             VALUES ('attempt', 'removed', 'spawn', 'pending', 'completed');",
+        )
+        .unwrap();
+        delete_agent_with_claims(&mut conn, "removed", false).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM agent_name_claims", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            conn.query_row("SELECT phase FROM legacy_name_attempts", [], |row| row
+                .get::<_, String>(
+                0
+            ))
+            .unwrap(),
+            "completed"
+        );
     }
 
     #[test]

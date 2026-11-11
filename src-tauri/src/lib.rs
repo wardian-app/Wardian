@@ -8,6 +8,7 @@ mod macos_window;
 pub mod manager;
 pub mod providers;
 pub mod remote;
+mod spawn_operations;
 mod startup_restore;
 pub mod state;
 mod topology_audit;
@@ -626,6 +627,8 @@ pub fn run() {
                     format!("Wardian control endpoint is already owned for this WARDIAN_HOME: {error}"),
                 )
             })?;
+            crate::spawn_operations::recover_after_owner_acquired()
+                .map_err(std::io::Error::other)?;
 
             if let Ok(resource_dir) = app.path().resource_dir() {
                 if let Some(app_home) = crate::utils::fs::get_wardian_home() {
@@ -659,9 +662,9 @@ pub fn run() {
             }
 
             let app_handle = app.handle().clone();
+            manager::init_agent_classes(&app_handle);
             control::spawn_control_server(app_handle.clone(), control_endpoint_claim);
             remote::gateway::spawn_remote_gateway(app_handle.clone());
-            manager::init_agent_classes(&app_handle);
 
             start_metrics_supervisor(app.handle().clone());
             // Deliberately its own loop rather than work added to the metrics
@@ -733,6 +736,26 @@ pub fn run() {
                                 // A duplicate saved ID must not wait on a claim
                                 // this same pass already carries into pass 2.
                                 if !seen_ids.insert(saved_config.session_id.clone()) {
+                                    continue;
+                                }
+                                let exclusion_session_id = saved_config.session_id.clone();
+                                let spawn_excluded = match tokio::task::spawn_blocking(move || {
+                                    wardian_core::agent_spawn::restore_is_excluded(
+                                        &exclusion_session_id,
+                                    )
+                                })
+                                .await
+                                {
+                                    Ok(Ok(excluded)) => excluded,
+                                    _ => true,
+                                };
+                                if spawn_excluded {
+                                    let _ = wardian_core::registry_reconciliation::record_quarantine(
+                                        app_dir,
+                                        &saved_config.session_id,
+                                        Some(&saved_config.session_name),
+                                        "Durable spawn recovery excludes automatic restore; inspect the spawn operation before retrying.",
+                                    );
                                     continue;
                                 }
                                 let Some(publication) = startup_restore::RestorePublication::begin(

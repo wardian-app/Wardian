@@ -373,6 +373,10 @@ wardian agent resume <name-or-uuid>
 wardian agent models --provider codex --refresh
 wardian agent spawn --provider codex --class Reviewer --name reviewer-a1 --workspace <absolute-workspace-path>
 wardian agent spawn --provider codex --class Reviewer --name reviewer-a1 --workspace <absolute-workspace-path> --model <model-id> --reasoning-effort <effort>
+wardian agent spawn --provider codex --class Reviewer --workspace <absolute-workspace-path> --async
+wardian agent spawn --provider codex --class Reviewer --workspace <absolute-workspace-path> --wait-timeout 30s
+wardian agent spawn-status <operation-id>
+wardian agent spawn-wait <operation-id> --timeout 30s
 wardian agent update <name-or-uuid> --class Reviewer
 wardian agent update <name-or-uuid> --workspace <absolute-workspace-path>
 wardian agent update <name-or-uuid> --description "Owns frontend release follow-up"
@@ -463,6 +467,59 @@ as the GUI: names are 1–64 characters, start with a letter or number, and use
 only letters, numbers, underscores, or hyphens. `all`, leading-hyphen names,
 and UUID-shaped names are reserved. Omit `--name` to receive a class-based
 phonetic name such as `Coder-alpha`.
+
+Every CLI spawn uses a durable operation key. The default command waits up to
+60 seconds for registration and preserves the normal agent JSON output. Use
+`--wait-timeout <duration>` to choose a shorter observation window. If the wait
+ends first, the error includes the operation key and a `spawn-status` command.
+`spawn-status` reads the current operation; `spawn-wait` observes it for up to
+60 seconds. `--async` returns the operation receipt immediately.
+
+Reuse `--operation-id <uuid>` with the same provider, class, name, workspace,
+model, and reasoning effort when retrying an uncertain submission. The key is
+bound to that typed request; changing the request with the same key is an
+error. Generated keys are written to a minimal private receipt under
+`<wardian-home>/spawn-submissions/` before Wardian sends the request. If the
+CLI exits before showing its key, recover it from that receipt and query the
+operation before submitting again. Wardian never retries an older app's
+rejection through the legacy spawn request; update the desktop app, then retry
+with the same key.
+
+Operation states are `queued`, `preparing`, `launching`, `registered`,
+`failed`, and `outcome_unknown`. `registered` records completed roster publication
+and required Codex attachment. Status and wait also report current roster
+`availability`: `current`, `missing`, `incompatible`, `unavailable`, or
+`not_registered`. Normal spawn success requires a compatible saved and live
+identity in `current_agent`. Historical registration survives removal or a
+roster discrepancy; it does not promise provider input readiness.
+`outcome_unknown` means Wardian could not prove whether launch completed. Check
+the roster and operation status before taking further action; a new key would
+create a separate spawn.
+
+Legacy spawn, clone, or rename can report `[agent-name-ownership-pending]`
+after publication. The error includes the stable agent and attempt IDs. Keep
+those IDs for metadata repair. The published agent and its reserved name stay
+bound. At startup, Wardian repairs ownership when the saved roster, database,
+and completion evidence agree. Incomplete evidence keeps automatic restore
+excluded. A bound removal first records its intent. If it reports that roster
+removal committed with durable ownership pending, the saved entry is absent and
+the database records and profile remain for repair. Retry the existing
+`wardian agent delete <agent-uuid> --confirm <exact-name>` using the same
+UUID and name. Once process closure is durably proved, this finishes metadata
+without launching a provider. Startup applies the same repair. Unproved closure,
+a republished roster entry, or changed ownership requires reconciliation and
+remains pending. An ordinary removal whose SQL write fails keeps a stopped agent
+available for retry and restores its saved entry from current live state.
+
+Executable Codex session bootstrap currently requires retained Windows process
+containment. On other platforms, the local Codex rollout path remains available;
+an unavailable executable fallback fails before starting a provider process.
+
+Do not downgrade the desktop app while durable spawn operations remain
+unresolved. Older app versions do not honor operation-owned name claims or
+restore exclusions, so an unresolved launch could be restored or duplicated.
+Resolve or manually reconcile queued, preparing, launching, and outcome-unknown
+operations with a version that supports durable spawn before downgrading.
 
 Model IDs and reasoning efforts are provider-discovered; use
 `wardian agent models --provider <provider>` to inspect the currently exposed

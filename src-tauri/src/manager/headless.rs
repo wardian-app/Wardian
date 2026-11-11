@@ -7,7 +7,7 @@ use crate::utils::process::new_headless_command;
 use crate::utils::shell::build_program_launch;
 use std::time::Duration;
 use wardian_core::conversation_lease::ConversationLeaseOwner;
-use wardian_core::models::{AgentConfig, AgentEvent, AgentProvider};
+use wardian_core::models::{AgentConfig, AgentProvider};
 
 use super::codex::{
     codex_bootstrap_launch_context, codex_session_file_path_in, migrate_codex_bootstrap_home,
@@ -1228,6 +1228,7 @@ fn append_codex_bootstrap_args(
     provider_args: &mut Vec<String>,
     provider_cwd: &std::path::Path,
     config: Option<&AgentConfig>,
+    selected_policy: Option<&crate::utils::CodexRuntimePolicy>,
 ) {
     provider_args.push("--cd".to_string());
     provider_args.push(provider_cwd.to_string_lossy().to_string());
@@ -1235,7 +1236,16 @@ fn append_codex_bootstrap_args(
     // Codex global options must precede `exec`; exec only accepts its own
     // subcommand options after this point.
     if let Some(config) = config {
-        CodexProvider::new().append_headless_global_args(provider_args, config);
+        let provider = CodexProvider::new();
+        if let Some(policy) = selected_policy {
+            provider.append_headless_global_args_with_effective_policy(
+                provider_args,
+                config,
+                policy,
+            );
+        } else {
+            provider.append_headless_global_args(provider_args, config);
+        }
         if let Some(custom) = config.custom_args.as_ref() {
             if let Some(parsed) = shlex::split(custom) {
                 provider_args.extend(parsed);
@@ -1298,7 +1308,33 @@ pub async fn obtain_session_id(
     agent_class: Option<&str>,
     config: Option<&AgentConfig>,
 ) -> Result<String, String> {
-    use tokio::io::{AsyncBufReadExt, BufReader};
+    obtain_session_id_inner(cwd, agent_class, config, None, None).await
+}
+
+pub(crate) async fn obtain_session_id_with_codex_context(
+    cwd: &std::path::Path,
+    agent_class: Option<&str>,
+    config: Option<&AgentConfig>,
+    codex_launch_context: &crate::utils::codex_home::CodexLaunchContext,
+    operation: Option<(&str, &str)>,
+) -> Result<String, String> {
+    obtain_session_id_inner(
+        cwd,
+        agent_class,
+        config,
+        Some(codex_launch_context),
+        operation,
+    )
+    .await
+}
+
+async fn obtain_session_id_inner(
+    cwd: &std::path::Path,
+    agent_class: Option<&str>,
+    config: Option<&AgentConfig>,
+    codex_launch_context: Option<&crate::utils::codex_home::CodexLaunchContext>,
+    operation: Option<(&str, &str)>,
+) -> Result<String, String> {
     let provider_name = config.map(|c| c.provider.as_str()).unwrap_or("claude");
     let provider = ProviderFactory::resolve(provider_name)?;
     crate::providers::readiness::ensure_provider_available_for_launch(provider_name)?;
@@ -1313,15 +1349,28 @@ pub async fn obtain_session_id(
         .unwrap_or("");
     let bootstrap_session_id = config
         .and_then(|cfg| (!cfg.session_id.trim().is_empty()).then_some(cfg.session_id.as_str()));
-    let habitat_root =
-        prepare_provider_habitat(provider_name, cwd, class_name, bootstrap_session_id)?;
-    let codex_bootstrap = if provider_name == "codex" {
-        let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
-        Some(codex_bootstrap_launch_context(&wardian_home, cwd))
+    let habitat_root = if provider_name == "codex" {
+        if let Some(context) = codex_launch_context {
+            let Some(session_id) = bootstrap_session_id else {
+                return Err("Codex bootstrap identity is missing".to_string());
+            };
+            let habitat = prepare_habitat_workspace(cwd, class_name, session_id)?;
+            let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
+            let _preparation =
+                crate::utils::codex_home::acquire_preparation(&wardian_home, session_id)?;
+            ensure_codex_home_projection_with_context(&habitat, cwd, session_id, context)?;
+            if let crate::utils::codex_messaging::Registration::Unavailable(reason) =
+                crate::utils::codex_messaging::ensure_managed_messaging(&wardian_home, session_id)?
+            {
+                log_debug(&format!("[Wardian] Codex messaging unavailable: {reason}"));
+            }
+            Some(habitat)
+        } else {
+            prepare_provider_habitat(provider_name, cwd, class_name, bootstrap_session_id)?
+        }
     } else {
-        None
+        prepare_provider_habitat(provider_name, cwd, class_name, bootstrap_session_id)?
     };
-
     if provider_name == "codex" && habitat_root.is_some() {
         let agent_id = bootstrap_session_id.ok_or("Codex habitat identity is missing")?;
         let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
@@ -1344,6 +1393,23 @@ pub async fn obtain_session_id(
                 )),
             }
     }
+    let codex_bootstrap = if provider_name == "codex" {
+        let wardian_home = get_wardian_home().ok_or("Could not find Wardian home")?;
+        let attempt_id = operation
+            .map(|(_, attempt)| attempt.to_string())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        Some(codex_bootstrap_launch_context(
+            &wardian_home,
+            cwd,
+            &attempt_id,
+        )?)
+    } else {
+        None
+    };
+    let mut bootstrap_credentials = codex_bootstrap
+        .as_ref()
+        .map(|(_, home)| super::codex::BootstrapCredentialRetirement::new(home.clone()));
+
     let provider_cwd = interactive_provider_cwd(
         provider_name,
         cwd,
@@ -1358,7 +1424,12 @@ pub async fn obtain_session_id(
     };
 
     if provider_name == "codex" {
-        append_codex_bootstrap_args(&mut provider_args, &provider_cwd, config);
+        append_codex_bootstrap_args(
+            &mut provider_args,
+            &provider_cwd,
+            config,
+            codex_launch_context.map(|context| context.effective_policy()),
+        );
     } else if provider_name == "opencode" {
         provider_args.push("run".to_string());
         if let Some(config) = config {
@@ -1409,10 +1480,22 @@ pub async fn obtain_session_id(
 
     if provider_name == "codex" {
         if let Some((_, bootstrap_home)) = codex_bootstrap.as_ref() {
-            let real_codex_home = dirs::home_dir()
-                .ok_or("Could not find user home directory")?
-                .join(".codex");
-            sync_codex_agent_home(&real_codex_home, bootstrap_home, std::path::Path::new(""))?;
+            let real_codex_home = match codex_launch_context {
+                Some(context) => context.upstream().path.clone(),
+                None => dirs::home_dir()
+                    .ok_or("Could not find user home directory")?
+                    .join(".codex"),
+            };
+            if let Some(context) = codex_launch_context {
+                crate::utils::fs::sync_codex_agent_home_with_context(
+                    &real_codex_home,
+                    bootstrap_home,
+                    std::path::Path::new(""),
+                    context,
+                )?;
+            } else {
+                sync_codex_agent_home(&real_codex_home, bootstrap_home, std::path::Path::new(""))?;
+            }
             cmd.env("CODEX_HOME", bootstrap_home);
         } else if let Some(root) = habitat_root.as_ref() {
             cmd.env("CODEX_HOME", habitat_codex_home(root));
@@ -1450,141 +1533,396 @@ pub async fn obtain_session_id(
         launch_spec.args.len(),
         command_cwd.display()
     ));
-    match cmd.spawn() {
-        Ok(mut child) => {
-            log_debug("[WARDIAN-DEBUG] Spawned headless process. Reading stdout...");
-            let mut session_id_res = None;
-            let mut stderr_output = String::new();
-
-            let timeout = tokio::time::Duration::from_secs(60);
-            let read_future = async {
-                let mut output = String::new();
-                if let Some(stdout) = child.stdout.take() {
-                    let mut reader = BufReader::new(stdout);
-                    let mut line = String::new();
-                    while let Ok(n) = reader.read_line(&mut line).await {
-                        if n == 0 {
-                            log_debug("[WARDIAN-DEBUG] Reached EOF on stdout.");
-                            break;
-                        }
-                        let trimmed = line.trim();
-                        output.push_str(trimmed);
-                        output.push('\n');
-                        if let Some(start) = trimmed.find('{') {
-                            let json_part = &trimmed[start..];
-                            if let Some(evt) = provider.parse_output(json_part) {
-                                match evt {
-                                    AgentEvent::Init { .. } => {
-                                        log_debug(
-                                            "[WARDIAN-DEBUG] Ignored provider initialization identifier.",
-                                        );
-                                    }
-                                    // ModelResponse means the prompt completed and the session
-                                    // has been persisted to disk — safe to stop reading.
-                                    AgentEvent::ModelResponse => {
-                                        log_debug(
-                                            "[WARDIAN-DEBUG] Prompt complete, session saved.",
-                                        );
-                                        break;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        line.clear();
-                    }
-                }
-                bootstrap_output_session_id(provider_name, &output)
-            };
-
-            let timed_out = match tokio::time::timeout(timeout, read_future).await {
-                Ok(sid) => {
-                    session_id_res = sid;
-                    false
-                }
-                Err(_) => {
-                    log_debug("[WARDIAN-DEBUG] Timed out waiting for session_id.");
-                    true
-                }
-            };
-
-            // Only force-kill if we timed out; otherwise let the process exit naturally
-            // so the session is fully flushed to disk before we attempt --resume.
-            if timed_out {
-                let _ = child.kill().await;
-            }
-            if let Some(stderr) = child.stderr.take() {
-                let mut reader = BufReader::new(stderr);
-                let mut line = String::new();
-                while let Ok(n) = reader.read_line(&mut line).await {
-                    if n == 0 {
-                        break;
-                    }
-                    stderr_output.push_str(&line);
-                    line.clear();
-                }
-            }
-            let _ = child.wait().await;
-            if provider_name == "antigravity" && session_id_res.is_none() {
-                let after = AntigravityProvider::antigravity_home()
-                    .and_then(|home| AntigravityProvider::conversation_for_workspace(&home, cwd));
-                session_id_res = changed_workspace_conversation(
-                    antigravity_workspace_before.as_deref(),
-                    after.as_deref(),
-                );
-            }
-            if let Some(candidate) = session_id_res.as_deref() {
-                let mut identity_config = config.cloned().unwrap_or_else(|| AgentConfig {
-                    provider: provider_name.to_string(),
-                    ..Default::default()
-                });
-                super::apply_provider_identity(provider_name, &mut identity_config, candidate)?;
-            }
-            if session_id_res.is_none() && !stderr_output.trim().is_empty() {
-                log_debug(&format!(
-                    "[WARDIAN-DEBUG] obtain_session_id received {} stderr bytes.",
-                    stderr_output.len()
-                ));
-            }
-            if provider_name == "codex" {
-                if let (Some((_, bootstrap_home)), Some(agent_habitat_root)) =
-                    (codex_bootstrap.as_ref(), habitat_root.as_ref())
-                {
-                    // The interactive process uses a habitat keyed by Wardian's
-                    // stable agent ID. Migrating under the freshly-created Codex
-                    // thread ID makes `codex resume` look in the wrong home.
-                    migrate_codex_bootstrap_home(
-                        bootstrap_home,
-                        &habitat_codex_home(agent_habitat_root),
-                    )?;
-                }
-            }
-            log_debug(&format!(
-                "[WARDIAN-DEBUG] Returning session identifier: found={}",
-                session_id_res.is_some()
-            ));
-            session_id_res.ok_or_else(|| {
-                if stderr_output.trim().is_empty() {
-                    format!(
-                        "Provider {} did not return a session ID during initialization.",
-                        provider_name
-                    )
-                } else {
-                    format!(
-                        "Provider {} failed during session initialization.",
-                        provider_name
-                    )
-                }
-            })
-        }
-        Err(e) => {
-            log_debug(&format!("[WARDIAN-DEBUG] Failed to spawn cmd: {:?}", e));
-            Err(format!(
-                "Failed to spawn {} bootstrap command: {}",
-                provider_name, e
-            ))
+    let process_receipt = run_owned_bootstrap_command(
+        &mut cmd,
+        provider_name,
+        Duration::from_secs(60),
+        BOOTSTRAP_CLEANUP_BUDGET,
+        codex_launch_context,
+        operation,
+        bootstrap_credentials.as_mut(),
+    )
+    .await?;
+    if let Some(credentials) = bootstrap_credentials.as_mut() {
+        credentials.confirm_closed(process_receipt.containment_empty)?;
+    }
+    if process_receipt.timed_out {
+        return Err("Provider bootstrap exceeded its 60 second work budget.".to_string());
+    }
+    if !process_receipt.work_complete
+        || !process_receipt.exit_success
+        || !process_receipt.stdout_eof
+        || !process_receipt.stderr_eof
+        || !process_receipt.containment_empty
+    {
+        log_debug(&format!(
+            "[WARDIAN-DEBUG] Bootstrap rejected: exit_code={}, stdout_eof={}, stderr_eof={}, containment_empty={}",
+            process_receipt.exit_code,
+            process_receipt.stdout_eof,
+            process_receipt.stderr_eof,
+            process_receipt.containment_empty
+        ));
+        return Err(format!(
+            "Provider {} failed during session initialization.",
+            provider_name
+        ));
+    }
+    let mut session_id_res = process_receipt.session_id;
+    if provider_name == "antigravity" && session_id_res.is_none() {
+        let after = AntigravityProvider::antigravity_home()
+            .and_then(|home| AntigravityProvider::conversation_for_workspace(&home, cwd));
+        session_id_res = changed_workspace_conversation(
+            antigravity_workspace_before.as_deref(),
+            after.as_deref(),
+        );
+    }
+    if let Some(candidate) = session_id_res.as_deref() {
+        let mut identity_config = config.cloned().unwrap_or_else(|| AgentConfig {
+            provider: provider_name.to_string(),
+            ..Default::default()
+        });
+        super::apply_provider_identity(provider_name, &mut identity_config, candidate)?;
+    }
+    if provider_name == "codex" {
+        if let (Some((_, bootstrap_home)), Some(agent_habitat_root)) =
+            (codex_bootstrap.as_ref(), habitat_root.as_ref())
+        {
+            migrate_codex_bootstrap_home(bootstrap_home, &habitat_codex_home(agent_habitat_root))?;
         }
     }
+    log_debug(&format!(
+        "[WARDIAN-DEBUG] Returning session identifier: found={}",
+        session_id_res.is_some()
+    ));
+    session_id_res.ok_or_else(|| {
+        if process_receipt.stderr_bytes == 0 {
+            format!(
+                "Provider {} did not return a session ID during initialization.",
+                provider_name
+            )
+        } else {
+            format!(
+                "Provider {} failed during session initialization.",
+                provider_name
+            )
+        }
+    })
+}
+
+const BOOTSTRAP_STDOUT_RETAIN_LIMIT: usize = 256 * 1024;
+const BOOTSTRAP_STDERR_RETAIN_LIMIT: usize = 16 * 1024;
+const BOOTSTRAP_LINE_LIMIT: usize = 64 * 1024;
+const BOOTSTRAP_CLEANUP_BUDGET: Duration = Duration::from_secs(5);
+
+struct BootstrapStreamReceipt {
+    session_id: Option<String>,
+    retained_output: Vec<u8>,
+    bytes_read: u64,
+    eof: bool,
+}
+
+async fn drain_bootstrap_stdout<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+    provider_name: &str,
+) -> Result<BootstrapStreamReceipt, String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut retained_output = Vec::new();
+    let mut pending_line = Vec::new();
+    let mut line_overflow = false;
+    let mut bytes_read = 0_u64;
+    let mut session_id = None;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .await
+            .map_err(|_| "bootstrap stdout read failed".to_string())?;
+        if count == 0 {
+            if !line_overflow && !pending_line.is_empty() && session_id.is_none() {
+                session_id = bootstrap_output_session_id(
+                    provider_name,
+                    &String::from_utf8_lossy(&pending_line),
+                );
+            }
+            return Ok(BootstrapStreamReceipt {
+                session_id,
+                retained_output,
+                bytes_read,
+                eof: true,
+            });
+        }
+        bytes_read = bytes_read.saturating_add(count as u64);
+        let retained = count.min(BOOTSTRAP_STDOUT_RETAIN_LIMIT - retained_output.len());
+        retained_output.extend_from_slice(&buffer[..retained]);
+        for byte in &buffer[..count] {
+            if *byte == b'\n' {
+                if !line_overflow && session_id.is_none() {
+                    session_id = bootstrap_output_session_id(
+                        provider_name,
+                        &String::from_utf8_lossy(&pending_line),
+                    );
+                }
+                pending_line.clear();
+                line_overflow = false;
+            } else if pending_line.len() < BOOTSTRAP_LINE_LIMIT {
+                pending_line.push(*byte);
+            } else {
+                pending_line.clear();
+                line_overflow = true;
+            }
+        }
+    }
+}
+
+async fn drain_bootstrap_stderr<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+) -> Result<BootstrapStreamReceipt, String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut retained_output = Vec::new();
+    let mut bytes_read = 0_u64;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .await
+            .map_err(|_| "bootstrap stderr read failed".to_string())?;
+        if count == 0 {
+            return Ok(BootstrapStreamReceipt {
+                session_id: None,
+                retained_output,
+                bytes_read,
+                eof: true,
+            });
+        }
+        bytes_read = bytes_read.saturating_add(count as u64);
+        let retained = count.min(BOOTSTRAP_STDERR_RETAIN_LIMIT - retained_output.len());
+        retained_output.extend_from_slice(&buffer[..retained]);
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct BootstrapProcessReceipt {
+    child_pid: Option<u32>,
+    session_id: Option<String>,
+    stderr_bytes: u64,
+    exit_code: i32,
+    exit_observed: bool,
+    exit_success: bool,
+    stdout_eof: bool,
+    stderr_eof: bool,
+    containment_empty: bool,
+    work_complete: bool,
+    timed_out: bool,
+}
+
+fn persist_bootstrap_receipt(
+    operation: Option<(&str, &str)>,
+    receipt: &BootstrapProcessReceipt,
+) -> Result<(), String> {
+    let Some((operation_id, attempt_id)) = operation else {
+        return Ok(());
+    };
+    let receipt_json = serde_json::to_string(receipt)
+        .map_err(|_| "bootstrap closure receipt could not be encoded".to_string())?;
+    if !wardian_core::agent_spawn::record_bootstrap_receipt(
+        operation_id,
+        attempt_id,
+        &receipt_json,
+    )? {
+        return Err("spawn operation lost ownership before bootstrap closure was recorded".into());
+    }
+    Ok(())
+}
+
+async fn run_owned_bootstrap_command(
+    command: &mut tokio::process::Command,
+    provider_name: &str,
+    work_budget: Duration,
+    cleanup_budget: Duration,
+    codex_launch_context: Option<&crate::utils::codex_home::CodexLaunchContext>,
+    operation: Option<(&str, &str)>,
+    mut credentials: Option<&mut super::codex::BootstrapCredentialRetirement>,
+) -> Result<BootstrapProcessReceipt, String> {
+    if let Some(context) = codex_launch_context {
+        context.revalidate()?;
+    }
+    let mut child = crate::utils::process::OwnedBootstrapChild::spawn(command, || {
+        if let Some(credentials) = credentials.as_mut() {
+            credentials.child_may_start();
+        }
+    })
+    .map_err(|_| format!("Failed to start the {provider_name} bootstrap command."))?;
+    let child_pid = child.child_mut().id();
+    let stdout = child
+        .child_mut()
+        .stdout
+        .take()
+        .ok_or_else(|| "bootstrap stdout pipe is unavailable".to_string())?;
+    let stderr = child
+        .child_mut()
+        .stderr
+        .take()
+        .ok_or_else(|| "bootstrap stderr pipe is unavailable".to_string())?;
+    let stdout_provider = provider_name.to_string();
+    let mut stdout_task =
+        tokio::spawn(async move { drain_bootstrap_stdout(stdout, &stdout_provider).await });
+    let mut stderr_task = tokio::spawn(drain_bootstrap_stderr(stderr));
+    let mut stdout_result: Option<Result<BootstrapStreamReceipt, String>> = None;
+    let mut stderr_result: Option<Result<BootstrapStreamReceipt, String>> = None;
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let work_deadline = tokio::time::Instant::now() + work_budget;
+    let work = async {
+        exit_status = Some(
+            child
+                .child_mut()
+                .wait()
+                .await
+                .map_err(|_| "bootstrap child wait failed".to_string())?,
+        );
+        stdout_result = Some(
+            (&mut stdout_task)
+                .await
+                .map_err(|_| "bootstrap stdout drain task failed".to_string())?,
+        );
+        stdout_result
+            .as_ref()
+            .expect("stdout result was assigned")
+            .as_ref()
+            .map_err(Clone::clone)?;
+        stderr_result = Some(
+            (&mut stderr_task)
+                .await
+                .map_err(|_| "bootstrap stderr drain task failed".to_string())?,
+        );
+        stderr_result
+            .as_ref()
+            .expect("stderr result was assigned")
+            .as_ref()
+            .map_err(Clone::clone)?;
+        child.wait_for_containment_empty(work_deadline).await
+    };
+    let work_result = tokio::time::timeout_at(work_deadline, work).await;
+    let work_complete = matches!(&work_result, Ok(Ok(())));
+    let timed_out = work_result.is_err();
+    let containment_empty;
+
+    if work_complete {
+        containment_empty = true;
+        child.release_after_verified_exit();
+        if let Some(credentials) = credentials.as_mut() {
+            credentials.confirm_closed(true)?;
+        }
+    } else {
+        let cleanup_deadline = tokio::time::Instant::now() + cleanup_budget;
+        let cleanup = async {
+            let cleanup_status = child.terminate_and_reap(cleanup_deadline).await?;
+            exit_status.get_or_insert(cleanup_status);
+            if stdout_result.is_none() {
+                stdout_result = Some(
+                    (&mut stdout_task)
+                        .await
+                        .map_err(|_| "bootstrap stdout drain task failed".to_string())?,
+                );
+            }
+            if stderr_result.is_none() {
+                stderr_result = Some(
+                    (&mut stderr_task)
+                        .await
+                        .map_err(|_| "bootstrap stderr drain task failed".to_string())?,
+                );
+            }
+            Ok::<(), String>(())
+        };
+        let cleanup_result = tokio::time::timeout_at(cleanup_deadline, cleanup).await;
+        let stdout_eof = stdout_result
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .is_some_and(|receipt| receipt.eof);
+        let stderr_eof = stderr_result
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .is_some_and(|receipt| receipt.eof);
+        containment_empty = matches!(cleanup_result, Ok(Ok(())))
+            && exit_status.is_some()
+            && stdout_eof
+            && stderr_eof;
+        let stdout_bytes = stdout_result
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .map_or(0, |receipt| receipt.bytes_read);
+        let stderr_bytes = stderr_result
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .map_or(0, |receipt| receipt.bytes_read);
+        log_debug(&format!(
+            "[WARDIAN-DEBUG] Bootstrap cleanup receipt: exit_observed={}, stdout_eof={} ({} bytes), stderr_eof={} ({} bytes), containment_empty={containment_empty}",
+            exit_status.is_some(), stdout_eof, stdout_bytes, stderr_eof, stderr_bytes
+        ));
+        if !containment_empty {
+            let receipt = BootstrapProcessReceipt {
+                child_pid,
+                session_id: None,
+                stderr_bytes,
+                exit_code: exit_status
+                    .as_ref()
+                    .and_then(std::process::ExitStatus::code)
+                    .unwrap_or(-1),
+                exit_observed: exit_status.is_some(),
+                exit_success: exit_status
+                    .as_ref()
+                    .is_some_and(std::process::ExitStatus::success),
+                stdout_eof,
+                stderr_eof,
+                containment_empty,
+                work_complete: false,
+                timed_out,
+            };
+            persist_bootstrap_receipt(operation, &receipt)?;
+            return Err(
+                "Provider bootstrap cleanup could not verify child and stream completion."
+                    .to_string(),
+            );
+        }
+        child.release_after_verified_exit();
+        if let Some(credentials) = credentials.as_mut() {
+            credentials.confirm_closed(true)?;
+        }
+    }
+
+    let status = exit_status.ok_or_else(|| "bootstrap child exit was not observed".to_string())?;
+    let stdout_receipt = stdout_result
+        .and_then(Result::ok)
+        .ok_or_else(|| "bootstrap stdout did not reach EOF".to_string())?;
+    let stderr_receipt = stderr_result
+        .and_then(Result::ok)
+        .ok_or_else(|| "bootstrap stderr did not reach EOF".to_string())?;
+    log_debug(&format!(
+        "[WARDIAN-DEBUG] Bootstrap closure receipt: exit={}, stdout_eof={}, stdout_bytes={}, stdout_retained={}, stderr_eof={}, stderr_bytes={}, stderr_retained={}, containment_empty={containment_empty}",
+        status.code().unwrap_or(-1),
+        stdout_receipt.eof,
+        stdout_receipt.bytes_read,
+        stdout_receipt.retained_output.len(),
+        stderr_receipt.eof,
+        stderr_receipt.bytes_read,
+        stderr_receipt.retained_output.len()
+    ));
+    let receipt = BootstrapProcessReceipt {
+        child_pid,
+        session_id: stdout_receipt.session_id,
+        stderr_bytes: stderr_receipt.bytes_read,
+        exit_code: status.code().unwrap_or(-1),
+        exit_observed: true,
+        exit_success: status.success(),
+        stdout_eof: stdout_receipt.eof,
+        stderr_eof: stderr_receipt.eof,
+        containment_empty,
+        work_complete,
+        timed_out,
+    };
+    persist_bootstrap_receipt(operation, &receipt)?;
+    Ok(receipt)
 }
 
 fn bootstrap_output_session_id(provider_name: &str, output: &str) -> Option<String> {
@@ -2865,7 +3203,7 @@ mod tests {
         };
         let mut args = Vec::new();
 
-        append_codex_bootstrap_args(&mut args, Path::new("/workspace"), Some(&config));
+        append_codex_bootstrap_args(&mut args, Path::new("/workspace"), Some(&config), None);
 
         let exec_index = args.iter().position(|arg| arg == "exec").unwrap();
         let policy_index = args
@@ -3458,5 +3796,362 @@ mod tests {
         let normalized = normalize_pi_headless_output(output, "json").expect("Pi output");
         assert_eq!(normalized["session_id"], "pi-session");
         assert_eq!(normalized["response"], "Pi final answer");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn sequential_bootstrap_attempts_launch_with_current_private_provider_configuration() {
+        if !node_available() {
+            return;
+        }
+        let home = TestWardianHome::new_async().await;
+        struct SourceEnvironment(Vec<(&'static str, Option<OsString>)>);
+        impl Drop for SourceEnvironment {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let _source_environment = SourceEnvironment(
+            ["CODEX_HOME", "OPENAI_API_KEY", "CODEX_API_KEY"]
+                .into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect(),
+        );
+        let upstream = home._home.path().join("selected-upstream");
+        std::fs::create_dir(&upstream).unwrap();
+        std::env::set_var("CODEX_HOME", &upstream);
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::remove_var("CODEX_API_KEY");
+        let mut first_home = None;
+        for endpoint in ["https://first.invalid", "https://second.invalid"] {
+            std::fs::write(upstream.join("config.toml"), format!(
+                "model_provider = 'fixture'\n[model_providers.fixture]\nname = 'fixture'\nbase_url = '{endpoint}'\n")).unwrap();
+            let auth = serde_json::json!({"OPENAI_API_KEY":endpoint}).to_string();
+            std::fs::write(upstream.join("auth.json"), &auth).unwrap();
+            let context = crate::utils::codex_home::CodexLaunchContext::capture(&AgentConfig {
+                provider: "codex".into(),
+                ..Default::default()
+            })
+            .unwrap();
+            let (_, projected) = codex_bootstrap_launch_context(
+                home._home.path(),
+                home._home.path(),
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+            crate::utils::fs::sync_codex_agent_home_with_context(
+                &context.upstream().path,
+                &projected,
+                Path::new(""),
+                &context,
+            )
+            .unwrap();
+            let capture = projected.join("captured.json");
+            let mut credentials =
+                super::super::codex::BootstrapCredentialRetirement::new(projected.clone());
+            let mut command = bootstrap_fixture_command("capture-config");
+            command
+                .env("CODEX_HOME", &projected)
+                .env("WARDIAN_BOOTSTRAP_TEST_CAPTURE", &capture);
+            let receipt = run_owned_bootstrap_command(
+                &mut command,
+                "codex",
+                Duration::from_secs(10),
+                Duration::from_secs(3),
+                Some(&context),
+                None,
+                Some(&mut credentials),
+            )
+            .await
+            .unwrap();
+            assert!(receipt.work_complete && receipt.exit_success && receipt.containment_empty);
+            credentials
+                .confirm_closed(receipt.containment_empty)
+                .unwrap();
+            assert!(!projected.join("auth.json").exists());
+            assert!(!projected.join("config.toml").exists());
+            let captured: Value = serde_json::from_slice(&std::fs::read(capture).unwrap()).unwrap();
+            let configuration = captured["config"]
+                .as_str()
+                .unwrap()
+                .parse::<toml_edit::DocumentMut>()
+                .unwrap();
+            assert_eq!(
+                configuration["model_providers"]["fixture"]["base_url"].as_str(),
+                Some(endpoint)
+            );
+            assert_eq!(captured["auth"].as_str(), Some(auth.as_str()));
+            if let Some(first) = &first_home {
+                assert_ne!(first, &projected);
+            } else {
+                first_home = Some(projected);
+            }
+        }
+        wardian_core::db::init_db().unwrap();
+        for fail_before_start in [true, false] {
+            let context = crate::utils::codex_home::CodexLaunchContext::capture(&AgentConfig {
+                provider: "codex".into(),
+                ..Default::default()
+            })
+            .unwrap();
+            let (_, projected) = codex_bootstrap_launch_context(
+                home._home.path(),
+                home._home.path(),
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+            crate::utils::fs::sync_codex_agent_home_with_context(
+                &context.upstream().path,
+                &projected,
+                Path::new(""),
+                &context,
+            )
+            .unwrap();
+            let mut credentials =
+                super::super::codex::BootstrapCredentialRetirement::new(projected.clone());
+            let pid = projected.join("child.pid");
+            let mut command = bootstrap_fixture_command("capture-config");
+            command
+                .env("CODEX_HOME", &projected)
+                .env(
+                    "WARDIAN_BOOTSTRAP_TEST_CAPTURE",
+                    projected.join("capture.json"),
+                )
+                .env("WARDIAN_BOOTSTRAP_TEST_PID_FILE", &pid);
+            if fail_before_start {
+                std::fs::write(
+                    upstream.join("auth.json"),
+                    r#"{"OPENAI_API_KEY":"rotated-fixture"}"#,
+                )
+                .unwrap();
+            }
+            let operation_id = uuid::Uuid::new_v4().to_string();
+            let attempt = uuid::Uuid::new_v4().to_string();
+            let result = run_owned_bootstrap_command(
+                &mut command,
+                "codex",
+                Duration::from_secs(10),
+                Duration::from_secs(3),
+                Some(&context),
+                Some((&operation_id, &attempt)),
+                Some(&mut credentials),
+            )
+            .await;
+            assert!(
+                result.is_err(),
+                "final validation or post-closure ledger write must fail"
+            );
+            drop(credentials);
+            assert_eq!(pid.exists(), !fail_before_start);
+            if !fail_before_start {
+                let child = std::fs::read_to_string(pid)
+                    .unwrap()
+                    .parse::<u32>()
+                    .unwrap();
+                assert!(!bootstrap_fixture_process_alive(child));
+            }
+            for leaf in ["auth.json", "config.toml", "cap_sid"] {
+                assert!(
+                    !projected.join(leaf).exists(),
+                    "known no-start/closure retires {leaf}"
+                );
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn owned_bootstrap_fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("manager")
+            .join("fixtures")
+            .join("owned_bootstrap_child.js")
+    }
+
+    #[cfg(windows)]
+    fn bootstrap_fixture_command(mode: &str) -> tokio::process::Command {
+        let executable = if cfg!(windows) { "node.exe" } else { "node" };
+        let mut command = crate::utils::process::new_headless_command(executable);
+        command
+            .arg(owned_bootstrap_fixture())
+            .arg(mode)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        command
+    }
+
+    #[cfg(windows)]
+    fn bootstrap_fixture_process_alive(pid: u32) -> bool {
+        crate::utils::process::process_exists(pid)
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn bootstrap_drains_stderr_flood_and_waits_for_child_exit_and_eof() {
+        if !node_available() {
+            return;
+        }
+        let mut command = bootstrap_fixture_command("stderr-flood");
+        let receipt = run_owned_bootstrap_command(
+            &mut command,
+            "codex",
+            Duration::from_secs(10),
+            Duration::from_secs(3),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("contained bootstrap should complete");
+
+        assert!(receipt.work_complete);
+        assert!(!receipt.timed_out);
+        assert!(receipt.exit_success);
+        assert!(receipt.stdout_eof);
+        assert!(receipt.stderr_eof);
+        assert!(receipt.containment_empty);
+        assert_eq!(
+            receipt.session_id.as_deref(),
+            Some("thread-controlled-bootstrap-fixture")
+        );
+        assert!(receipt.stderr_bytes >= 1024 * 1024);
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn bootstrap_marker_does_not_count_as_child_completion() {
+        if !node_available() {
+            return;
+        }
+        let mut command = bootstrap_fixture_command("early-marker");
+        let receipt = run_owned_bootstrap_command(
+            &mut command,
+            "codex",
+            Duration::from_secs(2),
+            Duration::from_secs(3),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("timed-out child cleanup should close its owned process group");
+
+        assert!(receipt.timed_out);
+        assert!(!receipt.work_complete);
+        assert!(!receipt.exit_success);
+        assert_eq!(
+            receipt.session_id.as_deref(),
+            Some("thread-controlled-bootstrap-fixture")
+        );
+        assert!(receipt.stdout_eof);
+        assert!(receipt.stderr_eof);
+        assert!(receipt.containment_empty);
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn cancellation_drops_owned_bootstrap_containment() {
+        if !node_available() {
+            return;
+        }
+        for mode in ["silent", "leader-exited"] {
+            let temp = tempfile::tempdir().expect("bootstrap pid marker directory");
+            let pid_path = temp.path().join("bootstrap.pid");
+            let leader_path = temp.path().join("leader.pid");
+            let failure_path = temp.path().join("failure.txt");
+            let task_pid_path = pid_path.clone();
+            let task_leader_path = leader_path.clone();
+            let task_failure_path = failure_path.clone();
+            let secret_home = temp.path().join("credentials");
+            std::fs::create_dir(&secret_home).unwrap();
+            for leaf in ["auth.json", "config.toml", "cap_sid"] {
+                std::fs::write(secret_home.join(leaf), "fixture").unwrap();
+            }
+            let task_secret_home = secret_home.clone();
+            let task = tokio::spawn(async move {
+                let mut command = bootstrap_fixture_command(mode);
+                command
+                    .env("WARDIAN_BOOTSTRAP_TEST_PID_FILE", task_pid_path)
+                    .env("WARDIAN_BOOTSTRAP_TEST_LEADER", task_leader_path)
+                    .env("WARDIAN_BOOTSTRAP_TEST_FAILURE", task_failure_path);
+                let mut credentials =
+                    super::super::codex::BootstrapCredentialRetirement::new(task_secret_home);
+                run_owned_bootstrap_command(
+                    &mut command,
+                    "codex",
+                    Duration::from_secs(30),
+                    Duration::from_secs(3),
+                    None,
+                    None,
+                    Some(&mut credentials),
+                )
+                .await
+            });
+            let observed = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if std::fs::read_to_string(&pid_path).is_ok() {
+                        break true;
+                    }
+                    if task.is_finished() || failure_path.exists() {
+                        break false;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            if !matches!(observed, Ok(true)) {
+                task.abort();
+                let outcome = task.await;
+                panic!("bootstrap fixture {mode} failed before its PID barrier: {outcome:?}; detail={:?}", std::fs::read_to_string(&failure_path));
+            }
+            let pid = std::fs::read_to_string(&pid_path)
+                .expect("fixture PID")
+                .trim()
+                .parse::<u32>()
+                .expect("numeric fixture PID");
+
+            if mode == "leader-exited" {
+                let leader = std::fs::read_to_string(&leader_path)
+                    .unwrap()
+                    .parse::<u32>()
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while bootstrap_fixture_process_alive(leader) {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("leader must exit before cancellation");
+                assert!(
+                    bootstrap_fixture_process_alive(pid),
+                    "descendant must still be live"
+                );
+                assert!(
+                    !task.is_finished(),
+                    "retained descendant pipes must keep the observation pending"
+                );
+            }
+
+            task.abort();
+            let _ = task.await;
+            for leaf in ["auth.json", "config.toml", "cap_sid"] {
+                assert!(
+                    secret_home.join(leaf).exists(),
+                    "cancelled observation retains uncertain inputs"
+                );
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while bootstrap_fixture_process_alive(pid) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("cancellation must terminate the retained bootstrap child");
+        }
     }
 }

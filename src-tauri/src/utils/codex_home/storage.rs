@@ -98,7 +98,7 @@ fn regular(file: &File) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn directory_identity(path: &Path) -> Result<(u64, u64), String> {
+pub(crate) fn directory_identity(path: &Path) -> Result<(u64, u64), String> {
     plain_directory(path)?;
     let file = options().open(path).map_err(error)?;
     let metadata = file.metadata().map_err(error)?;

@@ -1,7 +1,9 @@
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// The application's upstream home is distinct from each provider child's
 /// Wardian-managed CODEX_HOME. Explicit selection must never fall back silently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct UpstreamHome {
     pub(crate) path: PathBuf,
     pub(crate) explicit: bool,

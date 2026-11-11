@@ -58,6 +58,7 @@ pub fn run(_command: &McpCommand) -> i32 {
     }
 }
 
+#[derive(Debug)]
 struct ServeFailure {
     error: io::Error,
     reader_joined: bool,
@@ -168,6 +169,27 @@ where
     F: Fn() -> B + Send + Sync + 'static,
     H: Fn() + Send + Sync + 'static,
 {
+    serve_concurrent_with_hooks(input, output, create_backend, worker_start, || {}, || {})
+}
+
+fn serve_concurrent_with_hooks<R, W, B, F, H, E, J>(
+    input: R,
+    output: W,
+    create_backend: F,
+    worker_start: H,
+    input_eof: E,
+    workers_joined: J,
+) -> Result<(), ServeFailure>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+    B: messaging::Backend,
+    F: Fn() -> B + Send + Sync + 'static,
+    H: Fn() + Send + Sync + 'static,
+    E: FnOnce(),
+    J: FnOnce(),
+{
+    // These hooks let tests synchronize terminal-input and worker-join boundaries without sleeps.
     let output_failed = Arc::new(AtomicBool::new(false));
     let (output_tx, output_rx) = mpsc::sync_channel::<Value>(OUTPUT_QUEUE);
     let writer_failed = Arc::clone(&output_failed);
@@ -317,6 +339,7 @@ where
             }
             Ok(InputEvent::Eof) => {
                 input_terminal = true;
+                input_eof();
                 break;
             }
             Ok(InputEvent::Failed(error)) => {
@@ -348,6 +371,14 @@ where
             primary_error = Some(io::Error::other("MCP tool worker panicked"));
         }
     }
+    // Workers may saturate the output queue after EOF has ended the input loop.
+    if output_failed.load(Ordering::Acquire) && primary_error.is_none() {
+        primary_error = Some(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "MCP output failed",
+        ));
+    }
+    workers_joined();
     drop(output_tx);
     let writer_deadline = Instant::now() + OUTPUT_DRAIN_TIMEOUT;
     while !writer.is_finished() && Instant::now() < writer_deadline {

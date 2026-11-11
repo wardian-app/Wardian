@@ -12,6 +12,46 @@ mod tests;
 
 struct RegistrationPublicationAttempt(Arc<manager::RegistrationPublicationState>);
 
+/// The exact runtime that completed normal registration, retained until the
+/// durable operation commits its result under lifecycle exclusion.
+pub(crate) struct RegisteredAgentSpawn {
+    pub(crate) config: AgentConfig,
+    pub(crate) config_handle: Arc<std::sync::Mutex<AgentConfig>>,
+    pub(crate) runtime_generation: Option<u64>,
+}
+
+impl RegisteredAgentSpawn {
+    pub(crate) fn matches(&self, active: &ActiveAgent) -> bool {
+        Arc::ptr_eq(&active.config, &self.config_handle)
+            && active.runtime_generation == self.runtime_generation
+            && active.config.lock().is_ok_and(|config| {
+                config.session_name == self.config.session_name
+                    && config.provider == self.config.provider
+                    && config.agent_class == self.config.agent_class
+                    && config.folder == self.config.folder
+                    && ((config.resume_session == self.config.resume_session
+                        && config.fresh_provider_session_id
+                            == self.config.fresh_provider_session_id)
+                        || (matches!(config.provider.as_str(), "opencode" | "antigravity")
+                            && self.config.resume_session.is_none()
+                            && self.config.fresh_provider_session_id.is_none()
+                            && config.fresh_provider_session_id.is_none()
+                            && config
+                                .resume_session
+                                .as_deref()
+                                .zip(self.runtime_generation)
+                                .is_some_and(|(native, generation)| {
+                                    wardian_core::agent_spawn::first_native_binding_matches(
+                                        &config.session_id,
+                                        native,
+                                        generation,
+                                    )
+                                    .unwrap_or(false)
+                                })))
+            })
+    }
+}
+
 impl Drop for RegistrationPublicationAttempt {
     fn drop(&mut self) {
         self.0.fail();
@@ -24,7 +64,8 @@ pub(super) async fn register_new_agent(
     state: &AppState,
     app: &AppHandle,
     options: super::AgentRegistrationOptions<'_>,
-) -> Result<AgentConfig, String> {
+    codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
+) -> Result<RegisteredAgentSpawn, String> {
     let session_id = config.session_id.clone();
     config.system_include_directories = Some(crate::utils::fs::resolve_system_include_directories(
         &config.agent_class,
@@ -33,8 +74,16 @@ pub(super) async fn register_new_agent(
     let pending = PendingRuntime::prepare(&config, &state.terminal_sessions)?;
     let publication =
         RegistrationPublicationAttempt(Arc::new(manager::RegistrationPublicationState::default()));
-    let (active_agent, mut completion) =
-        spawn_for_registration(pending, app, &config, publication.0.clone()).await?;
+    let (active_agent, mut completion) = spawn_for_registration(
+        pending,
+        app,
+        &config,
+        publication.0.clone(),
+        codex_launch_context,
+    )
+    .await?;
+    let registered_config = active_agent.config.clone();
+    let registered_generation = active_agent.runtime_generation;
     // Propagate any fields that spawn_agent may have auto-assigned (e.g. opencode_port).
 
     {
@@ -70,15 +119,29 @@ pub(super) async fn register_new_agent(
             .map(|agent| agent.config.lock().unwrap().session_name.clone())
             .collect::<std::collections::HashSet<_>>()
     };
-    match super::resolve_registered_session_name(
-        &config.session_name,
-        options.clone_name_base,
-        &existing_names,
-    ) {
-        Ok(session_name) => config.session_name = session_name,
-        Err(error) => {
+    if let Some(reserved_session_name) = options.reserved_session_name {
+        if config.session_name != reserved_session_name
+            || existing_names.contains(reserved_session_name)
+        {
+            let error = format!(
+                "Reserved agent name '{}' is no longer available.",
+                reserved_session_name
+            );
             publication.0.fail();
             return Err(stop_uncommitted_agent(completion, active_agent, error).await);
+        }
+        config.session_name = reserved_session_name.to_string();
+    } else {
+        match super::resolve_registered_session_name(
+            &config.session_name,
+            options.clone_name_base,
+            &existing_names,
+        ) {
+            Ok(session_name) => config.session_name = session_name,
+            Err(error) => {
+                publication.0.fail();
+                return Err(stop_uncommitted_agent(completion, active_agent, error).await);
+            }
         }
     }
     if let Some(reserved_session_name) = options.reserved_session_name {
@@ -120,7 +183,74 @@ pub(super) async fn register_new_agent(
     .await?;
 
     publication.0.commit();
-    Ok(config)
+    if let Some(owner_id) = options.name_claim_owner_id {
+        finish_name_ownership(
+            state,
+            &config,
+            owner_id,
+            &registered_config,
+            registered_generation,
+        )
+        .await
+        .map_err(|error| ownership_pending(&session_id, owner_id, &error))?;
+    }
+    Ok(RegisteredAgentSpawn {
+        config,
+        config_handle: registered_config,
+        runtime_generation: registered_generation,
+    })
+}
+
+const OWNERSHIP_PENDING: &str = "[agent-name-ownership-pending]";
+
+pub(super) fn ownership_pending(agent_id: &str, attempt_id: &str, detail: &str) -> String {
+    format!("{OWNERSHIP_PENDING} Agent {agent_id}, attempt {attempt_id}, was committed with name ownership pending. Preserve this identity for metadata repair. {detail}")
+}
+
+pub(super) fn is_ownership_pending(error: &str) -> bool {
+    error.starts_with(OWNERSHIP_PENDING)
+}
+
+async fn finish_name_ownership(
+    state: &AppState,
+    config: &AgentConfig,
+    owner_id: &str,
+    expected: &Arc<std::sync::Mutex<AgentConfig>>,
+    generation: Option<u64>,
+) -> Result<(), String> {
+    let _lifecycle = state.lock_agent_lifecycle(&config.session_id).await;
+    let barrier = manager::roster_io::acquire_roster_barrier().await?;
+    let current = state
+        .agents
+        .lock()
+        .await
+        .get(&config.session_id)
+        .is_some_and(|agent| {
+            Arc::ptr_eq(&agent.config, expected)
+                && agent.runtime_generation == generation
+                && agent
+                    .config
+                    .lock()
+                    .is_ok_and(|current| current.session_name == config.session_name)
+        });
+    if !current {
+        return Err("Published incarnation changed before ownership completion".into());
+    }
+    let owner_id = owner_id.to_string();
+    let agent_id = config.session_id.clone();
+    manager::roster_io::run_roster_io(barrier, move || {
+        let _lifecycle = _lifecycle;
+        let roster = crate::spawn_operations::persisted_roster()?;
+        wardian_core::agent_spawn::complete_legacy_name(&owner_id, &agent_id, &roster)?;
+        match wardian_core::agent_spawn::finalize_legacy_name(&owner_id, &agent_id, &roster)? {
+            wardian_core::agent_spawn::LegacyNameFinalization::Committed
+            | wardian_core::agent_spawn::LegacyNameFinalization::AlreadyCommitted => Ok(()),
+            wardian_core::agent_spawn::LegacyNameFinalization::Conflict => {
+                Err("Name ownership conflicts with the published incarnation".into())
+            }
+        }
+    })
+    .await
 }
 
 pub(super) async fn spawn_for_registration(
@@ -128,20 +258,27 @@ pub(super) async fn spawn_for_registration(
     app: &AppHandle,
     config: &AgentConfig,
     publication: Arc<manager::RegistrationPublicationState>,
+    codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
 ) -> Result<(PendingRuntime, Option<manager::CodexAttachmentCompletion>), String> {
     if manager::should_publish_provisionally(&config.provider, false) {
-        let spawned = manager::spawn_agent_provisionally(
+        let spawned = manager::spawn::spawn_agent_provisionally_with_codex_context(
             app.clone(),
             config.clone(),
             false,
             None,
             publication,
+            codex_launch_context,
         )
         .await?;
         Ok((pending.attach(spawned.active), spawned.completion))
     } else {
-        let active =
-            manager::spawn_agent_for_registration(app.clone(), config.clone(), publication).await?;
+        let active = manager::spawn::spawn_agent_for_registration_with_codex_context(
+            app.clone(),
+            config.clone(),
+            publication,
+            codex_launch_context,
+        )
+        .await?;
         Ok((pending.attach(active), None))
     }
 }

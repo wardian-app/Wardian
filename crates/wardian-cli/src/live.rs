@@ -4,7 +4,8 @@ pub(crate) use wardian_cli::control_client::{
 };
 
 use std::{
-    fmt, io,
+    fmt,
+    io::{self, Write},
     time::{Duration, Instant},
 };
 
@@ -13,7 +14,8 @@ use wardian_core::browser::{
     ConsoleEntry, PageSnapshot,
 };
 use wardian_core::control::{
-    AgentDoctorResponse, AgentListResponse, AgentResponse, AgentUpdateResponse, AgentWatchResponse,
+    AgentDoctorResponse, AgentListResponse, AgentResponse, AgentSpawnAdmissionResponse,
+    AgentSpawnOperationResponse, AgentUpdateResponse, AgentWatchResponse,
     AgentWorktreeListResponse, AgentWorktreeMutationResponse, AgentWorktreeSummary,
     AutomationRunResponse, ControlRequest, ConversationListResponse, ConversationShowResponse,
     InboxListResponse, InboxNotificationPayload, InboxNotificationResponse, MessageOrigin,
@@ -49,7 +51,11 @@ enum ControlOperation {
     AgentPause,
     AgentResume,
     AgentModels,
-    AgentSpawn,
+    AgentSpawnAsync,
+    AgentSpawnGet,
+    AgentSpawnWait {
+        requested: Duration,
+    },
     AgentUpdate,
     AgentClone,
     AgentWorktreeList,
@@ -338,30 +344,80 @@ pub fn agent_resume(target: &str) -> io::Result<()> {
     .map(|_| ())
 }
 
-pub fn agent_spawn(
-    provider: &str,
-    class: &str,
-    name: Option<&str>,
-    workspace: Option<&str>,
-    model: Option<&str>,
-    reasoning_effort: Option<&str>,
-) -> io::Result<AgentIdentity> {
+pub fn agent_spawn_admit(
+    operation_id: &str,
+    request: wardian_core::agent_spawn::AgentSpawnRequest,
+) -> io::Result<AgentSpawnAdmissionResponse> {
     let runtime = build_runtime()?;
     let value = timeout_block(
         &runtime,
-        ControlOperation::AgentSpawn,
-        send_request(ControlRequest::AgentSpawn {
-            provider: provider.to_string(),
-            class: class.to_string(),
-            name: name.map(str::to_string),
-            workspace: workspace.map(str::to_string),
-            model: model.map(str::to_string),
-            reasoning_effort: reasoning_effort.map(str::to_string),
+        ControlOperation::AgentSpawnAsync,
+        send_request(ControlRequest::AgentSpawnAsync {
+            operation_id: operation_id.to_string(),
+            request,
         }),
     )?;
-    let resp: AgentResponse =
-        serde_json::from_value(value).map_err(|e| io::Error::other(e.to_string()))?;
-    Ok(resp.agent)
+    serde_json::from_value(value).map_err(|error| io::Error::other(error.to_string()))
+}
+
+pub fn agent_spawn_operation(operation_id: &str) -> io::Result<AgentSpawnOperationResponse> {
+    let runtime = build_runtime()?;
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::AgentSpawnGet,
+        send_request(ControlRequest::AgentSpawnOperationGet {
+            operation_id: operation_id.to_string(),
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|error| io::Error::other(error.to_string()))
+}
+
+pub fn agent_spawn_wait(
+    operation_id: &str,
+    timeout: Duration,
+) -> io::Result<AgentSpawnOperationResponse> {
+    let runtime = build_runtime()?;
+    let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+    let value = timeout_block(
+        &runtime,
+        ControlOperation::AgentSpawnWait { requested: timeout },
+        send_request(ControlRequest::AgentSpawnOperationWait {
+            operation_id: operation_id.to_string(),
+            timeout_ms,
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|error| io::Error::other(error.to_string()))
+}
+
+/// Persist the generated idempotency key before the request can reach the app.
+pub fn persist_spawn_submission_receipt(operation_id: &str) -> io::Result<()> {
+    let home = wardian_core::paths::wardian_home()
+        .ok_or_else(|| io::Error::other("could not resolve Wardian home for spawn receipt"))?;
+    let directory = home.join("spawn-submissions");
+    std::fs::create_dir_all(&directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let path = directory.join(format!("{operation_id}.json"));
+    let receipt = serde_json::json!({
+        "schema": 1,
+        "operation_id": operation_id,
+        "created_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    });
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    serde_json::to_writer(&mut file, &receipt)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    file.write_all(b"\n")?;
+    file.sync_all()
 }
 
 pub fn agent_models(provider: &str, force_refresh: bool) -> io::Result<serde_json::Value> {
@@ -806,7 +862,7 @@ fn timeout_block(
 
 fn operation_timeout(operation: &ControlOperation) -> Duration {
     match operation {
-        ControlOperation::AgentList => CONTROL_TIMEOUT,
+        ControlOperation::AgentList | ControlOperation::AgentSpawnGet => CONTROL_TIMEOUT,
         ControlOperation::AgentDoctor => CONTROL_DIAGNOSTIC_TIMEOUT,
         ControlOperation::ConversationList
         | ControlOperation::ConversationShow
@@ -821,7 +877,7 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::AgentPause
         | ControlOperation::AgentResume
         | ControlOperation::AgentModels
-        | ControlOperation::AgentSpawn
+        | ControlOperation::AgentSpawnAsync
         | ControlOperation::AgentUpdate
         | ControlOperation::AgentClone
         | ControlOperation::AgentWorktreeEnable
@@ -832,6 +888,7 @@ fn operation_timeout(operation: &ControlOperation) -> Duration {
         | ControlOperation::NotifyCreate
         | ControlOperation::TopologyMutate => CONTROL_MUTATION_TIMEOUT,
         ControlOperation::Delivery { requested } => watch_timeout_for(*requested),
+        ControlOperation::AgentSpawnWait { requested } => watch_timeout_for(*requested),
         ControlOperation::AgentWorktreeList => CONTROL_GIT_DISCOVERY_TIMEOUT,
         ControlOperation::AgentWatch { requested, .. } => watch_timeout_for(*requested),
         ControlOperation::NotifyWait { requested } => watch_timeout_for(*requested),
@@ -1311,7 +1368,7 @@ mod tests {
 
     #[test]
     fn agent_mutations_use_longer_control_timeout() {
-        assert!(operation_timeout(&ControlOperation::AgentSpawn) > CONTROL_TIMEOUT);
+        assert!(operation_timeout(&ControlOperation::AgentSpawnAsync) > CONTROL_TIMEOUT);
         assert_eq!(
             operation_timeout(&ControlOperation::AgentNewSession),
             CONTROL_MUTATION_TIMEOUT

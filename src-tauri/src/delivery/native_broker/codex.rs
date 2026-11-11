@@ -143,6 +143,14 @@ impl NativeDeliveryBroker {
         self: &Arc<Self>,
         spec: NativeSessionSpec,
     ) -> Result<Arc<CodexSharedOwner>, CodexSharedError> {
+        self.create_shared_codex_with_context(spec, None).await
+    }
+
+    async fn create_shared_codex_with_context(
+        self: &Arc<Self>,
+        spec: NativeSessionSpec,
+        codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
+    ) -> Result<Arc<CodexSharedOwner>, CodexSharedError> {
         // Capture disposal revisions before the first await or detached spawn.
         let request = self
             .codex_creations
@@ -157,7 +165,7 @@ impl NativeDeliveryBroker {
             let agent_id = spec.target_agent_id.clone();
             let generation = spec.generation;
             let started = broker
-                .create_shared_codex_inner(spec, reply.closed(), request)
+                .create_shared_codex_inner(spec, codex_launch_context, reply.closed(), request)
                 .await;
             let created = started.as_ref().is_ok_and(|(_, created)| *created);
             if reply.send(started.map(|(owner, _)| owner)).is_err() && created {
@@ -172,6 +180,7 @@ impl NativeDeliveryBroker {
     async fn create_shared_codex_inner(
         &self,
         spec: NativeSessionSpec,
+        codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
         cancelled: impl std::future::Future<Output = ()>,
         request: CodexCreationRequest,
     ) -> Result<(Arc<CodexSharedOwner>, bool), CodexSharedError> {
@@ -269,7 +278,7 @@ impl NativeDeliveryBroker {
                     .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 return Err(CodexSharedError::unsupported("test owner-start sentinel"));
             }
-            CodexSharedOwner::start(&spec, cancellation).await
+            CodexSharedOwner::start(&spec, codex_launch_context, cancellation).await
         };
         let owner = match start.await {
             Ok(owner) => owner,
@@ -334,11 +343,16 @@ impl NativeDeliveryBroker {
     }
 
     /// Lifecycle-only launch; manager must have terminated the prior incarnation.
-    pub async fn prepare_codex_tui(
+    pub(crate) async fn prepare_codex_tui(
         self: &Arc<Self>,
         spec: NativeSessionSpec,
+        codex_launch_context: Option<Arc<crate::utils::codex_home::CodexLaunchContext>>,
     ) -> Result<CodexTuiAttachment, CodexSharedError> {
-        Ok(self.create_shared_codex(spec).await?.attachment.clone())
+        Ok(self
+            .create_shared_codex_with_context(spec, codex_launch_context)
+            .await?
+            .attachment
+            .clone())
     }
 
     /// Manager has started the captured PTY reader/responder. Keep this owner
@@ -925,6 +939,7 @@ mod tests {
                                 ..Default::default()
                             },
                         },
+                        None,
                         std::future::pending(),
                         broker.codex_creations.register("late", 1).unwrap(),
                     )
