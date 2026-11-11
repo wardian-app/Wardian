@@ -28,15 +28,20 @@ fn rotate_debug_log_if_needed(path: &std::path::Path) {
     let _ = std::fs::rename(path, &rotated);
 }
 
+/// Append a UTC RFC 3339 millisecond timestamp and the original message.
 pub fn log_debug(msg: &str) {
-    let path = debug_log_path();
+    append_debug_log(&debug_log_path(), msg);
+}
+
+fn append_debug_log(path: &std::path::Path, msg: &str) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    rotate_debug_log_if_needed(&path);
+    rotate_debug_log_if_needed(path);
     for _ in 0..5 {
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
-            let _ = writeln!(file, "{}", msg);
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let _ = writeln!(file, "{} {}", timestamp, msg);
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -247,7 +252,70 @@ pub use terminal_trace::{log_terminal_trace_bytes, log_terminal_trace_note};
 
 #[cfg(test)]
 mod tests {
-    use super::{debug_log_path, log_debug};
+    use super::{append_debug_log, debug_log_path, log_debug, DEBUG_LOG_ROTATE_BYTES};
+
+    fn assert_timestamped_message(contents: &str, message: &str) {
+        let (timestamp, logged_message) = contents.split_once(' ').expect("timestamp prefix");
+        assert_eq!(timestamp.len(), 24, "expected millisecond precision");
+        assert!(timestamp.ends_with('Z'), "expected UTC timestamp");
+        let parsed = chrono::DateTime::parse_from_rfc3339(timestamp).expect("RFC 3339 timestamp");
+        assert_eq!(parsed.offset().local_minus_utc(), 0);
+        assert_eq!(logged_message, format!("{message}\n"));
+    }
+
+    #[test]
+    fn debug_log_prefixes_each_message_with_utc_milliseconds() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("wardian_debug.log");
+        let messages = [
+            "[spawn] provider ready: café",
+            "",
+            "message with trailing spaces  ",
+        ];
+        for message in messages {
+            append_debug_log(&path, message);
+        }
+        let contents = std::fs::read_to_string(path).expect("read debug log");
+        let lines: Vec<_> = contents.split_inclusive('\n').collect();
+        assert_eq!(lines.len(), messages.len());
+        for (line, message) in lines.into_iter().zip(messages) {
+            assert_timestamped_message(line, message);
+        }
+    }
+
+    #[test]
+    fn debug_log_rotates_at_threshold_and_replaces_previous_backup() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("wardian_debug.log");
+        let rotated = path.with_extension("log.old");
+        std::fs::write(&rotated, "previous backup").expect("seed backup");
+        let file = std::fs::File::create(&path).expect("create log");
+        file.set_len(DEBUG_LOG_ROTATE_BYTES - 1).expect("size log");
+        drop(file);
+
+        append_debug_log(&path, "cross threshold");
+        assert_eq!(
+            std::fs::read_to_string(&rotated).unwrap(),
+            "previous backup"
+        );
+        let before_rotation = std::fs::read(&path).expect("read unrotated log");
+        assert!(before_rotation.len() as u64 > DEBUG_LOG_ROTATE_BYTES);
+
+        append_debug_log(&path, "after rotation");
+        assert_eq!(std::fs::read(&rotated).unwrap(), before_rotation);
+        assert_timestamped_message(&std::fs::read_to_string(&path).unwrap(), "after rotation");
+
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(DEBUG_LOG_ROTATE_BYTES)
+            .expect("size log exactly at threshold");
+        drop(file);
+        append_debug_log(&path, "exact threshold");
+        assert_eq!(
+            std::fs::metadata(&rotated).unwrap().len(),
+            DEBUG_LOG_ROTATE_BYTES
+        );
+        assert_timestamped_message(&std::fs::read_to_string(path).unwrap(), "exact threshold");
+    }
 
     #[test]
     fn log_debug_creates_parent_directory_for_custom_home() {
@@ -264,6 +332,6 @@ mod tests {
 
         assert!(path.exists(), "expected debug log at {}", path.display());
         let contents = std::fs::read_to_string(path).expect("read debug log");
-        assert!(contents.contains("parent directory smoke test"));
+        assert_timestamped_message(&contents, "parent directory smoke test");
     }
 }
