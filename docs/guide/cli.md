@@ -365,6 +365,7 @@ wardian agent list
 wardian agent list --scope all
 wardian agent restart <name-or-uuid>
 wardian agent new-session <name-or-uuid>
+wardian agent release-hold <name-or-uuid> --acquisition-id <exact-acquisition-id> --operator-verified-exit
 wardian agent rename <name-or-uuid> <new-name>
 wardian agent delete <name-or-uuid> --confirm <current-agent-name>
 wardian agent delete <name-or-uuid> --confirm <current-agent-name> --force
@@ -547,12 +548,48 @@ in-progress fresh-session rotation finish. The exact old-session hold remains
 in place and blocks resuming that old session until verified recovery. Failed
 shutdown retains the stop fence and blocks rotation.
 
-Older stranded holds without retained launch/exit evidence cannot be released
-online safely. Off status, an absent PID, and an empty provider-candidate scan
-do not prove old-provider exit. Wardian keeps the hold and reports the missing
-evidence; see [PTY lifecycle recovery](../developer/pty-lifecycle.md) for the
-conservative recovery boundary. Retrying never deletes history or bypasses a
-pending conversation close.
+Legacy stranded holds without retained launch/exit evidence remain blocked by
+default. Off status, an absent PID, restart, and an empty provider-candidate scan
+do not prove old-provider exit. Once an operator has independently verified
+that the selected hold's exact old provider and every descendant writer exited,
+`agent release-hold` provides an explicit online fallback:
+
+```bash
+wardian agent release-hold <name-or-uuid> --acquisition-id <exact-acquisition-id> --operator-verified-exit
+```
+
+The same command works in PowerShell. The exact acquisition ID and the
+attestation flag are mandatory. Select an inspected `prior_provider_hold` /
+`uncertain_previous_provider` record from
+`<wardian-home>/runtime/conversation-leases.json`, or the startup diagnostic.
+Selection uses the target agent ID and acquisition ID. It supports historical
+holds whose provider/session differ from the agent's current configuration;
+the stored hold determines the provider/session being released. A foreign
+agent's hold cannot be selected. No other hold, conversation, workspace, or
+current configuration changes, and release does not finish a pending close.
+
+The desktop must support this command and be running. An older app rejection,
+unavailable endpoint, or timeout never triggers disk fallback or automatic
+replay. The command serializes with the agent's lifecycle and refuses an owned
+runtime, a retained stop entry, an active conversation owner, or any tied
+provider candidate for the held or current provider/session. The scan only
+vetoes release; **the operator's explicit attestation is the authority**.
+
+Before exact lease release, the desktop appends and syncs an authorization to
+`<wardian-home>/agents/<agent-id>/lifecycle-history.jsonl`. It records the OS
+principal (Windows domain/account or Unix effective UID), optional managed actor, UTC time, exact
+hold, and authorization ID. Audit failure prevents release. Before appending,
+the desktop checks at most 64 KiB plus one boundary byte to validate the final
+JSON record and terminating newline. Each new record is limited to 64 KiB.
+Accumulated history has no size ceiling; prior bytes are preserved without a
+full-history scan. A malformed, partial, or oversized final record requires
+inspection and is never repaired or truncated by this command.
+Its `authorization_only` records do not claim successful release if the
+subsequent lease write fails. A successful response identifies the released
+acquisition and authorization ID. After an error or timeout, inspect the exact
+lease and audit before deciding whether to retry. See
+[PTY lifecycle recovery](../developer/pty-lifecycle.md) for the conservative
+verification boundary.
 
 `agent restart` restarts the provider while preserving the Wardian agent, its
 habitat, and saved session history. Use it after `agent update` when the update

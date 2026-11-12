@@ -1317,6 +1317,17 @@ pub struct AgentArgs {
     pub pretty: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct ReleaseHoldArgs {
+    pub target: String,
+    /// Exact acquisition from the inspected prior-provider hold.
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    pub acquisition_id: String,
+    /// Attest that the exact old provider and every descendant writer exited.
+    #[arg(long, required = true)]
+    pub operator_verified_exit: bool,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum AgentCommand {
     /// Show one agent, or the managed session when no target is supplied.
@@ -1364,6 +1375,8 @@ pub enum AgentCommand {
     Restart { target: String },
     /// Archive the current conversation and start a fresh session, including for Off agents.
     NewSession { target: String },
+    /// Release one legacy hold after explicit operator verification of old-provider exit.
+    ReleaseHold(ReleaseHoldArgs),
     /// Pause an agent's provider process.
     Pause { target: String },
     /// Resume a paused agent.
@@ -2566,6 +2579,63 @@ mod tests {
             .unwrap()
             .iter()
             .any(|argument| { argument["name"] == "target" && argument["required"] == true }));
+    }
+
+    #[test]
+    fn release_hold_requires_target_exact_acquisition_and_explicit_attestation() {
+        let valid = [
+            "wardian",
+            "agent",
+            "release-hold",
+            "coder-a1",
+            "--acquisition-id",
+            "exact",
+            "--operator-verified-exit",
+        ];
+        let cli = Cli::try_parse_from(valid).unwrap();
+        let Command::Agent(args) = cli.command else {
+            panic!("expected agent command")
+        };
+        assert!(matches!(args.command, Some(AgentCommand::ReleaseHold(args))
+            if args.target == "coder-a1" && args.acquisition_id == "exact" && args.operator_verified_exit));
+        for invalid in [
+            vec!["wardian", "agent", "release-hold"],
+            vec![
+                "wardian",
+                "agent",
+                "release-hold",
+                "coder-a1",
+                "--acquisition-id",
+                "exact",
+            ],
+            vec![
+                "wardian",
+                "agent",
+                "release-hold",
+                "coder-a1",
+                "--operator-verified-exit",
+            ],
+            vec![
+                "wardian",
+                "agent",
+                "release-hold",
+                "coder-a1",
+                "--acquisition-id",
+                "",
+                "--operator-verified-exit",
+            ],
+            vec![
+                "wardian",
+                "agent",
+                "release-hold",
+                "coder-a1",
+                "--acquisition-id",
+                "exact",
+                "--operator-verified-exit=false",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(invalid).is_err());
+        }
     }
 
     #[test]

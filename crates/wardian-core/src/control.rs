@@ -40,6 +40,14 @@ pub enum ControlRequest {
     AgentNewSession {
         target: String,
     },
+    /// Explicit operator authorization; a negative process scan is not exit proof.
+    AgentReleaseHold {
+        target: String,
+        acquisition_id: String,
+        operator_verified_exit: bool,
+        #[serde(default)]
+        origin: Option<MessageOrigin>,
+    },
     AgentPause {
         target: String,
     },
@@ -631,6 +639,18 @@ pub struct OkResponse {
     pub ok: bool,
 }
 
+/// Exact hold released after a durable operator authorization was recorded.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentReleaseHoldResponse {
+    pub schema: u8,
+    pub ok: bool,
+    pub agent_id: String,
+    pub provider: String,
+    pub resume_session: String,
+    pub acquisition_id: String,
+    pub authorization_id: String,
+}
+
 impl OkResponse {
     pub fn new() -> Self {
         Self {
@@ -1215,6 +1235,25 @@ mod tests {
         assert!(
             serde_json::from_str::<ControlRequest>(r#"{"command":"agent_new_session"}"#).is_err()
         );
+    }
+
+    #[test]
+    fn release_hold_wire_contract_requires_exact_authorization_fields() {
+        let value = serde_json::json!({"command":"agent_release_hold", "target":"coder-a1",
+            "acquisition_id":"exact", "operator_verified_exit":true});
+        let request: ControlRequest = serde_json::from_value(value.clone()).unwrap();
+        assert!(
+            matches!(request, ControlRequest::AgentReleaseHold { ref acquisition_id, operator_verified_exit: true, origin: None, .. } if acquisition_id == "exact")
+        );
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["command"],
+            "agent_release_hold"
+        );
+        for field in ["target", "acquisition_id", "operator_verified_exit"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<ControlRequest>(missing).is_err());
+        }
     }
 
     #[test]

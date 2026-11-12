@@ -305,6 +305,12 @@ pub(crate) async fn recover_prior_hold(home: &Path, agent_id: &str) -> Result<()
     Ok(())
 }
 
+/// Operator fallback must not replace an existing retained-handle stop owner.
+/// Call while holding the per-agent lifecycle gate; do not retry or consume it.
+pub(crate) fn has_retained_stop(home: &Path, agent_id: &str) -> Result<bool, String> {
+    Ok(!entries(&key(home, agent_id)?).is_empty())
+}
+
 fn entries(key: &Key) -> Vec<Arc<Entry>> {
     registry()
         .lock()
