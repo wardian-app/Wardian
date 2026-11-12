@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
+import { By } from "selenium-webdriver";
 import ts from "typescript";
 import { invokeTauri } from "../lib/harness.mjs";
 import { chatBodyWitness } from "../lib/chatSavedFixture.mjs";
@@ -37,6 +38,7 @@ function observationHarness(invoke, options = {}) {
   let needleRect = null;
   const listeners = new Map();
   let frames = [];
+  let mutationCallback = () => {};
   const timers = new Map();
   let nextTimer = 0;
   let admitted = { session: "session", conversation: "conversation", generation: "generation", epoch: "epoch",
@@ -99,11 +101,19 @@ function observationHarness(invoke, options = {}) {
     const semantic = element({ "data-testid": kind === "agents-overview" ? "agents-overview-surface" : "agent-session-surface",
       "data-surface-id": surfaceId, "data-resource-key": owner }, panel);
     const root = kind === "agents-overview" ? element({ "data-agent-grid-card-id": owner }, semantic) : semantic;
-    root.querySelector = (selector) => selector.includes("Switch to Terminal") ? (chatMode ? {} : null)
-      : selector.includes("Switch to Chat") ? (chatMode ? null : {})
+    const mode = element({}, root);
+    mode.tagName = "BUTTON";
+    mode.getAttribute = function (name) { return name === "title" && !Object.hasOwn(this.attributes, name)
+      ? chatMode ? "Switch to Terminal" : "Switch to Chat" : this.attributes[name] ?? null; };
+    root.modePresent = options.modePresent !== false;
+    root.modeControls = [mode];
+    const modes = (selector) => shown && root.modePresent ? root.modeControls.filter((node) => node.matches(selector)) : [];
+    root.querySelector = (selector) => selector.includes("Switch to Terminal") || selector.includes("Switch to Chat")
+      ? modes(selector)[0] ?? null
         : !shown || !chatMode ? null : selector.includes("scroll-region") ? scroll
           : selector.includes("textarea") ? composers[0] ?? null : null;
-    root.querySelectorAll = (selector = "") => !shown || !chatMode ? [] : selector.includes("textarea") ? composers : candidates;
+    root.querySelectorAll = (selector = "") => selector.includes("button[title=") ? selector.split(",").flatMap((part) => modes(part.trim()))
+      : !shown || !chatMode ? [] : selector.includes("textarea") ? composers : candidates;
     root.findElement = async (selector) => {
       assert.equal(selector, "ancestor::*[@role='tabpanel'][1]");
       return root.closest('[role="tabpanel"]');
@@ -111,7 +121,7 @@ function observationHarness(invoke, options = {}) {
     const close = element({ "data-tab-close": "" }, tab);
     close.click = async () => { tab.closed = true; tab.isConnected = false; tabpanel.isConnected = false; root.isConnected = false; };
     tab.findElements = async (selector) => close.matches(selector) ? [close] : [];
-    const route = { root, semantic, panel, tabpanel, tab, host, portal, dockRoot, kind };
+    const route = { root, semantic, panel, tabpanel, tab, host, portal, dockRoot, kind, mode };
     routes.push(route);
     return route;
   };
@@ -160,7 +170,11 @@ function observationHarness(invoke, options = {}) {
     performance: { now: () => clock }, innerHeight: 500, innerWidth: 500,
     setTimeout: (callback, ms) => { const id = ++nextTimer; timers.set(id, { callback, at: clock + ms }); return id; },
     clearTimeout: (id) => timers.delete(id),
-    MutationObserver: class { observe() {} disconnect() { disconnected = true; } }, requestAnimationFrame: (callback) => frames.push(callback) };
+    MutationObserver: class {
+      constructor(callback) { mutationCallback = callback; }
+      observe() {}
+      disconnect() { disconnected = true; mutationCallback = () => {}; }
+    }, requestAnimationFrame: (callback) => frames.push(callback) };
   if (options.immutableInvoke) Object.defineProperty(context.window.__TAURI_INTERNALS__, "invoke", {
     value: invoke, writable: false, configurable: false,
   });
@@ -169,9 +183,11 @@ function observationHarness(invoke, options = {}) {
       config: { name: "Owned", body: rawBody, witness: options.witness, probe: "native-input-probe" } });
   const observer = context.window.__chatAcceptance;
   observer.bind("session");
-  observer.arm("cold");
+  if (options.arm !== false) observer.arm("cold");
   return {
     observer, document, content, row, scroll, route, window: context.window, bridge,
+    now: () => clock, frameCount: () => frames.length,
+    mutate() { mutationCallback([{ type: "childList" }]); },
     timerCount: () => timers.size,
     expire() { for (const [id, timer] of [...timers]) { clock = Math.max(clock, timer.at); timers.delete(id); timer.callback(); } },
     duplicate(id) {
@@ -209,7 +225,7 @@ function observationHarness(invoke, options = {}) {
       listeners.get(type)({ type, isTrusted: trusted,
         target: { closest: (selector) => selector === `[aria-label="Agent ${name}"]` ? row : null } });
     },
-    click(trusted = true, owned = true) {
+    click(trusted = true, owned = true, actualButton = null) {
       // The normal manual route starts with Roster; explicit-origin tests can
       // supply its earlier pointer event and verify that it is never replaced.
       if (trusted && owned && observer.state.phase.rosterAt === null) {
@@ -217,13 +233,15 @@ function observationHarness(invoke, options = {}) {
         listeners.get("pointerdown")({ type: "pointerdown", isTrusted: true,
           target: { closest: () => row } });
       }
-      const button = { owned };
+      const button = actualButton ?? { owned };
       const target = { closest: (selector) => selector.includes("Switch to Chat") ? button : null };
       listeners.get("click")({ isTrusted: trusted, target });
       if (trusted && owned) chatMode = true;
     },
-    input(trusted = true, owned = true) {
-      const target = composer({ owned, value: "native-input-probe" });
+    input(trusted = true, owned = true, value = "native-input-probe", actualInput = null) {
+      const target = actualInput ?? composer({ owned });
+      target.owned = owned;
+      target.value = value;
       if (owned) composers = [target];
       document.activeElement = target;
       listeners.get("input")({ isTrusted: trusted, target });
@@ -642,14 +660,141 @@ function rosterMeasurement(driver, evidence, visible, ownedSurface, extensions =
   const start = source.indexOf("function waitForChatEndpoint(binding,");
   const end = source.indexOf("async function closeTerminalSurface(driver,", start);
   assert.ok(start >= 0 && end > start);
-  return vm.runInNewContext(`${source.slice(start, end)}\nmeasureChat(driver, "session", "test-phase", "Owned Saved", evidence, requireTerminalToggle);`,
-    { driver, evidence, visible, ownedSurface, performance, captureRosterDiagnostics() {}, assert, requireTerminalToggle: false, ...extensions });
+  return vm.runInNewContext(`${source.slice(start, end)}\nmeasureChat(driver, "session", "test-phase", measurementName, evidence, requireTerminalToggle);`,
+    { driver, evidence, visible, ownedSurface, performance, captureRosterDiagnostics() {}, assert,
+      measurementName: "Owned Saved", requireTerminalToggle: false, ...extensions });
 }
 
+/** Discovery transport fixture for controller tests; native predicates still run. */
+function withModeDiscovery(driver, mode = {}, surface = {}) {
+  const nativeMode = { isDisplayed: async () => true, getAttribute: async () => "Switch to Terminal", click: async () => {}, ...mode };
+  const nativeSurface = { findElements: async () => [], ...surface };
+  const endpoint = driver.executeAsyncScript;
+  driver.executeAsyncScript = async function (fn, binding, ...args) {
+    if (fn.name === "waitForOwnedChatMode") {
+      assert.equal(args.length, 1); assert.ok(args[0] > 0 && args[0] <= 5000);
+      return { status: "ACCEPTED", ...binding, field: "ownedMode", surface: nativeSurface, control: nativeMode };
+    }
+    return Reflect.apply(endpoint, this, [fn, binding, ...args]);
+  };
+  driver.wait ??= async (predicate, timeout) => { assert.ok(timeout > 0 && timeout <= 5000); assert.ok(await predicate()); };
+  return driver;
+}
+
+test("normal mode readiness between discovery polls preserves subsecond usability with the original full workload", async () => {
+  const harness = observationHarness(() => Promise.resolve(actualPage()), { arm: false, modePresent: false });
+  const source = fs.readFileSync(new URL("./chat-turn-change-native.test.mjs", import.meta.url), "utf8");
+  const selectorsStart = source.indexOf("async function visible(driver,");
+  const selectorsEnd = source.indexOf("/** Wait only for the real raw producer", selectorsStart);
+  assert.ok(selectorsStart >= 0 && selectorsEnd > selectorsStart);
+  const selectors = vm.runInNewContext(`${source.slice(selectorsStart, selectorsEnd)}\n({ visible, ownedSurface });`, {
+    By, window: harness.window,
+  });
+  const readStart = source.indexOf("async function readObservation(driver) {");
+  const readEnd = source.indexOf("/** Return the acknowledgement", readStart);
+  assert.ok(readStart >= 0 && readEnd > readStart);
+  const readObservation = vm.runInNewContext(`${source.slice(readStart, readEnd)}\nreadObservation;`, {});
+  const trace = [];
+  let appearancePending = true;
+  const advance = (target) => {
+    if (appearancePending && target >= 20) {
+      appearancePending = false; harness.clock(20); harness.route.root.modePresent = true; harness.mutate();
+    }
+    harness.clock(target);
+  };
+  const input = harness.composer();
+  const proxyToDom = new Map();
+  const domToProxy = new Map();
+  const ref = (dom, methods) => { const proxy = methods; proxyToDom.set(proxy, dom); domToProxy.set(dom, proxy); return proxy; };
+  const mode = ref(harness.route.mode, {
+    isDisplayed() { assert.equal(this, mode); trace.push("mode.isDisplayed"); return harness.route.mode.isDisplayed(); },
+    getAttribute(name) { assert.equal(this, mode); assert.equal(name, "title"); trace.push("mode.getAttribute:title"); return harness.route.mode.getAttribute(name); },
+    async click() {
+      assert.equal(this, mode); trace.push("mode.click");
+      harness.click(true, true, harness.route.mode);
+      await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+      harness.mutate();
+    },
+  });
+  const nativeInput = ref(input, {
+    isDisplayed() { assert.equal(this, nativeInput); trace.push("input.isDisplayed"); return input.isDisplayed(); },
+    isEnabled() { assert.equal(this, nativeInput); trace.push("input.isEnabled"); return !input.disabled && !input.readOnly; },
+    getAttribute(name) { assert.equal(this, nativeInput); assert.equal(name, "value"); trace.push("input.getAttribute:value"); return input.value; },
+    sendKeys(...keys) {
+      assert.equal(this, nativeInput); assert.deepEqual(keys, ["native-input-probe"]); trace.push("input.sendKeys:full18");
+      for (let count = 1; count <= keys[0].length; count++) {
+        advance(harness.now() + 43); harness.input(true, true, keys[0].slice(0, count), input);
+      }
+    },
+  });
+  const nativeScroll = ref(harness.scroll, { isDisplayed: () => true });
+  ref(harness.route.root, {
+    findElements(by) {
+      if (by.value.includes("Switch to Chat")) return harness.route.root.modePresent ? [mode] : [];
+      assert.equal(by.value, '[data-testid="agent-chat-scroll-region"]'); return [nativeScroll];
+    },
+  });
+  const transport = (value) => {
+    if (domToProxy.has(value)) return domToProxy.get(value);
+    if (value?.coverage === "PAGE_LOADER_ONLY") return structuredClone(value);
+    if (value?.surface && value?.control) return { ...value, surface: transport(value.surface), control: transport(value.control) };
+    if (value && Object.hasOwn(value, "input")) return { ...value, input: transport(value.input) };
+    return value;
+  };
+  const execute = (fn, args, done) => vm.runInNewContext(`(${fn.toString()})(...args${done ? ", done" : ""})`, {
+    window: harness.window, args: args.map((arg) => proxyToDom.get(arg) ?? arg), done,
+    performance: { now: harness.now },
+  });
+  const driver = {
+    findElements(by) {
+      assert.equal(by.value, '[aria-label="Agent Owned"]');
+      return [{ isDisplayed: () => true, click: () => { trace.push("roster.click"); harness.roster(); } }];
+    },
+    async wait(predicate, timeout, _message, ...pollOverride) {
+      assert.deepEqual(pollOverride, [], "preserve default Selenium false polling");
+      const limit = harness.now() + timeout;
+      while (harness.now() < limit) { const value = await predicate(); if (value) return value; advance(harness.now() + 200); }
+      throw new Error("controlled original wait expired");
+    },
+    async executeScript(fn, ...args) { return transport(execute(fn, args)); },
+    async executeAsyncScript(fn, ...args) {
+      let settled = false;
+      const result = new Promise((resolve) => execute(fn, args, (ack) => { settled = true; resolve(transport(ack)); }));
+      for (let step = 0; !settled && step < 32; step++) {
+        await Promise.resolve();
+        if (settled) break;
+        if (harness.frameCount()) harness.frame();
+        else if (appearancePending) advance(20);
+        else harness.expire();
+      }
+      assert.ok(settled, "the actual observer must settle; no invented endpoint");
+      return result;
+    },
+  };
+  const evidence = { rosterFailures: [] };
+  const phase = await rosterMeasurement(driver, evidence, selectors.visible, selectors.ownedSurface, {
+    measurementName: "Owned", requireTerminalToggle: true,
+    readObservation, captureChatFailureMetadata() {}, Date: { now: harness.now }, performance: { now: harness.now },
+  });
+  assert.equal(phase.label, "test-phase");
+  assert.ok(phase.usableAt - phase.rosterAt < 1000, "retain the ORIGINAL strict threshold");
+  assert.equal(phase.completeTrustedProbeAt, phase.usableFrame1At - 16);
+  assert.equal(phase.usableFrame2At - phase.usableFrame1At, 16);
+  assert.equal(input.value, "native-input-probe");
+  assert.deepEqual(trace, ["roster.click", "mode.isDisplayed", "mode.getAttribute:title", "mode.click",
+    "input.isDisplayed", "input.isEnabled", "input.getAttribute:value", "input.sendKeys:full18"]);
+  assert.equal(evidence.phaseTimings["test-phase"].page.usableAt, phase.usableAt);
+  assert.equal(harness.observer.state.calls.length, 1);
+  console.log(JSON.stringify({ controlled_not_native: true, mode_appearance_ms: 20,
+    paint_ms: phase.paintAt - phase.rosterAt, usable_ms: phase.usableAt - phase.rosterAt,
+    full_probe_characters: input.value.length, physical_calls: harness.observer.state.calls.length }));
+  harness.observer.dispose();
+});
+
 test("passive timing retains the actual command trace, result and rejected command object", async (t) => {
-  for (const scenario of [null, "wheel-success", "remaining-budget", "controller-expiry", "foreign-ack", "paintWait", "scrollLookup", "prepareInteraction", "inputDisplayed", "inputEnabled",
+  for (const scenario of [null, "displayed-later", "modeDiscovery", "modeDisplayed", "modeTitle", "modeClick", "wheel-success", "remaining-budget", "controller-expiry", "foreign-ack", "paintWait", "scrollLookup", "prepareInteraction", "inputDisplayed", "inputEnabled",
     "inputValue", "sendKeys", "usableWait", "wheelPerform", "readObservation", "timeout", "clock", "sink"]) {
-    const failure = ["wheel-success", "remaining-budget"].includes(scenario) ? null : scenario;
+    const failure = ["displayed-later", "wheel-success", "remaining-budget"].includes(scenario) ? null : scenario;
     await t.test(scenario ?? "keyboard-success", async () => {
       const original = new Error("original command rejection");
       const trace = [];
@@ -675,7 +820,11 @@ test("passive timing retains the actual command trace, result and rejected comma
         isEnabled: async () => command("inputEnabled", true),
         getAttribute: async (key) => { assert.equal(key, "value"); return command("inputValue", ""); },
         sendKeys: async (...keys) => { assert.deepEqual(keys, ["native-input-probe"]); command("sendKeys"); } };
-      const surface = {};
+      const surface = { findElements: async () => [] };
+      let displayedChecks = 0;
+      const mode = { isDisplayed: async () => command("modeDisplayed", scenario !== "displayed-later" || ++displayedChecks > 1),
+        getAttribute: async (key) => { assert.equal(key, "title"); return command("modeTitle", failure === "modeClick" ? "Switch to Chat" : "Switch to Terminal"); },
+        click: async () => command("modeClick") };
       const scroll = {};
       const wheel = scenario === "wheel-success" || failure === "wheelPerform";
       const driver = {
@@ -689,6 +838,12 @@ test("passive timing retains the actual command trace, result and rejected comma
             top: 100, plannedAtPage: 24 });
         },
         executeAsyncScript: async (fn, actualBinding, field, budget) => {
+          if (fn.name === "captureRosterDiagnostics") { trace.push("failureCapture"); throw new Error("secondary capture rejection"); }
+          if (fn.name === "waitForOwnedChatMode") {
+            assert.equal(actualBinding, binding); assert.equal(field, 5000);
+            command("modeDiscovery");
+            return { status: "ACCEPTED", ...binding, field: "ownedMode", surface, control: mode, captureAtPage: 0 };
+          }
           assert.equal(fn.name, "waitForChatEndpoint"); assert.equal(actualBinding, binding);
           assert.ok(["paintAt", "usableAt"].includes(field));
           assert.equal(budget, scenario === "remaining-budget" && field === "usableAt" ? 4720 : 5000);
@@ -699,7 +854,7 @@ test("passive timing retains the actual command trace, result and rejected comma
           return { status: "ACCEPTED", ...binding, token: scenario === "foreign-ack" ? 2 : binding.token,
             field, endpointAt: phase[field], captureAtPage: 40 };
         },
-        wait: () => { throw new Error("endpoint polling must not run"); },
+        wait: async (predicate, timeout) => { assert.equal(timeout, 5000); if (!await predicate()) assert.ok(await predicate()); },
         actions: (options) => {
           assert.deepEqual({ ...options }, { async: true });
           return { scroll: (...args) => {
@@ -737,7 +892,9 @@ test("passive timing retains the actual command trace, result and rejected comma
       if (failure) await assert.rejects(result, (error) => failure === "controller-expiry" ? /original deadline/.test(error.message)
         : failure === "foreign-ack" ? /binding failed/.test(error.message) : error === original);
       else assert.equal(await result, phase, "return the original phase object");
-      const expected = ["arm", "rosterLookup", "rosterClick", "ownedSurface", "modeLookup", "modeTitle",
+      const expected = ["arm", "rosterLookup", "rosterClick", "modeDiscovery", "modeDisplayed",
+        ...(scenario === "displayed-later" ? ["modeDisplayed"] : []), "modeTitle",
+        ...(failure === "modeClick" ? ["modeClick"] : []),
         "paintWait", "scrollLookup", "prepareInteraction",
         ...(wheel ? ["wheelPerform"] : ["inputDisplayed", "inputEnabled", "inputValue", "sendKeys"]),
         "usableWait", "readObservation"];
@@ -752,7 +909,8 @@ test("passive timing retains the actual command trace, result and rejected comma
       assert.ok(timing, "retain bounded partial command timing even on rejection");
       if (failure === "clock") assert.equal(timing.spans.sendKeys.finishedAt, null);
       else {
-        const span = timing.spans[["readObservation", "timeout", "controller-expiry", "foreign-ack"].includes(failure) ? "paintWait" : failure ?? (wheel ? "wheelPerform" : "sendKeys")];
+        const field = ["readObservation", "timeout", "controller-expiry", "foreign-ack"].includes(failure) ? "paintWait" : failure ?? (wheel ? "wheelPerform" : "sendKeys");
+        const span = timing.spans[field] ?? timing.preToggle[field];
         assert.ok(Number.isFinite(span.startedAt) && Number.isFinite(span.finishedAt));
         assert.equal(span.durationMs, span.finishedAt - span.startedAt);
       }
@@ -764,6 +922,12 @@ test("passive timing retains the actual command trace, result and rejected comma
       if (!failure) {
         assert.equal(phase.controllerTiming, timing);
         assert.equal(timing.endpointObservation, "EVENT_NOTIFICATION");
+        assert.equal(timing.controlDiscovery, "OWNED_DOM_NOTIFICATION");
+        assert.equal(timing.discovery.attempts, 1); assert.equal(timing.discovery.nativeDisplayedChecks, scenario === "displayed-later" ? 2 : 1);
+        assert.equal(timing.preToggle.modeClick.startedAt, null);
+        for (const field of ["rosterLookup", "rosterClick", "modeDiscovery", "modeDisplayed", "modeTitle"]) {
+          assert.ok(Number.isFinite(timing.preToggle[field].durationMs), field);
+        }
         assert.equal(timing.waits.paintAt.attempts, 1); assert.equal(timing.waits.usableAt.attempts, 1);
         assert.equal(timing.waits.paintAt.timedAttempts, 1); assert.ok(timing.waits.paintAt.elapsedMs > 0);
         assert.equal(timing.page.plannedAtPage, 24); assert.equal(timing.page.paintCaptureAtPage, 40);
@@ -863,12 +1027,12 @@ test("Saved overflow prefers its already-safe empty composer over wheel input", 
     activation: { active: true, version: 1, token: 1, owner: "session", at: 0 },
     coverage: "PAGE_LOADER_ONLY", broaderIpcRuntime: "UNOBSERVED",
     calls: [{ session: "session", at: 1 }], receipts: [{ session: "session", requestSession: "session", at: 4 }] };
-  const driver = {
+  const driver = withModeDiscovery({
     executeScript: async (_fn, ...args) => args.length === 1 ? binding
       : ({ overflow: true, top: 100, input, control: "keyboard", reason: "safe_empty_composer" }),
     executeAsyncScript: async (_fn, actualBinding, field) => ({ status: "ACCEPTED", ...actualBinding, field, endpointAt: phase[field] }),
     actions: () => ({ scroll: () => ({ perform: async () => actions.push(["wheel"]) }) }),
-  };
+  });
   const visible = async (_driver, selector) => selector.includes("Switch to Chat")
     ? { getAttribute: async () => "Switch to Terminal" }
     : selector.includes("textarea") ? input : { click: async () => {} };
@@ -880,10 +1044,10 @@ test("a draft appearing after planning fails without typing, clearing or trying 
   const actions = [];
   const input = { isEnabled: async () => true, isDisplayed: async () => true,
     getAttribute: async () => "existing-owned-draft", sendKeys: async () => actions.push("keyboard") };
-  const driver = { executeScript: async () => ({ owner: "session", label: "test-phase", version: 1, token: 1, ordinal: 1,
+  const driver = withModeDiscovery({ executeScript: async () => ({ owner: "session", label: "test-phase", version: 1, token: 1, ordinal: 1,
     control: "keyboard", input, overflow: true, top: 100 }),
     executeAsyncScript: async (_fn, binding, field) => ({ status: "ACCEPTED", ...binding, field, endpointAt: 20 }),
-    actions: () => ({ scroll: () => ({ perform: async () => actions.push("wheel") }) }) };
+    actions: () => ({ scroll: () => ({ perform: async () => actions.push("wheel") }) }) });
   const visible = async (_driver, selector) => selector.includes("Switch to Chat")
     ? { getAttribute: async () => "Switch to Terminal" } : { click: async () => {} };
   await assert.rejects(rosterMeasurement(driver, { rosterFailures: [] }, visible, async () => ({})),
@@ -893,7 +1057,8 @@ test("a draft appearing after planning fails without typing, clearing or trying 
 
 test("live measurements still require the actual Terminal to Chat toggle before any probe", async () => {
   let probes = 0;
-  const driver = { executeScript: async () => {}, actions: () => { probes++; } };
+  const driver = withModeDiscovery({ executeScript: async () => ({ owner: "session", label: "test-phase", version: 1, token: 1, ordinal: 1 }),
+    actions: () => { probes++; } });
   const visible = async (_driver, selector) => selector.includes("Switch to Chat")
     ? { getAttribute: async () => "Switch to Terminal" } : { click: async () => {} };
   await assert.rejects(rosterMeasurement(driver, { rosterFailures: [] }, visible, async () => ({}),
@@ -974,7 +1139,7 @@ test("measurement captures click and surface failures only after rejection, pres
   const evidence = { rosterFailures: [] };
   await assert.rejects(rosterMeasurement({
     executeScript: async () => {},
-    executeAsyncScript: async () => { captures += 1; },
+    executeAsyncScript: async (fn) => { if (fn.name === "waitForOwnedChatMode") throw afterActivation; captures += 1; },
   }, evidence, async () => ({ click: async () => {} }),
   async () => { throw afterActivation; }), (error) => error === afterActivation);
   assert.equal(captures, 1);
@@ -989,7 +1154,7 @@ test("late toggle, paint, input, usability and assertion failures preserve their
       let waits = 0; let captures = 0; let registryCalls = 0;
       const input = { isEnabled: async () => true, isDisplayed: async () => true, getAttribute: async () => "",
         sendKeys: async () => { if (stage === "input") throw original; } };
-      const driver = {
+      const driver = withModeDiscovery({
         executeScript: async (fn) => {
           if (fn.name === "captureChatFailureMetadata") {
             captures++;
@@ -1006,7 +1171,7 @@ test("late toggle, paint, input, usability and assertion failures preserve their
           if ((stage === "paint" && waits === 1) || (stage === "usability" && waits === 2)) throw original;
           return { status: "ACCEPTED", ...binding, field, endpointAt: 20 };
         },
-      };
+      }, { getAttribute: async () => "Switch to Chat", click: async () => { if (stage === "chat-toggle") throw original; } });
       const visible = async (_driver, selector) => selector.includes("Switch to Chat")
         ? { getAttribute: async () => "Switch to Chat", click: async () => { if (stage === "chat-toggle") throw original; } }
         : selector.includes("textarea") ? input : { click: async () => {} };
@@ -1084,6 +1249,115 @@ function endpointBinding(harness) {
   const { activation, phase, phases } = harness.observer.state;
   return { owner: activation.owner, version: activation.version, token: activation.token, ordinal: phases.length, label: phase.label };
 }
+
+test("owned mode discovery returns actual current references on ready or ordinary DOM notification without body authority", async () => {
+  const observations = [];
+  for (const wait of [false, true]) {
+    const harness = observationHarness(() => Promise.resolve(actualPage()), { modePresent: false });
+    harness.roster();
+    const binding = endpointBinding(harness);
+    const acks = [];
+    if (wait) harness.observer.waitForOwnedMode(binding, 5000, (ack) => acks.push(ack));
+    assert.equal(harness.observer.state.phase.paintAt, null);
+    assert.equal(harness.observer.state.calls.length, 0);
+    harness.route.root.modePresent = true;
+    harness.mutate();
+    if (!wait) harness.observer.waitForOwnedMode(binding, 5000, (ack) => acks.push(ack));
+    assert.equal(acks.length, 1); assert.equal(acks[0].status, "ACCEPTED");
+    assert.equal(acks[0].surface, harness.route.root); assert.equal(acks[0].control, harness.route.mode);
+    assert.equal(acks[0].field, "ownedMode"); assert.equal(acks[0].endpointAt, null);
+    assert.equal(harness.timerCount(), 0); assert.equal(harness.frameCount(), 0);
+    assert.equal(harness.observer.state.phase.chatAt, null);
+    harness.click(); await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+    harness.mutate(); harness.frame(); harness.frame(); harness.input(); harness.frame(); harness.frame();
+    observations.push(JSON.parse(JSON.stringify(harness.observer.state)));
+    harness.expire(); assert.equal(acks.length, 1);
+    harness.observer.dispose();
+  }
+  assert.deepEqual(observations[0], observations[1], "discovery adds no sample, frame, request, input or body endpoint");
+});
+
+test("owned mode requires a trusted finite Roster and exact current owner facade token phase ordinal label", () => {
+  for (const invalid of ["no-roster", "synthetic-roster", "foreign-roster", "nonfinite-roster", "owner", "version", "token", "ordinal", "label", "facade", "phase", "budget"]) {
+    const harness = observationHarness(() => Promise.resolve(actualPage()));
+    const binding = endpointBinding(harness);
+    if (invalid === "synthetic-roster") harness.roster(false);
+    else if (invalid === "foreign-roster") harness.roster(true, "Foreign");
+    else if (invalid !== "no-roster") harness.roster();
+    if (invalid === "nonfinite-roster") harness.observer.state.phase.rosterAt = NaN;
+    if (["owner", "label"].includes(invalid)) binding[invalid] = "foreign";
+    if (["version", "token", "ordinal"].includes(invalid)) binding[invalid]++;
+    if (invalid === "facade") harness.window.__wardianChatPageObservation = { version: 1 };
+    if (invalid === "phase") { harness.observer.arm("same-label"); harness.roster(); }
+    const acks = [];
+    harness.observer.waitForOwnedMode(binding, invalid === "budget" ? 5001 : 5000, (ack) => acks.push(ack));
+    assert.equal(acks.length, 1, invalid); assert.equal(acks[0].status, "INVALID_BINDING", invalid);
+    assert.equal(acks[0].surface, null); assert.equal(acks[0].control, null);
+    assert.equal(harness.timerCount(), 0); harness.observer.dispose();
+  }
+});
+
+test("mode discovery fails closed for missing hidden ambiguous foreign stale or retired controls and shared waiter lifecycle", async () => {
+  for (const scenario of ["missing", "hidden", "detached", "foreign", "wrong-title", "wrong-tag", "offscreen", "multiple", "ambiguous-root", "hidden-root", "reset", "inert", "unselected", "stale", "rearm", "dispose", "fault", "facade", "deadline", "timeout", "duplicate-mode", "duplicate-endpoint", "endpoint-first", "callback-fault"]) {
+    const harness = observationHarness(() => Promise.resolve(actualPage()), { modePresent: false });
+    harness.roster();
+    const binding = endpointBinding(harness);
+    const acks = [];
+    const done = (ack) => { acks.push(ack); if (scenario === "callback-fault") throw new Error("callback failed"); };
+    if (scenario === "endpoint-first") harness.observer.waitForEndpoint(binding, "paintAt", 5000, done);
+    harness.observer.waitForOwnedMode(binding, 100, done);
+    harness.route.root.modePresent = scenario !== "missing";
+    if (scenario === "hidden") harness.route.mode.hidden = true;
+    if (scenario === "detached") harness.route.mode.isConnected = false;
+    if (scenario === "foreign") harness.route.mode.parentElement = null;
+    if (scenario === "wrong-title") harness.route.mode.attributes.title = "Unrelated";
+    if (scenario === "wrong-tag") harness.route.mode.tagName = "DIV";
+    if (scenario === "offscreen") harness.route.mode.getBoundingClientRect = () => ({ width: 20, height: 20, top: 2000, bottom: 2020, left: 0, right: 20 });
+    if (scenario === "multiple") harness.route.root.modeControls.push(harness.route.mode);
+    if (scenario === "ambiguous-root") harness.addContainer();
+    if (scenario === "hidden-root") harness.route.root.hidden = true;
+    if (scenario === "reset") harness.route.host.attributes["data-reset-pending"] = "true";
+    if (scenario === "inert") harness.route.host.inert = true;
+    if (scenario === "unselected") harness.route.tab.attributes["aria-selected"] = "false";
+    if (scenario === "stale") harness.replaceContainer();
+    if (scenario === "rearm") harness.observer.arm("warm");
+    if (scenario === "dispose") harness.observer.dispose();
+    if (scenario === "fault") await harness.wrapper("load_agent_chat_page", { sessionId: "session", get cursor() { throw new Error("fault"); } });
+    if (scenario === "facade") harness.window.__wardianChatPageObservation = { version: 1 };
+    if (scenario === "deadline") harness.clock(100);
+    if (scenario === "timeout") harness.expire();
+    if (scenario === "duplicate-mode") harness.observer.waitForOwnedMode(binding, 100, done);
+    if (scenario === "duplicate-endpoint") harness.observer.waitForEndpoint(binding, "paintAt", 100, done);
+    harness.mutate(); harness.expire();
+    const duplicates = ["duplicate-mode", "duplicate-endpoint", "endpoint-first"].includes(scenario);
+    assert.equal(acks.length, duplicates ? 2 : 1, scenario);
+    assert.ok(acks.every((ack) => scenario === "callback-fault" ? ack.status === "ACCEPTED" : ack.status !== "ACCEPTED"), scenario);
+    for (const ack of acks.filter((item) => item.field === "ownedMode" && item.status !== "ACCEPTED")) {
+      assert.equal(ack.surface, null, scenario); assert.equal(ack.control, null, scenario);
+    }
+    assert.equal(harness.timerCount(), 0, scenario);
+    harness.mutate(); harness.expire(); assert.equal(acks.length, duplicates ? 2 : 1, `${scenario}: late completion`);
+    if (scenario !== "dispose") harness.observer.dispose();
+  }
+});
+
+test("mode discovery transport and non-Element results fail honestly before native interaction", async () => {
+  for (const scenario of ["transport", "serialization", "foreign-ack"]) {
+    const original = new Error("native Element serialization or transport rejection");
+    const evidence = { rosterFailures: [] };
+    let predicates = 0;
+    const binding = { owner: "session", version: 1, token: 1, ordinal: 1, label: "test-phase" };
+    const driver = { executeScript: async () => binding, executeAsyncScript: async (fn) => {
+      if (fn.name !== "waitForOwnedChatMode") return {};
+      if (scenario === "transport") throw original;
+      return { status: "ACCEPTED", ...binding, token: scenario === "foreign-ack" ? 2 : 1, field: "ownedMode", surface: {}, control: {} };
+    }, wait: async () => { predicates++; } };
+    await assert.rejects(rosterMeasurement(driver, evidence, async () => ({ click: async () => {} }), async () => { throw new Error("selector fallback forbidden"); }),
+      (error) => scenario === "transport" ? error === original : /serialize native Element|binding failed/.test(error.message));
+    assert.equal(predicates, 0); assert.ok(Number.isFinite(evidence.commandTiming.preToggle.modeDiscovery.durationMs));
+    assert.equal(evidence.commandTiming.preToggle.modeDisplayed.startedAt, null);
+  }
+});
 
 test("endpoint notification accepts only original publication, handles ready-before-wait and preserves both trusted frames", async () => {
   for (const ready of [false, true]) {

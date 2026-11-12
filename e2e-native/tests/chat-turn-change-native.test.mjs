@@ -104,11 +104,19 @@ function installChatObservation(config) {
     const phase = waiter.phase;
     const ack = { status, owner: state.owner, version: subscription?.version ?? null, token: subscription?.token ?? null,
       ordinal: phase?.ordinal ?? null, label: bounded(phase?.label),
-      field: ["paintAt", "usableAt"].includes(waiter.field) ? waiter.field : null,
-      endpointAt: status === "ACCEPTED" ? phase[waiter.field] : null, captureAtPage: null };
-    try { ack.captureAtPage = now(); } catch { ack.status = "OBSERVER_FAULT"; ack.endpointAt = null; }
+      field: ["paintAt", "usableAt", "ownedMode"].includes(waiter.field) ? waiter.field : null,
+      endpointAt: status === "ACCEPTED" && waiter.field !== "ownedMode" ? phase[waiter.field] : null, captureAtPage: null };
+    if (waiter.field === "ownedMode") {
+      ack.surface = status === "ACCEPTED" ? waiter.surface : null;
+      ack.control = status === "ACCEPTED" ? waiter.control : null;
+    }
+    try { ack.captureAtPage = now(); } catch {
+      ack.status = "OBSERVER_FAULT"; ack.endpointAt = null;
+      if (waiter.field === "ownedMode") { ack.surface = null; ack.control = null; }
+    }
     const done = waiter.done;
     waiter.done = null; waiter.phase = null; waiter.binding = null; waiter.timer = null;
+    waiter.surface = null; waiter.control = null;
     try { done(ack); } catch (error) { fail(error); }
   };
   const cancelEndpoint = (status) => { if (endpointWaiter) finishEndpoint(endpointWaiter, status); };
@@ -121,6 +129,44 @@ function installChatObservation(config) {
       if (elapsed < 0 || elapsed >= waiter.budget) return finishEndpoint(waiter, "EXPIRED");
       if (Number.isFinite(phase[field])) finishEndpoint(waiter, "ACCEPTED");
     } catch (error) { fail(error); }
+  };
+  const publishOwnedMode = () => {
+    const waiter = endpointWaiter;
+    if (!waiter || waiter.field !== "ownedMode") return;
+    try {
+      if (!endpointHealthy(waiter) || !Number.isFinite(waiter.phase.rosterAt)) return finishEndpoint(waiter, "INVALID_BINDING");
+      const elapsed = now() - waiter.startedAt;
+      if (elapsed < 0 || elapsed >= waiter.budget) return finishEndpoint(waiter, "EXPIRED");
+      const current = ownedContainer();
+      if (waiter.surface && current?.node !== waiter.surface) return finishEndpoint(waiter, "STALE_CONTROL");
+      if (!current) return;
+      waiter.surface = current.node;
+      const controls = Array.from(current.node.querySelectorAll('button[title="Switch to Chat"], button[title="Switch to Terminal"]'));
+      if (controls.length !== 1) return;
+      const control = controls[0];
+      const rect = control.getBoundingClientRect();
+      if (control.tagName !== "BUTTON" || !["Switch to Chat", "Switch to Terminal"].includes(control.getAttribute("title"))
+        || !control.isConnected || control.hidden || !current.node.contains(control) || !readable(control)
+        || rect.width <= 0 || rect.height <= 0 || rect.right <= 0 || rect.bottom <= 0
+        || rect.left >= innerWidth || rect.top >= innerHeight) return;
+      waiter.control = control;
+      finishEndpoint(waiter, "ACCEPTED");
+    } catch (error) { fail(error); }
+  };
+  const installWaiter = (binding, field, budget, done, discovery = false) => {
+    const waiter = { binding: binding ? { ...binding } : {}, phase: state.phase, field,
+      budget, done, timer: null, settled: false, startedAt: null, surface: null, control: null };
+    if (endpointWaiter) { cancelEndpoint("DUPLICATE_WAITER"); finishEndpoint(waiter, "DUPLICATE_WAITER"); return; }
+    try {
+      if (!(discovery ? field === "ownedMode" : ["paintAt", "usableAt"].includes(field))
+        || !Number.isFinite(budget) || budget <= 0 || budget > 5000 || !waiter.phase || !endpointHealthy(waiter)
+        || (discovery && !Number.isFinite(waiter.phase.rosterAt))) { finishEndpoint(waiter, "INVALID_BINDING"); return; }
+      waiter.startedAt = now();
+      endpointWaiter = waiter;
+      waiter.timer = setTimeout(() => { if (endpointWaiter === waiter) finishEndpoint(waiter, "EXPIRED"); }, budget);
+      if (discovery) publishOwnedMode();
+      else publishEndpoint(waiter.phase, field);
+    } catch (error) { fail(error); if (!waiter.settled) finishEndpoint(waiter, "OBSERVER_FAULT"); }
   };
   const members = (value) => Array.isArray(value) && value.length <= 384
     && value.every((id) => bounded(id)) ? [...value] : null;
@@ -434,26 +480,23 @@ function installChatObservation(config) {
   document.addEventListener("click", click, true);
   document.addEventListener("input", input, true);
   document.addEventListener("wheel", wheel, true);
-  const observer = new MutationObserver(sample);
+  const observer = new MutationObserver(() => {
+    if (!retired && state.phase && Number.isFinite(state.phase.rosterAt)) {
+      state.phase.domNotificationsAfterRoster = Math.min(128, state.phase.domNotificationsAfterRoster + 1);
+    }
+    publishOwnedMode();
+    sample();
+  });
   observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true,
     attributes: true, attributeFilter: ["data-chat-page-scope", "data-chat-row-identity"] });
   window.__chatAcceptance = {
     state,
     // Install and check in one turn: an already accepted endpoint cannot be lost.
     waitForEndpoint(binding, field, budget, done) {
-      const waiter = { binding: binding ? { ...binding } : {}, phase: state.phase, field,
-        budget, done, timer: null, settled: false, startedAt: null };
-      if (endpointWaiter) { cancelEndpoint("DUPLICATE_WAITER"); finishEndpoint(waiter, "DUPLICATE_WAITER"); return; }
-      try {
-        if (!["paintAt", "usableAt"].includes(field) || !Number.isFinite(budget) || budget <= 0 || budget > 5000
-          || !waiter.phase || !endpointHealthy(waiter)) { finishEndpoint(waiter, "INVALID_BINDING"); return; }
-        waiter.startedAt = now();
-        endpointWaiter = waiter;
-        waiter.timer = setTimeout(() => {
-          if (endpointWaiter === waiter) finishEndpoint(waiter, "EXPIRED");
-        }, budget);
-        publishEndpoint(waiter.phase, field);
-      } catch (error) { fail(error); if (!waiter.settled) finishEndpoint(waiter, "OBSERVER_FAULT"); }
+      installWaiter(binding, field, budget, done);
+    },
+    waitForOwnedMode(binding, budget, done) {
+      installWaiter(binding, "ownedMode", budget, done, true);
     },
     container(owner) {
       if (owner !== state.owner) throw new Error("container owner does not match bound observation");
@@ -570,6 +613,7 @@ function installChatObservation(config) {
       paintedBody = null;
       state.interaction = null;
       state.phase = { label, ordinal: state.phases.length + 1, rosterAt: null, chatAt: null, exposureAt: null, exposureKind: null,
+        domNotificationsAfterRoster: 0,
         commitAt: null, paintAt: null, usableAt: null, body: null, checking: false,
         completeTrustedProbeAt: null, trustedWheelAt: null, usableFrame1At: null, usableFrame2At: null };
       state.phases.push(state.phase);
@@ -759,6 +803,13 @@ function waitForChatEndpoint(binding, field, remainingMs, done) {
   api.waitForEndpoint(binding, field, remainingMs, done);
 }
 
+/** Return discoverable references; the actual native predicates/actions follow. */
+function waitForOwnedChatMode(binding, remainingMs, done) {
+  const api = window.__chatAcceptance;
+  if (!api || typeof api.waitForOwnedMode !== "function") { done({ status: "OBSERVER_UNAVAILABLE" }); return; }
+  api.waitForOwnedMode(binding, remainingMs, done);
+}
+
 async function measureChat(driver, sessionId, label, name, evidence, requireTerminalToggle = true) {
   const binding = await driver.executeScript((phase) => window.__chatAcceptance.arm(phase), label);
   const deadline = Date.now() + 5_000;
@@ -777,23 +828,56 @@ async function measureChat(driver, sessionId, label, name, evidence, requireTerm
       usableWait: { startedAt: null, finishedAt: null, durationMs: null },
     },
     endpointObservation: "EVENT_NOTIFICATION",
+    controlDiscovery: "OWNED_DOM_NOTIFICATION",
+    preToggle: Object.fromEntries(["rosterLookup", "rosterClick", "modeDiscovery", "modeDisplayed", "modeTitle", "modeClick"]
+      .map((field) => [field, { startedAt: null, finishedAt: null, durationMs: null }])),
+    discovery: { attempts: 0, nativeDisplayedChecks: 0, captureAtPage: null },
     waits: { paintAt: { attempts: 0, timedAttempts: 0, elapsedMs: null }, usableAt: { attempts: 0, timedAttempts: 0, elapsedMs: null } },
     page: { paintCaptureAtPage: null, usableCaptureAtPage: null, plannedAtPage: null },
   };
   try { evidence.commandTiming = timing; } catch { /* Diagnostics cannot fail the measurement. */ }
+  const preToggle = async (field, command) => {
+    const span = timing.preToggle[field];
+    try { span.startedAt = performance.now(); } catch { /* Diagnostic only. */ }
+    try { return await command(); }
+    finally {
+      try {
+        span.finishedAt = performance.now();
+        if (span.startedAt !== null) span.durationMs = span.finishedAt - span.startedAt;
+      } catch { /* Preserve the original command result or rejection. */ }
+    }
+  };
   let surface;
   let mode;
   let stage = "roster-click";
   try {
-    await (await visible(driver, `[aria-label="Agent ${name}"]`)).click();
+    const roster = await preToggle("rosterLookup", () => visible(driver, `[aria-label="Agent ${name}"]`));
+    await preToggle("rosterClick", () => roster.click());
     stage = "surface-resolution";
-    surface = await ownedSurface(driver, sessionId);
+    const remainingDiscoveryMs = deadline - Date.now();
+    assert.ok(remainingDiscoveryMs > 0, `${label}: owned mode discovery exceeded original deadline`);
+    timing.discovery.attempts++;
+    const discovered = await preToggle("modeDiscovery", () => driver.executeAsyncScript(waitForOwnedChatMode, binding, remainingDiscoveryMs));
+    assert.ok(Date.now() < deadline, `${label}: owned mode discovery exceeded original deadline`);
+    assert.ok(discovered?.status === "ACCEPTED" && discovered.owner === sessionId && discovered.version === binding.version
+      && discovered.token === binding.token && discovered.ordinal === binding.ordinal && discovered.label === label
+      && discovered.field === "ownedMode", "owned mode discovery binding failed");
+    surface = discovered.surface;
+    mode = discovered.control;
+    assert.ok(typeof surface?.findElements === "function" && typeof mode?.isDisplayed === "function"
+      && typeof mode?.getAttribute === "function" && typeof mode?.click === "function", "owned mode discovery did not serialize native Element references");
+    try { timing.discovery.captureAtPage = discovered.captureAtPage ?? null; } catch { /* Diagnostic only. */ }
     stage = "mode-resolution";
-    mode = await visible(driver, 'button[title="Switch to Chat"], button[title="Switch to Terminal"]', surface);
+    const remainingDisplayedMs = deadline - Date.now();
+    assert.ok(remainingDisplayedMs > 0, `${label}: owned mode visibility exceeded original deadline`);
+    await preToggle("modeDisplayed", () => driver.wait(() => {
+      timing.discovery.nativeDisplayedChecks++;
+      return mode.isDisplayed();
+    }, remainingDisplayedMs, "owned discovered mode is not displayed"));
     stage = "chat-toggle";
-    const explicit = await mode.getAttribute("title") === "Switch to Chat";
+    const explicit = await preToggle("modeTitle", () => mode.getAttribute("title")) === "Switch to Chat";
     if (requireTerminalToggle) assert.ok(explicit, "live Terminal measurement requires its real Chat toggle");
-    if (explicit) await mode.click();
+    if (explicit) await preToggle("modeClick", () => mode.click());
     const waitForEndpoint = async (field) => {
       const remainingMs = deadline - Date.now();
       assert.ok(remainingMs > 0, `${label}: no source-bound ${field} before original deadline`);
@@ -1087,6 +1171,7 @@ function redactObservation(value) {
       || (key === "coverage" && item === "PAGE_LOADER_ONLY")
       || (key === "broaderIpcRuntime" && item === "UNOBSERVED")
       || (key === "endpointObservation" && item === "EVENT_NOTIFICATION")
+      || (key === "controlDiscovery" && item === "OWNED_DOM_NOTIFICATION")
       || (key === "scopeMode" && ["recent-preview", "durable", "invalid"].includes(item))
       || (key === "firstRejectionGate" && ["document-hidden", "owned-container", "chat-scroll", "chat-mode",
         "admitted-scope", "admitted-owner", "admitted-conversation", "target-text", "target-visibility",

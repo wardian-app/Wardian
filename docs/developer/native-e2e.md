@@ -888,8 +888,12 @@ complete `sendKeys`, wheel action and usability wait. Each has controller-monoto
 `startedAt`, `finishedAt` and `durationMs`, with `finally` recording rejected
 operations. Unused or unavailable values remain null. `endpointObservation` is
 `EVENT_NOTIFICATION`: `waits.paintAt` and `waits.usableAt` retain actual bounded
-async callback wait counts and controller durations. Only endpoint observation
-uses `executeAsyncScript`; the remaining command order, full input probe,
+async callback wait counts and controller durations. Owned surface/mode discovery
+also uses one `executeAsyncScript` call (`controlDiscovery: OWNED_DOM_NOTIFICATION`).
+Its six `preToggle` spans retain Roster lookup/click, discovery, native displayed
+wait, title read and conditional native click, including rejected operations.
+`discovery` records actual attempts, native displayed predicate checks and page
+capture time. Unused operations remain null. The full input probe,
 display/enabled/value checks, wheel alternative and original two-frame guards
 are preserved. Global Selenium timeout and polling settings are unchanged.
 
@@ -902,6 +906,20 @@ timer/callback references before completion. Each sequential wait uses the
 remaining original absolute five-second controller budget, checked again after
 transport returns; the page timer only bounds callback lifetime. It never resets
 that deadline, samples a body, dispatches input, or adds a frame/request.
+
+Discovery shares that single waiter and requires the original trusted finite
+Roster timestamp plus the same exact owner/facade/token/phase binding. It checks
+already-ready state synchronously, then uses the existing DOM observer's normal
+notifications. It returns only the unique current selected visible owned surface
+and mode button as real Element references. Missing, hidden, ambiguous, foreign,
+stale, reset or retired controls cannot qualify. Normal React/Dockview mounting
+provides the child-list notification; no separate signal or polling loop is added.
+After transport, the controller still runs the actual native `isDisplayed` wait,
+reads the actual title, requires the live Terminal toggle and conditionally calls
+the native click. Serialization or stale-element failures remain failures, with
+no selector fallback or JavaScript click. Browser coverage exercises the serialized
+callback against real DOM and preserves both references; native transport and
+subsecond acceptance require their separate native run.
 
 Page-clock `captureAtPage` is appended to the existing observation read;
 `page.paintCaptureAtPage` and `page.usableCaptureAtPage` retain each wait's last
