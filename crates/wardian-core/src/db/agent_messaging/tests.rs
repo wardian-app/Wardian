@@ -1014,6 +1014,51 @@ fn delivered_or_uncertain_reply_continuations_cannot_be_claimed_or_reopened() {
 }
 
 #[test]
+fn omitted_carried_information_stays_in_history_and_is_not_carried_again() {
+    use crate::agent_messaging::{pending_information_prompt, MAX_CARRIED_INFORMATION_ITEMS};
+
+    let conn = database();
+    let records: Vec<_> = (0..MAX_CARRIED_INFORMATION_ITEMS + 5)
+        .map(|index| {
+            admit(&conn, admission(&format!("carried-body-{index:02}"), false))
+                .unwrap()
+                .record
+        })
+        .collect();
+    let highwater = information_highwater(&conn, "receiver").unwrap();
+    let mut frame = message_context(&conn, records.last().unwrap()).unwrap();
+    let mut claims = Vec::new();
+    for id in pending_information(&conn, "receiver", highwater).unwrap() {
+        let claim = claim_information(&conn, "receiver", &id, 7)
+            .unwrap()
+            .unwrap();
+        frame
+            .pending_information
+            .push(message_context(&conn, &claim.record).unwrap());
+        claims.push(claim);
+    }
+    let prompt = pending_information_prompt(&frame);
+    assert!(!prompt.contains("carried-body-00"));
+    assert!(prompt.contains("5 older informational messages omitted"));
+    for claim in &claims {
+        finish_claim(&conn, claim, "provider_accepted").unwrap();
+        assert!(claim_information(&conn, "receiver", &claim.record.id, 8)
+            .unwrap()
+            .is_none());
+    }
+    assert!(pending_information(&conn, "receiver", highwater)
+        .unwrap()
+        .is_empty());
+    let history = super::super::list_interaction_records_with_conn(&conn).unwrap();
+    for record in records {
+        assert_eq!(
+            history.iter().find(|entry| entry.id == record.id),
+            Some(&record)
+        );
+    }
+}
+
+#[test]
 fn startup_information_and_reply_snapshots_are_separate_and_bounded() {
     let conn = database();
     let info = admit(&conn, admission("info", false)).unwrap();
