@@ -865,6 +865,33 @@ text-range intersection. Member counts distinguish the total from the first 64
 captured rows and report truncation; 64 is a diagnostic bound, not a renderer limit.
 These facts use the existing write-boundary redaction once and cannot set endpoints,
 move the viewport or dispatch another request.
+The same result also retains passive timing diagnostics. `commandTiming` is the
+current measurement's bounded record, including a failed measurement; successful
+phases retain that record as `controllerTiming`. Its nine fixed `spans` cover the
+paint wait, scroll lookup, interaction planner, displayed/enabled/value checks,
+complete `sendKeys`, wheel action and usability wait. Each has controller-monotonic
+`startedAt`, `finishedAt` and `durationMs`, with `finally` recording rejected
+operations. Unused or unavailable values remain null. `polls.paintAt` and
+`polls.usableAt` aggregate only existing callback attempts, timed attempts and
+callback elapsed milliseconds. They retain no per-poll history and change no
+command, arguments, deadline or default Selenium polling interval.
+
+Page-clock `captureAtPage` is appended to the existing observation read;
+`page.paintCaptureAtPage` and `page.usableCaptureAtPage` retain each wait's last
+owned-phase capture. `plannedAtPage` comes from the existing interaction planner.
+`completeTrustedProbeAt` records the existing trusted, owned, focused full-input
+acceptance; it alone proves neither a stable body nor usability. `trustedWheelAt`
+belongs only to the existing trusted wheel path. `usableFrame1At` is captured in
+the first existing usability frame and published only when the original second
+frame accepts the same phase/body. `usableFrame2At` aliases that original usable
+endpoint timestamp. Reset, stale and disposed callbacks cannot publish those
+frame stamps into another phase. Failure metadata retains the same page scalars.
+Compare page timestamps only with page timestamps, and controller durations only
+within their controller clock. Spans can overlap page frames and must not be
+summed with them. These scalar diagnostics contain no body or draft text, use the
+existing single redaction boundary, and never replace an original result or error.
+Structural tests establish unchanged commands, guards and frame scheduling;
+they do not establish zero instrumentation overhead or native latency improvement.
 At existing realm teardown, the one disposal operation returns a separate actual
 post-unsubscribe token/status and callback/error counters before closing the realm.
 The last pre-disposal observation is retained separately. Missing historical

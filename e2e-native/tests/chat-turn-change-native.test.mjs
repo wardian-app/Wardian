@@ -289,10 +289,20 @@ function installChatObservation(config) {
         && wheelEvidence.node.scrollTop !== wheelEvidence.before));
     if (!valid()) return;
     phase.usableChecking = true;
-    frame(() => frame(() => {
-      phase.usableChecking = false;
-      if (state.phase === phase && valid()) phase.usableAt = now();
-    }));
+    let firstFrameAt = null;
+    frame(() => {
+      try { firstFrameAt = now(); } catch { /* A diagnostic must not cancel the second frame. */ }
+      frame(() => {
+        phase.usableChecking = false;
+        if (state.phase === phase && valid()) {
+          phase.usableAt = now();
+          // Publish only for the original accepted phase/body. The second stamp
+          // aliases its existing endpoint clock; stale callbacks publish neither.
+          phase.usableFrame1At = firstFrameAt;
+          phase.usableFrame2At = phase.usableAt;
+        }
+      });
+    });
   };
   const sample = () => {
     if (retired) return;
@@ -356,6 +366,7 @@ function installChatObservation(config) {
       || !surface()?.contains(event.target) || event.target.getAttribute("aria-label") !== "Message agent"
       || event.target.value !== config.probe || document.activeElement !== event.target) return;
     inputEvidence = { phase, node: event.target, body: visibleBody(paintedBody?.phase === phase ? paintedBody.body : null) };
+    try { phase.completeTrustedProbeAt = now(); } catch { /* Keep the original interaction outcome. */ }
     checkUsable(phase);
   };
   const wheel = (event) => {
@@ -367,6 +378,7 @@ function installChatObservation(config) {
       if (phase && wheelEvidence?.phase === phase && wheelEvidence.node === scroll && phase.usableAt === null) {
         wheelEvidence.received = true;
         wheelEvidence.eventTop = scroll.scrollTop;
+        try { phase.trustedWheelAt = now(); } catch { /* Keep the original wheel outcome. */ }
         // Compositor-first scrolling is already eligible for the same two-frame
         // witness as input. The queued check also covers event-first scrolling.
         checkUsable(phase);
@@ -465,10 +477,11 @@ function installChatObservation(config) {
       const reason = !latchValid ? "invalid_painted_subject" : safe ? "safe_empty_composer"
         : !flags.present ? "composer_absent" : !flags.unique ? "composer_ambiguous"
           : !flags.visible ? "composer_hidden" : !flags.enabled ? "composer_disabled" : "composer_nonempty";
-      state.interaction = { control, reason, composer: flags, latchValid, overflow };
+      state.interaction = { control, reason, composer: flags, latchValid, overflow, plannedAtPage: null };
       // Capture before dispatch, not in a wheel callback that may follow compositor scrolling.
       wheelEvidence = control === "wheel" ? { phase: state.phase, node: scroll, before: scroll.scrollTop,
         eventTop: null, received: false, body: fresh } : null;
+      try { if (state.phase) state.interaction.plannedAtPage = now(); } catch { /* Diagnostic only. */ }
       return { ...state.interaction, input: control === "keyboard" ? candidate : null, top: scroll.scrollTop };
     },
     bind(owner) {
@@ -494,7 +507,8 @@ function installChatObservation(config) {
       paintedBody = null;
       state.interaction = null;
       state.phase = { label, rosterAt: null, chatAt: null, exposureAt: null, exposureKind: null,
-        commitAt: null, paintAt: null, usableAt: null, body: null, checking: false };
+        commitAt: null, paintAt: null, usableAt: null, body: null, checking: false,
+        completeTrustedProbeAt: null, trustedWheelAt: null, usableFrame1At: null, usableFrame2At: null };
       state.phases.push(state.phase);
     },
     sample,
@@ -521,7 +535,13 @@ function installChatObservation(config) {
 }
 
 async function readObservation(driver) {
-  return driver.executeScript(() => ({ ...window.__chatAcceptance.state, subscription: window.__chatAcceptance.subscriptionStatus() }));
+  return driver.executeScript(() => {
+    const observation = { ...window.__chatAcceptance.state, subscription: window.__chatAcceptance.subscriptionStatus(), captureAtPage: null };
+    try {
+      if (observation.phase && !observation.disposed && observation.subscription.active) observation.captureAtPage = performance.now();
+    } catch { /* Missing timing cannot replace the original observation. */ }
+    return observation;
+  });
 }
 
 /** Return the acknowledgement from the existing disposal, before its realm closes. */
@@ -661,7 +681,8 @@ function captureChatFailureMetadata(sessionId, stage) {
       candidate: observer.candidateStatus?.() ?? null,
       calls: observer.state.calls.length, receipts: observer.state.receipts.length,
       errors: observer.state.errors.length, rejections: observer.state.rejections,
-      endpoints: phase ? Object.fromEntries(["rosterAt", "chatAt", "exposureAt", "commitAt", "paintAt", "usableAt"]
+      endpoints: phase ? Object.fromEntries(["rosterAt", "chatAt", "exposureAt", "commitAt", "paintAt", "usableAt",
+        "completeTrustedProbeAt", "trustedWheelAt", "usableFrame1At", "usableFrame2At"]
         .map((key) => [key, phase[key]])) : null } : null,
   };
 }
@@ -669,6 +690,24 @@ function captureChatFailureMetadata(sessionId, stage) {
 async function measureChat(driver, sessionId, label, name, evidence, requireTerminalToggle = true) {
   await driver.executeScript((phase) => window.__chatAcceptance.arm(phase), label);
   const deadline = Date.now() + 5_000;
+  // One current record survives failure; completed records travel with the
+  // existing fixed measurement phases. Never retain commands, drafts or polls.
+  const timing = {
+    spans: {
+      paintWait: { startedAt: null, finishedAt: null, durationMs: null },
+      scrollLookup: { startedAt: null, finishedAt: null, durationMs: null },
+      prepareInteraction: { startedAt: null, finishedAt: null, durationMs: null },
+      inputDisplayed: { startedAt: null, finishedAt: null, durationMs: null },
+      inputEnabled: { startedAt: null, finishedAt: null, durationMs: null },
+      inputValue: { startedAt: null, finishedAt: null, durationMs: null },
+      sendKeys: { startedAt: null, finishedAt: null, durationMs: null },
+      wheelPerform: { startedAt: null, finishedAt: null, durationMs: null },
+      usableWait: { startedAt: null, finishedAt: null, durationMs: null },
+    },
+    polls: { paintAt: { attempts: 0, timedAttempts: 0, elapsedMs: null }, usableAt: { attempts: 0, timedAttempts: 0, elapsedMs: null } },
+    page: { paintCaptureAtPage: null, usableCaptureAtPage: null, plannedAtPage: null },
+  };
+  try { evidence.commandTiming = timing; } catch { /* Diagnostics cannot fail the measurement. */ }
   let surface;
   let mode;
   let stage = "roster-click";
@@ -683,32 +722,126 @@ async function measureChat(driver, sessionId, label, name, evidence, requireTerm
     if (requireTerminalToggle) assert.ok(explicit, "live Terminal measurement requires its real Chat toggle");
     if (explicit) await mode.click();
     const waitForEndpoint = (field) => driver.wait(async () => {
-      const observation = await readObservation(driver);
-      assert.deepEqual(observation.errors, [], "passive observer failed");
-      assert.ok(observation.subscription.active && observation.subscription.fault_count === 0, "passive subscription failed");
-      return observation.phase[field] !== null;
+      let startedAt = null;
+      timing.polls[field].attempts++;
+      try { startedAt = performance.now(); } catch { /* Diagnostic only. */ }
+      try {
+        const observation = await readObservation(driver);
+        assert.deepEqual(observation.errors, [], "passive observer failed");
+        assert.ok(observation.subscription.active && observation.subscription.fault_count === 0, "passive subscription failed");
+        try {
+          if (observation.owner === sessionId && observation.phase?.label === label && !observation.disposed) {
+            timing.page[field === "paintAt" ? "paintCaptureAtPage" : "usableCaptureAtPage"] = observation.captureAtPage ?? null;
+          }
+        } catch { /* A diagnostic cannot change the endpoint predicate. */ }
+        return observation.phase[field] !== null;
+      } finally {
+        try {
+          const finishedAt = performance.now();
+          if (startedAt !== null) {
+            timing.polls[field].elapsedMs = (timing.polls[field].elapsedMs ?? 0) + finishedAt - startedAt;
+            timing.polls[field].timedAttempts++;
+          }
+        } catch { /* Preserve an original poll rejection. */ }
+      }
     }, Math.max(1, deadline - Date.now()), `${label}: no source-bound ${field}`);
     stage = "paint";
-    await waitForEndpoint("paintAt");
+    try { timing.spans.paintWait.startedAt = performance.now(); } catch { /* Diagnostic only. */ }
+    try {
+      await waitForEndpoint("paintAt");
+    } finally {
+      try {
+        timing.spans.paintWait.finishedAt = performance.now();
+        if (timing.spans.paintWait.startedAt !== null) timing.spans.paintWait.durationMs = timing.spans.paintWait.finishedAt - timing.spans.paintWait.startedAt;
+      } catch { /* Preserve the original command result or rejection. */ }
+    }
     stage = "input";
-    const scroll = await visible(driver, '[data-testid="agent-chat-scroll-region"]', surface);
-    const plan = await driver.executeScript((node, owner) => window.__chatAcceptance.prepareInteraction(owner, node), scroll, sessionId);
+    let scroll;
+    try { timing.spans.scrollLookup.startedAt = performance.now(); } catch { /* Diagnostic only. */ }
+    try {
+      scroll = await visible(driver, '[data-testid="agent-chat-scroll-region"]', surface);
+    } finally {
+      try {
+        timing.spans.scrollLookup.finishedAt = performance.now();
+        if (timing.spans.scrollLookup.startedAt !== null) timing.spans.scrollLookup.durationMs = timing.spans.scrollLookup.finishedAt - timing.spans.scrollLookup.startedAt;
+      } catch { /* Preserve the original command result or rejection. */ }
+    }
+    let plan;
+    try { timing.spans.prepareInteraction.startedAt = performance.now(); } catch { /* Diagnostic only. */ }
+    try {
+      plan = await driver.executeScript((node, owner) => window.__chatAcceptance.prepareInteraction(owner, node), scroll, sessionId);
+    } finally {
+      try {
+        timing.spans.prepareInteraction.finishedAt = performance.now();
+        if (timing.spans.prepareInteraction.startedAt !== null) timing.spans.prepareInteraction.durationMs = timing.spans.prepareInteraction.finishedAt - timing.spans.prepareInteraction.startedAt;
+      } catch { /* Preserve the original command result or rejection. */ }
+    }
+    try { timing.page.plannedAtPage = plan.plannedAtPage ?? null; } catch { /* Diagnostic only. */ }
     assert.ok(["keyboard", "wheel"].includes(plan.control), "no safe owned usability control");
     const input = plan.control === "keyboard" ? plan.input : null;
     if (input) {
-      assert.ok(await input.isDisplayed(), "unsent composer is no longer visible");
-      assert.ok(await input.isEnabled(), "no safe enabled unsent composer interaction");
-      assert.equal(await input.getAttribute("value"), "", "fixture must not replace an existing draft");
-      await input.sendKeys("native-input-probe");
+      try { timing.spans.inputDisplayed.startedAt = performance.now(); } catch { /* Diagnostic only. */ }
+      try {
+        assert.ok(await input.isDisplayed(), "unsent composer is no longer visible");
+      } finally {
+        try {
+          timing.spans.inputDisplayed.finishedAt = performance.now();
+          if (timing.spans.inputDisplayed.startedAt !== null) timing.spans.inputDisplayed.durationMs = timing.spans.inputDisplayed.finishedAt - timing.spans.inputDisplayed.startedAt;
+        } catch { /* Preserve the original command result or rejection. */ }
+      }
+      try { timing.spans.inputEnabled.startedAt = performance.now(); } catch { /* Diagnostic only. */ }
+      try {
+        assert.ok(await input.isEnabled(), "no safe enabled unsent composer interaction");
+      } finally {
+        try {
+          timing.spans.inputEnabled.finishedAt = performance.now();
+          if (timing.spans.inputEnabled.startedAt !== null) timing.spans.inputEnabled.durationMs = timing.spans.inputEnabled.finishedAt - timing.spans.inputEnabled.startedAt;
+        } catch { /* Preserve the original command result or rejection. */ }
+      }
+      try { timing.spans.inputValue.startedAt = performance.now(); } catch { /* Diagnostic only. */ }
+      try {
+        assert.equal(await input.getAttribute("value"), "", "fixture must not replace an existing draft");
+      } finally {
+        try {
+          timing.spans.inputValue.finishedAt = performance.now();
+          if (timing.spans.inputValue.startedAt !== null) timing.spans.inputValue.durationMs = timing.spans.inputValue.finishedAt - timing.spans.inputValue.startedAt;
+        } catch { /* Preserve the original command result or rejection. */ }
+      }
+      try { timing.spans.sendKeys.startedAt = performance.now(); } catch { /* Diagnostic only. */ }
+      try {
+        await input.sendKeys("native-input-probe");
+      } finally {
+        try {
+          timing.spans.sendKeys.finishedAt = performance.now();
+          if (timing.spans.sendKeys.startedAt !== null) timing.spans.sendKeys.durationMs = timing.spans.sendKeys.finishedAt - timing.spans.sendKeys.startedAt;
+        } catch { /* Preserve the original command result or rejection. */ }
+      }
     } else {
       assert.equal(plan.control, "wheel", "planned keyboard control is missing its actual composer");
-      await driver.actions({ async: true }).scroll(0, 0, 0, plan.top > 0 ? -20 : 20, scroll).perform();
+      try { timing.spans.wheelPerform.startedAt = performance.now(); } catch { /* Diagnostic only. */ }
+      try {
+        await driver.actions({ async: true }).scroll(0, 0, 0, plan.top > 0 ? -20 : 20, scroll).perform();
+      } finally {
+        try {
+          timing.spans.wheelPerform.finishedAt = performance.now();
+          if (timing.spans.wheelPerform.startedAt !== null) timing.spans.wheelPerform.durationMs = timing.spans.wheelPerform.finishedAt - timing.spans.wheelPerform.startedAt;
+        } catch { /* Preserve the original command result or rejection. */ }
+      }
     }
     stage = "usability";
-    await waitForEndpoint("usableAt");
+    try { timing.spans.usableWait.startedAt = performance.now(); } catch { /* Diagnostic only. */ }
+    try {
+      await waitForEndpoint("usableAt");
+    } finally {
+      try {
+        timing.spans.usableWait.finishedAt = performance.now();
+        if (timing.spans.usableWait.startedAt !== null) timing.spans.usableWait.durationMs = timing.spans.usableWait.finishedAt - timing.spans.usableWait.startedAt;
+      } catch { /* Preserve the original command result or rejection. */ }
+    }
     stage = "assertions";
     const state = await readObservation(driver);
     const phase = state.phase;
+    try { phase.controllerTiming = timing; } catch { /* The original phase remains the result. */ }
     assert.ok(Number.isFinite(phase.rosterAt), "original trusted Roster selection was not observed");
     if (explicit) {
       assert.ok(Number.isFinite(phase.chatAt) && phase.chatAt >= phase.rosterAt,

@@ -637,8 +637,194 @@ function rosterMeasurement(driver, evidence, visible, ownedSurface, extensions =
   const end = source.indexOf("async function closeTerminalSurface(driver,", start);
   assert.ok(start >= 0 && end > start);
   return vm.runInNewContext(`${source.slice(start, end)}\nmeasureChat(driver, "session", "test-phase", "Owned Saved", evidence, requireTerminalToggle);`,
-    { driver, evidence, visible, ownedSurface, captureRosterDiagnostics() {}, assert, requireTerminalToggle: false, ...extensions });
+    { driver, evidence, visible, ownedSurface, performance, captureRosterDiagnostics() {}, assert, requireTerminalToggle: false, ...extensions });
 }
+
+test("passive timing retains the actual command trace, result and rejected command object", async (t) => {
+  for (const scenario of [null, "wheel-success", "paintWait", "scrollLookup", "prepareInteraction", "inputDisplayed", "inputEnabled",
+    "inputValue", "sendKeys", "usableWait", "wheelPerform", "readObservation", "timeout", "clock", "sink"]) {
+    const failure = scenario === "wheel-success" ? null : scenario;
+    await t.test(scenario ?? "keyboard-success", async () => {
+      const original = new Error("original command rejection");
+      const trace = [];
+      let clock = 0;
+      let reads = 0;
+      const evidence = { rosterFailures: [] };
+      if (failure === "sink") Object.defineProperty(evidence, "commandTiming", { set() { throw new Error("diagnostic sink unavailable"); } });
+      const phase = { label: "test-phase", rosterAt: 0, chatAt: null, exposureAt: 5, exposureKind: "automatic",
+        commitAt: 10, paintAt: 20, usableAt: 30, body: { receiptAt: 4 } };
+      const state = { owner: "session", phase, phases: [phase], errors: [], subscription: { active: true, fault_count: 0 },
+        activation: { active: true, owner: "session", at: 0 }, coverage: "PAGE_LOADER_ONLY", broaderIpcRuntime: "UNOBSERVED",
+        calls: [{ session: "session", at: 1 }], receipts: [{ session: "session", requestSession: "session", at: 4 }] };
+      const command = (step, value) => {
+        trace.push(step);
+        if (failure === step || (["clock", "sink"].includes(failure) && step === "sendKeys")) throw original;
+        return value;
+      };
+      const input = { isDisplayed: async () => command("inputDisplayed", true),
+        isEnabled: async () => command("inputEnabled", true),
+        getAttribute: async (key) => { assert.equal(key, "value"); return command("inputValue", ""); },
+        sendKeys: async (...keys) => { assert.deepEqual(keys, ["native-input-probe"]); command("sendKeys"); } };
+      const surface = {};
+      const scroll = {};
+      const wheel = scenario === "wheel-success" || failure === "wheelPerform";
+      const driver = {
+        executeScript: async (fn, ...args) => {
+          if (fn.name === "captureChatFailureMetadata") {
+            trace.push("failureCapture"); throw new Error("secondary capture rejection");
+          }
+          if (args.length === 1) { assert.deepEqual(args, ["test-phase"]); return command("arm"); }
+          assert.deepEqual(args, [scroll, "session"]);
+          return command("prepareInteraction", { control: wheel ? "wheel" : "keyboard", input: wheel ? null : input,
+            top: 100, plannedAtPage: 24 });
+        },
+        wait: async (predicate, timeout, message, ...pollOverride) => {
+          assert.equal(timeout, 5000); assert.deepEqual(pollOverride, [], "retain default Selenium polling");
+          command(message.endsWith("paintAt") ? "paintWait" : "usableWait");
+          if (failure === "timeout") { assert.equal(await predicate(), false); assert.equal(await predicate(), false); throw original; }
+          if (!(await predicate())) assert.equal(await predicate(), true);
+          return true;
+        },
+        actions: (options) => {
+          assert.deepEqual({ ...options }, { async: true });
+          return { scroll: (...args) => {
+            assert.deepEqual(args, [0, 0, 0, -20, scroll]);
+            return { perform: async () => command("wheelPerform") };
+          } };
+        },
+      };
+      const visible = async (actualDriver, selector, root) => {
+        assert.equal(actualDriver, driver);
+        if (selector === '[aria-label="Agent Owned Saved"]') {
+          assert.equal(root, undefined); command("rosterLookup"); return { click: async () => command("rosterClick") };
+        }
+        assert.equal(root, surface);
+        if (selector === 'button[title="Switch to Chat"], button[title="Switch to Terminal"]') {
+          command("modeLookup"); return { getAttribute: async (key) => {
+            assert.equal(key, "title"); return command("modeTitle", "Switch to Terminal");
+          } };
+        }
+        assert.equal(selector, '[data-testid="agent-chat-scroll-region"]'); return command("scrollLookup", scroll);
+      };
+      const result = rosterMeasurement(driver, evidence, visible, async (...args) => {
+        assert.deepEqual(args, [driver, "session"]); return command("ownedSurface", surface);
+      }, { Date: { now: () => 100 },
+        // WebDriver JSON arrays enter the controller realm in production. The
+        // extracted VM otherwise gives its empty expected array a foreign brand.
+        assert: { ...assert, deepEqual: (actual, expected, message) => assert.deepEqual(Array.from(actual), Array.from(expected), message) },
+        performance: { now: () => {
+        if (failure === "clock") throw new Error("diagnostic clock unavailable");
+        return ++clock;
+      } }, captureChatFailureMetadata() {}, readObservation: async () => {
+        command("readObservation"); reads++;
+        return reads === 1 || failure === "timeout" ? { ...state, captureAtPage: 21, phase: { ...phase, paintAt: null } }
+          : reads === 3 ? { ...state, captureAtPage: 31, phase: { ...phase, usableAt: null } }
+            : { ...state, captureAtPage: 40 };
+      } });
+      if (failure) await assert.rejects(result, (error) => error === original);
+      else assert.equal(await result, phase, "return the original phase object");
+      const expected = ["arm", "rosterLookup", "rosterClick", "ownedSurface", "modeLookup", "modeTitle",
+        "paintWait", "readObservation", "readObservation", "scrollLookup", "prepareInteraction",
+        ...(wheel ? ["wheelPerform"] : ["inputDisplayed", "inputEnabled", "inputValue", "sendKeys"]),
+        "usableWait", "readObservation", "readObservation", "readObservation"];
+      if (failure) {
+        const step = ["clock", "sink"].includes(failure) ? "sendKeys" : failure;
+        const prefix = failure === "timeout" ? expected.slice(0, expected.indexOf("scrollLookup")) : expected.slice(0, expected.indexOf(step) + 1);
+        assert.deepEqual(trace, [...prefix, "failureCapture"]);
+      } else assert.deepEqual(trace, expected);
+      if (failure === "sink") return;
+      const timing = evidence.commandTiming;
+      assert.ok(timing, "retain bounded partial command timing even on rejection");
+      if (failure === "clock") assert.equal(timing.spans.sendKeys.finishedAt, null);
+      else {
+        const span = timing.spans[["readObservation", "timeout"].includes(failure) ? "paintWait" : failure ?? (wheel ? "wheelPerform" : "sendKeys")];
+        assert.ok(Number.isFinite(span.startedAt) && Number.isFinite(span.finishedAt));
+        assert.equal(span.durationMs, span.finishedAt - span.startedAt);
+      }
+      if (["readObservation", "timeout"].includes(failure)) {
+        assert.equal(timing.polls.paintAt.attempts, failure === "timeout" ? 2 : 1);
+        assert.equal(timing.polls.paintAt.timedAttempts, timing.polls.paintAt.attempts);
+        assert.ok(timing.polls.paintAt.elapsedMs > 0, "finally includes rejected poll work");
+      }
+      if (!failure) {
+        assert.equal(phase.controllerTiming, timing);
+        assert.equal(timing.polls.paintAt.attempts, 2); assert.equal(timing.polls.usableAt.attempts, 2);
+        assert.equal(timing.polls.paintAt.timedAttempts, 2); assert.ok(timing.polls.paintAt.elapsedMs > 0);
+        assert.equal(timing.page.plannedAtPage, 24); assert.equal(timing.page.paintCaptureAtPage, 40);
+        assert.equal(timing.spans[wheel ? "sendKeys" : "wheelPerform"].startedAt, null);
+        assert.deepEqual(JSON.parse(JSON.stringify(actualRedaction(timing))), JSON.parse(JSON.stringify(timing)), "fixed scalar diagnostics survive one redaction");
+      }
+    });
+  }
+});
+
+test("passive timing observation capture shares its original RPC and preserves rejection identity", async () => {
+  const source = fs.readFileSync(new URL("./chat-turn-change-native.test.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("async function readObservation(driver) {");
+  const end = source.indexOf("/** Return the acknowledgement", start);
+  assert.ok(start >= 0 && end > start);
+  const phase = { label: "cold" };
+  const state = { phase, disposed: false };
+  let calls = 0;
+  let clockFails = false;
+  const subscription = { active: true };
+  const read = vm.runInNewContext(`${source.slice(start, end)}\nreadObservation;`, {
+    window: { __chatAcceptance: { state, subscriptionStatus: () => subscription } },
+    performance: { now: () => { if (clockFails) throw new Error("clock failed"); return 42; } },
+  });
+  const driver = { executeScript: async (fn, ...args) => { calls++; assert.deepEqual(args, []); return fn(); } };
+  const observation = await read(driver);
+  assert.equal(calls, 1); assert.equal(observation.phase, phase); assert.equal(observation.subscription, subscription);
+  assert.equal(observation.captureAtPage, 42);
+  assert.equal(Object.hasOwn(state, "captureAtPage"), false, "capture is appended to the existing result, not mutable observer state");
+  clockFails = true; assert.equal((await read(driver)).captureAtPage, null);
+  clockFails = false; state.disposed = true; assert.equal((await read(driver)).captureAtPage, null);
+  const original = new Error("original RPC rejection");
+  await assert.rejects(read({ executeScript: () => Promise.reject(original) }), (error) => error === original);
+});
+
+test("passive timing page stamps use only the accepted full probe and existing two frames", async (t) => {
+  for (const ending of ["keyboard", "wheel", "wheel-event-first", "reset", "rearm", "disposed"]) {
+    await t.test(ending, async () => {
+      const harness = observationHarness(() => Promise.resolve(actualPage()));
+      harness.mode("chat"); harness.roster();
+      await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+      harness.observer.sample(); harness.frame(); harness.frame();
+      const phase = harness.observer.state.phase;
+      const plan = harness.observer.prepareInteraction("session", harness.scroll);
+      assert.ok(Number.isFinite(plan.plannedAtPage));
+      assert.equal(phase.completeTrustedProbeAt, null);
+      assert.throws(() => harness.observer.prepareInteraction("foreign", harness.scroll), /owner/);
+      if (ending.startsWith("wheel")) {
+        harness.composer({ value: "owned draft" });
+        harness.wheel(true, 60, ending === "wheel" ? "before-handler" : "after-handler");
+      } else {
+        harness.input(false); assert.equal(phase.completeTrustedProbeAt, null);
+        harness.input();
+      }
+      assert.equal(phase.usableFrame1At, null); assert.equal(phase.usableFrame2At, null);
+      harness.frame();
+      if (ending === "wheel-event-first") {
+        assert.equal(phase.usableAt, null, "the existing event-first queued check precedes both witness frames");
+        harness.frame();
+      }
+      assert.equal(phase.usableAt, null, "one frame cannot qualify usability");
+      if (ending === "reset") harness.admitted({ revision: "replacement" });
+      if (ending === "rearm") harness.observer.arm("warm");
+      if (ending === "disposed") harness.observer.dispose();
+      harness.frame();
+      if (["reset", "rearm", "disposed"].includes(ending)) {
+        assert.equal(phase.usableAt, null); assert.equal(phase.usableFrame1At, null); assert.equal(phase.usableFrame2At, null);
+        if (ending === "rearm") assert.equal(harness.observer.state.phase.completeTrustedProbeAt, null);
+      } else {
+        assert.ok(Number.isFinite(phase.usableFrame1At)); assert.equal(phase.usableFrame2At, phase.usableAt);
+        assert.ok(phase.usableFrame1At < phase.usableFrame2At);
+        if (ending === "keyboard") assert.ok(phase.completeTrustedProbeAt <= phase.usableFrame1At);
+        else { assert.equal(phase.completeTrustedProbeAt, null); assert.ok(Number.isFinite(phase.trustedWheelAt)); }
+      }
+    });
+  }
+});
 
 test("Saved overflow prefers its already-safe empty composer over wheel input", async () => {
   const actions = [];
