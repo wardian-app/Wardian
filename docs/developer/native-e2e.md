@@ -787,8 +787,18 @@ visible Overview card or actual AgentSession. It verifies the current workbench,
 surface and selected tab/tabpanel linkage, and rejects hidden, detached, stale,
 foreign or ambiguous containers. Closing and reopening uses that actual parent
 tab and the normal Roster action. No context-menu Open substitutes for the timed
-primary click, and no transcript/page prewarm occurs. A passive IPC
-observer retains the original Promise and records actual scope and row identity.
+primary click, and no transcript/page prewarm occurs. The normal build publishes
+an inert, versioned, owner-bound page-loader subscription before React mounts.
+With no matching subscriber it retains no history and attaches no Promise handlers.
+The stable loader invokes the SDK once and returns its exact Promise. An active
+passive observer receives the original arguments and Promise, records actual scope
+and row identity, and requires positive activation before the trusted Roster action.
+It does not replace Tauri's immutable internal invoke function. Subscriber faults
+are isolated from the product and exposed as an explicit failure count. Disposal
+releases the subscription and DOM listeners and retires late settlements and frames.
+Runtime coverage is `PAGE_LOADER_ONLY`; a separate source call-site inventory
+checks ordinary routing. Broader legacy/all-IPC runtime coverage is `UNOBSERVED`.
+An empty page-call ledger cannot qualify no-prewarm or admitted-body evidence.
 Passive markers on the existing Chat scroll region and message row expose the
 page actually admitted by the consumer and its rendered event/member identity.
 The observer matches these markers to the actual response, including conversation,
@@ -822,6 +832,11 @@ Roster click, container lookup and mode lookup failures retain bounded failure-o
 registry and container/tab ownership/visibility metadata, including ambiguity.
 This capture reads no Chat body, performs no prewarm and preserves the original
 exception and unmeasured endpoints even if the secondary capture fails.
+Toggle, paint, input, usability and assertion failures also retain bounded DOM-only
+metadata: mode, mounted Chat or suspended placeholder, ownership/tab geometry,
+scope/member presence, observer activation and request/settlement/error counters.
+These later captures make no registry or other IPC request, preserve the original
+exception and NULL endpoints, and do not retry or extend the measurement deadline.
 
 After timing, genuine wheel/button actions load Older pages through opaque
 cursors and expand the declared 60,000-byte body. The fixture preserves both

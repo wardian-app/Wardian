@@ -2,11 +2,24 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
+import ts from "typescript";
 import { invokeTauri } from "../lib/harness.mjs";
 import { chatBodyWitness } from "../lib/chatSavedFixture.mjs";
+
+// CI uses Node20. Execute the actual type-erased module rather than relying on
+// newer Node's native TS loader or reimplementing the app facade in this fixture.
+const observationSource = fs.readFileSync(new URL("../../src/features/chat/chatPageObservation.ts", import.meta.url), "utf8");
+const observationModule = {};
+const observationJs = ts.transpileModule(observationSource, {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+vm.runInNewContext(observationJs, { exports: observationModule });
+const { createChatPageObservation } = observationModule;
 
 const { chatAcceptanceFixture, chatAcceptanceEvents } = createRequire(import.meta.url)("../../scripts/mock-agent.cjs");
 
@@ -104,6 +117,7 @@ function observationHarness(invoke, options = {}) {
     getElementById: (id) => routes.flatMap((item) => [item.tab, item.tabpanel])
       .find((node) => node.getAttribute("id") === id) ?? null,
     addEventListener: (type, callback) => listeners.set(type, callback),
+    removeEventListener: (type, callback) => { if (listeners.get(type) === callback) listeners.delete(type); },
     createTreeWalker: () => {
       let offset = 0;
       const nodes = (options.textSegments ?? [content.textContent]).map((text) => {
@@ -124,9 +138,15 @@ function observationHarness(invoke, options = {}) {
           : content.textContent.slice(start.node.offset + start.offset, end.node.offset + end.offset),
         getClientRects: () => [whole ? rect : needleRect ?? rect] };
     } };
-  const context = { window: { __TAURI_INTERNALS__: { invoke } }, document,
+  const bridge = createChatPageObservation();
+  let disconnected = false;
+  const context = { window: { __TAURI_INTERNALS__: { invoke },
+    __wardianChatPageObservation: Object.hasOwn(options, "facade") ? options.facade : bridge.facade }, document,
     performance: { now: () => clock }, innerHeight: 500, innerWidth: 500,
-    MutationObserver: class { observe() {} }, requestAnimationFrame: (callback) => frames.push(callback) };
+    MutationObserver: class { observe() {} disconnect() { disconnected = true; } }, requestAnimationFrame: (callback) => frames.push(callback) };
+  if (options.immutableInvoke) Object.defineProperty(context.window.__TAURI_INTERNALS__, "invoke", {
+    value: invoke, writable: false, configurable: false,
+  });
   vm.runInNewContext(`${source.slice(start, end)}\ninstallChatObservation(config);`,
     { ...context, getComputedStyle: (node) => node.style ?? { visibility: "visible", display: "block", opacity: "1" },
       config: { name: "Owned", body: rawBody, witness: options.witness, probe: "native-input-probe" } });
@@ -134,7 +154,13 @@ function observationHarness(invoke, options = {}) {
   observer.bind("session");
   observer.arm("cold");
   return {
-    observer, document, content, route, window: context.window, wrapper: context.window.__TAURI_INTERNALS__.invoke,
+    observer, document, content, route, window: context.window, bridge,
+    listenerCount: () => listeners.size, disconnected: () => disconnected,
+    wrapper(...args) {
+      const result = Reflect.apply(context.window.__TAURI_INTERNALS__.invoke, this, args);
+      if (args[0] === "load_agent_chat_page") bridge.notifyRequest(args[1], result);
+      return result;
+    },
     addContainer,
     replaceContainer() {
       route.root.isConnected = false;
@@ -209,6 +235,90 @@ function actualSurfaceOperations(harness) {
 }
 
 const actualOwnedSurface = (harness) => actualSurfaceOperations(harness).lookup();
+
+test("the maintained observer witnesses original page calls with an immutable native invoke descriptor", async () => {
+  const original = () => Promise.resolve(actualPage());
+  const harness = observationHarness(original, { immutableInvoke: true });
+  const descriptor = Object.getOwnPropertyDescriptor(harness.window.__TAURI_INTERNALS__, "invoke");
+  assert.equal(descriptor.writable, false);
+  assert.equal(descriptor.configurable, false);
+  assert.equal(harness.window.__TAURI_INTERNALS__.invoke, original);
+  await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+  assert.equal(harness.observer.state.calls.length, 1);
+  assert.equal(harness.observer.state.receipts.length, 1);
+  assert.equal(harness.observer.state.activation.owner, "session");
+  assert.equal(harness.observer.subscriptionStatus().active, true);
+});
+
+test("page-only source routing inventory is separate from broader unobserved runtime IPC", () => {
+  const root = fileURLToPath(new URL("../../src/", import.meta.url));
+  const files = fs.readdirSync(root, { recursive: true }).filter((name) => /\.[jt]sx?$/.test(name)
+    && !/\.test\.[jt]sx?$/.test(name) && !name.replaceAll("\\", "/").startsWith("test/"));
+  const sources = files.map((name) => ({ name: name.replaceAll("\\", "/"), text: fs.readFileSync(path.join(root, name), "utf8") }));
+  assert.deepEqual(sources.filter(({ text }) => /["']load_agent_chat_page["']/.test(text)).map(({ name }) => name),
+    ["features/chat/chatPageLoader.ts"]);
+  assert.deepEqual(sources.filter(({ text }) => /["']load_agent_chat_transcript["']/.test(text)), []);
+  const view = sources.find(({ name }) => name === "features/grid/AgentChatView.tsx").text;
+  assert.match(view, /import \{ loadChatPage \} from "\.\.\/chat\/chatPageLoader"/);
+  assert.match(view, /useChatPages\(sessionId, loadChatPage,/);
+  const main = sources.find(({ name }) => name === "main.tsx").text;
+  assert.ok(main.indexOf("installChatPageObservation(window)") < main.indexOf("ReactDOM.createRoot"));
+});
+
+test("observer activation fails explicitly for missing, incompatible, duplicate and wrong-owner subscriptions", () => {
+  const original = () => Promise.resolve(actualPage());
+  for (const facade of [null, { version: 2 }]) {
+    assert.throws(() => observationHarness(original, { facade }), /unavailable\/incompatible/);
+  }
+  const bridge = createChatPageObservation();
+  bridge.facade.subscribe({ version: 1, owner: "session", onRequest() {} });
+  assert.throws(() => observationHarness(original, { facade: bridge.facade }), /activation failed/);
+  let released = false;
+  assert.throws(() => observationHarness(original, { facade: { version: 1, subscribe: () => ({
+    active: true, version: 1, owner: "foreign", token: 1, status: () => ({ active: true }),
+    unsubscribe() { released = true; },
+  }) } }), /activation failed/);
+  assert.equal(released, true);
+});
+
+test("subscriber faults are explicit while the original product Promise survives", async () => {
+  const original = Promise.resolve(actualPage());
+  const harness = observationHarness(() => original);
+  const args = { sessionId: "session", get cursor() { throw new Error("observer metadata fault"); } };
+  assert.equal(harness.wrapper("load_agent_chat_page", args), original);
+  await original;
+  assert.equal(harness.observer.subscriptionStatus().fault_count, 1);
+  assert.throws(() => harness.observer.arm("broken"), /not active\/healthy/);
+});
+
+test("disposal retires pending settlements, queued frames and DOM listeners without removing a newer subscription", async () => {
+  for (const rejects of [false, true]) {
+    let resolve; let reject;
+    const pending = new Promise((yes, no) => { resolve = yes; reject = no; });
+    let calls = 0;
+    const harness = observationHarness(() => ++calls === 1 ? Promise.resolve(actualPage()) : pending);
+    harness.mode("chat"); harness.roster();
+    await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+    harness.observer.sample(); harness.frame();
+    assert.equal(harness.observer.state.phase.checking, true);
+    assert.equal(harness.observer.state.phase.paintAt, null);
+    const result = harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+    harness.observer.dispose();
+    const snapshot = JSON.stringify(harness.observer.state);
+    assert.equal(harness.disconnected(), true);
+    assert.equal(harness.listenerCount(), 0);
+    const next = harness.bridge.facade.subscribe({ version: 1, owner: "session", onRequest() {} });
+    assert.equal(next.active, true);
+    harness.observer.dispose();
+    assert.equal(next.status().active, true);
+    if (rejects) { const assertion = assert.rejects(result, /original/); reject(new Error("original")); await assertion; }
+    else { resolve(actualPage()); await result; }
+    harness.observer.sample(); harness.frame(); harness.frame();
+    assert.equal(JSON.stringify(harness.observer.state), snapshot);
+    assert.throws(() => harness.observer.bind("session"), /after disposal/);
+    next.unsubscribe();
+  }
+});
 
 test("the maintained oracle and close helper resolve real Dockview overlay placement through its current tab", async () => {
   for (const route of ["agents-overview", "agent-session"]) {
@@ -356,13 +466,13 @@ function rosterDiagnosticHarness(invoke, roster = null, observer = null) {
   return { result, expire: () => expire(), completions: () => completions };
 }
 
-function rosterMeasurement(driver, evidence, visible, ownedSurface) {
+function rosterMeasurement(driver, evidence, visible, ownedSurface, extensions = {}) {
   const source = fs.readFileSync(new URL("./chat-turn-change-native.test.mjs", import.meta.url), "utf8");
   const start = source.indexOf("async function measureChat(driver,");
   const end = source.indexOf("async function closeTerminalSurface(driver,", start);
   assert.ok(start >= 0 && end > start);
   return vm.runInNewContext(`${source.slice(start, end)}\nmeasureChat(driver, "session", "test-phase", "Owned Saved", evidence, false);`,
-    { driver, evidence, visible, ownedSurface, captureRosterDiagnostics() {} });
+    { driver, evidence, visible, ownedSurface, captureRosterDiagnostics() {}, assert, ...extensions });
 }
 
 test("Roster failure metadata distinguishes registry membership from bounded visible rows without changing results", async () => {
@@ -445,6 +555,78 @@ test("measurement captures click and surface failures only after rejection, pres
   assert.equal(evidence.rosterFailures[0].stage, "surface-resolution");
 });
 
+test("late toggle, paint, input, usability and assertion failures preserve their original error without registry RPC", async () => {
+  for (const stage of ["chat-toggle", "paint", "input", "usability", "assertions"]) {
+    for (const captureFails of [false, true]) {
+      const original = new Error(`original ${stage}`);
+      const evidence = { rosterFailures: [] };
+      let waits = 0; let captures = 0; let registryCalls = 0;
+      const driver = {
+        executeScript: async (fn) => {
+          if (fn.name === "captureChatFailureMetadata") {
+            captures++;
+            if (captureFails) throw new Error("secondary capture");
+            return { status: "OBSERVED_LATE_DOM" };
+          }
+          return { overflow: false, top: 0 };
+        },
+        executeAsyncScript: async () => { registryCalls++; throw new Error("late registry RPC forbidden"); },
+        wait: async (_callback, timeout) => {
+          assert.ok(timeout > 0 && timeout <= 5000);
+          waits++;
+          if ((stage === "paint" && waits === 1) || (stage === "usability" && waits === 2)) throw original;
+        },
+      };
+      const visible = async (_driver, selector) => selector.includes("Switch to Chat")
+        ? { getAttribute: async () => "Switch to Chat", click: async () => { if (stage === "chat-toggle") throw original; } }
+        : selector.includes("textarea") ? { isEnabled: async () => true, getAttribute: async () => "",
+          sendKeys: async () => { if (stage === "input") throw original; } } : { click: async () => {} };
+      await assert.rejects(rosterMeasurement(driver, evidence, visible, async () => ({}), {
+        captureChatFailureMetadata() {},
+        readObservation: async () => { if (stage === "assertions") throw original; },
+      }), (error) => error === original);
+      assert.equal(registryCalls, 0);
+      assert.equal(captures, 1);
+      assert.equal(evidence.rosterFailures.length, 0);
+      assert.equal(evidence.measurementFailures[0].stage, stage);
+    }
+  }
+});
+
+test("actual late DOM capture is bounded, leaves unmeasured endpoints null and never reads body or IPC", () => {
+  const source = fs.readFileSync(new URL("./chat-turn-change-native.test.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("function captureChatFailureMetadata(sessionId, stage) {");
+  const end = source.indexOf("async function measureChat(driver,", start);
+  assert.ok(start >= 0 && end > start);
+  const privateText = "private-body-must-never-be-read";
+  const region = {
+    getAttribute: () => "present-scope", getBoundingClientRect: () => ({ top: 0, left: 0, width: 100, height: 50 }),
+    querySelectorAll: () => Array.from({ length: 100 }, () => ({ get textContent() { throw new Error(privateText); } })),
+  };
+  const root = { querySelector: (selector) => selector.includes("scroll-region") ? region
+    : selector.includes("Switch to Terminal") ? {} : null };
+  const window = { get __TAURI_INTERNALS__() { throw new Error("no IPC"); }, __chatAcceptance: {
+    container: () => root, describeContainers: () => ({ count: 1, ownedMatchCount: 1 }),
+    subscriptionStatus: () => ({ active: true, fault_count: 0, request_count: 1 }),
+    state: { activation: { owner: "session", active: true }, calls: [{ privateText }], receipts: [], errors: [], rejections: 0,
+      phase: { rosterAt: 10, chatAt: 11, exposureAt: null, commitAt: null, paintAt: null, usableAt: null } },
+  } };
+  const metadata = vm.runInNewContext(`${source.slice(start, end)}\ncaptureChatFailureMetadata("session", "paint");`,
+    { window, document: { visibilityState: "visible" } });
+  assert.equal(metadata.memberRows, 64);
+  assert.equal(metadata.mode, "chat");
+  assert.equal(metadata.observer.endpoints.paintAt, null);
+  assert.equal(metadata.observer.endpoints.usableAt, null);
+  assert.equal(JSON.stringify(metadata).includes(privateText), false);
+  const redacted = actualRedaction({ ...metadata, coverage: "PAGE_LOADER_ONLY", broaderIpcRuntime: "UNOBSERVED" });
+  assert.equal(redacted.status, "OBSERVED_LATE_DOM");
+  assert.equal(redacted.stage, "paint");
+  assert.equal(redacted.mode, "chat");
+  assert.equal(redacted.visibility, "visible");
+  assert.equal(redacted.coverage, "PAGE_LOADER_ONLY");
+  assert.equal(redacted.broaderIpcRuntime, "UNOBSERVED");
+});
+
 test("failure-only container metadata is bounded and contains identities and visibility without body text", async () => {
   const harness = observationHarness(() => Promise.resolve(actualPage()), { route: "agents-overview" });
   const metadata = await rosterDiagnosticHarness(async () => [], null, harness.observer).result;
@@ -520,11 +702,11 @@ test("passive Chat observation preserves original synchronous and asynchronous f
   const failure = new Error("original rejection");
   const rejected = Promise.reject(failure);
   const harness = observationHarness(() => rejected);
-  assert.equal(harness.wrapper("load_agent_chat_page", {}), rejected);
+  assert.equal(harness.wrapper("load_agent_chat_page", { sessionId: "session" }), rejected);
   await assert.rejects(rejected, (error) => error === failure);
   assert.equal(harness.observer.state.receipts.length, 0);
   const sync = observationHarness(() => { throw failure; });
-  assert.throws(() => sync.wrapper("load_agent_chat_page", {}), (error) => error === failure);
+  assert.throws(() => sync.wrapper("load_agent_chat_page", { sessionId: "session" }), (error) => error === failure);
 });
 
 test("only trusted owned Chat input starts the original selection clock", () => {
@@ -678,7 +860,7 @@ test("observer bounds diagnostics without changing the original result", async (
   const page = actualPage({ events: Array(385).fill(actualPage().events[0]) });
   const promise = Promise.resolve(page);
   const harness = observationHarness(() => promise);
-  assert.equal(harness.wrapper("load_agent_chat_page", {}), promise);
+  assert.equal(harness.wrapper("load_agent_chat_page", { sessionId: "session" }), promise);
   assert.equal(await promise, page);
   assert.equal(harness.observer.state.receipts.length, 0);
   assert.match(harness.observer.state.errors[0], /bound exceeded/);
@@ -854,7 +1036,7 @@ test("preview and unknown body capabilities cannot supply canonical full-body ow
     assert.equal(actualCanonicalHistory([{ ...receipt, ...overrides }]).length, 0);
   }
   const harness = observationHarness(() => Promise.resolve(actualPage({ recent_admission: 42 })));
-  await harness.wrapper("load_agent_chat_page", {});
+  await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
   assert.equal(harness.observer.state.receipts.length, 0);
   assert.match(harness.observer.state.errors[0], /invalid recent admission/);
 });

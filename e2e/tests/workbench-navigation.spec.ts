@@ -1653,6 +1653,15 @@ test("reveals only the focused Off agent Saved Chat in the existing Overview wit
   await expect.poll(() => ipc.calls("list_provider_model_catalog")).toHaveLength(1);
   const openingCallIndex = (await ipc.calls()).length;
 
+  const descriptor = await page.evaluate(() => {
+    const native = (window as unknown as { __TAURI_INTERNALS__: { invoke: unknown } }).__TAURI_INTERNALS__;
+    Object.defineProperty(native, "invoke", { value: native.invoke, writable: false, configurable: false });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: native, writable: false, configurable: false });
+    const invoke = Object.getOwnPropertyDescriptor(native, "invoke");
+    return { writable: invoke?.writable, configurable: invoke?.configurable };
+  });
+  expect(descriptor).toEqual({ writable: false, configurable: false });
+
   // Execute the maintained native observer verbatim against real React/Dockview
   // DOM. Importing the native test would allocate its native harness instead.
   const nativeSource = readFileSync(path.resolve("e2e-native/tests/chat-turn-change-native.test.mjs"), "utf8");
@@ -1660,9 +1669,26 @@ test("reveals only the focused Off agent Saved Chat in the existing Overview wit
   const end = nativeSource.indexOf("\nasync function readObservation(driver)", start);
   expect(start).toBeGreaterThanOrEqual(0);
   expect(end).toBeGreaterThan(start);
-  await page.evaluate(`(${nativeSource.slice(start, end)})(${JSON.stringify({ name: "Saved Focus", body, probe: "saved-off-probe" })});
+  await page.evaluate(`(${nativeSource.slice(start, end)})(${JSON.stringify({ name: "Saved Focus", body, provider: "claude",
+    conversation: "saved-conversation", eventId: "saved-message", probe: "saved-off-probe" })});
     window.__chatAcceptance.bind(${JSON.stringify(owner)}); window.__chatAcceptance.arm("focused-off");`);
+  const readPassive = () => page.evaluate(() => {
+    const api = (window as unknown as { __chatAcceptance: {
+      state: { activation: { active: boolean; version: number; owner: string; token: number; at: number };
+        coverage: string; broaderIpcRuntime: string; errors: string[];
+        calls: Array<{ session: string; at: number }>;
+        receipts: Array<{ session: string; requestSession: string; at: number; rows: Array<{ id: string; target: boolean }> }>;
+        phase: { rosterAt: number; paintAt: number | null; usableAt: number | null;
+          body: { session: string; eventId: string; receiptAt: number } | null } };
+      subscriptionStatus(): { active: boolean; fault_count: number; request_count: number };
+    } }).__chatAcceptance;
+    return { ...api.state, subscription: api.subscriptionStatus() };
+  });
   try {
+    const active = await readPassive();
+    expect(active.activation).toMatchObject({ active: true, version: 1, owner });
+    expect(active.subscription).toEqual({ active: true, fault_count: 0, request_count: 0 });
+    expect(active.calls).toEqual([]);
     await page.getByLabel("Agent Saved Focus", { exact: true }).click();
     const card = page.locator(`[data-agent-grid-card-id="${owner}"]`);
     await expect(card).toBeVisible();
@@ -1673,6 +1699,27 @@ test("reveals only the focused Off agent Saved Chat in the existing Overview wit
     await expect(surfaceTab(page, "agent-session")).toHaveCount(0);
     await card.getByRole("button", { name: "Saved Focus mode: Terminal. Switch to Chat.", exact: true }).click();
     await expect(card.getByText(body, { exact: true })).toBeVisible();
+    await expect.poll(async () => (await readPassive()).phase.paintAt).not.toBeNull();
+    await card.getByRole("textbox", { name: "Message agent", exact: true }).pressSequentially("saved-off-probe");
+    await expect.poll(async () => (await readPassive()).phase.usableAt).not.toBeNull();
+    const observed = await readPassive();
+    expect(observed.errors).toEqual([]);
+    expect(observed.subscription.active).toBe(true);
+    expect(observed.subscription.fault_count).toBe(0);
+    expect(observed.coverage).toBe("PAGE_LOADER_ONLY");
+    expect(observed.broaderIpcRuntime).toBe("UNOBSERVED");
+    expect(observed.activation.at).toBeLessThanOrEqual(observed.phase.rosterAt);
+    expect(observed.calls.length).toBeGreaterThan(0);
+    expect(observed.calls.every((call) => call.session === owner && call.at >= observed.phase.rosterAt)).toBe(true);
+    expect(observed.phase.body).toMatchObject({ session: owner, eventId: "saved-message" });
+    expect(observed.receipts.some((receipt) => receipt.session === owner && receipt.requestSession === owner
+      && receipt.at === observed.phase.body?.receiptAt && receipt.rows.some((row) => row.id === "saved-message" && row.target))).toBe(true);
+    await testInfo.attach("native-page-loader-receipt", { body: JSON.stringify({
+      coverage: observed.coverage, broader_ipc_runtime: observed.broaderIpcRuntime,
+      activation: observed.activation, subscription: observed.subscription, descriptor,
+      request_count: observed.calls.length, receipt_count: observed.receipts.length,
+      phase: observed.phase,
+    }), contentType: "application/json" });
     await expect.poll(() => page.evaluate((id) => {
       const api = (window as unknown as { __chatAcceptance: { container(owner: string): Element | null } }).__chatAcceptance;
       return api.container(id)?.getAttribute("data-agent-grid-card-id") ?? null;
@@ -1700,8 +1747,10 @@ test("reveals only the focused Off agent Saved Chat in the existing Overview wit
     }
   } finally {
     const metadata = await page.evaluate(() => {
-      const api = (window as unknown as { __chatAcceptance: { describeContainers(): unknown } }).__chatAcceptance;
-      return { native: api.describeContainers(), containers: Array.from(document.querySelectorAll("[data-agent-grid-card-id]"))
+      const api = (window as unknown as { __chatAcceptance: { describeContainers(): unknown; dispose(): void } }).__chatAcceptance;
+      const native = api.describeContainers();
+      api.dispose();
+      return { native, containers: Array.from(document.querySelectorAll("[data-agent-grid-card-id]"))
         .slice(0, 4).map((node) => ({ owner: node.getAttribute("data-agent-grid-card-id"),
           surface: node.closest('[data-testid="surface-panel"]')?.getAttribute("data-surface-id"),
           geometry: node.getBoundingClientRect().toJSON() })) };

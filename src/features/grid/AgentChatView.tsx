@@ -5,7 +5,7 @@ import { readImage } from "@tauri-apps/plugin-clipboard-manager";
 import { FileText, Hand, Image as ImageIcon, Loader2, Plus, SendHorizontal, Square, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { DragEvent, KeyboardEvent } from "react";
-import type { AgentChatEvent, AgentChatPage, AgentConfig, AgentModelSelectionUpdateResult, AgentTelemetry } from "../../types";
+import type { AgentChatEvent, AgentConfig, AgentModelSelectionUpdateResult, AgentTelemetry } from "../../types";
 import { useSettingsStore } from "../../store/useSettingsStore";
 import { reasoningEffortForConfig } from "../agents/configUtils";
 import { ProviderModelSelector, type ModelSelection } from "../agents/ProviderModelSelector";
@@ -16,7 +16,8 @@ import {
   type ChatAttachment,
 } from "../../utils/terminalInput";
 import { ChatTranscriptRow } from "../chat/ChatTranscriptRows";
-import { useChatPages, type ChatPageLoader } from "../chat/useChatPages";
+import { useChatPages } from "../chat/useChatPages";
+import { loadChatPage } from "../chat/chatPageLoader";
 import { chatReadProgress, submittedChatEvent } from "../chat/chatReadState";
 import { captureChatScrollAnchor, restoreChatScrollAnchor, type ChatScrollAnchor } from "../chat/chatScrollAnchor";
 import { useChatReadingPresentation } from "../chat/useChatReadingPresentation";
@@ -72,11 +73,6 @@ const CHAT_REFRESH_INTERVAL_MS = 3000;
 type AwaitingResponseMarker = { id: string; response_ids: Set<string> };
 
 const CHAT_SCROLL_BOTTOM_THRESHOLD_PX = 48;
-const loadChatPage: ChatPageLoader = ({ sessionId, cursor, revision, detailRef, revalidateIds, recentPreview }) =>
-  invoke<AgentChatPage>("load_agent_chat_page", {
-    sessionId, cursor, revision, detailRef, ...(revalidateIds ? { revalidateIds } : {}),
-    recentPreview: recentPreview !== false && !cursor && !detailRef && !revalidateIds,
-  });
 
 export function AgentChatView({
   sessionId,
