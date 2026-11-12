@@ -1,17 +1,24 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { stripTypeScriptTypes } from "node:module";
 import { setImmediate as turn } from "node:timers/promises";
 import test from "node:test";
+import ts from "typescript";
 
 const sourceUrl = new URL("../src-tauri/resources/claude-delivery/hooks/register.ts", import.meta.url);
-const javascript = stripTypeScriptTypes(await readFile(sourceUrl, "utf8"), {
-  mode: "strip", sourceUrl: sourceUrl.href,
-});
+// Frontend CI also runs Node 20, which has no built-in TypeScript stripping.
+const javascript = ts.transpileModule(await readFile(sourceUrl, "utf8"), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+  fileName: sourceUrl.pathname,
+}).outputText;
 let fixtureId = 0;
 const inbox = "/owned/delivery/7/inbox";
 const recordPath = (kind, id) => `${inbox}/${kind}/${id}.json`;
-const deferred = () => Promise.withResolvers();
+const deferred = () => {
+  let resolve;
+  let reject;
+  const promise = new Promise((fulfill, fail) => { resolve = fulfill; reject = fail; });
+  return { promise, resolve, reject };
+};
 
 /** Load the shipped mod with only its documented host surface doubled.
  * Timer callbacks are driven independently, with an event-loop turn draining
