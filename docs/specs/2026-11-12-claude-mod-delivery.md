@@ -25,8 +25,7 @@ session where the mod is not running.
 
 The research record compares 13 options. The mod was the only one that kept
 the terminal interface, woke an idle session, left the user's draft untouched,
-queued until idle, used a documented non-preview API, and needed no launch
-dialog. All of these were confirmed by probe on Claude Code 2.1.322 on Windows.
+queued until idle, used a documented API, and needed no launch dialog. All of these were confirmed by probe on Claude Code 2.1.322 on Windows.
 
 ## Design
 
@@ -169,9 +168,12 @@ pending deliveries.
 
 ## Risks
 
-- **The mods API changes.** It is documented without a preview label, but it
-  is young. The heartbeat fallback keeps delivery working through a breaking
-  release.
+- **The mods API changes.** Its type declarations are marked "EARLY ACCESS:
+  this surface may change between releases without notice". The mod uses
+  only six calls (`session.start`, `$.clock.every`, `$.fs.*`, `$.session.id`,
+  `$.prompt.submit`). The heartbeat fallback keeps delivery working through a
+  breaking release, and native E2E pins the Claude Code version it was
+  verified on.
 - **Dialogs.** Claude's own onboarding dialogs can appear in a session. The
   probe showed a plugin submission still delivered while one was open, and
   nothing is typed, so a dialog cannot capture a delivery.

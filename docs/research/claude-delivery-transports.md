@@ -74,7 +74,7 @@ point.
 | Wakes an idle session | **Yes (probe)**: reply about 2 s after the event | **Yes (probe)**: reply about 2 s after the trigger | Yes (docs) | Yes (docs summary; per-event support unverified) |
 | Leaves the draft alone | **Yes (probe)**: draft stayed on screen and was never submitted | **Yes (probe)**: draft stayed on screen and was never submitted | Unverified | Unverified |
 | Turn semantics | Queued to the next turn while busy (docs); answered after a running turn (probe) | Waits for idle (docs, **probe**): `submit` resolves when queued, about 30 ms; a submission during a running turn was answered after it | Read between tool calls mid-turn (docs) | Wake only; delivered as a system reminder, not a message |
-| Supported surface | Documented, **research preview**; "contract may change" | Documented plugin API; the mods reference carries no preview label | Socket documented for scripts and hooks; **message format undocumented** | Documented hook field |
+| Supported surface | Documented, **research preview**; "contract may change" | Documented plugin API, but the API type declarations are marked **"EARLY ACCESS: this surface may change between releases without notice"** | Socket documented for scripts and hooks; **message format undocumented** | Documented hook field |
 | Launch friction | A custom server needs `--dangerously-load-development-channels`: a **warning dialog on every launch** (probe). Avoiding it needs an organisation allowlist in managed settings (`allowedChannelPlugins`) | None (probe): `CLAUDE_CODE_PLUGIN_DIRS` in the launch environment loads the mod like `--plugin-dir`, with no install and no dialog | None; on by default since 2.1.234 on Windows | Hook in projected settings |
 | Plan and policy limits | claude.ai or Console key; Team and Enterprise must enable | Not documented | `crossSessionInbound` may hold messages for approval depending on the sender's and receiver's permission modes, which matters for bypass agents | None documented |
 | Delivery confirmation | No acknowledgement; drops are silent; confirm from the transcript `<channel>` row | The mod writes a queued receipt when `submit` resolves; the transcript row "The <plugin> plugin sent a message:" confirms the turn | No socket acknowledgement documented | Exit status only |
@@ -126,7 +126,7 @@ meets every criterion:
 - it wakes an idle session;
 - it leaves the user's draft alone;
 - it queues until idle, which is Wardian's own default;
-- it is a documented plugin API with no preview label;
+- it is a documented plugin API (marked early access, like channels' research preview);
 - it needs no flag or dialog, because Wardian projects it with
   `CLAUDE_CODE_PLUGIN_DIRS` at launch;
 - it gives Wardian a queued receipt plus a distinctive transcript row for
@@ -142,7 +142,8 @@ Remaining design points belong to the spec, not this survey:
 - how this interacts with Claude's own cross-session inbox.
 
 **Channels** is the fallback. It is proven by probe, but it costs a warning
-dialog on every launch without an organisation allowlist, and its contract is
-an explicit preview. The **cross-session inbox** is not recommended: its
+dialog on every launch without an organisation allowlist. Both channels and
+mods are pre-stable surfaces, so stability does not separate them; the
+launch dialog does. The **cross-session inbox** is not recommended: its
 message format is undocumented, and its hold rules interact with
 bypass-permission agents.
