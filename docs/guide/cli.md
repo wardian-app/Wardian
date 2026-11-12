@@ -535,6 +535,25 @@ a desktop app that supports this control command. An older app's rejection or an
 unavailable endpoint remains an error; Wardian does not retry with `resume` or
 silently replace another operation with a fresh session.
 
+If closing archive staging fails after Codex shutdown, the previous session and
+its history remain configured. For new Windows Codex runtimes with prelaunch
+containment, verified tree exit releases only the hold acquired for that stop.
+Retry `agent resume` to retain that session, or `agent new-session` to finish the
+fresh-session transition after the archive error is resolved. These commands
+also retry a retained exact stop or a failed hold-release write online.
+
+On Unix and for uncontained runtimes, successful shutdown still lets an
+in-progress fresh-session rotation finish. The exact old-session hold remains
+in place and blocks resuming that old session until verified recovery. Failed
+shutdown retains the stop fence and blocks rotation.
+
+Older stranded holds without retained launch/exit evidence cannot be released
+online safely. Off status, an absent PID, and an empty provider-candidate scan
+do not prove old-provider exit. Wardian keeps the hold and reports the missing
+evidence; see [PTY lifecycle recovery](../developer/pty-lifecycle.md) for the
+conservative recovery boundary. Retrying never deletes history or bypasses a
+pending conversation close.
+
 `agent restart` restarts the provider while preserving the Wardian agent, its
 habitat, and saved session history. Use it after `agent update` when the update
 reports `restart_required`, including class changes. `agent delete` is

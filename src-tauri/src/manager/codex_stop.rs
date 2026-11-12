@@ -40,6 +40,10 @@ struct Entry {
     generation: Option<u64>,
     status_arc: Arc<Mutex<String>>,
     terminal_complete: std::sync::atomic::AtomicBool,
+    prior_hold: Option<wardian_core::conversation_lease::ConversationLeaseOwner>,
+    tree_exited: std::sync::atomic::AtomicBool,
+    #[cfg(windows)]
+    executor: Option<tokio::runtime::Handle>,
 }
 
 struct TerminalCleanup {
@@ -86,6 +90,9 @@ fn prepare_with_timeout(
         timeout,
         terminal: None,
         provider: "codex",
+        prior_hold: None,
+        #[cfg(windows)]
+        executor: tokio::runtime::Handle::try_current().ok(),
     })
 }
 
@@ -95,9 +102,21 @@ pub(crate) struct StopRegistration {
     timeout: Duration,
     terminal: Option<(Arc<TerminalSessionBroker>, tokio::runtime::Handle)>,
     provider: &'static str,
+    prior_hold: Option<wardian_core::conversation_lease::ConversationLeaseOwner>,
+    #[cfg(windows)]
+    executor: Option<tokio::runtime::Handle>,
 }
 
 impl StopRegistration {
+    /// Bind only the acquisition created immediately before this exact capture.
+    pub(crate) fn with_prior_hold(
+        mut self,
+        hold: Option<wardian_core::conversation_lease::ConversationLeaseOwner>,
+    ) -> Self {
+        self.prior_hold = hold;
+        self
+    }
+
     /// An uninstalled candidate has no roster owner to clean its terminal actor.
     /// Capture the executor before spawn so cancellation cleanup can await the
     /// exact broker generation from the retained stop worker's own thread.
@@ -135,6 +154,10 @@ impl StopRegistration {
             terminal,
             provider: self.provider,
             terminal_complete: std::sync::atomic::AtomicBool::new(false),
+            prior_hold: self.prior_hold,
+            tree_exited: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(windows)]
+            executor: self.executor,
         });
         let guard = StopGuard(Some(entry.clone()));
         let mut map = registry().lock().unwrap_or_else(|error| error.into_inner());
@@ -203,6 +226,10 @@ impl StopHandle {
         {
             return Ok(false);
         }
+        // Direct-child exit cannot upgrade a failed tree join into a receipt.
+        if entry.prior_hold.is_some() {
+            return Ok(false);
+        }
         let mut runtime = match entry.runtime.try_lock() {
             Ok(runtime) => runtime,
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
@@ -261,6 +288,19 @@ pub(crate) async fn await_quiescent(home: &Path, agent_id: &str) -> Result<(), S
 pub(crate) fn retry_stop(home: &Path, agent_id: &str) -> Result<(), String> {
     for entry in entries(&key(home, agent_id)?) {
         start(&entry, false);
+    }
+    Ok(())
+}
+
+/// Online lifecycle recovery uses only an acquisition already bound to retained
+/// runtime handles. An older persisted hold without that binding stays fenced.
+pub(crate) async fn recover_prior_hold(home: &Path, agent_id: &str) -> Result<(), String> {
+    for entry in entries(&key(home, agent_id)?) {
+        if entry.prior_hold.is_some() {
+            start(&entry, false);
+            wait(&entry).await?;
+            release(&entry);
+        }
     }
     Ok(())
 }
@@ -338,7 +378,18 @@ fn start(entry: &Arc<Entry>, allow_captured: bool) {
                     terminal.terminate(&worker.keys[0].1)?;
                 }
                 worker.terminal_complete.store(true, std::sync::atomic::Ordering::Release);
-                stop_and_join(agent, worker.timeout, worker.provider == "pi")?;
+                if worker.prior_hold.is_some() {
+                    stop_held_runtime(&worker, agent)?;
+                } else {
+                    stop_and_join(agent, worker.timeout, worker.provider == "pi")?;
+                }
+            }
+            if let Some(hold) = &worker.prior_hold {
+                if worker.tree_exited.load(std::sync::atomic::Ordering::Acquire) {
+                    // Persistence failure retains this entry and its tree receipt;
+                    // an online lifecycle retry can release only this acquisition.
+                    wardian_core::conversation_lease::release_lease_owner_persisted(hold)?;
+                }
             }
             // Terminal cleanup (when captured) and every child exit completed
             // before ActiveAgent Drop and release of the retained stop fence.
@@ -363,6 +414,39 @@ fn start(entry: &Arc<Entry>, allow_captured: bool) {
             "Cannot start Codex stop worker; runtime retained: {error}"
         )));
     }
+}
+
+fn stop_held_runtime(entry: &Entry, agent: &mut ActiveAgent) -> Result<(), String> {
+    if entry.tree_exited.load(std::sync::atomic::Ordering::Acquire) {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    if let (Some(job), Some(child), Some(executor)) = (
+        agent
+            .job_object
+            .as_ref()
+            .filter(|job| job.contained_from_launch()),
+        agent.child_process.as_mut(),
+        entry.executor.as_ref(),
+    ) {
+        if agent.background_processes.is_empty() {
+            // Reuse the established handle-based tree verifier. Do not drop
+            // the job or child before its receipt; retain that receipt if the
+            // subsequent lease release fails.
+            executor.block_on(job.stop_and_join(child.as_mut()))?;
+            entry
+                .tree_exited
+                .store(true, std::sync::atomic::Ordering::Release);
+            agent.process_id = None;
+            agent.runtime_generation = None;
+            agent.child_process.take();
+            agent.job_object.take();
+            return Ok(());
+        }
+    }
+    // Completing an uncontained stop permits fresh rotation. It does not
+    // establish tree exit or authorize reuse of the held old session.
+    stop_and_join(agent, entry.timeout, false)
 }
 
 fn release(entry: &Arc<Entry>) {
