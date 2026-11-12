@@ -37,6 +37,8 @@ function observationHarness(invoke, options = {}) {
   let needleRect = null;
   const listeners = new Map();
   let frames = [];
+  const timers = new Map();
+  let nextTimer = 0;
   let admitted = { session: "session", conversation: "conversation", generation: "generation", epoch: "epoch",
     revision: "opaque-revision", admission: null };
   let identity = { id: "public-id", members: null };
@@ -156,6 +158,8 @@ function observationHarness(invoke, options = {}) {
   const context = { window: { __TAURI_INTERNALS__: { invoke },
     __wardianChatPageObservation: Object.hasOwn(options, "facade") ? options.facade : bridge.facade }, document,
     performance: { now: () => clock }, innerHeight: 500, innerWidth: 500,
+    setTimeout: (callback, ms) => { const id = ++nextTimer; timers.set(id, { callback, at: clock + ms }); return id; },
+    clearTimeout: (id) => timers.delete(id),
     MutationObserver: class { observe() {} disconnect() { disconnected = true; } }, requestAnimationFrame: (callback) => frames.push(callback) };
   if (options.immutableInvoke) Object.defineProperty(context.window.__TAURI_INTERNALS__, "invoke", {
     value: invoke, writable: false, configurable: false,
@@ -168,6 +172,8 @@ function observationHarness(invoke, options = {}) {
   observer.arm("cold");
   return {
     observer, document, content, row, scroll, route, window: context.window, bridge,
+    timerCount: () => timers.size,
+    expire() { for (const [id, timer] of [...timers]) { clock = Math.max(clock, timer.at); timers.delete(id); timer.callback(); } },
     duplicate(id) {
       const twinRow = { isConnected: true, parentElement: scroll,
         getAttribute: (name) => name === "data-chat-row-key" ? id
@@ -633,7 +639,7 @@ function rosterDiagnosticHarness(invoke, roster = null, observer = null) {
 
 function rosterMeasurement(driver, evidence, visible, ownedSurface, extensions = {}) {
   const source = fs.readFileSync(new URL("./chat-turn-change-native.test.mjs", import.meta.url), "utf8");
-  const start = source.indexOf("async function measureChat(driver,");
+  const start = source.indexOf("function waitForChatEndpoint(binding,");
   const end = source.indexOf("async function closeTerminalSurface(driver,", start);
   assert.ok(start >= 0 && end > start);
   return vm.runInNewContext(`${source.slice(start, end)}\nmeasureChat(driver, "session", "test-phase", "Owned Saved", evidence, requireTerminalToggle);`,
@@ -641,24 +647,28 @@ function rosterMeasurement(driver, evidence, visible, ownedSurface, extensions =
 }
 
 test("passive timing retains the actual command trace, result and rejected command object", async (t) => {
-  for (const scenario of [null, "wheel-success", "paintWait", "scrollLookup", "prepareInteraction", "inputDisplayed", "inputEnabled",
+  for (const scenario of [null, "wheel-success", "remaining-budget", "controller-expiry", "foreign-ack", "paintWait", "scrollLookup", "prepareInteraction", "inputDisplayed", "inputEnabled",
     "inputValue", "sendKeys", "usableWait", "wheelPerform", "readObservation", "timeout", "clock", "sink"]) {
-    const failure = scenario === "wheel-success" ? null : scenario;
+    const failure = ["wheel-success", "remaining-budget"].includes(scenario) ? null : scenario;
     await t.test(scenario ?? "keyboard-success", async () => {
       const original = new Error("original command rejection");
       const trace = [];
       let clock = 0;
-      let reads = 0;
+      let wallClock = 100;
+      let secondFailure = false;
       const evidence = { rosterFailures: [] };
       if (failure === "sink") Object.defineProperty(evidence, "commandTiming", { set() { throw new Error("diagnostic sink unavailable"); } });
-      const phase = { label: "test-phase", rosterAt: 0, chatAt: null, exposureAt: 5, exposureKind: "automatic",
+      const binding = { owner: "session", version: 1, token: 1, ordinal: 1, label: "test-phase" };
+      const phase = { label: "test-phase", ordinal: 1, rosterAt: 0, chatAt: null, exposureAt: 5, exposureKind: "automatic",
         commitAt: 10, paintAt: 20, usableAt: 30, body: { receiptAt: 4 } };
       const state = { owner: "session", phase, phases: [phase], errors: [], subscription: { active: true, fault_count: 0 },
-        activation: { active: true, owner: "session", at: 0 }, coverage: "PAGE_LOADER_ONLY", broaderIpcRuntime: "UNOBSERVED",
+        activation: { active: true, version: 1, token: 1, owner: "session", at: 0 }, coverage: "PAGE_LOADER_ONLY", broaderIpcRuntime: "UNOBSERVED",
         calls: [{ session: "session", at: 1 }], receipts: [{ session: "session", requestSession: "session", at: 4 }] };
       const command = (step, value) => {
         trace.push(step);
+        if (secondFailure && step === (wheel ? "wheelPerform" : "sendKeys")) throw original;
         if (failure === step || (["clock", "sink"].includes(failure) && step === "sendKeys")) throw original;
+        if (scenario === "remaining-budget" && step === "sendKeys") wallClock += 80;
         return value;
       };
       const input = { isDisplayed: async () => command("inputDisplayed", true),
@@ -673,18 +683,23 @@ test("passive timing retains the actual command trace, result and rejected comma
           if (fn.name === "captureChatFailureMetadata") {
             trace.push("failureCapture"); throw new Error("secondary capture rejection");
           }
-          if (args.length === 1) { assert.deepEqual(args, ["test-phase"]); return command("arm"); }
+          if (args.length === 1) { assert.deepEqual(args, ["test-phase"]); return command("arm", binding); }
           assert.deepEqual(args, [scroll, "session"]);
           return command("prepareInteraction", { control: wheel ? "wheel" : "keyboard", input: wheel ? null : input,
             top: 100, plannedAtPage: 24 });
         },
-        wait: async (predicate, timeout, message, ...pollOverride) => {
-          assert.equal(timeout, 5000); assert.deepEqual(pollOverride, [], "retain default Selenium polling");
-          command(message.endsWith("paintAt") ? "paintWait" : "usableWait");
-          if (failure === "timeout") { assert.equal(await predicate(), false); assert.equal(await predicate(), false); throw original; }
-          if (!(await predicate())) assert.equal(await predicate(), true);
-          return true;
+        executeAsyncScript: async (fn, actualBinding, field, budget) => {
+          assert.equal(fn.name, "waitForChatEndpoint"); assert.equal(actualBinding, binding);
+          assert.ok(["paintAt", "usableAt"].includes(field));
+          assert.equal(budget, scenario === "remaining-budget" && field === "usableAt" ? 4720 : 5000);
+          command(field === "paintAt" ? "paintWait" : "usableWait");
+          if (failure === "timeout") throw original;
+          if (scenario === "remaining-budget") wallClock += 200;
+          if (scenario === "controller-expiry") wallClock += 5000;
+          return { status: "ACCEPTED", ...binding, token: scenario === "foreign-ack" ? 2 : binding.token,
+            field, endpointAt: phase[field], captureAtPage: 40 };
         },
+        wait: () => { throw new Error("endpoint polling must not run"); },
         actions: (options) => {
           assert.deepEqual({ ...options }, { async: true });
           return { scroll: (...args) => {
@@ -708,7 +723,7 @@ test("passive timing retains the actual command trace, result and rejected comma
       };
       const result = rosterMeasurement(driver, evidence, visible, async (...args) => {
         assert.deepEqual(args, [driver, "session"]); return command("ownedSurface", surface);
-      }, { Date: { now: () => 100 },
+      }, { Date: { now: () => wallClock },
         // WebDriver JSON arrays enter the controller realm in production. The
         // extracted VM otherwise gives its empty expected array a foreign brand.
         assert: { ...assert, deepEqual: (actual, expected, message) => assert.deepEqual(Array.from(actual), Array.from(expected), message) },
@@ -716,19 +731,19 @@ test("passive timing retains the actual command trace, result and rejected comma
         if (failure === "clock") throw new Error("diagnostic clock unavailable");
         return ++clock;
       } }, captureChatFailureMetadata() {}, readObservation: async () => {
-        command("readObservation"); reads++;
-        return reads === 1 || failure === "timeout" ? { ...state, captureAtPage: 21, phase: { ...phase, paintAt: null } }
-          : reads === 3 ? { ...state, captureAtPage: 31, phase: { ...phase, usableAt: null } }
-            : { ...state, captureAtPage: 40 };
+        command("readObservation");
+        return state;
       } });
-      if (failure) await assert.rejects(result, (error) => error === original);
+      if (failure) await assert.rejects(result, (error) => failure === "controller-expiry" ? /original deadline/.test(error.message)
+        : failure === "foreign-ack" ? /binding failed/.test(error.message) : error === original);
       else assert.equal(await result, phase, "return the original phase object");
       const expected = ["arm", "rosterLookup", "rosterClick", "ownedSurface", "modeLookup", "modeTitle",
-        "paintWait", "readObservation", "readObservation", "scrollLookup", "prepareInteraction",
+        "paintWait", "scrollLookup", "prepareInteraction",
         ...(wheel ? ["wheelPerform"] : ["inputDisplayed", "inputEnabled", "inputValue", "sendKeys"]),
-        "usableWait", "readObservation", "readObservation", "readObservation"];
+        "usableWait", "readObservation"];
       if (failure) {
-        const step = ["clock", "sink"].includes(failure) ? "sendKeys" : failure;
+        const step = ["clock", "sink"].includes(failure) ? "sendKeys"
+          : ["controller-expiry", "foreign-ack"].includes(failure) ? "paintWait" : failure;
         const prefix = failure === "timeout" ? expected.slice(0, expected.indexOf("scrollLookup")) : expected.slice(0, expected.indexOf(step) + 1);
         assert.deepEqual(trace, [...prefix, "failureCapture"]);
       } else assert.deepEqual(trace, expected);
@@ -737,22 +752,33 @@ test("passive timing retains the actual command trace, result and rejected comma
       assert.ok(timing, "retain bounded partial command timing even on rejection");
       if (failure === "clock") assert.equal(timing.spans.sendKeys.finishedAt, null);
       else {
-        const span = timing.spans[["readObservation", "timeout"].includes(failure) ? "paintWait" : failure ?? (wheel ? "wheelPerform" : "sendKeys")];
+        const span = timing.spans[["readObservation", "timeout", "controller-expiry", "foreign-ack"].includes(failure) ? "paintWait" : failure ?? (wheel ? "wheelPerform" : "sendKeys")];
         assert.ok(Number.isFinite(span.startedAt) && Number.isFinite(span.finishedAt));
         assert.equal(span.durationMs, span.finishedAt - span.startedAt);
       }
       if (["readObservation", "timeout"].includes(failure)) {
-        assert.equal(timing.polls.paintAt.attempts, failure === "timeout" ? 2 : 1);
-        assert.equal(timing.polls.paintAt.timedAttempts, timing.polls.paintAt.attempts);
-        assert.ok(timing.polls.paintAt.elapsedMs > 0, "finally includes rejected poll work");
+        assert.equal(timing.waits.paintAt.attempts, 1);
+        assert.equal(timing.waits.paintAt.timedAttempts, timing.waits.paintAt.attempts);
+        assert.ok(timing.waits.paintAt.elapsedMs > 0, "finally includes rejected wait work");
       }
       if (!failure) {
         assert.equal(phase.controllerTiming, timing);
-        assert.equal(timing.polls.paintAt.attempts, 2); assert.equal(timing.polls.usableAt.attempts, 2);
-        assert.equal(timing.polls.paintAt.timedAttempts, 2); assert.ok(timing.polls.paintAt.elapsedMs > 0);
+        assert.equal(timing.endpointObservation, "EVENT_NOTIFICATION");
+        assert.equal(timing.waits.paintAt.attempts, 1); assert.equal(timing.waits.usableAt.attempts, 1);
+        assert.equal(timing.waits.paintAt.timedAttempts, 1); assert.ok(timing.waits.paintAt.elapsedMs > 0);
         assert.equal(timing.page.plannedAtPage, 24); assert.equal(timing.page.paintCaptureAtPage, 40);
         assert.equal(timing.spans[wheel ? "sendKeys" : "wheelPerform"].startedAt, null);
         assert.deepEqual(JSON.parse(JSON.stringify(actualRedaction(timing))), JSON.parse(JSON.stringify(timing)), "fixed scalar diagnostics survive one redaction");
+        assert.equal(evidence.phaseTimings["test-phase"].controllerTiming, timing, "retain success before returning to the next phase");
+        secondFailure = true;
+        await assert.rejects(rosterMeasurement(driver, evidence, visible, async () => surface, {
+          Date: { now: () => wallClock }, readObservation: async () => state,
+          captureChatFailureMetadata() {},
+          assert: { ...assert, deepEqual: (actual, expected, message) => assert.deepEqual(Array.from(actual), Array.from(expected), message) },
+        }), (error) => error === original);
+        assert.equal(evidence.phaseTimings["test-phase"].controllerTiming, timing, "a later failure must not erase successful timing");
+        assert.notEqual(evidence.commandTiming, timing, "retain the second phase's partial current timing separately");
+        assert.equal(Object.keys(evidence.phaseTimings).length, 1);
       }
     });
   }
@@ -830,14 +856,17 @@ test("Saved overflow prefers its already-safe empty composer over wheel input", 
   const actions = [];
   const input = { isEnabled: async () => true, isDisplayed: async () => true,
     getAttribute: async () => "", sendKeys: async (...keys) => actions.push(["keyboard", ...keys]) };
-  const phase = { rosterAt: 0, chatAt: null, exposureAt: 5, exposureKind: "automatic", commitAt: 10,
+  const binding = { owner: "session", version: 1, token: 1, ordinal: 1, label: "test-phase" };
+  const phase = { label: "test-phase", ordinal: 1, rosterAt: 0, chatAt: null, exposureAt: 5, exposureKind: "automatic", commitAt: 10,
     paintAt: 20, usableAt: 30, body: { receiptAt: 4 } };
-  const state = { phase, phases: [phase], activation: { active: true, owner: "session", at: 0 },
+  const state = { owner: "session", errors: [], subscription: { active: true, fault_count: 0 }, phase, phases: [phase],
+    activation: { active: true, version: 1, token: 1, owner: "session", at: 0 },
     coverage: "PAGE_LOADER_ONLY", broaderIpcRuntime: "UNOBSERVED",
     calls: [{ session: "session", at: 1 }], receipts: [{ session: "session", requestSession: "session", at: 4 }] };
   const driver = {
-    executeScript: async () => ({ overflow: true, top: 100, input, control: "keyboard", reason: "safe_empty_composer" }),
-    wait: async () => true,
+    executeScript: async (_fn, ...args) => args.length === 1 ? binding
+      : ({ overflow: true, top: 100, input, control: "keyboard", reason: "safe_empty_composer" }),
+    executeAsyncScript: async (_fn, actualBinding, field) => ({ status: "ACCEPTED", ...actualBinding, field, endpointAt: phase[field] }),
     actions: () => ({ scroll: () => ({ perform: async () => actions.push(["wheel"]) }) }),
   };
   const visible = async (_driver, selector) => selector.includes("Switch to Chat")
@@ -851,8 +880,10 @@ test("a draft appearing after planning fails without typing, clearing or trying 
   const actions = [];
   const input = { isEnabled: async () => true, isDisplayed: async () => true,
     getAttribute: async () => "existing-owned-draft", sendKeys: async () => actions.push("keyboard") };
-  const driver = { executeScript: async () => ({ control: "keyboard", input, overflow: true, top: 100 }),
-    wait: async () => true, actions: () => ({ scroll: () => ({ perform: async () => actions.push("wheel") }) }) };
+  const driver = { executeScript: async () => ({ owner: "session", label: "test-phase", version: 1, token: 1, ordinal: 1,
+    control: "keyboard", input, overflow: true, top: 100 }),
+    executeAsyncScript: async (_fn, binding, field) => ({ status: "ACCEPTED", ...binding, field, endpointAt: 20 }),
+    actions: () => ({ scroll: () => ({ perform: async () => actions.push("wheel") }) }) };
   const visible = async (_driver, selector) => selector.includes("Switch to Chat")
     ? { getAttribute: async () => "Switch to Terminal" } : { click: async () => {} };
   await assert.rejects(rosterMeasurement(driver, { rosterFailures: [] }, visible, async () => ({})),
@@ -965,13 +996,15 @@ test("late toggle, paint, input, usability and assertion failures preserve their
             if (captureFails) throw new Error("secondary capture");
             return { status: "OBSERVED_LATE_DOM" };
           }
-          return { overflow: false, top: 0, input, control: "keyboard", reason: "safe_empty_composer" };
+          return { owner: "session", label: "test-phase", version: 1, token: 1, ordinal: 1,
+            overflow: false, top: 0, input, control: "keyboard", reason: "safe_empty_composer" };
         },
-        executeAsyncScript: async () => { registryCalls++; throw new Error("late registry RPC forbidden"); },
-        wait: async (_callback, timeout) => {
+        executeAsyncScript: async (fn, binding, field, timeout) => {
+          if (fn.name !== "waitForChatEndpoint") { registryCalls++; throw new Error("late registry RPC forbidden"); }
           assert.ok(timeout > 0 && timeout <= 5000);
           waits++;
           if ((stage === "paint" && waits === 1) || (stage === "usability" && waits === 2)) throw original;
+          return { status: "ACCEPTED", ...binding, field, endpointAt: 20 };
         },
       };
       const visible = async (_driver, selector) => selector.includes("Switch to Chat")
@@ -1045,6 +1078,81 @@ test("failure-only container metadata is bounded and contains identities and vis
   const ambiguous = await rosterDiagnosticHarness(async () => [], null, harness.observer).result;
   assert.equal(ambiguous.containers.ambiguous, true);
   assert.equal(ambiguous.containers.ownedMatchCount, 2);
+});
+
+function endpointBinding(harness) {
+  const { activation, phase, phases } = harness.observer.state;
+  return { owner: activation.owner, version: activation.version, token: activation.token, ordinal: phases.length, label: phase.label };
+}
+
+test("endpoint notification accepts only original publication, handles ready-before-wait and preserves both trusted frames", async () => {
+  for (const ready of [false, true]) {
+    const harness = observationHarness(() => Promise.resolve(actualPage()));
+    const binding = endpointBinding(harness);
+    harness.click(); await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+    const paint = [];
+    if (ready) { harness.observer.sample(); harness.frame(); harness.frame(); }
+    harness.observer.waitForEndpoint(binding, "paintAt", 5000, (ack) => paint.push(ack));
+    if (!ready) {
+      assert.equal(paint.length, 0);
+      harness.observer.sample(); harness.frame(); assert.equal(paint.length, 0);
+      harness.frame();
+    }
+    assert.equal(paint.length, 1); assert.equal(paint[0].status, "ACCEPTED");
+    assert.equal(paint[0].endpointAt, harness.observer.state.phase.paintAt);
+    assert.equal(harness.timerCount(), 0);
+    const usable = [];
+    harness.observer.waitForEndpoint(binding, "usableAt", 4000, (ack) => usable.push(ack));
+    harness.input(false); harness.frame(); harness.frame(); assert.equal(usable.length, 0);
+    harness.input(); harness.frame(); assert.equal(usable.length, 0); harness.frame();
+    assert.equal(usable.length, 1); assert.equal(usable[0].status, "ACCEPTED");
+    harness.observer.sample(); harness.frame(); harness.frame(); harness.expire();
+    assert.equal(usable.length, 1); assert.equal(harness.timerCount(), 0);
+    assert.equal(JSON.stringify(paint).includes(chatAcceptanceFixture().latestBody), false);
+  }
+});
+
+test("endpoint notification rejects stale bindings and retires every pending callback exactly once", async () => {
+  for (const scenario of ["owner", "version", "token", "ordinal", "label", "field", "budget", "rearm", "dispose", "fault", "timeout", "duplicate", "callback-fault"]) {
+    const harness = observationHarness(() => Promise.resolve(actualPage()));
+    const binding = endpointBinding(harness);
+    const acks = [];
+    if (["owner", "label"].includes(scenario)) binding[scenario] = "foreign";
+    if (["version", "token", "ordinal"].includes(scenario)) binding[scenario]++;
+    const done = (ack) => { acks.push(ack); if (scenario === "callback-fault") throw new Error("callback failed"); };
+    harness.observer.waitForEndpoint(binding, scenario === "field" ? "body" : "paintAt", scenario === "budget" ? 0 : 5000, done);
+    if (scenario === "rearm") harness.observer.arm("next");
+    if (scenario === "dispose") harness.observer.dispose();
+    if (scenario === "fault") await harness.wrapper("load_agent_chat_page", { sessionId: "session", get cursor() { throw new Error("fault"); } });
+    if (scenario === "duplicate") harness.observer.waitForEndpoint(binding, "paintAt", 4000, (ack) => acks.push(ack));
+    if (scenario === "timeout" || scenario === "callback-fault") harness.expire();
+    assert.equal(acks.length, scenario === "duplicate" ? 2 : 1, scenario);
+    assert.ok(acks.every((ack) => ack.status !== "ACCEPTED"), scenario);
+    assert.equal(harness.timerCount(), 0, scenario);
+    if (scenario === "callback-fault") assert.equal(harness.observer.state.errors.length, 1);
+    if (scenario !== "dispose") {
+      harness.click(); await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+      harness.observer.sample(); harness.frame(); harness.frame();
+    }
+    harness.expire(); assert.equal(acks.length, scenario === "duplicate" ? 2 : 1, `${scenario}: late publication`);
+  }
+});
+
+test("pending notification rejects facade retirement and late publication even before its timer dispatches", async () => {
+  for (const change of ["facade", "deadline"]) {
+    const harness = observationHarness(() => Promise.resolve(actualPage()));
+    const binding = endpointBinding(harness);
+    const acks = [];
+    harness.observer.waitForEndpoint(binding, "paintAt", 100, (ack) => acks.push(ack));
+    harness.click(); await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+    harness.observer.sample(); harness.frame();
+    if (change === "facade") harness.window.__wardianChatPageObservation = { version: 1 };
+    else harness.clock(100);
+    harness.frame();
+    assert.equal(acks.length, 1); assert.notEqual(acks[0].status, "ACCEPTED");
+    assert.equal(harness.timerCount(), 0);
+    harness.expire(); assert.equal(acks.length, 1);
+  }
 });
 
 function driverResult(result) {

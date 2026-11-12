@@ -1698,7 +1698,7 @@ test("reveals only the focused Off agent Saved Chat in the existing Overview wit
   expect(start).toBeGreaterThanOrEqual(0);
   expect(end).toBeGreaterThan(start);
   await page.evaluate(`(${nativeSource.slice(start, end)})(${JSON.stringify({ name: "Saved Focus", body, provider: "claude",
-    conversation: null, eventId: "saved-message", probe: "saved-off-probe" })});
+    conversation: null, eventId: "saved-message", probe: "native-input-probe" })});
     window.__chatAcceptance.bind(${JSON.stringify(owner)}); window.__chatAcceptance.arm("focused-off");`);
   const readPassive = () => page.evaluate(() => {
     const api = (window as unknown as { __chatAcceptance: {
@@ -1706,7 +1706,8 @@ test("reveals only the focused Off agent Saved Chat in the existing Overview wit
         coverage: string; broaderIpcRuntime: string; errors: string[];
         calls: Array<{ session: string; at: number }>;
         receipts: Array<{ session: string; requestSession: string; at: number; rows: Array<{ id: string; target: boolean }> }>;
-        phase: { rosterAt: number; paintAt: number | null; usableAt: number | null;
+        phase: { label: string; ordinal: number; rosterAt: number; paintAt: number | null; usableAt: number | null;
+          completeTrustedProbeAt: number | null; usableFrame1At: number | null; usableFrame2At: number | null;
           body: { session: string; eventId: string; receiptAt: number; matchingBodySlots: number } | null } };
       subscriptionStatus(): { active: boolean; fault_count: number; request_count: number };
       subjectStatus(): { latchedValid: boolean; latchedEventId: string; currentMatchingBodySlots: number };
@@ -1722,6 +1723,20 @@ test("reveals only the focused Off agent Saved Chat in the existing Overview wit
     expect(active.activation).toMatchObject({ active: true, version: 1, owner });
     expect(active.subscription).toEqual({ active: true, fault_count: 0, request_count: 0 });
     expect(active.calls).toEqual([]);
+    const callbackStart = nativeSource.indexOf("function waitForChatEndpoint(binding,");
+    const callbackEnd = nativeSource.indexOf("async function measureChat(driver,", callbackStart);
+    expect(callbackStart).toBeGreaterThanOrEqual(0);
+    expect(callbackEnd).toBeGreaterThan(callbackStart);
+    const callbackSource = nativeSource.slice(callbackStart, callbackEnd);
+    const binding = { owner, version: active.activation.version, token: active.activation.token,
+      ordinal: active.phase.ordinal, label: active.phase.label };
+    const deadline = Date.now() + 5000;
+    const waitEndpoint = (field: "paintAt" | "usableAt") => {
+      const remaining = deadline - Date.now();
+      expect(remaining).toBeGreaterThan(0);
+      return page.evaluate<{ status: string; owner: string; token: number; field: string; endpointAt: number }>(
+        `new Promise(done => (${callbackSource})(${JSON.stringify(binding)}, ${JSON.stringify(field)}, ${remaining}, done))`);
+    };
     await page.getByLabel("Agent Saved Focus", { exact: true }).click();
     const card = page.locator(`[data-agent-grid-card-id="${owner}"]`);
     await expect(card).toBeVisible();
@@ -1731,9 +1746,10 @@ test("reveals only the focused Off agent Saved Chat in the existing Overview wit
     await expect(surfaceTab(page, "agents-overview")).toHaveAttribute("aria-selected", "true");
     await expect(surfaceTab(page, "agent-session")).toHaveCount(0);
     await card.getByRole("button", { name: "Saved Focus mode: Terminal. Switch to Chat.", exact: true }).click();
+    const paintAck = await waitEndpoint("paintAt");
+    expect(paintAck).toMatchObject({ status: "ACCEPTED", owner, token: expectedToken, field: "paintAt" });
     await expect(card.getByText(body, { exact: true })).toHaveCount(2);
     await expect(card.locator('[data-chat-row-key="saved-message"]').getByText(body, { exact: true })).toBeVisible();
-    await expect.poll(async () => (await readPassive()).phase.paintAt).not.toBeNull();
     const planned = await page.evaluate((id) => {
       const api = (window as unknown as { __chatAcceptance: { container(owner: string): Element | null;
         prepareInteraction(owner: string, scroll: Element): { control: string; reason: string; overflow: boolean;
@@ -1748,9 +1764,16 @@ test("reveals only the focused Off agent Saved Chat in the existing Overview wit
     expect(planned).toMatchObject({ control: "keyboard", reason: "safe_empty_composer", overflow: true,
       actualOwnedInput: true, composer: { visible: true, enabled: true, empty: true } });
     await expect(card.getByRole("textbox", { name: "Message agent", exact: true })).toHaveValue("");
-    await card.getByRole("textbox", { name: "Message agent", exact: true }).pressSequentially("saved-off-probe");
-    await expect.poll(async () => (await readPassive()).phase.usableAt).not.toBeNull();
+    const usableWait = waitEndpoint("usableAt");
+    await card.getByRole("textbox", { name: "Message agent", exact: true }).pressSequentially("native-input-probe");
+    const usableAck = await usableWait;
+    expect(usableAck).toMatchObject({ status: "ACCEPTED", owner, token: expectedToken, field: "usableAt" });
     const observed = await readPassive();
+    expect(paintAck.endpointAt).toBe(observed.phase.paintAt);
+    expect(usableAck.endpointAt).toBe(observed.phase.usableAt);
+    expect(observed.phase.completeTrustedProbeAt).not.toBeNull();
+    expect(observed.phase.usableFrame1At).toBeGreaterThanOrEqual(observed.phase.completeTrustedProbeAt!);
+    expect(observed.phase.usableFrame2At).toBe(observed.phase.usableAt);
     const ownedReceipts = observed.receipts.filter((receipt) => receipt.session === owner && receipt.requestSession === owner);
     expect(ownedReceipts.length).toBeGreaterThanOrEqual(2);
     expect(ownedReceipts[0].rows).toHaveLength(2);

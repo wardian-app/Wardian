@@ -15,6 +15,15 @@ import { AgentChatView } from "./AgentChatView";
 import { chatPageInvokeFixture } from "../../test/chatPageTestFixture";
 import { actualProducerBatch, actualProducerPage } from "../../test/chatRevalidationTestFixture";
 
+const markdownWork = vi.hoisted(() => vi.fn());
+vi.mock("react-markdown", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-markdown")>();
+  return { ...actual, default: (props: Parameters<typeof actual.default>[0]) => {
+    markdownWork(props.children);
+    return <actual.default {...props} />;
+  } };
+});
+
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
   readImage: vi.fn(),
   writeImage: vi.fn(),
@@ -1749,6 +1758,25 @@ describe("AgentChatView", () => {
     expect(screen.queryByTestId("terminal-fallback-row")).not.toBeInTheDocument();
     expect(screen.queryByText("Codex started")).not.toBeInTheDocument();
     expect(screen.queryByText(/Startup screen/)).not.toBeInTheDocument();
+  });
+
+  it("keeps actual transcript Markdown work and code-copy state stable through the full draft probe", async () => {
+    const source = "Unchanged transcript\n\n```ts\nconst stable = true;\n```";
+    invokeMock.mockResolvedValue([event({ id: "stable-markdown", kind: "message", role: "assistant", text: source, sequence: 1 })]);
+    writeTextMock.mockResolvedValue(undefined);
+    render(<AgentChatView sessionId="agent-1" />);
+    const article = await screen.findByLabelText("assistant message");
+    await userEvent.click(within(article).getByRole("button", { name: "Copy code block" }));
+    const copied = await within(article).findByRole("button", { name: "Copy code block copied" });
+    const code = article.querySelector("pre");
+    const before = markdownWork.mock.calls.filter(([text]) => text === source).length;
+    expect(before).toBeGreaterThan(0);
+    const composer = screen.getByRole("textbox", { name: "Message agent" });
+    await userEvent.type(composer, "native-input-probe");
+    expect(composer).toHaveValue("native-input-probe");
+    expect(markdownWork.mock.calls.filter(([text]) => text === source)).toHaveLength(before);
+    expect(article.querySelector("pre")).toBe(code);
+    expect(within(article).getByRole("button", { name: "Copy code block copied" })).toBe(copied);
   });
 
   it("renders markdown structure in message bubbles", async () => {

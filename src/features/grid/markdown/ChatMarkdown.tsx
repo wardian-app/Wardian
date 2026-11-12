@@ -1,6 +1,6 @@
 import Markdown from "react-markdown";
 import type { Components } from "react-markdown";
-import type { CSSProperties, MouseEvent } from "react";
+import { memo, type CSSProperties, type MouseEvent } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import remarkGfm from "remark-gfm";
 import { CodePanel } from "../chatCode";
@@ -208,7 +208,8 @@ function createComponents(linkHandling?: ChatMarkdownProps["linkHandling"]): Com
   };
 }
 
-export function ChatMarkdown({ linkHandling, source }: ChatMarkdownProps) {
+// Draft edits keep these props stable; preserve parser work and child copy state.
+export const ChatMarkdown = memo(function ChatMarkdown({ linkHandling, source }: ChatMarkdownProps) {
   return (
     <div className="chat-markdown min-w-0 space-y-2 text-[13px] leading-5 text-primary">
       <Markdown components={createComponents(linkHandling)} remarkPlugins={[[remarkGfm, { singleTilde: false }]]} skipHtml urlTransform={markdownUrlTransform}>
@@ -216,4 +217,4 @@ export function ChatMarkdown({ linkHandling, source }: ChatMarkdownProps) {
       </Markdown>
     </div>
   );
-}
+});

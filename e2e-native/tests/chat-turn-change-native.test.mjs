@@ -29,6 +29,8 @@ function installChatObservation(config) {
   let retired = false;
   let subscription = null;
   let disposalReceipt = null;
+  let boundFacade = null;
+  let endpointWaiter = null;
   // Queued frame callbacks may outlive the subscription; never admit their writes.
   const frame = (callback) => requestAnimationFrame(() => { if (!retired) callback(); });
   const bounded = (value) => typeof value === "string" && value.length <= 1024 ? value : null;
@@ -85,6 +87,41 @@ function installChatObservation(config) {
   };
   const surface = () => ownedContainer()?.node ?? null;
   const now = () => performance.now();
+  const endpointHealthy = (waiter) => {
+    const { binding, phase } = waiter;
+    const status = subscription?.status();
+    return !retired && !state.disposed && state.errors.length === 0 && status?.active && !status.fault_count
+      && window.__wardianChatPageObservation === boundFacade && boundFacade?.version === binding.version
+      && binding.version === 1 && subscription.version === binding.version && subscription.token === binding.token
+      && subscription.owner === binding.owner && state.owner === binding.owner && state.phase === phase
+      && phase.ordinal === binding.ordinal && phase.label === binding.label;
+  };
+  const finishEndpoint = (waiter, status) => {
+    if (waiter.settled) return;
+    waiter.settled = true;
+    if (endpointWaiter === waiter) endpointWaiter = null;
+    if (waiter.timer !== null) clearTimeout(waiter.timer);
+    const phase = waiter.phase;
+    const ack = { status, owner: state.owner, version: subscription?.version ?? null, token: subscription?.token ?? null,
+      ordinal: phase?.ordinal ?? null, label: bounded(phase?.label),
+      field: ["paintAt", "usableAt"].includes(waiter.field) ? waiter.field : null,
+      endpointAt: status === "ACCEPTED" ? phase[waiter.field] : null, captureAtPage: null };
+    try { ack.captureAtPage = now(); } catch { ack.status = "OBSERVER_FAULT"; ack.endpointAt = null; }
+    const done = waiter.done;
+    waiter.done = null; waiter.phase = null; waiter.binding = null; waiter.timer = null;
+    try { done(ack); } catch (error) { fail(error); }
+  };
+  const cancelEndpoint = (status) => { if (endpointWaiter) finishEndpoint(endpointWaiter, status); };
+  const publishEndpoint = (phase, field) => {
+    const waiter = endpointWaiter;
+    if (!waiter || waiter.phase !== phase || waiter.field !== field) return;
+    try {
+      if (!endpointHealthy(waiter)) return finishEndpoint(waiter, "INVALID_BINDING");
+      const elapsed = now() - waiter.startedAt;
+      if (elapsed < 0 || elapsed >= waiter.budget) return finishEndpoint(waiter, "EXPIRED");
+      if (Number.isFinite(phase[field])) finishEndpoint(waiter, "ACCEPTED");
+    } catch (error) { fail(error); }
+  };
   const members = (value) => Array.isArray(value) && value.length <= 384
     && value.every((id) => bounded(id)) ? [...value] : null;
   const scopeValue = (value) => Boolean(bounded(value)) && value.trim().length > 0;
@@ -160,7 +197,10 @@ function installChatObservation(config) {
     }
     return null;
   };
-  const fail = (error) => { if (!retired && state.errors.length < 8) state.errors.push(String(error).slice(0, 160)); };
+  const fail = (error) => {
+    if (!retired && state.errors.length < 8) state.errors.push(String(error).slice(0, 160));
+    cancelEndpoint("OBSERVER_FAULT");
+  };
   const record = (command, args, dto, returnedAt) => {
     if (retired || command !== "load_agent_chat_page" || !dto || !Array.isArray(dto.events)) return;
     if (state.receipts.length >= 128 || dto.events.length > 384) throw new Error("passive receipt bound exceeded");
@@ -195,6 +235,7 @@ function installChatObservation(config) {
   };
   const observeRequest = (args, result) => {
     if (retired) return;
+    try {
     const command = "load_agent_chat_page";
     if (state.calls.length >= 128) fail("passive call bound exceeded");
     else state.calls.push({ command, at: now(), session: bounded(args?.sessionId),
@@ -209,6 +250,7 @@ function installChatObservation(config) {
       finally { state.captureCostMs += now() - started; }
     },
       () => { if (!retired) state.rejections++; }); } catch (error) { fail(error); }
+    } catch (error) { fail(error); throw error; }
   };
   const intersectsViewport = (rect, region) => rect.width > 0 && rect.height > 0
     && rect.bottom > Math.max(0, region.top) && rect.top < Math.min(innerHeight, region.bottom)
@@ -300,6 +342,7 @@ function installChatObservation(config) {
           // aliases its existing endpoint clock; stale callbacks publish neither.
           phase.usableFrame1At = firstFrameAt;
           phase.usableFrame2At = phase.usableAt;
+          publishEndpoint(phase, "usableAt");
         }
       });
     });
@@ -331,6 +374,7 @@ function installChatObservation(config) {
         phase.paintAt = now();
         phase.body = current.evidence;
         paintedBody = { phase, body: current };
+        publishEndpoint(phase, "paintAt");
         checkUsable(phase);
       }
     }));
@@ -395,6 +439,22 @@ function installChatObservation(config) {
     attributes: true, attributeFilter: ["data-chat-page-scope", "data-chat-row-identity"] });
   window.__chatAcceptance = {
     state,
+    // Install and check in one turn: an already accepted endpoint cannot be lost.
+    waitForEndpoint(binding, field, budget, done) {
+      const waiter = { binding: binding ? { ...binding } : {}, phase: state.phase, field,
+        budget, done, timer: null, settled: false, startedAt: null };
+      if (endpointWaiter) { cancelEndpoint("DUPLICATE_WAITER"); finishEndpoint(waiter, "DUPLICATE_WAITER"); return; }
+      try {
+        if (!["paintAt", "usableAt"].includes(field) || !Number.isFinite(budget) || budget <= 0 || budget > 5000
+          || !waiter.phase || !endpointHealthy(waiter)) { finishEndpoint(waiter, "INVALID_BINDING"); return; }
+        waiter.startedAt = now();
+        endpointWaiter = waiter;
+        waiter.timer = setTimeout(() => {
+          if (endpointWaiter === waiter) finishEndpoint(waiter, "EXPIRED");
+        }, budget);
+        publishEndpoint(waiter.phase, field);
+      } catch (error) { fail(error); if (!waiter.settled) finishEndpoint(waiter, "OBSERVER_FAULT"); }
+    },
     container(owner) {
       if (owner !== state.owner) throw new Error("container owner does not match bound observation");
       return surface();
@@ -496,25 +556,30 @@ function installChatObservation(config) {
         throw new Error("page observer activation failed");
       }
       subscription = ack;
+      boundFacade = facade;
       state.owner = owner;
       state.activation = { active: true, version: ack.version, owner, token: ack.token, at: now() };
     },
     arm(label) {
+      cancelEndpoint("REARMED");
       if (retired || !subscription?.status().active || subscription.status().fault_count) throw new Error("page observer is not active/healthy");
+      if (!bounded(label)) throw new Error("measurement phase label is invalid");
       if (state.phases.length >= 4) throw new Error("measurement phase bound exceeded");
       inputEvidence = null;
       wheelEvidence = null;
       paintedBody = null;
       state.interaction = null;
-      state.phase = { label, rosterAt: null, chatAt: null, exposureAt: null, exposureKind: null,
+      state.phase = { label, ordinal: state.phases.length + 1, rosterAt: null, chatAt: null, exposureAt: null, exposureKind: null,
         commitAt: null, paintAt: null, usableAt: null, body: null, checking: false,
         completeTrustedProbeAt: null, trustedWheelAt: null, usableFrame1At: null, usableFrame2At: null };
       state.phases.push(state.phase);
+      return { owner: state.owner, version: subscription.version, token: subscription.token, ordinal: state.phase.ordinal, label };
     },
     sample,
     dispose() {
       if (retired) return disposalReceipt;
       retired = true;
+      cancelEndpoint("DISPOSED");
       subscription?.unsubscribe();
       observer.disconnect();
       document.removeEventListener("pointerdown", rosterSelection, true);
@@ -687,8 +752,15 @@ function captureChatFailureMetadata(sessionId, stage) {
   };
 }
 
+/** Serialized WebDriver callback; its scalar acknowledgement admits no body. */
+function waitForChatEndpoint(binding, field, remainingMs, done) {
+  const api = window.__chatAcceptance;
+  if (!api || typeof api.waitForEndpoint !== "function") { done({ status: "OBSERVER_UNAVAILABLE" }); return; }
+  api.waitForEndpoint(binding, field, remainingMs, done);
+}
+
 async function measureChat(driver, sessionId, label, name, evidence, requireTerminalToggle = true) {
-  await driver.executeScript((phase) => window.__chatAcceptance.arm(phase), label);
+  const binding = await driver.executeScript((phase) => window.__chatAcceptance.arm(phase), label);
   const deadline = Date.now() + 5_000;
   // One current record survives failure; completed records travel with the
   // existing fixed measurement phases. Never retain commands, drafts or polls.
@@ -704,7 +776,8 @@ async function measureChat(driver, sessionId, label, name, evidence, requireTerm
       wheelPerform: { startedAt: null, finishedAt: null, durationMs: null },
       usableWait: { startedAt: null, finishedAt: null, durationMs: null },
     },
-    polls: { paintAt: { attempts: 0, timedAttempts: 0, elapsedMs: null }, usableAt: { attempts: 0, timedAttempts: 0, elapsedMs: null } },
+    endpointObservation: "EVENT_NOTIFICATION",
+    waits: { paintAt: { attempts: 0, timedAttempts: 0, elapsedMs: null }, usableAt: { attempts: 0, timedAttempts: 0, elapsedMs: null } },
     page: { paintCaptureAtPage: null, usableCaptureAtPage: null, plannedAtPage: null },
   };
   try { evidence.commandTiming = timing; } catch { /* Diagnostics cannot fail the measurement. */ }
@@ -721,30 +794,32 @@ async function measureChat(driver, sessionId, label, name, evidence, requireTerm
     const explicit = await mode.getAttribute("title") === "Switch to Chat";
     if (requireTerminalToggle) assert.ok(explicit, "live Terminal measurement requires its real Chat toggle");
     if (explicit) await mode.click();
-    const waitForEndpoint = (field) => driver.wait(async () => {
+    const waitForEndpoint = async (field) => {
+      const remainingMs = deadline - Date.now();
+      assert.ok(remainingMs > 0, `${label}: no source-bound ${field} before original deadline`);
       let startedAt = null;
-      timing.polls[field].attempts++;
+      timing.waits[field].attempts++;
       try { startedAt = performance.now(); } catch { /* Diagnostic only. */ }
       try {
-        const observation = await readObservation(driver);
-        assert.deepEqual(observation.errors, [], "passive observer failed");
-        assert.ok(observation.subscription.active && observation.subscription.fault_count === 0, "passive subscription failed");
+        const ack = await driver.executeAsyncScript(waitForChatEndpoint, binding, field, remainingMs);
+        assert.ok(Date.now() < deadline, `${label}: no source-bound ${field} before original deadline`);
+        assert.equal(ack?.status, "ACCEPTED", `${label}: no source-bound ${field}: ${ack?.status}`);
+        assert.ok(ack.owner === sessionId && ack.version === binding.version && ack.token === binding.token
+          && ack.ordinal === binding.ordinal && ack.label === label && ack.field === field
+          && Number.isFinite(ack.endpointAt), "endpoint acknowledgement binding failed");
         try {
-          if (observation.owner === sessionId && observation.phase?.label === label && !observation.disposed) {
-            timing.page[field === "paintAt" ? "paintCaptureAtPage" : "usableCaptureAtPage"] = observation.captureAtPage ?? null;
-          }
+          timing.page[field === "paintAt" ? "paintCaptureAtPage" : "usableCaptureAtPage"] = ack.captureAtPage ?? null;
         } catch { /* A diagnostic cannot change the endpoint predicate. */ }
-        return observation.phase[field] !== null;
       } finally {
         try {
           const finishedAt = performance.now();
           if (startedAt !== null) {
-            timing.polls[field].elapsedMs = (timing.polls[field].elapsedMs ?? 0) + finishedAt - startedAt;
-            timing.polls[field].timedAttempts++;
+            timing.waits[field].elapsedMs = (timing.waits[field].elapsedMs ?? 0) + finishedAt - startedAt;
+            timing.waits[field].timedAttempts++;
           }
-        } catch { /* Preserve an original poll rejection. */ }
+        } catch { /* Preserve the original transport rejection. */ }
       }
-    }, Math.max(1, deadline - Date.now()), `${label}: no source-bound ${field}`);
+    };
     stage = "paint";
     try { timing.spans.paintWait.startedAt = performance.now(); } catch { /* Diagnostic only. */ }
     try {
@@ -841,6 +916,10 @@ async function measureChat(driver, sessionId, label, name, evidence, requireTerm
     stage = "assertions";
     const state = await readObservation(driver);
     const phase = state.phase;
+    assert.ok(Array.isArray(state.errors) && state.errors.length === 0, "passive observer failed");
+    assert.ok(!state.disposed && state.owner === sessionId && state.subscription.active && state.subscription.fault_count === 0
+      && state.activation.version === binding.version && state.activation.token === binding.token
+      && phase.ordinal === binding.ordinal && phase.label === binding.label, "final passive observation binding failed");
     try { phase.controllerTiming = timing; } catch { /* The original phase remains the result. */ }
     assert.ok(Number.isFinite(phase.rosterAt), "original trusted Roster selection was not observed");
     if (explicit) {
@@ -866,6 +945,17 @@ async function measureChat(driver, sessionId, label, name, evidence, requireTerm
       && call.at >= state.phases[0].rosterAt && call.at <= phase.body.receiptAt), "no original owned page request");
     assert.ok(state.receipts.some((receipt) => receipt.session === sessionId && receipt.requestSession === sessionId
       && receipt.at === phase.body.receiptAt && receipt.at <= phase.paintAt), "no actual receipt linked to admitted paint");
+    // Retain success before another phase can replace the current partial timing.
+    // These six fixed measurements retain scalars, never drafts or body content.
+    try {
+      const completed = (evidence.phaseTimings ??= {});
+      if (Object.hasOwn(completed, label) || Object.keys(completed).length < 6) {
+        completed[label] = { label, controllerTiming: timing, page: Object.fromEntries([
+          "rosterAt", "chatAt", "exposureAt", "commitAt", "paintAt", "usableAt", "completeTrustedProbeAt",
+          "trustedWheelAt", "usableFrame1At", "usableFrame2At",
+        ].map((field) => [field, phase[field] ?? null])) };
+      }
+    } catch { /* Diagnostic retention cannot replace the original result. */ }
     return phase;
   } catch (error) {
     const early = ["roster-click", "surface-resolution", "mode-resolution"].includes(stage);
@@ -996,6 +1086,7 @@ function redactObservation(value) {
       || (key === "visibility" && ["visible", "hidden", "prerender"].includes(item))
       || (key === "coverage" && item === "PAGE_LOADER_ONLY")
       || (key === "broaderIpcRuntime" && item === "UNOBSERVED")
+      || (key === "endpointObservation" && item === "EVENT_NOTIFICATION")
       || (key === "scopeMode" && ["recent-preview", "durable", "invalid"].includes(item))
       || (key === "firstRejectionGate" && ["document-hidden", "owned-container", "chat-scroll", "chat-mode",
         "admitted-scope", "admitted-owner", "admitted-conversation", "target-text", "target-visibility",

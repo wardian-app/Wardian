@@ -879,14 +879,29 @@ These facts use the existing write-boundary redaction once and cannot set endpoi
 move the viewport or dispatch another request.
 The same result also retains passive timing diagnostics. `commandTiming` is the
 current measurement's bounded record, including a failed measurement; successful
-phases retain that record as `controllerTiming`. Its nine fixed `spans` cover the
+phases retain that record as `controllerTiming` and in the at-most-six-entry
+`phaseTimings` map before returning, so a later failure preserves earlier actual
+page/controller timing. No missing historical record is reconstructed.
+Its nine fixed `spans` cover the
 paint wait, scroll lookup, interaction planner, displayed/enabled/value checks,
 complete `sendKeys`, wheel action and usability wait. Each has controller-monotonic
 `startedAt`, `finishedAt` and `durationMs`, with `finally` recording rejected
-operations. Unused or unavailable values remain null. `polls.paintAt` and
-`polls.usableAt` aggregate only existing callback attempts, timed attempts and
-callback elapsed milliseconds. They retain no per-poll history and change no
-command, arguments, deadline or default Selenium polling interval.
+operations. Unused or unavailable values remain null. `endpointObservation` is
+`EVENT_NOTIFICATION`: `waits.paintAt` and `waits.usableAt` retain actual bounded
+async callback wait counts and controller durations. Only endpoint observation
+uses `executeAsyncScript`; the remaining command order, full input probe,
+display/enabled/value checks, wheel alternative and original two-frame guards
+are preserved. Global Selenium timeout and polling settings are unchanged.
+
+The existing observer installs one waiter and checks an already accepted endpoint
+in the same WebView turn. It binds owner, facade version/token, current phase
+object, ordinal/label and endpoint field. Only original accepted publication can
+complete it; the compact acknowledgement grants no body or scope authority.
+Rearm, disposal, observer fault, duplicate waiter and expiry fail closed and clear
+timer/callback references before completion. Each sequential wait uses the
+remaining original absolute five-second controller budget, checked again after
+transport returns; the page timer only bounds callback lifetime. It never resets
+that deadline, samples a body, dispatches input, or adds a frame/request.
 
 Page-clock `captureAtPage` is appended to the existing observation read;
 `page.paintCaptureAtPage` and `page.usableCaptureAtPage` retain each wait's last
