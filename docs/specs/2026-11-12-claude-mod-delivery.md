@@ -109,6 +109,7 @@ built so that it never needs them:
 | `queued/<interaction_id>.json` | mod, once | `submit` resolved with `{ text }`: the prompt entered Claude's queue. |
 | `dropped/<interaction_id>.json` | mod, once | `submit` resolved with `{ drop }`: proven not entered. Records the reason. |
 | `rejected/<interaction_id>.json` | mod, once | Malformed, or for another generation. Never submitted. |
+| `sessions/<session_id>.json` | mod, once per session | Session history for attribution (see Session changes) |
 
 The mod handles pending files serially, in `seq` order. Before claiming one it
 checks that no `claimed`, `rejected` or `dropped` record exists for that
@@ -141,32 +142,52 @@ The mod reuses the existing `NativeDeliveryPhase` vocabulary
 `ProviderPlugin`. That kind already exists in `DeliveryTransportKind` and is
 otherwise unused for Claude.
 
-| Evidence | Phase |
-| --- | --- |
-| `pending` published | `SubmittedUnconfirmed`, not `Dispatching`, so the broker never retries it automatically |
-| `queued` record | `ProviderAccepted` |
-| Transcript user row "The wardian plugin sent a message:" containing the `interaction_id`, in the session named by the claim | `TurnStarted` |
-| `dropped` or `rejected` record | `FailedBeforeSubmit`, with the recorded reason |
+| Evidence | Phase | Transition |
+| --- | --- | --- |
+| `pending` published | `SubmittedUnconfirmed` | `Dispatching → SubmittedUnconfirmed`; never retried automatically |
+| `queued` record | `ProviderAccepted` | ordinary |
+| Transcript user row "The wardian plugin sent a message:" containing the exact `interaction_id`, in any session of the generation's session history (see Session changes) | `TurnStarted` | ordinary |
+| `dropped` record | `Failed`, with Claude's reason | ordinary. Not redelivered automatically: Claude or a hook refused the prompt, for example because the user stopped a turn. The sender sees the reason. |
+| `rejected` record, or proven exit with no claim | `FailedBeforeSubmit` | **proof-bearing recovery only**, below |
 
 **Arbitration happens through generation ownership, not timing.** Once a
 delivery is published into a generation's inbox, it belongs to that
 generation's mod. Wardian never withdraws or reroutes it while that
 generation's Claude process may be alive, however stale the heartbeat looks.
-When the generation ends, Wardian resolves each unfinished delivery:
 
-1. **Prove exit first.** Wardian proves the generation's process tree has
-   exited, through the kill-on-close containment job required by the Claude
-   containment spec and used for #1662. The mod is then provably gone, so no
-   claimer remains.
-2. **No claim record:** the mod never called `submit`, so the delivery is
-   `FailedBeforeSubmit` and is redelivered as a new attempt, to the next
-   generation or the terminal fallback.
-3. **Claim but no outcome:** the delivery stays `SubmittedUnconfirmed`. It is
-   reconciled only by the transcript row and never resubmitted. This matches
-   the broker rule that an uncertain submission is not replayed.
+**Proof-bearing recovery.** `can_transition_to` deliberately forbids leaving
+`SubmittedUnconfirmed` for a replayable phase, and that rule is unchanged for
+every transport. This transport adds one narrow operation beside it:
 
-If exit cannot be proven, the deliveries stay as they are and Wardian reports
-them as uncertain. It does not guess.
+```rust
+/// Constructed only by the Claude delivery-mod resolver.
+pub struct NonSubmissionProof { /* private fields */ }
+
+impl NativeDeliveryPhase {
+    /// SubmittedUnconfirmed -> FailedBeforeSubmit, and nothing else.
+    pub fn resolve_proven_non_submission(self, proof: &NonSubmissionProof) -> Option<Self>;
+}
+```
+
+A `NonSubmissionProof` has private fields and a single constructor in the
+resolver, which builds one only from either:
+
+1. a complete, parsed `rejected` record bound to this interaction and
+   generation; the mod writes it instead of a claim, and never submits
+   afterwards; or
+2. proof that the generation's process tree exited, through the kill-on-close
+   containment job required by the Claude containment spec and used for #1662,
+   **and** no file of any content under `claimed/` for this interaction.
+
+In both cases nothing crossed into Claude, because the mod submits only after
+its claim write has resolved. A claim with no outcome cannot produce a proof,
+so it stays `SubmittedUnconfirmed`, is reconciled only by the transcript, and is
+never resubmitted. Every other transport keeps the existing rule, since none
+can construct the proof. A `FailedBeforeSubmit` delivery is redelivered as a
+new attempt, to the next generation or the terminal fallback.
+
+If exit cannot be proven, deliveries stay as they are and Wardian reports them
+as uncertain. It does not guess.
 
 ### Prompt text
 
@@ -205,14 +226,32 @@ behaviour rather than silently dropping messages.
 ### Session changes
 
 `/clear`, or a resume inside the running process, changes Claude's session ID
-without changing the generation. Every mod record carries the session ID that
-was current when it was written, and transcript reconciliation looks in that
-session's transcript. The heartbeat reports the current session ID. After a
-change, readiness for **new** deliveries also requires the heartbeat's session
-to be one Wardian has recorded for the agent through its existing
-session-tracking rules. Until Wardian has recorded it, new deliveries use the
-terminal fallback with the reason `session_mismatch`. Deliveries already
-published are unaffected, because they are bound to the generation.
+without changing the generation. A prompt can enter a different session from
+the one current when its claim was written: claim in session A, `/clear`
+switches to B, `submit` enters B. So no single record's session is trusted for
+attribution. Instead the mod keeps the generation's **session history**, one
+write-once `sessions/<session_id>.json` per session it observes:
+
+- the session at `session.start`, which fires once per process and never on
+  `/clear`;
+- every ending session, from the `session.end` hook, which fires on `/clear`,
+  resume and exit with the ending session's ID;
+- the current session, sampled on every heartbeat and after every `submit`.
+
+Every session that existed in the process either ended, and was recorded by
+`session.end`, or is current, and is sampled. The history is therefore
+complete.
+
+Transcript reconciliation searches every session in that history, plus the
+sessions Wardian's own session tracking recorded for the agent, for the exact
+`interaction_id`. The session named in a claim or outcome record is diagnostic
+only.
+
+Readiness for **new** deliveries after a session change also requires the
+heartbeat's session to be one Wardian has recorded for the agent. Until it
+is, new deliveries use the terminal fallback with the reason
+`session_mismatch`. Deliveries already published are unaffected, because they
+are bound to the generation.
 
 ## Non-goals
 
@@ -235,6 +274,10 @@ published are unaffected, because they are bound to the generation.
   - phase projection for every record combination, including a claim with no
     outcome;
   - end-of-generation resolution, with and without proven exit;
+  - `NonSubmissionProof`: it cannot be built when any claim file exists, and
+    `resolve_proven_non_submission` changes nothing but
+    `SubmittedUnconfirmed`;
+  - reconciliation of a prompt that entered a session other than the claim's;
   - routing for each fallback reason, including `session_mismatch`;
   - environment composition that appends to an existing
     `CLAUDE_CODE_PLUGIN_DIRS`;

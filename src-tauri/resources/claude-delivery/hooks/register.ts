@@ -13,6 +13,10 @@ import type { Register } from 'claude-code'
 //   queued/<id>.json     submit resolved { text }: the prompt entered the queue
 //   dropped/<id>.json    submit resolved { drop }: proven not entered
 //   rejected/<id>.json   malformed or for another generation; never submitted
+//   sessions/<sid>.json  once per Claude session observed (start, every
+//                        heartbeat, after each submit, and session.end), so
+//                        Wardian can attribute a prompt to whichever session
+//                        it entered after a /clear
 // heartbeat.json is the only file rewritten. It is diagnostic and readiness
 // only, so a failed or torn write is ignored.
 
@@ -75,7 +79,16 @@ const parsePending = (raw: string): Pending | string => {
 // is known to be valid.
 const keyFromName = (name: string) => name.replace(/\.json$/, '').replace(/^[^-]*-/, '')
 
+// Set once at session.start, which fires once per process and never on /clear.
+let noteSession: ((sessionId: string | null) => Promise<void>) | undefined
+let noteSessionEnd: ((sessionId: string, reason: string) => Promise<void>) | undefined
+
 export const register: Register = on => {
+  on('session.end', async ($, e, next) => {
+    await noteSessionEnd?.(e.sessionId, String(e.reason)).catch(() => undefined)
+    return next(e)
+  })
+
   on('session.start', async ($, e, next) => {
     const result = await next(e)
     if (!e.isInteractive) return result
@@ -102,6 +115,27 @@ export const register: Register = on => {
         }),
       )
 
+    const noted = new Set<string>()
+    noteSession = async sessionId => {
+      if (sessionId === null || !ID.test(sessionId) || noted.has(sessionId)) return
+      const path = `${inbox}/sessions/${sessionId}.json`
+      if (!(await $.fs.exists(path))) {
+        await $.fs.write(path, JSON.stringify({ schema: 1, generation, session_id: sessionId, at: Date.now() }))
+      }
+      noted.add(sessionId)
+    }
+    // A separate write-once record, so a session first seen by a heartbeat
+    // still gets its end recorded.
+    noteSessionEnd = async (sessionId, reason) => {
+      if (!ID.test(sessionId)) return
+      await noteSession?.(sessionId)
+      await $.fs.write(
+        `${inbox}/sessions/${sessionId}.end.json`,
+        JSON.stringify({ schema: 1, generation, session_id: sessionId, reason, at: Date.now() }),
+      )
+    }
+
+    await noteSession(await currentSession()).catch(() => undefined)
     await $.fs
       .write(
         `${inbox}/ready.json`,
@@ -116,6 +150,7 @@ export const register: Register = on => {
       .catch(() => undefined)
 
     $.clock.every(HEARTBEAT_MS, async () => {
+      await noteSession?.(await currentSession()).catch(() => undefined)
       await $.fs
         .write(
           `${inbox}/heartbeat.json`,
@@ -166,9 +201,11 @@ export const register: Register = on => {
           try {
             outcome = await $.prompt.submit({ text: parsed.text })
           } catch {
+            await noteSession?.(await currentSession()).catch(() => undefined)
             // Uncertain: leave the claim alone. Wardian never replays it.
             continue
           }
+          await noteSession?.(await currentSession()).catch(() => undefined)
           if (outcome !== undefined && typeof outcome.drop === 'string') {
             await record(`${inbox}/dropped/${key}.json`, key, { reason: outcome.drop })
           } else if (outcome !== undefined && typeof outcome.text === 'string') {
