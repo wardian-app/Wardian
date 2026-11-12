@@ -1620,13 +1620,14 @@ test("reveals only the focused Off agent Saved Chat in the existing Overview wit
   const body = "Saved synthetic conversation. This agent remains Off while its history is read.";
   const overview = makeWorkbenchSurface("saved-overview", "agents-overview");
   const saved: AgentChatPage = {
-    session_id: owner, conversation_id: "saved-conversation", generation: "saved-generation",
-    source_epoch: null, revision: "saved-revision", next_before: null, unchanged: false, reset: false,
-    progress: "ready", aliases: [], removed_ids: [], detail: null, bytes_read: 0, records_decoded: 0,
+    session_id: owner, conversation_id: null, generation: null,
+    source_epoch: null, recent_admission: "public-preview-admission", revision: "saved-revision",
+    next_before: null, unchanged: false, reset: false, older_page: false,
+    progress: "provisional", aliases: [], removed_ids: [], detail: null, bytes_read: 0, records_decoded: 0,
     events: [{ id: "saved-message", session_id: owner, provider: "claude", kind: "message",
       role: "assistant", text: body, title: null, status: null, turn_id: "saved-turn", source: "provider_log",
       command: null, exit_code: null, path: null, language: null, created_at: "2026-01-01T00:00:00Z",
-      sequence: 1, metadata: {} }],
+      sequence: 1, metadata: { chat_provisional: true, chat_source_admission: "public-preview-admission" } }],
   };
   const target = saved.events[0];
   // Public equal-text turns have distinct identities. Earlier rows create
@@ -1679,7 +1680,7 @@ test("reveals only the focused Off agent Saved Chat in the existing Overview wit
   expect(start).toBeGreaterThanOrEqual(0);
   expect(end).toBeGreaterThan(start);
   await page.evaluate(`(${nativeSource.slice(start, end)})(${JSON.stringify({ name: "Saved Focus", body, provider: "claude",
-    conversation: "saved-conversation", eventId: "saved-message", probe: "saved-off-probe" })});
+    conversation: null, eventId: "saved-message", probe: "saved-off-probe" })});
     window.__chatAcceptance.bind(${JSON.stringify(owner)}); window.__chatAcceptance.arm("focused-off");`);
   const readPassive = () => page.evaluate(() => {
     const api = (window as unknown as { __chatAcceptance: {
@@ -1740,7 +1741,8 @@ test("reveals only the focused Off agent Saved Chat in the existing Overview wit
     expect(observed.activation.at).toBeLessThanOrEqual(observed.phase.rosterAt);
     expect(observed.calls.length).toBeGreaterThan(0);
     expect(observed.calls.every((call) => call.session === owner && call.at >= observed.phase.rosterAt)).toBe(true);
-    expect(observed.phase.body).toMatchObject({ session: owner, eventId: "saved-message", matchingBodySlots: 2 });
+    expect(observed.phase.body).toMatchObject({ session: owner, eventId: "saved-message", matchingBodySlots: 2,
+      scopeMode: "recent-preview", conversation: null, generation: null, epoch: null, admission: "public-preview-admission" });
     expect(observed.subject).toMatchObject({ latchedValid: true, latchedEventId: "saved-message", currentMatchingBodySlots: 2 });
     expect(observed.receipts.some((receipt) => receipt.session === owner && receipt.requestSession === owner
       && receipt.at === observed.phase.body?.receiptAt && receipt.rows.some((row) => row.id === "saved-message" && row.target))).toBe(true);

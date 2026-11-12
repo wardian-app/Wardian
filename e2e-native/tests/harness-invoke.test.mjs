@@ -161,7 +161,7 @@ function observationHarness(invoke, options = {}) {
     value: invoke, writable: false, configurable: false,
   });
   vm.runInNewContext(`${source.slice(start, end)}\ninstallChatObservation(config);`,
-    { ...context, getComputedStyle: (node) => node.style ?? { visibility: "visible", display: "block", opacity: "1" },
+    { ...context, TextEncoder, getComputedStyle: (node) => node.style ?? { visibility: "visible", display: "block", opacity: "1" },
       config: { name: "Owned", body: rawBody, witness: options.witness, probe: "native-input-probe" } });
   const observer = context.window.__chatAcceptance;
   observer.bind("session");
@@ -459,6 +459,141 @@ function actualPage(overrides = {}) {
     ...overrides };
 }
 
+function actualPreviewPage(overrides = {}) {
+  return actualPage({ conversation_id: null, generation: null, source_epoch: null,
+    recent_admission: "preview-owner", progress: "provisional", reset: false, unchanged: false,
+    older_page: false, aliases: [], removed_ids: [], revalidated_ids: null, detail: null, ...overrides });
+}
+
+test("the actual observer paints an admitted recent preview with null canonical IDs", async () => {
+  const page = actualPreviewPage();
+  const harness = observationHarness(() => Promise.resolve(page));
+  harness.admitted({ conversation: null, generation: null, epoch: null, admission: page.recent_admission });
+  harness.click();
+  await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+  harness.observer.sample(); harness.frame(); harness.frame();
+  assert.notEqual(harness.observer.state.phase.paintAt, null, "legal admission-backed preview must qualify paint");
+  harness.input(); harness.frame(); harness.frame();
+  assert.notEqual(harness.observer.state.phase.usableAt, null);
+  assert.equal(harness.observer.state.phase.body.generation, null);
+  assert.equal(harness.observer.state.phase.body.conversation, null);
+  assert.equal(harness.observer.state.phase.body.admission, "preview-owner");
+  assert.equal(harness.observer.state.phase.body.scopeMode, "recent-preview");
+});
+
+test("recent preview preserves every actual nullable canonical hint without fabricating a durable scope", async () => {
+  for (const conversation of [null, "conversation-hint"]) for (const generation of [null, "generation-hint"])
+    for (const epoch of [null, "epoch-hint"]) {
+      const page = actualPreviewPage({ conversation_id: conversation, generation, source_epoch: epoch });
+      const harness = observationHarness(() => Promise.resolve(page));
+      harness.admitted({ conversation, generation, epoch, admission: page.recent_admission });
+      harness.click(); await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+      harness.observer.sample(); harness.frame(); harness.frame();
+      const body = harness.observer.state.phase.body;
+      assert.ok(body);
+      assert.equal(body.conversation, conversation); assert.equal(body.generation, generation); assert.equal(body.epoch, epoch);
+      assert.equal(body.scopeMode, "recent-preview");
+      assert.equal(actualCanonicalHistory(harness.observer.state.receipts).length, 0, "preview cannot grant Older/detail renewal authority");
+    }
+});
+
+test("a matching empty unchanged preview retains the original current target receipt", async () => {
+  let page = actualPreviewPage();
+  const harness = observationHarness(() => Promise.resolve(page));
+  harness.admitted({ conversation: null, generation: null, epoch: null, admission: page.recent_admission });
+  harness.click(); await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+  harness.observer.sample(); harness.frame(); harness.frame();
+  const originalReceipt = harness.observer.state.phase.body.receiptAt;
+  page = actualPreviewPage({ unchanged: true, events: [] });
+  harness.clock(200); await harness.wrapper("load_agent_chat_page", { sessionId: "session", revision: page.revision });
+  harness.observer.sample(); harness.input(); harness.frame(); harness.frame();
+  assert.notEqual(harness.observer.state.phase.usableAt, null);
+  assert.equal(harness.observer.state.phase.body.receiptAt, originalReceipt);
+  assert.equal(harness.observer.state.receipts.length, 2);
+  assert.equal(actualCanonicalHistory(harness.observer.state.receipts).length, 0);
+});
+
+test("preview scope requires exact owner admission revision and nullable hints in the admitted DOM", async () => {
+  const page = actualPreviewPage();
+  for (const mismatch of [{ session: "foreign" }, { admission: null }, { admission: undefined }, { admission: "" },
+    { admission: "other-preview" }, { revision: "other-window" }, { conversation: "different" },
+    { generation: "different" }, { epoch: "different" }, { generation: undefined }]) {
+    const harness = observationHarness(() => Promise.resolve(page));
+    harness.admitted({ conversation: null, generation: null, epoch: null, admission: page.recent_admission, ...mismatch });
+    harness.click(); await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+    harness.observer.sample(); harness.frame(); harness.frame();
+    assert.equal(harness.observer.state.phase.paintAt, null);
+  }
+});
+
+test("malformed preview capability cannot supply an observer receipt", async () => {
+  const normal = actualPreviewPage();
+  const event = normal.events[0];
+  for (const invalid of [{ progress: "ready" }, { next_before: "older" }, { detail: {} }, { older_page: true },
+    { revalidated_ids: [] }, { aliases: [{ observation_id: "a", canonical_id: "b" }] }, { removed_ids: ["removed"] },
+    { reset: undefined }, { unchanged: undefined }, { conversation_id: " " }, { generation: undefined },
+    { source_epoch: undefined }, { recent_admission: "" }, { recent_admission: "x".repeat(257) },
+    { events: [event, { ...event }] }, { events: [{ ...event, session_id: "foreign" }] },
+    { events: [{ ...event, text: "é".repeat(513) }] },
+    { events: Array.from({ length: 81 }, (_, index) => ({ ...event, id: `preview-${index}` })) }]) {
+    const page = actualPreviewPage(invalid);
+    const harness = observationHarness(() => Promise.resolve(page));
+    harness.admitted({ conversation: page.conversation_id, generation: page.generation, epoch: page.source_epoch,
+      admission: page.recent_admission });
+    harness.click(); await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+    harness.observer.sample(); harness.frame(); harness.frame();
+    assert.equal(harness.observer.state.phase.paintAt, null);
+    assert.equal(harness.observer.state.receipts.length, 0);
+    assert.equal(harness.observer.state.errors.length, 1);
+  }
+});
+
+test("preview admission or mode changes cannot qualify a pending or painted subject", async () => {
+  for (const change of [{ admission: "new-preview" }, { revision: "new-window" }, { generation: "new-hint" },
+    { admission: null, conversation: "canonical-conversation", generation: "canonical-generation", epoch: "canonical-epoch" }]) {
+    for (const painted of [false, true]) {
+      const page = actualPreviewPage();
+      const harness = observationHarness(() => Promise.resolve(page));
+      harness.admitted({ conversation: null, generation: null, epoch: null, admission: page.recent_admission });
+      harness.click(); await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+      harness.observer.sample();
+      if (painted) { harness.frame(); harness.frame(); }
+      harness.admitted(change);
+      harness.input(); harness.frame(); harness.frame();
+      if (!painted) assert.equal(harness.observer.state.phase.paintAt, null);
+      assert.equal(harness.observer.state.phase.usableAt, null);
+    }
+  }
+});
+
+test("failure-only candidate facts preserve actual preview scope and the first rejected gate without endpoints or body text", async () => {
+  const page = actualPreviewPage();
+  const harness = observationHarness(() => Promise.resolve(page));
+  harness.admitted({ conversation: null, generation: null, epoch: null, admission: page.recent_admission });
+  harness.click(); await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+  const valid = harness.observer.candidateStatus();
+  assert.equal(valid.scopeMode, "recent-preview"); assert.equal(valid.actualScope.generation, null);
+  assert.equal(valid.candidateValid, true); assert.equal(valid.firstRejectionGate, null);
+  assert.equal(valid.targetPresent, true); assert.equal(valid.targetIndex, 0); assert.equal(valid.candidateIndex, 0);
+  assert.equal(valid.range.intersects, true); assert.equal(valid.range.count, 1);
+  assert.equal(valid.scroll.top, 100); assert.equal(valid.scroll.clientHeight, 500);
+  assert.equal(harness.observer.state.phase.paintAt, null, "diagnostics cannot set an endpoint");
+  harness.admitted({ generation: undefined });
+  const invalid = harness.observer.candidateStatus();
+  assert.equal(invalid.scopeMode, "invalid"); assert.equal(invalid.firstRejectionGate, "admitted-scope");
+  assert.equal(invalid.scopeFieldsPresent.generation, false);
+  harness.admitted({ generation: null });
+  harness.rectangle({ top: -80, bottom: -20, left: 0, right: 400, width: 400, height: 60 });
+  const outside = harness.observer.candidateStatus();
+  assert.equal(outside.firstRejectionGate, "target-viewport"); assert.equal(outside.range.intersects, false);
+  assert.equal(harness.observer.state.calls.length, 1);
+  const redacted = actualRedaction(outside);
+  assert.equal(redacted.scopeMode, "recent-preview"); assert.equal(redacted.firstRejectionGate, "target-viewport");
+  assert.equal(redacted.actualScope.admission, createHash("sha256").update("preview-owner").digest("hex"));
+  assert.equal(JSON.stringify(redacted).includes(chatAcceptanceFixture().latestBody), false);
+  assert.equal(harness.observer.state.phase.paintAt, null);
+});
+
 function actualCanonicalHistory(receipts) {
   const source = fs.readFileSync(new URL("./chat-turn-change-native.test.mjs", import.meta.url), "utf8").replaceAll("\r\n", "\n");
   const start = source.indexOf("function canonicalHistoryReceipts(receipts, sessionId) {");
@@ -689,6 +824,8 @@ test("actual late DOM capture is bounded, leaves unmeasured endpoints null and n
   const metadata = vm.runInNewContext(`${source.slice(start, end)}\ncaptureChatFailureMetadata("session", "paint");`,
     { window, document: { visibilityState: "visible" } });
   assert.equal(metadata.memberRows, 64);
+  assert.equal(metadata.totalMemberRows, 100); assert.equal(metadata.capturedMemberRows, 64);
+  assert.equal(metadata.memberRowsTruncated, true);
   assert.equal(metadata.mode, "chat");
   assert.equal(metadata.observer.endpoints.paintAt, null);
   assert.equal(metadata.observer.endpoints.usableAt, null);
@@ -1239,7 +1376,7 @@ test("mixed preview/canonical receipts retain exactly two canonical repeated tur
   const body = chatAcceptanceFixture().repeatBody;
   const repeated = (prefix) => ["a", "b"].map((turn) => ({ ...actualPage().events[0],
     id: `${prefix}-${turn}`, turn_id: `repeated-${turn}`, text: body }));
-  let dto = actualPage({ recent_admission: "preview-owner", events: repeated("preview") });
+  let dto = actualPreviewPage({ events: repeated("preview") });
   const harness = observationHarness(() => Promise.resolve(dto));
   await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
   dto = actualPage({ reset: true, events: repeated("canonical") });

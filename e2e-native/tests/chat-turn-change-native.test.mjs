@@ -87,11 +87,33 @@ function installChatObservation(config) {
   const now = () => performance.now();
   const members = (value) => Array.isArray(value) && value.length <= 384
     && value.every((id) => bounded(id)) ? [...value] : null;
-  const scopeKey = (scope) => scope && bounded(scope.session) && bounded(scope.conversation)
-    && bounded(scope.generation) && bounded(scope.revision)
-    && (scope.epoch === null || bounded(scope.epoch))
-    && (scope.admission === null || bounded(scope.admission))
-    ? JSON.stringify([scope.session, scope.conversation, scope.generation, scope.epoch, scope.revision, scope.admission]) : null;
+  const scopeValue = (value) => Boolean(bounded(value)) && value.trim().length > 0;
+  const nullableScopeValue = (value) => value === null || scopeValue(value);
+  const scopeMode = (scope) => {
+    if (!scope || !scopeValue(scope.session) || !scopeValue(scope.revision) || !nullableScopeValue(scope.epoch)) return null;
+    if (scope.admission !== null) return typeof scope.admission === "string" && scope.admission.length > 0
+      && scope.admission.length <= 256 && nullableScopeValue(scope.conversation) && nullableScopeValue(scope.generation)
+      ? "recent-preview" : null;
+    return scopeValue(scope.conversation) && scopeValue(scope.generation) ? "durable" : null;
+  };
+  const scopeKey = (scope) => {
+    const mode = scopeMode(scope);
+    return mode ? JSON.stringify([mode, scope.session, scope.conversation, scope.generation,
+      scope.epoch, scope.revision, scope.admission]) : null;
+  };
+  // Match the consumer's validRecentPreview capability, not a generic nullable
+  // canonical scope. A preview never grants Older, detail or renewal authority.
+  const validRecentPreview = (dto) => scopeMode({ session: dto.session_id, conversation: dto.conversation_id,
+    generation: dto.generation, epoch: dto.source_epoch, revision: dto.revision, admission: dto.recent_admission }) === "recent-preview"
+    && typeof dto.reset === "boolean" && typeof dto.unchanged === "boolean"
+    && (dto.progress === "provisional" || dto.progress === "no_recent")
+    && dto.next_before === null && dto.detail === null
+    && (!Object.prototype.hasOwnProperty.call(dto, "older_page") || dto.older_page === false)
+    && dto.revalidated_ids == null && Array.isArray(dto.aliases) && dto.aliases.length === 0
+    && Array.isArray(dto.removed_ids) && dto.removed_ids.length === 0
+    && dto.events.length <= 80 && new Set(dto.events.map((event) => event.id)).size === dto.events.length
+    && dto.events.every((event) => event.session_id === dto.session_id && typeof event.id === "string" && event.id.length > 0
+      && (event.text == null || typeof event.text === "string") && new TextEncoder().encode(event.text ?? "").length <= 1024);
   const parse = (value) => { try { return JSON.parse(value); } catch { return null; } };
   const sameBody = (left, right) => left && right && left.node === right.node && left.row === right.row && left.scroll === right.scroll
     && ["node", "panel", "tabpanel", "tab", "host", "portal", "dockRoot"].every((key) => left.container[key] === right.container[key])
@@ -143,7 +165,8 @@ function installChatObservation(config) {
     if (retired || command !== "load_agent_chat_page" || !dto || !Array.isArray(dto.events)) return;
     if (state.receipts.length >= 128 || dto.events.length > 384) throw new Error("passive receipt bound exceeded");
     if (dto.recent_admission != null && (typeof dto.recent_admission !== "string"
-      || !dto.recent_admission || dto.recent_admission.length > 1024)) throw new Error("invalid recent admission");
+      || !dto.recent_admission || dto.recent_admission.length > 256)) throw new Error("invalid recent admission");
+    if (dto.recent_admission != null && !validRecentPreview(dto)) throw new Error("invalid recent preview capability");
     const aliases = Array.isArray(dto.aliases) && dto.aliases.length <= 384 ? dto.aliases.map((alias) => ({
       observation: bounded(alias.observation_id), canonical: bounded(alias.canonical_id),
     })) : [];
@@ -187,27 +210,39 @@ function installChatObservation(config) {
     },
       () => { if (!retired) state.rejections++; }); } catch (error) { fail(error); }
   };
-  const visibleBody = (subject = null) => {
-    if (document.visibilityState !== "visible") return null;
+  const intersectsViewport = (rect, region) => rect.width > 0 && rect.height > 0
+    && rect.bottom > Math.max(0, region.top) && rect.top < Math.min(innerHeight, region.bottom)
+    && rect.right > Math.max(0, region.left) && rect.left < Math.min(innerWidth, region.right);
+  const visibleBody = (subject = null, diagnostic = null) => {
+    const reject = (gate) => { if (diagnostic) diagnostic.firstRejectionGate = gate; return null; };
+    if (document.visibilityState !== "visible") return reject("document-hidden");
     const container = ownedContainer();
     const root = container?.node;
+    if (!root) return reject("owned-container");
     const scroll = root?.querySelector('[data-testid="agent-chat-scroll-region"]');
-    if (!scroll || !root.querySelector('button[title="Switch to Terminal"]')) return null;
+    if (!scroll) return reject("chat-scroll");
+    if (!root.querySelector('button[title="Switch to Terminal"]')) return reject("chat-mode");
     // Read the consumer's admitted page, not merely the last returned DTO.
     const admitted = parse(scroll.getAttribute("data-chat-page-scope"));
     const admittedKey = scopeKey(admitted);
-    if (!admittedKey || admitted.session !== state.owner
-      || (config.conversation != null && admitted.conversation !== config.conversation)) return null;
+    if (!admittedKey) return reject("admitted-scope");
+    if (admitted.session !== state.owner) return reject("admitted-owner");
+    if (config.conversation != null && admitted.conversation !== config.conversation) return reject("admitted-conversation");
     const region = scroll.getBoundingClientRect();
     const contents = Array.from(root.querySelectorAll('article[aria-label="assistant message"] .chat-message-content'));
+    let firstTargetRejection = null;
+    const rejectedTarget = (gate) => { firstTargetRejection ??= gate; };
     // A duplicate may become first without changing the measured subject.
     // Revalidate the requested node; never fall back to another equal-text row.
     for (const content of subject ? contents.filter((node) => node === subject.node) : contents) {
-      if (!content.isConnected || !readable(content)) continue;
+      if (!content.isConnected || !readable(content)) {
+        if (matchesText(content.textContent)) rejectedTarget("target-visibility");
+        continue;
+      }
       const range = textRange(content);
       if (!range) continue;
       const slot = content.closest("[data-chat-row-key]");
-      if (!slot?.isConnected || !root.contains(slot)) continue;
+      if (!slot?.isConnected || !root.contains(slot)) { rejectedTarget("target-row"); continue; }
       const key = slot?.getAttribute("data-chat-row-key");
       const identity = parse(slot?.getAttribute("data-chat-row-identity"));
       const receipt = state.receipts.findLast((item) => item.session === state.owner
@@ -216,20 +251,19 @@ function installChatObservation(config) {
           && row.session === state.owner && row.id === identity?.id
           && JSON.stringify(row.members) === JSON.stringify(identity.members)
           && (row.key === key || item.aliases.some((alias) => alias.observation === key && alias.canonical === row.id))));
-      if (!receipt || !key) continue;
+      if (!receipt || !key) { rejectedTarget("target-receipt"); continue; }
       // Measure the actual body text, not the row/header of a tall message.
       const rects = Array.from(range.getClientRects());
-      if (!rects.some((rect) => rect.width > 0 && rect.height > 0
-        && rect.bottom > Math.max(0, region.top) && rect.top < Math.min(innerHeight, region.bottom)
-        && rect.right > Math.max(0, region.left) && rect.left < Math.min(innerWidth, region.right))) continue;
+      if (!rects.some((rect) => intersectsViewport(rect, region))) { rejectedTarget("target-viewport"); continue; }
+      if (diagnostic) diagnostic.firstRejectionGate = null;
       return { node: content, row: slot, scroll, container, evidence: { key, eventId: identity.id, members: identity.members,
         container: container.identity,
-        session: receipt.session, receiptAt: receipt.at, window: receipt.revision, revision: receipt.revision, generation: receipt.generation,
+        scopeMode: scopeMode(receipt), session: receipt.session, receiptAt: receipt.at, window: receipt.revision, revision: receipt.revision, generation: receipt.generation,
         epoch: receipt.epoch, conversation: receipt.conversation, admission: receipt.admission,
         witnessKind: witness.kind, bodySha256: witness.bodySha256 ?? null,
         matchingBodySlots: contents.filter((node) => matchesText(node.textContent)).length } };
     }
-    return null;
+    return reject(firstTargetRejection ?? "target-text");
   };
   const composerState = (root) => {
     const composers = root ? Array.from(root.querySelectorAll('textarea[aria-label="Message agent"]')) : [];
@@ -378,6 +412,36 @@ function installChatObservation(config) {
         candidateMatchesLatch: Boolean(sameBody(body, candidate)),
         paintedMatchingBodySlots: body?.evidence.matchingBodySlots ?? null,
         currentMatchingBodySlots: fresh?.evidence.matchingBodySlots ?? candidate?.evidence.matchingBodySlots ?? null };
+    },
+    // Failure-only DOM facts. This never changes an endpoint or dispatches input.
+    candidateStatus() {
+      const root = surface();
+      const scroll = root?.querySelector('[data-testid="agent-chat-scroll-region"]');
+      const admitted = parse(scroll?.getAttribute("data-chat-page-scope"));
+      const fields = ["session", "conversation", "generation", "epoch", "revision", "admission"];
+      const actualScope = admitted ? Object.fromEntries(fields.map((key) => [key,
+        admitted[key] === null ? null : bounded(admitted[key])])) : null;
+      const contents = root ? Array.from(root.querySelectorAll('article[aria-label="assistant message"] .chat-message-content')) : [];
+      const targetIndex = contents.findIndex((node) => matchesText(node.textContent));
+      const target = contents[targetIndex];
+      const row = target?.closest("[data-chat-row-key]");
+      const identity = parse(row?.getAttribute("data-chat-row-identity"));
+      const range = target ? textRange(target) : null;
+      const rects = range ? Array.from(range.getClientRects()) : [];
+      const region = scroll?.getBoundingClientRect();
+      const diagnostic = { firstRejectionGate: null };
+      const candidate = visibleBody(null, diagnostic);
+      return { ...diagnostic, scopeMode: scopeMode(admitted) ?? "invalid", actualScope,
+        scopeFieldsPresent: Object.fromEntries(fields.map((key) => [key, Boolean(admitted && Object.hasOwn(admitted, key))])),
+        candidateValid: Boolean(candidate), assistantContents: contents.length,
+        candidateIndex: candidate ? contents.indexOf(candidate.node) : null,
+        targetPresent: targetIndex >= 0, targetIndex: targetIndex >= 0 ? targetIndex : null,
+        targetIdentity: identity ? { id: bounded(identity.id), members: members(identity.members) } : null,
+        scroll: scroll ? { top: scroll.scrollTop, clientHeight: scroll.clientHeight, scrollHeight: scroll.scrollHeight } : null,
+        range: { count: rects.length, captured: Math.min(64, rects.length), truncated: rects.length > 64,
+          intersects: Boolean(region && rects.some((rect) => intersectsViewport(rect, region))),
+          rects: rects.slice(0, 64).map((rect) => ({ top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right,
+            width: rect.width, height: rect.height })) } };
     },
     interactionStatus() {
       return { ...state.interaction, currentComposer: composerState(surface()).flags,
@@ -580,7 +644,8 @@ function captureChatFailureMetadata(sessionId, stage) {
   try { root = observer?.container(sessionId); } catch { /* Ambiguity remains in container metadata. */ }
   const region = root?.querySelector('[data-testid="agent-chat-scroll-region"]');
   const rect = region?.getBoundingClientRect();
-  const rows = region ? Array.from(region.querySelectorAll('[data-chat-row-identity]')).slice(0, 64) : [];
+  const allRows = region ? Array.from(region.querySelectorAll('[data-chat-row-identity]')) : [];
+  const rows = allRows.slice(0, 64);
   const phase = observer?.state.phase;
   return {
     status: "OBSERVED_LATE_DOM", stage, visibility: document.visibilityState,
@@ -589,9 +654,11 @@ function captureChatFailureMetadata(sessionId, stage) {
       : root?.querySelector('button[title="Switch to Chat"]') ? "terminal" : "unresolved",
     mountedChat: Boolean(region), suspended: Boolean(root?.querySelector('[data-agent-chat-state="suspended"]')),
     scopePresent: Boolean(region?.getAttribute("data-chat-page-scope")), memberRows: rows.length,
+    totalMemberRows: allRows.length, capturedMemberRows: rows.length, memberRowsTruncated: allRows.length > rows.length,
     geometry: rect ? { width: rect.width, height: rect.height, top: rect.top, left: rect.left } : null,
     observer: observer ? { activation: observer.state.activation, subscription: observer.subscriptionStatus(),
       subject: observer.subjectStatus?.() ?? null, interaction: observer.interactionStatus?.() ?? null,
+      candidate: observer.candidateStatus?.() ?? null,
       calls: observer.state.calls.length, receipts: observer.state.receipts.length,
       errors: observer.state.errors.length, rejections: observer.state.rejections,
       endpoints: phase ? Object.fromEntries(["rosterAt", "chatAt", "exposureAt", "commitAt", "paintAt", "usableAt"]
@@ -796,6 +863,10 @@ function redactObservation(value) {
       || (key === "visibility" && ["visible", "hidden", "prerender"].includes(item))
       || (key === "coverage" && item === "PAGE_LOADER_ONLY")
       || (key === "broaderIpcRuntime" && item === "UNOBSERVED")
+      || (key === "scopeMode" && ["recent-preview", "durable", "invalid"].includes(item))
+      || (key === "firstRejectionGate" && ["document-hidden", "owned-container", "chat-scroll", "chat-mode",
+        "admitted-scope", "admitted-owner", "admitted-conversation", "target-text", "target-visibility",
+        "target-row", "target-receipt", "target-viewport"].includes(item))
       || (key === "control" && ["keyboard", "wheel", "none"].includes(item))
       || (key === "reason" && ["invalid_painted_subject", "safe_empty_composer", "composer_absent",
         "composer_ambiguous", "composer_hidden", "composer_disabled", "composer_nonempty"].includes(item))

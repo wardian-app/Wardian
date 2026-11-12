@@ -812,6 +812,14 @@ window and DOM references through both frames. Another equal-text row becoming f
 cannot replace that subject. `matchingBodySlots` remains a reported diagnostic count;
 it is neither identity nor a unique-body-slot claim. Changes to unrelated matching
 rows do not invalidate an otherwise valid latched subject.
+Durable scope requires real conversation and generation IDs. A validated recent
+preview instead uses its producer-issued recent admission and retains every actual
+nullable canonical hint. The original preview receipt and current consumer DOM must
+match owner, admission, revision and the complete nullable tuple. Missing admission
+does not make null durable IDs valid. Preview paint proves recent-capability scope;
+it does not grant canonical-ready, Older, detail or renewal authority. A matching
+empty unchanged response can retain the original current target receipt while its
+actual admitted scope stays the same.
 Readable timing retains the independent full raw assistant body/hash in the RPC
 proof. Before App startup, the existing Markdown parser prepares a bounded
 rendered-text witness; plain Mock text retains whole-text matching. The actual
@@ -851,6 +859,12 @@ exception and NULL endpoints, and do not retry or extend the measurement deadlin
 They also retain the chosen control and reason, planned/current composer flags,
 latched-subject validity versus the current first candidate, and actual wheel
 baseline/event/after offsets with received/changed flags, without body or draft text.
+Failure-only candidate facts also retain the bounded actual DOM scope and field
+presence, scope mode, first rejection gate, target presence/index, real scroll and
+text-range intersection. Member counts distinguish the total from the first 64
+captured rows and report truncation; 64 is a diagnostic bound, not a renderer limit.
+These facts use the existing write-boundary redaction once and cannot set endpoints,
+move the viewport or dispatch another request.
 At existing realm teardown, the one disposal operation returns a separate actual
 post-unsubscribe token/status and callback/error counters before closing the realm.
 The last pre-disposal observation is retained separately. Missing historical
