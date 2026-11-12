@@ -11,6 +11,36 @@ use wardian_core::agent_messaging::{
 use wardian_core::db::agent_messaging as store;
 mod native;
 
+/// Queue admission and model visibility are distinct receipts. Preserve the
+/// terminal mod refusal as a failure rather than laundering it into uncertainty.
+fn surface_settlement(
+    result: &Result<
+        crate::delivery::LiveSurfacePromptResult,
+        Box<crate::delivery::live_surface::LiveSurfaceDeliveryError>,
+    >,
+) -> Result<&'static str, bool> {
+    match result {
+        Ok(result) if result.detail.delivery_phase.as_deref() == Some("provider_accepted") => {
+            Ok("provider_accepted")
+        }
+        Ok(_) => Ok("provider_visible"),
+        Err(error)
+            if error.detail.as_ref().is_some_and(|detail| {
+                detail.provider == "claude"
+                    && detail.delivery_phase.as_deref() == Some("failed")
+                    && detail
+                        .observed_state
+                        .as_deref()
+                        .is_some_and(|state| state.starts_with("claude_mod;"))
+            }) =>
+        {
+            Ok("failed")
+        }
+        Err(error) if error.retry_safe => Err(false),
+        Err(_) => Err(true),
+    }
+}
+
 /// Restore both canonical work and original-conversation continuations.
 pub(super) fn spawn_after_restore(app: &AppHandle, session_id: &str) {
     spawn_pending_tasks_when_ready(app, session_id, None);
@@ -613,11 +643,7 @@ pub(super) async fn dispatch_pending_wakeable_information(
                 },
             )
             .await;
-            let settlement = match &result {
-                Ok(_) => Ok("provider_visible"),
-                Err(error) if error.retry_safe => Err(false),
-                Err(_) => Err(true),
-            };
+            let settlement = surface_settlement(&result);
             native::settle(state, &claim, settlement).await?;
             if let Err(error) = result {
                 manager::log_debug(&format!(
@@ -978,11 +1004,7 @@ pub(super) async fn dispatch_pending_reply_continuations(
                 },
             )
             .await;
-            let outcome = match &result {
-                Ok(_) => Ok("provider_visible"),
-                Err(error) if error.retry_safe => Err(false),
-                Err(_) => Err(true),
-            };
+            let outcome = surface_settlement(&result);
             let delivery = native::settle(state, &claim, outcome).await;
             let information = settle_information_claims(state, information_claims, outcome).await;
             delivery.and(information)?;
@@ -1723,26 +1745,24 @@ async fn dispatch_one_with_request(
             OpenCodeDispatchDiagnosticReason::SurfaceSubmit,
         );
     }
-    let outcome = match &result {
-        Ok(_) => "provider_visible",
-        Err(error) if error.retry_safe => "failed_before_submit",
-        Err(_) => "uncertain",
+    let outcome = surface_settlement(&result);
+    let task_outcome = match outcome {
+        Ok(state) => state,
+        Err(false) => "failed_before_submit",
+        Err(true) => "uncertain",
     };
-    let delivery = state
-        .interactions
-        .finish_agent_task(&claim, outcome)
-        .await
-        .map_err(control_error);
-    let information = settle_information_claims(
-        state,
-        information_claims,
-        match &result {
-            Ok(_) => Ok("provider_visible"),
-            Err(error) if error.retry_safe => Err(false),
-            Err(_) => Err(true),
-        },
-    )
-    .await;
+    let recovered_mod = matches!(&result, Err(error) if error.retry_safe && error.detail.as_ref()
+        .and_then(|detail| detail.observed_state.as_deref()).is_some_and(|state| state.starts_with("claude_mod;")));
+    let delivery = if recovered_mod {
+        native::settle(state, &claim, outcome).await
+    } else {
+        state
+            .interactions
+            .finish_agent_task(&claim, task_outcome)
+            .await
+            .map_err(control_error)
+    };
+    let information = settle_information_claims(state, information_claims, outcome).await;
     delivery.and(information)?;
     Ok(())
 }

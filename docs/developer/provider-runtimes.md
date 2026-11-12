@@ -178,6 +178,26 @@ Claude also runs directly in the real target workspace. Wardian does not use a p
 - Resume launches use `--resume <session_id>` and do not resend `--session-id` or `--name`.
 - Fresh resume of an existing Wardian agent uses a new transient Claude provider session ID while keeping the Wardian agent ID stable. After launch, Wardian stores the transient Claude ID as the next `resume_session`.
 
+### Peer delivery mod
+
+Interactive Claude launches load the bundled `wardian` mod through
+`CLAUDE_CODE_PLUGIN_DIRS`, preserving existing entries. Rust owns immutable
+assets and launch identity under
+`<wardian-home>/agents/<agent-id>/claude/delivery/<runtime-generation>/mod/`
+and atomically publishes peer prompts into the sibling `inbox/pending/`.
+The mod queues prompts through Claude's prompt API, preserving terminal drafts.
+User composer submissions and approval keys retain their existing paths.
+
+New deliveries use the mod only with a matching readiness record and a heartbeat
+at most five seconds old. Terminal fallback records `mod_not_loaded`,
+`session_mismatch`, `generation_mismatch`, or `heartbeat_stale`. Once published,
+a delivery remains owned by that generation even if its heartbeat stops.
+Inspect the native delivery record for "waiting on the Claude delivery mod"
+and its age. A claim without an outcome remains uncertain and is never replayed.
+Parsed rejection or verified Windows containment exit with no claim permits
+recovery. Transcript reconciliation searches the mod's session history and
+Wardian-attributed sessions, including prompts that enter after `/clear`.
+
 ### Instruction and skill discovery
 
 - Claude reads `AGENTS.md` natively.

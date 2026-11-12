@@ -64,7 +64,6 @@
         "src-tauri/src/delivery/codex_shared.rs::CodexSharedClient.connect",
         "src-tauri/src/delivery/codex_shared.rs::CodexSharedError.connection_pending",
         "src-tauri/src/delivery/codex_shared.rs::validate_endpoint",
-        "src-tauri/src/delivery/live_surface.rs::LiveSurfacePromptRequest.message",
         "src-tauri/src/delivery/native_broker/codex.rs::NativeDeliveryBroker.run_codex_background",
         "src-tauri/src/delivery/native_broker/codex.rs::NativeDeliveryBroker.run_prepared_codex_background",
         "src-tauri/src/delivery/opencode_http/sse.rs::OpenCodeEvent.event_type",

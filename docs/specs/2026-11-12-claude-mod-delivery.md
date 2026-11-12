@@ -1,6 +1,6 @@
 # Claude Delivery Through a Wardian Mod
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-12
 - **Issue:** #1725
 - **Research:** [`docs/research/claude-delivery-transports.md`](../research/claude-delivery-transports.md)
@@ -178,6 +178,16 @@ resolver, which builds one only from either:
 2. proof that the generation's process tree exited, through the kill-on-close
    containment job required by the Claude containment spec and used for #1662,
    **and** no file of any content under `claimed/` for this interaction.
+
+Implementation boundary: the resolver lives in `wardian-core` so it can own
+the private token constructor and use that crate's internal atomic-file writer.
+The application wraps it in `delivery/claude_mod.rs` and supplies embedded assets.
+Containment handles live in the application crate, so the core resolver accepts
+a trusted `GenerationExitVerifier` adapter. Its application implementation is
+a private-field receipt constructed only after the retained job and child pass
+`stop_and_join`, bound to the agent and terminal runtime generation. The adapter
+trait is an explicit trusted-code boundary; Rust privacy seals the token's
+construction, but cannot authenticate an implementation in another crate.
 
 In both cases nothing crossed into Claude, because the mod submits only after
 its claim write has resolved. A claim with no outcome cannot produce a proof,

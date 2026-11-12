@@ -22,6 +22,16 @@ The setup script:
 - on Windows, can download a matching `msedgedriver.exe` into `tools/e2e-native/`
 - on macOS/Linux, prints the WebDriver package or `WARDIAN_NATIVE_WEBDRIVER` guidance when automatic setup is not reliable
 
+`e2e-native/tests/claude-mod-delivery-native.test.mjs` is an opt-in real-Claude
+acceptance probe (`WARDIAN_E2E_REAL_CLAUDE_MOD=1`). It requires a prebuilt app
+with `terminal-trace`, a frontend built with `VITE_WARDIAN_TERMINAL_DEBUG=1`,
+and an explicitly selected catalogue model in `WARDIAN_E2E_CLAUDE_MOD_MODEL`.
+The probe retains its provider version, inbox records, terminal trace and
+result report in separate isolated homes. It verifies an editable draft survives
+a correlated peer delivery without delivery keystrokes, then verifies the
+hooks-disabled terminal fallback and its recorded reason. A skipped probe is
+not native acceptance evidence.
+
 The legacy command is kept as an alias:
 
 ```bash

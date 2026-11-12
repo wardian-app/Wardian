@@ -2679,7 +2679,7 @@ pub async fn pause_agent(
     }
 
     lifecycle_heartbeat.ensure_active("pause")?;
-    manager::terminate_active_agent_process(&mut termination);
+    manager::terminate_rotated_agent_process(&mut termination, None).await?;
 
     let _lifecycle_context = save_live_state(
         &state,
@@ -2923,7 +2923,7 @@ pub async fn resume_agent(
     publication_disposition.commit();
     manager::publish_agent_status(&app, &session_id, &new_status_arc);
 
-    manager::terminate_active_agent_process(&mut old_agent);
+    manager::terminate_rotated_agent_process(&mut old_agent, None).await?;
 
     let _ = app.emit(
         "agent-terminal-cleared",
@@ -3850,7 +3850,7 @@ async fn clear_agent_session_inner(
         .await?;
     let (mut displaced_agent, session_close_context, replacement_journal) = commit_result;
     publication_disposition.commit();
-    manager::terminate_active_agent_process(&mut displaced_agent);
+    manager::terminate_rotated_agent_process(&mut displaced_agent, None).await?;
     manager::publish_agent_status(&app, &session_id, &new_status_arc);
 
     // 9. Force a frontend refresh and terminal resize to clear glitches

@@ -14,6 +14,26 @@ pub struct RuntimeProcessJob {
     contained_from_launch: bool,
 }
 
+/// Application-owned evidence that one launch-contained Claude tree was joined.
+///
+/// Only `RuntimeProcessJob::stop_and_join_for_claude_mod` constructs this receipt.
+/// The core verifier trait is an open, trusted adapter boundary, not a sealed
+/// cross-crate proof. Callers must supply the identity belonging to the retained
+/// job and child while holding the generation's lifecycle gate.
+#[cfg(windows)]
+#[derive(Debug)]
+pub(crate) struct ClaudeModTreeExit {
+    agent_id: String,
+    runtime_generation: u64,
+}
+
+#[cfg(windows)]
+impl wardian_core::claude_mod::GenerationExitVerifier for ClaudeModTreeExit {
+    fn process_tree_exited(&self, agent_id: &str, generation: u64) -> bool {
+        self.agent_id == agent_id && self.runtime_generation == generation
+    }
+}
+
 #[cfg(all(test, windows))]
 pub(crate) struct TestPty {
     pub(crate) listening_addr: std::net::SocketAddr,
@@ -218,6 +238,27 @@ impl RuntimeProcessJob {
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
+    }
+
+    /// Join the retained runtime tree before issuing an identity-bound mod receipt.
+    ///
+    /// The caller must retain this generation's original job and child under its
+    /// lifecycle gate. Errors and cancellation issue no receipt; PTY EOF or a PID
+    /// lookup cannot substitute for the existing containment verification.
+    pub(crate) async fn stop_and_join_for_claude_mod(
+        &self,
+        agent_id: &str,
+        generation: u64,
+        child: &mut (dyn portable_pty::Child + Send),
+    ) -> Result<ClaudeModTreeExit, String> {
+        if agent_id.is_empty() || generation == 0 {
+            return Err("Claude mod exit receipt requires an agent and runtime generation".into());
+        }
+        self.stop_and_join(child).await?;
+        Ok(ClaudeModTreeExit {
+            agent_id: agent_id.to_owned(),
+            runtime_generation: generation,
+        })
     }
 
     fn seal_process_creation(&self) -> Result<(), String> {
@@ -1220,6 +1261,55 @@ mod tests {
     };
 
     const SESSION_ID: &str = "019d331a-0500-7592-969f-8f437886f42b";
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn claude_mod_exit_receipt_requires_joined_tree_and_exact_identity() {
+        use std::os::windows::io::AsRawHandle;
+        use wardian_core::claude_mod::GenerationExitVerifier;
+        let temp = tempfile::tempdir().unwrap();
+        let (job, mut child, _pty, descendant) = super::test_contained_pty_tree(temp.path()).await;
+        assert!(job
+            .stop_and_join_for_claude_mod("", 7, child.as_mut())
+            .await
+            .is_err());
+        assert!(job
+            .stop_and_join_for_claude_mod(SESSION_ID, 0, child.as_mut())
+            .await
+            .is_err());
+        assert!(child.try_wait().unwrap().is_none());
+        let receipt = job
+            .stop_and_join_for_claude_mod(SESSION_ID, 7, child.as_mut())
+            .await
+            .unwrap();
+        assert!(receipt.process_tree_exited(SESSION_ID, 7));
+        assert!(!receipt.process_tree_exited("another-agent", 7));
+        assert!(!receipt.process_tree_exited(SESSION_ID, 8));
+        assert_eq!(job.active_processes().unwrap(), 0);
+        assert!(child.try_wait().unwrap().is_some());
+        assert_eq!(
+            unsafe {
+                winapi::um::synchapi::WaitForSingleObject(descendant.as_raw_handle() as _, 0)
+            },
+            winapi::um::winbase::WAIT_OBJECT_0
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn claude_mod_exit_receipt_rejects_uncontained_job() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut job, mut child, _pty, _descendant) =
+            super::test_contained_pty_tree(temp.path()).await;
+        job.contained_from_launch = false;
+        assert!(job
+            .stop_and_join_for_claude_mod(SESSION_ID, 7, child.as_mut())
+            .await
+            .is_err());
+        assert!(child.try_wait().unwrap().is_none());
+        job.contained_from_launch = true;
+        job.stop_and_join(child.as_mut()).await.unwrap();
+    }
 
     #[cfg(windows)]
     #[tokio::test]
