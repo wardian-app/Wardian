@@ -292,6 +292,186 @@ describe("normal Chat page polling", () => {
     hook.unmount();
   });
 
+  it("refreshes an admitted two-event preview within the original opening burst", async () => {
+    vi.useFakeTimers();
+    const latestBody = "Independently planned latest public assistant response.";
+    const earlier = [row("earlier-user", "Earlier public user message"),
+      { ...row("earlier-assistant", "Earlier public assistant response"), role: "assistant" as const }];
+    const preview = page("agent", { conversation_id: null, generation: null, source_epoch: null,
+      recent_admission: "opening-preview", revision: "opening-revision", progress: "provisional", events: earlier });
+    const enriched = page("agent", { conversation_id: null, generation: null, source_epoch: null,
+      recent_admission: "enriched-preview", revision: "enriched-revision", progress: "provisional",
+      events: [...earlier, { ...row("latest-assistant", latestBody), role: "assistant" as const }] });
+    const loader = vi.fn<ChatPageLoader>().mockResolvedValueOnce(preview).mockResolvedValue(enriched);
+    const hook = renderHook(() => useChatPages("agent", loader, 3_000, 0));
+    await act(async () => {});
+    expect(loader).toHaveBeenCalledTimes(1);
+    expect(hook.result.current.events.map((event) => event.id)).toEqual(["earlier-user", "earlier-assistant"]);
+    expect(hook.result.current.page?.recent_admission).toBe("opening-preview");
+    expect(hook.result.current.error).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(99); });
+    expect(loader).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(loader).toHaveBeenCalledTimes(2);
+    expect(loader.mock.calls[1][0]).toEqual({ sessionId: "agent", revision: "opening-revision" });
+    const events = hook.result.current.events;
+    expect(events[events.length - 1]?.text).toBe(latestBody);
+    expect(hook.result.current.page?.recent_admission).toBe("enriched-preview");
+    expect(hook.result.current.page?.conversation_id).toBeNull();
+    expect(hook.result.current.error).toBeNull();
+    hook.unmount();
+  });
+
+  it("keeps successive admitted preview windows inside the original opening schedule", async () => {
+    vi.useFakeTimers();
+    const latestBody = "Independently planned response after two partial recent windows.";
+    const earlier = [row("one", "Earlier one"), row("two", "Earlier two")];
+    const first = page("agent", { conversation_id: null, generation: null, source_epoch: null,
+      recent_admission: "first-preview", revision: "first-revision", progress: "provisional", events: earlier });
+    const second = { ...first, recent_admission: "second-preview", revision: "second-revision",
+      events: [...earlier, row("three", "Another earlier message")] };
+    const final = { ...second, recent_admission: "final-preview", revision: "final-revision",
+      events: [...second.events, { ...row("latest", latestBody), role: "assistant" as const }] };
+    const loader = vi.fn<ChatPageLoader>().mockResolvedValueOnce(first).mockResolvedValueOnce(second).mockResolvedValue(final);
+    const hook = renderHook(() => useChatPages("agent", loader, 3_000, 0));
+    await act(async () => {});
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(loader).toHaveBeenCalledTimes(2);
+    expect(hook.result.current.page?.recent_admission).toBe("second-preview");
+    expect(hook.result.current.events.some((event) => event.text === latestBody)).toBe(false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(loader).toHaveBeenCalledTimes(3);
+    expect(hook.result.current.page?.recent_admission).toBe("final-preview");
+    expect(hook.result.current.events.some((event) => event.text === latestBody)).toBe(true);
+    hook.unmount();
+  });
+
+  it.each(["ready", "provisional"])("keeps canonical nonempty %s pages on the ordinary cadence", async (progress) => {
+    vi.useFakeTimers();
+    const loader = vi.fn<ChatPageLoader>().mockResolvedValue(page("agent", { progress, events: [row("canonical")] }));
+    const hook = renderHook(() => useChatPages("agent", loader, 3_000, 0));
+    await act(async () => {});
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_999); });
+    expect(loader).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(loader).toHaveBeenCalledTimes(2);
+    hook.unmount();
+  });
+
+  it.each([false, true])("expires preview retries at the original empty-window boundary, changing admission: %s", async (changingAdmission) => {
+    vi.useFakeTimers();
+    const preview = page("agent", { conversation_id: null, generation: null, source_epoch: null,
+      recent_admission: "preview", progress: "provisional", events: [row("one"), row("two")] });
+    let refreshed = 0;
+    const loader = vi.fn<ChatPageLoader>().mockResolvedValueOnce(preview).mockImplementation(async () => {
+      refreshed++;
+      return changingAdmission ? { ...preview, revision: `revision-${refreshed}`, recent_admission: `preview-${refreshed}` }
+        : { ...preview, unchanged: true, events: [] };
+    });
+    const emptyLoader = vi.fn<ChatPageLoader>().mockResolvedValue(page("empty"));
+    const hook = renderHook(() => useChatPages("agent", loader, 3_000, 0));
+    const empty = renderHook(() => useChatPages("empty", emptyLoader, 3_000, 0));
+    await act(async () => {});
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    const count = loader.mock.calls.length;
+    expect(count).toBeGreaterThan(1);
+    expect(count).toBe(emptyLoader.mock.calls.length);
+    expect(hook.result.current.events.map((event) => event.id)).toEqual(["one", "two"]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_999); });
+    expect(loader).toHaveBeenCalledTimes(count);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(loader).toHaveBeenCalledTimes(count + 1);
+    expect(loader.mock.calls.length).toBe(emptyLoader.mock.calls.length);
+    hook.unmount(); empty.unmount();
+  });
+
+  it("stops preview burst eligibility after the current page becomes canonical", async () => {
+    vi.useFakeTimers();
+    const preview = page("agent", { conversation_id: null, generation: null, source_epoch: null,
+      recent_admission: "preview", progress: "provisional", events: [row("preview")] });
+    const canonical = page("agent", { reset: true, progress: "ready", events: [row("canonical")] });
+    const loader = vi.fn<ChatPageLoader>().mockResolvedValueOnce(preview).mockResolvedValue(canonical);
+    const hook = renderHook(() => useChatPages("agent", loader, 3_000, 0));
+    await act(async () => {});
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(hook.result.current.events.map((event) => event.id)).toEqual(["canonical"]);
+    expect(hook.result.current.page?.recent_admission).toBeUndefined();
+    await act(async () => { await vi.advanceTimersByTimeAsync(900); });
+    expect(loader).toHaveBeenCalledTimes(2);
+    hook.unmount();
+  });
+
+  it.each(["invalid", "foreign"])("does not acquire preview eligibility from a rejected %s response", async (kind) => {
+    vi.useFakeTimers();
+    const canonical = page("agent", { progress: "ready", events: [row("canonical")] });
+    const rejected = kind === "invalid" ? page("agent", { progress: "ready", recent_admission: "invalid", events: [row("invalid")] })
+      : page("foreign", { conversation_id: null, generation: null, source_epoch: null, progress: "provisional",
+        recent_admission: "foreign", events: [{ ...row("foreign"), session_id: "foreign" }] });
+    const loader = vi.fn<ChatPageLoader>().mockResolvedValueOnce(canonical).mockResolvedValue(rejected);
+    const hook = renderHook(({ reload }) => useChatPages("agent", loader, 3_000, reload), { initialProps: { reload: 0 } });
+    await act(async () => {});
+    hook.rerender({ reload: 1 });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(loader).toHaveBeenCalledTimes(2);
+    expect(hook.result.current.page).toEqual(canonical);
+    expect(hook.result.current.events.map((event) => event.id)).toEqual(["canonical"]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(loader).toHaveBeenCalledTimes(2);
+    hook.unmount();
+  });
+
+  it("does not issue preview reads while hidden or after window retirement", async () => {
+    vi.useFakeTimers();
+    const visibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    let visible = true;
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visible ? "visible" : "hidden" });
+    const loader = vi.fn<ChatPageLoader>().mockResolvedValue(page("agent", { conversation_id: null, generation: null,
+      source_epoch: null, recent_admission: "preview", progress: "provisional", events: [row("preview")] }));
+    const hook = renderHook(() => useChatPages("agent", loader, 3_000, 0));
+    try {
+      await act(async () => {});
+      visible = false;
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(loader).toHaveBeenCalledTimes(1);
+      hook.unmount(); visible = true;
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(loader).toHaveBeenCalledTimes(1);
+    } finally {
+      hook.unmount();
+      if (visibility) Object.defineProperty(document, "visibilityState", visibility);
+      else Reflect.deleteProperty(document, "visibilityState");
+    }
+  });
+
+  it("retains unsettled preview reads across session switches within the existing physical pool limits", async () => {
+    vi.useFakeTimers();
+    const heldA = deferred(); const heldB = deferred();
+    const counts = new Map<string, number>();
+    const loader = vi.fn<ChatPageLoader>((request) => {
+      const count = (counts.get(request.sessionId) ?? 0) + 1; counts.set(request.sessionId, count);
+      if (count > 1 && request.sessionId === "a") return heldA.promise;
+      if (count > 1 && request.sessionId === "b") return heldB.promise;
+      return Promise.resolve(page(request.sessionId, { conversation_id: null, generation: null, source_epoch: null,
+        recent_admission: `preview-${request.sessionId}`, progress: "provisional",
+        events: [{ ...row(request.sessionId), session_id: request.sessionId }] }));
+    });
+    const selected = renderHook(({ session }) => useChatPages(session, loader, 3_000, 0), { initialProps: { session: "a" } });
+    const other = renderHook(() => useChatPages("b", loader, 3_000, 0));
+    await act(async () => {});
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(counts.get("a")).toBe(2); expect(counts.get("b")).toBe(2);
+    selected.rerender({ session: "c" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(999); });
+    expect(counts.has("c")).toBe(false);
+    expect(counts.get("a")).toBe(2); expect(counts.get("b")).toBe(2);
+    await act(async () => { heldA.resolve(page("a", { events: [{ ...row("retired-a"), session_id: "a" }] })); await vi.advanceTimersByTimeAsync(0); });
+    expect(counts.get("c")).toBe(1);
+    expect(selected.result.current.events.map((event) => event.id)).toEqual(["c"]);
+    selected.unmount(); other.unmount();
+    await act(async () => { heldB.resolve(page("b")); await vi.advanceTimersByTimeAsync(0); });
+    expect(loader).toHaveBeenCalledTimes(5);
+  });
+
   it("ends rapid empty-window retries after the initial second", async () => {
     vi.useFakeTimers();
     const loader = vi.fn<ChatPageLoader>().mockResolvedValue(page("agent"));

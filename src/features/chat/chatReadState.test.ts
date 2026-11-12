@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentChatEvent, AgentChatPage } from "../../types";
-import { addChatSubmission, applyChatPage, canAdmitOlderChatPage, chatInputReceipt, chatReadProgress, MAX_LOADED_CHAT_BYTES, MAX_LOADED_CHAT_HEADERS, submittedChatEvent, utf8Window } from "./chatReadState";
+import { addChatSubmission, applyChatPage, canAdmitOlderChatPage, chatInputReceipt, chatReadProgress, chatRecentRefreshDelay, MAX_LOADED_CHAT_BYTES, MAX_LOADED_CHAT_HEADERS, submittedChatEvent, utf8Window } from "./chatReadState";
 
 const event = (id: string, metadata: Record<string, unknown> = {}): AgentChatEvent => ({
   id, session_id: "agent", provider: "codex", kind: "message", role: "user", text: "identical prompt",
@@ -15,6 +15,18 @@ const page = (events: AgentChatEvent[], overrides: Partial<AgentChatPage> = {}):
 });
 
 describe("bounded Chat state", () => {
+  it("shares the original empty-window spacing and opening budget with admitted previews only", () => {
+    for (const elapsed of [-1, 0, 99, 999, 1_000, 4_000]) {
+      for (const interval of [50, 3_000]) {
+        const emptyDelay = chatRecentRefreshDelay(interval, 5_000, 5_000 + elapsed, false);
+        expect(chatRecentRefreshDelay(interval, 5_000, 5_000 + elapsed, true, true)).toBe(emptyDelay);
+        expect(chatRecentRefreshDelay(interval, 5_000, 5_000 + elapsed, true)).toBe(interval);
+        expect(chatRecentRefreshDelay(interval, 5_000, 5_000 + elapsed, true, false)).toBe(interval);
+        expect(emptyDelay).toBe(elapsed >= 0 && elapsed < 1_000 ? Math.min(interval, 100) : interval);
+      }
+    }
+  });
+
   it("distinguishes bounded no-row, unavailable, disabled, and partial history from empty success", () => {
     expect(chatReadProgress("ready", false)).toBeNull();
     expect(chatReadProgress("provisional", false)).toContain("No public message");

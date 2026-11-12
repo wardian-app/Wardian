@@ -262,6 +262,12 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
               const fresh = applyChatPage([], next, "recent");
               latest.current = next; setPage(next); setEvents(fresh); setError(null);
               setBrowsingOlder(false); setLoadingOlder(false);
+              // A new admitted preview replaces the window, not its opening
+              // budget. This branch returns before the ordinary scheduler below.
+              if (latest.current.recent_admission != null) {
+                schedule(chatRecentRefreshDelay(pollInterval.current, openedAt.current, Date.now(),
+                  eventWindow.current.length > 0, true));
+              }
             } else {
               latest.current = null; setPage(null); setEvents([]); setError(null);
               setBrowsingOlder(false); setLoadingOlder(false); setLoading(true);
@@ -375,7 +381,9 @@ export function useChatPages(sessionId: string, loader: ChatPageLoader, interval
         }
       }
       const ordinaryDelay = olderDemand.current ? pollInterval.current
-        : chatRecentRefreshDelay(pollInterval.current, openedAt.current, Date.now(), eventWindow.current.length > 0);
+        : chatRecentRefreshDelay(pollInterval.current, openedAt.current, Date.now(), eventWindow.current.length > 0,
+          // Only admitted state can extend empty-window eligibility to a preview.
+          latest.current?.recent_admission != null && windowDirection.current === "recent");
       const delay = !olderDemand.current && queuedRefresh.current && !inFlight.current ? 0 : ordinaryDelay;
       if (!inFlight.current && !olderDemand.current) queuedRefresh.current = false;
       schedule(delay);

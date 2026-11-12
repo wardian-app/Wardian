@@ -1663,13 +1663,31 @@ test("reveals only the focused Off agent Saved Chat in the existing Overview wit
   await expect.poll(() => ipc.calls("list_provider_model_catalog")).toHaveLength(1);
   const openingCallIndex = (await ipc.calls()).length;
 
-  const descriptor = await page.evaluate(() => {
-    const native = (window as unknown as { __TAURI_INTERNALS__: { invoke: unknown } }).__TAURI_INTERNALS__;
-    Object.defineProperty(native, "invoke", { value: native.invoke, writable: false, configurable: false });
+  const descriptor = await page.evaluate((id) => {
+    const native = (window as unknown as { __TAURI_INTERNALS__: {
+      invoke(command: string, args?: Record<string, unknown>): Promise<unknown>;
+    } }).__TAURI_INTERNALS__;
+    const original = native.invoke;
+    let recentReads = 0;
+    // This case's synthetic backend begins with two earlier rows. Record every
+    // ordinary mock IPC call, then expose the full independently planned fixture
+    // only when the real consumer makes its next normal recent request.
+    const invoke = (command: string, args?: Record<string, unknown>) => {
+      const result = original(command, args);
+      if (command !== "load_agent_chat_page" || args?.sessionId !== id || args?.cursor != null) return result;
+      const first = recentReads++ === 0;
+      return result.then((value) => {
+        const dto = value as AgentChatPage;
+        return first ? { ...dto, revision: "opening-preview-revision", recent_admission: "opening-preview-admission",
+          events: dto.events.slice(0, 2).map((event) => ({ ...event,
+            metadata: { ...event.metadata, chat_source_admission: "opening-preview-admission" } })) } : dto;
+      });
+    };
+    Object.defineProperty(native, "invoke", { value: invoke, writable: false, configurable: false });
     Object.defineProperty(window, "__TAURI_INTERNALS__", { value: native, writable: false, configurable: false });
-    const invoke = Object.getOwnPropertyDescriptor(native, "invoke");
-    return { writable: invoke?.writable, configurable: invoke?.configurable };
-  });
+    const descriptor = Object.getOwnPropertyDescriptor(native, "invoke");
+    return { writable: descriptor?.writable, configurable: descriptor?.configurable };
+  }, owner);
   expect(descriptor).toEqual({ writable: false, configurable: false });
 
   // Execute the maintained native observer verbatim against real React/Dockview
@@ -1733,6 +1751,10 @@ test("reveals only the focused Off agent Saved Chat in the existing Overview wit
     await card.getByRole("textbox", { name: "Message agent", exact: true }).pressSequentially("saved-off-probe");
     await expect.poll(async () => (await readPassive()).phase.usableAt).not.toBeNull();
     const observed = await readPassive();
+    const ownedReceipts = observed.receipts.filter((receipt) => receipt.session === owner && receipt.requestSession === owner);
+    expect(ownedReceipts.length).toBeGreaterThanOrEqual(2);
+    expect(ownedReceipts[0].rows).toHaveLength(2);
+    expect(ownedReceipts[0].rows.every((row) => !row.target)).toBe(true);
     expect(observed.errors).toEqual([]);
     expect(observed.subscription.active).toBe(true);
     expect(observed.subscription.fault_count).toBe(0);

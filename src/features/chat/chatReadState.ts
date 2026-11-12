@@ -4,10 +4,16 @@ export const MAX_LOADED_CHAT_HEADERS = 640;
 export const MAX_LOADED_CHAT_BYTES = 2 * 1024 * 1024;
 export type ChatWindowDirection = "recent" | "older";
 
-/** Retry a newly opened empty window promptly, with a one-second burst limit. */
-export function chatRecentRefreshDelay(intervalMs: number, openedAt: number, now: number, hasEvents: boolean): number {
+/** Refresh empty windows and already-admitted recent previews within the original opening second. */
+export function chatRecentRefreshDelay(
+  intervalMs: number,
+  openedAt: number,
+  now: number,
+  hasEvents: boolean,
+  hasAdmittedRecentPreview = false,
+): number {
   const elapsed = now - openedAt;
-  return !hasEvents && elapsed >= 0 && elapsed < 1_000 ? Math.min(intervalMs, 100) : intervalMs;
+  return (!hasEvents || hasAdmittedRecentPreview) && elapsed >= 0 && elapsed < 1_000 ? Math.min(intervalMs, 100) : intervalMs;
 }
 
 /** Ignore absent and malformed receipts. A successful delivery alone proves no row. */

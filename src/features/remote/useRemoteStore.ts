@@ -502,11 +502,14 @@ const canRefreshSelectedChat = (get: RemoteGet) => isSelectedChatVisible(get) &&
 
 const scheduleSelectedChatRefresh = (set: RemoteSet, get: RemoteGet) => {
   if (!canRefreshSelectedChat(get) || isSelectedChatRefreshBlocked()) return;
+  const current = get();
   scheduleBackgroundActiveChatRefreshAt(
     set,
     get,
     Date.now() + chatRecentRefreshDelay(Math.min(15_000, SELECTED_CHAT_REFRESH_INTERVAL_MS * 2 ** Math.min(selectedChatUnchangedReads, 3)), activeChatOpenedAt,
-      Date.now(), get().chatEvents.length > 0),
+      Date.now(), current.chatEvents.length > 0,
+      current.chatPage?.session_id === current.activeAgentId && current.chatPage?.recent_admission != null
+        && !current.chatBrowsingOlder),
     "selected_poll",
   );
 };

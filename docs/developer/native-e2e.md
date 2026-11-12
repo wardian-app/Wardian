@@ -847,6 +847,18 @@ reopens are separate measurements. Each reopen uses the normal Roster action.
 Raw log inspection warms the
 filesystem, so these measurements do not establish OS-cold performance.
 
+Desktop and remote/PWA Chat keep their existing opening refresh burst for an
+already validated, admitted recent preview even when it contains earlier rows.
+Two provisional rows do not establish that the recent window is complete. Both
+consumers use the same existing minimum-of-interval-and-100ms spacing and original
+first-second budget; canonical nonempty windows keep their ordinary cadence and
+remote backoff. Preview admission comes from the current selected recent window,
+without granting Older authority or restarting the clock on unchanged responses,
+visibility changes or rejected foreign pages. This intentionally permits more
+bounded recent metadata requests. Hook/store fake-timer checks and one public
+React/Dockview partial-preview integration establish consumer behavior; they do
+not establish native latency sufficiency, unchanged physical IO or provider speed.
+
 Roster click, container lookup and mode lookup failures retain bounded failure-only
 registry and container/tab ownership/visibility metadata, including ambiguity.
 This capture reads no Chat body, performs no prewarm and preserves the original

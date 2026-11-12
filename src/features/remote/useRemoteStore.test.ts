@@ -71,6 +71,116 @@ function chatMessage(id: string, text: string, sequence: number): AgentChatEvent
 }
 
 describe("useRemoteStore watchlists", () => {
+  it("refreshes an admitted nonempty remote preview within the original opening burst", async () => {
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const latestBody = "Independently planned latest remote assistant response.";
+    const earlier = [chatMessage("earlier-one", "Earlier public message one", 1),
+      chatMessage("earlier-two", "Earlier public message two", 2)];
+    const preview: RemoteAgentChatPage = { ...chatPageFields, conversation_id: null, generation: null,
+      source_epoch: null, recent_admission: "opening-preview", revision: "opening-revision", progress: "provisional",
+      events: earlier, next_before: null };
+    const enriched: RemoteAgentChatPage = { ...preview, recent_admission: "enriched-preview", revision: "enriched-revision",
+      events: [...earlier, chatMessage("latest-remote", latestBody, 3)] };
+    vi.mocked(remoteClient.listAgents).mockResolvedValue([{ session_id: "agent-1", session_name: "Coder", agent_class: "Coder",
+      provider: "codex", workspace: "<absolute-workspace-path>", status: "Off", latest_text: null }]);
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValueOnce(preview).mockResolvedValue(enriched);
+    useRemoteStore.setState({ activeAgentViewModesById: { "agent-1": "chat" } });
+    try {
+      await useRemoteStore.getState().load();
+      await useRemoteStore.getState().openAgent("agent-1");
+      expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(1);
+      expect(useRemoteStore.getState().chatEvents.map((event) => event.id)).toEqual(["earlier-one", "earlier-two"]);
+      expect(useRemoteStore.getState().chatPage?.recent_admission).toBe("opening-preview");
+      expect(useRemoteStore.getState().chatError).toBe("");
+      await useRemoteStore.getState().loadOlderActiveAgentChat();
+      expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(99);
+      expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(remoteClient.loadAgentChatPage).mock.calls[1].slice(0, 3))
+        .toEqual(["agent-1", undefined, "opening-revision"]);
+      const events = useRemoteStore.getState().chatEvents;
+      expect(events[events.length - 1]?.text).toBe(latestBody);
+      expect(useRemoteStore.getState().chatPage?.recent_admission).toBe("enriched-preview");
+      expect(useRemoteStore.getState().chatError).toBe("");
+    } finally { visibility.mockRestore(); }
+  });
+
+  it.each([false, true])("expires nonempty remote preview retries at the original boundary, changing admission: %s", async (changingAdmission) => {
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    vi.mocked(remoteClient.listAgents).mockResolvedValue([{ session_id: "agent-1", session_name: "Coder", agent_class: "Coder",
+      provider: "codex", workspace: "<absolute-workspace-path>", status: "Off", latest_text: null }]);
+    const preview: RemoteAgentChatPage = { ...chatPageFields, conversation_id: null, generation: null,
+      source_epoch: null, recent_admission: "preview", progress: "provisional",
+      events: [chatMessage("one", "Earlier one", 1), chatMessage("two", "Earlier two", 2)], next_before: null };
+    let refreshed = 0;
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValueOnce(preview).mockImplementation(async () => {
+      refreshed++;
+      return changingAdmission ? { ...preview, revision: `revision-${refreshed}`, recent_admission: `preview-${refreshed}` }
+        : { ...preview, unchanged: true, events: [] };
+    });
+    useRemoteStore.setState({ activeAgentViewModesById: { "agent-1": "chat" } });
+    try {
+      await useRemoteStore.getState().load(); await useRemoteStore.getState().openAgent("agent-1");
+      await vi.advanceTimersByTimeAsync(1_000);
+      const count = vi.mocked(remoteClient.loadAgentChatPage).mock.calls.length;
+      expect(count).toBeGreaterThan(1);
+      expect(useRemoteStore.getState().chatEvents.map((event) => event.id)).toEqual(["one", "two"]);
+      await vi.advanceTimersByTimeAsync(2_999);
+      expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(count);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(count + 1);
+    } finally { visibility.mockRestore(); }
+  });
+
+  it.each(["invalid", "foreign"])("does not use a rejected %s remote preview as current burst authority", async (kind) => {
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    vi.mocked(remoteClient.listAgents).mockResolvedValue([{ session_id: "agent-1", session_name: "Coder", agent_class: "Coder",
+      provider: "codex", workspace: "<absolute-workspace-path>", status: "Off", latest_text: null }]);
+    const canonical: RemoteAgentChatPage = { ...chatPageFields, events: [chatMessage("canonical", "Current body", 1)], next_before: null };
+    const rejected: RemoteAgentChatPage = kind === "invalid" ? { ...canonical, recent_admission: "invalid" }
+      : { ...canonical, session_id: "foreign", conversation_id: null, generation: null, source_epoch: null,
+        recent_admission: "foreign", progress: "provisional", events: [{ ...chatMessage("foreign", "Foreign body", 1), session_id: "foreign" }] };
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValueOnce(canonical).mockResolvedValue(rejected);
+    useRemoteStore.setState({ activeAgentViewModesById: { "agent-1": "chat" } });
+    try {
+      await useRemoteStore.getState().load(); await useRemoteStore.getState().openAgent("agent-1");
+      const admittedEvents = useRemoteStore.getState().chatEvents;
+      await useRemoteStore.getState().refreshActiveAgentChat();
+      expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(2);
+      expect(useRemoteStore.getState().chatPage).toEqual(canonical);
+      expect(useRemoteStore.getState().chatEvents).toBe(admittedEvents);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(2);
+    } finally { visibility.mockRestore(); }
+  });
+
+  it("keeps a hidden remote preview on its original budget when visibility resumes", async () => {
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    vi.mocked(remoteClient.listAgents).mockResolvedValue([{ session_id: "agent-1", session_name: "Coder", agent_class: "Coder",
+      provider: "codex", workspace: "<absolute-workspace-path>", status: "Off", latest_text: null }]);
+    vi.mocked(remoteClient.loadAgentChatPage).mockResolvedValue({ ...chatPageFields, conversation_id: null,
+      generation: null, source_epoch: null, recent_admission: "preview", progress: "provisional",
+      events: [chatMessage("preview", "Earlier body", 1)], next_before: null });
+    useRemoteStore.setState({ activeAgentViewModesById: { "agent-1": "chat" } });
+    try {
+      await useRemoteStore.getState().load(); await useRemoteStore.getState().openAgent("agent-1");
+      visibility.mockReturnValue("hidden"); document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(1);
+      visibility.mockReturnValue("visible"); document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(remoteClient.loadAgentChatPage).toHaveBeenCalledTimes(2);
+    } finally { visibility.mockRestore(); }
+  });
+
   it("refreshes canonical DB rows across an Older window without fictitious source ACKs", async () => {
     const dbRow = (index: number, text: string): AgentChatEvent => ({
       ...chatMessage(`agent-1:${index.toString(16).padStart(16, "0")}:opencode_db:part-${index}`, text, index),
