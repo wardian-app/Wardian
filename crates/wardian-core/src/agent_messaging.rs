@@ -10,6 +10,9 @@ pub const MAX_RECEIVE_BODY_BYTES: usize = 128 * 1024;
 /// Serialized response bound, allowing JSON escaping of one maximum-size body.
 pub const MAX_RECEIVE_SERIALIZED_BYTES: usize = 512 * 1024;
 pub const MAX_RECEIVE_ITEMS: u32 = 100;
+/// Provider-only carry budget; canonical history is never truncated.
+pub const MAX_CARRIED_INFORMATION_ITEMS: usize = 10;
+pub const MAX_CARRIED_INFORMATION_BYTES: usize = 32 * 1024;
 
 /// Managed-origin operations; caller identity is supplied outside this payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -128,9 +131,11 @@ pub fn reply_continuation_prompt(context: &AgentMessageContext) -> String {
     } else {
         format!("{information}\n\n")
     };
+    let mut reply = context.clone();
+    reply.pending_information.clear();
     format!(
         "{information}Wardian delivered the terminal result for a task you requested. Continue this existing conversation using the result as appropriate. This is a reply continuation, not a new task, and it creates no reply obligation.\n\nCanonical reply context:\n{}",
-        serde_json::to_string(context).expect("AgentMessageContext is serializable")
+        serde_json::to_string(&reply).expect("AgentMessageContext is serializable")
     )
 }
 
@@ -150,9 +155,38 @@ pub fn pending_information_prompt(context: &AgentMessageContext) -> String {
     if context.pending_information.is_empty() {
         return String::new();
     }
+    // Keep the newest suffix in admission order. Never split a canonical body
+    // or recursively render a carried frame's own backlog.
+    let mut selected = Vec::new();
+    let mut bytes = 2;
+    let mut seen = std::collections::HashSet::new();
+    for information in context.pending_information.iter().rev() {
+        if selected.len() == MAX_CARRIED_INFORMATION_ITEMS {
+            break;
+        }
+        if !seen.insert(&information.interaction_id) {
+            continue;
+        }
+        let mut information = information.clone();
+        information.pending_information.clear();
+        let encoded = serde_json::to_vec(&information)
+            .expect("AgentMessageContext notifications are serializable");
+        if bytes + encoded.len() + 1 > MAX_CARRIED_INFORMATION_BYTES {
+            break;
+        }
+        bytes += encoded.len() + 1;
+        selected.push(information);
+    }
+    selected.reverse();
+    let omitted = context.pending_information.len() - selected.len();
+    let omission = if omitted == 0 {
+        String::new()
+    } else {
+        format!("\n{omitted} older informational messages omitted by the count or byte budget; see message history in Wardian for the full canonical records.")
+    };
     format!(
-        "Wardian carried these previously admitted informational messages into this turn. They do not create tasks or reply obligations:\n{}",
-        serde_json::to_string(&context.pending_information)
+        "Wardian carried these previously admitted informational messages into this turn. They do not create tasks or reply obligations:\n{}{omission}",
+        serde_json::to_string(&selected)
             .expect("AgentMessageContext notifications are serializable")
     )
 }
@@ -241,6 +275,60 @@ mod continuation_prompt_tests {
         assert!(carried[0].parent_interaction_id.is_none());
         assert!(carried[0].reply_status.is_none());
         assert!(!rendered.contains("\"request_id\":\"task-1\""));
+    }
+
+    #[test]
+    fn reply_renders_carried_information_once_without_mutating_context() {
+        let mut reply = frame(InteractionKind::Reply, "reply", "answer");
+        reply.pending_information.push(frame(
+            InteractionKind::Message,
+            "info",
+            "unique carried body",
+        ));
+        let original = reply.clone();
+        let prompt = reply_continuation_prompt(&reply);
+        assert_eq!(prompt.matches("unique carried body").count(), 1);
+        assert_eq!(reply, original);
+    }
+
+    #[test]
+    fn carried_information_is_bounded_and_points_to_history() {
+        let mut reply = frame(InteractionKind::Reply, "reply", "answer");
+        for index in 0..60 {
+            reply.pending_information.push(frame(
+                InteractionKind::Message,
+                &format!("info-{index}"),
+                &format!("body-{index:02}"),
+            ));
+        }
+        let prompt = reply_continuation_prompt(&reply);
+        assert!(!prompt.contains("body-00"));
+        assert!(prompt.contains("body-59"));
+        assert!(prompt.contains("50 older informational messages omitted"));
+        assert!(prompt.contains("message history in Wardian"));
+        assert_eq!(reply.pending_information.len(), 60);
+    }
+
+    #[test]
+    fn carried_information_byte_budget_excludes_oversized_and_nested_backlogs() {
+        let mut reply = frame(InteractionKind::Reply, "reply", "answer");
+        let mut info = frame(InteractionKind::Message, "info", "small body");
+        info.pending_information
+            .push(frame(InteractionKind::Message, "nested", "nested body"));
+        reply.pending_information.push(info.clone());
+        reply.pending_information.push(info);
+        let prompt = reply_continuation_prompt(&reply);
+        assert_eq!(prompt.matches("small body").count(), 1);
+        assert!(!prompt.contains("nested body"));
+        reply.pending_information.push(frame(
+            InteractionKind::Message,
+            "large",
+            &"x".repeat(MAX_CARRIED_INFORMATION_BYTES),
+        ));
+        let prompt = reply_continuation_prompt(&reply);
+        assert!(!prompt.contains(&"x".repeat(100)));
+        assert!(prompt.len() < MAX_CARRIED_INFORMATION_BYTES);
+        assert!(prompt.contains("message history in Wardian"));
     }
 
     #[test]
