@@ -54,3 +54,25 @@ command across lines.
 
 Never say `Memory saved` until the command returns success. Do not treat raw
 conversation logging or provider-native session history as memory.
+
+## Readable text and active memory limit
+
+Write one to three plain sentences for `save` and `update`. The CLI rejects
+whitespace-separated tokens longer than 48 characters, runs of 16 or more
+hexadecimal characters, and four identifier-like words within any eight words.
+Identifier-like words contain a digit, an internal dot or hyphen, an underscore,
+a path separator, `::`, or a lowercase-to-uppercase transition. Ordinary technical
+sentences with an issue number or file name still work. Put hashes and clusters
+of identifiers in `--evidence` or `--source` instead of memory text.
+
+Direct saves allow 25 active memories per agent and exact normalized scope.
+Stable and current kinds share the limit. Agent scope and each workspace scope
+count separately. At the cap, use `list`, then update or remove an existing memory
+instead of adding another. Updating alone does not free a slot. Existing records
+remain readable, editable, and removable even above the cap. An identical save
+with the same idempotency key can still be replayed at the cap.
+
+`list` includes `scope_counts`, with `workspace` (null for agent scope),
+`active_count`, and `cap` for agent scope and the selected workspace, including
+empty scopes. The prose check applies to CLI save/update only; batch consolidation
+and operator maintenance retain their existing policies.
