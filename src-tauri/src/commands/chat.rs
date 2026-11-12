@@ -1046,6 +1046,7 @@ async fn archive_agent_chat_events_bound(
                 stage: ChatTranscriptFailureStage::ProviderProjection,
                 message,
             })?;
+            recent_tags.apply(&mut result.events);
             result.background_stop = background_stop;
             let watch_only = result
                 .events

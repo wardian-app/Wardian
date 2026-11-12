@@ -20,8 +20,8 @@ pub(super) fn valid_ref(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// A publication-local cache of already hash-validated immutable seek nodes.
-/// Normal readers retain their existing per-read accounting and hard limits.
+/// An operation-local cache of already hash-validated immutable seek nodes.
+/// Each Store retains its existing hard byte and object limits.
 #[derive(Default)]
 pub(super) struct SeekCache {
     nodes: HashMap<String, Node>,

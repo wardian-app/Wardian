@@ -60,7 +60,6 @@ pub(super) async fn collect_agent_metrics_with_sampler(
     let global_logging = crate::utils::shell::load_shell_settings()
         .unwrap_or_default()
         .conversation_logging;
-    let capture_observation_sessions = state.background_capture.observation_sessions();
     for snapshot in &mut snapshots {
         snapshot.provider_generation = state
             .interactions
@@ -302,13 +301,10 @@ pub(super) async fn collect_agent_metrics_with_sampler(
 
                     // Provider-aware log parsing for status/query enrichment
                     if let Some(ref path) = *log_path_lock {
-                        // Capture admission is independent of the parser's
-                        // mtime. A failed archive pass must remain retryable on
-                        // an unchanged source during a later ordinary tick.
-                        if (wardian_core::identity::normalize_status(&status_before_log_work) == "off"
-                            || capture_observation_sessions.contains(&snap.session_id))
-                            && path.extension().is_some_and(|extension| extension == "jsonl")
-                        {
+                        // Observe LIVE sources independently of the parser's
+                        // mtime. The coordinator owns first/change admission,
+                        // settled no-ops and later-tick retries after failure.
+                        if path.extension().is_some_and(|extension| extension == "jsonl") {
                             if let Ok(source) = crate::commands::provider_log_acquisition::observe_provider_log_source(path) {
                                 background_captures.push(crate::state::background_capture::CaptureRequest {
                                     session_id: snap.session_id.clone(),

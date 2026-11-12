@@ -859,6 +859,19 @@ bounded recent metadata requests. Hook/store fake-timer checks and one public
 React/Dockview partial-preview integration establish consumer behavior; they do
 not establish native latency sufficiency, unchanged physical IO or provider speed.
 
+Ordinary telemetry also offers valid live JSONL source observations to the existing
+background capture coordinator, independently of the status transition and parser
+mtime watermark. The coordinator admits first or changed observations, coalesces
+in-flight work, suppresses workers for unchanged settled sources, and retains
+failed work for a later ordinary tick. Capture keeps runtime, source identity and
+logging-policy revalidation. Backend regressions exercise live sampled processes,
+the raw Mock history fixture and the normal queued recent prelude with the full
+80-row preview cohort. Canonical handoff still requires exact current-head coverage
+and a real Older cursor. The proof reuses hash-validated seek nodes within one
+request under the existing read limits; a deeper-history regression also covers
+a real head with at least 1,000 headers. These checks do not establish a historical native failure
+cause or native timing acceptance.
+
 Roster click, container lookup and mode lookup failures retain bounded failure-only
 registry and container/tab ownership/visibility metadata, including ambiguity.
 This capture reads no Chat body, performs no prewarm and preserves the original

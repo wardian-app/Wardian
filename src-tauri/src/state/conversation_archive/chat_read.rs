@@ -14,7 +14,7 @@ use wardian_core::conversations::write_json_atomic;
 use wardian_core::models::chat::{AgentChatEvent, AgentChatPage};
 use wardian_core::paths::agent_conversations_dir;
 
-use super::chat_read_store::{digest, valid_ref, Dependency, Store};
+use super::chat_read_store::{digest, valid_ref, Dependency, SeekCache, Store};
 use super::ConversationArchiveContext;
 
 #[path = "chat_archive_bootstrap.rs"]
@@ -1095,12 +1095,17 @@ fn recent_canonical_covers(
     {
         return Ok((false, store.bytes));
     }
+    // Identity and membership seeks share immutable nodes across the cohort.
+    // Keep reuse local to this proof and retain the Store's hard read limits.
+    let mut seeks = SeekCache::default();
     for binding in coverage {
         let identity = binding.native_key.as_ref().map_or_else(
             || digest(binding.event_id.as_bytes()),
             |key| recent_native_index_key(key),
         );
-        let Some(row_ref) = store.get(&published.identities, &identity)? else {
+        let Some(row_ref) =
+            store.get_reusing_nodes(&published.identities, &identity, &mut seeks)?
+        else {
             return Ok((false, store.bytes));
         };
         let row: Row = store.read(&row_ref)?;
@@ -1118,7 +1123,10 @@ fn recent_canonical_covers(
             || row.conversation_id != published.conversation_id
             || row.event.provider != snapshot.provider
             || !bound
-            || store.get(&published.root, &row.key)?.as_deref() != Some(row_ref.as_str())
+            || store
+                .get_reusing_nodes(&published.root, &row.key, &mut seeks)?
+                .as_deref()
+                != Some(row_ref.as_str())
         {
             return Ok((false, store.bytes));
         }

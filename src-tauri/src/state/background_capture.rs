@@ -151,6 +151,7 @@ impl BackgroundCaptureCoordinator {
 
     /// Existing stopped/error owners remain observable through ordinary ticks,
     /// including status-triggered owners whose runtime is currently active.
+    #[cfg(test)]
     pub(crate) fn observation_sessions(&self) -> std::collections::HashSet<String> {
         self.inner
             .lock()
