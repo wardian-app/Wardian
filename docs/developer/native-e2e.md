@@ -807,6 +807,11 @@ response alone cannot qualify an unadmitted page. Both animation-frame witnesses
 also retain the same actual container, panel and tab nodes; reused body/scroll
 nodes cannot hide a container replacement. Any display-slot alias requires
 the response's actual alias proof.
+Usability freshly validates the same painted node and row identity, scope, members,
+window and DOM references through both frames. Another equal-text row becoming first
+cannot replace that subject. `matchingBodySlots` remains a reported diagnostic count;
+it is neither identity nor a unique-body-slot claim. Changes to unrelated matching
+rows do not invalidate an otherwise valid latched subject.
 Readable timing retains the independent full raw assistant body/hash in the RPC
 proof. Before App startup, the existing Markdown parser prepares a bounded
 rendered-text witness; plain Mock text retains whole-text matching. The actual
@@ -819,8 +824,14 @@ null for that route, with a separate observed automatic-exposure timestamp. Live
 Terminal measurements retain the trusted Chat toggle. The original trusted Roster
 selection/open clock must satisfy both readable and usable endpoints in less than
 one second; neither route resets it. Usability requires trusted unsent composer
-input, or actual scrolling when the owned viewport has overflow. A non-overflowing
-Saved view uses the enabled empty composer without submission or model discovery.
+input, or actual scrolling when the owned viewport has overflow. The owned visible
+enabled empty composer is preferred even for overflowing Saved views. Only the
+unsent probe is typed, without Enter, clearing or overwriting a draft, submission,
+model discovery or wake. If no safe composer exists, an overflowing owned viewport
+uses a trusted wheel. Its baseline comes from the existing DOM metadata read before
+the action, so compositor scrolling before the event handler cannot erase it.
+Both an actual trusted event inside that region and an offset change are required.
+There is no retry or fallback after a failed probe; no safe control fails honestly.
 The fixture never toggles Off Chat away or loads history to manufacture activation
 or overflow. Both paint and trusted interaction retain the same admitted body and
 scope through two animation frames. Live cold/warm and small Mock Saved-Off cold/warm
@@ -837,6 +848,14 @@ metadata: mode, mounted Chat or suspended placeholder, ownership/tab geometry,
 scope/member presence, observer activation and request/settlement/error counters.
 These later captures make no registry or other IPC request, preserve the original
 exception and NULL endpoints, and do not retry or extend the measurement deadline.
+They also retain the chosen control and reason, planned/current composer flags,
+latched-subject validity versus the current first candidate, and actual wheel
+baseline/event/after offsets with received/changed flags, without body or draft text.
+At existing realm teardown, the one disposal operation returns a separate actual
+post-unsubscribe token/status and callback/error counters before closing the realm.
+The last pre-disposal observation is retained separately. Missing historical
+acknowledgements and unassigned historical wheel failures remain unobserved; a new
+controlled green does not establish the cause or success of an older native case.
 
 After timing, genuine wheel/button actions load Older pages through opaque
 cursors and expand the declared 60,000-byte body. The fixture preserves both

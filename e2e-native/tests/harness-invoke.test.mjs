@@ -42,10 +42,16 @@ function observationHarness(invoke, options = {}) {
   let identity = { id: "public-id", members: null };
   let key = "public-id";
   const rawBody = options.body ?? chatAcceptanceFixture().latestBody;
+  const row = { isConnected: true, parentElement: null,
+    getAttribute: (name) => name === "data-chat-row-key" ? key
+      : name === "data-chat-row-identity" ? JSON.stringify(identity) : null };
   const content = { textContent: options.renderedText ?? rawBody, isConnected: true, parentElement: null,
     getAttribute: () => null,
-    closest: () => ({ getAttribute: (name) => name === "data-chat-row-key" ? key : JSON.stringify(identity) }) };
+    closest: () => row };
+  let candidates = [content];
+  let composers = [];
   const scroll = { scrollTop: 100, scrollHeight: 1000, clientHeight: 500,
+    contains(node) { for (let current = node; current; current = current.parentElement) if (current === this) return true; return false; },
     getBoundingClientRect: () => ({ top: 0, bottom: 500, left: 0, right: 500 }),
     getAttribute: () => JSON.stringify(admitted) };
   const element = (attributes, parentElement = null) => ({
@@ -92,8 +98,10 @@ function observationHarness(invoke, options = {}) {
       "data-surface-id": surfaceId, "data-resource-key": owner }, panel);
     const root = kind === "agents-overview" ? element({ "data-agent-grid-card-id": owner }, semantic) : semantic;
     root.querySelector = (selector) => selector.includes("Switch to Terminal") ? (chatMode ? {} : null)
-      : shown && chatMode ? scroll : null;
-    root.querySelectorAll = () => shown && chatMode ? [content] : [];
+      : selector.includes("Switch to Chat") ? (chatMode ? null : {})
+        : !shown || !chatMode ? null : selector.includes("scroll-region") ? scroll
+          : selector.includes("textarea") ? composers[0] ?? null : null;
+    root.querySelectorAll = (selector = "") => !shown || !chatMode ? [] : selector.includes("textarea") ? composers : candidates;
     root.findElement = async (selector) => {
       assert.equal(selector, "ancestor::*[@role='tabpanel'][1]");
       return root.closest('[role="tabpanel"]');
@@ -106,8 +114,13 @@ function observationHarness(invoke, options = {}) {
     return route;
   };
   let route = addContainer(options.route);
-  content.parentElement = route.root;
+  row.parentElement = scroll;
+  content.parentElement = row;
   scroll.parentElement = route.root;
+  const composer = (settings = {}) => Object.assign(element({ "aria-label": "Message agent" }, route.root), {
+    value: "", disabled: false, readOnly: false,
+    getBoundingClientRect: () => ({ top: 400, bottom: 440, left: 10, right: 400, width: 390, height: 40 }), ...settings,
+  });
   const document = { documentElement: {}, activeElement: null, visibilityState: "visible",
     querySelectorAll: (selector) => {
       const nodes = selector.includes('role="tab"') ? routes.map((item) => item.tab)
@@ -118,10 +131,10 @@ function observationHarness(invoke, options = {}) {
       .find((node) => node.getAttribute("id") === id) ?? null,
     addEventListener: (type, callback) => listeners.set(type, callback),
     removeEventListener: (type, callback) => { if (listeners.get(type) === callback) listeners.delete(type); },
-    createTreeWalker: () => {
+    createTreeWalker: (root) => {
       let offset = 0;
-      const nodes = (options.textSegments ?? [content.textContent]).map((text) => {
-        const node = { textContent: text, parentElement: content, offset };
+      const nodes = (options.textSegments ?? [root.textContent]).map((text) => {
+        const node = { textContent: text, parentElement: root, offset };
         offset += text.length;
         return node;
       });
@@ -135,7 +148,7 @@ function observationHarness(invoke, options = {}) {
       return { selectNodeContents() { whole = true; },
         setStart(node, offset) { start = { node, offset }; }, setEnd(node, offset) { end = { node, offset }; },
         toString: () => start?.node === end?.node ? start.node.textContent.slice(start.offset, end.offset)
-          : content.textContent.slice(start.node.offset + start.offset, end.node.offset + end.offset),
+          : start.node.parentElement.textContent.slice(start.node.offset + start.offset, end.node.offset + end.offset),
         getClientRects: () => [whole ? rect : needleRect ?? rect] };
     } };
   const bridge = createChatPageObservation();
@@ -154,7 +167,17 @@ function observationHarness(invoke, options = {}) {
   observer.bind("session");
   observer.arm("cold");
   return {
-    observer, document, content, route, window: context.window, bridge,
+    observer, document, content, row, scroll, route, window: context.window, bridge,
+    duplicate(id) {
+      const twinRow = { isConnected: true, parentElement: scroll,
+        getAttribute: (name) => name === "data-chat-row-key" ? id
+          : name === "data-chat-row-identity" ? JSON.stringify({ id, members: null }) : null };
+      return { textContent: content.textContent, isConnected: true, parentElement: twinRow,
+        getAttribute: () => null, closest: () => twinRow };
+    },
+    candidates(value) { candidates = value; },
+    composer(settings) { composers = settings === null ? [] : [composer(settings)]; return composers[0] ?? null; },
+    composers(settings) { composers = settings.map(composer); return composers; },
     listenerCount: () => listeners.size, disconnected: () => disconnected,
     wrapper(...args) {
       const result = Reflect.apply(context.window.__TAURI_INTERNALS__.invoke, this, args);
@@ -165,7 +188,9 @@ function observationHarness(invoke, options = {}) {
     replaceContainer() {
       route.root.isConnected = false;
       route = addContainer(route.kind);
-      content.parentElement = route.root; scroll.parentElement = route.root;
+      for (const candidate of candidates) candidate.closest().parentElement = scroll;
+      for (const input of composers) input.parentElement = route.root;
+      scroll.parentElement = route.root;
       return route;
     },
     clock(value) { clock = value; }, shown(value) { shown = value; }, rectangle(value) { rect = value; },
@@ -192,14 +217,19 @@ function observationHarness(invoke, options = {}) {
       if (trusted && owned) chatMode = true;
     },
     input(trusted = true, owned = true) {
-      const target = { owned, value: "native-input-probe", getAttribute: () => "Message agent" };
+      const target = composer({ owned, value: "native-input-probe" });
+      if (owned) composers = [target];
       document.activeElement = target;
       listeners.get("input")({ isTrusted: trusted, target });
       return target;
     },
-    wheel(trusted, nextTop) {
-      listeners.get("wheel")({ isTrusted: trusted, target: { owned: true }, deltaY: -20 });
-      scroll.scrollTop = nextTop;
+    wheel(trusted, nextTop, timing = "after-handler") {
+      // A real driver can read this baseline before dispatch; old observation
+      // has no preparation boundary and instead samples after compositor scroll.
+      observer.prepareInteraction?.("session", scroll);
+      if (timing === "before-handler") scroll.scrollTop = nextTop;
+      listeners.get("wheel")({ isTrusted: trusted, target: scroll, deltaY: -20 });
+      if (timing === "after-handler") scroll.scrollTop = nextTop;
     },
     menu(owned = true) {
       const button = { owned, textContent: "Message actions" };
@@ -471,9 +501,53 @@ function rosterMeasurement(driver, evidence, visible, ownedSurface, extensions =
   const start = source.indexOf("async function measureChat(driver,");
   const end = source.indexOf("async function closeTerminalSurface(driver,", start);
   assert.ok(start >= 0 && end > start);
-  return vm.runInNewContext(`${source.slice(start, end)}\nmeasureChat(driver, "session", "test-phase", "Owned Saved", evidence, false);`,
-    { driver, evidence, visible, ownedSurface, captureRosterDiagnostics() {}, assert, ...extensions });
+  return vm.runInNewContext(`${source.slice(start, end)}\nmeasureChat(driver, "session", "test-phase", "Owned Saved", evidence, requireTerminalToggle);`,
+    { driver, evidence, visible, ownedSurface, captureRosterDiagnostics() {}, assert, requireTerminalToggle: false, ...extensions });
 }
+
+test("Saved overflow prefers its already-safe empty composer over wheel input", async () => {
+  const actions = [];
+  const input = { isEnabled: async () => true, isDisplayed: async () => true,
+    getAttribute: async () => "", sendKeys: async (...keys) => actions.push(["keyboard", ...keys]) };
+  const phase = { rosterAt: 0, chatAt: null, exposureAt: 5, exposureKind: "automatic", commitAt: 10,
+    paintAt: 20, usableAt: 30, body: { receiptAt: 4 } };
+  const state = { phase, phases: [phase], activation: { active: true, owner: "session", at: 0 },
+    coverage: "PAGE_LOADER_ONLY", broaderIpcRuntime: "UNOBSERVED",
+    calls: [{ session: "session", at: 1 }], receipts: [{ session: "session", requestSession: "session", at: 4 }] };
+  const driver = {
+    executeScript: async () => ({ overflow: true, top: 100, input, control: "keyboard", reason: "safe_empty_composer" }),
+    wait: async () => true,
+    actions: () => ({ scroll: () => ({ perform: async () => actions.push(["wheel"]) }) }),
+  };
+  const visible = async (_driver, selector) => selector.includes("Switch to Chat")
+    ? { getAttribute: async () => "Switch to Terminal" }
+    : selector.includes("textarea") ? input : { click: async () => {} };
+  await rosterMeasurement(driver, { rosterFailures: [] }, visible, async () => ({}), { readObservation: async () => state });
+  assert.deepEqual(actions, [["keyboard", "native-input-probe"]], "send only the probe, without submitting or clearing a draft");
+});
+
+test("a draft appearing after planning fails without typing, clearing or trying wheel", async () => {
+  const actions = [];
+  const input = { isEnabled: async () => true, isDisplayed: async () => true,
+    getAttribute: async () => "existing-owned-draft", sendKeys: async () => actions.push("keyboard") };
+  const driver = { executeScript: async () => ({ control: "keyboard", input, overflow: true, top: 100 }),
+    wait: async () => true, actions: () => ({ scroll: () => ({ perform: async () => actions.push("wheel") }) }) };
+  const visible = async (_driver, selector) => selector.includes("Switch to Chat")
+    ? { getAttribute: async () => "Switch to Terminal" } : { click: async () => {} };
+  await assert.rejects(rosterMeasurement(driver, { rosterFailures: [] }, visible, async () => ({})),
+    /fixture must not replace an existing draft/);
+  assert.deepEqual(actions, []);
+});
+
+test("live measurements still require the actual Terminal to Chat toggle before any probe", async () => {
+  let probes = 0;
+  const driver = { executeScript: async () => {}, actions: () => { probes++; } };
+  const visible = async (_driver, selector) => selector.includes("Switch to Chat")
+    ? { getAttribute: async () => "Switch to Terminal" } : { click: async () => {} };
+  await assert.rejects(rosterMeasurement(driver, { rosterFailures: [] }, visible, async () => ({}),
+    { requireTerminalToggle: true }), /live Terminal measurement requires its real Chat toggle/);
+  assert.equal(probes, 0);
+});
 
 test("Roster failure metadata distinguishes registry membership from bounded visible rows without changing results", async () => {
   const agents = Array.from({ length: 70 }, (_, index) => ({
@@ -561,6 +635,8 @@ test("late toggle, paint, input, usability and assertion failures preserve their
       const original = new Error(`original ${stage}`);
       const evidence = { rosterFailures: [] };
       let waits = 0; let captures = 0; let registryCalls = 0;
+      const input = { isEnabled: async () => true, isDisplayed: async () => true, getAttribute: async () => "",
+        sendKeys: async () => { if (stage === "input") throw original; } };
       const driver = {
         executeScript: async (fn) => {
           if (fn.name === "captureChatFailureMetadata") {
@@ -568,7 +644,7 @@ test("late toggle, paint, input, usability and assertion failures preserve their
             if (captureFails) throw new Error("secondary capture");
             return { status: "OBSERVED_LATE_DOM" };
           }
-          return { overflow: false, top: 0 };
+          return { overflow: false, top: 0, input, control: "keyboard", reason: "safe_empty_composer" };
         },
         executeAsyncScript: async () => { registryCalls++; throw new Error("late registry RPC forbidden"); },
         wait: async (_callback, timeout) => {
@@ -579,8 +655,7 @@ test("late toggle, paint, input, usability and assertion failures preserve their
       };
       const visible = async (_driver, selector) => selector.includes("Switch to Chat")
         ? { getAttribute: async () => "Switch to Chat", click: async () => { if (stage === "chat-toggle") throw original; } }
-        : selector.includes("textarea") ? { isEnabled: async () => true, getAttribute: async () => "",
-          sendKeys: async () => { if (stage === "input") throw original; } } : { click: async () => {} };
+        : selector.includes("textarea") ? input : { click: async () => {} };
       await assert.rejects(rosterMeasurement(driver, evidence, visible, async () => ({}), {
         captureChatFailureMetadata() {},
         readObservation: async () => { if (stage === "assertions") throw original; },
@@ -719,6 +794,168 @@ test("only trusted owned Chat input starts the original selection clock", () => 
   harness.clock(900);
   harness.click();
   assert.equal(harness.observer.state.phase.chatAt, 41);
+});
+
+for (const schedule of ["different-id becomes first", "diagnostic population changes"]) {
+  test(`usability keeps the valid painted subject when ${schedule}`, async () => {
+    const page = actualPage();
+    page.events.push({ ...page.events[0], id: "different-id", turn_id: "different-turn" });
+    const harness = observationHarness(() => Promise.resolve(page));
+    const twin = harness.duplicate("different-id");
+    harness.candidates([harness.content, twin]);
+    harness.mode("chat"); harness.roster();
+    await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+    harness.observer.sample(); harness.frame(); harness.frame();
+    const painted = harness.observer.state.phase;
+    assert.equal(painted.body.eventId, "public-id");
+    assert.equal(painted.body.matchingBodySlots, 2);
+    const paintAt = painted.paintAt;
+    if (schedule === "different-id becomes first") harness.candidates([twin, harness.content]);
+    else twin.textContent = "Unrelated synthetic diagnostic population.";
+    harness.observer.sample();
+    harness.input(); harness.frame(); harness.frame();
+    assert.notEqual(painted.usableAt, null, "valid original subject must qualify regardless of another matching row");
+    assert.equal(painted.paintAt, paintAt);
+    assert.equal(painted.body.eventId, "public-id", "no replacement duplicate can become the measured body");
+  });
+}
+
+test("two-frame paint validates its original candidate when a different matching ID becomes first", async () => {
+  const page = actualPage();
+  page.events.push({ ...page.events[0], id: "different-id", turn_id: "different-turn" });
+  const harness = observationHarness(() => Promise.resolve(page));
+  const twin = harness.duplicate("different-id");
+  harness.candidates([harness.content, twin]);
+  harness.mode("chat"); harness.roster();
+  await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+  harness.observer.sample(); harness.frame();
+  harness.candidates([twin, harness.content]);
+  harness.frame();
+  assert.notEqual(harness.observer.state.phase.paintAt, null);
+  assert.equal(harness.observer.state.phase.body.eventId, "public-id");
+});
+
+test("a compositor scroll before the trusted wheel handler uses the pre-action baseline", async () => {
+  const harness = observationHarness(() => Promise.resolve(actualPage()));
+  harness.mode("chat"); harness.roster();
+  await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+  harness.observer.sample(); harness.frame(); harness.frame();
+  const baseline = harness.scroll.scrollTop;
+  harness.wheel(true, baseline - 20, "before-handler");
+  harness.frame(); harness.frame();
+  assert.notEqual(harness.observer.state.phase.usableAt, null,
+    "the unchanged valid subject and a real trusted offset change must not lose the earlier baseline");
+  const wheel = harness.observer.interactionStatus().wheel;
+  assert.equal(wheel.before, baseline);
+  assert.equal(wheel.eventTop, baseline - 20);
+  assert.equal(wheel.after, baseline - 20);
+  assert.equal(wheel.received, true);
+  assert.equal(wheel.changed, true);
+});
+
+test("event-first scrolling waits for the actual change and then the full two-frame witness", async () => {
+  const harness = observationHarness(() => Promise.resolve(actualPage()));
+  harness.mode("chat"); harness.roster();
+  await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+  harness.observer.sample(); harness.frame(); harness.frame();
+  const before = harness.scroll.scrollTop;
+  harness.wheel(true, before - 20, "after-handler");
+  harness.frame(); harness.frame();
+  assert.equal(harness.observer.state.phase.usableAt, null);
+  harness.frame();
+  assert.notEqual(harness.observer.state.phase.usableAt, null);
+  const wheel = harness.observer.interactionStatus().wheel;
+  assert.equal(wheel.before, before);
+  assert.equal(wheel.eventTop, before);
+  assert.equal(wheel.after, before - 20);
+});
+
+for (const invalid of ["hidden", "detached", "member", "row-id", "window", "container", "unproved-alias"]) {
+  test(`a valid duplicate cannot replace the painted subject after ${invalid} changes`, async () => {
+    const page = actualPage();
+    page.events.push({ ...page.events[0], id: "different-id", turn_id: "different-turn" });
+    const harness = observationHarness(() => Promise.resolve(page));
+    const twin = harness.duplicate("different-id");
+    harness.candidates([harness.content, twin]);
+    harness.mode("chat"); harness.roster();
+    await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+    harness.observer.sample(); harness.frame(); harness.frame();
+    const paintAt = harness.observer.state.phase.paintAt;
+    if (invalid === "hidden") harness.content.style = { visibility: "hidden", display: "block", opacity: "1" };
+    if (invalid === "detached") harness.content.isConnected = false;
+    if (invalid === "member") harness.identity({ id: "public-id", members: ["unadmitted-member"] });
+    if (invalid === "row-id") harness.identity({ id: "foreign-id", members: null });
+    if (invalid === "window") harness.admitted({ revision: "new-window" });
+    if (invalid === "container") harness.replaceContainer();
+    if (invalid === "unproved-alias") harness.key("unproved-slot");
+    harness.observer.sample(); harness.input(); harness.frame(); harness.frame();
+    assert.equal(harness.observer.state.phase.usableAt, null);
+    assert.equal(harness.observer.state.phase.paintAt, paintAt);
+    assert.equal(harness.observer.state.phase.body.eventId, "public-id");
+    assert.equal(harness.observer.subjectStatus().latchedValid, false);
+  });
+}
+
+test("the actual planner prefers a safe empty composer with overflow and never changes an unsafe draft", async () => {
+  const harness = observationHarness(() => Promise.resolve(actualPage()));
+  harness.mode("chat"); harness.roster();
+  await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+  harness.observer.sample(); harness.frame(); harness.frame();
+  const safe = harness.composer({});
+  const plan = harness.observer.prepareInteraction("session", harness.scroll);
+  assert.equal(plan.overflow, true);
+  assert.equal(plan.control, "keyboard");
+  assert.equal(plan.input, safe);
+  assert.equal(safe.value, "");
+  assert.equal(harness.observer.state.phase.usableAt, null, "planning is not trusted input");
+  for (const settings of [{ value: "pre-existing-private-draft" }, { disabled: true }, { readOnly: true },
+    { hidden: true }, { style: { visibility: "hidden", display: "block", opacity: "1" } }]) {
+    const node = harness.composer(settings);
+    const before = node.value;
+    const fallback = harness.observer.prepareInteraction("session", harness.scroll);
+    assert.equal(fallback.control, "wheel");
+    assert.equal(fallback.input, null);
+    assert.equal(node.value, before);
+    assert.equal(JSON.stringify(harness.observer.interactionStatus()).includes("pre-existing-private-draft"), false);
+  }
+  harness.composers([{}, {}]);
+  assert.equal(harness.observer.prepareInteraction("session", harness.scroll).reason, "composer_ambiguous");
+  harness.composer(null); harness.overflow(false);
+  assert.equal(harness.observer.prepareInteraction("session", harness.scroll).control, "none");
+});
+
+test("actual wheel acknowledgement requires both the trusted owned event and an offset change", async () => {
+  for (const [trusted, change] of [[false, true], [true, false]]) {
+    const harness = observationHarness(() => Promise.resolve(actualPage()));
+    harness.mode("chat"); harness.roster();
+    await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+    harness.observer.sample(); harness.frame(); harness.frame();
+    harness.wheel(trusted, harness.scroll.scrollTop - (change ? 20 : 0), "before-handler");
+    harness.frame(); harness.frame(); harness.frame();
+    assert.equal(harness.observer.state.phase.usableAt, null);
+    const wheel = harness.observer.interactionStatus().wheel;
+    assert.equal(wheel.received, trusted);
+    assert.equal(wheel.changed, change);
+  }
+});
+
+test("post-disposal acknowledgement comes from the actual unsubscribe and leaves the pre-disposal observation intact", async () => {
+  const harness = observationHarness(() => Promise.resolve(actualPage()));
+  await harness.wrapper("load_agent_chat_page", { sessionId: "session" });
+  const before = JSON.parse(JSON.stringify(harness.observer.state));
+  const token = before.activation.token;
+  const ack = harness.observer.dispose();
+  assert.equal(ack.status, "OBSERVED_POST_DISPOSE");
+  assert.equal(ack.disposed, true);
+  assert.equal(ack.token, token);
+  assert.equal(ack.subscription.active, false);
+  assert.equal(harness.observer.subscriptionStatus().active, false);
+  assert.equal(ack.callback_count, 1);
+  assert.equal(ack.callback_fault_count, 0);
+  assert.equal(ack.request_count, 1);
+  assert.equal(before.disposed, false);
+  assert.equal(before.activation.token, token);
+  assert.equal(JSON.stringify(ack).includes(chatAcceptanceFixture().latestBody), false);
 });
 
 test("readable body qualification requires actual receipt identity and two animation frames", async () => {

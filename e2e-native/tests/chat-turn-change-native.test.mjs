@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { By, Key } from "selenium-webdriver";
+import { By } from "selenium-webdriver";
 
 import {
   createNativeHarness,
@@ -28,6 +28,7 @@ function installChatObservation(config) {
     captureCostMs: 0, coverage: "PAGE_LOADER_ONLY", broaderIpcRuntime: "UNOBSERVED", activation: null, rejections: 0, disposed: false };
   let retired = false;
   let subscription = null;
+  let disposalReceipt = null;
   // Queued frame callbacks may outlive the subscription; never admit their writes.
   const frame = (callback) => requestAnimationFrame(() => { if (!retired) callback(); });
   const bounded = (value) => typeof value === "string" && value.length <= 1024 ? value : null;
@@ -92,9 +93,10 @@ function installChatObservation(config) {
     && (scope.admission === null || bounded(scope.admission))
     ? JSON.stringify([scope.session, scope.conversation, scope.generation, scope.epoch, scope.revision, scope.admission]) : null;
   const parse = (value) => { try { return JSON.parse(value); } catch { return null; } };
-  const sameBody = (left, right) => left && right && left.node === right.node && left.scroll === right.scroll
+  const sameBody = (left, right) => left && right && left.node === right.node && left.row === right.row && left.scroll === right.scroll
     && ["node", "panel", "tabpanel", "tab", "host", "portal", "dockRoot"].every((key) => left.container[key] === right.container[key])
-    && JSON.stringify({ ...left.evidence, receiptAt: null }) === JSON.stringify({ ...right.evidence, receiptAt: null });
+    && JSON.stringify({ ...left.evidence, receiptAt: null, matchingBodySlots: null })
+      === JSON.stringify({ ...right.evidence, receiptAt: null, matchingBodySlots: null });
   let inputEvidence = null;
   let wheelEvidence = null;
   let paintedBody = null;
@@ -185,7 +187,7 @@ function installChatObservation(config) {
     },
       () => { if (!retired) state.rejections++; }); } catch (error) { fail(error); }
   };
-  const visibleBody = () => {
+  const visibleBody = (subject = null) => {
     if (document.visibilityState !== "visible") return null;
     const container = ownedContainer();
     const root = container?.node;
@@ -198,11 +200,14 @@ function installChatObservation(config) {
       || (config.conversation != null && admitted.conversation !== config.conversation)) return null;
     const region = scroll.getBoundingClientRect();
     const contents = Array.from(root.querySelectorAll('article[aria-label="assistant message"] .chat-message-content'));
-    for (const content of contents) {
+    // A duplicate may become first without changing the measured subject.
+    // Revalidate the requested node; never fall back to another equal-text row.
+    for (const content of subject ? contents.filter((node) => node === subject.node) : contents) {
       if (!content.isConnected || !readable(content)) continue;
       const range = textRange(content);
       if (!range) continue;
       const slot = content.closest("[data-chat-row-key]");
+      if (!slot?.isConnected || !root.contains(slot)) continue;
       const key = slot?.getAttribute("data-chat-row-key");
       const identity = parse(slot?.getAttribute("data-chat-row-identity"));
       const receipt = state.receipts.findLast((item) => item.session === state.owner
@@ -217,7 +222,7 @@ function installChatObservation(config) {
       if (!rects.some((rect) => rect.width > 0 && rect.height > 0
         && rect.bottom > Math.max(0, region.top) && rect.top < Math.min(innerHeight, region.bottom)
         && rect.right > Math.max(0, region.left) && rect.left < Math.min(innerWidth, region.right))) continue;
-      return { node: content, scroll, container, evidence: { key, eventId: identity.id, members: identity.members,
+      return { node: content, row: slot, scroll, container, evidence: { key, eventId: identity.id, members: identity.members,
         container: container.identity,
         session: receipt.session, receiptAt: receipt.at, window: receipt.revision, revision: receipt.revision, generation: receipt.generation,
         epoch: receipt.epoch, conversation: receipt.conversation, admission: receipt.admission,
@@ -226,14 +231,27 @@ function installChatObservation(config) {
     }
     return null;
   };
+  const composerState = (root) => {
+    const composers = root ? Array.from(root.querySelectorAll('textarea[aria-label="Message agent"]')) : [];
+    const candidate = composers.length === 1 ? composers[0] : null;
+    const rect = candidate?.getBoundingClientRect();
+    const bounds = root?.getBoundingClientRect();
+    return { candidate, flags: { present: composers.length > 0, unique: composers.length === 1,
+      visible: Boolean(candidate?.isConnected && !candidate.hidden && root.contains(candidate) && readable(candidate)
+        && document.visibilityState === "visible" && rect.width > 0 && rect.height > 0
+        && rect.right > Math.max(0, bounds.left) && rect.bottom > Math.max(0, bounds.top)
+        && rect.left < Math.min(innerWidth, bounds.right) && rect.top < Math.min(innerHeight, bounds.bottom)),
+      enabled: Boolean(candidate && !candidate.disabled && !candidate.readOnly && candidate.getAttribute("aria-disabled") !== "true"),
+      empty: Boolean(candidate && candidate.value === "") } };
+  };
   const checkUsable = (phase) => {
     if (retired || !phase || phase.exposureAt === null || phase.usableAt !== null || phase.usableChecking
       || paintedBody?.phase !== phase) return;
     const body = paintedBody.body;
-    const valid = () => sameBody(body, visibleBody()) && ((inputEvidence?.phase === phase
+    const valid = () => sameBody(body, visibleBody(body)) && ((inputEvidence?.phase === phase
       && sameBody(inputEvidence.body, body)
       && inputEvidence.node.value === config.probe && document.activeElement === inputEvidence.node)
-      || (wheelEvidence?.phase === phase && sameBody(wheelEvidence.body, body)
+      || (wheelEvidence?.phase === phase && wheelEvidence.received && sameBody(wheelEvidence.body, body)
         && wheelEvidence.node.scrollTop !== wheelEvidence.before));
     if (!valid()) return;
     phase.usableChecking = true;
@@ -244,7 +262,7 @@ function installChatObservation(config) {
   };
   const sample = () => {
     if (retired) return;
-    const presented = visibleBody();
+    const presented = visibleBody(paintedBody?.phase === state.phase ? paintedBody.body : null);
     if (presented && state.presentations.length < 64
       && JSON.stringify(state.presentations.at(-1)?.body) !== JSON.stringify(presented.evidence)) {
       state.presentations.push({ at: now(), body: presented.evidence, ...presented.evidence });
@@ -263,7 +281,7 @@ function installChatObservation(config) {
     frame(() => frame(() => {
       phase.checking = false;
       if (state.phase !== phase) return;
-      const current = visibleBody();
+      const current = visibleBody(body);
       if (sameBody(current, body)) {
         phase.commitAt = commitAt;
         phase.paintAt = now();
@@ -303,17 +321,21 @@ function installChatObservation(config) {
     if (retired || !event.isTrusted || !phase || phase.exposureAt === null || phase.usableAt !== null
       || !surface()?.contains(event.target) || event.target.getAttribute("aria-label") !== "Message agent"
       || event.target.value !== config.probe || document.activeElement !== event.target) return;
-    inputEvidence = { phase, node: event.target, body: visibleBody() };
+    inputEvidence = { phase, node: event.target, body: visibleBody(paintedBody?.phase === phase ? paintedBody.body : null) };
     checkUsable(phase);
   };
   const wheel = (event) => {
-    if (!retired && event.isTrusted && surface()?.contains(event.target) && state.intents.length < 64) {
+    if (retired) return;
+    const scroll = surface()?.querySelector('[data-testid="agent-chat-scroll-region"]');
+    if (!retired && event.isTrusted && scroll && (scroll === event.target || scroll.contains(event.target)) && state.intents.length < 64) {
       state.intents.push({ kind: event.deltaY < 0 ? "older" : "wheel", at: now() });
       const phase = state.phase;
-      const scroll = surface()?.querySelector('[data-testid="agent-chat-scroll-region"]');
-      const before = scroll?.scrollTop;
-      if (phase && phase.exposureAt !== null && scroll && scroll.scrollHeight > scroll.clientHeight && phase.usableAt === null) {
-        wheelEvidence = { phase, node: scroll, before, body: visibleBody() };
+      if (phase && wheelEvidence?.phase === phase && wheelEvidence.node === scroll && phase.usableAt === null) {
+        wheelEvidence.received = true;
+        wheelEvidence.eventTop = scroll.scrollTop;
+        // Compositor-first scrolling is already eligible for the same two-frame
+        // witness as input. The queued check also covers event-first scrolling.
+        checkUsable(phase);
         frame(() => checkUsable(phase));
       }
     }
@@ -347,6 +369,44 @@ function installChatObservation(config) {
         }) };
     },
     subscriptionStatus() { return subscription?.status() ?? { active: false, fault_count: 0, request_count: 0 }; },
+    subjectStatus() {
+      const body = paintedBody?.phase === state.phase ? paintedBody.body : null;
+      const fresh = body ? visibleBody(body) : null;
+      const candidate = visibleBody();
+      return { latched: Boolean(body), latchedValid: Boolean(sameBody(body, fresh)),
+        latchedEventId: body?.evidence.eventId ?? null, currentCandidateEventId: candidate?.evidence.eventId ?? null,
+        candidateMatchesLatch: Boolean(sameBody(body, candidate)),
+        paintedMatchingBodySlots: body?.evidence.matchingBodySlots ?? null,
+        currentMatchingBodySlots: fresh?.evidence.matchingBodySlots ?? candidate?.evidence.matchingBodySlots ?? null };
+    },
+    interactionStatus() {
+      return { ...state.interaction, currentComposer: composerState(surface()).flags,
+        wheel: wheelEvidence ? { prepared: true, received: wheelEvidence.received,
+        before: wheelEvidence.before, eventTop: wheelEvidence.eventTop, after: wheelEvidence.node.scrollTop,
+        changed: wheelEvidence.node.scrollTop !== wheelEvidence.before } : { prepared: false, received: false,
+        before: null, eventTop: null, after: null, changed: false } };
+    },
+    prepareInteraction(owner, requestedScroll) {
+      if (retired || owner !== state.owner) throw new Error("interaction owner is not active");
+      const root = surface();
+      const scroll = root?.querySelector('[data-testid="agent-chat-scroll-region"]');
+      if (!scroll || scroll !== requestedScroll) throw new Error("interaction region is not the current owned Chat");
+      const body = paintedBody?.phase === state.phase ? paintedBody.body : null;
+      const fresh = body ? visibleBody(body) : null;
+      const latchValid = Boolean(sameBody(body, fresh));
+      const { candidate, flags } = composerState(root);
+      const safe = flags.unique && flags.visible && flags.enabled && flags.empty;
+      const overflow = scroll.scrollHeight > scroll.clientHeight && scroll.clientHeight > 0;
+      const control = !latchValid ? "none" : safe ? "keyboard" : overflow ? "wheel" : "none";
+      const reason = !latchValid ? "invalid_painted_subject" : safe ? "safe_empty_composer"
+        : !flags.present ? "composer_absent" : !flags.unique ? "composer_ambiguous"
+          : !flags.visible ? "composer_hidden" : !flags.enabled ? "composer_disabled" : "composer_nonempty";
+      state.interaction = { control, reason, composer: flags, latchValid, overflow };
+      // Capture before dispatch, not in a wheel callback that may follow compositor scrolling.
+      wheelEvidence = control === "wheel" ? { phase: state.phase, node: scroll, before: scroll.scrollTop,
+        eventTop: null, received: false, body: fresh } : null;
+      return { ...state.interaction, input: control === "keyboard" ? candidate : null, top: scroll.scrollTop };
+    },
     bind(owner) {
       if (retired || (state.owner && state.owner !== owner)) throw new Error("owner cannot change or bind after disposal");
       if (subscription) return;
@@ -368,13 +428,14 @@ function installChatObservation(config) {
       inputEvidence = null;
       wheelEvidence = null;
       paintedBody = null;
+      state.interaction = null;
       state.phase = { label, rosterAt: null, chatAt: null, exposureAt: null, exposureKind: null,
         commitAt: null, paintAt: null, usableAt: null, body: null, checking: false };
       state.phases.push(state.phase);
     },
     sample,
     dispose() {
-      if (retired) return;
+      if (retired) return disposalReceipt;
       retired = true;
       subscription?.unsubscribe();
       observer.disconnect();
@@ -384,12 +445,24 @@ function installChatObservation(config) {
       document.removeEventListener("wheel", wheel, true);
       inputEvidence = null; wheelEvidence = null; paintedBody = null;
       state.disposed = true;
+      const status = subscription?.status() ?? null;
+      disposalReceipt = { status: status ? "OBSERVED_POST_DISPOSE" : "DISPOSED_WITHOUT_SUBSCRIPTION",
+        disposed: state.disposed, token: subscription?.token ?? null, owner: state.owner, subscription: status,
+        callback_count: status?.request_count ?? null, callback_fault_count: status?.fault_count ?? null,
+        request_count: state.calls.length, receipt_count: state.receipts.length,
+        observer_error_count: state.errors.length, rejection_count: state.rejections };
+      return disposalReceipt;
     },
   };
 }
 
 async function readObservation(driver) {
   return driver.executeScript(() => ({ ...window.__chatAcceptance.state, subscription: window.__chatAcceptance.subscriptionStatus() }));
+}
+
+/** Return the acknowledgement from the existing disposal, before its realm closes. */
+async function disposeObservation(driver) {
+  return driver.executeScript(() => window.__chatAcceptance?.dispose() ?? { status: "UNOBSERVED_POST_DISPOSE_ACK" });
 }
 
 /** Maintained normal-flow case; app-free checks never import this module. */
@@ -518,6 +591,7 @@ function captureChatFailureMetadata(sessionId, stage) {
     scopePresent: Boolean(region?.getAttribute("data-chat-page-scope")), memberRows: rows.length,
     geometry: rect ? { width: rect.width, height: rect.height, top: rect.top, left: rect.left } : null,
     observer: observer ? { activation: observer.state.activation, subscription: observer.subscriptionStatus(),
+      subject: observer.subjectStatus?.() ?? null, interaction: observer.interactionStatus?.() ?? null,
       calls: observer.state.calls.length, receipts: observer.state.receipts.length,
       errors: observer.state.errors.length, rejections: observer.state.rejections,
       endpoints: phase ? Object.fromEntries(["rosterAt", "chatAt", "exposureAt", "commitAt", "paintAt", "usableAt"]
@@ -525,7 +599,7 @@ function captureChatFailureMetadata(sessionId, stage) {
   };
 }
 
-async function measureChat(driver, sessionId, label, name, evidence, keyboard = true) {
+async function measureChat(driver, sessionId, label, name, evidence, requireTerminalToggle = true) {
   await driver.executeScript((phase) => window.__chatAcceptance.arm(phase), label);
   const deadline = Date.now() + 5_000;
   let surface;
@@ -539,7 +613,7 @@ async function measureChat(driver, sessionId, label, name, evidence, keyboard = 
     mode = await visible(driver, 'button[title="Switch to Chat"], button[title="Switch to Terminal"]', surface);
     stage = "chat-toggle";
     const explicit = await mode.getAttribute("title") === "Switch to Chat";
-    if (keyboard) assert.ok(explicit, "live Terminal measurement requires its real Chat toggle");
+    if (requireTerminalToggle) assert.ok(explicit, "live Terminal measurement requires its real Chat toggle");
     if (explicit) await mode.click();
     const waitForEndpoint = (field) => driver.wait(async () => {
       const observation = await readObservation(driver);
@@ -551,17 +625,18 @@ async function measureChat(driver, sessionId, label, name, evidence, keyboard = 
     await waitForEndpoint("paintAt");
     stage = "input";
     const scroll = await visible(driver, '[data-testid="agent-chat-scroll-region"]', surface);
-    const viewport = await driver.executeScript((node) => ({ overflow: node.scrollHeight > node.clientHeight,
-      top: node.scrollTop }), scroll);
-    // Normal Off Chat may fit entirely in its viewport. Its enabled textarea only
-    // updates the unsent local draft; focus does not open deferred model discovery.
-    const input = keyboard || !viewport.overflow
-      ? await visible(driver, 'textarea[aria-label="Message agent"]', surface) : null;
+    const plan = await driver.executeScript((node, owner) => window.__chatAcceptance.prepareInteraction(owner, node), scroll, sessionId);
+    assert.ok(["keyboard", "wheel"].includes(plan.control), "no safe owned usability control");
+    const input = plan.control === "keyboard" ? plan.input : null;
     if (input) {
+      assert.ok(await input.isDisplayed(), "unsent composer is no longer visible");
       assert.ok(await input.isEnabled(), "no safe enabled unsent composer interaction");
       assert.equal(await input.getAttribute("value"), "", "fixture must not replace an existing draft");
       await input.sendKeys("native-input-probe");
-    } else await driver.actions({ async: true }).scroll(0, 0, 0, viewport.top > 0 ? -20 : 20, scroll).perform();
+    } else {
+      assert.equal(plan.control, "wheel", "planned keyboard control is missing its actual composer");
+      await driver.actions({ async: true }).scroll(0, 0, 0, plan.top > 0 ? -20 : 20, scroll).perform();
+    }
     stage = "usability";
     await waitForEndpoint("usableAt");
     stage = "assertions";
@@ -591,8 +666,6 @@ async function measureChat(driver, sessionId, label, name, evidence, keyboard = 
       && call.at >= state.phases[0].rosterAt && call.at <= phase.body.receiptAt), "no original owned page request");
     assert.ok(state.receipts.some((receipt) => receipt.session === sessionId && receipt.requestSession === sessionId
       && receipt.at === phase.body.receiptAt && receipt.at <= phase.paintAt), "no actual receipt linked to admitted paint");
-    stage = "draft-cleanup";
-    if (input) await input.sendKeys(Key.chord(Key.CONTROL, "a"), Key.BACK_SPACE);
     return phase;
   } catch (error) {
     const early = ["roster-click", "surface-resolution", "mode-resolution"].includes(stage);
@@ -715,13 +788,17 @@ function redactObservation(value) {
       || (key === "witnessKind" && ["whole", "needle"].includes(item))
       || (key === "status" && ["UNPROVEN", "OBSERVED_ENDPOINTS_CLOSURE_UNPROVEN",
         "OBSERVED_REGISTRY", "REGISTRY_TIMEOUT", "MALFORMED_REGISTRY", "REGISTRY_ERROR", "CAPTURE_FAILED",
-        "OBSERVED_CONTAINERS", "OBSERVER_UNAVAILABLE", "CONTAINER_CAPTURE_ERROR", "OBSERVED_LATE_DOM"].includes(item))
+        "OBSERVED_CONTAINERS", "OBSERVER_UNAVAILABLE", "CONTAINER_CAPTURE_ERROR", "OBSERVED_LATE_DOM",
+        "OBSERVED_POST_DISPOSE", "DISPOSED_WITHOUT_SUBSCRIPTION", "UNOBSERVED_POST_DISPOSE_ACK"].includes(item))
       || (key === "stage" && ["roster-click", "surface-resolution", "mode-resolution", "chat-toggle", "paint",
         "input", "usability", "assertions", "draft-cleanup"].includes(item))
       || (key === "mode" && ["chat", "terminal", "unresolved"].includes(item))
       || (key === "visibility" && ["visible", "hidden", "prerender"].includes(item))
       || (key === "coverage" && item === "PAGE_LOADER_ONLY")
       || (key === "broaderIpcRuntime" && item === "UNOBSERVED")
+      || (key === "control" && ["keyboard", "wheel", "none"].includes(item))
+      || (key === "reason" && ["invalid_painted_subject", "safe_empty_composer", "composer_absent",
+        "composer_ambiguous", "composer_hidden", "composer_disabled", "composer_nonempty"].includes(item))
       || (/Sha256$/.test(key) && typeof item === "string" && /^[a-f0-9]{64}$/i.test(item))
       || (["agentPolicy", "globalPolicy", "effectivePolicy"].includes(key) && ["default", "enabled", "disabled"].includes(item));
     result[key] = typeof item === "string" && publicToken ? item : redactObservation(item);
@@ -751,7 +828,7 @@ test("chat transcript renders the per-turn change surface", { timeout: 600_000 }
   const sessions = [];
   const cleanupOwner = { sessionId: null };
   let paused = false;
-  const evidence = { timings: [], history: null, endpoints: "UNRUN", preselectionIndex: [], rosterFailures: [],
+  const evidence = { timings: [], history: null, endpoints: "UNRUN", preselectionIndex: [], rosterFailures: [], disposalAcknowledgements: [],
     closure: { status: "UNPROVEN", reason: "original-handle/fullbirth/exit+stream-EOF/Job-empty caller receipt required; timer is not proof" },
     cacheState: "cold process only; raw producer inspection warms filesystem", transition: "UNRUN" };
   t.after(async () => {
@@ -760,7 +837,10 @@ test("chat transcript renders the per-turn change surface", { timeout: 600_000 }
       if (entry.closed) continue;
       try { evidence.lastObservation = await readObservation(entry.session.driver); }
       catch (error) { evidence.observationReadError = String(error).slice(0, 160); }
-      try { await entry.session.driver.executeScript(() => window.__chatAcceptance?.dispose()); }
+      try {
+        const acknowledgement = await (entry.disposalPromise ??= disposeObservation(entry.session.driver));
+        evidence.disposalAcknowledgements[sessions.indexOf(entry)] = { realm: sessions.indexOf(entry), acknowledgement };
+      }
       catch (error) { errors.push(error); }
       try {
         if (cleanupOwner.sessionId && !paused) {
@@ -813,6 +893,8 @@ test("chat transcript renders the per-turn change surface", { timeout: 600_000 }
       observation: await readObservation(external.session.driver) };
     verifySavedFixture(harness, archive);
     await closeTerminalSurface(external.session.driver, archive.sessionId);
+    const externalDisposal = await (external.disposalPromise ??= disposeObservation(external.session.driver));
+    evidence.disposalAcknowledgements[sessions.indexOf(external)] = { realm: sessions.indexOf(external), acknowledgement: externalDisposal };
     await external.session.close();
     external.closed = true;
   } else evidence.genuineArchiveSaved = "UNRUN: optional external manifest absent; small Mock Saved is a separate witness";
@@ -872,6 +954,8 @@ test("chat transcript renders the per-turn change surface", { timeout: 600_000 }
   await (await visible(driver, 'button[title="Switch to Terminal"]', surface)).click();
   await invokeTauri(driver, "pause_agent", { sessionId });
   paused = true;
+  const liveDisposal = await (first.disposalPromise ??= disposeObservation(driver));
+  evidence.disposalAcknowledgements[sessions.indexOf(first)] = { realm: sessions.indexOf(first), acknowledgement: liveDisposal };
   await first.session.close();
   first.closed = true;
   assert.ok(first.session.tauriDriver.exitCode !== null || first.session.tauriDriver.signalCode !== null,

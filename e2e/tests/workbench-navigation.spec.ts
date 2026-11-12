@@ -1628,6 +1628,15 @@ test("reveals only the focused Off agent Saved Chat in the existing Overview wit
       command: null, exit_code: null, path: null, language: null, created_at: "2026-01-01T00:00:00Z",
       sequence: 1, metadata: {} }],
   };
+  const target = saved.events[0];
+  // Public equal-text turns have distinct identities. Earlier rows create
+  // ordinary content overflow; no viewport or scroll position is forced.
+  saved.events = [
+    ...Array.from({ length: 60 }, (_, index) => ({ ...target, id: `earlier-saved-${index}`,
+      text: `Earlier public synthetic saved message ${index + 1}.`, turn_id: `earlier-turn-${index}`, sequence: index + 1 })),
+    { ...target, id: "saved-message-twin", turn_id: "saved-twin-turn", sequence: 61 },
+    { ...target, sequence: 62 },
+  ];
   await page.addInitScript(() => localStorage.setItem("wardian-settings", JSON.stringify({
     state: { gridCardDisplayMode: "terminal" }, version: 2,
   })));
@@ -1679,13 +1688,18 @@ test("reveals only the focused Off agent Saved Chat in the existing Overview wit
         calls: Array<{ session: string; at: number }>;
         receipts: Array<{ session: string; requestSession: string; at: number; rows: Array<{ id: string; target: boolean }> }>;
         phase: { rosterAt: number; paintAt: number | null; usableAt: number | null;
-          body: { session: string; eventId: string; receiptAt: number } | null } };
+          body: { session: string; eventId: string; receiptAt: number; matchingBodySlots: number } | null } };
       subscriptionStatus(): { active: boolean; fault_count: number; request_count: number };
+      subjectStatus(): { latchedValid: boolean; latchedEventId: string; currentMatchingBodySlots: number };
+      interactionStatus(): unknown;
     } }).__chatAcceptance;
-    return { ...api.state, subscription: api.subscriptionStatus() };
+    return { ...api.state, subscription: api.subscriptionStatus(), subject: api.subjectStatus(), interaction: api.interactionStatus() };
   });
+  let expectedToken: number;
+  let postDisposal: { status: string; disposed: boolean; token: number; subscription: { active: boolean } };
   try {
     const active = await readPassive();
+    expectedToken = active.activation.token;
     expect(active.activation).toMatchObject({ active: true, version: 1, owner });
     expect(active.subscription).toEqual({ active: true, fault_count: 0, request_count: 0 });
     expect(active.calls).toEqual([]);
@@ -1698,8 +1712,23 @@ test("reveals only the focused Off agent Saved Chat in the existing Overview wit
     await expect(surfaceTab(page, "agents-overview")).toHaveAttribute("aria-selected", "true");
     await expect(surfaceTab(page, "agent-session")).toHaveCount(0);
     await card.getByRole("button", { name: "Saved Focus mode: Terminal. Switch to Chat.", exact: true }).click();
-    await expect(card.getByText(body, { exact: true })).toBeVisible();
+    await expect(card.getByText(body, { exact: true })).toHaveCount(2);
+    await expect(card.locator('[data-chat-row-key="saved-message"]').getByText(body, { exact: true })).toBeVisible();
     await expect.poll(async () => (await readPassive()).phase.paintAt).not.toBeNull();
+    const planned = await page.evaluate((id) => {
+      const api = (window as unknown as { __chatAcceptance: { container(owner: string): Element | null;
+        prepareInteraction(owner: string, scroll: Element): { control: string; reason: string; overflow: boolean;
+          input: Element | null; composer: { visible: boolean; enabled: boolean; empty: boolean } } } }).__chatAcceptance;
+      const root = api.container(id);
+      const region = root?.querySelector('[data-testid="agent-chat-scroll-region"]');
+      if (!region) throw new Error("current owned Chat region missing");
+      const plan = api.prepareInteraction(id, region);
+      return { control: plan.control, reason: plan.reason, overflow: plan.overflow, composer: plan.composer,
+        actualOwnedInput: plan.input === root?.querySelector('textarea[aria-label="Message agent"]') };
+    }, owner);
+    expect(planned).toMatchObject({ control: "keyboard", reason: "safe_empty_composer", overflow: true,
+      actualOwnedInput: true, composer: { visible: true, enabled: true, empty: true } });
+    await expect(card.getByRole("textbox", { name: "Message agent", exact: true })).toHaveValue("");
     await card.getByRole("textbox", { name: "Message agent", exact: true }).pressSequentially("saved-off-probe");
     await expect.poll(async () => (await readPassive()).phase.usableAt).not.toBeNull();
     const observed = await readPassive();
@@ -1711,14 +1740,16 @@ test("reveals only the focused Off agent Saved Chat in the existing Overview wit
     expect(observed.activation.at).toBeLessThanOrEqual(observed.phase.rosterAt);
     expect(observed.calls.length).toBeGreaterThan(0);
     expect(observed.calls.every((call) => call.session === owner && call.at >= observed.phase.rosterAt)).toBe(true);
-    expect(observed.phase.body).toMatchObject({ session: owner, eventId: "saved-message" });
+    expect(observed.phase.body).toMatchObject({ session: owner, eventId: "saved-message", matchingBodySlots: 2 });
+    expect(observed.subject).toMatchObject({ latchedValid: true, latchedEventId: "saved-message", currentMatchingBodySlots: 2 });
     expect(observed.receipts.some((receipt) => receipt.session === owner && receipt.requestSession === owner
       && receipt.at === observed.phase.body?.receiptAt && receipt.rows.some((row) => row.id === "saved-message" && row.target))).toBe(true);
     await testInfo.attach("native-page-loader-receipt", { body: JSON.stringify({
       coverage: observed.coverage, broader_ipc_runtime: observed.broaderIpcRuntime,
       activation: observed.activation, subscription: observed.subscription, descriptor,
       request_count: observed.calls.length, receipt_count: observed.receipts.length,
-      phase: observed.phase,
+      phase: observed.phase, subject: observed.subject, interaction: observed.interaction,
+      natural_overflow: planned.overflow, duplicate_body_ids: ["saved-message-twin", "saved-message"],
     }), contentType: "application/json" });
     await expect.poll(() => page.evaluate((id) => {
       const api = (window as unknown as { __chatAcceptance: { container(owner: string): Element | null } }).__chatAcceptance;
@@ -1747,16 +1778,20 @@ test("reveals only the focused Off agent Saved Chat in the existing Overview wit
     }
   } finally {
     const metadata = await page.evaluate(() => {
-      const api = (window as unknown as { __chatAcceptance: { describeContainers(): unknown; dispose(): void } }).__chatAcceptance;
+      const api = (window as unknown as { __chatAcceptance: { describeContainers(): unknown;
+        dispose(): { status: string; disposed: boolean; token: number; subscription: { active: boolean } } } }).__chatAcceptance;
       const native = api.describeContainers();
-      api.dispose();
-      return { native, containers: Array.from(document.querySelectorAll("[data-agent-grid-card-id]"))
+      const postDispose = api.dispose();
+      return { native, postDispose, containers: Array.from(document.querySelectorAll("[data-agent-grid-card-id]"))
         .slice(0, 4).map((node) => ({ owner: node.getAttribute("data-agent-grid-card-id"),
           surface: node.closest('[data-testid="surface-panel"]')?.getAttribute("data-surface-id"),
           geometry: node.getBoundingClientRect().toJSON() })) };
     });
+    postDisposal = metadata.postDispose;
     await testInfo.attach("native-container-real-dom", { body: JSON.stringify(metadata), contentType: "application/json" });
   }
+  expect(postDisposal).toMatchObject({ status: "OBSERVED_POST_DISPOSE", disposed: true,
+    token: expectedToken, subscription: { active: false } });
 });
 
 test("cancelling one dirty close guard leaves the complete group unchanged", async ({ page }) => {
