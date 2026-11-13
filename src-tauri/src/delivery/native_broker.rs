@@ -26,6 +26,7 @@ use super::opencode_http::{
 use crate::providers::{CodexProvider, PiProvider, ProviderFactory};
 
 mod codex;
+pub(crate) use codex::CapturedCodexStop;
 
 #[cfg(test)]
 pub(crate) use codex::shared_error as codex_shared_error_for_test;
@@ -371,6 +372,31 @@ type CodexCreationRevisionMap =
 #[derive(Debug, Default)]
 struct CodexCreationRegistry {
     revisions: std::sync::Mutex<CodexCreationRevisionMap>,
+    stopping: Arc<std::sync::Mutex<HashMap<String, usize>>>,
+}
+
+/// Keeps new preparations out while a retained stop owns the generation gate.
+/// Without this admission fence a new request could wait forever behind a
+/// failed stop instead of returning its retained-fence error.
+#[derive(Debug)]
+struct CodexStopAdmission {
+    stopping: Arc<std::sync::Mutex<HashMap<String, usize>>>,
+    agent_id: String,
+}
+
+impl Drop for CodexStopAdmission {
+    fn drop(&mut self) {
+        let mut stopping = self
+            .stopping
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(count) = stopping.get_mut(&self.agent_id) {
+            *count -= 1;
+            if *count == 0 {
+                stopping.remove(&self.agent_id);
+            }
+        }
+    }
 }
 
 /// Keeps its generation's revision alive until the detached creation worker ends.
@@ -381,12 +407,30 @@ struct CodexCreationRequest {
 }
 
 impl CodexCreationRegistry {
+    fn pause_for_stop(&self, agent_id: &str) -> Result<CodexStopAdmission, &'static str> {
+        let mut stopping = self
+            .stopping
+            .lock()
+            .map_err(|_| "Codex stop admission lock poisoned")?;
+        *stopping.entry(agent_id.to_owned()).or_default() += 1;
+        Ok(CodexStopAdmission {
+            stopping: self.stopping.clone(),
+            agent_id: agent_id.to_owned(),
+        })
+    }
     /// Capture before the creation request's first await or detached spawn.
     fn register(
         &self,
         agent_id: &str,
         generation: u64,
     ) -> Result<CodexCreationRequest, &'static str> {
+        let stopping = self
+            .stopping
+            .lock()
+            .map_err(|_| "Codex stop admission lock poisoned")?;
+        if stopping.contains_key(agent_id) {
+            return Err("Codex runtime is stopping; retained owner fence excludes preparation");
+        }
         let mut revisions = self
             .revisions
             .lock()

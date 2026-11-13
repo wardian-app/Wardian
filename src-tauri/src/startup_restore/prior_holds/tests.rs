@@ -29,6 +29,20 @@ fn hold(session: &str, acquisition: &str) -> ConversationLease {
 }
 
 #[test]
+fn codex_retained_hold_diagnostic_explains_out_of_job_writer_evidence() {
+    let reports = plan_retained_holds(&[config()], &[hold("saved-session", "writer-evidence")]);
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].blocks_saved_session);
+    assert!(reports[0].reason.contains("out-of-job Codex daemon"));
+    assert!(reports[0].reason.contains("supported unload evidence"));
+    assert!(reports[0]
+        .recovery_command
+        .as_deref()
+        .unwrap()
+        .contains("--operator-verified-exit"));
+}
+
+#[test]
 fn provider_label_and_hold_age_never_substitute_for_creator_and_launch_evidence() {
     for provider in ["codex", "claude", "pi", "mock"] {
         let mut config = config();

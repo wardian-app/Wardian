@@ -42,7 +42,9 @@ struct Entry {
     terminal_complete: std::sync::atomic::AtomicBool,
     prior_hold: Option<wardian_core::conversation_lease::ConversationLeaseOwner>,
     tree_exited: std::sync::atomic::AtomicBool,
-    #[cfg(windows)]
+    codex_owner: Option<crate::delivery::native_broker::CapturedCodexStop>,
+    writer_exit: Mutex<Option<Arc<crate::delivery::codex_shared::CodexThreadExit>>>,
+    thread_id: Option<String>,
     executor: Option<tokio::runtime::Handle>,
 }
 
@@ -91,7 +93,7 @@ fn prepare_with_timeout(
         terminal: None,
         provider: "codex",
         prior_hold: None,
-        #[cfg(windows)]
+        codex_owner: None,
         executor: tokio::runtime::Handle::try_current().ok(),
     })
 }
@@ -103,11 +105,22 @@ pub(crate) struct StopRegistration {
     terminal: Option<(Arc<TerminalSessionBroker>, tokio::runtime::Handle)>,
     provider: &'static str,
     prior_hold: Option<wardian_core::conversation_lease::ConversationLeaseOwner>,
-    #[cfg(windows)]
+    codex_owner: Option<crate::delivery::native_broker::CapturedCodexStop>,
     executor: Option<tokio::runtime::Handle>,
 }
 
 impl StopRegistration {
+    /// Transfer the exact native owner and creation gate before runtime capture.
+    pub(crate) fn with_codex_owner(
+        mut self,
+        owner: crate::delivery::native_broker::CapturedCodexStop,
+    ) -> Result<Self, String> {
+        if self.executor.is_none() {
+            return Err("Cannot retain Codex owner cleanup without its async executor".into());
+        }
+        self.codex_owner = Some(owner);
+        Ok(self)
+    }
     /// Bind only the acquisition created immediately before this exact capture.
     pub(crate) fn with_prior_hold(
         mut self,
@@ -135,6 +148,13 @@ impl StopRegistration {
     /// The returned guard starts cleanup on Drop, including broker-await abort.
     pub(crate) fn capture(self, agent: ActiveAgent) -> StopGuard {
         let (status, _) = watch::channel(Status::Captured);
+        let thread_id = agent
+            .config
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .resume_session
+            .clone()
+            .filter(|id| !id.is_empty());
         // Keep the terminal identity independently: process exit clears the
         // ActiveAgent field, but must not discard its pending broker cleanup.
         let terminal = self.terminal.and_then(|(broker, executor)| {
@@ -156,7 +176,9 @@ impl StopRegistration {
             terminal_complete: std::sync::atomic::AtomicBool::new(false),
             prior_hold: self.prior_hold,
             tree_exited: std::sync::atomic::AtomicBool::new(false),
-            #[cfg(windows)]
+            codex_owner: self.codex_owner,
+            writer_exit: Mutex::new(None),
+            thread_id,
             executor: self.executor,
         });
         let guard = StopGuard(Some(entry.clone()));
@@ -227,7 +249,7 @@ impl StopHandle {
             return Ok(false);
         }
         // Direct-child exit cannot upgrade a failed tree join into a receipt.
-        if entry.prior_hold.is_some() {
+        if entry.prior_hold.is_some() || entry.codex_owner.is_some() {
             return Ok(false);
         }
         let mut runtime = match entry.runtime.try_lock() {
@@ -390,11 +412,26 @@ fn start(entry: &Arc<Entry>, allow_captured: bool) {
                     stop_and_join(agent, worker.timeout, worker.provider == "pi")?;
                 }
             }
-            if let Some(hold) = &worker.prior_hold {
-                if worker.tree_exited.load(std::sync::atomic::Ordering::Acquire) {
-                    // Persistence failure retains this entry and its tree receipt;
-                    // an online lifecycle retry can release only this acquisition.
-                    wardian_core::conversation_lease::release_lease_owner_persisted(hold)?;
+            let mut writer_exit = worker.writer_exit.lock().unwrap_or_else(|error| error.into_inner());
+            if writer_exit.is_none() {
+                if let Some(owner) = &worker.codex_owner {
+                    let executor = worker.executor.as_ref().ok_or("Codex owner cleanup executor unavailable")?;
+                    *writer_exit = executor.block_on(owner.finish(
+                        worker.thread_id.as_deref().filter(|_| worker.prior_hold.is_some()),
+                        worker.tree_exited.load(std::sync::atomic::Ordering::Acquire),
+                    )).map_err(|error| error.to_string())?;
+                }
+            }
+            if let Some(owner) = &worker.prior_hold {
+                if let (Some(receipt), Some(generation)) = (writer_exit.as_ref(), worker.generation) {
+                    let leases = wardian_core::conversation_lease::load_leases_checked()?;
+                    let hold = leases.iter().find(|hold| hold.owner() == *owner)
+                        .ok_or("Bound Codex hold is missing; writer receipt retained")?;
+                    // The private receipt validates agent/generation/thread and
+                    // compares the entire acquisition under both lease locks.
+                    receipt.release_hold(hold, generation)?;
+                } else {
+                    log_retained_writer_hold();
                 }
             }
             // Terminal cleanup (when captured) and every child exit completed
@@ -420,6 +457,12 @@ fn start(entry: &Arc<Entry>, allow_captured: bool) {
             "Cannot start Codex stop worker; runtime retained: {error}"
         )));
     }
+}
+
+fn log_retained_writer_hold() {
+    crate::manager::log_debug(
+        "[WARDIAN] Codex prior-session hold retained: terminal exit does not prove the exact thread writer exited; inspect writer ownership before operator release",
+    );
 }
 
 fn stop_held_runtime(entry: &Entry, agent: &mut ActiveAgent) -> Result<(), String> {

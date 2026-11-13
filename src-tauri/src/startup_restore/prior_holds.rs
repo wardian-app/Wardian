@@ -45,6 +45,7 @@ fn plan_retained_holds(
             let mut reason = "The hold has no durable creating-instance or launch-containment binding. Acquiring the desktop lock or comparing hold age cannot prove that the old provider tree exited.".to_string();
             if hold.provider == "codex" {
                 reason.push_str(" Some legacy Codex TUI paths used a breakaway-enabled supervisor, and app-server job assignment followed process spawn. This hold does not identify its launch path.");
+                reason.push_str(" Terminal exit also does not exclude a thread writer hosted by an out-of-job Codex daemon. Exact thread ownership, supported unload evidence, and verified owner-tree exit are required for automatic release.");
             } else {
                 reason.push_str(" The provider name alone does not establish the historical runtime's launch path.");
             }

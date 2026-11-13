@@ -313,12 +313,14 @@ where
     )
         -> Result<Option<wardian_core::conversation_lease::ConversationLeaseOwner>, String>,
 {
+    // Codex capture now retains its native owner until the TUI tree is joined.
+    // Cancellation after capture is handled by the retained stop worker.
+    stop_codex_runtime(state, session_id, remove_terminal, before_capture).await?;
     state
         .native_delivery
         .dispose_agent(session_id)
         .await
-        .map_err(|error| error.to_string())?;
-    stop_codex_runtime(state, session_id, remove_terminal, before_capture).await
+        .map_err(|error| error.to_string())
 }
 
 /// Explicit lifecycle operations may retry the same retained children. Native
@@ -336,13 +338,12 @@ where
     )
         -> Result<Option<wardian_core::conversation_lease::ConversationLeaseOwner>, String>,
 {
-    let config = {
+    let (config, captured_generation) = {
         let agents = state.agents.lock().await;
-        agents
+        let agent = agents
             .get(session_id)
-            .ok_or_else(|| format!("Agent {session_id} not found"))?
-            .config
-            .clone()
+            .ok_or_else(|| format!("Agent {session_id} not found"))?;
+        (agent.config.clone(), agent.runtime_generation)
     };
     let is_codex = config
         .lock()
@@ -357,12 +358,23 @@ where
     crate::manager::codex_stop::await_quiescent(&home, session_id).await?;
     // Validate while the roster still owns the runtime. Lifecycle exclusion
     // covers the interval until capture; this token does not fence owner startup.
-    let registration = crate::manager::codex_stop::prepare_stop(&home, session_id)?;
+    let owner = state
+        .native_delivery
+        .capture_codex_stop(session_id, captured_generation)
+        .await
+        .map_err(|error| error.to_string())?;
+    let registration =
+        crate::manager::codex_stop::prepare_stop(&home, session_id)?.with_codex_owner(owner)?;
     let (guard, generation) = {
         let mut agents = state.agents.lock().await;
         let agent = agents
             .get_mut(session_id)
             .ok_or_else(|| format!("Agent {session_id} not found"))?;
+        if agent.runtime_generation != captured_generation
+            || !std::sync::Arc::ptr_eq(&agent.config, &config)
+        {
+            return Err("Codex runtime changed before stop capture".into());
+        }
         let hold = before_capture(agent)?;
         let generation = agent.runtime_generation;
         let guard = registration

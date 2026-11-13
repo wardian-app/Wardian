@@ -1,6 +1,9 @@
 //! Synthetic native owner observations for no-child lifecycle tests.
 use super::{CodexTurnActivity, Observation};
 
+#[cfg(windows)]
+pub(crate) use super::owner::stop::tests::{stop_fixture, WriterCase};
+
 pub(crate) fn observation_with_activity(activity: CodexTurnActivity) -> Observation {
     let mut observation = Observation::default();
     match activity {

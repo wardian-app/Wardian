@@ -1,11 +1,97 @@
 //! Codex's shared owner lives in the existing native sessions registry.
 use super::*;
 use crate::delivery::codex_shared::{
-    CodexSettingsUpdate, CodexSharedError, CodexSharedOwner, CodexSharedReceipt, CodexTuiAttachment,
+    CodexSettingsUpdate, CodexSharedError, CodexSharedOwner, CodexSharedReceipt, CodexThreadExit,
+    CodexTuiAttachment,
 };
 use std::time::Duration;
 
+/// Retain the exact owner and its creation gate through captured TUI shutdown.
+/// Dropping before runtime capture merely releases the gate; the registry still
+/// owns the live process. After capture the retained stop worker owns this token.
+pub(crate) struct CapturedCodexStop {
+    broker: Arc<NativeDeliveryBroker>,
+    agent_id: String,
+    generation: Option<u64>,
+    owner: Option<Arc<CodexSharedOwner>>,
+    _gate: tokio::sync::OwnedMutexGuard<()>,
+    _admission: CodexStopAdmission,
+}
+
+impl CapturedCodexStop {
+    pub(crate) async fn finish(
+        &self,
+        thread_id: Option<&str>,
+        tui_tree_exited: bool,
+    ) -> Result<Option<Arc<CodexThreadExit>>, NativeBrokerError> {
+        self.broker
+            .dispose_pi_generation(&self.agent_id, None)
+            .await?;
+        self.broker
+            .dispose_opencode_http(&self.agent_id, None)
+            .await?;
+        let current = self
+            .broker
+            .sessions
+            .lock()
+            .await
+            .get(&self.agent_id)
+            .cloned();
+        if let Some(owner) = &self.owner {
+            if !current
+                .as_ref()
+                .and_then(|handle| handle.shared_codex.as_ref())
+                .is_some_and(|current| Arc::ptr_eq(current, owner))
+            {
+                return Err(shared_error(CodexSharedError::uncertain(
+                    "captured Codex owner changed",
+                )));
+            }
+        }
+        let receipt = self
+            .broker
+            .stop_registered_owner_with_evidence(
+                &self.agent_id,
+                None,
+                self.generation,
+                thread_id,
+                tui_tree_exited,
+            )
+            .await?;
+        Ok(receipt)
+    }
+}
+
 impl NativeDeliveryBroker {
+    /// Reserve the current Codex owner without stopping or discarding it before
+    /// the roster's runtime and prior-session hold transfer into the stop fence.
+    pub(crate) async fn capture_codex_stop(
+        self: &Arc<Self>,
+        agent_id: &str,
+        generation: Option<u64>,
+    ) -> Result<CapturedCodexStop, NativeBrokerError> {
+        let admission = self
+            .codex_creations
+            .pause_for_stop(agent_id)
+            .map_err(|message| shared_error(CodexSharedError::unsupported(message)))?;
+        let gate = self.lock_owner_for_stop(agent_id, None).await?;
+        let handle = self.sessions.lock().await.get(agent_id).cloned();
+        if handle.as_ref().is_some_and(|handle| {
+            generation.is_some_and(|generation| generation != handle.generation)
+        }) {
+            return Err(shared_error(CodexSharedError::uncertain(
+                "Codex owner generation does not match captured TUI",
+            )));
+        }
+        Ok(CapturedCodexStop {
+            broker: self.clone(),
+            agent_id: agent_id.to_owned(),
+            generation,
+            owner: handle.and_then(|handle| handle.shared_codex),
+            _gate: gate,
+            _admission: admission,
+        })
+    }
     pub(super) async fn owner_gate(&self, agent_id: &str) -> Arc<Mutex<()>> {
         self.owner_gates
             .lock()
@@ -53,11 +139,27 @@ impl NativeDeliveryBroker {
         agent_id: &str,
         generation: Option<u64>,
     ) -> Result<(), NativeBrokerError> {
+        self.stop_registered_owner_with_evidence(agent_id, generation, None, None, false)
+            .await
+            .map(|_| ())
+    }
+
+    async fn stop_registered_owner_with_evidence(
+        &self,
+        agent_id: &str,
+        generation: Option<u64>,
+        captured_generation: Option<u64>,
+        thread_id: Option<&str>,
+        tui_tree_exited: bool,
+    ) -> Result<Option<Arc<CodexThreadExit>>, NativeBrokerError> {
         let handle = self.sessions.lock().await.get(agent_id).cloned();
-        let Some(handle) = handle else { return Ok(()) };
+        let Some(handle) = handle else {
+            return Ok(None);
+        };
         if generation.is_some_and(|generation| generation != handle.generation) {
-            return Ok(());
+            return Ok(None);
         }
+        let mut receipt = None;
         if let Some(owner) = &handle.shared_codex {
             // Withdraw advertised capabilities before joining transport exit.
             let binding = NativeSessionBinding {
@@ -70,7 +172,15 @@ impl NativeDeliveryBroker {
                 observed_at: now(),
             };
             let _ = wardian_core::db::upsert_native_session_binding(&binding);
-            owner.shutdown().await.map_err(shared_error)?;
+            receipt = owner
+                .stop_after_tui(
+                    agent_id,
+                    captured_generation.unwrap_or(0),
+                    thread_id,
+                    tui_tree_exited,
+                )
+                .await
+                .map_err(shared_error)?;
         } else if let Some(mut stopped) = handle.stopped.clone() {
             let _ = handle.tx.send(SessionCommand::Shutdown).await;
             tokio::time::timeout(Duration::from_secs(30), async {
@@ -97,7 +207,7 @@ impl NativeDeliveryBroker {
             })??;
         }
         self.sessions.lock().await.remove(agent_id);
-        Ok(())
+        Ok(receipt)
     }
 
     /// Used by captured PTY incarnations; an old exit cannot dispose a replacement.

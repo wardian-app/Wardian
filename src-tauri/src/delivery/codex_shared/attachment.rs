@@ -298,6 +298,14 @@ async fn loaded(client: &CodexSharedClient) -> Result<Value, CodexSharedError> {
         .await
 }
 
+/// Read the complete private owner's loaded-thread set through its supported API.
+pub(super) async fn observed_loaded_thread(
+    client: &CodexSharedClient,
+    expected: Option<&str>,
+) -> Result<Option<String>, CodexSharedError> {
+    loaded_thread(&loaded(client).await?, expected)
+}
+
 pub(super) async fn require_empty(client: &CodexSharedClient) -> Result<(), CodexSharedError> {
     if loaded_thread(&loaded(client).await?, None)?.is_some() {
         return Err(CodexSharedError::unsupported(
