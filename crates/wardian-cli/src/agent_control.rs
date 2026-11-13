@@ -1,6 +1,27 @@
 //! Render live agent lifecycle mutations after the desktop operation succeeds.
 use crate::{control_error, errors::CliError, live};
 
+pub(crate) fn rename(target: &str, new_name: &str) -> Result<String, CliError> {
+    let response = live::agent_rename(target, new_name).map_err(control_error)?;
+    serde_json::to_string(&response)
+        .map(|json| format!("{json}\n"))
+        .map_err(|error| CliError::generic(error.to_string()))
+}
+
+/// Only the live desktop may authorize and audit this mutation. Never fall back
+/// to editing leases when the endpoint is unavailable or predates the command.
+pub(crate) fn release_hold(args: &crate::args::ReleaseHoldArgs) -> Result<String, CliError> {
+    let response = live::agent_release_hold(
+        &args.target,
+        &args.acquisition_id,
+        args.operator_verified_exit,
+    )
+    .map_err(control_error)?;
+    serde_json::to_string(&response)
+        .map(|json| format!("{json}\n"))
+        .map_err(|error| CliError::generic(error.to_string()))
+}
+
 pub(crate) fn restart(target: &str) -> Result<String, CliError> {
     live::agent_restart(target).map_err(control_error)?;
     Ok(format!(

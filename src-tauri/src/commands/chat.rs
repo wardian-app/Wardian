@@ -2374,12 +2374,35 @@ fn message_event_from_transcript(
         }
     }
 
-    AgentChatEvent {
-        id: event_id(
+    // Window ordinals can already belong to unbound historical observations.
+    // Native binding must never reuse those IDs or attach them as aliases.
+    let id = if metadata["provider_log"] == true {
+        let mut hash = Sha256::new();
+        for value in [
+            session_id,
+            provider.as_str(),
+            metadata["provider_session_id"].as_str().unwrap_or_default(),
+            metadata["log_path"].as_str().unwrap_or_default(),
+            metadata["provider_turn_id"].as_str().unwrap_or_default(),
+            source.as_deref().unwrap_or_default(),
+            message.turn_id.as_deref().unwrap_or_default(),
+            message.role.as_str(),
+            message.text.as_str(),
+        ] {
+            hash.update((value.len() as u64).to_le_bytes());
+            hash.update(value.as_bytes());
+        }
+        format!("{session_id}:watch_native:{:x}", hash.finalize())
+    } else {
+        event_id(
             session_id,
             sequence,
             source.as_deref().unwrap_or("transcript"),
-        ),
+        )
+    };
+
+    AgentChatEvent {
+        id,
         session_id: session_id.to_string(),
         provider,
         kind: AgentChatEventKind::Message,
@@ -4454,6 +4477,89 @@ Do you want to proceed?
         assert_eq!(
             merge_chat_events(Vec::new(), vec![rooted_stream, rooted_completion]).len(),
             2
+        );
+    }
+
+    #[test]
+    fn bound_watch_projection_does_not_reuse_legacy_ordinal_identity() {
+        let env_lock = crate::utils::wardian_test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _home_guard = WardianHomeGuard::set(&env_lock, temp.path());
+        let archive = crate::state::conversation_archive::ConversationArchiveState::default();
+        let mut message = WatchTranscriptMessage {
+            role: "assistant".into(),
+            text: "Closing answer".into(),
+            provider: "codex".into(),
+            turn_id: None,
+            source: Some("event_msg".into()),
+            provider_provenance: None,
+        };
+        let transcript = WatchTranscript {
+            cursor: "agent-1:0000000000000100".into(),
+            messages: vec![],
+            latest_text: String::new(),
+            truncated: false,
+            omitted_bytes: 0,
+        };
+        let legacy = message_event_from_transcript("agent-1", "codex", 3, &message, &transcript);
+        archive
+            .append_chat_events("agent-1", std::slice::from_ref(&legacy))
+            .unwrap();
+        message.provider_provenance = Some(wardian_core::control::WatchTranscriptProvenance {
+            provider_session_id: "native-session".into(),
+            source_path: "session.jsonl".into(),
+            provider_turn_id: "native-turn".into(),
+        });
+        let bound = message_event_from_transcript("agent-1", "codex", 3, &message, &transcript);
+        archive
+            .append_chat_events("agent-1", std::slice::from_ref(&bound))
+            .unwrap();
+        assert_ne!(legacy.id, bound.id);
+        let shifted = message_event_from_transcript("agent-1", "codex", 27, &message, &transcript);
+        assert_eq!(
+            bound.id, shifted.id,
+            "watch window position is not native identity"
+        );
+        archive.append_chat_events("agent-1", &[shifted]).unwrap();
+        let saved = archive.chat_events_for_agent("agent-1").unwrap();
+        assert_eq!(
+            saved.len(),
+            2,
+            "retain legacy evidence without claiming it is native"
+        );
+        assert_ne!(
+            saved
+                .iter()
+                .find(|event| event.id == legacy.id)
+                .unwrap()
+                .metadata["provider_log"],
+            true,
+            "legacy evidence must not inherit a later native binding"
+        );
+        let mut captured = bound.clone();
+        captured.id = "agent-1:provider_log:captured".into();
+        captured.sequence = Some(345);
+        captured
+            .metadata
+            .as_object_mut()
+            .unwrap()
+            .remove("transcript_cursor");
+        captured.metadata["legacy_event_ids"] = serde_json::json!([bound.id]);
+        archive.append_chat_events("agent-1", &[captured]).unwrap();
+        assert_eq!(
+            archive.chat_events_for_agent("agent-1").unwrap().len(),
+            2,
+            "late native capture enriches the bound observation without a source collision"
+        );
+        message
+            .provider_provenance
+            .as_mut()
+            .unwrap()
+            .provider_turn_id = "another-turn".into();
+        let another = message_event_from_transcript("agent-1", "codex", 3, &message, &transcript);
+        assert_ne!(
+            bound.id, another.id,
+            "equal answers from distinct turns stay distinct"
         );
     }
 

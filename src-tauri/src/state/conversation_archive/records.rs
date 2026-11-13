@@ -92,10 +92,21 @@ pub(super) fn source_record_from_chat_event(
         .source
         .clone()
         .or_else(|| metadata_source_kind(&event.provider, &event.metadata))?;
+    // Bound watch projections have no native log position. Keep their source
+    // distinct from a later captured native row owning the same narrative.
+    let native_watch = event.metadata["provider_log"] == true
+        && event
+            .id
+            .starts_with(&format!("{}:watch_native:", event.session_id))
+        && event.metadata.get("transcript_cursor").is_some();
 
     Some(ConversationSourceRecord {
         schema: CONVERSATION_SCHEMA,
-        source_id: format!("src_{seq}"),
+        source_id: if native_watch {
+            format!("watch:{}", event.id)
+        } else {
+            format!("src_{seq}")
+        },
         provider: event.provider.clone(),
         provider_session_id: metadata_string(&event.metadata, "opencode_session_id")
             .or_else(|| metadata_string(&event.metadata, "provider_session_id")),
@@ -106,8 +117,12 @@ pub(super) fn source_record_from_chat_event(
             .or_else(|| metadata_string(&event.metadata, "source_path"))
             .or_else(|| metadata_string(&event.metadata, "path"))
             .or_else(|| metadata_string(&event.metadata, "log_path")),
-        cursor: metadata_string(&event.metadata, "cursor")
-            .or_else(|| event.sequence.map(|sequence| sequence.to_string())),
+        cursor: if native_watch {
+            None
+        } else {
+            metadata_string(&event.metadata, "cursor")
+                .or_else(|| event.sequence.map(|sequence| sequence.to_string()))
+        },
         offset: metadata_u64(&event.metadata, "offset"),
         row_id: metadata_string(&event.metadata, "part_id"),
         provider_event_type: metadata_string(&event.metadata, "raw_type")

@@ -277,7 +277,7 @@ async fn codex_stop_preflight_error_does_not_install_hold_or_detach_runtime() {
 
     let error = stop_native_owner_with_before_capture(&state, id, false, |_| {
         callback_ran.store(true, Ordering::SeqCst);
-        Ok(())
+        Ok(None)
     })
     .await
     .unwrap_err();
@@ -287,6 +287,83 @@ async fn codex_stop_preflight_error_does_not_install_hold_or_detach_runtime() {
     assert!(agents[id].child_process.is_some());
     assert_eq!(agents[id].runtime_generation, Some(7));
     assert_eq!(child.kills.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn uncontained_clear_stop_completes_while_old_hold_blocks_resume_and_allows_fresh() {
+    use wardian_core::conversation_lease::{
+        load_leases_checked, retarget_lifecycle_lease_persisted, ConversationLeaseRetargetOutcome,
+    };
+    let _environment = crate::utils::wardian_test_env_lock_async().await;
+    let fixture = Fixture::new();
+    let id = "uncontained-clear";
+    let child = Arc::new(ChildState::default());
+    child.exited.store(true, Ordering::SeqCst);
+    let runtime = fixture.runtime(id, &child);
+    runtime.config.lock().unwrap().resume_session = Some("old-session".into());
+    let state = AppState::new();
+    state.agents.lock().await.insert(id.into(), runtime);
+    let lifecycle =
+        super::super::acquire_agent_lifecycle_transition_lease_for_session(&state, id, "clear")
+            .await
+            .unwrap();
+    let _gate = state.lock_agent_lifecycle(id).await;
+    let mut bound_hold = None;
+    stop_native_owner_with_before_capture(&state, id, false, |agent| {
+        let hold = super::hold_previous_provider_before_rotation(agent, &lifecycle)?;
+        assert!(hold.is_some());
+        bound_hold = hold.clone();
+        Ok(hold)
+    })
+    .await
+    .unwrap();
+    await_quiescent(&fixture.home, id).await.unwrap();
+    assert!(load_leases_checked()
+        .unwrap()
+        .iter()
+        .any(|lease| { Some(lease.owner()) == bound_hold }));
+    let now = chrono::Utc::now();
+    let now_text = now.to_rfc3339();
+    let expiry = (now + chrono::Duration::minutes(5)).to_rfc3339();
+    assert!(matches!(
+        retarget_lifecycle_lease_persisted(
+            lifecycle.owner(),
+            id,
+            "codex",
+            "old-session",
+            &now_text,
+            &expiry,
+        )
+        .unwrap(),
+        ConversationLeaseRetargetOutcome::Conflict(_)
+    ));
+    assert_eq!(
+        retarget_lifecycle_lease_persisted(
+            lifecycle.owner(),
+            id,
+            "codex",
+            "fresh-session",
+            &now_text,
+            &expiry,
+        )
+        .unwrap(),
+        ConversationLeaseRetargetOutcome::Retargeted
+    );
+    drop(lifecycle);
+    let error =
+        super::super::acquire_agent_lifecycle_transition_lease_for_session(&state, id, "resume")
+            .await
+            .unwrap_err();
+    assert!(error.contains("uncertain_previous_provider"), "{error}");
+    let mut fresh = state.agents.lock().await[id].config.lock().unwrap().clone();
+    assert_eq!(fresh.resume_session.as_deref(), Some("old-session"));
+    fresh.resume_session = Some("fresh-session".into());
+    let _fresh_lease =
+        super::super::acquire_agent_lifecycle_transition_lease(&fresh, "fresh-rotation").unwrap();
+    assert!(load_leases_checked()
+        .unwrap()
+        .iter()
+        .any(|lease| { Some(lease.owner()) == bound_hold }));
 }
 
 #[tokio::test]

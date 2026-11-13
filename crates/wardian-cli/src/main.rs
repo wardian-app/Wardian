@@ -292,9 +292,10 @@ fn handle_agent(args: AgentArgs) -> Result<String, CliError> {
             confirm,
             force,
         }) => handle_agent_delete(target, confirm, *force),
-        Some(AgentCommand::Rename { target, new_name }) => handle_agent_rename(target, new_name),
+        Some(AgentCommand::Rename { target, new_name }) => agent_control::rename(target, new_name),
         Some(AgentCommand::Restart { target }) => agent_control::restart(target),
         Some(AgentCommand::NewSession { target }) => agent_control::new_session(target),
+        Some(AgentCommand::ReleaseHold(args)) => agent_control::release_hold(args),
         Some(AgentCommand::Pause { target }) => agent_control::pause(target),
         Some(AgentCommand::Resume { target }) => agent_control::resume(target),
         Some(command @ AgentCommand::Spawn { .. }) => handle_agent_spawn(command, &args),
@@ -371,13 +372,6 @@ fn handle_agent_delete(target: &str, confirm_name: &str, force: bool) -> Result<
         }))
         .unwrap()
     ))
-}
-
-fn handle_agent_rename(target: &str, new_name: &str) -> Result<String, CliError> {
-    let response = live::agent_rename(target, new_name).map_err(control_error)?;
-    serde_json::to_string(&response)
-        .map(|json| format!("{json}\n"))
-        .map_err(|error| CliError::generic(error.to_string()))
 }
 
 fn handle_agent_models(provider: &str, force_refresh: bool) -> Result<String, CliError> {

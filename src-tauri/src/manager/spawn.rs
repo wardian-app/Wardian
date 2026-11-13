@@ -3004,7 +3004,7 @@ async fn spawn_agent_inner(
     // The transition lease acquired before native owner preparation remains
     // held through PTY creation and publication.
     #[cfg(windows)]
-    let contained_job = if config.provider == "claude" {
+    let contained_job = if matches!(config.provider.as_str(), "claude" | "codex") {
         Some(crate::utils::process::RuntimeProcessJob::prepare(&mut cmd)?)
     } else {
         None

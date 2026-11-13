@@ -1,7 +1,171 @@
-//! Delayed/failing child handles only; these tests never start or stop a process.
+//! Fake-child regressions and isolated Windows contained-tree acceptance.
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use wardian_core::models::AgentConfig;
+
+struct LeaseHome(Option<std::ffi::OsString>);
+
+impl LeaseHome {
+    fn set(path: &Path) -> Self {
+        let previous = Self(std::env::var_os("WARDIAN_HOME"));
+        std::env::set_var("WARDIAN_HOME", path);
+        previous
+    }
+}
+
+impl Drop for LeaseHome {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(value) => std::env::set_var("WARDIAN_HOME", value),
+            None => std::env::remove_var("WARDIAN_HOME"),
+        }
+    }
+}
+
+fn prior_hold() -> wardian_core::conversation_lease::ConversationLease {
+    wardian_core::conversation_lease::ConversationLease {
+        agent_id: "held-agent".into(),
+        provider: "codex".into(),
+        resume_session: "old-session".into(),
+        owner_kind: "prior_provider_hold".into(),
+        owner_id: "prior-owner".into(),
+        acquisition_id: "exact-acquisition".into(),
+        owner_node_id: None,
+        mode: "uncertain_previous_provider".into(),
+        started_at: "2026-11-12T00:00:00Z".into(),
+        heartbeat_at: "2026-11-12T00:00:00Z".into(),
+        expires_at: "9999-12-31T23:59:59Z".into(),
+    }
+}
+
+#[tokio::test]
+async fn legacy_hold_without_runtime_evidence_is_never_released_online() {
+    use wardian_core::conversation_lease::{load_leases_checked, save_leases};
+    let _lock = crate::utils::wardian_test_env_lock_async().await;
+    let home = tempfile::tempdir().unwrap();
+    let _env = LeaseHome::set(home.path());
+    let hold = prior_hold();
+    save_leases(std::slice::from_ref(&hold)).unwrap();
+    recover_prior_hold(home.path(), &hold.agent_id)
+        .await
+        .unwrap();
+    assert_eq!(load_leases_checked().unwrap(), vec![hold]);
+}
+
+#[tokio::test]
+async fn direct_child_exit_does_not_release_a_bound_prior_hold() {
+    use wardian_core::conversation_lease::{load_leases_checked, save_leases};
+    let _lock = crate::utils::wardian_test_env_lock_async().await;
+    let home = tempfile::tempdir().unwrap();
+    let _env = LeaseHome::set(home.path());
+    let hold = prior_hold();
+    save_leases(std::slice::from_ref(&hold)).unwrap();
+    let signals = Arc::new(Signals::default());
+    signals.exited.store(true, Ordering::SeqCst);
+    signals.wait_failure.store(true, Ordering::SeqCst);
+    let handle = prepare_stop(home.path(), &hold.agent_id)
+        .unwrap()
+        .with_prior_hold(Some(hold.owner()))
+        .capture(agent(&hold.agent_id, &signals))
+        .begin_stop();
+    assert!(handle.wait().await.is_err());
+    assert!(await_quiescent(home.path(), &hold.agent_id).await.is_err());
+    assert_eq!(load_leases_checked().unwrap(), vec![hold.clone()]);
+    assert_eq!(signals.drops.load(Ordering::SeqCst), 0);
+    signals.wait_failure.store(false, Ordering::SeqCst);
+    retry_stop(home.path(), &hold.agent_id).unwrap();
+    handle.wait().await.unwrap();
+    assert!(!handle.0.tree_exited.load(Ordering::Acquire));
+    assert!(handle.observe_exit().unwrap());
+    await_quiescent(home.path(), &hold.agent_id).await.unwrap();
+    recover_prior_hold(home.path(), &hold.agent_id)
+        .await
+        .unwrap();
+    assert_eq!(load_leases_checked().unwrap(), vec![hold]);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn real_codex_tree_exit_after_cancellation_releases_only_bound_acquisition() {
+    real_tree_release(false).await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn real_codex_tree_receipt_survives_lease_io_failure_for_online_retry() {
+    real_tree_release(true).await;
+}
+
+#[cfg(windows)]
+async fn real_tree_release(fail_release: bool) {
+    use std::os::windows::io::AsRawHandle;
+    use wardian_core::conversation_lease::{load_leases_checked, save_leases};
+    let _lock = crate::utils::wardian_test_env_lock_async().await;
+    let home = tempfile::tempdir().unwrap();
+    let _env = LeaseHome::set(home.path());
+    let hold = prior_hold();
+    let mut later = hold.clone();
+    later.acquisition_id = "later-acquisition".into();
+    save_leases(&[hold.clone(), later.clone()]).unwrap();
+    let history = home.path().join("history.jsonl");
+    std::fs::write(&history, "retained history\n").unwrap();
+    let (job, child, pty, descendant) =
+        crate::utils::process::test_contained_pty_tree(home.path()).await;
+    let signals = Arc::new(Signals::default());
+    let mut runtime = agent(&hold.agent_id, &signals);
+    runtime.config.lock().unwrap().resume_session = Some(hold.resume_session.clone());
+    let config_before = runtime.config.lock().unwrap().clone();
+    let config = runtime.config.clone();
+    runtime.process_id = child.process_id();
+    runtime.child_process = Some(child);
+    runtime.job_object = Some(job);
+    let guard = prepare_stop(home.path(), &hold.agent_id)
+        .unwrap()
+        .with_prior_hold(Some(hold.owner()))
+        .capture(runtime);
+    if fail_release {
+        std::fs::write(
+            wardian_core::conversation_lease::lease_path().unwrap(),
+            "invalid-json",
+        )
+        .unwrap();
+    }
+    // Model cancellation during the broker await: Drop must finish the exact
+    // retained stop and hold release without an observing request surviving.
+    drop(guard);
+    if fail_release {
+        assert!(await_quiescent(home.path(), &hold.agent_id).await.is_err());
+        assert_eq!(entries(&key(home.path(), &hold.agent_id).unwrap()).len(), 1);
+        assert_eq!(
+            unsafe {
+                winapi::um::synchapi::WaitForSingleObject(descendant.as_raw_handle() as _, 0)
+            },
+            winapi::um::winbase::WAIT_OBJECT_0
+        );
+        save_leases(&[hold.clone(), later.clone()]).unwrap();
+        recover_prior_hold(home.path(), &hold.agent_id)
+            .await
+            .unwrap();
+    }
+    await_quiescent(home.path(), &hold.agent_id).await.unwrap();
+    recover_prior_hold(home.path(), &hold.agent_id)
+        .await
+        .unwrap();
+    assert_eq!(load_leases_checked().unwrap(), vec![later]);
+    assert_eq!(
+        unsafe { winapi::um::synchapi::WaitForSingleObject(descendant.as_raw_handle() as _, 0) },
+        winapi::um::winbase::WAIT_OBJECT_0
+    );
+    let _listener = std::net::TcpListener::bind(pty.listening_addr).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(history).unwrap(),
+        "retained history\n"
+    );
+    assert_eq!(
+        serde_json::to_value(&*config.lock().unwrap()).unwrap(),
+        serde_json::to_value(config_before).unwrap()
+    );
+}
 
 #[tokio::test]
 async fn missing_pi_child_handle_cannot_become_late_exit_evidence() {
