@@ -402,6 +402,50 @@ pub async fn submit_live_surface_prompt(
             .await);
         }
     };
+    let mut claude_mod_fallback = None;
+    if super::claude_mod::is_peer_delivery(&provider, &request) {
+        match super::claude_mod::try_deliver(
+            app,
+            state,
+            &request,
+            &config,
+            &interaction_id,
+            broker_state.runtime_generation,
+        )
+        .await
+        {
+            Ok(result) => return result.map_err(Box::new),
+            Err(reason) => {
+                claude_mod_fallback = Some(reason.as_str().to_string());
+                crate::utils::logging::log_debug(&format!(
+                    "[Wardian] Claude delivery mod terminal fallback session={} generation={} reason={}",
+                    request.session_id, broker_state.runtime_generation, reason.as_str(),
+                ));
+                // Persist the reason before constructing a terminal sink, including
+                // cases where the fallback's own readiness check later fails.
+                state
+                    .interactions
+                    .record_delivery_attempt_durable(
+                        &interaction_id,
+                        &request.session_id,
+                        DeliveryTransportKind::LiveSurface,
+                        broker_state.runtime_generation,
+                        request.runtime_state,
+                        "queued",
+                        Some("terminal_fallback".into()),
+                        Some("claude_mod_unavailable".into()),
+                        claude_mod_fallback.clone(),
+                        None,
+                    )
+                    .await
+                    .map_err(|message| LiveSurfaceDeliveryError {
+                        message,
+                        detail: None,
+                        retry_safe: true,
+                    })?;
+            }
+        }
+    }
     let native_write_receipts = match state
         .terminal_sessions
         .native_write_receipts_enabled(&request.session_id)
@@ -889,7 +933,7 @@ pub async fn submit_live_surface_prompt(
         ),
         delivery_phase: Some(outcome.delivery_phase),
         observed_state: outcome.observed_state,
-        reason: outcome.reason,
+        reason: claude_mod_fallback.clone().or(outcome.reason),
         profile: Some(crate::utils::delivery_profile::delivery_profile(&provider).provider),
         error: None,
     };
@@ -979,6 +1023,9 @@ pub async fn submit_live_surface_prompt(
         } else {
             "provider emitted a turn-start event after native terminal submission".to_string()
         });
+        if let Some(reason) = claude_mod_fallback {
+            detail.reason = Some(reason);
+        }
         persist_live_surface_delivery_detail(state, &interaction_id, &request.session_id, &detail)
             .await
             .map_err(|message| LiveSurfaceDeliveryError {

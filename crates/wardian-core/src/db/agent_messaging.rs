@@ -1037,6 +1037,105 @@ pub struct TaskClaim {
     pub generation: u64,
 }
 
+/// Recover only the Claude-mod attempt named by resolver-owned non-submission
+/// evidence. The native runtime generation and scheduler generation are separate;
+/// the former binds this proof and the existing canonical row retains the latter.
+pub fn resolve_claude_mod_non_submission(
+    proof: &crate::native_transport::NonSubmissionProof,
+) -> Result<()> {
+    with_db(|conn| resolve_claude_mod_non_submission_with_conn(conn, proof))
+}
+
+fn resolve_claude_mod_non_submission_with_conn(
+    conn: &Connection,
+    proof: &crate::native_transport::NonSubmissionProof,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let Some(mut record) = crate::db::native_delivery_with_conn(&tx, proof.interaction_id())?
+    else {
+        return Err(Error::new("not_found", "Claude mod attempt not found."));
+    };
+    if record.provider != "claude"
+        || record.transport != "claude_mod"
+        || record.envelope.interaction_id != proof.interaction_id()
+        || record.envelope.target_agent_id != proof.agent_id()
+        || record.envelope.generation != proof.generation()
+    {
+        return Err(Error::new(
+            "stale_proof",
+            "Non-submission proof does not bind this attempt.",
+        ));
+    }
+    let Some(next) = record.phase.resolve_proven_non_submission(proof) else {
+        return Ok(());
+    };
+    record.phase = next;
+    record.updated_at = now();
+    crate::db::upsert_native_delivery_with_conn(&tx, &record)?;
+    // Do not compare the scheduler generation with the runtime generation in
+    // the proof: they are distinct namespaces. Keep the scheduler generation,
+    // clear its old claim, and exclude terminal tasks and mailbox owners.
+    tx.execute(
+        "UPDATE agent_message_delivery
+         SET owner=CASE WHEN operation='followup_task' THEN 'pending' ELSE 'stored' END,
+             claim_token=NULL,
+             continuation_state=CASE WHEN operation='reply' THEN 'pending' ELSE continuation_state END
+         WHERE interaction_id=?1 AND recipient=?2
+           AND owner IN ('dispatching','uncertain','failed_before_submit')
+           AND (operation!='followup_task' OR EXISTS (
+               SELECT 1 FROM interactions i
+               WHERE i.id=agent_message_delivery.interaction_id AND i.status='awaiting_reply'))",
+        params![proof.interaction_id(), proof.agent_id()],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Late mod receipts settle an uncertain canonical claim without creating a new
+/// attempt. Rejected submissions need proof-bearing recovery instead. A dropped
+/// prompt is terminal `failed`, so neither receive nor dispatch can replay it.
+/// Stronger evidence advances an accepted delivery to visible/completed or a
+/// terminal failure; a queued snapshot cannot downgrade it. A live dispatching
+/// caller owns ordinary finish_claim settlement, then reconciles again to consume
+/// any stronger receipt observed before that settlement.
+pub fn reconcile_claude_mod_receipt(id: &str) -> Result<()> {
+    with_db(|conn| reconcile_claude_mod_receipt_with_conn(conn, id))
+}
+
+fn reconcile_claude_mod_receipt_with_conn(conn: &Connection, id: &str) -> Result<()> {
+    use crate::native_transport::NativeDeliveryPhase as Phase;
+
+    let tx = conn.unchecked_transaction()?;
+    let Some(record) = crate::db::native_delivery_with_conn(&tx, id)? else {
+        return Ok(());
+    };
+    if record.provider != "claude"
+        || record.transport != "claude_mod"
+        || record.envelope.interaction_id != id
+    {
+        return Ok(());
+    }
+    let (owner, continuation) = match record.phase {
+        Phase::ProviderAccepted => ("provider_accepted", "delivered"),
+        Phase::TurnStarted => ("provider_visible", "delivered"),
+        Phase::Completed => ("provider_completed", "delivered"),
+        Phase::Failed => ("failed", "failed"),
+        _ => return Ok(()),
+    };
+    tx.execute(
+        "UPDATE agent_message_delivery
+         SET owner=?2,
+             continuation_state=CASE WHEN operation='reply' THEN ?3 ELSE continuation_state END
+         WHERE interaction_id=?1 AND recipient=?4
+           AND (owner='uncertain'
+                OR (owner='provider_accepted' AND ?2 IN ('provider_visible','provider_completed','failed'))
+                OR (owner='provider_visible' AND ?2='provider_completed'))",
+        params![id, owner, continuation, record.envelope.target_agent_id],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn claim_next_task(
     conn: &Connection,
     recipient: &str,
@@ -1064,6 +1163,8 @@ pub fn claim_next_task(
 
 /// A dispatched claim is never returned to receive automatically. A lost
 /// process/receipt remains dispatching or uncertain and cannot authorize replay.
+/// Use `failed` for a refused/dropped prompt; it is terminal, unlike a proven
+/// pre-submission failure eligible for the transport-specific recovery resolver.
 pub fn finish_claim(conn: &Connection, claim: &TaskClaim, state: &str) -> Result<()> {
     if !matches!(
         state,
@@ -1072,12 +1173,14 @@ pub fn finish_claim(conn: &Connection, claim: &TaskClaim, state: &str) -> Result
             | "provider_completed"
             | "uncertain"
             | "failed_before_submit"
+            | "failed"
     ) {
         return Err(Error::new("invalid_state", "Invalid scheduler result."));
     }
     let continuation_state = match state {
         "provider_accepted" | "provider_visible" | "provider_completed" => "delivered",
         "uncertain" => "uncertain",
+        "failed" => "failed",
         _ => "dispatching",
     };
     let changed = conn.execute("UPDATE agent_message_delivery SET owner=?4,continuation_state=CASE WHEN operation='reply' AND ?5!='dispatching' THEN ?5 ELSE continuation_state END WHERE interaction_id=?1 AND claim_token=?2 AND generation=?3 AND owner='dispatching'",params![claim.record.id,claim.token,claim.generation,state,continuation_state])?;

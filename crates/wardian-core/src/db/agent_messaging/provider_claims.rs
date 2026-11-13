@@ -199,10 +199,39 @@ pub fn claim_wakeable_information(
 pub fn release_before_write(conn: &Connection, claim: &TaskClaim) -> Result<()> {
     let changed = conn.execute("UPDATE agent_message_delivery SET owner=CASE WHEN operation='followup_task' THEN 'pending' ELSE 'stored' END,claim_token=NULL,continuation_state=CASE WHEN operation='reply' THEN 'pending' ELSE continuation_state END WHERE interaction_id=?1 AND claim_token=?2 AND generation=?3 AND owner='dispatching'", params![claim.record.id, claim.token, claim.generation])?;
     if changed != 1 {
-        return Err(Error::new(
-            "stale_claim",
-            "Delivery claim no longer owns this message.",
-        ));
+        // The resolver may have committed proof-bearing recovery while this
+        // live caller waited. Acknowledge only that exact cleared scheduler
+        // generation; never mutate an intervening claim or trust a generic
+        // pending row as evidence of non-submission.
+        let proof_reset = match crate::db::native_delivery_with_conn(conn, &claim.record.id)? {
+            Some(record)
+                if record.provider == "claude"
+                    && record.transport == "claude_mod"
+                    && record.phase == crate::native_transport::NativeDeliveryPhase::FailedBeforeSubmit
+                    && record.envelope.generation > 0
+                    && record.envelope.interaction_id == claim.record.id
+                    && claim.record.target_session_ids.len() == 1
+                    && claim.record.target_session_ids[0] == record.envelope.target_agent_id =>
+            {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM agent_message_delivery
+                     WHERE interaction_id=?1 AND recipient=?2 AND generation=?3
+                       AND claim_token IS NULL
+                       AND ((operation='followup_task' AND owner='pending')
+                            OR (operation='send_message' AND owner='stored')
+                            OR (operation='reply' AND owner='stored' AND continuation_state='pending')))",
+                    params![claim.record.id, record.envelope.target_agent_id, claim.generation],
+                    |row| row.get::<_, bool>(0),
+                )?
+            }
+            _ => false,
+        };
+        if !proof_reset {
+            return Err(Error::new(
+                "stale_claim",
+                "Delivery claim no longer owns this message.",
+            ));
+        }
     }
     Ok(())
 }

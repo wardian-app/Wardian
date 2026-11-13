@@ -9,6 +9,7 @@ pub mod automation_execution_lock;
 pub mod automation_migration;
 pub mod browser;
 pub mod classes;
+pub mod claude_mod;
 pub mod control;
 pub mod conversation_lease;
 pub mod conversations;

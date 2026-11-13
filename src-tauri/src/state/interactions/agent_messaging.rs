@@ -183,6 +183,11 @@ impl InteractionState {
             ));
         }
         store::with_db(|conn| store::finish_claim(conn, claim, outcome))?;
+        // The mod observer may have persisted a stronger receipt while this
+        // caller waited for the mutation gate, then stopped at TurnStarted or
+        // a terminal phase. Consume that receipt after clearing dispatching.
+        // The gate still excludes lifecycle/generation changes here.
+        store::reconcile_claude_mod_receipt(&claim.record.id)?;
         if matches!(
             outcome,
             "provider_accepted" | "provider_visible" | "provider_completed"

@@ -1121,3 +1121,633 @@ fn startup_information_and_reply_snapshots_are_separate_and_bounded() {
         later.record.id
     );
 }
+
+// These tests use the real file resolver to obtain proofs and an isolated
+// in-memory canonical DB. No global connection or synthetic proof is needed.
+fn claude_mod_claim(conn: &Connection, operation: &str) -> TaskClaim {
+    match operation {
+        "followup_task" => {
+            admit(conn, admission("work", true)).unwrap();
+            claim_next_task(conn, "receiver", 43).unwrap().unwrap()
+        }
+        "send_message" => {
+            let message = admit(conn, admission("information", false)).unwrap();
+            claim_information(conn, "receiver", &message.record.id, 43)
+                .unwrap()
+                .unwrap()
+        }
+        "reply" => {
+            let origin = RequesterOrigin {
+                provider: "claude".into(),
+                conversation_id: "session-original".into(),
+                generation: 2,
+            };
+            let task =
+                admit_with_requester_origin(conn, admission("work", true), Some(&origin)).unwrap();
+            let response = reply(
+                conn,
+                "receiver",
+                &task.record.id,
+                ReplyStatus::Done,
+                "result",
+            )
+            .unwrap();
+            claim_reply_continuation(conn, "sender", &response.record.id, 43)
+                .unwrap()
+                .unwrap()
+        }
+        _ => panic!("unknown test operation"),
+    }
+}
+
+fn claude_mod_native(
+    conn: &Connection,
+    claim: &TaskClaim,
+    phase: crate::native_transport::NativeDeliveryPhase,
+) -> crate::native_transport::NativeDeliveryRecord {
+    use crate::native_transport::{
+        NativeDeliveryRecord, NativeMessageEnvelope, NativeMessageOperation,
+    };
+    let record = NativeDeliveryRecord {
+        envelope: NativeMessageEnvelope {
+            interaction_id: claim.record.id.clone(),
+            message_id: "message-1".into(),
+            target_agent_id: claim.record.target_session_ids[0].clone(),
+            sender_agent_id: None,
+            parent_interaction_id: None,
+            caller_idempotency_key: None,
+            generation: 7,
+            operation: NativeMessageOperation::StartTurn,
+            deadline_at: None,
+            body: "prompt".into(),
+        },
+        canonical_hash: "hash".into(),
+        provider: "claude".into(),
+        transport: "claude_mod".into(),
+        phase,
+        provider_request_id: None,
+        provider_turn_id: None,
+        detail: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    crate::db::upsert_native_delivery_with_conn(conn, &record).unwrap();
+    record
+}
+
+fn claude_mod_proof(claim: &TaskClaim) -> crate::native_transport::NonSubmissionProof {
+    use crate::claude_mod::{ClaudeModLaunchPlan, ClaudeModResolver};
+    let temp = tempfile::tempdir().unwrap();
+    let plan = ClaudeModLaunchPlan::new(
+        temp.path(),
+        &claim.record.target_session_ids[0],
+        7,
+        "session-original",
+    )
+    .unwrap();
+    plan.materialize(&[]).unwrap();
+    std::fs::write(
+        plan.inbox()
+            .join("rejected")
+            .join(format!("{}.json", claim.record.id)),
+        serde_json::to_vec(&serde_json::json!({
+            "generation":7, "interaction_id":claim.record.id,
+            "session_id":"session-original", "reason":"invalid payload",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    ClaudeModResolver::open(plan.inbox())
+        .unwrap()
+        .resolve_rejected(&claim.record.id)
+        .unwrap()
+        .unwrap()
+}
+
+fn claude_mod_mailbox(
+    conn: &Connection,
+    id: &str,
+) -> (String, i64, Option<String>, Option<String>) {
+    conn.query_row(
+        "SELECT owner,generation,claim_token,continuation_state FROM agent_message_delivery WHERE interaction_id=?1",
+        [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).unwrap()
+}
+
+#[test]
+fn claude_mod_proof_recovers_uncertain_with_distinct_scheduler_generation() {
+    use crate::native_transport::NativeDeliveryPhase as Phase;
+    for operation in ["followup_task", "send_message", "reply"] {
+        let conn = database();
+        let claim = claude_mod_claim(&conn, operation);
+        claude_mod_native(&conn, &claim, Phase::SubmittedUnconfirmed);
+        finish_claim(&conn, &claim, "uncertain").unwrap();
+        let proof = claude_mod_proof(&claim);
+        assert_ne!(proof.generation(), claim.generation);
+        resolve_claude_mod_non_submission_with_conn(&conn, &proof).unwrap();
+        let expected_owner = if operation == "followup_task" {
+            "pending"
+        } else {
+            "stored"
+        };
+        let expected_continuation = (operation == "reply").then(|| "pending".to_owned());
+        assert_eq!(
+            claude_mod_mailbox(&conn, &claim.record.id),
+            (expected_owner.into(), 43, None, expected_continuation)
+        );
+        assert_eq!(
+            crate::db::native_delivery_with_conn(&conn, &claim.record.id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            Phase::FailedBeforeSubmit
+        );
+        resolve_claude_mod_non_submission_with_conn(&conn, &proof).unwrap();
+        let recovered = match operation {
+            "followup_task" => claim_next_task(&conn, "receiver", 44),
+            "send_message" => claim_information(&conn, "receiver", &claim.record.id, 44),
+            "reply" => claim_reply_continuation(&conn, "sender", &claim.record.id, 44),
+            _ => unreachable!(),
+        }
+        .unwrap()
+        .unwrap();
+        assert_ne!(recovered.token, claim.token);
+        assert_eq!(recovered.generation, 44);
+        assert_eq!(
+            finish_claim(&conn, &claim, "provider_accepted")
+                .unwrap_err()
+                .code,
+            "stale_claim"
+        );
+    }
+}
+
+#[test]
+fn claude_mod_claim_only_evidence_cannot_recover_the_canonical_mailbox() {
+    use crate::claude_mod::{ClaudeModLaunchPlan, ClaudeModResolver, GenerationExitVerifier};
+    use crate::native_transport::NativeDeliveryPhase as Phase;
+    let conn = database();
+    let claim = claude_mod_claim(&conn, "followup_task");
+    claude_mod_native(&conn, &claim, Phase::SubmittedUnconfirmed);
+    finish_claim(&conn, &claim, "uncertain").unwrap();
+    let before = claude_mod_mailbox(&conn, &claim.record.id);
+    let temp = tempfile::tempdir().unwrap();
+    let plan = ClaudeModLaunchPlan::new(temp.path(), "receiver", 7, "session-original").unwrap();
+    plan.materialize(&[]).unwrap();
+    std::fs::write(
+        plan.inbox()
+            .join("claimed")
+            .join(format!("{}.json", claim.record.id)),
+        b"{torn",
+    )
+    .unwrap();
+    let resolver = ClaudeModResolver::open(plan.inbox()).unwrap();
+    struct Exited;
+    impl GenerationExitVerifier for Exited {
+        fn process_tree_exited(&self, _: &str, _: u64) -> bool {
+            true
+        }
+    }
+    assert!(resolver
+        .resolve_rejected(&claim.record.id)
+        .unwrap()
+        .is_none());
+    assert!(resolver
+        .resolve_after_verified_exit(&claim.record.id, &Exited)
+        .unwrap()
+        .is_none());
+    reconcile_claude_mod_receipt_with_conn(&conn, &claim.record.id).unwrap();
+    assert_eq!(claude_mod_mailbox(&conn, &claim.record.id), before);
+    assert!(claim_next_task(&conn, "receiver", 44).unwrap().is_none());
+    assert!(receive(&conn, "receiver", None, None, 100)
+        .unwrap()
+        .messages
+        .is_empty());
+}
+
+#[test]
+fn claude_mod_stale_proof_cannot_rewind_a_replacement_native_attempt() {
+    use crate::native_transport::NativeDeliveryPhase as Phase;
+    let conn = database();
+    let claim = claude_mod_claim(&conn, "followup_task");
+    let mut replacement = claude_mod_native(&conn, &claim, Phase::SubmittedUnconfirmed);
+    finish_claim(&conn, &claim, "uncertain").unwrap();
+    let proof = claude_mod_proof(&claim);
+    replacement.envelope.generation = 8;
+    crate::db::upsert_native_delivery_with_conn(&conn, &replacement).unwrap();
+    let before = claude_mod_mailbox(&conn, &claim.record.id);
+    assert_eq!(
+        resolve_claude_mod_non_submission_with_conn(&conn, &proof)
+            .unwrap_err()
+            .code,
+        "stale_proof"
+    );
+    assert_eq!(
+        crate::db::native_delivery_with_conn(&conn, &claim.record.id)
+            .unwrap()
+            .unwrap(),
+        replacement
+    );
+    assert_eq!(claude_mod_mailbox(&conn, &claim.record.id), before);
+}
+
+#[test]
+fn claude_mod_proof_refuses_other_providers_transports_and_recipients() {
+    use crate::native_transport::NativeDeliveryPhase as Phase;
+    for mismatch in ["provider", "transport", "recipient"] {
+        let conn = database();
+        let claim = claude_mod_claim(&conn, "followup_task");
+        let mut native = claude_mod_native(&conn, &claim, Phase::SubmittedUnconfirmed);
+        finish_claim(&conn, &claim, "uncertain").unwrap();
+        let proof = claude_mod_proof(&claim);
+        match mismatch {
+            "provider" => native.provider = "codex".into(),
+            "transport" => native.transport = "terminal".into(),
+            "recipient" => native.envelope.target_agent_id = "other-agent".into(),
+            _ => unreachable!(),
+        }
+        crate::db::upsert_native_delivery_with_conn(&conn, &native).unwrap();
+        let before = claude_mod_mailbox(&conn, &claim.record.id);
+        assert_eq!(
+            resolve_claude_mod_non_submission_with_conn(&conn, &proof)
+                .unwrap_err()
+                .code,
+            "stale_proof"
+        );
+        assert_eq!(claude_mod_mailbox(&conn, &claim.record.id), before);
+        assert_eq!(
+            crate::db::native_delivery_with_conn(&conn, &claim.record.id)
+                .unwrap()
+                .unwrap(),
+            native
+        );
+    }
+}
+
+#[test]
+fn claude_mod_proof_does_not_rewind_positive_or_terminal_native_phases() {
+    use crate::native_transport::NativeDeliveryPhase as Phase;
+    for phase in [
+        Phase::ProviderAccepted,
+        Phase::TurnStarted,
+        Phase::Completed,
+        Phase::Failed,
+        Phase::FailedBeforeSubmit,
+    ] {
+        let conn = database();
+        let claim = claude_mod_claim(&conn, "followup_task");
+        let native = claude_mod_native(&conn, &claim, phase);
+        finish_claim(&conn, &claim, "uncertain").unwrap();
+        let before = claude_mod_mailbox(&conn, &claim.record.id);
+        resolve_claude_mod_non_submission_with_conn(&conn, &claude_mod_proof(&claim)).unwrap();
+        assert_eq!(claude_mod_mailbox(&conn, &claim.record.id), before);
+        assert_eq!(
+            crate::db::native_delivery_with_conn(&conn, &claim.record.id)
+                .unwrap()
+                .unwrap(),
+            native
+        );
+    }
+}
+
+#[test]
+fn claude_mod_proof_reset_rolls_back_both_records_on_mailbox_failure() {
+    use crate::native_transport::NativeDeliveryPhase as Phase;
+    let conn = database();
+    let claim = claude_mod_claim(&conn, "followup_task");
+    let native = claude_mod_native(&conn, &claim, Phase::SubmittedUnconfirmed);
+    finish_claim(&conn, &claim, "uncertain").unwrap();
+    let before = claude_mod_mailbox(&conn, &claim.record.id);
+    let proof = claude_mod_proof(&claim);
+    conn.execute_batch("CREATE TRIGGER fail_mod_reset BEFORE UPDATE OF owner ON agent_message_delivery WHEN NEW.owner='pending' BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    assert!(resolve_claude_mod_non_submission_with_conn(&conn, &proof).is_err());
+    assert_eq!(claude_mod_mailbox(&conn, &claim.record.id), before);
+    assert_eq!(
+        crate::db::native_delivery_with_conn(&conn, &claim.record.id)
+            .unwrap()
+            .unwrap(),
+        native
+    );
+    conn.execute_batch("DROP TRIGGER fail_mod_reset").unwrap();
+    resolve_claude_mod_non_submission_with_conn(&conn, &proof).unwrap();
+    assert_eq!(claude_mod_mailbox(&conn, &claim.record.id).0, "pending");
+}
+
+#[test]
+fn claude_mod_proof_does_not_reopen_a_completed_task_or_terminal_owner() {
+    use crate::native_transport::NativeDeliveryPhase as Phase;
+    for terminal in [
+        "completed_task",
+        "failed",
+        "provider_accepted",
+        "receiver_available",
+    ] {
+        let conn = database();
+        let claim = claude_mod_claim(&conn, "followup_task");
+        claude_mod_native(&conn, &claim, Phase::SubmittedUnconfirmed);
+        if terminal == "completed_task" {
+            finish_claim(&conn, &claim, "uncertain").unwrap();
+            reply(
+                &conn,
+                "receiver",
+                &claim.record.id,
+                ReplyStatus::Done,
+                "done",
+            )
+            .unwrap();
+        } else if terminal == "receiver_available" {
+            release_before_write(&conn, &claim).unwrap();
+            receive(&conn, "receiver", None, None, 100).unwrap();
+        } else {
+            finish_claim(&conn, &claim, terminal).unwrap();
+        }
+        let before = claude_mod_mailbox(&conn, &claim.record.id);
+        resolve_claude_mod_non_submission_with_conn(&conn, &claude_mod_proof(&claim)).unwrap();
+        assert_eq!(claude_mod_mailbox(&conn, &claim.record.id), before);
+        assert!(claim_next_task(&conn, "receiver", 44).unwrap().is_none());
+    }
+}
+
+#[test]
+fn claude_mod_late_positive_receipts_settle_uncertain_without_replay() {
+    use crate::native_transport::NativeDeliveryPhase as Phase;
+    for operation in ["followup_task", "send_message", "reply"] {
+        for (phase, owner) in [
+            (Phase::ProviderAccepted, "provider_accepted"),
+            (Phase::TurnStarted, "provider_visible"),
+            (Phase::Completed, "provider_completed"),
+        ] {
+            let conn = database();
+            let claim = claude_mod_claim(&conn, operation);
+            let native = claude_mod_native(&conn, &claim, phase);
+            finish_claim(&conn, &claim, "uncertain").unwrap();
+            reconcile_claude_mod_receipt_with_conn(&conn, &claim.record.id).unwrap();
+            reconcile_claude_mod_receipt_with_conn(&conn, &claim.record.id).unwrap();
+            let mailbox = claude_mod_mailbox(&conn, &claim.record.id);
+            assert_eq!(mailbox.0, owner);
+            assert_eq!(mailbox.1, 43);
+            assert_eq!(mailbox.2.as_deref(), Some(claim.token.as_str()));
+            if operation == "reply" {
+                assert_eq!(mailbox.3.as_deref(), Some("delivered"));
+            }
+            assert_eq!(
+                crate::db::native_delivery_with_conn(&conn, &claim.record.id)
+                    .unwrap()
+                    .unwrap(),
+                native
+            );
+            assert!(
+                receive(&conn, &claim.record.target_session_ids[0], None, None, 100)
+                    .unwrap()
+                    .messages
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[test]
+fn claude_mod_late_receipts_do_not_steal_dispatching_or_terminal_owners() {
+    use crate::native_transport::NativeDeliveryPhase as Phase;
+    for owner in ["dispatching", "failed", "provider_accepted"] {
+        let conn = database();
+        let claim = claude_mod_claim(&conn, "reply");
+        claude_mod_native(&conn, &claim, Phase::ProviderAccepted);
+        if owner != "dispatching" {
+            finish_claim(&conn, &claim, owner).unwrap();
+        }
+        let before = claude_mod_mailbox(&conn, &claim.record.id);
+        reconcile_claude_mod_receipt_with_conn(&conn, &claim.record.id).unwrap();
+        assert_eq!(claude_mod_mailbox(&conn, &claim.record.id), before);
+    }
+}
+
+#[test]
+fn claude_mod_dropped_prompts_are_terminal_for_all_canonical_claim_types() {
+    use crate::native_transport::NativeDeliveryPhase as Phase;
+    for operation in ["followup_task", "send_message", "reply"] {
+        for late in [false, true] {
+            let conn = database();
+            let claim = claude_mod_claim(&conn, operation);
+            claude_mod_native(&conn, &claim, Phase::Failed);
+            if late {
+                finish_claim(&conn, &claim, "uncertain").unwrap();
+                reconcile_claude_mod_receipt_with_conn(&conn, &claim.record.id).unwrap();
+                let settled = claude_mod_mailbox(&conn, &claim.record.id);
+                reconcile_claude_mod_receipt_with_conn(&conn, &claim.record.id).unwrap();
+                assert_eq!(claude_mod_mailbox(&conn, &claim.record.id), settled);
+            } else {
+                finish_claim(&conn, &claim, "failed").unwrap();
+            }
+            let mailbox = claude_mod_mailbox(&conn, &claim.record.id);
+            assert_eq!(mailbox.0, "failed");
+            if operation == "reply" {
+                assert_eq!(mailbox.3.as_deref(), Some("failed"));
+            }
+            let recipient = &claim.record.target_session_ids[0];
+            assert!(receive(&conn, recipient, None, None, 100)
+                .unwrap()
+                .messages
+                .is_empty());
+            assert!(claim_next_task(&conn, recipient, 44).unwrap().is_none());
+            assert!(claim_information(&conn, recipient, &claim.record.id, 44)
+                .unwrap()
+                .is_none());
+            assert!(
+                claim_reply_continuation(&conn, recipient, &claim.record.id, 44)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                release_before_write(&conn, &claim).unwrap_err().code,
+                "stale_claim"
+            );
+            if operation == "reply" {
+                assert!(!set_reply_continuation_state(&conn, &claim.record.id, "pending").unwrap());
+                assert!(pending_reply_continuations(&conn, recipient)
+                    .unwrap()
+                    .is_empty());
+            }
+            resolve_claude_mod_non_submission_with_conn(&conn, &claude_mod_proof(&claim)).unwrap();
+            assert_eq!(claude_mod_mailbox(&conn, &claim.record.id), mailbox);
+        }
+    }
+}
+
+#[test]
+fn claude_mod_transcript_advances_accepted_to_visible_without_downgrade() {
+    use crate::native_transport::NativeDeliveryPhase as Phase;
+    for operation in ["followup_task", "send_message", "reply"] {
+        let conn = database();
+        let claim = claude_mod_claim(&conn, operation);
+        claude_mod_native(&conn, &claim, Phase::ProviderAccepted);
+        finish_claim(&conn, &claim, "uncertain").unwrap();
+        reconcile_claude_mod_receipt_with_conn(&conn, &claim.record.id).unwrap();
+        assert_eq!(
+            claude_mod_mailbox(&conn, &claim.record.id).0,
+            "provider_accepted"
+        );
+        // A queue acknowledgement alone never projects provider_visible.
+        reconcile_claude_mod_receipt_with_conn(&conn, &claim.record.id).unwrap();
+        assert_eq!(
+            claude_mod_mailbox(&conn, &claim.record.id).0,
+            "provider_accepted"
+        );
+        claude_mod_native(&conn, &claim, Phase::TurnStarted);
+        reconcile_claude_mod_receipt_with_conn(&conn, &claim.record.id).unwrap();
+        let visible = claude_mod_mailbox(&conn, &claim.record.id);
+        assert_eq!(visible.0, "provider_visible");
+        claude_mod_native(&conn, &claim, Phase::ProviderAccepted);
+        reconcile_claude_mod_receipt_with_conn(&conn, &claim.record.id).unwrap();
+        assert_eq!(claude_mod_mailbox(&conn, &claim.record.id), visible);
+        claude_mod_native(&conn, &claim, Phase::Completed);
+        reconcile_claude_mod_receipt_with_conn(&conn, &claim.record.id).unwrap();
+        assert_eq!(
+            claude_mod_mailbox(&conn, &claim.record.id).0,
+            "provider_completed"
+        );
+    }
+}
+
+#[test]
+fn claude_mod_proof_reset_allows_idempotent_live_release_without_touching_new_claim() {
+    use crate::native_transport::NativeDeliveryPhase as Phase;
+    for operation in ["followup_task", "send_message", "reply"] {
+        for next_generation in [43, 44] {
+            let conn = database();
+            let claim = claude_mod_claim(&conn, operation);
+            claude_mod_native(&conn, &claim, Phase::SubmittedUnconfirmed);
+            // Simulate the waiting live caller: canonical ownership is still dispatching.
+            resolve_claude_mod_non_submission_with_conn(&conn, &claude_mod_proof(&claim)).unwrap();
+            let cleared = claude_mod_mailbox(&conn, &claim.record.id);
+            release_before_write(&conn, &claim).unwrap();
+            release_before_write(&conn, &claim).unwrap();
+            assert_eq!(claude_mod_mailbox(&conn, &claim.record.id), cleared);
+            let next = match operation {
+                "followup_task" => claim_next_task(&conn, "receiver", next_generation),
+                "send_message" => {
+                    claim_information(&conn, "receiver", &claim.record.id, next_generation)
+                }
+                "reply" => {
+                    claim_reply_continuation(&conn, "sender", &claim.record.id, next_generation)
+                }
+                _ => unreachable!(),
+            }
+            .unwrap()
+            .unwrap();
+            let claimed = claude_mod_mailbox(&conn, &claim.record.id);
+            assert_eq!(claimed.2.as_deref(), Some(next.token.as_str()));
+            assert_eq!(
+                release_before_write(&conn, &claim).unwrap_err().code,
+                "stale_claim"
+            );
+            assert_eq!(claude_mod_mailbox(&conn, &claim.record.id), claimed);
+        }
+    }
+}
+
+#[test]
+fn claude_mod_idempotent_release_requires_exact_native_evidence_and_scheduler_generation() {
+    use crate::native_transport::NativeDeliveryPhase as Phase;
+    for mismatch in [
+        "missing",
+        "provider",
+        "transport",
+        "recipient",
+        "phase",
+        "runtime_generation",
+        "scheduler_generation",
+    ] {
+        let conn = database();
+        let claim = claude_mod_claim(&conn, "followup_task");
+        release_before_write(&conn, &claim).unwrap();
+        if mismatch != "missing" {
+            let mut native = claude_mod_native(&conn, &claim, Phase::FailedBeforeSubmit);
+            match mismatch {
+                "provider" => native.provider = "codex".into(),
+                "transport" => native.transport = "terminal".into(),
+                "recipient" => native.envelope.target_agent_id = "other-agent".into(),
+                "phase" => native.phase = Phase::SubmittedUnconfirmed,
+                "runtime_generation" => native.envelope.generation = 0,
+                "scheduler_generation" => {
+                    conn.execute(
+                        "UPDATE agent_message_delivery SET generation=44 WHERE interaction_id=?1",
+                        [&claim.record.id],
+                    )
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            crate::db::upsert_native_delivery_with_conn(&conn, &native).unwrap();
+        }
+        let before = claude_mod_mailbox(&conn, &claim.record.id);
+        assert_eq!(
+            release_before_write(&conn, &claim).unwrap_err().code,
+            "stale_claim",
+            "{mismatch}"
+        );
+        assert_eq!(claude_mod_mailbox(&conn, &claim.record.id), before);
+    }
+}
+
+#[test]
+fn claude_mod_stronger_receipt_before_queued_caller_settlement_is_not_stranded() {
+    use crate::native_transport::NativeDeliveryPhase as Phase;
+    for operation in ["followup_task", "send_message", "reply"] {
+        for (phase, owner) in [
+            (Phase::TurnStarted, "provider_visible"),
+            (Phase::Completed, "provider_completed"),
+            (Phase::Failed, "failed"),
+        ] {
+            let conn = database();
+            let claim = claude_mod_claim(&conn, operation);
+            // The caller has already captured an accepted surface snapshot.
+            claude_mod_native(&conn, &claim, Phase::ProviderAccepted);
+            let dispatching = claude_mod_mailbox(&conn, &claim.record.id);
+            // The observer receives stronger evidence before the caller settles.
+            claude_mod_native(&conn, &claim, phase);
+            reconcile_claude_mod_receipt_with_conn(&conn, &claim.record.id).unwrap();
+            assert_eq!(claude_mod_mailbox(&conn, &claim.record.id), dispatching);
+            // Match finish_agent_task: settle the snapshot, then reconcile the
+            // durable native receipt under the application's mutation lock.
+            finish_claim(&conn, &claim, "provider_accepted").unwrap();
+            reconcile_claude_mod_receipt_with_conn(&conn, &claim.record.id).unwrap();
+            let settled = claude_mod_mailbox(&conn, &claim.record.id);
+            assert_eq!(settled.0, owner);
+            assert_eq!(settled.1, 43);
+            assert_eq!(settled.2.as_deref(), Some(claim.token.as_str()));
+            if operation == "reply" {
+                let continuation = if phase == Phase::Failed {
+                    "failed"
+                } else {
+                    "delivered"
+                };
+                assert_eq!(settled.3.as_deref(), Some(continuation));
+            }
+            reconcile_claude_mod_receipt_with_conn(&conn, &claim.record.id).unwrap();
+            assert_eq!(claude_mod_mailbox(&conn, &claim.record.id), settled);
+            // Even an older queued observation must not overwrite stronger state.
+            claude_mod_native(&conn, &claim, Phase::ProviderAccepted);
+            reconcile_claude_mod_receipt_with_conn(&conn, &claim.record.id).unwrap();
+            assert_eq!(claude_mod_mailbox(&conn, &claim.record.id), settled);
+            let recipient = &claim.record.target_session_ids[0];
+            assert!(receive(&conn, recipient, None, None, 100)
+                .unwrap()
+                .messages
+                .is_empty());
+            assert!(claim_next_task(&conn, recipient, 44).unwrap().is_none());
+            assert!(claim_information(&conn, recipient, &claim.record.id, 44)
+                .unwrap()
+                .is_none());
+            assert!(
+                claim_reply_continuation(&conn, recipient, &claim.record.id, 44)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                release_before_write(&conn, &claim).unwrap_err().code,
+                "stale_claim"
+            );
+        }
+    }
+}
