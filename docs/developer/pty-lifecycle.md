@@ -86,6 +86,13 @@ jobs if app-level supervision cannot be installed. Legacy runtimes do not gain
 an exit receipt from post-launch assignment. See
 [Verified Windows Claude Process Stop](https://github.com/wardian-app/Wardian/blob/main/docs/specs/2026-10-02-claude-process-containment.md).
 
+The Windows Codex shared app-server owner also uses suspended launch: its
+private non-breakaway, kill-on-close job is assigned before execution resumes.
+Assignment or resume failure retains the suspended child for termination and
+reaping. Cancellation after launch closes the job, covering descendants created
+at startup. This containment covers the launched owner only; it does not prove
+exit of a thread hosted by another daemon discovered outside that job.
+
 Codex binds the newly acquired prior-provider hold to the retained stop entry
 before releasing its runtime handles. For a contained Windows runtime, the
 stop worker releases that exact acquisition only after the existing tree
